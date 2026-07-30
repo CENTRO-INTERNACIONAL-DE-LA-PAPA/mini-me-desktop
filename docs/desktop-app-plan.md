@@ -1,4 +1,4 @@
-# Mini-Me Desktop — Phase 6 spike plan (P6.0)
+# Mini-Me Desktop — Phase 6 plan & status
 
 A native **desktop research-acceleration workbench** for Mini-Me, built in Rust
 on **GPUI** (the GPU UI framework extracted from [Zed](https://github.com/zed-industries/zed)).
@@ -6,12 +6,25 @@ This repo is the desktop **client**; the Mini-Me agent stack (the coordinator +
 Asta-backed subagents + skills) stays in Python/TypeScript and runs as a **local
 sidecar** that the client spawns and supervises.
 
-> Status: **P6.1 — PASS (go/no-go cleared).** `cargo build` is green **and** the
-> three-pane workbench window renders natively (verified on Windows / DirectX,
-> 2026-07-30). GPUI pinned at published **`gpui 0.2.2`** (crates.io). Next:
-> **P6.2** — spawn the local Python sidecar + stream one real coordinator turn.
-> See §8 for the execution log; risk-register R1 is now **downgraded** — GPUI
-> turned out to be a *published* crate, not a `git`-only dependency.
+## Where we are now (updated 2026-07-30)
+
+| Milestone | Status |
+|---|---|
+| **P6.0** — spike doc + scaffold | ✅ done |
+| **P6.1** — buildable window *(go/no-go gate)* | ✅ **PASS** — builds green; window renders natively (verified on Windows/DirectX). §8 |
+| **P6.2** — talk to the real backend | 🟡 **backend path verified end to end** (spawn → health → thread → 75-chunk streamed turn). Remaining: confirm the live token stream *visually*. §9 |
+| **P6.3** — port the core panels | ⬜ next |
+| **P6.4** — native affordances | ⬜ not started |
+
+**Health of the bet.** The two risks that could have killed this are both down:
+**R1** (GPUI as an unstable `git` dep) — GPUI is a *published* crate, pinned at
+`gpui 0.2.2`. **R2** (API churn) — the P6.0 sketch compiled against it unchanged.
+What remains is scope risk (**R3**: rebuilding rich UI) and packaging (**R4**),
+both of which are work, not uncertainty.
+
+**Open decision on the table:** whether the local backend should keep using the
+**remote LangSmith sandbox** for execution or switch to a **local execution
+backend** now that everything runs on the user's machine — see §10.
 
 ---
 
@@ -114,20 +127,23 @@ the backend), `ui` (reusable GPUI components), `sidecar` (packaging).
 
 ## 5. Milestones
 
-- **P6.0 — Spike doc + skeleton** *(this repo, now).* Plan + a Cargo workspace +
-  a root view sketch + a sidecar-supervisor stub. Not yet buildable-verified
-  here (no Rust toolchain in the authoring environment).
-- **P6.1 — "Hello workbench" (go/no-go).** On a Rust machine: pin the `gpui` rev,
-  get **one window** with a command palette and a chat pane that streams a
-  hard-coded response. Reconcile `main.rs` against the pinned GPUI API. *Kill-
-  criterion R1.*
-- **P6.2 — Talk to the real backend.** `BackendSupervisor` spawns the Python
-  sidecar, health-checks it, and streams **one real coordinator turn** end to
-  end; render the assistant text as it arrives.
-- **P6.3 — Port the core panels.** Artifacts/Outputs, the project spine (mission +
-  completed/pending), and the plan/Autopilot panel — the workbench identity.
-- **P6.4 — Native affordances.** Local file → sandbox path, background-run tray +
-  notifications, keychain-stored keys, multi-window.
+- ✅ **P6.0 — Spike doc + skeleton.** Plan + Cargo workspace + a root view sketch
+  + a sidecar-supervisor stub. Authored without a Rust toolchain, so unverified.
+- ✅ **P6.1 — "Hello workbench" (go/no-go).** Pin `gpui`, get **one window** on
+  screen, reconcile `main.rs` against the pinned API. *Kill-criterion R1 — passed;
+  see §8.* (The command palette slipped to P6.3 — the gate was the window.)
+- 🟡 **P6.2 — Talk to the real backend.** `BackendSupervisor` spawns the Python
+  sidecar, health-checks it, and streams **one real coordinator turn** end to end;
+  render the assistant text as it arrives. *Backend path verified headlessly
+  (§9); the on-screen stream still needs a human look.*
+- ⬜ **P6.3 — Port the core panels.** Artifacts/Outputs, the project spine
+  (mission + completed/pending), the plan/Autopilot panel — the workbench
+  identity. Plus the two P6.2 deferrals: a **text composer** (P6.2 uses one
+  seeded prompt) and the **command palette**; and `values`/`custom` stream events
+  for state + `sandbox_status`.
+- ⬜ **P6.4 — Native affordances.** Local file → analysis, background-run tray +
+  notifications, keychain-stored keys, multi-window. Also: Windows process-tree
+  teardown via a Job Object (§9), and sidecar packaging (R4).
 
 **MVP acceptance:** a launchable app that opens a project, runs a real coordinator
 turn against the local sidecar, streams the answer, renders the artifacts/spine
@@ -136,14 +152,32 @@ background-run notification).
 
 ---
 
-## 6. Open decisions (locked 2026-07-29)
+## 6. Decisions
 
-- **Repo shape:** ✅ **separate repo** (`mini-me-desktop`) — this one.
-- **Backend locality:** ✅ **local sidecar** (spawn the Python backend locally;
-  inherits the auto-refreshing `asta` auth).
-- **GPUI dependency:** pin a `rev` in `crates/app/Cargo.toml` (P6.1). Vendoring is
-  a fallback if the git dep proves unstable.
-- **Rust capacity:** confirm sustained Rust availability before P6.1.
+**Locked (2026-07-29):**
+
+- **Repo shape:** ✅ **separate repo** — `mini-me-desktop`, this one. Published
+  private at `CENTRO-INTERNACIONAL-DE-LA-PAPA/mini-me-desktop` (2026-07-29).
+- **Backend locality:** ✅ **local sidecar** — the client spawns the Python backend
+  on localhost. (Nuance found in P6.2: this removes the web app's paste-a-token
+  dance, but the backend forwards a *pre-minted* `ASTA_TOKEN` rather than
+  refreshing live — see §9.)
+- **UI framework:** ✅ **Rust on GPUI**, pinned to published **`gpui = "=0.2.2"`**
+  from crates.io — *not* a Zed monorepo `git` rev (§8). Tauri remains the
+  documented fallback but was not needed.
+- **Agents stay Python/TS:** ✅ no agent code is rewritten; the desktop app is
+  another client of the existing HTTP/SSE protocol.
+- **Where the app + sidecar run:** ✅ **co-located on Linux** for development
+  (the checkout, `.env`, and `asta` CLI live there). The app itself also builds
+  and runs on Windows.
+
+**Open:**
+
+- **Execution locality (§10, new):** keep the remote **LangSmith sandbox** for
+  code/`asta` execution, or move to a **local execution backend** now that the
+  whole stack is local? Affects the Mini-Me repo, not this one.
+- **Rust capacity:** an organizational gate (R6) — sustained Rust availability.
+- **Packaging (R4):** bundling Python + `asta` per OS is deferred past MVP.
 
 ---
 
