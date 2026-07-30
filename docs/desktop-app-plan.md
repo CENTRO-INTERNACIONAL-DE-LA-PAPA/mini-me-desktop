@@ -6,12 +6,12 @@ This repo is the desktop **client**; the Mini-Me agent stack (the coordinator +
 Asta-backed subagents + skills) stays in Python/TypeScript and runs as a **local
 sidecar** that the client spawns and supervises.
 
-> Status: **P6.1 — buildable window (go/no-go: PASS on build).** `cargo build
-> -p mini-me-desktop-app` succeeds on Linux against the pinned **`gpui 0.2.2`**
-> (crates.io). Visual window-verification (`cargo run` in a graphical session) is
-> the one remaining hand-check. See §8 for the execution log — and note the
-> "Honest risk register" R1 is now **downgraded**: GPUI turned out to be a
-> *published* crate, not a `git`-only dependency.
+> Status: **P6.1 — PASS (go/no-go cleared).** `cargo build` is green **and** the
+> three-pane workbench window renders natively (verified on Windows / DirectX,
+> 2026-07-30). GPUI pinned at published **`gpui 0.2.2`** (crates.io). Next:
+> **P6.2** — spawn the local Python sidecar + stream one real coordinator turn.
+> See §8 for the execution log; risk-register R1 is now **downgraded** — GPUI
+> turned out to be a *published* crate, not a `git`-only dependency.
 
 ---
 
@@ -215,6 +215,10 @@ upstream future-incompat warning in `proc-macro-error2` (transitive; not our cod
 The `BackendSupervisor` dead-code warnings are silenced with a documented
 `#![allow(dead_code)]` — it's P6.2 scaffolding, constructed but not yet wired.
 
-**Remaining to fully close P6.1.** Visual confirmation only: run
-`cargo run -p mini-me-desktop-app` in a graphical session and confirm the
-three-pane workbench window paints (rail / chat / artifacts).
+**P6.1 CLOSED (2026-07-30).** Visual confirmation done: `cargo run` on **Windows**
+(GPUI's DirectX backend) opened the three-pane workbench window — orange-accented
+rail, chat pane with the two placeholder turns, and the right panel with the
+mission + P6.3 note — exactly as designed. Note the run environment: the app
+**builds on Linux (headless)** and **runs/renders on a Windows dev machine**
+(`C:\Users\LENOVO\…\mini-me-desktop`); Windows is a first-class GPUI target
+(DirectX — no Vulkan/Wayland needed). **Go decision: proceed to P6.2.**

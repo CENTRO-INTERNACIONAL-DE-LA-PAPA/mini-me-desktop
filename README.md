@@ -10,12 +10,13 @@ sidecar** the client spawns and supervises — which also means the app inherits
 the local `asta` CLI's auto-refreshing auth, so the web app's token-expiry pain
 goes away.
 
-> **Status: P6.1 — it builds.** `cargo build -p mini-me-desktop-app` is green on
-> Linux against **`gpui 0.2.2`** (crates.io — GPUI turned out to be a *published*
-> crate, not a `git`-only dep, which retires the biggest risk in the register).
-> Visual window-check (`cargo run` in a graphical session) is the one remaining
-> step. Read [`docs/desktop-app-plan.md`](docs/desktop-app-plan.md) — the risk
-> register and the P6.1 execution log (§8).
+> **Status: P6.1 — DONE.** `cargo build` is green **and** the three-pane workbench
+> window renders natively (verified on Windows / DirectX, 2026-07-30). GPUI is
+> pinned at published **`gpui 0.2.2`** (crates.io — not a `git`-only dep, which
+> retired the biggest risk in the register). Next up: **P6.2** — spawn the local
+> Python sidecar and stream a real coordinator turn. Read
+> [`docs/desktop-app-plan.md`](docs/desktop-app-plan.md) — the risk register and
+> the P6.1 execution log (§8).
 
 ## Layout
 
