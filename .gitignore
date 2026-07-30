@@ -10,3 +10,6 @@ Cargo.lock.orig
 .DS_Store
 .idea/
 .vscode/
+
+# Claude Code session + linked worktrees (never commit — holds build output)
+.claude/
