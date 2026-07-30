@@ -1,0 +1,5 @@
+[toolchain]
+# GPUI tracks recent stable Rust closely. Pin here once P6.1 confirms a working
+# combination against the pinned gpui rev; bump deliberately.
+channel = "stable"
+components = ["rustfmt", "clippy"]

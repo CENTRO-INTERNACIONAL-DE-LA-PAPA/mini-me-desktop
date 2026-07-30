@@ -1,0 +1,12 @@
+/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# Local sidecar / env
+.env
+.env.local
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

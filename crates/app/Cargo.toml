@@ -1,0 +1,34 @@
+[package]
+name = "mini-me-desktop-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "mini-me-desktop-app"
+path = "src/main.rs"
+
+[dependencies]
+# GPUI is not published to crates.io — it lives in the Zed monorepo and must be
+# taken as a git dependency. TODO(P6.1): replace `branch` with a pinned `rev`
+# once a known-good commit is confirmed to build against this scaffold, e.g.
+#   gpui = { git = "https://github.com/zed-industries/zed", rev = "<sha>", package = "gpui" }
+gpui = { git = "https://github.com/zed-industries/zed", branch = "main", package = "gpui" }
+
+# Local sidecar supervision + streaming.
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+futures = "0.3"
+
+# Protocol payloads (mirror the backend's run/stream shapes as they are needed).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# OS keychain for model/API keys instead of a plaintext dotfile.
+keyring = "3"
+
+# Diagnostics.
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
