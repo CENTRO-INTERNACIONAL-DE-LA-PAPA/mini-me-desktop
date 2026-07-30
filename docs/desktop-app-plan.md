@@ -16,15 +16,36 @@ sidecar** that the client spawns and supervises.
 | **P6.3** — port the core panels | ⬜ next |
 | **P6.4** — native affordances | ⬜ not started |
 
+| **P6.2.5** — local-first backend (drop LangSmith/WorkOS) | 🔴 **new critical path** — see §10/§11 |
+
 **Health of the bet.** The two risks that could have killed this are both down:
 **R1** (GPUI as an unstable `git` dep) — GPUI is a *published* crate, pinned at
 `gpui 0.2.2`. **R2** (API churn) — the P6.0 sketch compiled against it unchanged.
-What remains is scope risk (**R3**: rebuilding rich UI) and packaging (**R4**),
-both of which are work, not uncertainty.
+What remains is scope risk (**R3**: rebuilding rich UI) and packaging (**R4**) —
+work, not uncertainty. **R4 shrank** once the target became local-first for
+colleagues rather than a notarized public installer.
 
-**Open decision on the table:** whether the local backend should keep using the
-**remote LangSmith sandbox** for execution or switch to a **local execution
-backend** now that everything runs on the user's machine — see §10.
+## What this product is (clarified 2026-07-30)
+
+A **local-first, single-user research workbench** — deliberately *not* a hosted
+service. The web app is the thing we are leaving behind, so the desktop app should
+shed its infrastructure rather than reproduce it:
+
+- **Drop the hosted services.** No **WorkOS** (auth is meaningless for a local
+  single user) and no **LangSmith** (sandbox *and* tracing). §11 proves both are
+  droppable — WorkOS for free today, LangSmith once execution is local.
+- **Execution runs on the user's machine** (§10). That is also what makes an
+  installable app possible: you cannot ask every scientist to provision their own
+  remote sandbox.
+- **The user's own API keys, on their own computer** — OS keychain, plus a setup
+  tutorial. Two externals remain by nature: **Asta** and the **model API**.
+- **"Click to update"**, Zed-style. The backend is Python, so an update is a fetch
+  + dependency sync of a pinned checkout — no compile step. (Self-updating the
+  Rust binary is a separate, later problem.)
+- **Mini-Me stays upstream, unmodified and pinned** — bundled, never forked. The
+  agent stack *is* the product and is actively developed; a modified copy would
+  either accrue permanent merge debt or freeze and drift from the web app. Desktop
+  needs are met by one opt-in seam (§10), not a fork.
 
 ---
 
@@ -136,14 +157,26 @@ the backend), `ui` (reusable GPUI components), `sidecar` (packaging).
   sidecar, health-checks it, and streams **one real coordinator turn** end to end;
   render the assistant text as it arrives. *Backend path verified headlessly
   (§9); the on-screen stream still needs a human look.*
+- 🔴 **P6.2.5 — Local-first backend** *(new; critical path — §10/§11).* Replace the
+  remote LangSmith sandbox with host execution (`LocalShellBackend`) behind
+  `MINIME_EXECUTION_BACKEND`, add the ~6 bespoke methods deepagents lacks
+  (`aget_work_dir`, `aexecute_untruncated`, the lifecycle quartet,
+  `_emit_sandbox_status`), and stop configuring WorkOS/LangSmith. Revisit
+  `prompts.py` (path + `python3` rules) and `guardrails.py` (the isolation
+  assumption), and gate `execute` with human approval.
+  *Acceptance:* a real turn — including an `asta` subagent call — completes with
+  **no `LANGSMITH_API_KEY` and no `WORKOS_*`**, executing on the host.
 - ⬜ **P6.3 — Port the core panels.** Artifacts/Outputs, the project spine
   (mission + completed/pending), the plan/Autopilot panel — the workbench
   identity. Plus the two P6.2 deferrals: a **text composer** (P6.2 uses one
   seeded prompt) and the **command palette**; and `values`/`custom` stream events
   for state + `sandbox_status`.
-- ⬜ **P6.4 — Native affordances.** Local file → analysis, background-run tray +
-  notifications, keychain-stored keys, multi-window. Also: Windows process-tree
-  teardown via a Job Object (§9), and sidecar packaging (R4).
+- ⬜ **P6.4 — Native affordances + shipping.** Local file → analysis,
+  background-run tray + notifications, **keychain-stored keys**, multi-window.
+  Plus what "installable" now means: a **pinned Mini-Me checkout + venv the app
+  provisions**, a **"click to update"** button, a **setup tutorial**, and Windows
+  process-tree teardown via a Job Object (§9). Not a notarized public installer —
+  a guided local install for colleagues.
 
 **MVP acceptance:** a launchable app that opens a project, runs a real coordinator
 turn against the local sidecar, streams the answer, renders the artifacts/spine
@@ -171,13 +204,25 @@ background-run notification).
   (the checkout, `.env`, and `asta` CLI live there). The app itself also builds
   and runs on Windows.
 
+**Locked (2026-07-30):**
+
+- **Product shape:** ✅ **local-first, single-user**; not a hosted service, not
+  production. This is the premise the rest follows from.
+- **Execution locality:** ✅ **local host execution** (§10), proven to be the only
+  blocker to dropping LangSmith (§11).
+- **Hosted services:** ✅ **drop WorkOS and LangSmith** (sandbox + tracing).
+- **Mini-Me:** ✅ **bundled upstream, pinned, unmodified — not forked.** Desktop
+  needs are met through one opt-in seam.
+- **Secrets:** ✅ the user's own keys, in the **OS keychain**, with a setup tutorial.
+
 **Open:**
 
-- **Execution locality (§10, new):** keep the remote **LangSmith sandbox** for
-  code/`asta` execution, or move to a **local execution backend** now that the
-  whole stack is local? Affects the Mini-Me repo, not this one.
+- **Where the §10 change lands:** a branch/PR in Mini-Me, or a thin overlay in
+  this repo? *Needs sign-off — nothing in Mini-Me has been touched.*
+- **Human-gating `execute`:** approval UX for host commands (policy + design).
 - **Rust capacity:** an organizational gate (R6) — sustained Rust availability.
-- **Packaging (R4):** bundling Python + `asta` per OS is deferred past MVP.
+- **`asta` version pinning on the host:** the sandbox pinned `v0.101.0`; the dev
+  box has `0.101.1`. Needs a version check at startup.
 
 ---
 
@@ -374,17 +419,19 @@ docstring during startup; the server boots fine. Mini-Me is read-only here.)
 
 ---
 
-## 10. Open decision: execution locality (remote sandbox → local?)
+## 10. Execution locality: remote sandbox → local host
 
-**The question.** Today the agent executes code and the `asta` CLI in a **remote
-per-thread LangSmith sandbox**, even when the backend itself runs on the user's
-machine. Now that the whole stack is local, should execution move to the host —
-via deepagents' `LocalShellBackend`? Raised 2026-07-30; **not yet decided.**
+**Decided (2026-07-30): go local.** The product is a **local-first, single-user
+workbench** — not a hosted service. That makes the remote **LangSmith sandbox**
+(and WorkOS auth) infrastructure we neither need nor want: it costs a per-user
+API key, a cold start, a 10-minute idle TTL, a 1-concurrent-sandbox free tier, and
+it ships the user's files to someone else's VM. Execution moves to the host via
+deepagents' `LocalShellBackend`. **This is now on the critical path** — see §11 for
+the experiment that proves it is the *only* thing standing in the way.
 
-> **Scope warning.** This is a change to the **Mini-Me repo**, which this project
-> treats as **read-only reference** (it has open PRs). Nothing here is actionable
-> without explicit sign-off, and it should land as its own branch/PR *there*, not
-> as edits entangled with in-flight work.
+> **Scope gate.** The change itself lands in the **Mini-Me repo**, which this
+> project treats as read-only reference (it has open PRs). Still **awaiting
+> sign-off on where the code lands** — a branch/PR there, or a thin overlay here.
 
 ### What the codebase says (read-only audit, 2026-07-30)
 
@@ -460,4 +507,64 @@ assumption).
 
 **Verdict: medium-low code risk, medium-high behavioural risk.** The plumbing is
 a small bounded diff; the isolation question is the actual decision. Keeping the
-remote sandbox as the default makes it reversible and lets the desktop app opt in.
+remote sandbox behind a flag makes it reversible and lets the desktop app opt in.
+
+**On isolation, decided:** for a local-first app the user runs on their own
+machine against their own files, host execution is the *point*, not a regression —
+the same trade Zed, Claude Code, and every local dev tool make. But
+`guardrails.py` currently *states* it relies on sandbox isolation, so that
+assumption must be rewritten rather than silently invalidated, and the
+**human-gated** policy is honoured by putting approval on the `execute` tool
+(deepagents recommends HITL here). Local ≠ ungoverned.
+
+---
+
+## 11. Experiment: what actually breaks without LangSmith / WorkOS (2026-07-30)
+
+Rather than argue about the dependency surface, we measured it. A **stripped
+overlay** of the backend was assembled in scratch space — every directory
+symlinked to the real checkout (which stayed untouched, `git status` clean) plus a
+hand-written `.env` containing **only** `OPENAI_API_KEY`, `ASTA_API_KEY`,
+`ASTA_TOKEN`, and `LANGSMITH_TRACING=false`. No `LANGSMITH_API_KEY`, no
+`WORKOS_*`, and those names were scrubbed from the launching environment too. Then
+`--check-backend --stream` ran a real turn against it.
+
+**Result:**
+
+| Layer | Without LangSmith + WorkOS |
+|---|---|
+| Server boot / graph import | ✅ works |
+| `GET /ok` health | ✅ works |
+| Auth (`POST /threads`) | ✅ works — unauthenticated `local-user`, thread created |
+| Tracing | ✅ fine, silently off |
+| **Agent run** | ❌ **fails** |
+
+The failure is precise and singular:
+
+```
+SandboxSyncMiddleware.before_agent
+  -> sandbox.aget_work_dir()  (backend/sandbox.py:259)
+  -> aresolve()               (backend/sandbox.py:161)
+  -> langsmith client.get_sandbox(...)
+  -> SandboxAuthenticationError: 401 Unauthorized
+     https://api.smith.langchain.com/v2/sandboxes/boxes/minime-<thread-id>
+```
+
+**Conclusions.**
+
+1. **WorkOS is already droppable — zero code change.** Local mode never
+   authenticates; `auth.py` admits `local-user`. `vault.py` (WorkOS Vault for
+   storing user keys) simply goes unused when keys come from the environment or
+   the OS keychain.
+2. **LangSmith *tracing* is droppable — one flag.** `LANGSMITH_API_KEY` appears
+   **nowhere** in backend code; it is purely SDK-implicit.
+3. **The LangSmith *sandbox* is the single hard blocker**, and it fails *before
+   the agent even starts* (in `before_agent` middleware) — so nothing works
+   partially. Replace the execution backend (§10) and LangSmith drops out
+   entirely.
+4. **Two externals remain by nature:** the **Asta** API/CLI and the **model API**.
+   Those are the product, not infrastructure. The honest privacy claim is
+   therefore *"no infrastructure services, and your files never leave your
+   machine"* — not "no network".
+
+This is the whole justification for §10, measured rather than assumed.
