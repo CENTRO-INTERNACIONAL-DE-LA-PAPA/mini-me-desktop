@@ -12,7 +12,7 @@ sidecar** that the client spawns and supervises.
 |---|---|
 | **P6.0** — spike doc + scaffold | ✅ done |
 | **P6.1** — buildable window *(go/no-go gate)* | ✅ **PASS** — builds green; window renders natively (verified on Windows/DirectX). §8 |
-| **P6.2** — talk to the real backend | 🟡 **backend path verified end to end** (spawn → health → thread → 75-chunk streamed turn). Remaining: confirm the live token stream *visually*. §9 |
+| **P6.2** — talk to the real backend | ✅ **done** — a real coordinator turn spawned, streamed and rendered **on Windows** (2026-07-30). §9 |
 | **P6.3** — port the core panels | ⬜ next |
 | **P6.4** — native affordances | ⬜ not started |
 
@@ -153,10 +153,10 @@ the backend), `ui` (reusable GPUI components), `sidecar` (packaging).
 - ✅ **P6.1 — "Hello workbench" (go/no-go).** Pin `gpui`, get **one window** on
   screen, reconcile `main.rs` against the pinned API. *Kill-criterion R1 — passed;
   see §8.* (The command palette slipped to P6.3 — the gate was the window.)
-- 🟡 **P6.2 — Talk to the real backend.** `BackendSupervisor` spawns the Python
-  sidecar, health-checks it, and streams **one real coordinator turn** end to end;
-  render the assistant text as it arrives. *Backend path verified headlessly
-  (§9); the on-screen stream still needs a human look.*
+- ✅ **P6.2 — Talk to the real backend.** `BackendSupervisor` spawns the Python
+  sidecar, health-checks it, and streams **one real coordinator turn** end to end,
+  rendering assistant text as it arrives. *Verified on Windows 2026-07-30 — the
+  coordinator answered in the chat pane, status `done`.*
 - 🔴 **P6.2.5 — Local-first backend** *(new; critical path — §10/§11).* Replace the
   remote LangSmith sandbox with host execution (`LocalShellBackend`) behind
   `MINIME_EXECUTION_BACKEND`, add the ~6 bespoke methods deepagents lacks
@@ -248,7 +248,33 @@ cargo run   -p mini-me-desktop-app   # opens the workbench window (needs a displ
 
 `cargo build` is confirmed working (P6.1). `cargo run` must be launched from a
 graphical session (Wayland/X11 + a Vulkan device) — it cannot open a window from a
-headless TTY.
+headless TTY. On **Windows** GPUI renders via DirectX, so no Vulkan/Wayland is
+needed and `cargo build && cargo run` works natively.
+
+### Backend prerequisites (the sidecar)
+
+The app spawns the Mini-Me Python backend, so that checkout must be able to serve:
+
+```bash
+git clone <Mini-Me>            # then, inside it:
+uv sync --extra dev            # NOT plain `uv sync` — see below
+```
+
+**`--extra dev` is required.** The LangGraph *CLI* lives in an optional extra
+(`langgraph-cli[inmem]` under `[project.optional-dependencies] dev`), which plain
+`uv sync` skips. You then get the server libraries but **no `langgraph` entry
+point**, and both `langgraph dev` and `uv run langgraph dev` fail with "program not
+found" (hit on Windows 2026-07-30). The supervisor's spawn error now names this fix.
+
+The checkout also needs a populated `.env` — at minimum `OPENAI_API_KEY`, plus
+`ASTA_API_KEY` / `ASTA_TOKEN` for Asta features and, **until P6.2.5 lands**,
+`LANGSMITH_API_KEY` (§11 explains why the run dies without it).
+
+How the app finds the checkout: `MINIME_BACKEND_DIR` wins; otherwise it tries
+`~/Documents/Mini-Me` and `~/Documents/GitHub/Mini-Me` (honouring `USERPROFILE` on
+Windows) and then `../Mini-Me`. Related env vars: `MINIME_BACKEND_PORT`,
+`MINIME_BACKEND_URL`, and `MINIME_BACKEND_ATTACH_ONLY` (never spawn — talk to a
+backend you started yourself).
 
 ---
 

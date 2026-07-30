@@ -26,6 +26,20 @@ crates/app        the desktop binary (GPUI app + backend supervisor)
 docs/             the Phase 6 spike plan
 ```
 
+## Backend prerequisite
+
+The app spawns the Mini-Me Python backend as a sidecar. In that checkout run:
+
+```bash
+uv sync --extra dev
+```
+
+**`--extra dev` matters** — the LangGraph CLI is an optional extra, so plain
+`uv sync` leaves you with no `langgraph` entry point. Populate `.env` too
+(`OPENAI_API_KEY`, `ASTA_API_KEY`, `ASTA_TOKEN`, and for now `LANGSMITH_API_KEY`).
+The app looks for the checkout via `MINIME_BACKEND_DIR`, else
+`~/Documents/Mini-Me` or `~/Documents/GitHub/Mini-Me`.
+
 ## Build
 
 On Linux (Ubuntu 22.04), install the GPUI system dev headers once:

@@ -149,7 +149,18 @@ impl Workbench {
     }
 
     fn chat_pane(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut col = div().flex().flex_col().flex_grow().h_full().p_4().gap_3();
+        // `min_w_0` is what makes long assistant text *wrap* instead of running off
+        // the right edge: a flex item defaults to min-width:auto, so its content
+        // width becomes its floor and a long paragraph widens the pane instead of
+        // flowing down.
+        let mut col = div()
+            .flex()
+            .flex_col()
+            .flex_grow()
+            .min_w_0()
+            .h_full()
+            .p_4()
+            .gap_3();
 
         if self.transcript.is_empty() {
             col = col.child(
@@ -170,6 +181,8 @@ impl Workbench {
                 div()
                     .flex()
                     .flex_col()
+                    .w_full()
+                    .min_w_0()
                     .gap_1()
                     .child(
                         div()
@@ -177,7 +190,7 @@ impl Workbench {
                             .text_sm()
                             .child(message.role),
                     )
-                    .child(div().text_color(rgb(TEXT)).child(body)),
+                    .child(div().w_full().text_color(rgb(TEXT)).child(body)),
             );
         }
 

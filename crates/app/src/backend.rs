@@ -190,9 +190,18 @@ impl BackendSupervisor {
             command.process_group(0);
         }
 
-        let child = command
-            .spawn()
-            .with_context(|| format!("failed to spawn backend: {program}"))?;
+        let child = command.spawn().with_context(|| {
+            // The usual cause: the checkout is synced but the LangGraph *CLI* is not
+            // installed. It lives in an optional extra (`langgraph-cli[inmem]` under
+            // `[project.optional-dependencies] dev`), which plain `uv sync` skips —
+            // so the server libraries are present and the `langgraph` entry point is
+            // simply absent. Name the fix rather than reporting "program not found".
+            format!(
+                "failed to spawn the backend ({program}). If the LangGraph CLI is \
+                 missing, install the dev extra in {}:\n    uv sync --extra dev",
+                self.config.project_dir.display()
+            )
+        })?;
         self.child = Some(child);
         Ok(())
     }
