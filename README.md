@@ -10,11 +10,12 @@ sidecar** the client spawns and supervises — which also means the app inherits
 the local `asta` CLI's auto-refreshing auth, so the web app's token-expiry pain
 goes away.
 
-> **Status: P6.0 — kickoff scaffold.** Skeleton + plan only; not yet a working
-> app. This was authored in an environment without a Rust toolchain, so the code
-> is **not compile-verified** — P6.1's first job is to make it build. Read
-> [`docs/desktop-app-plan.md`](docs/desktop-app-plan.md) first, including the
-> honest risk register (GPUI is a `git`-only, API-unstable dependency).
+> **Status: P6.1 — it builds.** `cargo build -p mini-me-desktop-app` is green on
+> Linux against **`gpui 0.2.2`** (crates.io — GPUI turned out to be a *published*
+> crate, not a `git`-only dep, which retires the biggest risk in the register).
+> Visual window-check (`cargo run` in a graphical session) is the one remaining
+> step. Read [`docs/desktop-app-plan.md`](docs/desktop-app-plan.md) — the risk
+> register and the P6.1 execution log (§8).
 
 ## Layout
 
@@ -23,14 +24,24 @@ crates/app        the desktop binary (GPUI app + backend supervisor)
 docs/             the Phase 6 spike plan
 ```
 
-## Build (needs a Rust machine)
+## Build
+
+On Linux (Ubuntu 22.04), install the GPUI system dev headers once:
 
 ```bash
-# Prereqs: rustup, and on Linux the GPUI system deps (Vulkan/Wayland/X11).
-# 1) Pin the gpui `rev` in crates/app/Cargo.toml (see TODO).
-# 2) Reconcile crates/app/src/main.rs against that rev's examples/ API.
-cargo run -p mini-me-desktop-app
+sudo apt-get install -y libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+                        libasound2-dev libvulkan-dev
 ```
+
+Then:
+
+```bash
+cargo build -p mini-me-desktop-app   # verified green (rustc 1.97.1, gpui 0.2.2)
+cargo run   -p mini-me-desktop-app   # opens the workbench window (needs a display)
+```
+
+`cargo run` must be launched from a graphical session (Wayland/X11 + Vulkan) — it
+can't open a window from a headless TTY.
 
 ## Direction
 

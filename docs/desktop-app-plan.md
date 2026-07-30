@@ -6,9 +6,12 @@ This repo is the desktop **client**; the Mini-Me agent stack (the coordinator +
 Asta-backed subagents + skills) stays in Python/TypeScript and runs as a **local
 sidecar** that the client spawns and supervises.
 
-> Status: **P6.0 — kickoff / scaffold.** This document is the risk-burndown and
-> milestone plan; the code here is a skeleton to iterate on, not yet a working
-> app. See "Honest risk register" before investing.
+> Status: **P6.1 — buildable window (go/no-go: PASS on build).** `cargo build
+> -p mini-me-desktop-app` succeeds on Linux against the pinned **`gpui 0.2.2`**
+> (crates.io). Visual window-verification (`cargo run` in a graphical session) is
+> the one remaining hand-check. See §8 for the execution log — and note the
+> "Honest risk register" R1 is now **downgraded**: GPUI turned out to be a
+> *published* crate, not a `git`-only dependency.
 
 ---
 
@@ -41,7 +44,7 @@ stays **human-gated**: nothing auto-runs.
 
 | # | Risk | Severity | Mitigation / kill-criterion |
 |---|------|----------|------------------------------|
-| R1 | **GPUI is not a stable published crate.** It ships inside the Zed monorepo; using it standalone means a `git` dependency on a large tree with an **unstable API**. | High | Pin a specific `rev`. Budget P6.1 purely to get a window on screen. **Kill-criterion:** if a "hello window" can't be built + run in ~2 days, fall back to Tauri. |
+| R1 | ~~**GPUI is not a stable published crate.**~~ **Resolved (P6.1):** GPUI *is* published to crates.io. `gpui 0.2.2` is self-contained (companions `gpui_macros`/`gpui_util` published too; no `git`/`path` deps), so no Zed-monorepo `git` dependency is needed. | ~~High~~ **Low** | Pin the published crate: `gpui = "=0.2.2"`. Bump deliberately. Zed `git` rev `00bd72e…` (v1.13.1) kept documented as a fallback if a newer API is ever required. |
 | R2 | **GPUI API churn.** Examples online drift from the current API (`App`/`AppContext`/`Context`, `cx.new` vs `cx.new_view`, `Render` signature). | Med | Build against the `examples/` in the pinned Zed rev, not blog posts. The `crates/app/src/main.rs` here is a *starting sketch* to reconcile against that rev. |
 | R3 | **Rewriting rich UI** (streaming markdown, artifacts panel, PDF/figure views, charts) in GPUI is a lot of surface the browser gave for free. | High | Port incrementally (P6.3). Start with plain text + a simple list; add markdown/artifacts later. Consider embedding a webview *per-panel* only if a surface proves impractical in GPUI. |
 | R4 | **Sidecar packaging.** Bundling a Python backend (uv/venv + the `asta` CLI + system deps) into a shippable app is non-trivial per-OS. | Med | P6.2 spawns a *dev* sidecar (assume `uv`/venv on PATH). Packaging (PyInstaller / uv bundle / container) is a later milestone, not MVP. |
@@ -144,16 +147,74 @@ background-run notification).
 
 ---
 
-## 7. Build (once a Rust toolchain is present)
+## 7. Build & run
+
+**Prereqs (Linux / Ubuntu 22.04):** rustup + the stable toolchain, plus the GPUI
+system dev headers:
 
 ```bash
-# On a machine with rustup + the GPUI system deps (Vulkan/Wayland/X11 on Linux):
-cd mini-me-desktop
-# 1) Pin the gpui rev in crates/app/Cargo.toml (see the TODO there).
-# 2) Reconcile crates/app/src/main.rs against that rev's examples/ API.
-cargo run -p mini-me-desktop-app
+sudo apt-get install -y libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
+                        libasound2-dev libvulkan-dev
 ```
 
-The authoring environment for this scaffold had **no `cargo`/`rustc`**, so the
-skeleton is written but **not compile-verified**. P6.1's first task is to make it
-build.
+(Already on the dev box: `libx11`/`libxcb`/`fontconfig`/`freetype`/`openssl`/`zlib`
+plus a C toolchain + `cmake`. `protoc` is **not** required — we depend only on
+`package = "gpui"`, not Zed's proto crates.)
+
+```bash
+cd mini-me-desktop
+cargo build -p mini-me-desktop-app   # verified green: rustc 1.97.1, gpui 0.2.2
+cargo run   -p mini-me-desktop-app   # opens the workbench window (needs a display)
+```
+
+`cargo build` is confirmed working (P6.1). `cargo run` must be launched from a
+graphical session (Wayland/X11 + a Vulkan device) — it cannot open a window from a
+headless TTY.
+
+---
+
+## 8. P6.1 execution log (2026-07-29)
+
+The go/no-go gate. **Outcome: PASS on build.** `cargo build -p mini-me-desktop-app`
+succeeds; the visual window-check is the user's remaining step (the build shell is
+a headless TTY, so it can compile but not display).
+
+**Key finding — GPUI is published.** The P6.0 assumption ("not on crates.io, must
+be a Zed `git` dependency") was wrong. `gpui 0.2.2` is on crates.io (updated
+2025-10-22), fully self-contained — no `git`/`path` deps, and its only companions,
+`gpui_macros` and `gpui_util`, are published at the same version. We therefore pin
+**`gpui = "=0.2.2"`**, which retires most of risk **R1** (no unstable monorepo
+`git` dep). This Oct-2025 published snapshot still exposes the classic
+`Application::new().run()` entry point, matching the scaffold. Newer Zed revs
+(e.g. `v1.13.1` = `00bd72e7838f4b875a913cd112b47a0ebe1ca62b`) have since moved the
+entry point into a separate `gpui_platform::application()` crate — kept documented
+as the fallback if a newer API is ever needed.
+
+**API reconciliation — zero code changes required.** The P6.0 `main.rs` sketch
+compiled against `gpui 0.2.2` unmodified. Cross-checked against the crate's own
+`examples/hello_world.rs`:
+- `Application::new().run(|cx: &mut App| …)` ✓
+- `cx.open_window(WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), .. }, |_, cx| cx.new(|_| …))` ✓
+- `Render::render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement` ✓
+- `Bounds::centered(None, size(px(w), px(h)), cx)`, `rgb(u32)`, and the
+  macro-generated Tailwind-style helpers (`p_*`, `gap_*`, `w`, `h_full`,
+  `size_full`, `border_r_1`, `flex_grow`, …) ✓
+
+**Toolchain.** rustc/cargo **1.97.1** (stable), via rustup. Workspace
+`rust-toolchain.toml` stays `channel = "stable"`. (gpui's own repo pins 1.95.0, but
+building only the `gpui` crate downstream is fine on newer stable.)
+
+**Linux system deps.** Missing on the dev box and installed for the build:
+`libwayland-dev`, `libxkbcommon-dev`, `libxkbcommon-x11-dev`, `libasound2-dev`,
+`libvulkan-dev`. Already present: X11/xcb/fontconfig/freetype/openssl/zlib + C
+toolchain + cmake.
+
+**Build result.** `cargo fetch` resolves the full graph with no conflicts;
+`cargo build` finishes green (~1m35s cold on a 32-core box). One benign note: an
+upstream future-incompat warning in `proc-macro-error2` (transitive; not our code).
+The `BackendSupervisor` dead-code warnings are silenced with a documented
+`#![allow(dead_code)]` — it's P6.2 scaffolding, constructed but not yet wired.
+
+**Remaining to fully close P6.1.** Visual confirmation only: run
+`cargo run -p mini-me-desktop-app` in a graphical session and confirm the
+three-pane workbench window paints (rail / chat / artifacts).

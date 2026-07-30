@@ -10,11 +10,19 @@ name = "mini-me-desktop-app"
 path = "src/main.rs"
 
 [dependencies]
-# GPUI is not published to crates.io — it lives in the Zed monorepo and must be
-# taken as a git dependency. TODO(P6.1): replace `branch` with a pinned `rev`
-# once a known-good commit is confirmed to build against this scaffold, e.g.
-#   gpui = { git = "https://github.com/zed-industries/zed", rev = "<sha>", package = "gpui" }
-gpui = { git = "https://github.com/zed-industries/zed", branch = "main", package = "gpui" }
+# GPUI *is* published to crates.io — contrary to the P6.0 assumption. `gpui 0.2.2`
+# (an Oct-2025 snapshot) is fully self-contained: its only companions, `gpui_macros`
+# and `gpui_util`, are published too, and it has no `git`/`path` deps. It exposes the
+# exact `Application::new().run()` / `open_window` / `Render` API this app targets
+# (verified 2026-07-29 against gpui 0.2.2's own examples/hello_world.rs). Pinning the
+# published crate instead of a Zed monorepo `git` rev retires risk R1 (unstable
+# git dependency on an API-churning tree).
+#
+# Fallback, only if a newer API becomes necessary: the Zed monorepo at
+#   rev = "00bd72e7838f4b875a913cd112b47a0ebe1ca62b"   # tag v1.13.1 (2026-07-29)
+# — but note revs after ~mid-2025 move the entry point out of `gpui` into a separate
+# `gpui_platform::application()` crate, so main.rs would need reconciling for that.
+gpui = "=0.2.2"
 
 # Local sidecar supervision + streaming.
 tokio = { version = "1", features = ["full"] }

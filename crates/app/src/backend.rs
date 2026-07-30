@@ -11,6 +11,11 @@
 //! against a dev backend (assume `uv`/venv on PATH); real streaming lands in
 //! P6.2. Nothing here runs a subagent; org policy stays human-gated.
 
+// The supervisor is constructed in `main` but its methods aren't called until
+// P6.2 wires the sidecar lifecycle in. Silence dead-code for this forward-looking
+// scaffolding rather than deleting code we're about to use.
+#![allow(dead_code)]
+
 use std::process::{Child, Command, Stdio};
 
 use anyhow::{Context, Result};
