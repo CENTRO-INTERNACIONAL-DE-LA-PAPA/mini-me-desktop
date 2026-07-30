@@ -100,7 +100,10 @@ fn resolve_project_dir() -> PathBuf {
         return PathBuf::from(dir);
     }
     let mut candidates = Vec::new();
-    if let Some(home) = std::env::var_os("HOME") {
+    // Windows sets USERPROFILE, not HOME — without this the candidates below are
+    // skipped entirely and discovery falls through to the cwd.
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    if let Some(home) = home {
         candidates.push(PathBuf::from(&home).join("Documents/Mini-Me"));
         candidates.push(PathBuf::from(&home).join("Documents/GitHub/Mini-Me"));
     }
