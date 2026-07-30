@@ -371,3 +371,93 @@ backend check: PASS                 # and no orphaned process afterwards
 confirm tokens land in the chat pane live. (Unrelated observation, *not ours to
 fix*: the backend prints a non-fatal `yaml.scanner.ScannerError` from a skill
 docstring during startup; the server boots fine. Mini-Me is read-only here.)
+
+---
+
+## 10. Open decision: execution locality (remote sandbox → local?)
+
+**The question.** Today the agent executes code and the `asta` CLI in a **remote
+per-thread LangSmith sandbox**, even when the backend itself runs on the user's
+machine. Now that the whole stack is local, should execution move to the host —
+via deepagents' `LocalShellBackend`? Raised 2026-07-30; **not yet decided.**
+
+> **Scope warning.** This is a change to the **Mini-Me repo**, which this project
+> treats as **read-only reference** (it has open PRs). Nothing here is actionable
+> without explicit sign-off, and it should land as its own branch/PR *there*, not
+> as edits entangled with in-flight work.
+
+### What the codebase says (read-only audit, 2026-07-30)
+
+The good news: **the seam is narrow and the replacement already exists.**
+
+- Mini-Me depends on `deepagents 0.6.1`, which **already ships**
+  `LocalShellBackend(root_dir=…, virtual_mode=True)`. Critically it subclasses
+  `FilesystemBackend` *and* `SandboxBackendProtocol`, so `supports_execution`
+  stays true and the `execute` tool is **not** stripped from the agent/subagents.
+  Its `virtual_mode` path-rooting is almost exactly the semantics
+  `sandbox.py`'s `_resolve_for_read/_write` hand-rolls today.
+- The LangSmith SDK is imported in **one** module (`backend/sandbox.py`), and the
+  injection point is **~3 lines**: `agent.py:86` (construct), `routes/common.py:41`
+  (HTTP routes), with `runtime.py:50`'s ContextVar deliberately typed `Any`.
+- Every tool module is already **duck-typed** against the backend surface
+  (`getattr(sandbox, "aexecute_untruncated", None) or sandbox.aexecute`), and the
+  test suite already substitutes fake sandboxes — so a swap is a proven pattern.
+- `/skills/` and `/memories/` are already routed to `StoreBackend` via
+  `CompositeBackend`; only the `default` route is the sandbox.
+- Report rendering (`pypandoc` + `typst`) **already runs host-side**.
+
+The tail that would have to be written — deepagents has no equivalent: a
+`aget_work_dir()` (7 call sites, trivially `root_dir`), `aexecute_untruncated()`
+(without it the ~500 KB theorizer record gets clipped to unparseable JSON), the
+lifecycle quartet `aresolve`/`try_resolve`/`aresume`/`adelete` (locally mostly
+no-ops or `mkdir`/`rmtree`), and `_emit_sandbox_status` (emit `ready` at once, or
+the UI waits on a state that never comes). Keep the output-truncation cap — it
+protects the UI from verbose PyMC/sklearn output, and is *not* sandbox-specific.
+
+### The trade
+
+**Wins (real, and aligned with why we went desktop):** no cold-start
+provisioning; no LangSmith dependency for the filesystem (only for tracing); no
+free-tier **1-concurrent-sandbox** limit; no 10-min idle TTL; and true local files
+— the "no upload dance" promise.
+
+**Costs:**
+
+1. **Isolation disappears.** `guardrails.py` states the current design *relies on
+   sandbox isolation* for the execution backend. `virtual_mode` constrains the
+   filesystem *tools*; it does **not** constrain what a shell command the model
+   wrote can reach. For a desktop app running the user's own code on the user's
+   own machine that may be an acceptable trade — but it is a **product decision**,
+   and `guardrails.py` plus CIP's human-gated policy must be revisited with it
+   (deepagents explicitly recommends HITL for this backend).
+2. **Host prerequisites.** `asta` must be on PATH at the pinned version (the
+   snapshot pins `v0.101.0`; the dev box has `0.101.1`), plus a `python3` with the
+   numerical stack — note that's a *different* interpreter from the backend venv
+   unless we deliberately point `env`/PATH at one. Natural move: reuse the backend
+   venv, which already carries most of those deps (and would retire
+   `build_sandbox_snapshot.py`'s duplicate manifest).
+3. **Platform assumptions.** Prompts instruct the model that `python3` exists and
+   `python` doesn't — inverted on Windows. `als`/`aglob` shell out to GNU
+   `find -printf`, which BSD/macOS `find` lacks. A local backend on Windows/macOS
+   needs those revisited; the remote sandbox hid all of it.
+
+### Recommended shape (if approved)
+
+A **factory, not a replacement** — keep both paths behind
+`MINIME_EXECUTION_BACKEND=local|langsmith`:
+
+```
+backend/execution.py  ->  LazyLangsmithSandbox(thread_id)                    # default, unchanged
+                      ->  LocalWorkspaceBackend(LocalShellBackend)           # root_dir=<app_data>/threads/<id>,
+                                                                             # virtual_mode=True, env={ASTA_TOKEN}
+```
+
+Wire it at `agent.py:86` + `routes/common.py:41` and **touch nothing else** —
+`mcp_tools.py`, `theory_tools.py`, `datavoyager_tools.py`, `middleware/sync.py`,
+`routes/rendering.py` are already duck-typed against the surface. Then revisit
+`prompts.py` (path + `python3` rules) and `guardrails.py` (the isolation
+assumption).
+
+**Verdict: medium-low code risk, medium-high behavioural risk.** The plumbing is
+a small bounded diff; the isolation question is the actual decision. Keeping the
+remote sandbox as the default makes it reversible and lets the desktop app opt in.
