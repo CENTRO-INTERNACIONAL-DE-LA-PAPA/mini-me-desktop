@@ -3148,6 +3148,7 @@ dependencies = [
  "futures",
  "gpui",
  "keyring",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",

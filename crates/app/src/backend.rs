@@ -3,57 +3,124 @@
 //! The desktop app is a *client* of the existing Mini-Me agent stack, not a
 //! reimplementation of it. `BackendSupervisor` owns the lifecycle of a locally
 //! spawned backend process: it starts it on a localhost port, waits for health,
-//! streams turns over HTTP/SSE, and tears it down on quit. Running the backend
-//! locally is what lets the app inherit the local `asta` CLI's auto-refreshing
-//! auth (killing the web app's token-expiry pain).
+//! and tears it down on quit. Running the backend locally is what lets the app
+//! inherit the local `asta` CLI's auth story (the web app has to paste a token
+//! that expires; locally it is minted once from the CLI into the repo's `.env`).
 //!
-//! This is a **stub** for P6.0 — the process spawn and health-check are sketched
-//! against a dev backend (assume `uv`/venv on PATH); real streaming lands in
-//! P6.2. Nothing here runs a subagent; org policy stays human-gated.
+//! Verified against the Mini-Me repo (2026-07-30): the backend is a LangGraph
+//! server started with `uv run langgraph dev`, defaulting to `127.0.0.1:2024`,
+//! which auto-loads `.env` from the repo root and does not open a browser.
 
-// The supervisor is constructed in `main` but its methods aren't called until
-// P6.2 wires the sidecar lifecycle in. Silence dead-code for this forward-looking
-// scaffolding rather than deleting code we're about to use.
-#![allow(dead_code)]
-
+use std::fs::File;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 
-/// How the client reaches the backend. Defaults to a locally spawned sidecar;
-/// a hosted URL is a future fallback (not the chosen direction).
+use crate::protocol::LangGraphClient;
+
+/// Where the sidecar's own stdout/stderr is tee'd. A GUI has no useful terminal,
+/// and piping to us would let the child hold our stdout open (and deadlock once
+/// the pipe buffer fills), so the logs go to a file we can point the user at.
+fn default_log_path() -> PathBuf {
+    std::env::temp_dir().join("mini-me-desktop-backend.log")
+}
+
+/// How the client reaches the backend. Defaults to a locally spawned sidecar.
 #[derive(Clone, Debug)]
 pub struct BackendConfig {
     /// Port the local sidecar listens on.
     pub port: u16,
-    /// Working directory of the Mini-Me checkout to launch from.
-    pub project_dir: String,
-    /// Command + args that start the dev backend (e.g. the LangGraph dev server
-    /// via `uv run`). Kept configurable so packaging can swap it later.
+    /// The Mini-Me checkout to launch from (its `.env` supplies the API keys).
+    pub project_dir: PathBuf,
+    /// Command + args that start the dev backend. Kept configurable so packaging
+    /// can swap it later.
     pub launch_command: Vec<String>,
+    /// When set, never spawn — just talk to a backend someone else is running.
+    pub attach_only: bool,
+    /// File the sidecar's stdout/stderr is written to.
+    pub log_path: PathBuf,
 }
 
 impl Default for BackendConfig {
     fn default() -> Self {
+        let port = std::env::var("MINIME_BACKEND_PORT")
+            .ok()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(2024);
+        let project_dir = resolve_project_dir();
         Self {
-            port: 2024,
-            project_dir: ".".to_string(),
-            // TODO(P6.2): confirm the exact dev-server invocation for the
-            // deployed graph (langgraph.json defines the graph id).
-            launch_command: vec![
-                "uv".into(),
-                "run".into(),
-                "langgraph".into(),
-                "dev".into(),
-                "--port".into(),
-            ],
+            port,
+            launch_command: launch_command_for(&project_dir, port),
+            project_dir,
+            attach_only: std::env::var_os("MINIME_BACKEND_ATTACH_ONLY").is_some(),
+            log_path: default_log_path(),
         }
     }
 }
 
+/// Build the launch argv.
+///
+/// Prefer the checkout's own venv entry point over `uv run langgraph`: `uv run`
+/// **forks** the real server as a grandchild, so killing our direct child leaves
+/// an orphaned server holding the port (observed in P6.2). Invoking the venv
+/// binary directly keeps it a single process we actually own.
+fn launch_command_for(project_dir: &Path, port: u16) -> Vec<String> {
+    let venv_entry = if cfg!(windows) {
+        project_dir.join(".venv/Scripts/langgraph.exe")
+    } else {
+        project_dir.join(".venv/bin/langgraph")
+    };
+
+    let mut argv: Vec<String> = if venv_entry.is_file() {
+        vec![venv_entry.to_string_lossy().into_owned(), "dev".into()]
+    } else {
+        // Fallback: let uv resolve the environment (it will create one if needed).
+        vec!["uv".into(), "run".into(), "langgraph".into(), "dev".into()]
+    };
+    argv.extend([
+        "--host".into(),
+        "127.0.0.1".into(),
+        "--port".into(),
+        port.to_string(),
+        // Keep it a single supervised process: the reloader forks children we
+        // don't own.
+        "--no-reload".into(),
+        // We are the client — don't hijack the user's browser with Studio.
+        "--no-browser".into(),
+    ]);
+    argv
+}
+
+/// Where the Mini-Me Python checkout lives. `MINIME_BACKEND_DIR` wins; otherwise
+/// try the conventional sibling locations before giving up on the cwd.
+fn resolve_project_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("MINIME_BACKEND_DIR") {
+        return PathBuf::from(dir);
+    }
+    let mut candidates = Vec::new();
+    if let Some(home) = std::env::var_os("HOME") {
+        candidates.push(PathBuf::from(&home).join("Documents/Mini-Me"));
+        candidates.push(PathBuf::from(&home).join("Documents/GitHub/Mini-Me"));
+    }
+    // A sibling of this repo, the layout a `git clone` pair produces.
+    candidates.push(PathBuf::from("../Mini-Me"));
+    candidates
+        .into_iter()
+        .find(|p| p.join("langgraph.json").is_file())
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
 impl BackendConfig {
     pub fn base_url(&self) -> String {
-        format!("http://127.0.0.1:{}", self.port)
+        std::env::var("MINIME_BACKEND_URL")
+            .unwrap_or_else(|_| format!("http://127.0.0.1:{}", self.port))
+    }
+
+    /// Whether the configured directory actually looks like the Mini-Me backend.
+    pub fn looks_like_backend_repo(&self) -> bool {
+        self.project_dir.join("langgraph.json").is_file()
     }
 }
 
@@ -65,49 +132,110 @@ pub struct BackendSupervisor {
 
 impl BackendSupervisor {
     pub fn new(config: BackendConfig) -> Self {
-        Self { config, child: None }
+        Self {
+            config,
+            child: None,
+        }
     }
 
-    /// Spawn the local backend sidecar. Idempotent: a second call is a no-op
-    /// while a child is already running.
+    /// Spawn the local backend sidecar. Idempotent: a no-op while a child runs.
     pub fn start(&mut self) -> Result<()> {
         if self.child.is_some() {
             return Ok(());
         }
-        let mut args = self.config.launch_command.clone();
-        // The launch command ends with `--port`; append the actual port.
-        args.push(self.config.port.to_string());
-        let (program, rest) = args
+        anyhow::ensure!(
+            self.config.looks_like_backend_repo(),
+            "no langgraph.json under {} — set MINIME_BACKEND_DIR to the Mini-Me checkout",
+            self.config.project_dir.display()
+        );
+
+        let (program, rest) = self
+            .config
+            .launch_command
             .split_first()
             .context("launch_command must not be empty")?;
 
-        tracing::info!(program, port = self.config.port, "spawning backend sidecar");
-        let child = Command::new(program)
+        tracing::info!(
+            program = %program,
+            dir = %self.config.project_dir.display(),
+            port = self.config.port,
+            log = %self.config.log_path.display(),
+            "spawning backend sidecar"
+        );
+
+        let log = File::create(&self.config.log_path).with_context(|| {
+            format!(
+                "could not open the sidecar log at {}",
+                self.config.log_path.display()
+            )
+        })?;
+        let log_err = log.try_clone().context("could not dup the sidecar log")?;
+
+        let mut command = Command::new(program);
+        command
             .args(rest)
             .current_dir(&self.config.project_dir)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(log))
+            .stderr(Stdio::from(log_err));
+
+        // Put the child in its own process group so we can signal the whole tree
+        // on shutdown (see `terminate`) rather than just the process we spawned.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+
+        let child = command
             .spawn()
             .with_context(|| format!("failed to spawn backend: {program}"))?;
         self.child = Some(child);
         Ok(())
     }
 
-    /// Poll the backend's health endpoint until it responds or the budget runs
-    /// out. TODO(P6.2): point at the real health/OK route the dev server exposes.
-    pub async fn wait_until_healthy(&self, attempts: u32) -> Result<()> {
-        let url = format!("{}/ok", self.config.base_url());
-        let client = reqwest::Client::new();
-        for attempt in 1..=attempts {
-            match client.get(&url).send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    tracing::info!("backend healthy after {attempt} attempt(s)");
-                    return Ok(());
-                }
-                _ => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
-            }
+    /// Ensure *something* healthy is listening: attach if it is already up,
+    /// otherwise spawn and wait. Returns a status string for the UI.
+    pub async fn ensure_running(&mut self, client: &LangGraphClient) -> Result<String> {
+        if client.is_healthy().await {
+            return Ok("attached to a running backend".into());
         }
-        anyhow::bail!("backend did not become healthy within {attempts} attempts")
+        if self.config.attach_only {
+            anyhow::bail!(
+                "no backend at {} and attach-only mode is on",
+                self.config.base_url()
+            );
+        }
+        self.start()?;
+        // `langgraph dev` imports the graph on boot, so first health can take a
+        // while on a cold venv.
+        self.wait_until_healthy(client, 120).await?;
+        Ok("sidecar started".into())
+    }
+
+    /// Poll `GET /ok` until it responds or the budget runs out.
+    pub async fn wait_until_healthy(
+        &mut self,
+        client: &LangGraphClient,
+        attempts: u32,
+    ) -> Result<()> {
+        for attempt in 1..=attempts {
+            // Fail fast if the process died rather than waiting out the budget.
+            if let Some(child) = self.child.as_mut() {
+                if let Some(status) = child.try_wait().context("could not poll the sidecar")? {
+                    anyhow::bail!("backend exited during startup with {status}");
+                }
+            }
+            if client.is_healthy().await {
+                tracing::info!("backend healthy after {attempt} attempt(s)");
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        anyhow::bail!(
+            "backend did not become healthy within {} attempts",
+            attempts
+        )
     }
 }
 
@@ -115,8 +243,38 @@ impl Drop for BackendSupervisor {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
             tracing::info!("terminating backend sidecar");
-            let _ = child.kill();
-            let _ = child.wait();
+            terminate(&mut child);
         }
     }
+}
+
+/// Stop the sidecar and everything it spawned.
+///
+/// On Unix the child leads its own process group, so we signal the *group*:
+/// `Child::kill` only reaps the process we spawned, which left an orphaned
+/// server holding the port when a wrapper had forked the real one. SIGTERM
+/// first so the server can shut its workers down, then SIGKILL if it lingers.
+#[cfg(unix)]
+fn terminate(child: &mut Child) {
+    let group = -(child.id() as i32);
+    unsafe { libc::kill(group, libc::SIGTERM) };
+    for _ in 0..40 {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(_) => break,
+        }
+    }
+    tracing::warn!("sidecar ignored SIGTERM; sending SIGKILL");
+    unsafe { libc::kill(group, libc::SIGKILL) };
+    let _ = child.wait();
+}
+
+/// TODO(P6.4): Windows needs a Job Object to reap a whole process tree; this
+/// kills only the direct child, which is correct for the venv entry point but
+/// would orphan a `uv run` grandchild.
+#[cfg(not(unix))]
+fn terminate(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
