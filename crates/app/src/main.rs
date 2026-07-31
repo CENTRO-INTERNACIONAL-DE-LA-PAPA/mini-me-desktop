@@ -12,6 +12,7 @@
 mod backend;
 mod composer;
 mod protocol;
+mod settings;
 mod sidecar;
 
 use std::sync::Arc;
@@ -1518,6 +1519,56 @@ mod tests {
     }
 }
 
+/// Assemble the model routing the backend expects from settings plus the keychain.
+fn model_choice(user_settings: &settings::Settings) -> Option<protocol::ModelChoice> {
+    let provider = settings::provider(&user_settings.provider)?;
+    Some(protocol::ModelChoice {
+        spec: user_settings.model_spec(),
+        provider: user_settings.provider.clone(),
+        api_key: settings::secret(&user_settings.key_name()),
+        base_url: if provider.needs_base_url && !user_settings.base_url.trim().is_empty() {
+            Some(user_settings.base_url.trim().to_string())
+        } else {
+            None
+        },
+    })
+}
+
+/// `--set-secret NAME [VALUE]` writes one credential to the OS keychain and exits.
+///
+/// The settings *panel* is the real interface, but this exists so the machine can be set
+/// up headlessly — which is exactly how the whole backend path is tested on a box with no
+/// display. An empty value forgets the entry.
+fn set_secret_from_args(args: &[String]) -> Option<i32> {
+    let at = args.iter().position(|arg| arg == "--set-secret")?;
+    let Some(name) = args.get(at + 1) else {
+        eprintln!("--set-secret needs a name, e.g. ASTA_TOKEN or llm:anthropic");
+        return Some(2);
+    };
+    let value = args.get(at + 2).map(String::as_str).unwrap_or("");
+    match settings::set_secret(name, value) {
+        Ok(()) => {
+            // Never echo the value.
+            println!(
+                "{name}: {}",
+                if value.trim().is_empty() {
+                    "cleared"
+                } else {
+                    "stored in the OS keychain"
+                }
+            );
+            Some(0)
+        }
+        Err(error) => {
+            eprintln!("could not store {name}: {error:#}");
+            if let Err(status) = settings::keychain_status() {
+                eprintln!("keychain: {status:#}");
+            }
+            Some(1)
+        }
+    }
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -1529,6 +1580,9 @@ fn main() {
     // `--replay <capture>` needs no backend at all, so it runs before one is
     // configured.
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(code) = set_secret_from_args(&args) {
+        std::process::exit(code);
+    }
     if let Some(path) = args.iter().position(|a| a == "--replay") {
         let Some(capture) = args.get(path + 1) else {
             eprintln!("--replay needs a path to a captured SSE stream");
@@ -1567,7 +1621,17 @@ fn main() {
             "no langgraph.json found — set MINIME_BACKEND_DIR to the Mini-Me checkout"
         );
     }
-    let sidecar = Arc::new(Sidecar::new(config).expect("failed to build the sidecar runtime"));
+    // The model choice comes from settings; the key comes from the OS keychain and goes
+    // straight into each run request, so no key is ever written to a file or an
+    // environment variable (docs §20).
+    let user_settings = settings::Settings::load();
+    let model = model_choice(&user_settings);
+    for problem in user_settings.problems(model.as_ref().is_some_and(|m| m.api_key.is_some())) {
+        // Warned, not fatal: the app still opens, which is where the user fixes it.
+        tracing::warn!(%problem, "settings incomplete");
+    }
+    let sidecar =
+        Arc::new(Sidecar::new(config, model).expect("failed to build the sidecar runtime"));
 
     // `--check-backend [--stream]` exercises the sidecar without a window, so the
     // client/backend contract can be verified on a headless machine.

@@ -17,7 +17,7 @@ sidecar** that the client spawns and supervises.
 | **P6.3** — port the core panels | ✅ **done** — composer, spine, outputs, sandbox status, agent activity trace, **command palette**; plus conversation continuity (turns used to each start a new thread) |
 | **P6.3.5** — visuals pass, starting with **markdown rendering** | ⬜ queued — answers currently render with their asterisks showing, and reports/citations are the deliverable. §16 |
 | **Native-Windows probe** | ✅ **answered** — `cmd.exe` is ruled out by upstream's *own* tool code (POSIX pipes, `mkdir -p`, `shlex.quote`), so WSL2 stays the v1 runtime and the installer's job is guided provisioning. Native-plus-Git-Bash is a documented half-day experiment. §21 |
-| **P6.4a** — settings panel + keychain secrets | ⬜ **next** — the prerequisite for a clickable install: nobody is hand-editing a `.env` inside WSL. §20 |
+| **P6.4a** — settings panel + keychain secrets | 🟡 **store + key path done** — a turn runs with no provider key in the backend's `.env`: it comes from the OS keychain via `settings.toml` and rides in the run request. The `ctrl-,` **panel UI** is still to build. §20/§22 |
 | **P6.4b** — native affordances + shipping | ⬜ not started — click-to-update, local file → analysis, tray notifications, Windows Job Object teardown |
 | **P6.5** — async subagents + Jobs panel | ⬜ planned — the payoff that most justifies going native. §14 |
 
@@ -1531,3 +1531,60 @@ Windows machine, not a prerequisite.
 `wsl --install`, provision the distro, then hand off to the settings panel (§20). Nothing
 about that is blocked by this verdict, which is why it was worth spending a day to get it
 before designing the installer rather than after.
+
+## 22. P6.4a part one: settings store, keychain, and the key path (2026-07-31)
+
+**Proven:** a turn ran against a checkout whose `.env` contained **no provider key at
+all**. The key came from the OS keychain, the model choice from `settings.toml`, and both
+travelled in the run request. That is the mechanism a clickable install needs — nobody has
+to edit a file inside a WSL distro to get started.
+
+```
+$ mini-me-desktop-app --set-secret llm:openai "sk-…"
+llm:openai: stored in the OS keychain
+$ mini-me-desktop-app --check-backend --prompt "…"      # .env has no OPENAI_API_KEY
+--- assistant text ---
+settings path works
+```
+
+### What exists now
+
+- **`settings.rs`** — `Settings` (provider, model id, base URL, host execution, approval,
+  port) in `settings.toml` under the platform config dir, plus keychain access. Every
+  field defaults, so a file from an older build still loads.
+- **Two stores, as designed (§20):** settings in plain TOML; keys in the OS keychain.
+- **The request contract** — `model_config.default` = `"provider::model_id"`,
+  `__llm_keys.<provider> = {api_key, base_url}`, `storage_mode: "client"`,
+  `__is_for_execution__: true`. Also sent on **resume**, so a continuation cannot silently
+  lose the key mid-turn.
+- **`--set-secret NAME [VALUE]`** writes one credential and exits, never echoing the
+  value. An empty value forgets it. The panel is the real interface; this is how a headless
+  machine gets set up, and it is what made the test above possible.
+- **Asta credentials** reach the backend as environment variables (they must — the `asta`
+  CLI reads them when `execute` runs), via `WSLENV` in WSL mode rather than the command
+  line.
+- Settings now drive the port, execution locality and the approval gate, with environment
+  variables still winning as the debugging escape hatch.
+
+### Three things worth keeping
+
+1. **`storage_mode` is omitted when there is no key.** Claiming client-only storage with
+   nothing to supply would tell the backend to skip its own lookup and then find nothing —
+   a confusing failure instead of a working fallback to its environment.
+2. **Keychain reads must not happen on a Tokio thread.** The Linux client (zbus) runs its
+   own `block_on`, so reading a secret from inside the runtime panics with *"Cannot start a
+   runtime from within a runtime"* — which is exactly how the first live run died. Secrets
+   are now read once on the main thread, before any runtime exists, and passed in.
+3. **No `libdbus-1-dev`.** `keyring`'s default Linux backend needs that plus `pkg-config`;
+   the zbus backend (`async-secret-service` + `crypto-rust`) is pure Rust. `cargo build` on
+   a fresh machine has to just work.
+
+### Not done yet — the panel itself
+
+This is the plumbing, not the UI. Still to build: the `ctrl-,` Settings pane, masked secret
+fields (needs a mask mode on `Composer`), the per-section **Test** button, and the
+first-run behaviour of opening Settings instead of letting a turn fail. Until then the CLI
+is the only way to store a key, which is fine for us and not fine for a researcher.
+
+**Unverified:** keychain read/write has only been exercised on Linux/zbus. Windows
+Credential Manager is the path that actually matters and needs a run on Windows.

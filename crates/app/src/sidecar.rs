@@ -17,7 +17,7 @@ use tokio::sync::Mutex;
 
 use crate::backend::{BackendConfig, BackendSupervisor};
 use crate::protocol::{
-    AgentRef, Decision, LangGraphClient, Project, TurnEvent, TurnOutcome,
+    AgentRef, Decision, LangGraphClient, ModelChoice, Project, TurnEvent, TurnOutcome,
 };
 
 /// Find (or start) the tally row for one subagent invocation, keyed by namespace so
@@ -49,13 +49,16 @@ pub struct Sidecar {
     thread: ThreadId,
     base_url: String,
     log_path: String,
+    /// The user's model choice and key, from settings + the keychain. Attached to every
+    /// client, since the backend resolves the model per request.
+    model: Option<ModelChoice>,
     /// Where the agent's code runs, for the status bar. The user should be able to
     /// see at a glance that commands are landing on their own machine.
     execution: &'static str,
 }
 
 impl Sidecar {
-    pub fn new(config: BackendConfig) -> Result<Self> {
+    pub fn new(config: BackendConfig, model: Option<ModelChoice>) -> Result<Self> {
         let base_url = config.base_url();
         let log_path = config.log_path.display().to_string();
         let execution = config.execution_label();
@@ -68,6 +71,7 @@ impl Sidecar {
             runtime,
             supervisor: Arc::new(Mutex::new(BackendSupervisor::new(config))),
             thread: Arc::new(SyncMutex::new(None)),
+            model,
             base_url,
             log_path,
             execution,
@@ -95,9 +99,10 @@ impl Sidecar {
         let supervisor = self.supervisor.clone();
         let thread = self.thread.clone();
         let base_url = self.base_url.clone();
+        let model = self.model.clone();
 
         self.runtime.spawn(async move {
-            let client = LangGraphClient::new(base_url);
+            let client = LangGraphClient::new(base_url).with_model(model);
             // Send failures just mean the UI dropped the receiver (window closed).
             let mut emit = |event: TurnEvent| {
                 let _ = tx.unbounded_send(event);
@@ -126,9 +131,10 @@ impl Sidecar {
         let (tx, rx) = mpsc::unbounded();
         let thread = self.thread.clone();
         let base_url = self.base_url.clone();
+        let model = self.model.clone();
 
         self.runtime.spawn(async move {
-            let client = LangGraphClient::new(base_url);
+            let client = LangGraphClient::new(base_url).with_model(model);
             let mut emit = |event: TurnEvent| {
                 let _ = tx.unbounded_send(event);
             };
@@ -192,10 +198,11 @@ impl Sidecar {
         let supervisor = self.supervisor.clone();
         let thread = self.thread.clone();
         let base_url = self.base_url.clone();
+        let model = self.model.clone();
         println!("url      : {base_url}");
         println!("log      : {}", self.log_path);
         self.runtime.block_on(async move {
-            let client = LangGraphClient::new(base_url);
+            let client = LangGraphClient::new(base_url).with_model(model);
             // Scoped: `run_turn` locks the supervisor itself, so holding it here
             // would deadlock the first turn.
             {

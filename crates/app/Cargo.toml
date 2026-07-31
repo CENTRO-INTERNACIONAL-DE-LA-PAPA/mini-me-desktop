@@ -33,8 +33,21 @@ futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# OS keychain for model/API keys instead of a plaintext dotfile.
-keyring = "3"
+# OS keychain for model/API keys instead of a plaintext dotfile. Native backends on
+# Windows and macOS; on Linux the **zbus** Secret Service client (`async-secret-service`
+# + `crypto-rust`) rather than the libdbus one, so building needs no `libdbus-1-dev` and
+# no `pkg-config` — a `cargo build` on a fresh machine has to just work, and every system
+# dependency we add is one more thing that can stop it.
+keyring = { version = "3", features = [
+    "apple-native",
+    "windows-native",
+    "async-secret-service",
+    "crypto-rust",
+    "tokio",
+] }
+
+# `settings.toml` — the non-secret half of the configuration (see settings.rs).
+toml = "0.8"
 
 # Grapheme-aware cursor movement in the composer (matches what gpui's own input
 # example uses, so arrow keys/backspace don't split emoji or accented clusters).

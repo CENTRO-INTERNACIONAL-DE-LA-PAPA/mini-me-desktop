@@ -171,10 +171,27 @@ struct ThreadCreated {
     thread_id: String,
 }
 
+/// Which model to use, and the key to use it with.
+///
+/// The backend resolves this **per request** — its provider table is even commented
+/// *"provider id (from the panel)"* — so the key travels from the OS keychain into the
+/// request body and never becomes an environment variable, a line in a `.env`, or an
+/// argument on a `wsl.exe` command line (docs §20).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ModelChoice {
+    /// `"provider::model_id"`, e.g. `anthropic::claude-sonnet-4-5`.
+    pub spec: String,
+    pub provider: String,
+    pub api_key: Option<String>,
+    /// Mandatory for the `custom` provider, ignored otherwise.
+    pub base_url: Option<String>,
+}
+
 /// Thin HTTP client bound to a backend base URL.
 pub struct LangGraphClient {
     http: reqwest::Client,
     base_url: String,
+    model: Option<ModelChoice>,
 }
 
 impl LangGraphClient {
@@ -182,7 +199,15 @@ impl LangGraphClient {
         Self {
             http: reqwest::Client::new(),
             base_url: base_url.into(),
+            model: None,
         }
+    }
+
+    /// Attach the user's model choice and key. Without one the backend falls back to
+    /// whatever provider variables its own environment happens to have.
+    pub fn with_model(mut self, model: Option<ModelChoice>) -> Self {
+        self.model = model;
+        self
     }
 
     /// `GET /ok` — true when the server is up and the graph is loaded.
@@ -242,7 +267,8 @@ impl LangGraphClient {
         prompt: &str,
         on_event: impl FnMut(TurnEvent),
     ) -> Result<TurnOutcome> {
-        self.stream(thread_id, run_request_body(prompt), on_event).await
+        self.stream(thread_id, run_request_body(prompt, self.model.as_ref()), on_event)
+            .await
     }
 
     /// Resume a run that stopped at the approval gate, streaming the continuation.
@@ -252,8 +278,12 @@ impl LangGraphClient {
         decisions: &[Decision],
         on_event: impl FnMut(TurnEvent),
     ) -> Result<TurnOutcome> {
-        self.stream(thread_id, resume_request_body(decisions), on_event)
-            .await
+        self.stream(
+            thread_id,
+            resume_request_body(decisions, self.model.as_ref()),
+            on_event,
+        )
+        .await
     }
 
     async fn stream(
@@ -321,8 +351,8 @@ impl LangGraphClient {
 /// Asking for `messages` instead selects the v1 path, which emits
 /// `messages/partial` + `messages/complete` with a different payload shape — and
 /// yields no tokens through this decoder.
-fn run_request_body(prompt: &str) -> Value {
-    let mut body = stream_request_body();
+fn run_request_body(prompt: &str, model: Option<&ModelChoice>) -> Value {
+    let mut body = stream_request_body(model);
     body["input"] = json!({ "messages": [ { "type": "human", "content": prompt } ] });
     body
 }
@@ -332,7 +362,7 @@ fn run_request_body(prompt: &str) -> Value {
 /// Shape from the HITL middleware (`human_in_the_loop.py`:
 /// `decisions = interrupt(hitl_request)["decisions"]`): exactly one decision per
 /// held action, in the order they were presented.
-fn resume_request_body(decisions: &[Decision]) -> Value {
+fn resume_request_body(decisions: &[Decision], model: Option<&ModelChoice>) -> Value {
     let decisions: Vec<Value> = decisions
         .iter()
         .map(|decision| match decision {
@@ -340,7 +370,7 @@ fn resume_request_body(decisions: &[Decision]) -> Value {
             Decision::Reject { message } => json!({ "type": "reject", "message": message }),
         })
         .collect();
-    let mut body = stream_request_body();
+    let mut body = stream_request_body(model);
     body["command"] = json!({ "resume": { "decisions": decisions } });
     body
 }
@@ -360,7 +390,7 @@ pub enum TurnOutcome {
 }
 
 /// The parts of the request body shared by a fresh run and a resume.
-fn stream_request_body() -> Value {
+fn stream_request_body(model: Option<&ModelChoice>) -> Value {
     json!({
         "assistant_id": "agent",
         "stream_mode": ["messages-tuple", "values", "custom"],
@@ -369,13 +399,52 @@ fn stream_request_body() -> Value {
         // the silent gap the activity trace exists to close. On a measured turn this
         // flag is the difference between 176 and 495 message events.
         "stream_subgraphs": true,
+        "config": config_for(model),
+    })
+}
+
+/// The `config` object: recursion limit, model routing, and the key.
+fn config_for(model: Option<&ModelChoice>) -> Value {
+    let mut configurable = json!({
+        // Marks this as a real run rather than a read-only graph load, which is what the
+        // backend's key check keys off.
+        "__is_for_execution__": true,
+    });
+
+    if let Some(model) = model {
+        let mut model_config = json!({
+            "default": model.spec,
+            // "client" keeps the backend's *server-side* Vault path dormant. Left unset
+            // with no inline keys it tries a Vault lookup that needs a user identity —
+            // i.e. the WorkOS world this product dropped (docs §11/§20).
+            "storage_mode": "client",
+        });
+        if model.api_key.is_none() {
+            // Nothing to supply inline, so don't claim client-only storage.
+            model_config
+                .as_object_mut()
+                .expect("object")
+                .remove("storage_mode");
+        }
+        configurable["model_config"] = model_config;
+
+        if let Some(api_key) = &model.api_key {
+            configurable["__llm_keys"] = json!({
+                model.provider.clone(): {
+                    "api_key": api_key,
+                    "base_url": model.base_url,
+                }
+            });
+        }
+    }
+
+    json!({
         // LangGraph defaults to 25 supersteps, and one turn already spends ~22 on
-        // middleware alone (PII scrubbing, call limits, todos, skills, sandbox
-        // sync) before any delegation -- so a multi-subagent research turn would
-        // hit the ceiling and fail. The web frontend sets the same value
-        // (`streamConfig.ts`: `{ recursionLimit: 10000 }`), so this matches the
-        // client the backend was built against.
-        "config": { "recursion_limit": 10_000 },
+        // middleware alone (PII scrubbing, call limits, todos, skills, sandbox sync)
+        // before any delegation -- so a multi-subagent research turn would hit the
+        // ceiling and fail. The web frontend sets the same value.
+        "recursion_limit": 10_000,
+        "configurable": configurable,
     })
 }
 
@@ -970,7 +1039,7 @@ mod tests {
         // tokens, because the server then emits `messages/partial` frames.
         // `values` rides alongside for the artifacts/spine snapshot — verified on a
         // live backend that asking for both still produces `event: messages`.
-        let body = run_request_body("hi");
+        let body = run_request_body("hi", None);
         assert_eq!(
             body["stream_mode"],
             json!(["messages-tuple", "values", "custom"])
@@ -981,6 +1050,58 @@ mod tests {
         // Without subgraphs a delegated turn streams nothing while the subagent
         // works — the silent gap the activity trace exists to close.
         assert_eq!(body["stream_subgraphs"], json!(true));
+    }
+
+    #[test]
+    fn sends_the_model_choice_and_key_in_the_run_config() {
+        // The contract measured in `backend/models.py`: `model_config.default` is
+        // `provider::model_id`, keys ride in `__llm_keys` per provider, and
+        // `storage_mode: "client"` keeps the server-side Vault path dormant.
+        let model = ModelChoice {
+            spec: "custom::openai/gpt-4o-mini".into(),
+            provider: "custom".into(),
+            api_key: Some("sk-test".into()),
+            base_url: Some("https://openrouter.ai/api/v1".into()),
+        };
+        let body = run_request_body("hi", Some(&model));
+        let configurable = &body["config"]["configurable"];
+        assert_eq!(configurable["model_config"]["default"], "custom::openai/gpt-4o-mini");
+        assert_eq!(configurable["model_config"]["storage_mode"], "client");
+        assert_eq!(configurable["__llm_keys"]["custom"]["api_key"], "sk-test");
+        assert_eq!(
+            configurable["__llm_keys"]["custom"]["base_url"],
+            "https://openrouter.ai/api/v1"
+        );
+        assert_eq!(configurable["__is_for_execution__"], true);
+        // The limit still has to be there — it is what keeps a multi-subagent turn from
+        // hitting LangGraph's 25-superstep ceiling.
+        assert_eq!(body["config"]["recursion_limit"], 10_000);
+
+        // A resume carries the same routing: the continuation must not silently switch
+        // model or lose the key mid-turn.
+        let resumed = resume_request_body(&[Decision::Approve], Some(&model));
+        assert_eq!(
+            resumed["config"]["configurable"]["__llm_keys"],
+            configurable["__llm_keys"]
+        );
+        assert_eq!(resumed["command"]["resume"]["decisions"][0]["type"], "approve");
+    }
+
+    #[test]
+    fn omits_client_key_storage_when_there_is_no_key() {
+        // Claiming client-only storage with nothing to supply would tell the backend to
+        // skip its own lookup and then find no key at all.
+        let model = ModelChoice {
+            spec: "openai::gpt-5.4".into(),
+            provider: "openai".into(),
+            api_key: None,
+            base_url: None,
+        };
+        let body = run_request_body("hi", Some(&model));
+        let configurable = &body["config"]["configurable"];
+        assert_eq!(configurable["model_config"]["default"], "openai::gpt-5.4");
+        assert!(configurable["model_config"]["storage_mode"].is_null());
+        assert!(configurable["__llm_keys"].is_null());
     }
 
     #[test]

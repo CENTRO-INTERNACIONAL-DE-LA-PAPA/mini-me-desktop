@@ -146,6 +146,12 @@ pub struct BackendConfig {
     pub log_path: PathBuf,
     /// Where the agent's code runs — the remote sandbox, or this machine.
     pub execution: Execution,
+    /// Credentials the `asta` CLI needs, read from the keychain **once at startup**
+    /// (see `secret_env`). Never logged.
+    pub secrets: Vec<(String, String)>,
+    /// Whether the backend should stop and ask before every `execute`. Off is for
+    /// automation, not a recommendation (docs §19).
+    pub approve_execute: bool,
 }
 
 impl BackendConfig {
@@ -154,15 +160,36 @@ impl BackendConfig {
     /// `Some(true)` forces host execution, `Some(false)` forces the sandbox, `None`
     /// falls back to `MINIME_EXECUTION_BACKEND`.
     pub fn with_execution_override(override_local: Option<bool>) -> Self {
+        let settings = crate::settings::Settings::load();
         let mut config = Self::default();
-        let execution = resolve_execution(override_local);
-        if execution != config.execution {
-            // The launch command embeds the execution environment, so it has to be
-            // rebuilt rather than patched.
-            config.launch_command =
-                launch_command_for(&config.project_dir, config.port, config.wsl.as_ref(), &execution);
-            config.execution = execution;
+        // Settings lose to an explicit environment variable, which is the debugging
+        // escape hatch, but win over the built-in default.
+        if std::env::var_os("MINIME_BACKEND_PORT").is_none() {
+            config.port = settings.backend_port;
         }
+        let execution = resolve_execution(
+            override_local.or_else(|| {
+                if std::env::var_os("MINIME_EXECUTION_BACKEND").is_some() {
+                    None
+                } else {
+                    Some(settings.local_execution)
+                }
+            }),
+        );
+        // The launch command embeds both the port and the execution environment, so it is
+        // rebuilt rather than patched.
+        config.launch_command =
+            launch_command_for(
+                &config.project_dir,
+                config.port,
+                config.wsl.as_ref(),
+                &execution,
+                settings.approve_execute,
+            );
+        config.execution = execution;
+        config.approve_execute = settings.approve_execute;
+        // Read here, on the main thread: see `secret_env`.
+        config.secrets = crate::settings::asta_env();
         config
     }
 }
@@ -178,12 +205,14 @@ impl Default for BackendConfig {
         let execution = resolve_execution(None);
         Self {
             port,
-            launch_command: launch_command_for(&project_dir, port, wsl.as_ref(), &execution),
+            launch_command: launch_command_for(&project_dir, port, wsl.as_ref(), &execution, true),
             project_dir,
             wsl,
             attach_only: std::env::var_os("MINIME_BACKEND_ATTACH_ONLY").is_some(),
             log_path: default_log_path(),
             execution,
+            secrets: Vec::new(),
+            approve_execute: true,
         }
     }
 }
@@ -199,6 +228,7 @@ fn launch_command_for(
     port: u16,
     wsl: Option<&WslTarget>,
     execution: &Execution,
+    approve_execute: bool,
 ) -> Vec<String> {
     if let Some(wsl) = wsl {
         let mut argv = vec!["wsl.exe".to_string()];
@@ -219,7 +249,7 @@ fn launch_command_for(
         // Host execution needs two variables set *inside* the distro, so they go in
         // the command line rather than on `wsl.exe`'s own environment.
         let mut exports = String::new();
-        for (name, value) in execution_env(execution, true) {
+        for (name, value) in execution_env(execution, true, approve_execute) {
             exports.push_str(&format!("{name}={} ", shell_quote(&value)));
         }
         argv.push(format!(
@@ -268,7 +298,7 @@ fn launch_command_for(
 ///
 /// Empty for [`Execution::Sandbox`], so the sandbox path is byte-for-byte the launch
 /// it always was. `for_wsl` selects how the overlay path is spelled.
-fn execution_env(execution: &Execution, for_wsl: bool) -> Vec<(String, String)> {
+fn execution_env(execution: &Execution, for_wsl: bool, approve: bool) -> Vec<(String, String)> {
     let Execution::Local { overlay_dir } = execution else {
         return Vec::new();
     };
@@ -279,10 +309,42 @@ fn execution_env(execution: &Execution, for_wsl: bool) -> Vec<(String, String)> 
     };
     vec![
         ("MINIME_EXECUTION_BACKEND".to_string(), "local".to_string()),
+        (
+            "MINIME_APPROVE_EXECUTE".to_string(),
+            if approve { "1" } else { "0" }.to_string(),
+        ),
         // Python imports `sitecustomize` from here at startup; that is the whole
         // injection mechanism. Prepended, so an existing PYTHONPATH survives.
         ("PYTHONPATH".to_string(), overlay),
     ]
+}
+
+/// The Asta credentials, delivered as environment variables on the *process*.
+///
+/// These two genuinely have to be variables: the `asta` CLI reads them from its
+/// environment when `execute` runs a command, so there is no in-request path for them the
+/// way there is for the model key (docs §20).
+///
+/// **Never on the command line.** In WSL mode the execution flags ride in the `bash -lc`
+/// string, which `ps` would show to anyone else on the machine — fine for a flag, not for
+/// a token. WSL's documented mechanism is `WSLENV`: set the variables on `wsl.exe` and
+/// name them in `WSLENV`, and the distro inherits them.
+///
+/// Takes the already-read values rather than reading the keychain itself. That is not a
+/// style choice: the Linux keychain client (zbus) runs its own `block_on`, and calling it
+/// from a thread that is already driving a Tokio runtime panics with "Cannot start a
+/// runtime from within a runtime" — which is exactly how the first live run of this code
+/// died. Secrets are read once, on the main thread, before any runtime exists.
+fn secret_env(secrets: &[(String, String)], wsl: bool) -> Vec<(String, String)> {
+    if secrets.is_empty() {
+        return Vec::new();
+    }
+    let mut env = secrets.to_vec();
+    if wsl {
+        let names: Vec<&str> = secrets.iter().map(|(name, _)| name.as_str()).collect();
+        env.push(("WSLENV".to_string(), names.join(":")));
+    }
+    env
 }
 
 /// Single-quote a value for `bash -lc`, so a path with spaces survives.
@@ -450,11 +512,17 @@ impl BackendSupervisor {
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(log_err));
 
+        // Secrets always go on the process environment, in both modes — see
+        // `secret_env` for why they must not travel on the command line.
+        for (name, value) in secret_env(&self.config.secrets, self.config.wsl.is_some()) {
+            command.env(name, value);
+        }
+
         // Host execution on the host itself: the variables go straight onto the
         // child. (In WSL mode they are already inside the `bash -lc` string, because
         // `wsl.exe`'s own environment does not cross into the distro.)
         if self.config.wsl.is_none() {
-            for (name, value) in execution_env(&self.config.execution, false) {
+            for (name, value) in execution_env(&self.config.execution, false, self.config.approve_execute) {
                 if name == "PYTHONPATH" {
                     // Prepend rather than replace: whatever the user had still works.
                     let existing = std::env::var("PYTHONPATH").unwrap_or_default();
@@ -637,8 +705,8 @@ mod tests {
     fn the_sandbox_path_is_left_exactly_as_it_was() {
         // Regression guard: no stray variables on the default launch, so choosing
         // nothing keeps upstream's behaviour byte for byte.
-        assert!(execution_env(&Execution::Sandbox, false).is_empty());
-        assert!(execution_env(&Execution::Sandbox, true).is_empty());
+        assert!(execution_env(&Execution::Sandbox, false, true).is_empty());
+        assert!(execution_env(&Execution::Sandbox, true, true).is_empty());
 
         let argv = launch_command_for(
             Path::new("/tmp/mini-me"),
@@ -648,6 +716,7 @@ mod tests {
                 dir: "~/Mini-Me".into(),
             }),
             &Execution::Sandbox,
+            true,
         );
         let command = argv.last().expect("the bash -lc payload");
         assert!(!command.contains("MINIME_EXECUTION_BACKEND"), "{command}");
@@ -667,11 +736,16 @@ mod tests {
                 dir: "~/Mini-Me".into(),
             }),
             &execution,
+            true,
         );
         let command = argv.last().expect("the bash -lc payload");
         // Assignments must land *before* `exec`, or the server never sees them.
         assert!(
-            command.contains("MINIME_EXECUTION_BACKEND='local' PYTHONPATH='/mnt/c/repo/overlay' exec"),
+            command.contains(
+                "MINIME_EXECUTION_BACKEND='local' MINIME_APPROVE_EXECUTE='1'                  PYTHONPATH='/mnt/c/repo/overlay' exec"
+                    .replace("                 ", "")
+                    .as_str()
+            ),
             "{command}"
         );
     }
