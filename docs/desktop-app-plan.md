@@ -14,7 +14,7 @@ sidecar** that the client spawns and supervises.
 | **P6.1** — buildable window *(go/no-go gate)* | ✅ **PASS** — builds green; window renders natively (verified on Windows/DirectX). §8 |
 | **P6.2** — talk to the real backend | ✅ **done** — a real coordinator turn spawned, streamed and rendered **on Windows** (2026-07-30). §9 |
 | **P6.2.5** — local-first backend (drop LangSmith/WorkOS) | 🔴 **queued** — needs sign-off on where the change lands. WSL2 runtime now working, which is its prerequisite. §10/§11/§13 |
-| **P6.3** — port the core panels | 🟡 **in progress** — composer, spine, outputs and sandbox status done; **command palette** is the last step |
+| **P6.3** — port the core panels | 🟡 **in progress** — composer, spine, outputs, sandbox status done; remaining: **agent activity trace** (§15) and command palette |
 | **P6.4** — native affordances + shipping | ⬜ not started |
 | **P6.5** — async subagents + Jobs panel | ⬜ planned — the payoff that most justifies going native. §14 |
 
@@ -197,6 +197,9 @@ the backend), `ui` (reusable GPUI components), `sidecar` (packaging).
      cold thread blocks on that provisioning, and without it the UI looks stuck.
   5. ⬜ **Command palette** — Zed-style `Ctrl-P`: run turn, new thread, switch
      project.
+  6. ⬜ **Agent activity trace** (§15) — stream subagent work and tool-call steps
+     instead of showing a silent gap while a subagent runs. Needs
+     `stream_subgraphs: true` plus attribution via `lc_agent_name`.
 - ⬜ **P6.4 — Native affordances + shipping.** Local file → analysis,
   background-run tray + notifications, **keychain-stored keys**, multi-window.
   Plus what "installable" now means: a **pinned Mini-Me checkout + venv the app
@@ -839,3 +842,80 @@ across many tool results) into one turn — is real but minor next to (1).
 **P6.5, after P6.2.5.** Building it before the panels and local execution would
 stack two unsettled foundations. Prerequisites: pin the deepagents version, answer
 the sidecar-lifetime question, and design the Jobs panel.
+
+---
+
+## 15. Agent activity: streaming subagent work and steps (2026-07-30)
+
+**The gap.** The app renders only the coordinator's final text. Ask *"find the
+deseq2 paper"* and you get a long silence, then an answer — while underneath, a
+subagent ran a literature search. The web frontend surfaces this; we don't, and the
+logic lives in TypeScript, so it has to be ported.
+
+Measured on a real turn (`find the deseq2 paper`, `stream_subgraphs=true`,
+718 KB captured), which is what makes this designable rather than guesswork:
+
+| event | count | what it is |
+|---|---|---|
+| `messages\|tools:<uuid>` | **319** | the subagent's own token stream |
+| `messages` | 176 | coordinator tokens + tool-call chunks |
+| `updates` | 35 | node-level state changes |
+| `updates\|tools:<uuid>` | 8 | subagent node changes |
+| `values`, `values\|tools:…` | 6, 5 | state snapshots (already consumed) |
+| `custom` | 2 | `sandbox_status` (already consumed) |
+
+**Attribution is clean.** The `messages` tuple's metadata names the subagent
+outright:
+
+```json
+{ "lc_agent_name": "academic_researcher",
+  "checkpoint_ns": "tools:d6c187d3-…",
+  "langgraph_node": "model",
+  "ls_model_name": "gpt-5.4" }
+```
+
+So: namespace `tools:<uuid>` identifies *an invocation*, `lc_agent_name` gives the
+*display name*, and `checkpoint_ns` groups a subagent's events together. The
+LangChain docs describe the same thing as the `ns` tuple with
+`any(s.startswith("tools:"))`.
+
+**Steps are derivable from tool-call chunks.** Coordinator `messages` chunks carry
+`tool_call_chunks`; on this turn: `task` (the deepagents delegation tool) and
+`search_paper_by_title`. That yields real step labels — *"delegating to
+academic_researcher"*, *"searching papers"* — without inventing anything.
+
+**Two honest findings that shape the design:**
+
+1. **There is no "thinking" channel today.** Every content block on that turn was a
+   plain string — no `thinking`/`reasoning` block types. The event-streaming docs
+   don't cover reasoning either. So what we can show is *work and steps*, not
+   chain-of-thought. If a reasoning-exposing model is configured later, non-text
+   content blocks would carry it and the same decoder path can surface it.
+2. **Raw `updates` is unusable as UI.** Of the 35 events, almost all are middleware
+   plumbing: `PIIMiddleware[email].before_model`, `ModelCallLimitMiddleware.*`,
+   `TodoListMiddleware.after_model`, `SkillsMiddleware.before_agent`… Only `model`
+   and `tools` are meaningful. The docs make the same point, recommending a filter
+   to "interesting nodes". We should not render this stream directly.
+
+### Design (P6.3 step 6)
+
+1. Request `stream_subgraphs: true` — currently off, which is *why* none of the 319
+   events reach us. Our SSE decoder already matches the `messages|<ns>` prefix, so
+   the transport work is small.
+2. Extend `TurnEvent` with `SubagentToken { agent, text }` and `Step { label }`,
+   keyed off `lc_agent_name` / `checkpoint_ns` and `tool_call_chunks`.
+3. Render an **activity trace** attached to the in-flight assistant turn:
+   one collapsible group per subagent (`▸ academic_researcher`), streaming its text
+   live, auto-collapsing when the turn completes so the transcript stays readable.
+   Steps appear as one-line entries.
+4. Keep the coordinator's answer visually primary — the trace is context, not the
+   deliverable.
+5. Do **not** render `updates`; if step granularity is later wanted beyond tool
+   calls, filter to `model`/`tools` explicitly.
+
+**Cost note:** subagent tokens outnumber coordinator tokens roughly 2:1 on a simple
+literature lookup. The trace must be cheap to render and collapsible, or a long
+research turn will bury the answer.
+
+A full captured stream is kept in the session scratchpad as a decoder fixture, so
+this can be built and unit-tested without burning tokens on live runs.
