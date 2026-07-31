@@ -1624,10 +1624,27 @@ Manager**, and a turn runs using a key read from there. So the whole point of §
 researcher configuring the app without touching a `.env` inside WSL — works on the target
 platform.
 
-**Still unverified in a window** (nobody has clicked them): the approve/reject buttons on a
-held command, the activity-trace group toggle, the palette's arrow-key navigation, and
-composer editing keys — the last one especially on a **Spanish keyboard**, where accented
+**Verified on Windows 2026-07-31 (second pass):** the approve/reject buttons on a held
+command, the activity trace's delegation view, and the palette with arrow-key navigation
+all work.
+
+**Still unverified:** composer editing keys on a **Spanish keyboard**, where accented
 characters come from dead keys.
+
+### The bug that pass found
+
+**Suggestions vanished when the answer arrived**, so they could not be clicked. Cause: our
+client treated every spine payload as authoritative, but upstream recomputes suggestions
+opportunistically — `ProjectSpineMiddleware.abefore_agent` derives them from whatever
+artifacts the thread has and emits a payload carrying mission and completed work even when
+it produces none. Measured: every `values` snapshot in a turn had `suggestions: 0`.
+
+Fixed by distinguishing advisory content from state: a payload without suggestions means
+"no new advice", not "the advice is withdrawn", so suggestions survive while mission /
+completed / pending still replace. Clicking one now also removes it from the list, since it
+is in the composer at that point. **Only a human watching would have caught this** — every
+headless check passed throughout, which is worth remembering the next time a panel looks
+fine in a test.
 
 *Also noted:* closing the window logs `window not found` and two invalid-window-handle
 HRESULTs from GPUI's Windows text-input teardown, after the sidecar has already stopped.
