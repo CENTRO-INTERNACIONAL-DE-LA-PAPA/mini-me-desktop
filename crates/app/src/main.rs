@@ -19,8 +19,8 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use futures::StreamExt;
 use gpui::{
-    div, prelude::*, px, rgb, size, App, Application, Bounds, Context, Entity, Focusable,
-    SharedString, Window, WindowBounds, WindowOptions,
+    actions, div, prelude::*, px, rgb, size, App, Application, Bounds, ClipboardItem, Context,
+    Entity, Focusable, KeyBinding, SharedString, Window, WindowBounds, WindowOptions,
 };
 
 use composer::{Composer, ComposerEvent};
@@ -82,6 +82,106 @@ fn spine_list(label: &'static str, items: &[String], bullet: &'static str) -> im
         );
     }
     list
+}
+
+actions!(
+    workbench,
+    [TogglePalette, PaletteNext, PalettePrev, PaletteDismiss]
+);
+
+/// Bindings the workbench itself owns. `ctrl-p`/`cmd-p` is deliberately *not*
+/// scoped to a key context: it has to open the palette while the chat composer has
+/// focus, which is where focus almost always is.
+fn workbench_key_bindings() -> Vec<KeyBinding> {
+    let palette = Some("Palette");
+    let mut bindings = vec![
+        KeyBinding::new("escape", PaletteDismiss, palette),
+        KeyBinding::new("down", PaletteNext, palette),
+        KeyBinding::new("up", PalettePrev, palette),
+    ];
+    for modifier in ["cmd", "ctrl"] {
+        bindings.push(KeyBinding::new(&format!("{modifier}-p"), TogglePalette, None));
+    }
+    bindings
+}
+
+/// One command-palette entry.
+///
+/// Deliberately a closed enum rather than a registry of closures: the whole point of
+/// the palette is that every action is also reachable another way, so there is no
+/// dynamic set to register.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Command {
+    RunTurn,
+    NewThread,
+    RefreshSpine,
+    ExpandTraces,
+    CollapseTraces,
+    CopyLastAnswer,
+    Quit,
+}
+
+impl Command {
+    const ALL: [Command; 7] = [
+        Command::RunTurn,
+        Command::NewThread,
+        Command::RefreshSpine,
+        Command::ExpandTraces,
+        Command::CollapseTraces,
+        Command::CopyLastAnswer,
+        Command::Quit,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Command::RunTurn => "Run turn",
+            Command::NewThread => "New thread",
+            Command::RefreshSpine => "Refresh project spine",
+            Command::ExpandTraces => "Expand agent activity",
+            Command::CollapseTraces => "Collapse agent activity",
+            Command::CopyLastAnswer => "Copy last answer",
+            Command::Quit => "Quit",
+        }
+    }
+
+    fn hint(self) -> &'static str {
+        match self {
+            Command::RunTurn => "send what is in the composer",
+            Command::NewThread => "start a fresh conversation",
+            Command::RefreshSpine => "reload mission, completed and pending",
+            Command::ExpandTraces => "open every subagent group",
+            Command::CollapseTraces => "close every subagent group",
+            Command::CopyLastAnswer => "to the clipboard",
+            Command::Quit => "close the window and the sidecar",
+        }
+    }
+}
+
+/// Score how well `query` matches `label`, or `None` when it doesn't match.
+///
+/// A plain subsequence test is too loose to *filter* on: "nt" also matches
+/// "ru**n** **t**urn" and "expa**n**d ac**t**ivity". So matches are **ranked** instead
+/// of hidden — a hit at the start of a word counts for much more than one mid-word,
+/// and a hit adjacent to the previous one counts for more again. The list stays
+/// sorted, so "nt" puts "New thread" under the cursor while still showing the rest.
+fn match_score(query: &str, label: &str) -> Option<i32> {
+    let label: Vec<char> = label.to_lowercase().chars().collect();
+    let query = query.to_lowercase();
+
+    let mut score = 0;
+    let mut cursor = 0;
+    let mut previous_end = None;
+    for needle in query.chars().filter(|c| !c.is_whitespace()) {
+        let at = cursor + label[cursor..].iter().position(|c| *c == needle)?;
+        let starts_a_word = at == 0 || label[at - 1] == ' ' || label[at - 1] == '-';
+        score += if starts_a_word { 8 } else { 1 };
+        if previous_end == Some(at) {
+            score += 4;
+        }
+        previous_end = Some(at + 1);
+        cursor = at + 1;
+    }
+    Some(score)
 }
 
 /// A single chat message in the transcript, plus the agent activity behind it.
@@ -172,6 +272,17 @@ struct Workbench {
     error: Option<String>,
     /// The text field. Owns its own focus/selection state.
     composer: Entity<Composer>,
+    /// Command palette: open flag, the highlighted row, and its own query field.
+    /// The query is a second `Composer`, kept alive across opens so its
+    /// subscriptions are registered once rather than per-open.
+    palette_open: bool,
+    palette_selected: usize,
+    palette_query: Entity<Composer>,
+    /// Set when focus must return to the composer but no `Window` is at hand — an
+    /// entity subscription doesn't get one. `render` does, so it settles the debt
+    /// there. Without this, activating a command with Enter would leave focus on a
+    /// field that is no longer rendered and typing would go nowhere.
+    restore_focus: bool,
 }
 
 impl Workbench {
@@ -188,6 +299,26 @@ impl Workbench {
         })
         .detach();
 
+        let palette_query = cx.new(|cx| {
+            let mut query = Composer::new(cx, "Type a command…");
+            // Enter in the palette means "run the highlighted command", which has to
+            // work before anything is typed.
+            query.set_submits_empty(true);
+            query
+        });
+        cx.subscribe(&palette_query, |workbench, _query, event, cx| match event {
+            ComposerEvent::Submit(_) => workbench.activate_palette(cx),
+        })
+        .detach();
+        // Re-filter as the user types: editing the query notifies the *query*, and
+        // without observing it the list would only refresh on the next unrelated
+        // render.
+        cx.observe(&palette_query, |workbench, _query, cx| {
+            workbench.palette_selected = 0;
+            cx.notify();
+        })
+        .detach();
+
         let workbench = Self {
             project: None,
             buckets: Vec::new(),
@@ -197,6 +328,10 @@ impl Workbench {
             streaming: false,
             error: None,
             composer,
+            palette_open: false,
+            palette_selected: 0,
+            palette_query,
+            restore_focus: false,
         };
         // Populate the spine if a backend is already listening. This does not
         // start one — see `Sidecar::fetch_project`.
@@ -420,6 +555,233 @@ impl Workbench {
             .child(self.status_bar())
     }
 
+    // ---- Command palette ------------------------------------------------------
+
+    /// The commands matching the current query, best first.
+    fn palette_commands(&self, cx: &App) -> Vec<Command> {
+        let query = self.palette_query.read(cx).text().to_string();
+        let mut scored: Vec<(i32, usize, Command)> = Command::ALL
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, command)| {
+                match_score(&query, command.label()).map(|score| (score, index, command))
+            })
+            .collect();
+        // Declaration order breaks ties, so an empty query lists the commands in the
+        // order they are written rather than an arbitrary one.
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        scored.into_iter().map(|(_, _, command)| command).collect()
+    }
+
+    fn toggle_palette(&mut self, _: &TogglePalette, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette_open {
+            self.close_palette(window, cx);
+            return;
+        }
+        self.palette_open = true;
+        self.palette_selected = 0;
+        self.palette_query
+            .update(cx, |query, cx| query.set_text("", cx));
+        let focus = self.palette_query.focus_handle(cx);
+        window.focus(&focus);
+        cx.notify();
+    }
+
+    /// Close the palette and hand focus back to the composer — otherwise focus would
+    /// be left on a field that is no longer rendered and typing would go nowhere.
+    fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette_open = false;
+        self.palette_query
+            .update(cx, |query, cx| query.set_text("", cx));
+        let focus = self.composer.focus_handle(cx);
+        window.focus(&focus);
+        cx.notify();
+    }
+
+    fn move_palette_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let count = self.palette_commands(cx).len();
+        if count == 0 {
+            return;
+        }
+        // Wrap, so `up` from the first row lands on the last.
+        let current = self.palette_selected.min(count - 1) as isize;
+        self.palette_selected = (current + delta).rem_euclid(count as isize) as usize;
+        cx.notify();
+    }
+
+    fn activate_palette(&mut self, cx: &mut Context<Self>) {
+        let Some(command) = self
+            .palette_commands(cx)
+            .get(self.palette_selected)
+            .copied()
+        else {
+            return;
+        };
+        self.palette_open = false;
+        self.palette_query
+            .update(cx, |query, cx| query.set_text("", cx));
+        self.restore_focus = true;
+        self.run_command(command, cx);
+        cx.notify();
+    }
+
+    fn run_command(&mut self, command: Command, cx: &mut Context<Self>) {
+        match command {
+            // Same path as Enter in the composer and as the Send button.
+            Command::RunTurn => self
+                .composer
+                .update(cx, |composer, cx| composer.submit_now(cx)),
+            Command::NewThread => {
+                if self.streaming {
+                    self.status = "can't start a new thread mid-turn".into();
+                    return;
+                }
+                self.sidecar.reset_thread();
+                self.transcript.clear();
+                self.buckets.clear();
+                self.error = None;
+                // The spine is thread-independent — the mission survives, so say so
+                // rather than letting the panel look stale.
+                self.status = "new thread — the project spine is kept".into();
+            }
+            Command::RefreshSpine => {
+                self.refresh_project(cx);
+                self.status = "refreshing the project spine…".into();
+            }
+            Command::ExpandTraces => self.set_all_traces_expanded(true),
+            Command::CollapseTraces => self.set_all_traces_expanded(false),
+            Command::CopyLastAnswer => {
+                let answer = self
+                    .transcript
+                    .iter()
+                    .rev()
+                    .find(|message| message.role == "mini-me" && !message.body.is_empty())
+                    .map(|message| message.body.clone());
+                match answer {
+                    Some(answer) => {
+                        cx.write_to_clipboard(ClipboardItem::new_string(answer));
+                        self.status = "last answer copied".into();
+                    }
+                    None => self.status = "no answer to copy yet".into(),
+                }
+            }
+            Command::Quit => cx.quit(),
+        }
+    }
+
+    fn set_all_traces_expanded(&mut self, expanded: bool) {
+        for message in &mut self.transcript {
+            for trace in &mut message.agents {
+                trace.expanded = expanded;
+            }
+        }
+    }
+
+    /// The palette overlay: a query field over a filtered command list.
+    ///
+    /// Rendered as the root's last child so it paints above the panes; it is
+    /// `absolute`, so it takes no part in the three-pane flex layout.
+    fn palette(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let commands = self.palette_commands(cx);
+        let selected = self.palette_selected.min(commands.len().saturating_sub(1));
+
+        let mut list = div().flex().flex_col().w_full().min_w_0();
+        if commands.is_empty() {
+            list = list.child(
+                div()
+                    .p_2()
+                    .text_color(rgb(MUTED))
+                    .text_sm()
+                    .child("No matching command."),
+            );
+        }
+        for (index, command) in commands.iter().enumerate() {
+            let is_selected = index == selected;
+            let command = *command;
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("command-{index}")))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .w_full()
+                    .min_w_0()
+                    .gap_3()
+                    .px_2()
+                    .py_1()
+                    .when(is_selected, |row| row.bg(rgb(BORDER)))
+                    .hover(|style| style.bg(rgb(BORDER)).cursor_pointer())
+                    .child(
+                        div()
+                            .flex_grow()
+                            .min_w_0()
+                            .text_color(rgb(if is_selected { TEXT } else { MUTED }))
+                            .child(command.label()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(rgb(MUTED))
+                            .text_xs()
+                            .child(command.hint()),
+                    )
+                    .on_click(cx.listener(move |workbench, _event, window, cx| {
+                        workbench.close_palette(window, cx);
+                        workbench.run_command(command, cx);
+                        cx.notify();
+                    })),
+            );
+        }
+
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .flex_col()
+            .items_center()
+            // The context the palette's own keys are bound to. It wraps the query
+            // field, so those bindings win while the palette has focus.
+            .key_context("Palette")
+            .on_action(cx.listener(|workbench, _: &PaletteNext, _window, cx| {
+                workbench.move_palette_selection(1, cx)
+            }))
+            .on_action(cx.listener(|workbench, _: &PalettePrev, _window, cx| {
+                workbench.move_palette_selection(-1, cx)
+            }))
+            .on_action(cx.listener(|workbench, _: &PaletteDismiss, window, cx| {
+                workbench.close_palette(window, cx)
+            }))
+            .child(
+                div()
+                    .mt(px(96.))
+                    .w(px(520.))
+                    .flex()
+                    .flex_col()
+                    .bg(rgb(PANEL))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .child(
+                        div()
+                            .p_2()
+                            .border_b_1()
+                            .border_color(rgb(BORDER))
+                            .child(self.palette_query.clone()),
+                    )
+                    .child(list)
+                    .child(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .border_t_1()
+                            .border_color(rgb(BORDER))
+                            .text_color(rgb(MUTED))
+                            .text_xs()
+                            .child("↑↓ select · ⏎ run · esc close"),
+                    ),
+            )
+    }
+
     /// The agent activity trace for one turn: coordinator steps as one-liners, then
     /// a collapsible group per subagent.
     ///
@@ -571,6 +933,15 @@ impl Workbench {
                     .text_color(rgb(status_color))
                     .text_sm()
                     .child(status_text),
+            )
+            // Discoverability: a palette nobody knows the shortcut for is a palette
+            // nobody opens.
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(rgb(MUTED))
+                    .text_xs()
+                    .child("ctrl-p commands"),
             )
             .child(
                 div()
@@ -756,15 +1127,31 @@ impl Workbench {
 }
 
 impl Render for Workbench {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.restore_focus {
+            self.restore_focus = false;
+            let composer = self.composer.focus_handle(cx);
+            window.focus(&composer);
+        }
+
+        // `relative` so the palette's `absolute` overlay is positioned against the
+        // window rather than the page origin.
+        let root = div()
+            .relative()
             .flex()
             .size_full()
             .bg(rgb(BG))
             .text_color(rgb(TEXT))
+            .on_action(cx.listener(Self::toggle_palette))
             .child(self.rail())
             .child(self.chat_pane(cx))
-            .child(self.artifacts_panel(cx))
+            .child(self.artifacts_panel(cx));
+
+        if self.palette_open {
+            root.child(self.palette(cx))
+        } else {
+            root
+        }
     }
 }
 
@@ -899,6 +1286,45 @@ mod tests {
     }
 
     #[test]
+    fn the_palette_ranks_matches_rather_than_hiding_them() {
+        // "nt" should find "New thread" — initials across words is how you actually
+        // type in a palette.
+        let ranked = |query: &str| {
+            let mut hits: Vec<(i32, usize, &str)> = Command::ALL
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, command)| {
+                    match_score(query, command.label()).map(|score| (score, index, command.label()))
+                })
+                .collect();
+            hits.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+            hits.into_iter().map(|(_, _, label)| label).collect::<Vec<_>>()
+        };
+        // "nt" is ambiguous — "ruN Turn" matches too — so the test is about *rank*,
+        // which is what Enter acts on.
+        assert_eq!(ranked("nt")[0], "New thread");
+        assert_eq!(ranked("quit"), vec!["Quit"]);
+        // Case-insensitive, and spaces in the query are ignored.
+        assert_eq!(ranked("RUN T")[0], "Run turn");
+        // An empty query lists everything, in declaration order.
+        assert_eq!(ranked("").len(), Command::ALL.len());
+        assert_eq!(ranked("")[0], "Run turn");
+        // Out-of-order letters must not match at all.
+        assert!(ranked("tnur").is_empty());
+        assert!(ranked("zzz").is_empty());
+    }
+
+    #[test]
+    fn every_command_is_labelled_and_hinted() {
+        // A palette row with an empty label is invisible but still selectable, which
+        // is worse than a missing command.
+        for command in Command::ALL {
+            assert!(!command.label().is_empty(), "{command:?}");
+            assert!(!command.hint().is_empty(), "{command:?}");
+        }
+    }
+
+    #[test]
     fn a_purely_delegated_turn_is_not_discarded_as_empty() {
         // The web client filters tool-call-only assistant messages out of the
         // transcript, which is precisely why a delegation there renders as nothing.
@@ -971,17 +1397,20 @@ fn main() {
     if args.iter().any(|a| a == "--check-backend") {
         // `--stream` runs the seed prompt; `--prompt "…"` runs your own, which is how
         // a delegating turn (and so the activity trace) gets verified headlessly.
-        let custom = args
-            .iter()
-            .position(|a| a == "--prompt")
-            .and_then(|at| args.get(at + 1))
-            .map(String::as_str);
-        let prompt = match (custom, args.iter().any(|a| a == "--stream")) {
-            (Some(prompt), _) => Some(prompt),
-            (None, true) => Some(SEED_PROMPT),
-            (None, false) => None,
-        };
-        let outcome = sidecar.check(prompt);
+        // Repeating `--prompt` runs several turns **on one thread**, which is how
+        // conversation continuity gets checked without a window.
+        let mut prompts: Vec<&str> = Vec::new();
+        for (at, arg) in args.iter().enumerate() {
+            if arg == "--prompt" {
+                if let Some(prompt) = args.get(at + 1) {
+                    prompts.push(prompt);
+                }
+            }
+        }
+        if prompts.is_empty() && args.iter().any(|a| a == "--stream") {
+            prompts.push(SEED_PROMPT);
+        }
+        let outcome = sidecar.check(&prompts);
         let failed = match &outcome {
             Ok(()) => {
                 println!("\nbackend check: PASS");
@@ -1005,6 +1434,7 @@ fn main() {
         // Without these the composer receives no editing keys at all — GPUI
         // dispatches actions, and nothing binds to them by default.
         cx.bind_keys(composer::key_bindings());
+        cx.bind_keys(workbench_key_bindings());
 
         let bounds = Bounds::centered(None, size(px(1200.), px(800.)), cx);
         let window = cx

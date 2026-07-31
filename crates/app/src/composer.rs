@@ -98,6 +98,11 @@ pub struct Composer {
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
+    /// Whether Enter on an *empty* field still counts as a submission. False for the
+    /// chat composer (an empty prompt is nothing to send); true for the command
+    /// palette, where Enter means "activate the selected command", not "send this
+    /// text" — so it has to fire before the user has typed anything.
+    submits_empty: bool,
     /// While a turn is in flight the field is read-only.
     disabled: bool,
 }
@@ -116,8 +121,18 @@ impl Composer {
             last_layout: None,
             last_bounds: None,
             is_selecting: false,
+            submits_empty: false,
             disabled: false,
         }
+    }
+
+    /// The current text. Read by the command palette to filter on every keystroke.
+    pub fn text(&self) -> &str {
+        &self.content
+    }
+
+    pub fn set_submits_empty(&mut self, submits_empty: bool) {
+        self.submits_empty = submits_empty;
     }
 
     /// Prefill the field (used to seed the first prompt).
@@ -145,7 +160,7 @@ impl Composer {
             return;
         }
         let text = self.content.trim().to_string();
-        if text.is_empty() {
+        if text.is_empty() && !self.submits_empty {
             return;
         }
         self.content = SharedString::default();

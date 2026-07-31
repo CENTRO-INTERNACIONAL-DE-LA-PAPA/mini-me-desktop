@@ -9,7 +9,7 @@
 //! which the root view holds for the whole session. Individual turns are just
 //! tasks on that runtime, so ending a turn never kills the backend.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as SyncMutex};
 
 use anyhow::Result;
 use futures::channel::mpsc;
@@ -31,10 +31,20 @@ fn entry<'a>(
     agents.last_mut().expect("just pushed")
 }
 
+/// The conversation's thread id: created on first use, then reused.
+///
+/// A plain `std::sync::Mutex` rather than a Tokio one because the guard is never
+/// held across an `await` — and because the UI thread resets it synchronously.
+type ThreadId = Arc<SyncMutex<Option<String>>>;
+
 /// Owns the Tokio runtime and the supervised backend process.
 pub struct Sidecar {
     runtime: tokio::runtime::Runtime,
     supervisor: Arc<Mutex<BackendSupervisor>>,
+    /// One thread for the whole conversation. Until 2026-07-31 every turn created a
+    /// *fresh* thread, which meant the coordinator had no memory of the previous
+    /// question — a follow-up like "and its dataset?" started from nothing.
+    thread: ThreadId,
     base_url: String,
     log_path: String,
 }
@@ -51,6 +61,7 @@ impl Sidecar {
         Ok(Self {
             runtime,
             supervisor: Arc::new(Mutex::new(BackendSupervisor::new(config))),
+            thread: Arc::new(SyncMutex::new(None)),
             base_url,
             log_path,
         })
@@ -71,16 +82,17 @@ impl Sidecar {
     pub fn submit(&self, prompt: String) -> mpsc::UnboundedReceiver<TurnEvent> {
         let (tx, rx) = mpsc::unbounded();
         let supervisor = self.supervisor.clone();
+        let thread = self.thread.clone();
         let base_url = self.base_url.clone();
 
         self.runtime.spawn(async move {
             let client = LangGraphClient::new(base_url);
             // Send failures just mean the UI dropped the receiver (window closed).
-            let emit = |event: TurnEvent| {
+            let mut emit = |event: TurnEvent| {
                 let _ = tx.unbounded_send(event);
             };
 
-            if let Err(error) = run_turn(&client, &supervisor, &prompt, &emit).await {
+            if let Err(error) = run_turn(&client, &supervisor, &thread, &prompt, &mut emit).await {
                 // `{:#}` includes the anyhow context chain, which is where the
                 // actionable part of these failures lives.
                 emit(TurnEvent::Error(format!("{error:#}")));
@@ -90,6 +102,14 @@ impl Sidecar {
         });
 
         rx
+    }
+
+    /// Forget the current thread, so the next turn starts a fresh conversation.
+    ///
+    /// The backend keeps the old thread — nothing is deleted; we simply stop adding
+    /// to it. The project spine is thread-independent, so the mission survives.
+    pub fn reset_thread(&self) {
+        self.thread.lock().expect("thread id mutex").take();
     }
 
     /// Fetch the project spine. Returns the receiver of a one-shot result so the
@@ -122,19 +142,21 @@ impl Sidecar {
     ///
     /// Exists so the whole client/backend contract can be exercised on a
     /// headless machine, where no window can be opened.
-    pub fn check(&self, prompt: Option<&str>) -> Result<()> {
+    pub fn check(&self, prompts: &[&str]) -> Result<()> {
         let supervisor = self.supervisor.clone();
+        let thread = self.thread.clone();
         let base_url = self.base_url.clone();
         println!("url      : {base_url}");
         println!("log      : {}", self.log_path);
         self.runtime.block_on(async move {
             let client = LangGraphClient::new(base_url);
-            let mut supervisor = supervisor.lock().await;
-            let status = supervisor.ensure_running(&client).await?;
-            println!("health   : ok ({status})");
-
-            let thread_id = client.create_thread().await?;
-            println!("thread   : {thread_id}");
+            // Scoped: `run_turn` locks the supervisor itself, so holding it here
+            // would deadlock the first turn.
+            {
+                let mut supervisor = supervisor.lock().await;
+                let status = supervisor.ensure_running(&client).await?;
+                println!("health   : ok ({status})");
+            }
 
             // The spine panel depends on this custom route, so cover it here too —
             // a decode change would otherwise only show up as an empty panel.
@@ -153,34 +175,36 @@ impl Sidecar {
                 Err(error) => println!("project  : unavailable — {error:#}"),
             }
 
-            let Some(prompt) = prompt else {
+            if prompts.is_empty() {
                 println!("stream   : skipped (pass --stream to run a real turn)");
                 return Ok(());
-            };
-            println!("prompt   : {prompt}");
+            }
 
-            let mut text = String::new();
-            let mut chunks = 0usize;
-            // (namespace, display name, steps, characters) per subagent invocation, so
-            // a regression in the activity trace fails the headless check instead of
-            // quietly emptying a panel nobody can see on this machine.
-            let mut agents: Vec<(String, String, usize, usize)> = Vec::new();
-            client
-                .stream_turn(&thread_id, prompt, |event| match event {
+            // Every prompt goes through `run_turn` — the *same* function the window
+            // uses — so this covers thread reuse, not just the HTTP surface. Passing
+            // two prompts is how multi-turn continuity gets checked headlessly.
+            for (index, prompt) in prompts.iter().enumerate() {
+                println!("\nturn {}   : {prompt}", index + 1);
+                let mut text = String::new();
+                let mut chunks = 0usize;
+                // (namespace, display name, steps, characters) per subagent
+                // invocation, so a regression in the activity trace fails the check
+                // instead of quietly emptying a panel nobody can see on this machine.
+                let mut agents: Vec<(String, String, usize, usize)> = Vec::new();
+
+                run_turn(&client, &supervisor, &thread, prompt, &mut |event| match event {
                     TurnEvent::Token(token) => {
                         chunks += 1;
                         text.push_str(&token);
                     }
                     TurnEvent::Status(status) => println!("status   : {status}"),
-                    TurnEvent::Step { agent, label } => {
-                        match agent {
-                            Some(agent) => {
-                                println!("step     : {} · {label}", agent.name);
-                                entry(&mut agents, &agent).2 += 1;
-                            }
-                            None => println!("step     : {label}"),
-                        };
-                    }
+                    TurnEvent::Step { agent, label } => match agent {
+                        Some(agent) => {
+                            println!("step     : {} · {label}", agent.name);
+                            entry(&mut agents, &agent).2 += 1;
+                        }
+                        None => println!("step     : {label}"),
+                    },
                     TurnEvent::SubagentToken { agent, text } => {
                         entry(&mut agents, &agent).3 += text.len();
                     }
@@ -206,15 +230,28 @@ impl Sidecar {
                     TurnEvent::Done => {}
                 })
                 .await?;
-            println!("stream   : {chunks} chunk(s), {} chars", text.len());
-            if agents.is_empty() {
-                println!("activity : no subagent ran on this prompt");
+
+                println!("stream   : {chunks} chunk(s), {} chars", text.len());
+                if agents.is_empty() {
+                    println!("activity : no subagent ran on this prompt");
+                }
+                for (_, name, steps, chars) in &agents {
+                    println!("activity : {name} · {steps} step(s) · {chars} chars");
+                }
+                println!("--- assistant text ---\n{}", text.trim());
+                anyhow::ensure!(!text.trim().is_empty(), "no assistant text was streamed");
             }
-            for (_, name, steps, chars) in &agents {
-                println!("activity : {name} · {steps} step(s) · {chars} chars");
-            }
-            println!("--- assistant text ---\n{}", text.trim());
-            anyhow::ensure!(!text.trim().is_empty(), "no assistant text was streamed");
+            // One thread across every prompt is the point — a second `create_thread`
+            // would mean the coordinator forgot the first question.
+            println!(
+                "\nthread   : {} (reused across {} turn(s))",
+                thread
+                    .lock()
+                    .expect("thread id mutex")
+                    .clone()
+                    .unwrap_or_else(|| "none".into()),
+                prompts.len(),
+            );
             Ok(())
         })
     }
@@ -223,8 +260,9 @@ impl Sidecar {
 async fn run_turn(
     client: &LangGraphClient,
     supervisor: &Arc<Mutex<BackendSupervisor>>,
+    thread: &ThreadId,
     prompt: &str,
-    emit: &impl Fn(TurnEvent),
+    emit: &mut impl FnMut(TurnEvent),
 ) -> Result<()> {
     emit(TurnEvent::Status("checking backend…".into()));
     {
@@ -233,8 +271,18 @@ async fn run_turn(
         emit(TurnEvent::Status(status));
     }
 
-    emit(TurnEvent::Status("creating thread…".into()));
-    let thread_id = client.create_thread().await?;
+    // Reuse the conversation's thread; only create one when there isn't one yet.
+    // The guard is dropped before the await, so no lock is held across it.
+    let existing = thread.lock().expect("thread id mutex").clone();
+    let thread_id = match existing {
+        Some(thread_id) => thread_id,
+        None => {
+            emit(TurnEvent::Status("creating thread…".into()));
+            let thread_id = client.create_thread().await?;
+            *thread.lock().expect("thread id mutex") = Some(thread_id.clone());
+            thread_id
+        }
+    };
     tracing::info!(%thread_id, "streaming coordinator turn");
 
     emit(TurnEvent::Status("streaming…".into()));

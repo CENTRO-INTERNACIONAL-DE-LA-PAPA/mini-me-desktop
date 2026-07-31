@@ -14,7 +14,8 @@ sidecar** that the client spawns and supervises.
 | **P6.1** — buildable window *(go/no-go gate)* | ✅ **PASS** — builds green; window renders natively (verified on Windows/DirectX). §8 |
 | **P6.2** — talk to the real backend | ✅ **done** — a real coordinator turn spawned, streamed and rendered **on Windows** (2026-07-30). §9 |
 | **P6.2.5** — local-first backend (drop LangSmith/WorkOS) | 🔴 **queued** — needs sign-off on where the change lands. WSL2 runtime now working, which is its prerequisite. §10/§11/§13 |
-| **P6.3** — port the core panels | 🟡 **in progress** — composer, spine, outputs, sandbox status, **agent activity trace** done; remaining: **command palette** |
+| **P6.3** — port the core panels | ✅ **done** — composer, spine, outputs, sandbox status, agent activity trace, **command palette**; plus conversation continuity (turns used to each start a new thread) |
+| **P6.3.5** — visuals pass, starting with **markdown rendering** | ⬜ queued — answers currently render with their asterisks showing, and reports/citations are the deliverable. §16 |
 | **P6.4** — native affordances + shipping | ⬜ not started |
 | **P6.5** — async subagents + Jobs panel | ⬜ planned — the payoff that most justifies going native. §14 |
 
@@ -195,8 +196,10 @@ the backend), `ui` (reusable GPUI components), `sidecar` (packaging).
   4. ✅ **`sandbox_status`** from `custom` events now drives the status line
      (`Creating sandbox… → Sandbox ready`). This matters because the first turn on a
      cold thread blocks on that provisioning, and without it the UI looks stuck.
-  5. ⬜ **Command palette** — Zed-style `Ctrl-P`: run turn, new thread, switch
-     project. *The last open item in P6.3.*
+  5. ✅ **Command palette** — Zed-style `ctrl-p`/`cmd-p` (§17): a ranked, filterable
+     list of seven commands over the workbench. Building it surfaced a real defect —
+     "New thread" was meaningless because *every* turn created a new thread — so
+     conversation continuity landed with it.
   6. ✅ **Agent activity trace** (§15/§15c) — a delegated turn is no longer silent.
      `stream_subgraphs: true` is now requested, subagent frames are attributed by
      namespace and named from `lc_agent_name`, and the transcript shows the
@@ -1086,3 +1089,93 @@ signal** — the terminal `task` `ToolMessage` arrives in the *main* namespace a
 can't be tied to a namespace without §15b's heuristic, so groups simply collapse when
 the turn ends rather than showing a false "done" tick. Theorizer/DataVoyager progress
 is still HTTP-polled upstream and remains unimplemented here.
+
+## 16. Rendering markdown — and the visual-layer decision it forces (2026-07-31)
+
+**The gap.** The coordinator writes markdown and we render the source. A real answer
+currently reads `Love MI et al. 2014. **Moderated estimation…**` with the asterisks
+showing. This is **not cosmetic**: reports, citations and tables *are* the
+deliverable of this product, and a citation the user has to mentally de-escape is a
+worse artifact than the web app's.
+
+Measured on the DESeq2 turn, the coordinator emitted `**bold**`, `*italic*`, a bare
+URL and a hard line break — so the minimum useful set is inline emphasis, inline
+code, links, headings, lists, code blocks and tables (report subagents emit tables).
+
+**What GPUI gives us.** `gpui 0.2.2` has the primitives but no markdown element:
+`StyledText::with_highlights(Vec<(Range<usize>, HighlightStyle)>)` for inline runs,
+and `InteractiveText` for clickable ranges (links). Zed's own markdown crate is not
+something we can depend on — it is wired into Zed's internal `ui`/`theme`/`language`
+crates. So the block layer (paragraphs, lists, tables, code fences) is ours to write
+as GPUI elements either way.
+
+**Two ways to close it, and a genuinely surprising option B:**
+
+| | A — our own renderer | B — adopt `gpui-component` |
+|---|---|---|
+| Dependency | `markdown = "1.0"` (CommonMark → AST), 1 crate | `gpui-component 0.5.1`, **58k LOC**, 31 required deps (tree-sitter, html5ever, ropey, rust-i18n, lsp-types) |
+| Effort | ~250 lines: walk the AST, emit divs + highlight runs | wire in its `TextView` |
+| What we get | exactly the subset we need | markdown *plus* tables, theming, `dock` panel layout, notifications, virtual lists, spinners, a full text input |
+| What we give up | tables and code highlighting cost extra work | our hand-rolled composer and palette become redundant; we inherit its theme system and its release cadence |
+
+**The surprise:** `gpui-component 0.5.1` (Apache-2.0, Longbridge) depends on
+**`gpui = "0.2.2"` — the exact version we pinned**, from crates.io, not a Zed git rev.
+So there is no two-incompatible-gpui problem, which is normally what rules these
+libraries out. It is a real option, not a fantasy.
+
+**Recommendation: A now, B as a deliberate decision later.** A is proportionate to
+the gap, keeps rebuild time low (which the "click to update" story in P6.4 depends on
+— every update is a rebuild on the user's machine), and leaves B open. B is worth its
+weight only if we decide to buy the *whole* visual layer at once, and that is a
+locked-decision-level call for the visuals milestone, not something to slide in
+under a markdown ticket.
+
+**Sequencing.** Not part of P6.3. This is the first item of the visuals pass, before
+the palette gets prettier and before any theming work — because every other visual
+improvement is judged against text that is still showing its asterisks.
+
+## 17. P6.3 step 5: the command palette — and the thread bug it exposed (2026-07-31)
+
+`ctrl-p` / `cmd-p` opens a ranked, filterable command list; `↑↓` moves, `⏎` runs,
+`esc` closes, and the status bar carries a `ctrl-p commands` hint because a palette
+nobody knows the shortcut for is a palette nobody opens.
+
+**Commands:** Run turn · New thread · Refresh project spine · Expand agent activity ·
+Collapse agent activity · Copy last answer · Quit. A closed enum, not a registry of
+closures: every command is reachable another way too, so there is nothing dynamic to
+register.
+
+**The bug it exposed.** Adding "New thread" made no sense until we looked — because
+`run_turn` called `POST /threads` **on every turn**. Each question was its own
+conversation, so a follow-up started from nothing. One `Arc<Mutex<Option<String>>>`
+in `Sidecar` fixes it: create on first use, reuse after, and `reset_thread()` is what
+"New thread" now means. Nothing is deleted server-side; we just stop adding to the
+old thread, and the spine is thread-independent so the mission survives.
+
+*Verified live:* `--check-backend --prompt "find the deseq2 paper" --prompt "who is
+the first author of that paper?"` → turn 2 answered **"Michael I. Love."** in 5
+chunks with no subagent and no re-search, on the same thread id. That answer was
+impossible before the fix.
+
+**Three implementation notes worth keeping:**
+
+1. **Ranking, not filtering.** A plain subsequence test is too loose for a palette:
+   `nt` also matches "ru**n** **t**urn" and "expa**n**d ac**t**ivity". So matches are
+   *scored* — 8 for a word-initial hit, 1 mid-word, +4 for adjacency — and sorted, so
+   `nt` puts "New thread" under the cursor without hiding the rest. Declaration order
+   breaks ties, which keeps an empty query in a stable, authored order.
+2. **The query field is a second `Composer`.** Reusing it gives the palette real text
+   editing (selection, clipboard, IME) for nothing. It needed one new flag,
+   `submits_empty`: in the chat composer an empty Enter is nothing to send, but in the
+   palette Enter means "run the highlighted command" and must fire before anything is
+   typed. It is created once and kept, so its subscriptions register once rather than
+   per-open.
+3. **Focus has to be handed back explicitly.** An entity subscription has no `Window`,
+   so activating with Enter can't refocus the composer directly — a `restore_focus`
+   flag is settled in `render`, which does have one. Without it, focus would sit on a
+   field that is no longer rendered and typing would go nowhere.
+
+**The headless check now runs the real path.** `check()` used to call `stream_turn`
+directly with its own thread; it now goes through `run_turn` — the same function the
+window uses — so it covers thread reuse rather than just the HTTP surface, and
+repeating `--prompt` is how multi-turn continuity gets verified with no window.

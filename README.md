@@ -10,14 +10,18 @@ sidecar** the client spawns and supervises — which also means the app inherits
 the local `asta` CLI's auto-refreshing auth, so the web app's token-expiry pain
 goes away.
 
-> **Status: P6.2 — the app talks to the real agent stack.** The workbench window
-> renders natively (P6.1, verified on Windows/DirectX) and the app now **spawns
-> the local Python sidecar, health-checks it, and streams a real coordinator
-> turn** over LangGraph SSE (verified end to end on Linux: 75 chunks / 423 chars,
-> `--check-backend --stream`). GPUI is pinned at published **`gpui 0.2.2`**.
-> Remaining for P6.2: confirm the live token stream visually in a desktop
-> session. Read [`docs/desktop-app-plan.md`](docs/desktop-app-plan.md) — the risk
-> register plus the P6.1 (§8) and P6.2 (§9) execution logs.
+> **Status: P6.3 done — the core panels work against the real agent stack.** The
+> window renders natively (verified on Windows/DirectX), the app **spawns the local
+> Python sidecar and streams real coordinator turns** over LangGraph SSE, and it now
+> shows the **project spine**, live **outputs**, sandbox provisioning, an **agent
+> activity trace** (what each subagent is doing, while it does it) and a **`ctrl-p`
+> command palette**. One thread spans the conversation, so follow-up questions work.
+> GPUI is pinned at published **`gpui 0.2.2`**.
+>
+> Next: **markdown rendering** — answers currently show their `**asterisks**`, and
+> reports and citations are the deliverable (§16). Read
+> [`docs/desktop-app-plan.md`](docs/desktop-app-plan.md) — the risk register plus the
+> execution logs (§8–§17).
 
 ## Layout
 
@@ -99,6 +103,8 @@ cargo run -p mini-me-desktop-app -- --check-backend --stream
 Drop `--stream` to stop before the model call, or swap it for
 `--prompt "find the deseq2 paper"` to run your own — which is how a *delegating*
 turn gets checked: the output then lists each step and a per-subagent tally.
+Repeat `--prompt` to run several turns **on one thread**, which is how conversation
+continuity gets verified without a window.
 
 To decode a **saved** SSE capture instead, with no backend and no tokens spent:
 
