@@ -11,6 +11,7 @@
 
 mod backend;
 mod composer;
+mod markdown;
 mod protocol;
 mod settings;
 mod sidecar;
@@ -21,7 +22,8 @@ use anyhow::Context as _;
 use futures::StreamExt;
 use gpui::{
     actions, div, prelude::*, px, rgb, size, App, Application, Bounds, ClipboardItem, Context,
-    Entity, Focusable, KeyBinding, SharedString, Window, WindowBounds, WindowOptions,
+    Entity, Focusable, FontStyle, FontWeight, HighlightStyle, KeyBinding, SharedString, StyledText,
+    Window, WindowBounds, WindowOptions,
 };
 
 use composer::{Composer, ComposerEvent};
@@ -251,6 +253,99 @@ fn match_score(query: &str, label: &str) -> Option<i32> {
         cursor = at + 1;
     }
     Some(score)
+}
+
+/// Render one Markdown block as an element.
+///
+/// Emphasis becomes a `HighlightStyle` run rather than a nested element, which is how GPUI
+/// wants inline styling: one shaped line per block, with ranges carrying the differences.
+fn markdown_block(block: &markdown::Block) -> gpui::AnyElement {
+    use markdown::{Block, Emphasis};
+
+    let styled = |inlines: &markdown::Inlines, base: u32| {
+        let highlights: Vec<(std::ops::Range<usize>, HighlightStyle)> = inlines
+            .styles
+            .iter()
+            .map(|(range, emphasis)| {
+                let style = match emphasis {
+                    Emphasis::Strong => HighlightStyle {
+                        font_weight: Some(FontWeight::BOLD),
+                        ..Default::default()
+                    },
+                    Emphasis::Italic => HighlightStyle {
+                        font_style: Some(FontStyle::Italic),
+                        ..Default::default()
+                    },
+                    // No monospace family is bundled yet, so code is marked by colour.
+                    // Honest and legible; a real code face is a follow-up.
+                    Emphasis::Code => HighlightStyle {
+                        color: Some(rgb(ACCENT).into()),
+                        ..Default::default()
+                    },
+                    Emphasis::Link => HighlightStyle {
+                        color: Some(rgb(ACCENT).into()),
+                        underline: Some(gpui::UnderlineStyle {
+                            thickness: px(1.),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    Emphasis::Url => HighlightStyle {
+                        color: Some(rgb(MUTED).into()),
+                        ..Default::default()
+                    },
+                };
+                (range.clone(), style)
+            })
+            .collect();
+        div().w_full().min_w_0().text_color(rgb(base)).child(
+            StyledText::new(inlines.text.clone()).with_highlights(highlights),
+        )
+    };
+
+    match block {
+        Block::Heading { level, inlines } => {
+            let element = styled(inlines, TEXT);
+            // Only two sizes: an answer is not a document, and six heading levels of
+            // typography would be noise.
+            if *level <= 2 {
+                element.text_lg().into_any_element()
+            } else {
+                element.into_any_element()
+            }
+        }
+        Block::Paragraph(inlines) => styled(inlines, TEXT).into_any_element(),
+        Block::ListItem { marker, inlines } => div()
+            .flex()
+            .flex_row()
+            .w_full()
+            .min_w_0()
+            .gap_2()
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(rgb(MUTED))
+                    .child(marker.clone()),
+            )
+            .child(styled(inlines, TEXT))
+            .into_any_element(),
+        Block::Code { text, .. } => div()
+            .w_full()
+            .min_w_0()
+            .p_2()
+            .bg(rgb(PANEL))
+            .border_1()
+            .border_color(rgb(BORDER))
+            .text_color(rgb(TEXT))
+            .text_sm()
+            .child(text.clone())
+            .into_any_element(),
+        Block::Rule => div()
+            .w_full()
+            .border_b_1()
+            .border_color(rgb(BORDER))
+            .into_any_element(),
+    }
 }
 
 /// Fold an incoming project spine into what is already on screen.
@@ -693,10 +788,19 @@ impl Workbench {
                 block = block.child(self.activity_block(index, message, cx));
             }
             if !body.is_empty() {
-                col = col.child(block.child(div().w_full().text_color(rgb(TEXT)).child(body)));
-            } else {
-                col = col.child(block);
+                // The user's own text is shown as typed — they wrote it, and reinterpreting
+                // their asterisks would be presumptuous. Assistant text is Markdown.
+                if message.role == "you" {
+                    block = block.child(div().w_full().text_color(rgb(TEXT)).child(body));
+                } else {
+                    let mut rendered = div().flex().flex_col().w_full().min_w_0().gap_2();
+                    for parsed in markdown::parse(&body) {
+                        rendered = rendered.child(markdown_block(&parsed));
+                    }
+                    block = block.child(rendered);
+                }
             }
+            col = col.child(block);
         }
 
         let mut pane = div()

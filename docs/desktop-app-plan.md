@@ -15,7 +15,7 @@ sidecar** that the client spawns and supervises.
 | **P6.2** — talk to the real backend | ✅ **done** — a real coordinator turn spawned, streamed and rendered **on Windows** (2026-07-30). §9 |
 | **P6.2.5** — local-first backend (drop LangSmith/WorkOS) | ✅ **done, and now the default** — turns run on the host with no `LANGSMITH_API_KEY`/`WORKOS_*`, via a `PYTHONPATH` overlay that leaves the Mini-Me checkout untouched, and **every `execute` call waits for approval**. `--sandbox` still available. §18/§19 |
 | **P6.3** — port the core panels | ✅ **done** — composer, spine, outputs, sandbox status, agent activity trace, **command palette**; plus conversation continuity (turns used to each start a new thread) |
-| **P6.3.5** — visuals pass, starting with **markdown rendering** | ⬜ queued — answers currently render with their asterisks showing, and reports/citations are the deliverable. §16 |
+| **P6.3.5** — visuals pass, starting with **markdown rendering** | 🟡 **markdown built** — emphasis, inline code, links, headings, lists and fenced code now render instead of showing their markers. Tables are still literal. **Needs a look on Windows.** §16/§23 |
 | **Native-Windows probe** | ✅ **answered** — `cmd.exe` is ruled out by upstream's *own* tool code (POSIX pipes, `mkdir -p`, `shlex.quote`), so WSL2 stays the v1 runtime and the installer's job is guided provisioning. Native-plus-Git-Bash is a documented half-day experiment. §21 |
 | **P6.4a** — settings panel + keychain secrets | ✅ **built** — a turn runs with no provider key in the backend's `.env`; keys come from the OS keychain and ride in the run request, and `ctrl-,` opens a Settings pane (provider, model, keys, execution). **Never rendered — needs a look on Windows.** §20/§22/§22b |
 | **P6.4b** — native affordances + shipping | ⬜ not started — click-to-update, local file → analysis, tray notifications, Windows Job Object teardown |
@@ -1628,8 +1628,9 @@ platform.
 command, the activity trace's delegation view, and the palette with arrow-key navigation
 all work.
 
-**Still unverified:** composer editing keys on a **Spanish keyboard**, where accented
-characters come from dead keys.
+**Spanish keyboard verified 2026-07-31:** `¿qué papa es mas resisñente?` typed and
+submitted intact — dead-key accents, `ñ` and inverted punctuation all survive the
+composer's grapheme handling. That was the last open verification item for P6.3/P6.4a.
 
 ### The bug that pass found
 
@@ -1649,3 +1650,38 @@ fine in a test.
 *Also noted:* closing the window logs `window not found` and two invalid-window-handle
 HRESULTs from GPUI's Windows text-input teardown, after the sidecar has already stopped.
 Cosmetic shutdown noise, not a crash — a polish item.
+
+## 23. Markdown rendering (2026-07-31)
+
+The asterisks are gone. `**bold**`, `*italic*`, `` `code` ``, `[text](url)`, `#` headings,
+`-`/`1.` lists, fenced code and `---` rules now render; anything else is shown as typed.
+
+**Hand-written, not a parser crate** (option A of §16). GPUI has no Markdown element, so the
+block layer had to be built regardless; the inline layer is then a few hundred lines against
+a *measured* subset, with no dependency to track. Inline styling uses
+`StyledText::with_highlights` — one shaped line per block with ranges carrying the
+differences — which is how GPUI wants it, rather than a tree of nested elements.
+
+Four decisions worth keeping:
+
+1. **The user's own text is never reinterpreted.** Only assistant messages go through the
+   parser: rewriting someone's asterisks in their own prompt would be presumptuous.
+2. **A link keeps its URL beside the text.** Nothing is clickable yet, and dropping the URL
+   would lose the DOI — the part of a citation a researcher actually needs.
+3. **`snake_case` does not become italics.** `read_file` and `write_file` in one sentence
+   would otherwise italicise everything between them, which is a real thing this
+   coordinator writes about.
+4. **Half-written markup renders as typed.** Text streams in token by token, so the
+   transcript is *constantly* showing unclosed markers; an unterminated `**` must not
+   swallow the rest of the line or make it disappear.
+
+**The bug the tests caught:** stepping one *byte* past a marker lands inside `á`, and slicing
+there panics. Every other branch is safe because it only steps past an ASCII marker, but the
+plain-text branch had to advance by a whole character. Spanish text would have crashed the
+renderer on the first accented word — worth remembering that ~98% of users type Spanish.
+
+**Not covered:** tables (report subagents emit them; they render as literal pipes for now),
+blockquotes, nested lists, and images. Code has no monospace face — no font is bundled — so
+it is marked by colour instead, which is honest but not ideal.
+
+**Unverified:** never rendered. Everything here rests on unit tests over measured output.
