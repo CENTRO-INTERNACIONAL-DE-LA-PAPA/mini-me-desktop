@@ -673,4 +673,53 @@ Note one thing that got *easier*: `LocalShellBackend`'s `ls`/`glob` are pure Pyt
 `find -printf` shims in `sandbox.py` do **not** need porting. The shell is the
 remaining problem, not file operations.
 
-**Decision needed before writing P6.2.5.** Not resolved yet.
+**Decided 2026-07-30: WSL2.** Confirmed available on the target machine
+(`wsl --status` → default distro Ubuntu, version 2).
+
+**Why WSL2 won.** The decisive argument isn't that it dodges `cmd.exe` — it's that
+**inside WSL the backend simply *is* on Linux**, so the §10 local-execution design
+works exactly as written, with **zero upstream changes to Mini-Me's tool layer**.
+That matters because "bundle upstream, never fork" is a locked decision: WSL2
+shrinks P6.2.5 from "rewrite the tool layer's shell handling" to "swap one backend
+class". The client↔backend boundary is HTTP on localhost — which WSL2 forwards — so
+the backend's OS is genuinely an implementation detail. Two bonuses: `uv sync` of
+the PyMC/scikit-learn stack is far more reliable on Linux than through MSVC on
+Windows (a support burden avoided), and it's the same environment we develop in.
+
+**Why not the others.** *Remote sandbox* was ruled out as the primary path because
+it needs a **LangSmith API key per user** — we cannot ship ours, so every scientist
+would register an account on a free tier allowing one concurrent sandbox; worse
+onboarding than WSL2 *and* it contradicts the privacy premise. It stays as a
+documented fallback for machines where WSL2 is blocked by IT. *Shell-agnostic tool
+layer* remains the best end state but is large upstream work that still can't fully
+succeed, since the **model** writes shell commands at runtime — closing that would
+mean constraining execution to Python-only. Worth revisiting later, incrementally.
+
+**Implemented (client side).** `MINIME_BACKEND_WSL=1` (or a distro name) launches
+the sidecar via `wsl.exe [-d <distro>] -- bash -lc "cd <dir> && exec
+.venv/bin/langgraph dev --host 0.0.0.0 …"`, with `MINIME_BACKEND_WSL_DIR`
+(default `~/Mini-Me`) giving the checkout path *inside* the distro. Details that
+matter:
+
+- **`--host 0.0.0.0`**, not loopback: WSL2's localhost forwarding reliably reaches
+  services bound to all interfaces; loopback-only binds are not always visible.
+- **`exec`** so the login shell is *replaced* by the server — otherwise killing our
+  child leaves the real process running.
+- **Teardown also runs `pkill -f "langgraph dev"` inside the distro**, because
+  killing `wsl.exe` does not reliably reap the Linux process it fronted.
+- The repo-layout check is skipped in WSL mode (we can't cheaply stat the distro's
+  filesystem from Windows), and `current_dir` is *not* set — pointing `wsl.exe` at
+  a host path is meaningless and would fail the spawn if it didn't exist.
+
+`scripts/setup-wsl.sh` provisions the distro (uv, clone, `uv sync --extra dev`,
+`.env` template); it is idempotent and never overwrites an existing checkout or
+`.env`.
+
+**Accepted wrinkle:** Windows files reach the backend as `/mnt/c/...`, so the
+"drop a CSV, no upload dance" flow needs host→WSL path translation. That is the
+P6.4 *local file → analysis* seam, ~10 lines, but it must be designed rather than
+discovered.
+
+**Still to verify on Windows (cannot be tested from the Linux dev box):** that
+`wsl.exe` spawning works end to end, that localhost forwarding reaches the server,
+and that teardown leaves no process behind.

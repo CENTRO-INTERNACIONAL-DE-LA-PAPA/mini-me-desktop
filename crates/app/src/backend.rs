@@ -27,13 +27,33 @@ fn default_log_path() -> PathBuf {
     std::env::temp_dir().join("mini-me-desktop-backend.log")
 }
 
+/// Run the backend inside a WSL2 distribution instead of on the host.
+///
+/// This is the **Windows strategy** (~98% of our users): the agent stack shells
+/// out with POSIX commands (`>/dev/null`, `| python3 -c …`) and expects `bash`,
+/// `python3` and the `asta` CLI, none of which behave under `cmd.exe`. Inside WSL
+/// the backend simply *is* on Linux, so nothing upstream has to change — and the
+/// client/backend boundary is HTTP on localhost, which WSL2 forwards. It also
+/// dodges the MSVC build pain of installing the scientific stack on Windows.
+#[derive(Clone, Debug)]
+pub struct WslTarget {
+    /// Distribution name; `None` uses WSL's default distro.
+    pub distro: Option<String>,
+    /// Checkout path *inside* the distro (a Linux path — `~` is expanded by the
+    /// shell we launch through, so `~/Mini-Me` is fine).
+    pub dir: String,
+}
+
 /// How the client reaches the backend. Defaults to a locally spawned sidecar.
 #[derive(Clone, Debug)]
 pub struct BackendConfig {
     /// Port the local sidecar listens on.
     pub port: u16,
     /// The Mini-Me checkout to launch from (its `.env` supplies the API keys).
+    /// Ignored when `wsl` is set — see [`WslTarget::dir`].
     pub project_dir: PathBuf,
+    /// When set, the sidecar is launched inside WSL2 rather than on the host.
+    pub wsl: Option<WslTarget>,
     /// Command + args that start the dev backend. Kept configurable so packaging
     /// can swap it later.
     pub launch_command: Vec<String>,
@@ -49,11 +69,13 @@ impl Default for BackendConfig {
             .ok()
             .and_then(|p| p.parse().ok())
             .unwrap_or(2024);
+        let wsl = resolve_wsl_target();
         let project_dir = resolve_project_dir();
         Self {
             port,
-            launch_command: launch_command_for(&project_dir, port),
+            launch_command: launch_command_for(&project_dir, port, wsl.as_ref()),
             project_dir,
+            wsl,
             attach_only: std::env::var_os("MINIME_BACKEND_ATTACH_ONLY").is_some(),
             log_path: default_log_path(),
         }
@@ -66,7 +88,30 @@ impl Default for BackendConfig {
 /// **forks** the real server as a grandchild, so killing our direct child leaves
 /// an orphaned server holding the port (observed in P6.2). Invoking the venv
 /// binary directly keeps it a single process we actually own.
-fn launch_command_for(project_dir: &Path, port: u16) -> Vec<String> {
+fn launch_command_for(project_dir: &Path, port: u16, wsl: Option<&WslTarget>) -> Vec<String> {
+    if let Some(wsl) = wsl {
+        let mut argv = vec!["wsl.exe".to_string()];
+        if let Some(distro) = &wsl.distro {
+            argv.push("-d".into());
+            argv.push(distro.clone());
+        }
+        // Go through a login shell so PATH/uv are set up as the user's own shell
+        // would have them, and `exec` so the shell is *replaced* by the server —
+        // otherwise killing our child leaves the real process behind.
+        //
+        // Bind 0.0.0.0, not 127.0.0.1: WSL2's localhost forwarding reliably
+        // reaches services bound to all interfaces, while loopback-only binds
+        // are not always visible from Windows.
+        argv.push("--".into());
+        argv.push("bash".into());
+        argv.push("-lc".into());
+        argv.push(format!(
+            "cd {dir} && exec .venv/bin/langgraph dev --host 0.0.0.0 --port {port} --no-reload",
+            dir = wsl.dir,
+        ));
+        return argv;
+    }
+
     let venv_entry = if cfg!(windows) {
         project_dir.join(".venv/Scripts/langgraph.exe")
     } else {
@@ -91,6 +136,30 @@ fn launch_command_for(project_dir: &Path, port: u16) -> Vec<String> {
         "--no-browser".into(),
     ]);
     argv
+}
+
+/// Read the WSL configuration from the environment.
+///
+/// `MINIME_BACKEND_WSL=1` (or `true`) uses WSL's default distro; any other value
+/// is taken as the distro name. The checkout path inside the distro comes from
+/// `MINIME_BACKEND_WSL_DIR`, defaulting to `~/Mini-Me`.
+fn resolve_wsl_target() -> Option<WslTarget> {
+    let raw = std::env::var("MINIME_BACKEND_WSL").ok()?;
+    let raw = raw.trim();
+    if raw.is_empty() || raw.eq_ignore_ascii_case("0") || raw.eq_ignore_ascii_case("false") {
+        return None;
+    }
+    let distro = if raw.eq_ignore_ascii_case("1") || raw.eq_ignore_ascii_case("true") {
+        None
+    } else {
+        Some(raw.to_string())
+    };
+    let dir = std::env::var("MINIME_BACKEND_WSL_DIR")
+        .ok()
+        .map(|dir| dir.trim().to_string())
+        .filter(|dir| !dir.is_empty())
+        .unwrap_or_else(|| "~/Mini-Me".to_string());
+    Some(WslTarget { distro, dir })
 }
 
 /// Where the Mini-Me Python checkout lives. `MINIME_BACKEND_DIR` wins; otherwise
@@ -122,8 +191,27 @@ impl BackendConfig {
     }
 
     /// Whether the configured directory actually looks like the Mini-Me backend.
+    ///
+    /// In WSL mode the checkout lives on the distro's filesystem, which we can't
+    /// cheaply stat from Windows, so we defer to the spawn error instead of
+    /// pretending to validate it here.
     pub fn looks_like_backend_repo(&self) -> bool {
+        if self.wsl.is_some() {
+            return true;
+        }
         self.project_dir.join("langgraph.json").is_file()
+    }
+
+    /// Human-readable description of where the sidecar will run.
+    pub fn location(&self) -> String {
+        match &self.wsl {
+            Some(wsl) => format!(
+                "WSL ({}) {}",
+                wsl.distro.as_deref().unwrap_or("default distro"),
+                wsl.dir
+            ),
+            None => self.project_dir.display().to_string(),
+        }
     }
 }
 
@@ -160,7 +248,7 @@ impl BackendSupervisor {
 
         tracing::info!(
             program = %program,
-            dir = %self.config.project_dir.display(),
+            location = %self.config.location(),
             port = self.config.port,
             log = %self.config.log_path.display(),
             "spawning backend sidecar"
@@ -177,10 +265,16 @@ impl BackendSupervisor {
         let mut command = Command::new(program);
         command
             .args(rest)
-            .current_dir(&self.config.project_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(log_err));
+
+        // In WSL mode the working directory is set by the shell we launch *inside*
+        // the distro; pointing `wsl.exe` at a host path would be meaningless, and
+        // would fail the spawn outright if that path doesn't exist on Windows.
+        if self.config.wsl.is_none() {
+            command.current_dir(&self.config.project_dir);
+        }
 
         // Put the child in its own process group so we can signal the whole tree
         // on shutdown (see `terminate`) rather than just the process we spawned.
@@ -196,11 +290,20 @@ impl BackendSupervisor {
             // `[project.optional-dependencies] dev`), which plain `uv sync` skips —
             // so the server libraries are present and the `langgraph` entry point is
             // simply absent. Name the fix rather than reporting "program not found".
-            format!(
-                "failed to spawn the backend ({program}). If the LangGraph CLI is \
-                 missing, install the dev extra in {}:\n    uv sync --extra dev",
-                self.config.project_dir.display()
-            )
+            if self.config.wsl.is_some() {
+                format!(
+                    "failed to launch the backend in {}. Check that WSL is running \
+                     (`wsl --status`), that the checkout exists there, and that it \
+                     was synced with `uv sync --extra dev`.",
+                    self.config.location()
+                )
+            } else {
+                format!(
+                    "failed to spawn the backend ({program}). If the LangGraph CLI is \
+                     missing, install the dev extra in {}:\n    uv sync --extra dev",
+                    self.config.project_dir.display()
+                )
+            }
         })?;
         self.child = Some(child);
         Ok(())
@@ -256,6 +359,21 @@ impl Drop for BackendSupervisor {
         if let Some(mut child) = self.child.take() {
             tracing::info!("terminating backend sidecar");
             terminate(&mut child);
+            // Killing `wsl.exe` does not reliably reap the Linux process it
+            // fronted, so ask the distro to clean up. Best-effort: if the server
+            // already exited, `pkill` just finds nothing.
+            if let Some(wsl) = &self.config.wsl {
+                let mut command = Command::new("wsl.exe");
+                if let Some(distro) = &wsl.distro {
+                    command.args(["-d", distro]);
+                }
+                let _ = command
+                    .args(["--", "pkill", "-f", "langgraph dev"])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
         }
     }
 }

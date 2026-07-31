@@ -26,6 +26,29 @@ crates/app        the desktop binary (GPUI app + backend supervisor)
 docs/             the Phase 6 spike plan
 ```
 
+## Windows (the primary platform)
+
+~98% of our users are on Windows. The app runs **natively** on Windows (GPUI uses
+DirectX), while the Python backend runs **inside WSL2** — the agent stack shells out
+with POSIX commands and needs `bash`/`python3`/`asta`, which don't behave under
+`cmd.exe`. Inside WSL it's just Linux, and the app reaches it over localhost.
+
+In WSL (Ubuntu):
+
+```bash
+bash scripts/setup-wsl.sh
+```
+
+That installs `uv`, clones the backend, runs `uv sync --extra dev`, and writes a
+`.env` template for your keys. Then, from Windows:
+
+```powershell
+$env:MINIME_BACKEND_WSL=1; cargo run -p mini-me-desktop-app
+```
+
+The app launches the backend inside WSL itself. Override the checkout path with
+`MINIME_BACKEND_WSL_DIR` (default `~/Mini-Me`).
+
 ## Backend prerequisite
 
 The app spawns the Mini-Me Python backend as a sidecar. In that checkout run:

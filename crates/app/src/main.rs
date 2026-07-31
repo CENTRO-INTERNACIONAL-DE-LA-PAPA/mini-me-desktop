@@ -366,7 +366,7 @@ fn main() {
 
     let config = backend::BackendConfig::default();
     tracing::info!(
-        dir = %config.project_dir.display(),
+        location = %config.location(),
         url = %config.base_url(),
         "backend sidecar configured"
     );
