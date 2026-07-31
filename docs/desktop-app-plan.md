@@ -16,6 +16,7 @@ sidecar** that the client spawns and supervises.
 | **P6.2.5** — local-first backend (drop LangSmith/WorkOS) | ✅ **done, and now the default** — turns run on the host with no `LANGSMITH_API_KEY`/`WORKOS_*`, via a `PYTHONPATH` overlay that leaves the Mini-Me checkout untouched, and **every `execute` call waits for approval**. `--sandbox` still available. §18/§19 |
 | **P6.3** — port the core panels | ✅ **done** — composer, spine, outputs, sandbox status, agent activity trace, **command palette**; plus conversation continuity (turns used to each start a new thread) |
 | **P6.3.5** — visuals pass, starting with **markdown rendering** | ⬜ queued — answers currently render with their asterisks showing, and reports/citations are the deliverable. §16 |
+| **Native-Windows probe** | ✅ **answered** — `cmd.exe` is ruled out by upstream's *own* tool code (POSIX pipes, `mkdir -p`, `shlex.quote`), so WSL2 stays the v1 runtime and the installer's job is guided provisioning. Native-plus-Git-Bash is a documented half-day experiment. §21 |
 | **P6.4a** — settings panel + keychain secrets | ⬜ **next** — the prerequisite for a clickable install: nobody is hand-editing a `.env` inside WSL. §20 |
 | **P6.4b** — native affordances + shipping | ⬜ not started — click-to-update, local file → analysis, tray notifications, Windows Job Object teardown |
 | **P6.5** — async subagents + Jobs panel | ⬜ planned — the payoff that most justifies going native. §14 |
@@ -1472,3 +1473,61 @@ the execution flags use.
 Only the delivery detail depends on it: on WSL the keys travel via `WSLENV`, natively they
 are plain child-process variables. The panel's UI and both stores are the same either way,
 so this is *not* blocked on that probe.
+
+## 21. Native-Windows probe: verdict (2026-07-31)
+
+**Question:** now that host execution is the default, can we drop WSL2 and make the
+installer "unzip and run"?
+
+**Answer: not on `cmd.exe`, and not by re-prompting the model — because the POSIX
+assumptions are in Mini-Me's *own tool code*, not in what the model writes.**
+
+Evidence (read-only audit):
+
+```python
+# backend/theory_tools.py:246-247  — the theorizer
+fetch = f"asta generate-theories task {shlex.quote(task_id)} 2>/dev/null"
+return f"{fetch} | python3 -c {shlex.quote(_REDUCE_TASK_PY)}"
+
+# backend/datavoyager_tools.py:_export_shell  — DataVoyager artifact export
+f"mkdir -p {run_dir} && "
+f"asta analyze-data task {tid} > {run_dir}/task.json 2>/dev/null && "
+f"asta artifacts --input {run_dir} --output {export_dir} --format md 2>/dev/null"
+```
+
+`2>/dev/null`, `|`, `&&`, `mkdir -p`, and **`shlex.quote`** — which emits POSIX
+single-quoting that `cmd.exe` passes through literally, quotes included. These are the
+two headline research features, so "it mostly works" is not an option.
+
+**What *did* clear up since §13:** the GNU `find -printf` dependency is gone (our
+backend's file operations come from deepagents' pure-Python `FilesystemBackend`, not
+upstream's shell-based sandbox), and `python3` resolves to the venv interpreter because
+the overlay sets `PATH` (§18). So the remaining blocker is narrower than it was — it is
+now *only* the shell dialect.
+
+### Three options, and the recommendation
+
+| | viability |
+|---|---|
+| **`cmd.exe` natively** | ❌ ruled out by the evidence above |
+| **WSL2** | ✅ works today, verified end to end (§13, §18, §19) |
+| **Native + a POSIX shell** (Git Bash / MSYS2) | 🟡 plausible, untested |
+
+The third is genuinely interesting and cheap to try, because our overlay already owns
+`aexecute`: route commands through `bash -lc` instead of letting `subprocess.run(shell=True)`
+pick `COMSPEC`, add a `python3` shim next to the venv's `python.exe`, and Git for Windows
+is a small silent-installable dependency compared with enabling a Windows feature and
+provisioning a distro. The open risk is MSYS path translation — our `aget_work_dir()`
+returns `C:\Users\…`, and drive-letter paths inside MSYS bash need testing on real
+Windows, which cannot be done from the Linux dev box.
+
+**Recommendation: keep WSL2 as the supported runtime for v1**, and put the effort into
+making *provisioning* automatic (`wsl --install`, then `scripts/setup-wsl.sh`) rather than
+betting the packaging design on an untested shell. Native-plus-bash stays a documented
+follow-up that could simplify the installer later; it is a half-day experiment on a
+Windows machine, not a prerequisite.
+
+**Consequence for P6.4b:** the installer's job is a guided first run — detect WSL, offer
+`wsl --install`, provision the distro, then hand off to the settings panel (§20). Nothing
+about that is blocked by this verdict, which is why it was worth spending a day to get it
+before designing the installer rather than after.
