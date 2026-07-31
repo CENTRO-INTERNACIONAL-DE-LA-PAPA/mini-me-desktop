@@ -115,6 +115,22 @@ cargo run -p mini-me-desktop-app -- --replay crates/app/tests/fixtures/delegated
 Env overrides: `MINIME_BACKEND_DIR`, `MINIME_BACKEND_PORT`, `MINIME_BACKEND_URL`,
 `MINIME_BACKEND_ATTACH_ONLY`.
 
+### Settings
+
+`ctrl-,` opens Settings: provider (Anthropic / OpenAI / Google / Mistral / any
+OpenAI-compatible endpoint such as OpenRouter), model, API keys, and whether code runs on
+this machine. **Keys go into your OS keychain, never into a file** — so you do not need to
+edit the backend's `.env` at all. On a fresh install the pane opens by itself.
+
+Headless equivalent, which never echoes the value:
+
+```bash
+cargo run -p mini-me-desktop-app -- --set-secret llm:anthropic "sk-…"
+```
+
+The model and key apply to the next turn. The port and execution locality are baked into
+the sidecar's launch command, so those need a restart.
+
 ### Host execution (the default)
 
 The agent's code runs **on this machine** — no LangSmith key, no cold start, no upload

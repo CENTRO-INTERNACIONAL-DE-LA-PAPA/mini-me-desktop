@@ -51,7 +51,9 @@ pub struct Sidecar {
     log_path: String,
     /// The user's model choice and key, from settings + the keychain. Attached to every
     /// client, since the backend resolves the model per request.
-    model: Option<ModelChoice>,
+    /// Behind a lock so Settings can change it without a restart: `submit` clones it per
+    /// turn, so the next turn simply uses the new one.
+    model: SyncMutex<Option<ModelChoice>>,
     /// Where the agent's code runs, for the status bar. The user should be able to
     /// see at a glance that commands are landing on their own machine.
     execution: &'static str,
@@ -71,7 +73,7 @@ impl Sidecar {
             runtime,
             supervisor: Arc::new(Mutex::new(BackendSupervisor::new(config))),
             thread: Arc::new(SyncMutex::new(None)),
-            model,
+            model: SyncMutex::new(model),
             base_url,
             log_path,
             execution,
@@ -99,7 +101,7 @@ impl Sidecar {
         let supervisor = self.supervisor.clone();
         let thread = self.thread.clone();
         let base_url = self.base_url.clone();
-        let model = self.model.clone();
+        let model = self.model.lock().expect("model mutex").clone();
 
         self.runtime.spawn(async move {
             let client = LangGraphClient::new(base_url).with_model(model);
@@ -123,6 +125,12 @@ impl Sidecar {
         rx
     }
 
+    /// Swap the model/key the next turn will use. No restart, because the backend
+    /// resolves the model per request.
+    pub fn set_model(&self, model: Option<ModelChoice>) {
+        *self.model.lock().expect("model mutex") = model;
+    }
+
     /// Answer a paused run's approval request and stream what follows.
     ///
     /// Runs on the conversation's existing thread, so the continuation lands in the
@@ -131,7 +139,7 @@ impl Sidecar {
         let (tx, rx) = mpsc::unbounded();
         let thread = self.thread.clone();
         let base_url = self.base_url.clone();
-        let model = self.model.clone();
+        let model = self.model.lock().expect("model mutex").clone();
 
         self.runtime.spawn(async move {
             let client = LangGraphClient::new(base_url).with_model(model);
@@ -198,7 +206,7 @@ impl Sidecar {
         let supervisor = self.supervisor.clone();
         let thread = self.thread.clone();
         let base_url = self.base_url.clone();
-        let model = self.model.clone();
+        let model = self.model.lock().expect("model mutex").clone();
         println!("url      : {base_url}");
         println!("log      : {}", self.log_path);
         self.runtime.block_on(async move {

@@ -17,7 +17,7 @@ sidecar** that the client spawns and supervises.
 | **P6.3** — port the core panels | ✅ **done** — composer, spine, outputs, sandbox status, agent activity trace, **command palette**; plus conversation continuity (turns used to each start a new thread) |
 | **P6.3.5** — visuals pass, starting with **markdown rendering** | ⬜ queued — answers currently render with their asterisks showing, and reports/citations are the deliverable. §16 |
 | **Native-Windows probe** | ✅ **answered** — `cmd.exe` is ruled out by upstream's *own* tool code (POSIX pipes, `mkdir -p`, `shlex.quote`), so WSL2 stays the v1 runtime and the installer's job is guided provisioning. Native-plus-Git-Bash is a documented half-day experiment. §21 |
-| **P6.4a** — settings panel + keychain secrets | 🟡 **store + key path done** — a turn runs with no provider key in the backend's `.env`: it comes from the OS keychain via `settings.toml` and rides in the run request. The `ctrl-,` **panel UI** is still to build. §20/§22 |
+| **P6.4a** — settings panel + keychain secrets | ✅ **built** — a turn runs with no provider key in the backend's `.env`; keys come from the OS keychain and ride in the run request, and `ctrl-,` opens a Settings pane (provider, model, keys, execution). **Never rendered — needs a look on Windows.** §20/§22/§22b |
 | **P6.4b** — native affordances + shipping | ⬜ not started — click-to-update, local file → analysis, tray notifications, Windows Job Object teardown |
 | **P6.5** — async subagents + Jobs panel | ⬜ planned — the payoff that most justifies going native. §14 |
 
@@ -207,7 +207,7 @@ the backend), `ui` (reusable GPUI components), `sidecar` (packaging).
      namespace and named from `lc_agent_name`, and the transcript shows the
      coordinator's delegation plus a collapsible group per subagent with its tool
      calls and streamed text. *Verified live 2026-07-31.*
-- ⬜ **P6.4a — Settings panel + keychain secrets** (§20). `ctrl-,`, two stores
+- ✅ **P6.4a — Settings panel + keychain secrets** (§20/§22/§22b). `ctrl-,`, two stores
   (`settings.toml` for settings, the OS keychain for keys), secrets delivered to the
   sidecar as environment variables so the checkout's `.env` becomes optional, and a
   first-run panel instead of a failed turn. *Gates the installable.*
@@ -1588,3 +1588,37 @@ is the only way to store a key, which is fine for us and not fine for a research
 
 **Unverified:** keychain read/write has only been exercised on Linux/zbus. Windows
 Credential Manager is the path that actually matters and needs a run on Windows.
+
+### 22b. The Settings pane (2026-07-31)
+
+`ctrl-,` (or the palette's **Settings**) opens Settings in place of the artifacts panel —
+a pane, not a modal, so it can be left open while you work.
+
+- **Provider** cycles on click through Anthropic / OpenAI / Google / Mistral / Custom.
+  Five options do not need a dropdown, and a dropdown is a widget GPUI has none of.
+  Switching also suggests a model that exists for the provider just chosen, rather than
+  leaving one that does not.
+- **Base URL** only appears for the custom provider, which is the only one that requires it.
+- **Secret fields open empty and are masked.** What is in the keychain is never read back
+  into the UI; the row says `· stored` or `· not set` instead. Leaving a field blank on
+  save keeps what is already there — so changing your model does not mean re-pasting your
+  key. Saving clears the field.
+- **Toggles** for host execution and the approval gate.
+- **Problems are listed before you hit them** — a custom provider with no base URL, a
+  missing key — using the same `Settings::problems` the startup log uses.
+- **First run opens the pane** with "Add a model key to get started", instead of letting a
+  turn fail against a backend with no key.
+
+**Masking is byte-for-byte.** The composer replaces each *byte* of the content with `*`, so
+the mask is exactly as long as the text. Cursor and selection are byte offsets into the
+string being shaped, and a mask of a different length would put the caret in the wrong
+place or panic on a character boundary. Keys are ASCII in practice, so the count is exact.
+
+**What applies when.** The model and key take effect on the **next turn** — the backend
+resolves them per request, so `Sidecar::set_model` swaps them behind a lock with no
+restart. The port and execution locality are baked into the sidecar's launch command, so
+those need a restart, and the pane says so rather than leaving the user to wonder.
+
+**Unverified:** the pane has never been rendered. Field focus, the provider cycle, masking,
+and Save are all unexercised outside unit tests — as is Windows Credential Manager, which
+is the keychain that actually matters here.

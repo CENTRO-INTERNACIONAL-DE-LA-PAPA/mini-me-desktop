@@ -87,8 +87,71 @@ fn spine_list(label: &'static str, items: &[String], bullet: &'static str) -> im
 
 actions!(
     workbench,
-    [TogglePalette, PaletteNext, PalettePrev, PaletteDismiss]
+    [TogglePalette, PaletteNext, PalettePrev, PaletteDismiss, ToggleSettings]
 );
+
+/// The editable fields in Settings, in the order they are shown.
+///
+/// Secret fields never display what is stored — the keychain is write-only from here, and
+/// the panel says "stored" or "not set" beside them. A field left blank on save keeps
+/// whatever is already in the keychain; that is what lets someone change their model
+/// without re-pasting a key.
+#[derive(Clone, Copy, PartialEq)]
+enum Field {
+    ModelId,
+    BaseUrl,
+    ApiKey,
+    AstaToken,
+    AstaApiKey,
+    Port,
+}
+
+impl Field {
+    const ALL: [Field; 6] = [
+        Field::ModelId,
+        Field::BaseUrl,
+        Field::ApiKey,
+        Field::AstaToken,
+        Field::AstaApiKey,
+        Field::Port,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Field::ModelId => "Model",
+            Field::BaseUrl => "Base URL",
+            Field::ApiKey => "API key",
+            Field::AstaToken => "Asta token",
+            Field::AstaApiKey => "Asta API key",
+            Field::Port => "Backend port",
+        }
+    }
+
+    fn placeholder(self) -> &'static str {
+        match self {
+            Field::ModelId => "model id",
+            Field::BaseUrl => "https://… (custom providers only)",
+            Field::ApiKey => "paste to set — stored in the OS keychain",
+            Field::AstaToken => "paste to set",
+            Field::AstaApiKey => "paste to set",
+            Field::Port => "2024",
+        }
+    }
+
+    fn is_secret(self) -> bool {
+        matches!(self, Field::ApiKey | Field::AstaToken | Field::AstaApiKey)
+    }
+
+    /// The keychain entry a secret field writes to. `None` for the provider key, whose
+    /// name depends on the provider currently chosen.
+    fn secret_name(self) -> Option<&'static str> {
+        match self {
+            Field::AstaToken => Some("ASTA_TOKEN"),
+            Field::AstaApiKey => Some("ASTA_API_KEY"),
+            _ => None,
+        }
+    }
+}
 
 /// Bindings the workbench itself owns. `ctrl-p`/`cmd-p` is deliberately *not*
 /// scoped to a key context: it has to open the palette while the chat composer has
@@ -102,6 +165,7 @@ fn workbench_key_bindings() -> Vec<KeyBinding> {
     ];
     for modifier in ["cmd", "ctrl"] {
         bindings.push(KeyBinding::new(&format!("{modifier}-p"), TogglePalette, None));
+        bindings.push(KeyBinding::new(&format!("{modifier}-,"), ToggleSettings, None));
     }
     bindings
 }
@@ -119,17 +183,19 @@ enum Command {
     ExpandTraces,
     CollapseTraces,
     CopyLastAnswer,
+    OpenSettings,
     Quit,
 }
 
 impl Command {
-    const ALL: [Command; 7] = [
+    const ALL: [Command; 8] = [
         Command::RunTurn,
         Command::NewThread,
         Command::RefreshSpine,
         Command::ExpandTraces,
         Command::CollapseTraces,
         Command::CopyLastAnswer,
+        Command::OpenSettings,
         Command::Quit,
     ];
 
@@ -141,6 +207,7 @@ impl Command {
             Command::ExpandTraces => "Expand agent activity",
             Command::CollapseTraces => "Collapse agent activity",
             Command::CopyLastAnswer => "Copy last answer",
+            Command::OpenSettings => "Settings",
             Command::Quit => "Quit",
         }
     }
@@ -153,6 +220,7 @@ impl Command {
             Command::ExpandTraces => "open every subagent group",
             Command::CollapseTraces => "close every subagent group",
             Command::CopyLastAnswer => "to the clipboard",
+            Command::OpenSettings => "model, keys, execution (ctrl-,)",
             Command::Quit => "close the window and the sidecar",
         }
     }
@@ -279,6 +347,12 @@ struct Workbench {
     palette_open: bool,
     palette_selected: usize,
     palette_query: Entity<Composer>,
+    /// Settings pane: open flag, the draft being edited, and one field per input.
+    settings_open: bool,
+    draft: settings::Settings,
+    fields: Vec<(Field, Entity<Composer>)>,
+    /// What the last save did, shown in the pane. Never contains a secret.
+    settings_note: String,
     /// A run paused at the approval gate: the command it wants to run, awaiting a
     /// decision. While this is set the turn is *open*, not finished.
     pending_approval: Option<ApprovalRequest>,
@@ -323,7 +397,21 @@ impl Workbench {
         })
         .detach();
 
-        let workbench = Self {
+        // One field per input. Created up front so each keeps its own focus and
+        // selection state for the life of the window.
+        let fields: Vec<(Field, Entity<Composer>)> = Field::ALL
+            .into_iter()
+            .map(|field| {
+                let composer = cx.new(|cx| {
+                    let mut composer = Composer::new(cx, field.placeholder());
+                    composer.set_masked(field.is_secret());
+                    composer
+                });
+                (field, composer)
+            })
+            .collect();
+
+        let mut workbench = Self {
             project: None,
             buckets: Vec::new(),
             transcript: Vec::new(),
@@ -335,9 +423,33 @@ impl Workbench {
             palette_open: false,
             palette_selected: 0,
             palette_query,
+            settings_open: false,
+            draft: settings::Settings::load(),
+            fields,
+            settings_note: String::new(),
             pending_approval: None,
             restore_focus: false,
         };
+        // Fill the editable fields from what is stored, and open Settings on a fresh
+        // install instead of letting the first turn fail against a backend with no key.
+        let draft = workbench.draft.clone();
+        for (field, composer) in &workbench.fields {
+            let value = match field {
+                Field::ModelId => draft.model_id.clone(),
+                Field::BaseUrl => draft.base_url.clone(),
+                Field::Port => draft.backend_port.to_string(),
+                // Secrets are never read back out of the keychain into the UI.
+                _ => continue,
+            };
+            composer.update(cx, |composer, cx| composer.set_text(value, cx));
+        }
+        let has_key = settings::secret(&draft.key_name()).is_some();
+        if !draft.problems(has_key).is_empty() {
+            workbench.settings_open = true;
+            workbench.settings_note =
+                "Add a model key to get started — it goes into your OS keychain.".to_string();
+        }
+
         // Populate the spine if a backend is already listening. This does not
         // start one — see `Sidecar::fetch_project`.
         workbench.refresh_project(cx);
@@ -772,6 +884,334 @@ impl Workbench {
         cx.notify();
     }
 
+    // ---- Settings ---------------------------------------------------------------
+
+    fn toggle_settings(&mut self, _: &ToggleSettings, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_open {
+            self.settings_open = false;
+            self.restore_focus = true;
+            cx.notify();
+            return;
+        }
+        self.open_settings(Some(window), cx);
+    }
+
+    /// Load the stored settings into the draft and show the pane.
+    ///
+    /// Secret fields open **empty**: what is in the keychain is never read back into the
+    /// UI. The row says "stored" or "not set" instead, and leaving a field blank on save
+    /// keeps whatever is already there — so changing your model does not mean re-pasting
+    /// your key.
+    fn open_settings(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
+        self.draft = settings::Settings::load();
+        self.settings_note.clear();
+        let values: Vec<(Field, String)> = self
+            .fields
+            .iter()
+            .map(|(field, _)| {
+                let value = match field {
+                    Field::ModelId => self.draft.model_id.clone(),
+                    Field::BaseUrl => self.draft.base_url.clone(),
+                    Field::Port => self.draft.backend_port.to_string(),
+                    _ => String::new(),
+                };
+                (*field, value)
+            })
+            .collect();
+        for ((_, composer), (_, value)) in self.fields.iter().zip(values) {
+            composer.update(cx, |composer, cx| composer.set_text(value, cx));
+        }
+        self.settings_open = true;
+        if let Some(window) = window {
+            if let Some((_, first)) = self.fields.first() {
+                let focus = first.focus_handle(cx);
+                window.focus(&focus);
+            }
+        }
+        cx.notify();
+    }
+
+    fn field_text(&self, field: Field, cx: &App) -> String {
+        self.fields
+            .iter()
+            .find(|(candidate, _)| *candidate == field)
+            .map(|(_, composer)| composer.read(cx).text().trim().to_string())
+            .unwrap_or_default()
+    }
+
+    /// Write the draft: settings to `settings.toml`, secrets to the OS keychain.
+    fn save_settings(&mut self, cx: &mut Context<Self>) {
+        self.draft.model_id = self.field_text(Field::ModelId, cx);
+        self.draft.base_url = self.field_text(Field::BaseUrl, cx);
+        let port = self.field_text(Field::Port, cx);
+        if let Ok(port) = port.parse::<u16>() {
+            self.draft.backend_port = port;
+        } else if !port.is_empty() {
+            self.settings_note = format!("{port:?} is not a port number — not saved.");
+            cx.notify();
+            return;
+        }
+
+        let mut stored = Vec::new();
+        // Only non-empty fields are written, so a blank field means "leave it alone"
+        // rather than "delete my key".
+        let key_name = self.draft.key_name();
+        let secrets: Vec<(String, String)> = self
+            .fields
+            .iter()
+            .filter(|(field, _)| field.is_secret())
+            .filter_map(|(field, composer)| {
+                let value = composer.read(cx).text().trim().to_string();
+                if value.is_empty() {
+                    return None;
+                }
+                let name = field.secret_name().map(str::to_string).unwrap_or_else(|| key_name.clone());
+                Some((name, value))
+            })
+            .collect();
+        for (name, value) in &secrets {
+            match settings::set_secret(name, value) {
+                Ok(()) => stored.push(name.clone()),
+                Err(error) => {
+                    // Say which keychain failed, not the value.
+                    self.settings_note = format!("Could not store {name}: {error:#}");
+                    cx.notify();
+                    return;
+                }
+            }
+        }
+
+        if let Err(error) = self.draft.save() {
+            self.settings_note = format!("Could not write settings: {error:#}");
+            cx.notify();
+            return;
+        }
+
+        // Clear the secret fields once written — nothing is gained by leaving a key on
+        // screen, and the row now reports it as stored.
+        for (field, composer) in &self.fields {
+            if field.is_secret() {
+                composer.update(cx, |composer, cx| composer.set_text("", cx));
+            }
+        }
+
+        // The model takes effect on the next turn, because the backend resolves it per
+        // request. The port and execution locality are baked into the launch command, so
+        // those need a restart — say so rather than letting the user wonder.
+        self.sidecar.set_model(model_choice(&self.draft));
+        let mut note = String::from("Saved.");
+        if !stored.is_empty() {
+            note.push_str(&format!(" Stored: {}.", stored.join(", ")));
+        }
+        note.push_str(" Model applies to the next turn; port and execution need a restart.");
+        self.settings_note = note;
+        cx.notify();
+    }
+
+    /// The Settings pane, in place of the artifacts panel.
+    fn settings_pane(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let provider = settings::provider(&self.draft.provider);
+        let provider_label = provider.map(|p| p.label).unwrap_or("unknown");
+        let needs_base_url = provider.is_some_and(|p| p.needs_base_url);
+        let key_name = self.draft.key_name();
+
+        let mut pane = div()
+            .id("settings")
+            .flex()
+            .flex_col()
+            .w(px(420.))
+            .flex_none()
+            .h_full()
+            .overflow_y_scroll()
+            .bg(rgb(PANEL))
+            .border_l_1()
+            .border_color(rgb(BORDER))
+            .p_4()
+            .gap_3()
+            .child(section_label("SETTINGS"))
+            // Clicking cycles: five providers do not need a dropdown, and a dropdown in
+            // GPUI is a whole widget we would have to build.
+            .child(
+                div()
+                    .id("provider")
+                    .w_full()
+                    .p_2()
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .text_color(rgb(TEXT))
+                    .text_sm()
+                    .hover(|style| style.border_color(rgb(ACCENT)).cursor_pointer())
+                    .child(format!("Provider: {provider_label}  ⟳"))
+                    .on_click(cx.listener(|workbench, _event, _window, cx| {
+                        let current = settings::PROVIDERS
+                            .iter()
+                            .position(|p| p.id == workbench.draft.provider)
+                            .unwrap_or(0);
+                        let next = &settings::PROVIDERS[(current + 1) % settings::PROVIDERS.len()];
+                        workbench.draft.provider = next.id.to_string();
+                        // Suggest a model that exists for the provider just chosen,
+                        // rather than leaving one that does not.
+                        let suggested = next.suggested_model.to_string();
+                        if let Some((_, composer)) = workbench
+                            .fields
+                            .iter()
+                            .find(|(field, _)| *field == Field::ModelId)
+                        {
+                            let composer = composer.clone();
+                            composer.update(cx, |composer, cx| composer.set_text(suggested, cx));
+                        }
+                        cx.notify();
+                    })),
+            );
+
+        for (field, composer) in &self.fields {
+            if *field == Field::BaseUrl && !needs_base_url {
+                continue;
+            }
+            let status = if field.is_secret() {
+                let name = field.secret_name().map(str::to_string).unwrap_or_else(|| key_name.clone());
+                // Presence only — the value itself is never read back into the UI.
+                if settings::secret(&name).is_some() {
+                    " · stored"
+                } else {
+                    " · not set"
+                }
+            } else {
+                ""
+            };
+            pane = pane.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .min_w_0()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_color(rgb(MUTED))
+                            .text_xs()
+                            .child(format!("{}{status}", field.label())),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .p_2()
+                            .border_1()
+                            .border_color(rgb(BORDER))
+                            .child(composer.clone()),
+                    ),
+            );
+        }
+
+        // Toggles, as rows rather than checkboxes — a row is one element and reads the
+        // same way.
+        for (label, value, toggle) in [
+            (
+                "Run code on this machine",
+                self.draft.local_execution,
+                0usize,
+            ),
+            ("Ask before every command", self.draft.approve_execute, 1),
+        ] {
+            pane = pane.child(
+                div()
+                    .id(SharedString::from(format!("toggle-{toggle}")))
+                    .w_full()
+                    .p_2()
+                    .border_1()
+                    .border_color(rgb(if value { ACCENT } else { BORDER }))
+                    .text_color(rgb(if value { TEXT } else { MUTED }))
+                    .text_sm()
+                    .hover(|style| style.cursor_pointer())
+                    .child(format!("{} {label}", if value { "☑" } else { "☐" }))
+                    .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                        if toggle == 0 {
+                            workbench.draft.local_execution = !workbench.draft.local_execution;
+                        } else {
+                            workbench.draft.approve_execute = !workbench.draft.approve_execute;
+                        }
+                        cx.notify();
+                    })),
+            );
+        }
+
+        // What is still missing, before the user finds out from a failed turn.
+        let has_key = settings::secret(&key_name).is_some()
+            || !self.field_text(Field::ApiKey, cx).is_empty();
+        for problem in self.draft.problems(has_key) {
+            pane = pane.child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .text_color(rgb(ERROR))
+                    .text_xs()
+                    .child(problem),
+            );
+        }
+
+        if !self.settings_note.is_empty() {
+            pane = pane.child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .text_color(rgb(MUTED))
+                    .text_xs()
+                    .child(self.settings_note.clone()),
+            );
+        }
+
+        pane.child(
+            div()
+                .flex()
+                .flex_row()
+                .gap_3()
+                .child(
+                    div()
+                        .id("save-settings")
+                        .px_3()
+                        .py_1()
+                        .border_1()
+                        .border_color(rgb(ACCENT))
+                        .text_color(rgb(ACCENT))
+                        .text_sm()
+                        .hover(|style| style.cursor_pointer())
+                        .child("Save")
+                        .on_click(cx.listener(|workbench, _event, _window, cx| {
+                            workbench.save_settings(cx)
+                        })),
+                )
+                .child(
+                    div()
+                        .id("close-settings")
+                        .px_3()
+                        .py_1()
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .text_color(rgb(MUTED))
+                        .text_sm()
+                        .hover(|style| style.cursor_pointer())
+                        .child("Close")
+                        .on_click(cx.listener(|workbench, _event, _window, cx| {
+                            workbench.settings_open = false;
+                            workbench.restore_focus = true;
+                            cx.notify();
+                        })),
+                ),
+        )
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .text_color(rgb(MUTED))
+                .text_xs()
+                .child(format!(
+                    "Keys live in your OS keychain, never in a file. Settings: {}",
+                    settings::settings_path().display()
+                )),
+        )
+    }
+
     fn run_command(&mut self, command: Command, cx: &mut Context<Self>) {
         match command {
             // Same path as Enter in the composer and as the Send button.
@@ -812,6 +1252,7 @@ impl Workbench {
                     None => self.status = "no answer to copy yet".into(),
                 }
             }
+            Command::OpenSettings => self.open_settings(None, cx),
             Command::Quit => cx.quit(),
         }
     }
@@ -1303,9 +1744,15 @@ impl Render for Workbench {
             .bg(rgb(BG))
             .text_color(rgb(TEXT))
             .on_action(cx.listener(Self::toggle_palette))
+            .on_action(cx.listener(Self::toggle_settings))
             .child(self.rail())
-            .child(self.chat_pane(cx))
-            .child(self.artifacts_panel(cx));
+            .child(self.chat_pane(cx));
+
+        let root = if self.settings_open {
+            root.child(self.settings_pane(cx))
+        } else {
+            root.child(self.artifacts_panel(cx))
+        };
 
         if self.palette_open {
             root.child(self.palette(cx))
@@ -1477,6 +1924,29 @@ mod tests {
         // Out-of-order letters must not match at all.
         assert!(ranked("tnur").is_empty());
         assert!(ranked("zzz").is_empty());
+    }
+
+    #[test]
+    fn secret_fields_are_masked_and_named() {
+        // A field that looks like a secret but is not masked would put an API key on
+        // screen; one that is masked but has nowhere to go would silently discard it.
+        for field in Field::ALL {
+            assert!(!field.label().is_empty());
+            assert!(!field.placeholder().is_empty());
+            match field {
+                Field::ApiKey => {
+                    assert!(field.is_secret());
+                    // The provider key's entry name depends on the provider chosen, so it
+                    // is resolved at save time rather than being fixed here.
+                    assert!(field.secret_name().is_none());
+                }
+                Field::AstaToken | Field::AstaApiKey => {
+                    assert!(field.is_secret());
+                    assert!(field.secret_name().is_some());
+                }
+                _ => assert!(!field.is_secret(), "{}", field.label()),
+            }
+        }
     }
 
     #[test]

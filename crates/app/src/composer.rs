@@ -103,6 +103,8 @@ pub struct Composer {
     /// palette, where Enter means "activate the selected command", not "send this
     /// text" — so it has to fire before the user has typed anything.
     submits_empty: bool,
+    /// Render the content as asterisks. For API-key fields in Settings.
+    masked: bool,
     /// While a turn is in flight the field is read-only.
     disabled: bool,
 }
@@ -122,6 +124,7 @@ impl Composer {
             last_bounds: None,
             is_selecting: false,
             submits_empty: false,
+            masked: false,
             disabled: false,
         }
     }
@@ -133,6 +136,26 @@ impl Composer {
 
     pub fn set_submits_empty(&mut self, submits_empty: bool) {
         self.submits_empty = submits_empty;
+    }
+
+    /// Hide what is typed — API keys should not sit on screen in plain text.
+    pub fn set_masked(&mut self, masked: bool) {
+        self.masked = masked;
+    }
+
+    /// What the element should draw: the content, or asterisks standing in for it.
+    ///
+    /// Masks **byte for byte**, not character for character, so the mask has exactly the
+    /// same length as the content. Cursor and selection are byte offsets into the string
+    /// being shaped, and a mask of a different length would put the caret in the wrong
+    /// place — or panic on a boundary. Keys are ASCII in practice, so the count is exact;
+    /// for anything multi-byte the mask is simply a little longer, which for a secret is
+    /// no loss.
+    fn display_content(&self) -> SharedString {
+        if self.masked && !self.content.is_empty() {
+            return SharedString::from("*".repeat(self.content.len()));
+        }
+        self.content.clone()
     }
 
     /// Prefill the field (used to seed the first prompt).
@@ -561,7 +584,7 @@ impl Element for ComposerElement {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let composer = self.composer.read(cx);
-        let content = composer.content.clone();
+        let content = composer.display_content();
         let selected_range = composer.selected_range.clone();
         let cursor = composer.cursor_offset();
         let style = window.text_style();
