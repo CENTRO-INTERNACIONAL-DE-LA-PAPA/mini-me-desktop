@@ -30,6 +30,11 @@ A **local-first, single-user research workbench** — deliberately *not* a hoste
 service. The web app is the thing we are leaving behind, so the desktop app should
 shed its infrastructure rather than reproduce it:
 
+> **Windows is the primary platform: ~98% of our users are on Windows**
+> (stated 2026-07-30). Linux is the *development* platform, not the target. Every
+> feature is only "done" once it works on Windows, and anything that assumes a
+> POSIX shell is a defect for almost the whole user base — see §13.
+
 - **Drop the hosted services.** No **WorkOS** (auth is meaningless for a local
   single user) and no **LangSmith** (sandbox *and* tracing). §11 proves both are
   droppable — WorkOS for free today, LangSmith once execution is local.
@@ -637,3 +642,35 @@ soft wrap and `shift-enter` for a newline need a different layout path — defer
 
 **Verified:** builds clean, clippy clean, and a real turn still streams
 end to end headlessly (102 chunks). Typing itself needs a human at a window.
+
+---
+
+## 13. Windows is the target — what that costs P6.2.5 (2026-07-30)
+
+~98% of our users run Windows. Linux is where we develop; Windows is where the
+product lives. This reorders the local-execution work (§10) rather than the UI.
+
+**The problem.** `LocalShellBackend.execute` runs `subprocess.run(..., shell=True)`,
+which on Windows is **`cmd.exe`**. Mini-Me's tool layer builds **POSIX** command
+strings — `cmd >/dev/null 2>&1; cat /tmp/…`, `… | python3 -c <reducer>` — and its
+prompts instruct the model that `python3` exists and `python` does not. On Windows
+all of that is wrong. The remote sandbox has been hiding it, because the sandbox is
+Linux no matter what the client runs.
+
+So "move execution to the host" is **not** platform-neutral: done naively it works
+on our dev Linux box and fails for essentially every real user.
+
+**The options, honestly:**
+
+| Option | Cost | Consequence |
+|---|---|---|
+| **WSL2 runs the backend** (app stays native Windows, talks to `127.0.0.1:2024`) | An extra install step per user; WSL2 must be enabled | Real Linux userspace, so `bash`/`python3`/`asta` all behave; keeps the local-first story intact. Localhost forwarding makes the client unchanged. |
+| **Keep the remote sandbox on Windows** | None | No install pain, but LangSmith stays, and the "no infrastructure, files never leave your machine" claim dies for 98% of users. |
+| **Make the tool layer shell-agnostic** (upstream) | Largest change: rewrite the POSIX command construction in `theory_tools.py`, `datavoyager_tools.py`, prompts | The only option that makes native Windows a first-class execution host. Best long-term, most work, and it is upstream code. |
+
+Note one thing that got *easier*: `LocalShellBackend`'s `ls`/`glob` are pure Python
+(`rglob`) and `grep` falls back to Python when the binary is absent — so the GNU
+`find -printf` shims in `sandbox.py` do **not** need porting. The shell is the
+remaining problem, not file operations.
+
+**Decision needed before writing P6.2.5.** Not resolved yet.
