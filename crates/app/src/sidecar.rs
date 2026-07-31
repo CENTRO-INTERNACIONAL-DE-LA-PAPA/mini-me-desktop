@@ -153,6 +153,24 @@ impl Sidecar {
                         text.push_str(&token);
                     }
                     TurnEvent::Status(status) => println!("status   : {status}"),
+                    // Covers the `values` decode path, so an artifacts-shape
+                    // regression fails the headless check instead of quietly
+                    // emptying the outputs panel.
+                    TurnEvent::Snapshot(snapshot) => {
+                        let summary: Vec<String> = snapshot
+                            .buckets
+                            .iter()
+                            .map(|bucket| format!("{} {}", bucket.items.len(), bucket.name))
+                            .collect();
+                        println!(
+                            "outputs  : {}",
+                            if summary.is_empty() {
+                                "none yet".to_string()
+                            } else {
+                                summary.join(", ")
+                            }
+                        );
+                    }
                     TurnEvent::Error(error) => println!("error    : {error}"),
                     TurnEvent::Done => {}
                 })

@@ -22,7 +22,7 @@ use gpui::{
 };
 
 use composer::{Composer, ComposerEvent};
-use protocol::{Project, TurnEvent};
+use protocol::{Bucket, Project, TurnEvent};
 use sidecar::Sidecar;
 
 // ---- Palette (placeholder; align with the web app's tokens in P6.3) --------
@@ -83,6 +83,8 @@ struct Workbench {
     /// The project spine from `GET /project`. `None` until the first fetch lands
     /// (or if the backend isn't up yet) — the panel says so rather than lying.
     project: Option<Project>,
+    /// Research outputs, from the latest `values` snapshot of the current run.
+    buckets: Vec<Bucket>,
     transcript: Vec<Message>,
     sidecar: Arc<Sidecar>,
     /// Status line text (backend/stream progress, not model output).
@@ -111,6 +113,7 @@ impl Workbench {
 
         let workbench = Self {
             project: None,
+            buckets: Vec::new(),
             transcript: Vec::new(),
             sidecar,
             status: "idle — type a prompt and press Enter".to_string(),
@@ -189,6 +192,17 @@ impl Workbench {
             TurnEvent::Token(text) => {
                 if let Some(last) = self.transcript.last_mut() {
                     last.body.push_str(&text);
+                }
+            }
+            // Each `values` event is a *whole* snapshot, so replace rather than
+            // merge. The spine rides along in the same payload, which keeps the
+            // mission current without another HTTP round trip.
+            TurnEvent::Snapshot(snapshot) => {
+                if let Some(project) = snapshot.project {
+                    self.project = Some(project);
+                }
+                if !snapshot.buckets.is_empty() {
+                    self.buckets = snapshot.buckets;
                 }
             }
             TurnEvent::Done => {
@@ -394,12 +408,16 @@ impl Workbench {
             .child(section_label("RESEARCH PROJECT"));
 
         let Some(project) = &self.project else {
-            return panel.child(
-                div()
-                    .text_color(rgb(MUTED))
-                    .text_sm()
-                    .child("No project loaded yet. Run a turn — the mission is derived from your first question."),
-            );
+            // No spine yet, but a run may already be producing outputs — still show
+            // them rather than an empty panel.
+            return panel
+                .child(
+                    div()
+                        .text_color(rgb(MUTED))
+                        .text_sm()
+                        .child("No project loaded yet. Run a turn — the mission is derived from your first question."),
+                )
+                .child(self.outputs_section());
         };
 
         panel = panel.child(if project.mission.is_empty() {
@@ -486,7 +504,64 @@ impl Workbench {
             );
         }
 
-        panel
+        panel.child(self.outputs_section())
+    }
+
+    /// Research outputs from the current run, grouped by kind.
+    ///
+    /// Fed by the `values` stream event, so it fills in as a turn produces papers,
+    /// datasets, theories and reports — not only at the end.
+    fn outputs_section(&self) -> impl IntoElement {
+        let mut section = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .pt_2()
+            .border_t_1()
+            .border_color(rgb(BORDER))
+            .child(section_label("OUTPUTS"));
+
+        if self.buckets.is_empty() {
+            return section.child(
+                div()
+                    .text_color(rgb(MUTED))
+                    .text_xs()
+                    .child("Papers, datasets, theories and reports show up here as a turn produces them."),
+            );
+        }
+
+        for bucket in &self.buckets {
+            // Show a bounded number of titles — a literature search can return
+            // dozens, and the count already conveys the scale.
+            const MAX_SHOWN: usize = 4;
+            let mut group = div().flex().flex_col().gap_1().child(
+                div()
+                    .text_color(rgb(TEXT))
+                    .text_sm()
+                    .child(format!("{} · {}", bucket.name, bucket.items.len())),
+            );
+            for item in bucket.items.iter().take(MAX_SHOWN) {
+                group = group.child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .text_color(rgb(MUTED))
+                        .text_xs()
+                        .child(item.clone()),
+                );
+            }
+            if bucket.items.len() > MAX_SHOWN {
+                group = group.child(
+                    div()
+                        .text_color(rgb(MUTED))
+                        .text_xs()
+                        .child(format!("+{} more", bucket.items.len() - MAX_SHOWN)),
+                );
+            }
+            section = section.child(group);
+        }
+
+        section
     }
 }
 

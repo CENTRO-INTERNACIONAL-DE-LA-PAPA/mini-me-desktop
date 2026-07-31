@@ -8,11 +8,21 @@
 //! - `POST /threads`                   → `{"thread_id": "<uuid>"}`
 //! - `POST /threads/{id}/runs/stream`  → SSE stream of the run
 //!
-//! We ask for `stream_mode: ["messages-tuple"]` — the same mode the React
-//! frontend uses — and leave `stream_subgraphs` off, so we receive only the
-//! *coordinator's* token chunks with no subagent namespaces to filter. In local
-//! dev the backend needs no `Authorization` header (`backend/auth.py` admits an
-//! unauthenticated `local-user`) and falls back to `OPENAI_API_KEY` from `.env`.
+//! We ask for `stream_mode: ["messages-tuple", "values", "custom"]` and leave
+//! `stream_subgraphs` off, so we receive only the *coordinator's* token chunks
+//! with no subagent namespaces to filter:
+//!
+//! - `messages-tuple` → `event: messages` frames, `[chunk, metadata]` — the tokens
+//! - `values`         → full state snapshots carrying `artifacts` (and the spine
+//!                      nested at `artifacts.project`)
+//! - `custom`         → `sandbox_status` provisioning progress
+//!
+//! Verified against a live backend that requesting all three still yields
+//! `event: messages` (asking for plain `messages` instead of `messages-tuple`
+//! degrades them to `messages/partial` frames and silently breaks tokens).
+//!
+//! In local dev the backend needs no `Authorization` header (`backend/auth.py`
+//! admits an unauthenticated `local-user`) and falls back to `OPENAI_API_KEY`.
 
 use anyhow::{Context as _, Result};
 use futures::StreamExt;
@@ -26,18 +36,54 @@ pub enum TurnEvent {
     Status(String),
     /// A chunk of assistant text to append to the transcript.
     Token(String),
+    /// A full snapshot of the run's artifacts (and the spine, which rides along).
+    /// Emitted by the `values` stream mode; **replaces** prior state rather than
+    /// accumulating, since each event carries the whole picture.
+    Snapshot(Snapshot),
     /// The run finished cleanly.
     Done,
     /// The run failed; the string is display-safe.
     Error(String),
 }
 
+/// Research outputs produced so far, as carried by a `values` event.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Snapshot {
+    pub buckets: Vec<Bucket>,
+    /// The `values` payload nests the spine under `artifacts.project`, so a turn
+    /// updates the mission for free — no extra `GET /project` round trip.
+    pub project: Option<Project>,
+}
+
+/// One named group of outputs (datasets, sources, reports, …).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Bucket {
+    pub name: &'static str,
+    pub items: Vec<String>,
+}
+
+/// The artifact buckets we surface, in display order.
+///
+/// Taken from a live `values` payload (2026-07-30), which carries exactly:
+/// `datasets, sources, reports, files, hypotheses, libraries, analyses, edges,
+/// project`. `edges` is graph wiring rather than a user-facing output, and
+/// `project` is the spine, so neither is listed here.
+const ARTIFACT_BUCKETS: [&str; 7] = [
+    "datasets",
+    "sources",
+    "reports",
+    "files",
+    "hypotheses",
+    "libraries",
+    "analyses",
+];
+
 /// The research project "spine": the durable mission plus what has been done and
 /// what is queued. This is the workbench's identity — the thing a chat window
 /// alone can't express.
 ///
 /// Every field defaults, so a sparse or older backend response still decodes.
-#[derive(Debug, Default, Clone, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Deserialize)]
 pub struct Project {
     #[serde(default)]
     pub mission: String,
@@ -52,7 +98,7 @@ pub struct Project {
 /// An advisory next step. **Advisory only** — org policy is human-gated, so the
 /// app never runs one of these on its own; `prompt` is what gets *offered* to the
 /// user, not executed.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Suggestion {
     #[serde(default)]
     pub title: String,
@@ -180,7 +226,7 @@ fn run_request_body(prompt: &str) -> Value {
     json!({
         "assistant_id": "agent",
         "input": { "messages": [ { "type": "human", "content": prompt } ] },
-        "stream_mode": ["messages-tuple"],
+        "stream_mode": ["messages-tuple", "values", "custom"],
     })
 }
 
@@ -239,6 +285,83 @@ fn parse_sse_block(block: &str) -> Option<SseEvent> {
     Some(event)
 }
 
+/// Pull the artifact buckets (and the nested spine) out of a `values` payload.
+///
+/// Returns `None` when there is nothing to show, so an early snapshot doesn't
+/// blank a panel that already has content.
+fn decode_values(data: &str) -> Option<Snapshot> {
+    let value = serde_json::from_str::<Value>(data).ok()?;
+    let artifacts = value.get("artifacts")?;
+
+    let buckets: Vec<Bucket> = ARTIFACT_BUCKETS
+        .iter()
+        .filter_map(|name| {
+            let items: Vec<String> = artifacts
+                .get(name)?
+                .as_array()?
+                .iter()
+                .map(artifact_label)
+                .collect();
+            if items.is_empty() {
+                return None;
+            }
+            Some(Bucket { name, items })
+        })
+        .collect();
+
+    let project = artifacts
+        .get("project")
+        .and_then(|project| serde_json::from_value::<Project>(project.clone()).ok());
+
+    if buckets.is_empty() && project.is_none() {
+        return None;
+    }
+    Some(Snapshot { buckets, project })
+}
+
+/// Turn a `custom` event into status-line text.
+///
+/// The backend emits sandbox provisioning progress here — verified live
+/// (2026-07-30): `{"sandbox_status":{"state":"preparing","message":"Creating
+/// sandbox…"}}` then `{"state":"ready","message":"Sandbox ready"}`. Surfacing it
+/// matters because the first turn on a cold thread waits on that provisioning, and
+/// without this the UI just looks stuck.
+fn decode_custom(data: &str) -> Option<String> {
+    let value = serde_json::from_str::<Value>(data).ok()?;
+    let status = value.get("sandbox_status")?;
+    // Prefer the human message; fall back to the bare state.
+    let text = status
+        .get("message")
+        .and_then(Value::as_str)
+        .filter(|message| !message.trim().is_empty())
+        .or_else(|| status.get("state").and_then(Value::as_str))?;
+    Some(text.trim().to_string())
+}
+
+/// Best-effort human label for an artifact.
+///
+/// The payload schemas mostly expose `title`, with `name` on file artifacts
+/// (`backend/schemas.py`), but we tolerate anything: an unlabelled artifact should
+/// still be *counted* rather than dropped or crash the panel.
+fn artifact_label(item: &Value) -> String {
+    for key in ["title", "name", "filename", "label", "question", "id"] {
+        if let Some(text) = item.get(key).and_then(Value::as_str) {
+            let text = text.trim();
+            if !text.is_empty() {
+                return text.to_string();
+            }
+        }
+    }
+    // A bare string entry is plausible too.
+    if let Some(text) = item.as_str() {
+        let text = text.trim();
+        if !text.is_empty() {
+            return text.to_string();
+        }
+    }
+    "(untitled)".to_string()
+}
+
 /// Map one SSE event onto UI events.
 ///
 /// The `messages` stream mode emits a 2-element array `[message_chunk, metadata]`.
@@ -254,6 +377,16 @@ pub fn decode_sse_event(event: &SseEvent) -> Vec<TurnEvent> {
     }
     if event.name == "metadata" {
         return vec![TurnEvent::Status("run started".into())];
+    }
+    if event.name == "values" {
+        return decode_values(&event.data)
+            .map(|snapshot| vec![TurnEvent::Snapshot(snapshot)])
+            .unwrap_or_default();
+    }
+    if event.name == "custom" {
+        return decode_custom(&event.data)
+            .map(|status| vec![TurnEvent::Status(status)])
+            .unwrap_or_default();
     }
     if !is_messages {
         return Vec::new();
@@ -322,11 +455,96 @@ mod tests {
     fn requests_the_tuple_stream_mode() {
         // Regression guard: `messages` (without `-tuple`) silently yields zero
         // tokens, because the server then emits `messages/partial` frames.
+        // `values` rides alongside for the artifacts/spine snapshot — verified on a
+        // live backend that asking for both still produces `event: messages`.
         let body = run_request_body("hi");
-        assert_eq!(body["stream_mode"], json!(["messages-tuple"]));
+        assert_eq!(
+            body["stream_mode"],
+            json!(["messages-tuple", "values", "custom"])
+        );
         assert_eq!(body["assistant_id"], "agent");
         assert_eq!(body["input"]["messages"][0]["type"], "human");
         assert_eq!(body["input"]["messages"][0]["content"], "hi");
+    }
+
+    #[test]
+    fn decodes_artifacts_and_the_nested_spine_from_values() {
+        // Shape copied from a live `values` payload (2026-07-30).
+        let data = json!({
+            "messages": [],
+            "artifacts": {
+                "datasets": [],
+                "sources": [{"title": "A paper"}, {"title": "Another"}],
+                "reports": [],
+                "files": [{"name": "eda.png"}],
+                "hypotheses": [{"statement": "no label field here"}],
+                "libraries": [],
+                "analyses": [],
+                "edges": [{"from": "a", "to": "b"}],
+                "project": {"mission": "M", "completed": ["c"], "pending": [], "suggestions": []}
+            }
+        })
+        .to_string();
+
+        let decoded = decode_sse_event(&SseEvent {
+            name: "values".into(),
+            data,
+        });
+        let [TurnEvent::Snapshot(snapshot)] = decoded.as_slice() else {
+            panic!("expected exactly one snapshot, got {decoded:?}");
+        };
+
+        // Empty buckets are dropped, `edges` is never surfaced.
+        let names: Vec<&str> = snapshot.buckets.iter().map(|b| b.name).collect();
+        assert_eq!(names, vec!["sources", "files", "hypotheses"]);
+        assert_eq!(snapshot.buckets[0].items, vec!["A paper", "Another"]);
+        assert_eq!(snapshot.buckets[1].items, vec!["eda.png"]);
+        // An item with no recognised label is still counted, not dropped.
+        assert_eq!(snapshot.buckets[2].items, vec!["(untitled)"]);
+
+        let project = snapshot.project.as_ref().expect("spine rides along");
+        assert_eq!(project.mission, "M");
+        assert_eq!(project.completed, vec!["c"]);
+    }
+
+    #[test]
+    fn surfaces_sandbox_provisioning_as_status() {
+        // Live shape (2026-07-30). Without this the first turn on a cold thread
+        // looks stuck while the sandbox is created.
+        let decoded = decode_sse_event(&SseEvent {
+            name: "custom".into(),
+            data: json!({"sandbox_status": {"state": "preparing", "message": "Creating sandbox…"}})
+                .to_string(),
+        });
+        assert_eq!(
+            decoded,
+            vec![TurnEvent::Status("Creating sandbox…".into())]
+        );
+
+        // Falls back to the state when no message is given.
+        let decoded = decode_sse_event(&SseEvent {
+            name: "custom".into(),
+            data: json!({"sandbox_status": {"state": "ready"}}).to_string(),
+        });
+        assert_eq!(decoded, vec![TurnEvent::Status("ready".into())]);
+
+        // Unrelated custom payloads are ignored rather than shown as noise.
+        let decoded = decode_sse_event(&SseEvent {
+            name: "custom".into(),
+            data: json!({"something_else": 1}).to_string(),
+        });
+        assert!(decoded.is_empty(), "got {decoded:?}");
+    }
+
+    #[test]
+    fn ignores_a_values_payload_with_nothing_to_show() {
+        // Must not blank an already-populated panel.
+        let data = json!({"messages": [], "artifacts": {"datasets": [], "edges": []}}).to_string();
+        let decoded = decode_sse_event(&SseEvent {
+            name: "values".into(),
+            data,
+        });
+        assert!(decoded.is_empty(), "got {decoded:?}");
     }
 
     #[test]

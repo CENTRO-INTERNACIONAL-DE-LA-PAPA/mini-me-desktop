@@ -14,7 +14,7 @@ sidecar** that the client spawns and supervises.
 | **P6.1** — buildable window *(go/no-go gate)* | ✅ **PASS** — builds green; window renders natively (verified on Windows/DirectX). §8 |
 | **P6.2** — talk to the real backend | ✅ **done** — a real coordinator turn spawned, streamed and rendered **on Windows** (2026-07-30). §9 |
 | **P6.2.5** — local-first backend (drop LangSmith/WorkOS) | 🔴 **queued** — needs sign-off on where the change lands. WSL2 runtime now working, which is its prerequisite. §10/§11/§13 |
-| **P6.3** — port the core panels | 🟡 **in progress** — composer + scrolling transcript (§12) and the live project spine done; artifacts/status/palette next |
+| **P6.3** — port the core panels | 🟡 **in progress** — composer, spine, outputs and sandbox status done; **command palette** is the last step |
 | **P6.4** — native affordances + shipping | ⬜ not started |
 | **P6.5** — async subagents + Jobs panel | ⬜ planned — the payoff that most justifies going native. §14 |
 
@@ -181,9 +181,20 @@ the backend), `ui` (reusable GPUI components), `sidecar` (packaging).
      composer** — it never runs it, keeping the human gate. The headless
      `--check-backend` now covers this route too, so a decode regression shows up
      as a failed check rather than a silently empty panel.
-  3. ⬜ **Artifacts/Outputs** — the `values` stream event (`artifacts`, `todos`)
-     plus `GET /files/{thread_id}`.
-  4. ⬜ **`sandbox_status`** from `custom` stream events in the status line.
+  3. ✅ **Artifacts/Outputs** — an OUTPUTS section under the spine, fed by the
+     `values` stream event so it fills in *during* a turn. Buckets come from the
+     live payload: `datasets, sources, reports, files, hypotheses, libraries,
+     analyses` (`edges` is graph wiring, not an output, so it's hidden). Each shows
+     a count plus up to four titles, then "+N more" — a literature search can
+     return dozens. Labels fall back through `title → name → filename → label →
+     question → id`, and an unlabelled item is still *counted* rather than dropped.
+     *Two corrections to what this plan previously assumed:* the state key is
+     `files`, not `todos`; and **`GET /files/{thread_id}` is a download route**
+     (it 400s with `missing 'path' query param`), not a listing — so artifacts come
+     from the stream, not that route.
+  4. ✅ **`sandbox_status`** from `custom` events now drives the status line
+     (`Creating sandbox… → Sandbox ready`). This matters because the first turn on a
+     cold thread blocks on that provisioning, and without it the UI looks stuck.
   5. ⬜ **Command palette** — Zed-style `Ctrl-P`: run turn, new thread, switch
      project.
 - ⬜ **P6.4 — Native affordances + shipping.** Local file → analysis,
