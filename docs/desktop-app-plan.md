@@ -13,7 +13,7 @@ sidecar** that the client spawns and supervises.
 | **P6.0** — spike doc + scaffold | ✅ done |
 | **P6.1** — buildable window *(go/no-go gate)* | ✅ **PASS** — builds green; window renders natively (verified on Windows/DirectX). §8 |
 | **P6.2** — talk to the real backend | ✅ **done** — a real coordinator turn spawned, streamed and rendered **on Windows** (2026-07-30). §9 |
-| **P6.2.5** — local-first backend (drop LangSmith/WorkOS) | 🟡 **works, opt-in** — a real turn runs with no `LANGSMITH_API_KEY`/`WORKOS_*`, executing on the host, via a `PYTHONPATH` overlay that leaves the Mini-Me checkout untouched. Default stays the sandbox until `execute` is human-gated. §18 |
+| **P6.2.5** — local-first backend (drop LangSmith/WorkOS) | ✅ **done, and now the default** — turns run on the host with no `LANGSMITH_API_KEY`/`WORKOS_*`, via a `PYTHONPATH` overlay that leaves the Mini-Me checkout untouched, and **every `execute` call waits for approval**. `--sandbox` still available. §18/§19 |
 | **P6.3** — port the core panels | ✅ **done** — composer, spine, outputs, sandbox status, agent activity trace, **command palette**; plus conversation continuity (turns used to each start a new thread) |
 | **P6.3.5** — visuals pass, starting with **markdown rendering** | ⬜ queued — answers currently render with their asterisks showing, and reports/citations are the deliverable. §16 |
 | **P6.4** — native affordances + shipping | ⬜ not started |
@@ -251,6 +251,8 @@ background-run notification).
 
 **Locked (2026-07-31):**
 
+- **Execution default:** ✅ **host, with `execute` human-gated** (§19). The remote
+  sandbox stays reachable via `--sandbox` but nothing uses it by default.
 - **Where the §10 change lands:** ✅ **a `PYTHONPATH` overlay in this repo**
   (`overlay/`), not a PR or a fork — the checkout stays byte-for-byte upstream, which
   is what "bundled, pinned, unmodified" asks for. An upstream seam remains the nicer
@@ -258,8 +260,8 @@ background-run notification).
 
 **Open:**
 
-- **Human-gating `execute`:** the blocker on making host execution the *default*.
-  Needs `interrupt_on` plus an approve/reject path in the client (§18).
+- **Approval fatigue:** whether a long analysis holding a dozen commands is tolerable.
+  If not, the answer is remembered decisions, not removing the gate (§19).
 - **Human-gating `execute`:** approval UX for host commands (policy + design).
 - **Rust capacity:** an organizational gate (R6) — sustained Rust availability.
 - **`asta` version pinning on the host:** the sandbox pinned `v0.101.0`; the dev
@@ -1289,3 +1291,76 @@ isolation.** We cannot rewrite it from an overlay, and it should not be silently
 invalidated — which is another reason the default stays where it is. And the sandbox
 snapshot pins `asta v0.101.0` while this host has `0.101.1`; a startup version check
 is still owed.
+
+## 19. Host execution becomes the default, gated by approval (2026-07-31)
+
+**Decided:** local is the default; nothing runs in the remote sandbox unless someone
+asks for it with `--sandbox` (or `MINIME_EXECUTION_BACKEND=sandbox`).
+
+What made that safe to do is the other half of this step: **every `execute` call now
+stops and asks.** The run pauses, the desktop shows the command verbatim, and nothing
+happens until the researcher approves or rejects.
+
+```
+step     : execute
+approve  : execute — python3 - <<'PY' ⏎ value = 7 * 6 ⏎ … ⏎ PY
+--- assistant text ---
+42
+$ cat …/answer.txt → 42
+```
+
+Verified with **no flags set** — default path, no `LANGSMITH_API_KEY`, command held,
+approved, run resumed on the same thread.
+
+### The gate
+
+`create_deep_agent(interrupt_on={"execute": {"allowed_decisions": ["approve","reject"]}})`,
+plus the same key on every subagent dict — most execution happens *inside* subagents
+(data cleaning, EDA, predictive modelling), so gating only the coordinator would leave
+the majority of commands unreviewed. Upstream already uses this mechanism
+(`diagnostic_analytics` interrupts on `request_diagnostic_context`), so the shape is
+Mini-Me's own, not an invention.
+
+`edit` and `respond` are not offered: the client can approve or reject, and advertising a
+decision the UI cannot produce would strand the run.
+
+### Two things the measurements changed
+
+1. **The import hook has to target `deepagents`, not `backend.agent`.** LangGraph loads
+   the graph module by *file path* (`langgraph.json` → `./backend/agent.py:agent`) via
+   `spec_from_file_location`, which bypasses `sys.meta_path` — so a hook on
+   `backend.agent` never fires in the real server. This failed silently and looked like
+   a working gate: the sandbox patch landed, the approval patch did not, and the command
+   ran. `backend/agent.py` does `from deepagents import create_deep_agent`, and *that*
+   goes through normal machinery, so patching the package attribute first is what takes
+   effect. **A patch that can fail quietly is worse than one that cannot.**
+2. **We were already broken on interrupts, before any of this.** Upstream's
+   `diagnostic_analytics` gate means a paused run has always been possible — and to our
+   client a pause is indistinguishable from a finished stream: the SSE connection simply
+   ends. So that subagent's turns died silently with no answer. `TurnOutcome` now
+   distinguishes them, and `Sidecar::resume` continues the turn on the same thread.
+
+`__interrupt__` arrives inside the `values` frame we already request, so no new stream
+mode was needed. Payload:
+`[{"value":{"action_requests":[{"name","args","description"}],"review_configs":[{"action_name","allowed_decisions"}]},"id"}]`,
+and the resume body is `{"command":{"resume":{"decisions":[{"type":"approve"}]}}}` — one
+decision per held action, in order, which the middleware validates.
+
+### Also added
+
+`MINIME_CAPTURE_SSE=<path>` appends the raw stream to a file. Every wire shape in this
+plan was measured that way; now it is a flag instead of a one-off probe, and what it
+writes is exactly what `--replay` reads back.
+
+### What this leaves open
+
+- **`guardrails.py` upstream still says the design relies on sandbox isolation.** That
+  sentence is now wrong for the default path. It cannot be fixed from an overlay, and it
+  is the strongest remaining argument for eventually sending Mini-Me a PR.
+- **Approval fatigue is untested.** A long analysis may hold a dozen commands. If it
+  becomes tiring in practice the answer is remembered decisions (per-command-shape
+  allowlists), not removing the gate — `MINIME_APPROVE_EXECUTE=0` exists but is not a
+  recommendation.
+- **The gate has never been driven by a human.** Approve/Reject buttons are unverified
+  in a window; the headless check auto-approves because it cannot ask anyone.
+- `asta` version pinning (sandbox pinned `v0.101.0`, host has `0.101.1`) is still owed.

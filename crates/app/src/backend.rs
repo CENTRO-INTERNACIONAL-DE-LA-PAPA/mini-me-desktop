@@ -61,10 +61,13 @@ pub enum Execution {
 
 /// Decide the execution locality.
 ///
-/// **Opt-in, and the sandbox stays the default.** Host execution is the decided
-/// direction (docs §10) but it is not yet safe to *default* to: org policy is
-/// human-gated, and the approval UX for the `execute` tool is still open. Until that
-/// lands, turning this on is a deliberate act.
+/// **Host execution is the default** (2026-07-31). This is a local-first, single-user
+/// workbench: the researcher's files are on this machine, and shipping them to a rented
+/// VM to be read was always the wrong shape (docs §10/§11). What made defaulting safe
+/// is the approval gate — every `execute` call now stops and asks (docs §19).
+///
+/// `MINIME_EXECUTION_BACKEND=sandbox`, or `--sandbox`, still gets the old path, so the
+/// change is reversible for anyone who needs it.
 ///
 /// `override_local` comes from `--local` / `--sandbox` and wins over the environment.
 /// A flag you just typed is more obviously in force than a variable your shell has
@@ -75,7 +78,9 @@ fn resolve_execution(override_local: Option<bool>) -> Execution {
         Some(local) => local,
         None => {
             let requested = std::env::var("MINIME_EXECUTION_BACKEND").unwrap_or_default();
-            requested.trim().eq_ignore_ascii_case("local")
+            let requested = requested.trim();
+            // Anything explicit is honoured; an unset variable now means local.
+            !requested.eq_ignore_ascii_case("sandbox") || requested.is_empty()
         }
     };
     if !local {
@@ -681,19 +686,27 @@ mod tests {
     }
 
     #[test]
-    fn local_execution_is_opt_in() {
+    fn host_execution_is_the_default_and_sandbox_is_the_escape_hatch() {
         // Nothing set, or anything other than `local`, must keep the sandbox: host
         // execution is not safe to default to until `execute` is human-gated (§18).
-        for value in ["", "sandbox", "Local ", "true", "1"] {
+        // Unset, or anything that is not `sandbox`, is now host execution — the
+        // default flipped once `execute` was gated (§19). `sandbox` is the escape hatch.
+        for value in ["", "local", "Local ", "anything"] {
             std::env::set_var("MINIME_EXECUTION_BACKEND", value);
-            let resolved = resolve_execution(None);
-            let expected_local = value.trim().eq_ignore_ascii_case("local");
-            assert_eq!(
-                matches!(resolved, Execution::Local { .. }),
-                expected_local,
+            assert!(
+                matches!(resolve_execution(None), Execution::Local { .. }),
                 "for {value:?}"
             );
         }
+        for value in ["sandbox", " SANDBOX "] {
+            std::env::set_var("MINIME_EXECUTION_BACKEND", value);
+            assert!(
+                matches!(resolve_execution(None), Execution::Sandbox),
+                "for {value:?}"
+            );
+        }
+        std::env::remove_var("MINIME_EXECUTION_BACKEND");
+        assert!(matches!(resolve_execution(None), Execution::Local { .. }));
 
         // A flag beats a stale variable in both directions — `--sandbox` has to be
         // able to switch host execution *off* without the user hunting for what set it.

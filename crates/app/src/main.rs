@@ -24,7 +24,7 @@ use gpui::{
 };
 
 use composer::{Composer, ComposerEvent};
-use protocol::{AgentRef, Bucket, Project, TurnEvent};
+use protocol::{AgentRef, ApprovalRequest, Bucket, Decision, Project, TurnEvent};
 use sidecar::Sidecar;
 
 // ---- Palette (placeholder; align with the web app's tokens in P6.3) --------
@@ -278,6 +278,9 @@ struct Workbench {
     palette_open: bool,
     palette_selected: usize,
     palette_query: Entity<Composer>,
+    /// A run paused at the approval gate: the command it wants to run, awaiting a
+    /// decision. While this is set the turn is *open*, not finished.
+    pending_approval: Option<ApprovalRequest>,
     /// Set when focus must return to the composer but no `Window` is at hand — an
     /// entity subscription doesn't get one. `render` does, so it settles the debt
     /// there. Without this, activating a command with Enter would leave focus on a
@@ -331,6 +334,7 @@ impl Workbench {
             palette_open: false,
             palette_selected: 0,
             palette_query,
+            pending_approval: None,
             restore_focus: false,
         };
         // Populate the spine if a backend is already listening. This does not
@@ -410,6 +414,18 @@ impl Workbench {
                     }
                 }
             }
+            // The run is holding a command at the gate. Keep the turn open and show it.
+            TurnEvent::Approval(request) => {
+                let commands = request.actions.len();
+                self.pending_approval = Some(request);
+                self.status = if commands == 1 {
+                    "waiting for your approval".into()
+                } else {
+                    format!("waiting for your approval ({commands} commands)")
+                };
+                // The composer stays disabled: this turn is still running, it is just
+                // paused on a question for the user.
+            }
             TurnEvent::SubagentToken { agent, text } => {
                 if let Some(message) = self.transcript.last_mut() {
                     trace_for(message, &agent).push_text(&text);
@@ -453,6 +469,7 @@ impl Workbench {
     /// A turn ended (either way): collapse its activity trace, drop the assistant
     /// placeholder if nothing at all arrived, and hand the field back to the user.
     fn finish_turn(&mut self, cx: &mut Context<Self>) {
+        self.pending_approval = None;
         // While a turn runs the trace is the only sign of progress; once the answer
         // is there, the answer is the point.
         if let Some(message) = self.transcript.last_mut() {
@@ -544,15 +561,144 @@ impl Workbench {
             }
         }
 
-        div()
+        let mut pane = div()
             .flex()
             .flex_col()
             .flex_grow()
             .min_w_0()
             .h_full()
-            .child(col)
-            .child(self.composer_row(cx))
-            .child(self.status_bar())
+            .child(col);
+        // Above the composer, so the decision sits where the user's attention already
+        // is and cannot be scrolled out of view.
+        if let Some(request) = &self.pending_approval {
+            pane = pane.child(self.approval_card(request, cx));
+        }
+        pane.child(self.composer_row(cx)).child(self.status_bar())
+    }
+
+    /// Answer the pending approval and pump the continuation into the same turn.
+    fn decide(&mut self, approve: bool, cx: &mut Context<Self>) {
+        let Some(request) = self.pending_approval.take() else {
+            return;
+        };
+        // Exactly one decision per held action, in the order they were presented —
+        // the agent validates the count and errors out if it disagrees.
+        let decisions: Vec<Decision> = request
+            .actions
+            .iter()
+            .map(|_| {
+                if approve {
+                    Decision::Approve
+                } else {
+                    Decision::Reject {
+                        message: "The researcher declined to run this command.".to_string(),
+                    }
+                }
+            })
+            .collect();
+        self.status = if approve { "approved — running…" } else { "rejected" }.into();
+
+        let mut events = self.sidecar.resume(decisions);
+        cx.spawn(async move |this, cx| {
+            while let Some(event) = events.next().await {
+                if this
+                    .update(cx, |workbench, cx| {
+                        workbench.apply(event, cx);
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// The approval card: the command, verbatim, and the two decisions.
+    ///
+    /// Deliberately shows the command rather than a summary. Host execution means this
+    /// runs on the researcher's own machine with their permissions, and the only
+    /// meaningful review is of the actual text (docs §19).
+    fn approval_card(&self, request: &ApprovalRequest, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut card = div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w_0()
+            .gap_2()
+            .p_3()
+            .border_t_1()
+            .border_color(rgb(ACCENT))
+            .bg(rgb(PANEL))
+            .child(
+                div()
+                    .text_color(rgb(ACCENT))
+                    .text_xs()
+                    .child("RUN THIS ON YOUR MACHINE?"),
+            );
+
+        for action in &request.actions {
+            if !action.description.is_empty() {
+                card = card.child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .text_color(rgb(MUTED))
+                        .text_xs()
+                        .child(action.description.clone()),
+                );
+            }
+            card = card.child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .p_2()
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .text_color(rgb(TEXT))
+                    .text_sm()
+                    .child(action.detail.clone()),
+            );
+        }
+
+        card.child(
+            div()
+                .flex()
+                .flex_row()
+                .gap_3()
+                .child(
+                    div()
+                        .id("approve")
+                        .px_3()
+                        .py_1()
+                        .border_1()
+                        .border_color(rgb(ACCENT))
+                        .text_color(rgb(ACCENT))
+                        .text_sm()
+                        .hover(|style| style.cursor_pointer())
+                        .child("Approve")
+                        .on_click(cx.listener(|workbench, _event, _window, cx| {
+                            workbench.decide(true, cx)
+                        })),
+                )
+                .child(
+                    div()
+                        .id("reject")
+                        .px_3()
+                        .py_1()
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .text_color(rgb(MUTED))
+                        .text_sm()
+                        .hover(|style| style.cursor_pointer())
+                        .child("Reject")
+                        .on_click(cx.listener(|workbench, _event, _window, cx| {
+                            workbench.decide(false, cx)
+                        })),
+                ),
+        )
     }
 
     // ---- Command palette ------------------------------------------------------
@@ -1193,6 +1339,11 @@ fn decode_capture(raw: &[u8], mut on_status: impl FnMut(&str)) -> (Message, Vec<
                 TurnEvent::Snapshot(snapshot) => {
                     if !snapshot.buckets.is_empty() {
                         outputs = snapshot.buckets;
+                    }
+                }
+                TurnEvent::Approval(request) => {
+                    for action in &request.actions {
+                        message.steps.push(format!("awaiting approval: {}", action.tool));
                     }
                 }
                 TurnEvent::Status(status) => on_status(&status),

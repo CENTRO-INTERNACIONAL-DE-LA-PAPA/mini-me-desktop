@@ -49,6 +49,9 @@ pub enum TurnEvent {
     /// Text streamed by a *subagent*. Kept apart from [`TurnEvent::Token`] so the
     /// coordinator's answer stays the primary thing in the transcript.
     SubagentToken { agent: AgentRef, text: String },
+    /// The run has paused: a tool call needs a human decision before it proceeds.
+    /// The turn is **not** over — it continues when the client resumes.
+    Approval(ApprovalRequest),
     /// A full snapshot of the run's artifacts (and the spine, which rides along).
     /// Emitted by the `values` stream mode; **replaces** prior state rather than
     /// accumulating, since each event carries the whole picture.
@@ -76,6 +79,29 @@ pub enum TurnEvent {
 pub struct AgentRef {
     pub ns: String,
     pub name: String,
+}
+
+/// A paused run waiting on the person.
+///
+/// Measured shape (2026-07-31), carried in a `values` event as `__interrupt__`:
+/// `[{"value": {"action_requests": [...], "review_configs": [...]}, "id": "…"}]`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ApprovalRequest {
+    /// One entry per action awaiting a decision. Order matters: the resume payload
+    /// must carry exactly one decision per action, in this order.
+    pub actions: Vec<PendingAction>,
+}
+
+/// One tool call held at the gate.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingAction {
+    pub tool: String,
+    /// What the tool would actually do, rendered for a human. For `execute` this is
+    /// the shell command verbatim — the thing the user is really deciding about.
+    pub detail: String,
+    pub description: String,
+    /// Decisions the agent will accept (`approve`, `reject`, …).
+    pub allowed: Vec<String>,
 }
 
 /// Research outputs produced so far, as carried by a `values` event.
@@ -214,9 +240,28 @@ impl LangGraphClient {
         &self,
         thread_id: &str,
         prompt: &str,
+        on_event: impl FnMut(TurnEvent),
+    ) -> Result<TurnOutcome> {
+        self.stream(thread_id, run_request_body(prompt), on_event).await
+    }
+
+    /// Resume a run that stopped at the approval gate, streaming the continuation.
+    pub async fn resume_turn(
+        &self,
+        thread_id: &str,
+        decisions: &[Decision],
+        on_event: impl FnMut(TurnEvent),
+    ) -> Result<TurnOutcome> {
+        self.stream(thread_id, resume_request_body(decisions), on_event)
+            .await
+    }
+
+    async fn stream(
+        &self,
+        thread_id: &str,
+        body: Value,
         mut on_event: impl FnMut(TurnEvent),
-    ) -> Result<()> {
-        let body = run_request_body(prompt);
+    ) -> Result<TurnOutcome> {
 
         let resp = self
             .http
@@ -232,18 +277,39 @@ impl LangGraphClient {
             .error_for_status()
             .context("POST /runs/stream returned an error status")?;
 
+        let mut outcome = TurnOutcome::Finished;
         let mut frames = SseDecoder::default();
         let mut turn = TurnDecoder::default();
+        // `MINIME_CAPTURE_SSE=<path>` appends the raw stream, which is how every wire
+        // shape in the plan was measured — and what `--replay` consumes afterwards.
+        // Synchronous writes on purpose: this is a debug aid, not a hot path.
+        let mut capture = std::env::var_os("MINIME_CAPTURE_SSE").and_then(|path| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .ok()
+        });
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let bytes = chunk.context("the run stream broke mid-turn")?;
+            if let Some(file) = capture.as_mut() {
+                use std::io::Write as _;
+                let _ = file.write_all(&bytes);
+            }
             for event in frames.push(&bytes) {
                 for decoded in turn.push(&event) {
+                    // A paused run looks exactly like a finished one at the transport
+                    // layer — the stream just ends. Remembering the interrupt is what
+                    // lets the caller tell "done" from "waiting on you".
+                    if matches!(decoded, TurnEvent::Approval(_)) {
+                        outcome = TurnOutcome::AwaitingApproval;
+                    }
                     on_event(decoded);
                 }
             }
         }
-        Ok(())
+        Ok(outcome)
     }
 }
 
@@ -256,9 +322,47 @@ impl LangGraphClient {
 /// `messages/partial` + `messages/complete` with a different payload shape — and
 /// yields no tokens through this decoder.
 fn run_request_body(prompt: &str) -> Value {
+    let mut body = stream_request_body();
+    body["input"] = json!({ "messages": [ { "type": "human", "content": prompt } ] });
+    body
+}
+
+/// Body for resuming a paused run with the human's decisions.
+///
+/// Shape from the HITL middleware (`human_in_the_loop.py`:
+/// `decisions = interrupt(hitl_request)["decisions"]`): exactly one decision per
+/// held action, in the order they were presented.
+fn resume_request_body(decisions: &[Decision]) -> Value {
+    let decisions: Vec<Value> = decisions
+        .iter()
+        .map(|decision| match decision {
+            Decision::Approve => json!({ "type": "approve" }),
+            Decision::Reject { message } => json!({ "type": "reject", "message": message }),
+        })
+        .collect();
+    let mut body = stream_request_body();
+    body["command"] = json!({ "resume": { "decisions": decisions } });
+    body
+}
+
+/// What the user decided about one held action.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Decision {
+    Approve,
+    Reject { message: String },
+}
+
+/// How a stream ended: finished, or stopped at the approval gate.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TurnOutcome {
+    Finished,
+    AwaitingApproval,
+}
+
+/// The parts of the request body shared by a fresh run and a resume.
+fn stream_request_body() -> Value {
     json!({
         "assistant_id": "agent",
-        "input": { "messages": [ { "type": "human", "content": prompt } ] },
         "stream_mode": ["messages-tuple", "values", "custom"],
         // Without this the whole stream stops at the coordinator: a delegated turn
         // then emits a `task` tool call and nothing else until the answer, which is
@@ -334,6 +438,59 @@ fn parse_sse_block(block: &str) -> Option<SseEvent> {
 ///
 /// Returns `None` when there is nothing to show, so an early snapshot doesn't
 /// blank a panel that already has content.
+/// Pull a pending-approval request out of a `values` payload.
+fn decode_interrupt(value: &Value) -> Option<ApprovalRequest> {
+    let interrupts = value.get("__interrupt__")?.as_array()?;
+    let mut actions = Vec::new();
+    for interrupt in interrupts {
+        let payload = interrupt.get("value")?;
+        let requests = payload.get("action_requests")?.as_array()?;
+        let configs = payload.get("review_configs").and_then(Value::as_array);
+        for (index, request) in requests.iter().enumerate() {
+            let tool = request
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("tool")
+                .to_string();
+            // `execute`'s whole argument is the command; for anything else, show the
+            // arguments as they are rather than inventing a summary.
+            let args = request.get("args");
+            let detail = args
+                .and_then(|args| args.get("command"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| args.map(|args| args.to_string()))
+                .unwrap_or_default();
+            let allowed = configs
+                .and_then(|configs| configs.get(index))
+                .and_then(|config| config.get("allowed_decisions"))
+                .and_then(Value::as_array)
+                .map(|decisions| {
+                    decisions
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_else(|| vec!["approve".to_string(), "reject".to_string()]);
+            actions.push(PendingAction {
+                tool,
+                detail,
+                description: request
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                allowed,
+            });
+        }
+    }
+    if actions.is_empty() {
+        return None;
+    }
+    Some(ApprovalRequest { actions })
+}
+
 fn decode_values(data: &str) -> Option<Snapshot> {
     let value = serde_json::from_str::<Value>(data).ok()?;
     let artifacts = value.get("artifacts")?;
@@ -485,9 +642,18 @@ impl TurnDecoder {
             // up in the subagent's snapshot three events before the coordinator's),
             // so consuming both would render the same outputs twice.
             "values" => {
-                return decode_values(&event.data)
-                    .map(|snapshot| vec![TurnEvent::Snapshot(snapshot)])
-                    .unwrap_or_default()
+                let mut events = Vec::new();
+                // A paused run's `values` frame carries both the state *and* the
+                // interrupt, so decode both rather than treating them as alternatives.
+                if let Ok(value) = serde_json::from_str::<Value>(&event.data) {
+                    if let Some(request) = decode_interrupt(&value) {
+                        events.push(TurnEvent::Approval(request));
+                    }
+                }
+                if let Some(snapshot) = decode_values(&event.data) {
+                    events.push(TurnEvent::Snapshot(snapshot));
+                }
+                return events;
             }
             "custom" => {
                 return decode_custom(&event.data)

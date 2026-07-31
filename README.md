@@ -115,28 +115,29 @@ cargo run -p mini-me-desktop-app -- --replay crates/app/tests/fixtures/delegated
 Env overrides: `MINIME_BACKEND_DIR`, `MINIME_BACKEND_PORT`, `MINIME_BACKEND_URL`,
 `MINIME_BACKEND_ATTACH_ONLY`.
 
-### Host execution (opt-in)
+### Host execution (the default)
 
-By default the agent's code runs in a remote LangSmith sandbox, as upstream Mini-Me
-does. Set `MINIME_EXECUTION_BACKEND=local` and it runs **on this machine** instead — no
-LangSmith key, no cold start, no upload dance, and files land in
-`~/.mini-me/workspaces/<thread>/` where you can open them yourself.
+The agent's code runs **on this machine** — no LangSmith key, no cold start, no upload
+dance. Files land in `~/.mini-me/workspaces/<thread>/`, where you can open them yourself.
+
+**Every `execute` call stops and asks first.** The run pauses, the app shows you the
+command verbatim, and nothing runs until you approve it. That is what makes running on
+your own machine reasonable rather than reckless.
+
+The remote LangSmith sandbox is still there if you want it:
 
 ```bash
-cargo run -p mini-me-desktop-app -- --local
+cargo run -p mini-me-desktop-app -- --sandbox
 ```
 
-`--local` and `--sandbox` override `MINIME_EXECUTION_BACKEND`, and are the better habit
-on Windows: PowerShell has no `VAR=value cmd` prefix form, and a `$env:` assignment
+`--local` / `--sandbox` override `MINIME_EXECUTION_BACKEND`, and are the better habit on
+Windows: PowerShell has no `VAR=value cmd` prefix form, and a `$env:` assignment
 outlives the command that needed it.
 
-That works by putting [`overlay/`](overlay/) on the backend's `PYTHONPATH`; **the
-Mini-Me checkout is not modified**. Read [`overlay/README.md`](overlay/README.md) for
-the mechanism and the plan's §18 for the trade-offs.
-
-It is opt-in rather than the default for one reason: the `execute` tool has no approval
-step yet, and locally that means model-written commands on your own files. The status
-bar says `host (local)` in orange whenever it is on.
+This works by putting [`overlay/`](overlay/) on the backend's `PYTHONPATH`; **the
+Mini-Me checkout is not modified**. See [`overlay/README.md`](overlay/README.md) for the
+mechanism and the plan's §18/§19 for the trade-offs. `MINIME_APPROVE_EXECUTE=0` disables
+the gate — it exists for automation, and is not a recommendation.
 
 ## Direction
 

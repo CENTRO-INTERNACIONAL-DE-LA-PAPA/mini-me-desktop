@@ -11,12 +11,14 @@
 
 use std::sync::{Arc, Mutex as SyncMutex};
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use futures::channel::mpsc;
 use tokio::sync::Mutex;
 
 use crate::backend::{BackendConfig, BackendSupervisor};
-use crate::protocol::{AgentRef, LangGraphClient, Project, TurnEvent};
+use crate::protocol::{
+    AgentRef, Decision, LangGraphClient, Project, TurnEvent, TurnOutcome,
+};
 
 /// Find (or start) the tally row for one subagent invocation, keyed by namespace so
 /// two concurrent runs of the same subagent type are counted separately.
@@ -101,13 +103,48 @@ impl Sidecar {
                 let _ = tx.unbounded_send(event);
             };
 
-            if let Err(error) = run_turn(&client, &supervisor, &thread, &prompt, &mut emit).await {
+            match run_turn(&client, &supervisor, &thread, &prompt, &mut emit).await {
+                // A paused run is *not* done: the UI keeps the turn open, shows the
+                // command, and calls `resume` with the person's decision. Emitting
+                // `Done` here would close the turn and strand the run forever.
+                Ok(TurnOutcome::AwaitingApproval) => {}
+                Ok(TurnOutcome::Finished) => emit(TurnEvent::Done),
                 // `{:#}` includes the anyhow context chain, which is where the
                 // actionable part of these failures lives.
-                emit(TurnEvent::Error(format!("{error:#}")));
-                return;
+                Err(error) => emit(TurnEvent::Error(format!("{error:#}"))),
             }
-            emit(TurnEvent::Done);
+        });
+
+        rx
+    }
+
+    /// Answer a paused run's approval request and stream what follows.
+    ///
+    /// Runs on the conversation's existing thread, so the continuation lands in the
+    /// same turn rather than starting a new one.
+    pub fn resume(&self, decisions: Vec<Decision>) -> mpsc::UnboundedReceiver<TurnEvent> {
+        let (tx, rx) = mpsc::unbounded();
+        let thread = self.thread.clone();
+        let base_url = self.base_url.clone();
+
+        self.runtime.spawn(async move {
+            let client = LangGraphClient::new(base_url);
+            let mut emit = |event: TurnEvent| {
+                let _ = tx.unbounded_send(event);
+            };
+            let Some(thread_id) = thread.lock().expect("thread id mutex").clone() else {
+                emit(TurnEvent::Error(
+                    "there is no thread to resume — the run was already lost".into(),
+                ));
+                return;
+            };
+            match client.resume_turn(&thread_id, &decisions, &mut emit).await {
+                // A second gate in the same turn is normal: an agent often runs several
+                // commands, and each one stops here.
+                Ok(TurnOutcome::AwaitingApproval) => {}
+                Ok(TurnOutcome::Finished) => emit(TurnEvent::Done),
+                Err(error) => emit(TurnEvent::Error(format!("{error:#}"))),
+            }
         });
 
         rx
@@ -201,7 +238,10 @@ impl Sidecar {
                 // instead of quietly emptying a panel nobody can see on this machine.
                 let mut agents: Vec<(String, String, usize, usize)> = Vec::new();
 
-                run_turn(&client, &supervisor, &thread, prompt, &mut |event| match event {
+                // A `RefCell` because the event handler and the resume loop both need
+                // it, and the handler holds its borrow for as long as it lives.
+                let pending: std::cell::RefCell<Vec<Decision>> = Default::default();
+                let mut handle = |event: TurnEvent| match event {
                     TurnEvent::Token(token) => {
                         chunks += 1;
                         text.push_str(&token);
@@ -235,10 +275,39 @@ impl Sidecar {
                             }
                         );
                     }
+                    // Headless runs approve automatically — a check with no window
+                    // cannot ask anyone, and refusing would make the gate untestable
+                    // here. The window always asks.
+                    TurnEvent::Approval(request) => {
+                        for action in &request.actions {
+                            println!(
+                                "approve  : {} — {}",
+                                action.tool,
+                                action.detail.replace('\n', " ⏎ ")
+                            );
+                            pending.borrow_mut().push(Decision::Approve);
+                        }
+                    }
                     TurnEvent::Error(error) => println!("error    : {error}"),
                     TurnEvent::Done => {}
-                })
-                .await?;
+                };
+
+                let mut outcome =
+                    run_turn(&client, &supervisor, &thread, prompt, &mut handle).await?;
+                while outcome == TurnOutcome::AwaitingApproval {
+                    let decisions: Vec<Decision> = pending.borrow_mut().drain(..).collect();
+                    anyhow::ensure!(
+                        !decisions.is_empty(),
+                        "the run paused but no approval request was decoded"
+                    );
+                    // The thread was created (or reused) by `run_turn` above.
+                    let thread_id = thread
+                        .lock()
+                        .expect("thread id mutex")
+                        .clone()
+                        .context("the run paused but no thread was recorded")?;
+                    outcome = client.resume_turn(&thread_id, &decisions, &mut handle).await?;
+                }
 
                 println!("stream   : {chunks} chunk(s), {} chars", text.len());
                 if agents.is_empty() {
@@ -272,7 +341,7 @@ async fn run_turn(
     thread: &ThreadId,
     prompt: &str,
     emit: &mut impl FnMut(TurnEvent),
-) -> Result<()> {
+) -> Result<TurnOutcome> {
     emit(TurnEvent::Status("checking backend…".into()));
     {
         let mut supervisor = supervisor.lock().await;
@@ -295,6 +364,5 @@ async fn run_turn(
     tracing::info!(%thread_id, "streaming coordinator turn");
 
     emit(TurnEvent::Status("streaming…".into()));
-    client.stream_turn(&thread_id, prompt, emit).await?;
-    Ok(())
+    client.stream_turn(&thread_id, prompt, emit).await
 }

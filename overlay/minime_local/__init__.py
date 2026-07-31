@@ -14,8 +14,21 @@ import sys
 LOCAL_EXECUTION_ENV = "MINIME_EXECUTION_BACKEND"
 
 #: The module whose sandbox class we replace, and the name we replace.
-_TARGET_MODULE = "backend.sandbox"
+_SANDBOX_MODULE = "backend.sandbox"
 _TARGET_NAME = "LazyLangsmithSandbox"
+
+#: Where the agent factory comes *from*. We wrap it here rather than on
+#: `backend.agent`, because LangGraph loads the graph module by file path
+#: (`langgraph.json` → `./backend/agent.py:agent`) via `spec_from_file_location`, which
+#: bypasses `sys.meta_path` entirely — so a hook on `backend.agent` never fires in the
+#: real server. Measured: the sandbox patch landed and the approval patch silently did
+#: not. `backend/agent.py` does `from deepagents import create_deep_agent` at its own
+#: import time, and *that* goes through normal machinery, so patching the package
+#: attribute first is what actually takes effect.
+_AGENT_MODULE = "deepagents"
+
+#: Every module we patch, and what patching it means.
+_TARGETS = (_SANDBOX_MODULE, _AGENT_MODULE)
 
 log = logging.getLogger("minime_local")
 
@@ -31,6 +44,16 @@ def local_execution_requested() -> bool:
 
 
 def _patch(module) -> None:
+    """Apply whichever patch this module needs."""
+    if module.__name__ == _AGENT_MODULE:
+        from minime_local import approval
+
+        approval.install(module)
+        return
+    _patch_sandbox(module)
+
+
+def _patch_sandbox(module) -> None:
     """Rebind ``backend.sandbox.LazyLangsmithSandbox`` to the local backend.
 
     Both construction sites — ``backend/agent.py`` and ``backend/routes/common.py`` —
@@ -43,7 +66,7 @@ def _patch(module) -> None:
     # quietly starts billing a LangSmith account again.
     if not hasattr(module, _TARGET_NAME):
         raise RuntimeError(
-            f"minime_local: {_TARGET_MODULE} has no {_TARGET_NAME} to replace — the "
+            f"minime_local: {_SANDBOX_MODULE} has no {_TARGET_NAME} to replace — the "
             "pinned Mini-Me commit has moved and overlay/minime_local needs updating "
             "(desktop plan §18)."
         )
@@ -73,7 +96,7 @@ class _PatchingLoader(importlib.abc.Loader):
 
 
 class _PatchOnImport(importlib.abc.MetaPathFinder):
-    """Waits for ``backend.sandbox`` to be imported, whenever that happens.
+    """Waits for a target module to be imported, whenever that happens.
 
     A startup-time ``import backend.sandbox`` would be simpler but unreliable: for a
     console script ``sys.path[0]`` is ``.venv/bin``, not the project, and it is
@@ -82,7 +105,7 @@ class _PatchOnImport(importlib.abc.MetaPathFinder):
     """
 
     def find_spec(self, fullname, path=None, target=None):
-        if fullname != _TARGET_MODULE:
+        if fullname not in _TARGETS:
             return None
         # Ask every *other* finder for the real spec, then wrap its loader. Returning
         # None for anything else keeps this finder invisible to normal imports.
@@ -105,10 +128,10 @@ def install() -> bool:
     if not local_execution_requested():
         return False
 
-    already = sys.modules.get(_TARGET_MODULE)
-    if already is not None:
-        _patch(already)
-        return True
+    for name in _TARGETS:
+        already = sys.modules.get(name)
+        if already is not None:
+            _patch(already)
 
     if not any(isinstance(finder, _PatchOnImport) for finder in sys.meta_path):
         sys.meta_path.insert(0, _PatchOnImport())
