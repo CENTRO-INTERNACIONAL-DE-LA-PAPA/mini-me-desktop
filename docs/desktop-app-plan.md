@@ -16,7 +16,8 @@ sidecar** that the client spawns and supervises.
 | **P6.2.5** — local-first backend (drop LangSmith/WorkOS) | ✅ **done, and now the default** — turns run on the host with no `LANGSMITH_API_KEY`/`WORKOS_*`, via a `PYTHONPATH` overlay that leaves the Mini-Me checkout untouched, and **every `execute` call waits for approval**. `--sandbox` still available. §18/§19 |
 | **P6.3** — port the core panels | ✅ **done** — composer, spine, outputs, sandbox status, agent activity trace, **command palette**; plus conversation continuity (turns used to each start a new thread) |
 | **P6.3.5** — visuals pass, starting with **markdown rendering** | ⬜ queued — answers currently render with their asterisks showing, and reports/citations are the deliverable. §16 |
-| **P6.4** — native affordances + shipping | ⬜ not started |
+| **P6.4a** — settings panel + keychain secrets | ⬜ **next** — the prerequisite for a clickable install: nobody is hand-editing a `.env` inside WSL. §20 |
+| **P6.4b** — native affordances + shipping | ⬜ not started — click-to-update, local file → analysis, tray notifications, Windows Job Object teardown |
 | **P6.5** — async subagents + Jobs panel | ⬜ planned — the payoff that most justifies going native. §14 |
 
 **Health of the bet.** The two risks that could have killed this are both down:
@@ -205,7 +206,11 @@ the backend), `ui` (reusable GPUI components), `sidecar` (packaging).
      namespace and named from `lc_agent_name`, and the transcript shows the
      coordinator's delegation plus a collapsible group per subagent with its tool
      calls and streamed text. *Verified live 2026-07-31.*
-- ⬜ **P6.4 — Native affordances + shipping.** Local file → analysis,
+- ⬜ **P6.4a — Settings panel + keychain secrets** (§20). `ctrl-,`, two stores
+  (`settings.toml` for settings, the OS keychain for keys), secrets delivered to the
+  sidecar as environment variables so the checkout's `.env` becomes optional, and a
+  first-run panel instead of a failed turn. *Gates the installable.*
+- ⬜ **P6.4b — Native affordances + shipping.** Local file → analysis,
   background-run tray + notifications, **keychain-stored keys**, multi-window.
   Plus what "installable" now means: a **pinned Mini-Me checkout + venv the app
   provisions**, a **"click to update"** button, a **setup tutorial**, and Windows
@@ -1364,3 +1369,65 @@ writes is exactly what `--replay` reads back.
 - **The gate has never been driven by a human.** Approve/Reject buttons are unverified
   in a window; the headless check auto-approves because it cannot ask anyone.
 - `asta` version pinning (sandbox pinned `v0.101.0`, host has `0.101.1`) is still owed.
+
+## 20. Settings panel and secrets (added 2026-07-31, on request)
+
+**This is a prerequisite for the installable, not a nicety.** The whole "click an icon"
+goal dies if the first thing a researcher must do is hand-edit a `.env` file inside a WSL
+distro. The settings panel is what replaces that.
+
+### What actually has to be collected
+
+Audited from `.env.example` and every `os.getenv` in the backend (read-only, 2026-07-31).
+Dropping WorkOS and LangSmith removes most of it:
+
+| | key | why |
+|---|---|---|
+| **required** | one model provider key — `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `MISTRAL_API_KEY`, or a custom OpenAI-compatible base URL | nothing runs without one (`backend/models.py`) |
+| **required for research tools** | `ASTA_TOKEN`, `ASTA_API_KEY` | literature search, theorizer, DataVoyager, PDF extraction |
+| **no longer needed** | `LANGSMITH_API_KEY`, `WORKOS_CLIENT_ID`, `WORKOS_API_KEY`, `AUTH_ALLOWED_EMAIL_DOMAINS`, `MINIME_SANDBOX_SNAPSHOT` | §11 and §19 removed the need |
+
+Plus the desktop's own, which are *settings, not secrets*: model choice
+(`MINIME_DEFAULT_MODEL`), backend port, checkout location, WSL on/off and distro,
+execution locality, approval on/off, workspace root.
+
+### The split, and why it matters
+
+**Two stores, deliberately.** Settings go in a plain `settings.toml` under the platform
+config dir — readable, diffable, safe to paste into a bug report. Secrets go in the **OS
+keychain** (Windows Credential Manager / Secret Service / macOS Keychain) via the
+`keyring` crate. A key must never land in a file the user might sync, zip, or attach; and
+CIP policy is that credentials stay the user's own, on the user's own machine.
+
+### Getting secrets into the sidecar without a `.env`
+
+The launcher already injects environment variables (§18/§19), so the same seam carries
+the keys — which is what makes the checkout's `.env` *optional* and the install
+clickable. One wrinkle worth getting right: **secrets must not go on the `wsl.exe`
+command line**, where `ps` would show them. WSL's documented mechanism is `WSLENV` —
+set the variables on the `wsl.exe` process and list their names in `WSLENV`, and the
+distro inherits them. That is the plumbing to use, not the `VAR=… exec …` prefix the
+execution flags use.
+
+### Panel design (Zed-shaped)
+
+- `ctrl-,` opens **Settings** as a pane, plus a palette entry. Not a modal dialog — Zed's
+  lesson is that settings you can leave open while you work get fixed.
+- Sections: **Model** (provider + key + model name) · **Research tools** (Asta) ·
+  **Execution** (host/sandbox, approval on/off, workspace root) · **Backend** (checkout,
+  port, WSL distro).
+- Secret fields are **masked**, show only "set / not set" once stored, and are never
+  logged. This needs one new `Composer` capability — a mask mode — which is a small
+  addition to what §12 already built.
+- A **Test** button per section: for the model key, start the sidecar and run the trivial
+  seed turn; for Asta, `asta --version` through the backend. Better a failure the user
+  sees here, next to the field, than a cryptic error on their first real question.
+- **First-run**: with no model key stored, the app opens Settings instead of letting a
+  turn fail against a backend that cannot answer. That is the "setup tutorial" item made
+  concrete — a filled-in panel beats a document.
+
+### Interaction with the native-Windows question
+
+Only the delivery detail depends on it: on WSL the keys travel via `WSLENV`, natively they
+are plain child-process variables. The panel's UI and both stores are the same either way,
+so this is *not* blocked on that probe.
