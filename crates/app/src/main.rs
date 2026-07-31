@@ -934,6 +934,19 @@ impl Workbench {
                     .text_sm()
                     .child(status_text),
             )
+            // Say where the agent's code runs. When that is the user's own machine
+            // it should be visible without opening a log (docs §18).
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(rgb(if self.sidecar.execution() == "host (local)" {
+                        ACCENT
+                    } else {
+                        MUTED
+                    }))
+                    .text_xs()
+                    .child(self.sidecar.execution()),
+            )
             // Discoverability: a palette nobody knows the shortcut for is a palette
             // nobody opens.
             .child(
@@ -1382,8 +1395,14 @@ fn main() {
     tracing::info!(
         location = %config.location(),
         url = %config.base_url(),
+        execution = config.execution_label(),
         "backend sidecar configured"
     );
+    if matches!(config.execution, backend::Execution::Local { .. }) {
+        // Loud on purpose: this is the setting that lets model-written commands touch
+        // the user's own machine (docs §18).
+        tracing::warn!("host execution is ON — the agent runs commands on this machine");
+    }
     if !config.looks_like_backend_repo() {
         tracing::warn!(
             dir = %config.project_dir.display(),

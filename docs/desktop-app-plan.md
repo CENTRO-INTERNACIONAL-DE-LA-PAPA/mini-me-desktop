@@ -13,7 +13,7 @@ sidecar** that the client spawns and supervises.
 | **P6.0** — spike doc + scaffold | ✅ done |
 | **P6.1** — buildable window *(go/no-go gate)* | ✅ **PASS** — builds green; window renders natively (verified on Windows/DirectX). §8 |
 | **P6.2** — talk to the real backend | ✅ **done** — a real coordinator turn spawned, streamed and rendered **on Windows** (2026-07-30). §9 |
-| **P6.2.5** — local-first backend (drop LangSmith/WorkOS) | 🔴 **queued** — needs sign-off on where the change lands. WSL2 runtime now working, which is its prerequisite. §10/§11/§13 |
+| **P6.2.5** — local-first backend (drop LangSmith/WorkOS) | 🟡 **works, opt-in** — a real turn runs with no `LANGSMITH_API_KEY`/`WORKOS_*`, executing on the host, via a `PYTHONPATH` overlay that leaves the Mini-Me checkout untouched. Default stays the sandbox until `execute` is human-gated. §18 |
 | **P6.3** — port the core panels | ✅ **done** — composer, spine, outputs, sandbox status, agent activity trace, **command palette**; plus conversation continuity (turns used to each start a new thread) |
 | **P6.3.5** — visuals pass, starting with **markdown rendering** | ⬜ queued — answers currently render with their asterisks showing, and reports/citations are the deliverable. §16 |
 | **P6.4** — native affordances + shipping | ⬜ not started |
@@ -249,10 +249,17 @@ background-run notification).
   needs are met through one opt-in seam.
 - **Secrets:** ✅ the user's own keys, in the **OS keychain**, with a setup tutorial.
 
+**Locked (2026-07-31):**
+
+- **Where the §10 change lands:** ✅ **a `PYTHONPATH` overlay in this repo**
+  (`overlay/`), not a PR or a fork — the checkout stays byte-for-byte upstream, which
+  is what "bundled, pinned, unmodified" asks for. An upstream seam remains the nicer
+  destination and the code would move across almost verbatim (§18).
+
 **Open:**
 
-- **Where the §10 change lands:** a branch/PR in Mini-Me, or a thin overlay in
-  this repo? *Needs sign-off — nothing in Mini-Me has been touched.*
+- **Human-gating `execute`:** the blocker on making host execution the *default*.
+  Needs `interrupt_on` plus an approve/reject path in the client (§18).
 - **Human-gating `execute`:** approval UX for host commands (policy + design).
 - **Rust capacity:** an organizational gate (R6) — sustained Rust availability.
 - **`asta` version pinning on the host:** the sandbox pinned `v0.101.0`; the dev
@@ -492,9 +499,9 @@ it ships the user's files to someone else's VM. Execution moves to the host via
 deepagents' `LocalShellBackend`. **This is now on the critical path** — see §11 for
 the experiment that proves it is the *only* thing standing in the way.
 
-> **Scope gate.** The change itself lands in the **Mini-Me repo**, which this
-> project treats as read-only reference (it has open PRs). Still **awaiting
-> sign-off on where the code lands** — a branch/PR there, or a thin overlay here.
+> **Resolved 2026-07-31 (§18):** it landed as a `PYTHONPATH` overlay in *this* repo.
+> The Mini-Me checkout is not modified, so it remains read-only reference in fact and
+> not just in intent.
 
 ### What the codebase says (read-only audit, 2026-07-30)
 
@@ -1179,3 +1186,103 @@ impossible before the fix.
 directly with its own thread; it now goes through `run_turn` — the same function the
 window uses — so it covers thread reuse rather than just the HTTP surface, and
 repeating `--prompt` is how multi-turn continuity gets verified with no window.
+
+## 18. P6.2.5: host execution, shipped as an overlay (2026-07-31)
+
+**Acceptance met.** A real turn ran with **no `LANGSMITH_API_KEY` and no `WORKOS_*`**,
+executing on this machine:
+
+```
+$ MINIME_BACKEND_DIR=<checkout with those keys stripped> MINIME_EXECUTION_BACKEND=local \
+  mini-me-desktop-app --check-backend --prompt "compute the mean of [2,4,6,8] with pandas,
+  write it to result.txt…"
+status   : Local workspace: …/local-workspaces/019fb99b-…
+step     : ls
+step     : execute
+--- assistant text ---
+5.0
+$ cat …/019fb99b-…/result.txt
+5.0
+```
+
+`asta` resolves on `PATH` (0.101.1) with `ASTA_TOKEN` reaching executed commands, so
+theory generation, DataVoyager and PDF extraction have what they need.
+
+### The answer to "where does the change land"
+
+**Neither a PR in Mini-Me nor a fork: a `PYTHONPATH` overlay in this repo.**
+`overlay/` ships a Python package that the app injects; the checkout stays byte-for-byte
+upstream. That is what the locked decision — *"bundled upstream, pinned, unmodified —
+not forked"* — actually asks for, and it means a `git pull` in Mini-Me can never
+conflict with us.
+
+Mechanism: `PYTHONPATH=overlay/` makes Python auto-import `overlay/sitecustomize.py`,
+which registers an import hook; when the backend later imports `backend.sandbox`, the
+hook rebinds `LazyLangsmithSandbox`. Both construction sites (`backend/agent.py`,
+`backend/routes/common.py`) import that name at *their* module load, so one rebinding
+covers both — the "~3 lines" §10 identified, achieved with zero edits.
+
+An import hook rather than a startup `import backend.sandbox`: for a console script
+`sys.path[0]` is `.venv/bin`, and it is LangGraph that puts the checkout on the path
+later while resolving `langgraph.json`. Hooking the import removes that ordering
+guesswork. **The upstream seam is still the nicer destination** — if Mini-Me grows a
+real `MINIME_EXECUTION_BACKEND` factory, `workspace.py` moves across almost verbatim
+and the hook disappears. This is the bridge, not a rejection of the PR.
+
+### Five things the audit and the live run corrected
+
+1. **The replacement is thinner than §10 thought, for a different reason.** Every `a*`
+   method in deepagents' `BackendProtocol` is a *concrete default* that offloads its
+   sync twin with `asyncio.to_thread`. So subclassing `LocalShellBackend` inherits the
+   whole async surface Mini-Me awaits — nothing to write. (`BaseSandbox`, which
+   upstream's sandbox extends, needs only 4 abstract methods and implements file ops
+   *in terms of* `execute`; interesting, but a dead end for us.)
+2. **`virtual_mode=False`, not `True` as §10 recommended.** Upstream's tools build
+   absolute paths from `aget_work_dir()` — `f"{work_dir}/theories/{task_id}"` — pass
+   them to the file operations *and* print them in tool output the model then opens
+   with executed Python. Both sides must agree on one namespace. Virtual mode re-roots
+   only the file operations (deepagents is explicit that it never constrains
+   `execute`), so `/workspace/x` would mean two different things. Verified: `awrite`
+   then `cat` sees the same file.
+3. **Absolute *writes* still get re-rooted.** With `virtual_mode=False` deepagents
+   passes absolute paths through, but upstream's `_resolve_for_write` sent anything
+   outside the work dir to `<work_dir>/<basename>`. We mirror it, and locally it does
+   double duty as the only guardrail the file tools have: `write("/etc/hosts", …)`
+   lands harmlessly in the workspace. Reads need nothing — `virtual_mode=False`
+   already means "absolute as-is, relative under cwd", which is what upstream's
+   `_resolve_for_read` arranged.
+4. **`langgraph dev` runs a blocking-call detector, and it failed the first turn.** A
+   bare `Path.mkdir` inside an `async def` raised `BlockingError: Blocking call to
+   os.mkdir` and aborted the run in `SandboxSyncMiddleware.before_agent`. Every
+   filesystem touch in the overlay now goes through `asyncio.to_thread`. Only a live
+   run finds this.
+5. **The overlay must not follow commands into their child processes.** `PYTHONPATH` is
+   inherited, so every command the model ran re-imported `sitecustomize` and its
+   startup line landed in the command's stderr — which `execute` merges into the
+   output the *model* reads. The command environment now has the overlay stripped out.
+
+Two smaller things worth keeping: `python3` is pointed at the venv interpreter via
+`sys.executable`'s directory (the app launches `.venv/bin/langgraph` without
+activating, so `python3` would otherwise be a bare system interpreter with no pandas —
+this also retires `build_sandbox_snapshot.py`'s duplicate manifest), and truncation is
+imported from upstream rather than reimplemented, so the cap behaves identically
+(measured: 32 KB cap, 50 KB survives the untruncated path).
+
+### Still open — and why it is not on by default
+
+**Host execution is opt-in; the sandbox remains the default.** `MINIME_EXECUTION_BACKEND`
+must be set to `local` explicitly, the app logs a warning when it is, and the status
+bar says `host (local)` in the accent colour.
+
+Flipping the default is gated on **human-approval for `execute`**. Org policy is
+human-gated and deepagents explicitly recommends HITL for this backend; the file tools
+have the re-rooting guardrail but `execute` has nothing, and locally that means the
+user's own files. That needs `interrupt_on` in the agent plus an approve/reject path in
+the Rust client — a new streaming concern (interrupt + resume), so it is its own step
+rather than a rider on this one.
+
+Also still true: **`guardrails.py` upstream still states the design relies on sandbox
+isolation.** We cannot rewrite it from an overlay, and it should not be silently
+invalidated — which is another reason the default stays where it is. And the sandbox
+snapshot pins `asta v0.101.0` while this host has `0.101.1`; a startup version check
+is still owed.

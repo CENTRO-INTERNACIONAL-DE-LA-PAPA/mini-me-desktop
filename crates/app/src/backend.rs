@@ -44,6 +44,73 @@ pub struct WslTarget {
     pub dir: String,
 }
 
+/// Where the agent's files and shell commands run.
+///
+/// Upstream Mini-Me executes inside a remote LangSmith sandbox. For a local-first
+/// desktop app that is infrastructure we neither need nor want (docs §10/§11), and
+/// `Local` replaces it with a directory on this machine via the Python overlay in
+/// `overlay/` — **without modifying the Mini-Me checkout** (docs §18).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Execution {
+    /// Upstream's remote LangSmith sandbox. Still the default.
+    Sandbox,
+    /// The host. `overlay_dir` goes on `PYTHONPATH`, where its `sitecustomize`
+    /// swaps the sandbox class at interpreter startup.
+    Local { overlay_dir: PathBuf },
+}
+
+/// Read the execution locality from the environment.
+///
+/// **Opt-in, and the sandbox stays the default.** Host execution is the decided
+/// direction (docs §10) but it is not yet safe to *default* to: org policy is
+/// human-gated, and the approval UX for the `execute` tool is still open. Until that
+/// lands, turning this on is a deliberate act.
+fn resolve_execution() -> Execution {
+    let requested = std::env::var("MINIME_EXECUTION_BACKEND").unwrap_or_default();
+    if requested.trim().to_ascii_lowercase() != "local" {
+        return Execution::Sandbox;
+    }
+    Execution::Local {
+        overlay_dir: overlay_dir(),
+    }
+}
+
+/// Where the Python overlay lives.
+///
+/// Defaults to this repo's `overlay/`, resolved at compile time. That is sound here
+/// precisely *because* of how this app ships: the user builds it themselves from a
+/// checkout (`git pull` + `cargo build` is also the update story, docs §5), so the
+/// compiled-in path is a real path on their machine. `MINIME_OVERLAY_DIR` overrides
+/// it for a packaged layout.
+fn overlay_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("MINIME_OVERLAY_DIR") {
+        return PathBuf::from(dir);
+    }
+    // `CARGO_MANIFEST_DIR` is `crates/app`; the overlay sits at the repo root.
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../overlay")
+        .components()
+        .collect()
+}
+
+/// Render a path the way WSL sees it: `C:\\Users\\x` becomes `/mnt/c/Users/x`.
+///
+/// The overlay lives in *this* repo, which on Windows is on the Windows filesystem,
+/// while the interpreter that must import it runs inside the distro.
+fn wsl_path(path: &Path) -> String {
+    let raw = path.to_string_lossy().replace('\\', "/");
+    let mut chars = raw.chars();
+    let drive = chars.next();
+    let colon = chars.next();
+    match (drive, colon) {
+        (Some(drive), Some(':')) if drive.is_ascii_alphabetic() => {
+            format!("/mnt/{}{}", drive.to_ascii_lowercase(), &raw[2..])
+        }
+        // Already a POSIX path (or a UNC path we can't translate) — pass it through.
+        _ => raw,
+    }
+}
+
 /// How the client reaches the backend. Defaults to a locally spawned sidecar.
 #[derive(Clone, Debug)]
 pub struct BackendConfig {
@@ -61,6 +128,8 @@ pub struct BackendConfig {
     pub attach_only: bool,
     /// File the sidecar's stdout/stderr is written to.
     pub log_path: PathBuf,
+    /// Where the agent's code runs — the remote sandbox, or this machine.
+    pub execution: Execution,
 }
 
 impl Default for BackendConfig {
@@ -71,13 +140,15 @@ impl Default for BackendConfig {
             .unwrap_or(2024);
         let wsl = resolve_wsl_target();
         let project_dir = resolve_project_dir();
+        let execution = resolve_execution();
         Self {
             port,
-            launch_command: launch_command_for(&project_dir, port, wsl.as_ref()),
+            launch_command: launch_command_for(&project_dir, port, wsl.as_ref(), &execution),
             project_dir,
             wsl,
             attach_only: std::env::var_os("MINIME_BACKEND_ATTACH_ONLY").is_some(),
             log_path: default_log_path(),
+            execution,
         }
     }
 }
@@ -88,7 +159,12 @@ impl Default for BackendConfig {
 /// **forks** the real server as a grandchild, so killing our direct child leaves
 /// an orphaned server holding the port (observed in P6.2). Invoking the venv
 /// binary directly keeps it a single process we actually own.
-fn launch_command_for(project_dir: &Path, port: u16, wsl: Option<&WslTarget>) -> Vec<String> {
+fn launch_command_for(
+    project_dir: &Path,
+    port: u16,
+    wsl: Option<&WslTarget>,
+    execution: &Execution,
+) -> Vec<String> {
     if let Some(wsl) = wsl {
         let mut argv = vec!["wsl.exe".to_string()];
         if let Some(distro) = &wsl.distro {
@@ -105,9 +181,15 @@ fn launch_command_for(project_dir: &Path, port: u16, wsl: Option<&WslTarget>) ->
         argv.push("--".into());
         argv.push("bash".into());
         argv.push("-lc".into());
+        // Host execution needs two variables set *inside* the distro, so they go in
+        // the command line rather than on `wsl.exe`'s own environment.
+        let mut exports = String::new();
+        for (name, value) in execution_env(execution, true) {
+            exports.push_str(&format!("{name}={} ", shell_quote(&value)));
+        }
         argv.push(format!(
-            "cd {dir} && exec .venv/bin/langgraph dev --host 0.0.0.0 --port {port} \
-             --no-reload --no-browser --n-jobs-per-worker {jobs}",
+            "cd {dir} && {exports}exec .venv/bin/langgraph dev --host 0.0.0.0 \
+             --port {port} --no-reload --no-browser --n-jobs-per-worker {jobs}",
             dir = wsl.dir,
             jobs = JOBS_PER_WORKER,
         ));
@@ -145,6 +227,32 @@ fn launch_command_for(project_dir: &Path, port: u16, wsl: Option<&WslTarget>) ->
         JOBS_PER_WORKER.to_string(),
     ]);
     argv
+}
+
+/// The environment that switches the backend to host execution.
+///
+/// Empty for [`Execution::Sandbox`], so the sandbox path is byte-for-byte the launch
+/// it always was. `for_wsl` selects how the overlay path is spelled.
+fn execution_env(execution: &Execution, for_wsl: bool) -> Vec<(String, String)> {
+    let Execution::Local { overlay_dir } = execution else {
+        return Vec::new();
+    };
+    let overlay = if for_wsl {
+        wsl_path(overlay_dir)
+    } else {
+        overlay_dir.to_string_lossy().into_owned()
+    };
+    vec![
+        ("MINIME_EXECUTION_BACKEND".to_string(), "local".to_string()),
+        // Python imports `sitecustomize` from here at startup; that is the whole
+        // injection mechanism. Prepended, so an existing PYTHONPATH survives.
+        ("PYTHONPATH".to_string(), overlay),
+    ]
+}
+
+/// Single-quote a value for `bash -lc`, so a path with spaces survives.
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', r"'\''"))
 }
 
 /// Concurrent runs the sidecar may process. Modest on purpose: each run can drive
@@ -243,6 +351,14 @@ impl BackendConfig {
             None => self.project_dir.display().to_string(),
         }
     }
+
+    /// Human-readable execution locality, for the log line and the status bar.
+    pub fn execution_label(&self) -> &'static str {
+        match self.execution {
+            Execution::Sandbox => "remote sandbox",
+            Execution::Local { .. } => "host (local)",
+        }
+    }
 }
 
 /// Owns the spawned backend process and shuts it down on drop.
@@ -298,6 +414,26 @@ impl BackendSupervisor {
             .stdin(Stdio::null())
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(log_err));
+
+        // Host execution on the host itself: the variables go straight onto the
+        // child. (In WSL mode they are already inside the `bash -lc` string, because
+        // `wsl.exe`'s own environment does not cross into the distro.)
+        if self.config.wsl.is_none() {
+            for (name, value) in execution_env(&self.config.execution, false) {
+                if name == "PYTHONPATH" {
+                    // Prepend rather than replace: whatever the user had still works.
+                    let existing = std::env::var("PYTHONPATH").unwrap_or_default();
+                    let combined = if existing.is_empty() {
+                        value
+                    } else {
+                        format!("{value}{}{existing}", if cfg!(windows) { ";" } else { ":" })
+                    };
+                    command.env(name, combined);
+                } else {
+                    command.env(name, value);
+                }
+            }
+        }
 
         // In WSL mode the working directory is set by the shell we launch *inside*
         // the distro; pointing `wsl.exe` at a host path would be meaningless, and
@@ -443,4 +579,91 @@ fn terminate(child: &mut Child) {
 fn terminate(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn translates_windows_paths_for_wsl() {
+        // The overlay lives in this repo — on Windows that means the Windows
+        // filesystem, while the interpreter that imports it runs inside the distro.
+        assert_eq!(
+            wsl_path(Path::new(r"C:\Users\piero\mini-me-desktop\overlay")),
+            "/mnt/c/Users/piero/mini-me-desktop/overlay"
+        );
+        assert_eq!(wsl_path(Path::new(r"D:\repos\overlay")), "/mnt/d/repos/overlay");
+        // A POSIX path is already what WSL wants.
+        assert_eq!(wsl_path(Path::new("/home/piero/overlay")), "/home/piero/overlay");
+    }
+
+    #[test]
+    fn the_sandbox_path_is_left_exactly_as_it_was() {
+        // Regression guard: no stray variables on the default launch, so choosing
+        // nothing keeps upstream's behaviour byte for byte.
+        assert!(execution_env(&Execution::Sandbox, false).is_empty());
+        assert!(execution_env(&Execution::Sandbox, true).is_empty());
+
+        let argv = launch_command_for(
+            Path::new("/tmp/mini-me"),
+            2024,
+            Some(&WslTarget {
+                distro: None,
+                dir: "~/Mini-Me".into(),
+            }),
+            &Execution::Sandbox,
+        );
+        let command = argv.last().expect("the bash -lc payload");
+        assert!(!command.contains("MINIME_EXECUTION_BACKEND"), "{command}");
+        assert!(command.contains("cd ~/Mini-Me && exec .venv/bin/langgraph dev"), "{command}");
+    }
+
+    #[test]
+    fn local_execution_reaches_the_interpreter_inside_wsl() {
+        let execution = Execution::Local {
+            overlay_dir: PathBuf::from(r"C:\repo\overlay"),
+        };
+        let argv = launch_command_for(
+            Path::new("/tmp/mini-me"),
+            2024,
+            Some(&WslTarget {
+                distro: Some("Ubuntu".into()),
+                dir: "~/Mini-Me".into(),
+            }),
+            &execution,
+        );
+        let command = argv.last().expect("the bash -lc payload");
+        // Assignments must land *before* `exec`, or the server never sees them.
+        assert!(
+            command.contains("MINIME_EXECUTION_BACKEND='local' PYTHONPATH='/mnt/c/repo/overlay' exec"),
+            "{command}"
+        );
+    }
+
+    #[test]
+    fn quotes_paths_that_contain_spaces() {
+        // "Documents\My Repos\..." is entirely normal on Windows, and an unquoted
+        // assignment would silently split into a bogus command.
+        let quoted = shell_quote("/mnt/c/Users/a b/overlay");
+        assert_eq!(quoted, "'/mnt/c/Users/a b/overlay'");
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
+    }
+
+    #[test]
+    fn local_execution_is_opt_in() {
+        // Nothing set, or anything other than `local`, must keep the sandbox: host
+        // execution is not safe to default to until `execute` is human-gated (§18).
+        for value in ["", "sandbox", "Local ", "true", "1"] {
+            std::env::set_var("MINIME_EXECUTION_BACKEND", value);
+            let resolved = resolve_execution();
+            let expected_local = value.trim().eq_ignore_ascii_case("local");
+            assert_eq!(
+                matches!(resolved, Execution::Local { .. }),
+                expected_local,
+                "for {value:?}"
+            );
+        }
+        std::env::remove_var("MINIME_EXECUTION_BACKEND");
+    }
 }

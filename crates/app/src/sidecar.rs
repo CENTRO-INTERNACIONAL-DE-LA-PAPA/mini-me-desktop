@@ -47,12 +47,16 @@ pub struct Sidecar {
     thread: ThreadId,
     base_url: String,
     log_path: String,
+    /// Where the agent's code runs, for the status bar. The user should be able to
+    /// see at a glance that commands are landing on their own machine.
+    execution: &'static str,
 }
 
 impl Sidecar {
     pub fn new(config: BackendConfig) -> Result<Self> {
         let base_url = config.base_url();
         let log_path = config.log_path.display().to_string();
+        let execution = config.execution_label();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -64,11 +68,16 @@ impl Sidecar {
             thread: Arc::new(SyncMutex::new(None)),
             base_url,
             log_path,
+            execution,
         })
     }
 
     pub fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    pub fn execution(&self) -> &'static str {
+        self.execution
     }
 
     /// Where the sidecar's own logs land — the first place to look when a turn
