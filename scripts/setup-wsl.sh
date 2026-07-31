@@ -46,13 +46,46 @@ fi
 ok "uv $(uv --version | awk '{print $2}')"
 
 # ------------------------------------------------------------------- checkout
+# Find an existing checkout on the Windows side. Most users already cloned the
+# backend there, and copying it avoids GitHub authentication entirely — which
+# matters because GitHub removed password auth for git in 2021, so the password
+# prompt actually wants a personal access token and rejects the account password.
+find_windows_checkout() {
+  local candidate
+  for candidate in /mnt/c/Users/*/Documents/GitHub/Mini-Me /mnt/c/Users/*/Documents/Mini-Me; do
+    if [ -f "$candidate/langgraph.json" ]; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
 if [ -d "$DIR/.git" ]; then
   ok "checkout already present at $DIR (leaving it alone)"
 else
-  say "Cloning the Mini-Me backend into $DIR"
-  echo "    This is a private repository, so you'll need credentials."
-  echo "    Easiest: run 'gh auth login' first, or use a personal access token."
-  git clone "$REPO_URL" "$DIR"
+  # A failed clone can leave an empty directory behind; it would block the copy.
+  [ -d "$DIR" ] && [ -z "$(ls -A "$DIR" 2>/dev/null)" ] && rmdir "$DIR"
+
+  if WIN_CHECKOUT="$(find_windows_checkout)"; then
+    say "Copying the existing Windows checkout from $WIN_CHECKOUT"
+    echo "    (avoids needing GitHub credentials inside WSL)"
+    cp -r "$WIN_CHECKOUT" "$DIR"
+    # A Windows venv holds Scripts/*.exe and Windows-built wheels — unusable from
+    # Linux. Drop it so uv rebuilds a native one below.
+    if [ -d "$DIR/.venv" ]; then
+      rm -rf "$DIR/.venv"
+      ok "removed the copied Windows .venv (Linux needs its own)"
+    fi
+    ok "copied to $DIR"
+  else
+    say "Cloning the Mini-Me backend into $DIR"
+    echo "    This is a private repository. Note that GitHub does NOT accept your"
+    echo "    account password here — Git over HTTPS needs a personal access token."
+    echo "    Easiest: run 'gh auth login' first. Otherwise create a token at"
+    echo "    https://github.com/settings/tokens and paste it at the password prompt."
+    git clone "$REPO_URL" "$DIR"
+  fi
 fi
 
 cd "$DIR"
@@ -103,4 +136,10 @@ cat <<EOF
 
        The app starts the backend inside WSL itself — you don't need to run it
        here. To check by hand:  .venv/bin/langgraph dev --host 0.0.0.0 --port 2024
+
+    Tip: to run 'git pull' in here later without re-entering credentials (this is
+    what a future "click to update" will need), reuse Windows' credential manager:
+
+      git config --global credential.helper \\
+        "/mnt/c/Program Files/Git/mingw64/libexec/git-core/git-credential-manager.exe"
 EOF
