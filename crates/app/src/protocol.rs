@@ -338,28 +338,68 @@ fn decode_custom(data: &str) -> Option<String> {
     Some(text.trim().to_string())
 }
 
+/// Longest label we show in the side panel. Citations in particular run long, and
+/// this is a scannable summary — full detail belongs in an artifact view.
+const MAX_LABEL_CHARS: usize = 96;
+
 /// Best-effort human label for an artifact.
 ///
-/// The payload schemas mostly expose `title`, with `name` on file artifacts
-/// (`backend/schemas.py`), but we tolerate anything: an unlabelled artifact should
-/// still be *counted* rather than dropped or crash the panel.
+/// The key differs per artifact type, so this walks a fallback list. Taken from the
+/// `*Payload` TypedDicts in `backend/schemas.py` (2026-07-30):
+///
+/// | bucket      | field      |
+/// |-------------|------------|
+/// | datasets    | `title`    |
+/// | sources     | `citation` |
+/// | reports     | `title`    |
+/// | files       | `name`     |
+/// | hypotheses  | `question` |
+/// | libraries   | `summary`  |
+/// | analyses    | `question` |
+///
+/// An unrecognised artifact is still *counted* rather than dropped — an empty panel
+/// would misrepresent work that actually happened.
 fn artifact_label(item: &Value) -> String {
-    for key in ["title", "name", "filename", "label", "question", "id"] {
-        if let Some(text) = item.get(key).and_then(Value::as_str) {
-            let text = text.trim();
-            if !text.is_empty() {
-                return text.to_string();
-            }
-        }
+    const LABEL_KEYS: [&str; 8] = [
+        "title",
+        "citation",
+        "name",
+        "question",
+        "summary",
+        "filename",
+        "label",
+        "id",
+    ];
+
+    let text = LABEL_KEYS
+        .iter()
+        .find_map(|key| item.get(key).and_then(Value::as_str))
+        // A bare string entry is plausible too.
+        .or_else(|| item.as_str())
+        .map(str::trim)
+        .filter(|text| !text.is_empty());
+
+    match text {
+        Some(text) => truncate_label(text),
+        None => "(untitled)".to_string(),
     }
-    // A bare string entry is plausible too.
-    if let Some(text) = item.as_str() {
-        let text = text.trim();
-        if !text.is_empty() {
-            return text.to_string();
-        }
+}
+
+/// Shorten to [`MAX_LABEL_CHARS`] on a word boundary where possible. Operates on
+/// `char`s, never bytes, so multi-byte text can't be split mid-character.
+fn truncate_label(text: &str) -> String {
+    if text.chars().count() <= MAX_LABEL_CHARS {
+        return text.to_string();
     }
-    "(untitled)".to_string()
+    let clipped: String = text.chars().take(MAX_LABEL_CHARS).collect();
+    let cut = clipped.rfind(' ').unwrap_or(clipped.len());
+    // Only prefer the word boundary if it keeps most of the text.
+    let kept = if cut > MAX_LABEL_CHARS / 2 {
+        &clipped[..cut]
+    } else {
+        clipped.as_str()
+    };
+    format!("{}…", kept.trim_end())
 }
 
 /// Map one SSE event onto UI events.
@@ -534,6 +574,37 @@ mod tests {
             data: json!({"something_else": 1}).to_string(),
         });
         assert!(decoded.is_empty(), "got {decoded:?}");
+    }
+
+    #[test]
+    fn labels_every_artifact_kind_from_its_own_field() {
+        // Regression guard: a real `sources` artifact carries `citation`, not
+        // `title`, and rendered as "(untitled)" until this list covered it.
+        let cases = [
+            (json!({"title": "A dataset"}), "A dataset"),
+            (json!({"citation": "Love MI et al. 2014."}), "Love MI et al. 2014."),
+            (json!({"name": "eda.png"}), "eda.png"),
+            (json!({"question": "Does X affect Y?"}), "Does X affect Y?"),
+            (json!({"summary": "Indexed 12 papers"}), "Indexed 12 papers"),
+            (json!("a bare string"), "a bare string"),
+            (json!({"unknown": "x"}), "(untitled)"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(artifact_label(&input), expected, "for {input}");
+        }
+    }
+
+    #[test]
+    fn truncates_long_labels_without_splitting_characters() {
+        let long = "á".repeat(200);
+        let label = artifact_label(&json!({"citation": long}));
+        // Truncated, and still valid UTF-8 with every char intact.
+        assert!(label.chars().count() <= MAX_LABEL_CHARS + 1, "{label}");
+        assert!(label.ends_with('…'));
+        assert!(label.chars().filter(|c| *c == 'á').count() > 0);
+
+        // Short labels are untouched.
+        assert_eq!(artifact_label(&json!({"title": "short"})), "short");
     }
 
     #[test]
