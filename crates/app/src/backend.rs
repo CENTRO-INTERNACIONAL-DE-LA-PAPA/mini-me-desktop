@@ -106,8 +106,10 @@ fn launch_command_for(project_dir: &Path, port: u16, wsl: Option<&WslTarget>) ->
         argv.push("bash".into());
         argv.push("-lc".into());
         argv.push(format!(
-            "cd {dir} && exec .venv/bin/langgraph dev --host 0.0.0.0 --port {port} --no-reload",
+            "cd {dir} && exec .venv/bin/langgraph dev --host 0.0.0.0 --port {port} \
+             --no-reload --no-browser --n-jobs-per-worker {jobs}",
             dir = wsl.dir,
+            jobs = JOBS_PER_WORKER,
         ));
         return argv;
     }
@@ -134,9 +136,21 @@ fn launch_command_for(project_dir: &Path, port: u16, wsl: Option<&WslTarget>) ->
         "--no-reload".into(),
         // We are the client — don't hijack the user's browser with Studio.
         "--no-browser".into(),
+        // `langgraph dev` defaults to ONE concurrent job (langgraph_api/cli.py:
+        // `n_jobs_per_worker if ... else 1`). With one slot, a second turn — from
+        // another thread or another window — queues behind the first, and any
+        // background run (async subagents, docs §14) would starve because the
+        // supervisor's own run holds the only slot.
+        "--n-jobs-per-worker".into(),
+        JOBS_PER_WORKER.to_string(),
     ]);
     argv
 }
+
+/// Concurrent runs the sidecar may process. Modest on purpose: each run can drive
+/// model calls and sandbox execution, so this is about not self-deadlocking, not
+/// about throughput.
+const JOBS_PER_WORKER: u8 = 10;
 
 /// Read the WSL configuration from the environment.
 ///

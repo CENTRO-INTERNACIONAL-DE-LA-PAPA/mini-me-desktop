@@ -16,6 +16,7 @@ sidecar** that the client spawns and supervises.
 | **P6.2.5** — local-first backend (drop LangSmith/WorkOS) | 🔴 **queued** — needs sign-off on where the change lands. WSL2 runtime now working, which is its prerequisite. §10/§11/§13 |
 | **P6.3** — port the core panels | 🟡 **in progress** — composer + scrolling transcript (§12) and the live project spine done; artifacts/status/palette next |
 | **P6.4** — native affordances + shipping | ⬜ not started |
+| **P6.5** — async subagents + Jobs panel | ⬜ planned — the payoff that most justifies going native. §14 |
 
 **Health of the bet.** The two risks that could have killed this are both down:
 **R1** (GPUI as an unstable `git` dep) — GPUI is a *published* crate, pinned at
@@ -728,3 +729,102 @@ discovered.
 **Still to verify on Windows (cannot be tested from the Linux dev box):** that
 `wsl.exe` spawning works end to end, that localhost forwarding reaches the server,
 and that teardown leaves no process behind.
+
+---
+
+## 14. Async subagents (P6.5) — and the sidecar-lifetime question they force
+
+Evaluated 2026-07-30 against LangChain's
+[async subagents](https://docs.langchain.com/oss/python/deepagents/async-subagents)
+and [interpreters](https://docs.langchain.com/oss/python/deepagents/interpreters)
+docs plus the live Mini-Me code. **Verdict: adopt async subagents as P6.5; skip
+interpreters.**
+
+### Where we actually are today (the premise, corrected)
+
+The stack is *not* uniformly synchronous. The two genuinely long jobs already
+don't block a chat turn — they submit and return, and the **client** polls:
+
+- `hypothesis_generator` (theorizer) and `data_voyager` (DataVoyager) run
+  `asta … --no-wait`, return `task_id` + `status="running"`, park the id in graph
+  state, and the frontend polls `/theorizer/{thread}/{task}` and
+  `/analyze-data/{thread}/{task}` until terminal. DataVoyager's own docstring:
+  *"20–40 min for multi-step modelling, so — exactly like the theorizer — Mini-Me
+  does NOT block a chat turn on it."*
+
+So the worst case was hand-solved with bespoke plumbing. What **does** block is the
+other eight subagents — `data_cleaning`, `exploratory_data_analysis`,
+`diagnostic_analytics`, `predictive_analytics`, `report_writer`,
+`academic_researcher`, `dataverse_explorer`, `pdf_librarian`. Seconds to minutes
+each, with the conversation frozen throughout.
+
+### Why async subagents fit *this* product
+
+1. **The conversation stays live.** Launch an EDA and keep working — refine the
+   mission, chase literature — while it runs. That is what "acceleration" means
+   for a workbench.
+2. **One mechanism instead of bespoke polling.** `start_async_task`,
+   `check_async_task`, `update_async_task`, `cancel_async_task`,
+   `list_async_tasks`, with task metadata in a dedicated `async_tasks` state
+   channel that survives summarization. Long term this could retire the custom
+   poll routes and per-tool poll code.
+3. **`list_async_tasks` is the data model for a Jobs panel.** Background jobs +
+   tray notifications + "close the window and come back" is precisely the native
+   affordance we justified this app with (P6.4). This is the feature that makes
+   desktop worth the rewrite.
+
+### The four real costs
+
+1. **Preview API.** `deepagents 0.6.1` does export `AsyncSubAgent` /
+   `AsyncSubAgentMiddleware` (verified in the installed package), but the docs
+   flag it preview: *"APIs may change."* Same class of churn risk we escaped with
+   gpui — acceptable only with a pinned version.
+2. **Each async subagent must be its own graph** (`graph_id` on an Agent Protocol
+   server). Mini-Me declares **one** graph today (`agent` in `langgraph.json`), so
+   this is a structural upstream change — in the repo we deliberately do not fork.
+   Co-deployed ASGI mode (omit `url`) keeps it in-process with no network hop,
+   which is the right starting point for a local sidecar.
+3. **Worker starvation — measured, and it applied to us.** `langgraph dev`
+   defaults to **one** concurrent job
+   (`langgraph_api/cli.py`: `n_jobs_per_worker if … is not None else 1`). Async
+   subagent runs are separate runs on separate threads, so with a single slot the
+   supervisor's own run holds it and the child run queues — the feature would look
+   broken. **Fixed now:** the sidecar launches with `--n-jobs-per-worker 10` on
+   both the host and WSL paths. This already pays off for concurrent turns across
+   threads/windows, independent of async subagents.
+4. **It contradicts our sidecar lifetime.** ⚠️ **The open design question.** The
+   supervisor kills the backend when the window closes, so background jobs would
+   die with it. "Run in the background" and "the backend is a child of the window"
+   are incompatible. Options: let the sidecar outlive the window (detached, with
+   adoption on next launch — note the app already health-checks and attaches to a
+   running backend, so the machinery half-exists); or keep the current lifetime and
+   rely on jobs being resumable by `task_id` after a restart. **Decide before
+   building P6.5.** Either way it needs a **Jobs panel** with visible state and
+   cancel, so background work stays observably human-gated.
+
+Documented model-discipline failure modes to expect, all mitigated only by prompt
+engineering (upstream, fragile): supervisors polling immediately after launch
+(turning async back into blocking), truncating `task_id`s, and reporting stale
+status instead of re-checking.
+
+### Why not interpreters
+
+Not a rival to async subagents, and a poor fit for us on two counts:
+
+1. **It bypasses the human gate.** *"PTC calls do not go through the normal tool
+   calling path. As a result, `interrupt_on` approval workflows are not enforced
+   per PTC-invoked tool call."* Our policy is human-gated; a mechanism that fans
+   out tool calls around the approval path is a policy problem, not a feature gap.
+2. **Wrong runtime for our workload.** QuickJS — JavaScript, 5s default timeout,
+   64 MB heap, no filesystem/network. Our compute is pandas/PyMC/scikit-learn in a
+   sandbox. The docs themselves scope interpreters to in-memory orchestration and
+   point at sandboxes for real execution.
+
+The legitimate use — collapsing multi-step *orchestration* (dedupe/merge/score
+across many tool results) into one turn — is real but minor next to (1).
+
+### Sequencing
+
+**P6.5, after P6.2.5.** Building it before the panels and local execution would
+stack two unsettled foundations. Prerequisites: pin the deepagents version, answer
+the sidecar-lifetime question, and design the Jobs panel.
