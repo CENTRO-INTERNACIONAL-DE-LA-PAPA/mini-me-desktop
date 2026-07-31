@@ -13,10 +13,9 @@ sidecar** that the client spawns and supervises.
 | **P6.0** — spike doc + scaffold | ✅ done |
 | **P6.1** — buildable window *(go/no-go gate)* | ✅ **PASS** — builds green; window renders natively (verified on Windows/DirectX). §8 |
 | **P6.2** — talk to the real backend | ✅ **done** — a real coordinator turn spawned, streamed and rendered **on Windows** (2026-07-30). §9 |
-| **P6.3** — port the core panels | ⬜ next |
-| **P6.4** — native affordances | ⬜ not started |
-
-| **P6.2.5** — local-first backend (drop LangSmith/WorkOS) | 🔴 **new critical path** — see §10/§11 |
+| **P6.2.5** — local-first backend (drop LangSmith/WorkOS) | 🔴 **queued** — the change that makes an installable app possible. §10/§11 |
+| **P6.3** — port the core panels | 🟡 **in progress** — composer + scrolling transcript done (§12); spine/artifacts/palette next |
+| **P6.4** — native affordances + shipping | ⬜ not started |
 
 **Health of the bet.** The two risks that could have killed this are both down:
 **R1** (GPUI as an unstable `git` dep) — GPUI is a *published* crate, pinned at
