@@ -227,6 +227,13 @@ fn run_request_body(prompt: &str) -> Value {
         "assistant_id": "agent",
         "input": { "messages": [ { "type": "human", "content": prompt } ] },
         "stream_mode": ["messages-tuple", "values", "custom"],
+        // LangGraph defaults to 25 supersteps, and one turn already spends ~22 on
+        // middleware alone (PII scrubbing, call limits, todos, skills, sandbox
+        // sync) before any delegation -- so a multi-subagent research turn would
+        // hit the ceiling and fail. The web frontend sets the same value
+        // (`streamConfig.ts`: `{ recursionLimit: 10000 }`), so this matches the
+        // client the backend was built against.
+        "config": { "recursion_limit": 10_000 },
     })
 }
 
