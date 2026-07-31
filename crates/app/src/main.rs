@@ -9,6 +9,7 @@
 //! rendering (markdown, artifacts, spine) is P6.3.
 
 mod backend;
+mod composer;
 mod protocol;
 mod sidecar;
 
@@ -16,10 +17,11 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use gpui::{
-    div, prelude::*, px, rgb, size, App, Application, Bounds, Context, Window, WindowBounds,
-    WindowOptions,
+    div, prelude::*, px, rgb, size, App, Application, Bounds, Context, Entity, Focusable, Window,
+    WindowBounds, WindowOptions,
 };
 
+use composer::{Composer, ComposerEvent};
 use protocol::TurnEvent;
 use sidecar::Sidecar;
 
@@ -32,7 +34,8 @@ const MUTED: u32 = 0x9a9aa2;
 const ACCENT: u32 = 0xe8703a; // Mini-Me orange
 const ERROR: u32 = 0xe05252;
 
-/// The seeded prompt for P6.2. A real composer (text input) lands in P6.3.
+/// Prefilled into the composer on first launch so Enter alone proves the round
+/// trip; the user can clear or replace it.
 const SEED_PROMPT: &str = "In one short paragraph, what is your role as the Mini-Me coordinator?";
 
 /// A single chat message in the transcript.
@@ -52,33 +55,50 @@ struct Workbench {
     streaming: bool,
     /// Set when the last turn failed, rendered in the status line.
     error: Option<String>,
+    /// The text field. Owns its own focus/selection state.
+    composer: Entity<Composer>,
 }
 
 impl Workbench {
-    fn new(sidecar: Arc<Sidecar>) -> Self {
+    fn new(sidecar: Arc<Sidecar>, cx: &mut Context<Self>) -> Self {
+        let composer = cx.new(|cx| {
+            let mut composer = Composer::new(cx, "Ask Mini-Me…  (Enter to send)");
+            composer.set_text(SEED_PROMPT, cx);
+            composer
+        });
+        // The composer only reports *that* text was submitted; deciding it means
+        // "run a coordinator turn" stays here.
+        cx.subscribe(&composer, |workbench, _composer, event, cx| match event {
+            ComposerEvent::Submit(text) => workbench.start_turn(text.clone(), cx),
+        })
+        .detach();
+
         Self {
             mission: "Whether coffea canephora or eugenioides gave heat-shock \
                       resistant features to coffea arabica."
                 .to_string(),
             transcript: Vec::new(),
             sidecar,
-            status: "idle — press Run to stream a coordinator turn".to_string(),
+            status: "idle — type a prompt and press Enter".to_string(),
             streaming: false,
             error: None,
+            composer,
         }
     }
 
     /// Kick off one coordinator turn and pump its events into the transcript.
-    fn start_turn(&mut self, cx: &mut Context<Self>) {
-        if self.streaming {
+    fn start_turn(&mut self, prompt: String, cx: &mut Context<Self>) {
+        if self.streaming || prompt.trim().is_empty() {
             return;
         }
         self.streaming = true;
         self.error = None;
         self.status = "starting…".into();
+        self.composer
+            .update(cx, |composer, cx| composer.set_disabled(true, cx));
         self.transcript.push(Message {
             role: "you",
-            body: SEED_PROMPT.to_string(),
+            body: prompt.clone(),
         });
         // The assistant message streams into this (initially empty) entry.
         self.transcript.push(Message {
@@ -86,13 +106,13 @@ impl Workbench {
             body: String::new(),
         });
 
-        let mut events = self.sidecar.submit(SEED_PROMPT.to_string());
+        let mut events = self.sidecar.submit(prompt);
         cx.spawn(async move |this, cx| {
             while let Some(event) = events.next().await {
                 // `Err` here means the view is gone (window closed) — stop pumping.
                 if this
                     .update(cx, |workbench, cx| {
-                        workbench.apply(event);
+                        workbench.apply(event, cx);
                         cx.notify();
                     })
                     .is_err()
@@ -106,7 +126,7 @@ impl Workbench {
         cx.notify();
     }
 
-    fn apply(&mut self, event: TurnEvent) {
+    fn apply(&mut self, event: TurnEvent, cx: &mut Context<Self>) {
         match event {
             TurnEvent::Status(status) => self.status = status,
             TurnEvent::Token(text) => {
@@ -116,6 +136,7 @@ impl Workbench {
             }
             TurnEvent::Done => {
                 self.streaming = false;
+                self.finish_turn(cx);
                 self.status = "done".into();
                 if let Some(last) = self.transcript.last() {
                     if last.body.is_empty() {
@@ -125,6 +146,7 @@ impl Workbench {
             }
             TurnEvent::Error(message) => {
                 self.streaming = false;
+                self.finish_turn(cx);
                 self.status = "failed".into();
                 // Point at the sidecar log: backend-side failures (a missing key,
                 // a bad graph import) surface there, not in the HTTP error.
@@ -134,6 +156,20 @@ impl Workbench {
                 ));
             }
         }
+    }
+
+    /// A turn ended (either way): drop the empty assistant placeholder if no
+    /// token ever arrived, and hand the field back to the user.
+    fn finish_turn(&mut self, cx: &mut Context<Self>) {
+        if self
+            .transcript
+            .last()
+            .is_some_and(|message| message.role == "mini-me" && message.body.is_empty())
+        {
+            self.transcript.pop();
+        }
+        self.composer
+            .update(cx, |composer, cx| composer.set_disabled(false, cx));
     }
 
     fn rail(&self) -> impl IntoElement {
@@ -153,12 +189,15 @@ impl Workbench {
         // the right edge: a flex item defaults to min-width:auto, so its content
         // width becomes its floor and a long paragraph widens the pane instead of
         // flowing down.
+        // `id` + `overflow_y_scroll` is what lets a long transcript scroll; GPUI
+        // keeps the scroll offset keyed on that id across re-renders.
         let mut col = div()
+            .id("transcript")
             .flex()
             .flex_col()
             .flex_grow()
             .min_w_0()
-            .h_full()
+            .overflow_y_scroll()
             .p_4()
             .gap_3();
 
@@ -198,22 +237,20 @@ impl Workbench {
             .flex()
             .flex_col()
             .flex_grow()
+            .min_w_0()
             .h_full()
             .child(col)
-            .child(self.status_bar(cx))
+            .child(self.composer_row(cx))
+            .child(self.status_bar())
     }
 
-    fn status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (status_text, status_color) = match &self.error {
-            Some(error) => (error.clone(), ERROR),
-            None => (self.status.clone(), MUTED),
-        };
-        let button_label = if self.streaming {
-            "Streaming…"
+    /// The input row: the text field plus a Send affordance.
+    fn composer_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (send_label, send_color) = if self.streaming {
+            ("Streaming…", MUTED)
         } else {
-            "Run coordinator turn"
+            ("Send ⏎", ACCENT)
         };
-        let button_color = if self.streaming { MUTED } else { ACCENT };
 
         div()
             .flex()
@@ -224,23 +261,49 @@ impl Workbench {
             .border_t_1()
             .border_color(rgb(BORDER))
             .bg(rgb(PANEL))
+            .child(self.composer.clone())
             .child(
                 div()
-                    .id("run-turn")
+                    .id("send-turn")
+                    .flex_none()
                     .px_3()
                     .py_1()
                     .border_1()
-                    .border_color(rgb(button_color))
-                    .text_color(rgb(button_color))
+                    .border_color(rgb(send_color))
+                    .text_color(rgb(send_color))
                     .text_sm()
-                    .child(button_label)
+                    .child(send_label)
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
-                        workbench.start_turn(cx);
+                        // Same path as Enter. Calling the entity directly rather
+                        // than dispatching an action keeps this working regardless
+                        // of where focus is when the button is clicked.
+                        workbench
+                            .composer
+                            .update(cx, |composer, cx| composer.submit_now(cx));
                     })),
             )
+    }
+
+    fn status_bar(&self) -> impl IntoElement {
+        let (status_text, status_color) = match &self.error {
+            Some(error) => (error.clone(), ERROR),
+            None => (self.status.clone(), MUTED),
+        };
+
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_3()
+            .px_3()
+            .py_1()
+            .border_t_1()
+            .border_color(rgb(BORDER))
+            .bg(rgb(PANEL))
             .child(
                 div()
                     .flex_grow()
+                    .min_w_0()
                     .text_color(rgb(status_color))
                     .text_sm()
                     .child(status_text),
@@ -341,15 +404,29 @@ fn main() {
     }
 
     Application::new().run(move |cx: &mut App| {
+        // Without these the composer receives no editing keys at all — GPUI
+        // dispatches actions, and nothing binds to them by default.
+        cx.bind_keys(composer::key_bindings());
+
         let bounds = Bounds::centered(None, size(px(1200.), px(800.)), cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                ..Default::default()
-            },
-            |_window, cx| cx.new(|_cx| Workbench::new(sidecar.clone())),
-        )
-        .expect("failed to open window");
+        let window = cx
+            .open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    ..Default::default()
+                },
+                |_window, cx| cx.new(|cx| Workbench::new(sidecar.clone(), cx)),
+            )
+            .expect("failed to open window");
+
+        // Focus the composer so the user can type immediately on launch.
+        window
+            .update(cx, |workbench, window, cx| {
+                let composer = workbench.composer.focus_handle(cx);
+                window.focus(&composer);
+            })
+            .expect("failed to focus the composer");
+
         cx.activate(true);
     });
 }

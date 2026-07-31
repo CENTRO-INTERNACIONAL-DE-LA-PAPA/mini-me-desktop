@@ -166,11 +166,16 @@ the backend), `ui` (reusable GPUI components), `sidecar` (packaging).
   assumption), and gate `execute` with human approval.
   *Acceptance:* a real turn — including an `asta` subagent call — completes with
   **no `LANGSMITH_API_KEY` and no `WORKOS_*`**, executing on the host.
-- ⬜ **P6.3 — Port the core panels.** Artifacts/Outputs, the project spine
-  (mission + completed/pending), the plan/Autopilot panel — the workbench
-  identity. Plus the two P6.2 deferrals: a **text composer** (P6.2 uses one
-  seeded prompt) and the **command palette**; and `values`/`custom` stream events
-  for state + `sandbox_status`.
+- 🟡 **P6.3 — Port the core panels.** In progress, in this order:
+  1. ✅ **Composer + transcript scroll** — a real text field (type, Enter sends)
+     and a scrollable transcript. §12.
+  2. ⬜ **Project spine** — `GET /project` → `{mission, completed, pending,
+     suggestions}` instead of the hardcoded mission.
+  3. ⬜ **Artifacts/Outputs** — the `values` stream event (`artifacts`, `todos`)
+     plus `GET /files/{thread_id}`.
+  4. ⬜ **`sandbox_status`** from `custom` stream events in the status line.
+  5. ⬜ **Command palette** — Zed-style `Ctrl-P`: run turn, new thread, switch
+     project.
 - ⬜ **P6.4 — Native affordances + shipping.** Local file → analysis,
   background-run tray + notifications, **keychain-stored keys**, multi-window.
   Plus what "installable" now means: a **pinned Mini-Me checkout + venv the app
@@ -594,3 +599,42 @@ SandboxSyncMiddleware.before_agent
    machine"* — not "no network".
 
 This is the whole justification for §10, measured rather than assumed.
+
+---
+
+## 12. P6.3 step 1: the composer (2026-07-30)
+
+Until now the app could only send one hardcoded prompt — the gap between a demo
+and a tool. It now has a real text field: type, press **Enter**, the turn streams.
+
+**Why this was the expensive step.** GPUI ships **no text-input widget** — only
+primitives (focus, key actions, IME plumbing, `shape_line`). Its own
+`examples/input.rs` is **746 lines**, because an input means cursor motion,
+selection, clipboard, grapheme-aware boundaries, IME pre-edit, *and* a custom
+`Element` that lays out the line and paints the caret. We adapted that example
+into `crates/app/src/composer.rs` rather than hand-rolling a lesser one (decision
+taken 2026-07-30). It is Apache-2.0, same as `gpui`; attribution is in `NOTICE`.
+
+**Changes from upstream:**
+
+- **Enter submits**, emitting `ComposerEvent::Submit(text)`; the parent view
+  decides that means "run a coordinator turn". Empty/whitespace input is ignored.
+- **Cross-platform bindings** — `ctrl-a/c/v/x` as well as `cmd-`; the example is
+  mac-only and our primary dev machine is Windows. Bindings are scoped to a
+  `Composer` key context so `enter` doesn't leak into other surfaces.
+- **A disabled state** — the field is read-only while a turn is in flight.
+- **No let-chains** — the example uses them; they need edition 2024, we're on 2021.
+- Dark-theme placeholder, accent-coloured caret.
+
+**Also in this step:**
+
+- **The transcript scrolls** (`id` + `overflow_y_scroll`) — previously long
+  conversations just ran off the bottom.
+- **Empty assistant turns are dropped.** A failed run used to leave a blank
+  `you`/`mini-me` pair in the transcript (visible in the P6.2 Windows screenshot).
+
+**Known limitation:** single-line by design. `shape_line` lays out one line, so
+soft wrap and `shift-enter` for a newline need a different layout path — deferred.
+
+**Verified:** builds clean, clippy clean, and a real turn still streams
+end to end headlessly (102 chunks). Typing itself needs a human at a window.

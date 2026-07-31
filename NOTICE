@@ -1,0 +1,24 @@
+Mini-Me Desktop
+Copyright (c) CIP (International Potato Center)
+
+This product includes software from the Zed project.
+
+  Zed — https://github.com/zed-industries/zed
+  Copyright (c) Zed Industries, Inc.
+  Licensed under the Apache License, Version 2.0
+
+Specifically:
+
+* The `gpui` crate (https://crates.io/crates/gpui), used as this application's
+  UI framework and consumed as a published dependency.
+
+* `crates/app/src/composer.rs` is adapted from `crates/gpui/examples/input.rs`
+  in the Zed repository. GPUI ships no text-input widget, so the example is the
+  reference implementation for cursor movement, selection, clipboard handling,
+  grapheme boundaries, IME integration, and the custom text `Element`. Our
+  version adds Enter-to-submit, cross-platform key bindings, dark-theme colours,
+  a disabled state, and avoids let-chains (edition 2021). See the file header.
+
+You may obtain a copy of the Apache License, Version 2.0 at:
+
+    http://www.apache.org/licenses/LICENSE-2.0

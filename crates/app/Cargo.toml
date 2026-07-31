@@ -36,6 +36,10 @@ serde_json = "1"
 # OS keychain for model/API keys instead of a plaintext dotfile.
 keyring = "3"
 
+# Grapheme-aware cursor movement in the composer (matches what gpui's own input
+# example uses, so arrow keys/backspace don't split emoji or accented clusters).
+unicode-segmentation = "1"
+
 # Diagnostics.
 anyhow = "1"
 tracing = "0.1"
