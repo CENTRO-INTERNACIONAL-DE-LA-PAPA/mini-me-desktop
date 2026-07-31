@@ -140,16 +140,32 @@ fn launch_command_for(project_dir: &Path, port: u16, wsl: Option<&WslTarget>) ->
 
 /// Read the WSL configuration from the environment.
 ///
+/// **On Windows this is the default**, because native Windows cannot host the
+/// agent stack's execution: it shells out with POSIX commands and expects
+/// `bash`/`python3`/`asta` (see docs §13). Set `MINIME_BACKEND_WSL=0` to opt out
+/// and run the backend on the host anyway.
+///
 /// `MINIME_BACKEND_WSL=1` (or `true`) uses WSL's default distro; any other value
 /// is taken as the distro name. The checkout path inside the distro comes from
 /// `MINIME_BACKEND_WSL_DIR`, defaulting to `~/Mini-Me`.
 fn resolve_wsl_target() -> Option<WslTarget> {
-    let raw = std::env::var("MINIME_BACKEND_WSL").ok()?;
+    let raw = std::env::var("MINIME_BACKEND_WSL").unwrap_or_default();
     let raw = raw.trim();
-    if raw.is_empty() || raw.eq_ignore_ascii_case("0") || raw.eq_ignore_ascii_case("false") {
+
+    let explicitly_off =
+        raw.eq_ignore_ascii_case("0") || raw.eq_ignore_ascii_case("false") || raw == "-";
+    if explicitly_off {
         return None;
     }
-    let distro = if raw.eq_ignore_ascii_case("1") || raw.eq_ignore_ascii_case("true") {
+    // Unset: on by default on Windows, off elsewhere (there is no `wsl.exe` to
+    // call on Linux/macOS, where the backend runs natively).
+    if raw.is_empty() && !cfg!(windows) {
+        return None;
+    }
+
+    let use_default_distro =
+        raw.is_empty() || raw.eq_ignore_ascii_case("1") || raw.eq_ignore_ascii_case("true");
+    let distro = if use_default_distro {
         None
     } else {
         Some(raw.to_string())

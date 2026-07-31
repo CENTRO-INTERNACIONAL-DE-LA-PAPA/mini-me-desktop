@@ -22,7 +22,7 @@ use gpui::{
 };
 
 use composer::{Composer, ComposerEvent};
-use protocol::TurnEvent;
+use protocol::{Project, TurnEvent};
 use sidecar::Sidecar;
 
 // ---- Palette (placeholder; align with the web app's tokens in P6.3) --------
@@ -38,6 +38,40 @@ const ERROR: u32 = 0xe05252;
 /// trip; the user can clear or replace it.
 const SEED_PROMPT: &str = "In one short paragraph, what is your role as the Mini-Me coordinator?";
 
+/// A small caps-ish section heading for the side panel.
+fn section_label(text: &'static str) -> impl IntoElement {
+    div().text_color(rgb(ACCENT)).text_xs().child(text)
+}
+
+/// A labelled, bulleted list of spine entries.
+fn spine_list(label: &'static str, items: &[String], bullet: &'static str) -> impl IntoElement {
+    let mut list = div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(section_label(label));
+    for item in items {
+        list = list.child(
+            div()
+                .flex()
+                .flex_row()
+                .w_full()
+                .min_w_0()
+                .gap_2()
+                .child(div().flex_none().text_color(rgb(MUTED)).text_sm().child(bullet))
+                .child(
+                    div()
+                        .flex_grow()
+                        .min_w_0()
+                        .text_color(rgb(TEXT))
+                        .text_sm()
+                        .child(item.clone()),
+                ),
+        );
+    }
+    list
+}
+
 /// A single chat message in the transcript.
 struct Message {
     role: &'static str,
@@ -46,7 +80,9 @@ struct Message {
 
 /// Root view: the three-pane research workbench.
 struct Workbench {
-    mission: String,
+    /// The project spine from `GET /project`. `None` until the first fetch lands
+    /// (or if the backend isn't up yet) — the panel says so rather than lying.
+    project: Option<Project>,
     transcript: Vec<Message>,
     sidecar: Arc<Sidecar>,
     /// Status line text (backend/stream progress, not model output).
@@ -73,17 +109,38 @@ impl Workbench {
         })
         .detach();
 
-        Self {
-            mission: "Whether coffea canephora or eugenioides gave heat-shock \
-                      resistant features to coffea arabica."
-                .to_string(),
+        let workbench = Self {
+            project: None,
             transcript: Vec::new(),
             sidecar,
             status: "idle — type a prompt and press Enter".to_string(),
             streaming: false,
             error: None,
             composer,
-        }
+        };
+        // Populate the spine if a backend is already listening. This does not
+        // start one — see `Sidecar::fetch_project`.
+        workbench.refresh_project(cx);
+        workbench
+    }
+
+    /// Pull the project spine in the background and swap it in when it arrives.
+    fn refresh_project(&self, cx: &mut Context<Self>) {
+        let mut results = self.sidecar.fetch_project();
+        cx.spawn(async move |this, cx| {
+            if let Some(outcome) = results.next().await {
+                let _ = this.update(cx, |workbench, cx| {
+                    match outcome {
+                        Ok(project) => workbench.project = Some(project),
+                        // A missing spine is not worth interrupting the user for —
+                        // the panel already shows an honest placeholder.
+                        Err(error) => tracing::debug!(%error, "could not load the project spine"),
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     /// Kick off one coordinator turn and pump its events into the transcript.
@@ -170,6 +227,9 @@ impl Workbench {
         }
         self.composer
             .update(cx, |composer, cx| composer.set_disabled(false, cx));
+        // A turn can change the spine — the mission is derived from the first
+        // question, and completed/pending shift as work lands.
+        self.refresh_project(cx);
     }
 
     fn rail(&self) -> impl IntoElement {
@@ -316,30 +376,117 @@ impl Workbench {
             )
     }
 
-    fn artifacts_panel(&self) -> impl IntoElement {
-        div()
+    /// The project spine: mission, what's done, what's queued, what's suggested.
+    fn artifacts_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut panel = div()
+            .id("spine")
             .flex()
             .flex_col()
             .w(px(320.))
+            .flex_none()
             .h_full()
+            .overflow_y_scroll()
             .bg(rgb(PANEL))
             .border_l_1()
             .border_color(rgb(BORDER))
             .p_4()
-            .gap_2()
-            .child(
-                div()
-                    .text_color(rgb(ACCENT))
-                    .text_sm()
-                    .child("RESEARCH PROJECT"),
-            )
-            .child(div().text_color(rgb(TEXT)).child(self.mission.clone()))
-            .child(
+            .gap_4()
+            .child(section_label("RESEARCH PROJECT"));
+
+        let Some(project) = &self.project else {
+            return panel.child(
                 div()
                     .text_color(rgb(MUTED))
                     .text_sm()
-                    .child("Outputs / spine / plan panels port in P6.3."),
-            )
+                    .child("No project loaded yet. Run a turn — the mission is derived from your first question."),
+            );
+        };
+
+        panel = panel.child(if project.mission.is_empty() {
+            div()
+                .text_color(rgb(MUTED))
+                .text_sm()
+                .child("No mission yet — it comes from your first question.")
+        } else {
+            div()
+                .w_full()
+                .text_color(rgb(TEXT))
+                .child(project.mission.clone())
+        });
+
+        if !project.completed.is_empty() {
+            panel = panel.child(spine_list("COMPLETED", &project.completed, "✓"));
+        }
+        if !project.pending.is_empty() {
+            panel = panel.child(spine_list("PENDING", &project.pending, "○"));
+        }
+
+        // Advisory only: shown so the user can choose to ask for one. Nothing here
+        // auto-runs — org policy is human-gated.
+        if !project.suggestions.is_empty() {
+            let mut suggestions = div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(section_label("SUGGESTED NEXT"));
+            for (index, suggestion) in project.suggestions.iter().enumerate() {
+                let prompt = suggestion.prompt.clone();
+                suggestions = suggestions.child(
+                    div()
+                        .id(("suggestion", index))
+                        .flex()
+                        .flex_col()
+                        .w_full()
+                        .min_w_0()
+                        .gap_1()
+                        .p_2()
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .hover(|style| style.border_color(rgb(ACCENT)).cursor_pointer())
+                        .child(
+                            div()
+                                .w_full()
+                                .text_color(rgb(TEXT))
+                                .text_sm()
+                                .child(suggestion.title.clone()),
+                        )
+                        .child(
+                            div()
+                                .w_full()
+                                .text_color(rgb(MUTED))
+                                .text_xs()
+                                .child(suggestion.rationale.clone()),
+                        )
+                        // Clicking *loads* the prompt into the composer; it never
+                        // runs it. Suggestions are advisory and org policy is
+                        // human-gated, so the user still presses Enter.
+                        .on_click(cx.listener(move |workbench, _event, window, cx| {
+                            if workbench.streaming || prompt.is_empty() {
+                                return;
+                            }
+                            workbench.composer.update(cx, |composer, cx| {
+                                composer.set_text(prompt.clone(), cx);
+                            });
+                            let focus = workbench.composer.focus_handle(cx);
+                            window.focus(&focus);
+                            workbench.status = "suggestion loaded — press Enter to run it".into();
+                            cx.notify();
+                        })),
+                );
+            }
+            panel = panel.child(suggestions);
+        }
+
+        if project.completed.is_empty() && project.pending.is_empty() {
+            panel = panel.child(
+                div()
+                    .text_color(rgb(MUTED))
+                    .text_xs()
+                    .child("Completed and pending work will appear here as the project grows."),
+            );
+        }
+
+        panel
     }
 }
 
@@ -352,7 +499,7 @@ impl Render for Workbench {
             .text_color(rgb(TEXT))
             .child(self.rail())
             .child(self.chat_pane(cx))
-            .child(self.artifacts_panel())
+            .child(self.artifacts_panel(cx))
     }
 }
 

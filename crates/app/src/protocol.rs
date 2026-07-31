@@ -32,6 +32,36 @@ pub enum TurnEvent {
     Error(String),
 }
 
+/// The research project "spine": the durable mission plus what has been done and
+/// what is queued. This is the workbench's identity — the thing a chat window
+/// alone can't express.
+///
+/// Every field defaults, so a sparse or older backend response still decodes.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct Project {
+    #[serde(default)]
+    pub mission: String,
+    #[serde(default)]
+    pub completed: Vec<String>,
+    #[serde(default)]
+    pub pending: Vec<String>,
+    #[serde(default)]
+    pub suggestions: Vec<Suggestion>,
+}
+
+/// An advisory next step. **Advisory only** — org policy is human-gated, so the
+/// app never runs one of these on its own; `prompt` is what gets *offered* to the
+/// user, not executed.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Suggestion {
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub rationale: String,
+    #[serde(default)]
+    pub prompt: String,
+}
+
 #[derive(Deserialize)]
 struct ThreadCreated {
     thread_id: String,
@@ -57,6 +87,26 @@ impl LangGraphClient {
             Ok(resp) => resp.status().is_success(),
             Err(_) => false,
         }
+    }
+
+    /// `GET /project` → the research project spine.
+    ///
+    /// A custom Mini-Me route (not part of the LangGraph API). Verified against a
+    /// live backend 2026-07-30: `200 {"mission":…,"completed":[],"pending":[],
+    /// "suggestions":[]}`. The mission is derived server-side from the first human
+    /// message of the project, so it is empty until a turn has run.
+    pub async fn fetch_project(&self) -> Result<Project> {
+        let resp = self
+            .http
+            .get(format!("{}/project", self.base_url))
+            .send()
+            .await
+            .context("GET /project failed (is the sidecar running?)")?
+            .error_for_status()
+            .context("GET /project returned an error status")?;
+        resp.json()
+            .await
+            .context("could not decode the project spine from GET /project")
     }
 
     /// `POST /threads` → a fresh thread id.

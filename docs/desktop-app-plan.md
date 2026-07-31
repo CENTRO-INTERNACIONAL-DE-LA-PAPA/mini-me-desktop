@@ -13,8 +13,8 @@ sidecar** that the client spawns and supervises.
 | **P6.0** — spike doc + scaffold | ✅ done |
 | **P6.1** — buildable window *(go/no-go gate)* | ✅ **PASS** — builds green; window renders natively (verified on Windows/DirectX). §8 |
 | **P6.2** — talk to the real backend | ✅ **done** — a real coordinator turn spawned, streamed and rendered **on Windows** (2026-07-30). §9 |
-| **P6.2.5** — local-first backend (drop LangSmith/WorkOS) | 🔴 **queued** — the change that makes an installable app possible. §10/§11 |
-| **P6.3** — port the core panels | 🟡 **in progress** — composer + scrolling transcript done (§12); spine/artifacts/palette next |
+| **P6.2.5** — local-first backend (drop LangSmith/WorkOS) | 🔴 **queued** — needs sign-off on where the change lands. WSL2 runtime now working, which is its prerequisite. §10/§11/§13 |
+| **P6.3** — port the core panels | 🟡 **in progress** — composer + scrolling transcript (§12) and the live project spine done; artifacts/status/palette next |
 | **P6.4** — native affordances + shipping | ⬜ not started |
 
 **Health of the bet.** The two risks that could have killed this are both down:
@@ -173,8 +173,13 @@ the backend), `ui` (reusable GPUI components), `sidecar` (packaging).
 - 🟡 **P6.3 — Port the core panels.** In progress, in this order:
   1. ✅ **Composer + transcript scroll** — a real text field (type, Enter sends)
      and a scrollable transcript. §12.
-  2. ⬜ **Project spine** — `GET /project` → `{mission, completed, pending,
-     suggestions}` instead of the hardcoded mission.
+  2. ✅ **Project spine** — the right panel now renders live `GET /project` data
+     (mission, completed, pending, suggestions) instead of a hardcoded string. It
+     refreshes on launch and after every turn, since the mission is derived from
+     the first question. Clicking a suggestion **loads its prompt into the
+     composer** — it never runs it, keeping the human gate. The headless
+     `--check-backend` now covers this route too, so a decode regression shows up
+     as a failed check rather than a silently empty panel.
   3. ⬜ **Artifacts/Outputs** — the `values` stream event (`artifacts`, `todos`)
      plus `GET /files/{thread_id}`.
   4. ⬜ **`sandbox_status`** from `custom` stream events in the status line.

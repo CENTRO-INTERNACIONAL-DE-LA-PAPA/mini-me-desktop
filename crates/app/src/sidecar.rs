@@ -16,7 +16,7 @@ use futures::channel::mpsc;
 use tokio::sync::Mutex;
 
 use crate::backend::{BackendConfig, BackendSupervisor};
-use crate::protocol::{LangGraphClient, TurnEvent};
+use crate::protocol::{LangGraphClient, Project, TurnEvent};
 
 /// Owns the Tokio runtime and the supervised backend process.
 pub struct Sidecar {
@@ -79,6 +79,29 @@ impl Sidecar {
         rx
     }
 
+    /// Fetch the project spine. Returns the receiver of a one-shot result so the
+    /// UI thread never blocks on HTTP.
+    ///
+    /// Deliberately does **not** start the backend: the spine is decoration, and
+    /// spawning a sidecar as a side effect of rendering a panel would be
+    /// surprising. If nothing is listening yet this just reports an error the
+    /// caller can ignore.
+    pub fn fetch_project(&self) -> mpsc::UnboundedReceiver<Result<Project, String>> {
+        let (tx, rx) = mpsc::unbounded();
+        let base_url = self.base_url.clone();
+
+        self.runtime.spawn(async move {
+            let client = LangGraphClient::new(base_url);
+            let outcome = client
+                .fetch_project()
+                .await
+                .map_err(|error| format!("{error:#}"));
+            let _ = tx.unbounded_send(outcome);
+        });
+
+        rx
+    }
+
     /// Headless check of the backend path — no GPUI, no window. Verifies the
     /// sidecar comes up and a thread can be created; with `stream` it also runs
     /// one real coordinator turn (which calls the model, so it costs tokens).
@@ -98,6 +121,23 @@ impl Sidecar {
 
             let thread_id = client.create_thread().await?;
             println!("thread   : {thread_id}");
+
+            // The spine panel depends on this custom route, so cover it here too —
+            // a decode change would otherwise only show up as an empty panel.
+            match client.fetch_project().await {
+                Ok(project) => println!(
+                    "project  : mission {} · {} completed · {} pending · {} suggestion(s)",
+                    if project.mission.is_empty() {
+                        "unset"
+                    } else {
+                        "set"
+                    },
+                    project.completed.len(),
+                    project.pending.len(),
+                    project.suggestions.len(),
+                ),
+                Err(error) => println!("project  : unavailable — {error:#}"),
+            }
 
             if !stream {
                 println!("stream   : skipped (pass --stream to run a real turn)");
