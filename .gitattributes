@@ -1,0 +1,24 @@
+# Normalize to LF in the repo, and check out LF on every platform.
+#
+# This is not cosmetic: `scripts/*.sh` run inside WSL/Linux, and Git for Windows
+# defaults to `core.autocrlf=true`, which checks them out with CRLF. bash then
+# fails on the stray carriage returns with:
+#
+#     line 12: $'\r': command not found
+#     set: pipefail: invalid option name
+#
+# Rust/TOML/Markdown are all happier on LF too, so LF is the default here.
+* text=auto eol=lf
+
+# Shell scripts must never get CRLF, whatever the user's git config says.
+*.sh text eol=lf
+
+# Windows-native scripts are the exception — those genuinely want CRLF.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Don't touch binaries.
+*.png binary
+*.jpg binary
+*.ico binary
