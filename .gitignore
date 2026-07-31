@@ -13,3 +13,9 @@ Cargo.lock.orig
 
 # Claude Code session + linked worktrees (never commit — holds build output)
 .claude/
+
+# Python bytecode from the overlay, which the *backend* regenerates every run. Tracking
+# these made `git pull` abort with "local changes would be overwritten" on the one machine
+# that actually runs the backend — the user's.
+__pycache__/
+*.py[cod]
