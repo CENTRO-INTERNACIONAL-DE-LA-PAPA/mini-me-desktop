@@ -1619,6 +1619,16 @@ resolves them per request, so `Sidecar::set_model` swaps them behind a lock with
 restart. The port and execution locality are baked into the sidecar's launch command, so
 those need a restart, and the pane says so rather than leaving the user to wonder.
 
-**Unverified:** the pane has never been rendered. Field focus, the provider cycle, masking,
-and Save are all unexercised outside unit tests — as is Windows Credential Manager, which
-is the keychain that actually matters here.
+**Verified on Windows 2026-07-31:** the pane renders, keys store to **Windows Credential
+Manager**, and a turn runs using a key read from there. So the whole point of §20 — a
+researcher configuring the app without touching a `.env` inside WSL — works on the target
+platform.
+
+**Still unverified in a window** (nobody has clicked them): the approve/reject buttons on a
+held command, the activity-trace group toggle, the palette's arrow-key navigation, and
+composer editing keys — the last one especially on a **Spanish keyboard**, where accented
+characters come from dead keys.
+
+*Also noted:* closing the window logs `window not found` and two invalid-window-handle
+HRESULTs from GPUI's Windows text-input teardown, after the sidecar has already stopped.
+Cosmetic shutdown noise, not a crash — a polish item.
