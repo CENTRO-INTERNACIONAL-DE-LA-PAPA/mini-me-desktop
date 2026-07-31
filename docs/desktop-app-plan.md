@@ -919,3 +919,81 @@ research turn will bury the answer.
 
 A full captured stream is kept in the session scratchpad as a decoder fixture, so
 this can be built and unit-tested without burning tokens on live runs.
+
+### 15b. How the web frontend does it (read-only audit, 2026-07-31)
+
+Audited the React app to port rather than reinvent. **Four findings change §15's
+design.**
+
+**1. The logic is in the SDK, not the app.** `filterSubagentMessages` is not a local
+helper — it is an option on `useStream` from `@langchain/react`, implemented inside
+`@langchain/langgraph-sdk`. The app supplies ~40 lines of glue
+(`ThreadStreamSession.tsx:54-74`); the SDK does namespace parsing, tool-call
+correlation and chunk accumulation. **Porting means reimplementing SDK behaviour**,
+which is a bigger job than §15 first implied.
+
+**2. The web app *displays* subagent work — we are catching up, not leading.**
+Subagent messages are stripped from the main transcript and re-routed into a
+per-subagent side channel rendered as live collapsible cards:
+`SubagentActivityPanel` (left sidebar) → `SubagentCard` (spinner, status pill, live
+subtitle, tool list, markdown result). Chat also gets a one-line
+`describeActivity` summary ("Academic Researcher · <task>", "Coordinating N
+subagents…").
+
+**3. Attribution: the SDK's path is fragile — ours can be simpler.**
+- The SDK attributes `messages` events via `metadata.langgraph_checkpoint_ns`
+  (fallback `checkpoint_ns`), splitting on `|` and taking the first `tools:` segment.
+  Other modes (`updates`/`values`/`custom`) are attributed by the **event-name
+  suffix** instead. Two different paths.
+- **The namespace id is a pregel task UUID, *not* the `tool_call_id`.** The SDK
+  reconciles them by matching the subgraph's first `HumanMessage` content against
+  the `task` tool call's `description` argument — a three-pass heuristic (exact →
+  substring → pending-retry) that can mis-attribute when two subagents receive
+  identical descriptions in one turn.
+- **Our measured shortcut:** the `messages` metadata already carries
+  **`lc_agent_name: "academic_researcher"`** (§15). For *displaying* named,
+  grouped subagent activity we can key off `lc_agent_name` + `checkpoint_ns` and
+  **skip the description-matching heuristic entirely**. We only need the harder
+  correlation if we want to tie a card to its originating `task` tool call (for the
+  task description and the terminal `ToolMessage`). Prefer the simple path first.
+
+**4. Reasoning is not rendered anywhere, and the extractor silently drops it.**
+`messages.ts:37-58` duck-types on the presence of a `text` field with **no `type`
+discrimination**, so an Anthropic-style `{type:"thinking", thinking:"…"}` block
+yields `""` and disappears. "Thinking…" in the UI is a hardcoded placeholder. The
+app never requests `events` mode either. Combined with §15's measurement (all
+content blocks were plain strings under `gpt-5.4`), the honest position stands:
+**no reasoning is available today**, and if a reasoning-exposing model is
+configured, *not* dropping non-text blocks is a place we can exceed the web app.
+
+**Other details worth copying:**
+
+- Effective stream request: `stream_mode` = `messages-tuple`, `values`, `updates`,
+  `custom`; `stream_subgraphs: true`; `config.recursionLimit: 10000`. (We were the
+  only client running on LangGraph's default limit of 25 — **fixed 2026-07-31**.)
+- Subagent registration accepts a tool call only when `name == "task"` **and**
+  `args.subagent_type` matches `^[a-zA-Z][a-zA-Z0-9_-]{2,49}$` — a guard against
+  half-streamed JSON args. Stored args are upgraded only when the new value is
+  *longer*.
+- Lifecycle: `pending` (registered from tool call) → `running` (first namespaced
+  `updates`) → `complete`/`error` (main-namespace `ToolMessage` matched by
+  `tool_call_id`).
+- Tool calls pair with results by id; state is `error` if the result errored,
+  `completed` if a result exists **or any later AI message exists** (an
+  approximation worth deciding on deliberately rather than copying), else `pending`.
+- Main transcript filter (`shouldRenderMainMessage`): user/assistant only, non-empty
+  text, and excluding `message.name ∈ {academic_researcher, dataverse_explorer,
+  data_cleaning, exploratory_data_analysis, diagnostic_analytics,
+  predictive_analytics, report_writer}`. **Consequence:** a delegation turn that is
+  *purely* tool calls renders as nothing in chat — its visibility comes entirely
+  from the subagent panel. That is exactly the silent gap we see today.
+- Truncation budgets: result preview 50 000 chars, tool result 480, tool args 200.
+- **Theorizer and DataVoyager progress cards are HTTP-polled, not streamed** —
+  `GET /theorizer/{thread}/{task}` and `GET /analyze-data/{thread}/{task}` every
+  30 s while the artifact is `running`. A stream-only client will never show their
+  progress; that needs a polling loop (own milestone, not part of §15).
+- Also stream-fed: a todo/plan progress bar from `values.todos`, and the sandbox
+  pill from `custom` (we already consume the latter).
+
+*Caveat: this audit read the SDK's compiled `dist/` JavaScript, so names are
+minifier-influenced though the logic is intact.*
