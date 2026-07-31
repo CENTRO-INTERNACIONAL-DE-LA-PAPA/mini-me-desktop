@@ -1399,21 +1399,62 @@ keychain** (Windows Credential Manager / Secret Service / macOS Keychain) via th
 `keyring` crate. A key must never land in a file the user might sync, zip, or attach; and
 CIP policy is that credentials stay the user's own, on the user's own machine.
 
-### Getting secrets into the sidecar without a `.env`
+### Providers: upstream already built this for a panel
+
+`backend/models.py`'s table is commented *"provider id (from the panel)"* — the web app
+has a model-config panel and the backend takes its keys **per request**, so the desktop
+should speak the same contract rather than invent one:
+
+```json
+"config": { "configurable": {
+  "model_config": {
+    "default": "anthropic::claude-sonnet-4-5",
+    "subagents": { "data_cleaning": "openai::gpt-4o-mini" },
+    "storage_mode": "client"
+  },
+  "__llm_keys": { "anthropic": { "api_key": "…", "base_url": null } },
+  "__is_for_execution__": true
+} }
+```
+
+Providers: `openai`, `anthropic`, `google`, `mistral`, and **`custom`** — an
+OpenAI-compatible endpoint with a mandatory `base_url`, which is how OpenRouter, Groq,
+Ollama, vLLM and friends are reached. Model specs are `"provider::model_id"`.
+
+Three consequences that improve the design above:
+
+1. **Model keys never have to become environment variables at all.** They go from the OS
+   keychain into the request body, in memory — not into `.env`, not into the sidecar's
+   environment, not onto a `wsl.exe` command line. That is a *better* security property
+   than the env-var plumbing, and it removes the `WSLENV` concern for these keys entirely.
+   `ASTA_TOKEN`/`ASTA_API_KEY` still need the environment, because the `asta` CLI reads
+   them when `execute` runs a command — so `WSLENV` applies to those two only.
+2. **`storage_mode: "client"` sidesteps the server-side Vault.** Left unset with no inline
+   keys, the backend tries a Vault lookup that needs a user identity — i.e. the WorkOS
+   world we dropped. Saying "client" explicitly keeps that path dormant.
+3. **Per-subagent model overrides are free.** `model_config.subagents` already routes each
+   subagent to its own model, so "cheap model for data cleaning, strong model for theory"
+   is a panel row, not a feature to build. Worth exposing once the basics work.
+
+Switching provider or model then needs **no sidecar restart** — it is just the next
+request's config.
+
+### Getting the Asta credentials into the sidecar without a `.env`
 
 The launcher already injects environment variables (§18/§19), so the same seam carries
-the keys — which is what makes the checkout's `.env` *optional* and the install
-clickable. One wrinkle worth getting right: **secrets must not go on the `wsl.exe`
-command line**, where `ps` would show them. WSL's documented mechanism is `WSLENV` —
-set the variables on the `wsl.exe` process and list their names in `WSLENV`, and the
-distro inherits them. That is the plumbing to use, not the `VAR=… exec …` prefix the
-execution flags use.
+the two Asta credentials — which is what makes the checkout's `.env` *optional* and the
+install clickable. One wrinkle worth getting right: **secrets must not go on the
+`wsl.exe` command line**, where `ps` would show them. WSL's documented mechanism is
+`WSLENV` — set the variables on the `wsl.exe` process and list their names in `WSLENV`,
+and the distro inherits them. That is the plumbing to use, not the `VAR=… exec …` prefix
+the execution flags use.
 
 ### Panel design (Zed-shaped)
 
 - `ctrl-,` opens **Settings** as a pane, plus a palette entry. Not a modal dialog — Zed's
   lesson is that settings you can leave open while you work get fixed.
-- Sections: **Model** (provider + key + model name) · **Research tools** (Asta) ·
+- Sections: **Model** (provider — including a custom OpenAI-compatible endpoint with its
+  base URL — plus key and model id) · **Research tools** (Asta) ·
   **Execution** (host/sandbox, approval on/off, workspace root) · **Backend** (checkout,
   port, WSL distro).
 - Secret fields are **masked**, show only "set / not set" once stored, and are never
