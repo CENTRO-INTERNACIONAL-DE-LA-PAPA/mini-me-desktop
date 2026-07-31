@@ -123,8 +123,12 @@ LangSmith key, no cold start, no upload dance, and files land in
 `~/.mini-me/workspaces/<thread>/` where you can open them yourself.
 
 ```bash
-MINIME_EXECUTION_BACKEND=local cargo run -p mini-me-desktop-app
+cargo run -p mini-me-desktop-app -- --local
 ```
+
+`--local` and `--sandbox` override `MINIME_EXECUTION_BACKEND`, and are the better habit
+on Windows: PowerShell has no `VAR=value cmd` prefix form, and a `$env:` assignment
+outlives the command that needed it.
 
 That works by putting [`overlay/`](overlay/) on the backend's `PYTHONPATH`; **the
 Mini-Me checkout is not modified**. Read [`overlay/README.md`](overlay/README.md) for

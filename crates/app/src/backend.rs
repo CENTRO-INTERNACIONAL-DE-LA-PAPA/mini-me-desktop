@@ -59,15 +59,26 @@ pub enum Execution {
     Local { overlay_dir: PathBuf },
 }
 
-/// Read the execution locality from the environment.
+/// Decide the execution locality.
 ///
 /// **Opt-in, and the sandbox stays the default.** Host execution is the decided
 /// direction (docs §10) but it is not yet safe to *default* to: org policy is
 /// human-gated, and the approval UX for the `execute` tool is still open. Until that
 /// lands, turning this on is a deliberate act.
-fn resolve_execution() -> Execution {
-    let requested = std::env::var("MINIME_EXECUTION_BACKEND").unwrap_or_default();
-    if requested.trim().to_ascii_lowercase() != "local" {
+///
+/// `override_local` comes from `--local` / `--sandbox` and wins over the environment.
+/// A flag you just typed is more obviously in force than a variable your shell has
+/// been holding since an hour ago — and on Windows, `$env:` assignments outlive the
+/// command, which has already caused one confusing session.
+fn resolve_execution(override_local: Option<bool>) -> Execution {
+    let local = match override_local {
+        Some(local) => local,
+        None => {
+            let requested = std::env::var("MINIME_EXECUTION_BACKEND").unwrap_or_default();
+            requested.trim().eq_ignore_ascii_case("local")
+        }
+    };
+    if !local {
         return Execution::Sandbox;
     }
     Execution::Local {
@@ -132,6 +143,25 @@ pub struct BackendConfig {
     pub execution: Execution,
 }
 
+impl BackendConfig {
+    /// Build the configuration, letting a command-line flag override the environment.
+    ///
+    /// `Some(true)` forces host execution, `Some(false)` forces the sandbox, `None`
+    /// falls back to `MINIME_EXECUTION_BACKEND`.
+    pub fn with_execution_override(override_local: Option<bool>) -> Self {
+        let mut config = Self::default();
+        let execution = resolve_execution(override_local);
+        if execution != config.execution {
+            // The launch command embeds the execution environment, so it has to be
+            // rebuilt rather than patched.
+            config.launch_command =
+                launch_command_for(&config.project_dir, config.port, config.wsl.as_ref(), &execution);
+            config.execution = execution;
+        }
+        config
+    }
+}
+
 impl Default for BackendConfig {
     fn default() -> Self {
         let port = std::env::var("MINIME_BACKEND_PORT")
@@ -140,7 +170,7 @@ impl Default for BackendConfig {
             .unwrap_or(2024);
         let wsl = resolve_wsl_target();
         let project_dir = resolve_project_dir();
-        let execution = resolve_execution();
+        let execution = resolve_execution(None);
         Self {
             port,
             launch_command: launch_command_for(&project_dir, port, wsl.as_ref(), &execution),
@@ -656,7 +686,7 @@ mod tests {
         // execution is not safe to default to until `execute` is human-gated (§18).
         for value in ["", "sandbox", "Local ", "true", "1"] {
             std::env::set_var("MINIME_EXECUTION_BACKEND", value);
-            let resolved = resolve_execution();
+            let resolved = resolve_execution(None);
             let expected_local = value.trim().eq_ignore_ascii_case("local");
             assert_eq!(
                 matches!(resolved, Execution::Local { .. }),
@@ -664,6 +694,13 @@ mod tests {
                 "for {value:?}"
             );
         }
+
+        // A flag beats a stale variable in both directions — `--sandbox` has to be
+        // able to switch host execution *off* without the user hunting for what set it.
+        std::env::set_var("MINIME_EXECUTION_BACKEND", "local");
+        assert!(matches!(resolve_execution(Some(false)), Execution::Sandbox));
+        std::env::set_var("MINIME_EXECUTION_BACKEND", "sandbox");
+        assert!(matches!(resolve_execution(Some(true)), Execution::Local { .. }));
         std::env::remove_var("MINIME_EXECUTION_BACKEND");
     }
 }

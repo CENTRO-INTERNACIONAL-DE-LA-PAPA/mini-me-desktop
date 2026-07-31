@@ -1391,7 +1391,14 @@ fn main() {
         return;
     }
 
-    let config = backend::BackendConfig::default();
+    // `--local` / `--sandbox` override `MINIME_EXECUTION_BACKEND`; see
+    // `resolve_execution`. Last one wins if both are given.
+    let execution_override = args.iter().rev().find_map(|arg| match arg.as_str() {
+        "--local" => Some(true),
+        "--sandbox" => Some(false),
+        _ => None,
+    });
+    let config = backend::BackendConfig::with_execution_override(execution_override);
     tracing::info!(
         location = %config.location(),
         url = %config.base_url(),

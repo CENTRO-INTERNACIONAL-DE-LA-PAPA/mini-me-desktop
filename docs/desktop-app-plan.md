@@ -1270,9 +1270,12 @@ imported from upstream rather than reimplemented, so the cap behaves identically
 
 ### Still open — and why it is not on by default
 
-**Host execution is opt-in; the sandbox remains the default.** `MINIME_EXECUTION_BACKEND`
-must be set to `local` explicitly, the app logs a warning when it is, and the status
-bar says `host (local)` in the accent colour.
+**Host execution is opt-in; the sandbox remains the default.** Turn it on with
+`--local` (or `MINIME_EXECUTION_BACKEND=local`); `--sandbox` forces it back off. The
+flags win over the variable on purpose: PowerShell has no `VAR=value cmd` prefix form,
+and a `$env:` assignment persists for the whole session — which has already produced one
+confusing debugging session on this project. The app logs a warning when host execution
+is on, and the status bar says `host (local)` in the accent colour.
 
 Flipping the default is gated on **human-approval for `execute`**. Org policy is
 human-gated and deepagents explicitly recommends HITL for this backend; the file tools
