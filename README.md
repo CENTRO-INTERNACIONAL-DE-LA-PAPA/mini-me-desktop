@@ -96,8 +96,17 @@ thread → stream), which is also the fastest way to debug a bad turn:
 cargo run -p mini-me-desktop-app -- --check-backend --stream
 ```
 
-Drop `--stream` to stop before the model call. Env overrides:
-`MINIME_BACKEND_DIR`, `MINIME_BACKEND_PORT`, `MINIME_BACKEND_URL`,
+Drop `--stream` to stop before the model call, or swap it for
+`--prompt "find the deseq2 paper"` to run your own — which is how a *delegating*
+turn gets checked: the output then lists each step and a per-subagent tally.
+
+To decode a **saved** SSE capture instead, with no backend and no tokens spent:
+
+```bash
+cargo run -p mini-me-desktop-app -- --replay crates/app/tests/fixtures/delegated-turn.sse
+```
+
+Env overrides: `MINIME_BACKEND_DIR`, `MINIME_BACKEND_PORT`, `MINIME_BACKEND_URL`,
 `MINIME_BACKEND_ATTACH_ONLY`.
 
 ## Direction

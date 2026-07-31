@@ -1,0 +1,484 @@
+: Derived from a real delegated turn ("find the deseq2 paper", 2026-07-30) — see
+: docs/desktop-app-plan.md §15. Reduced so it can live in the repo: middleware
+: `updates` dropped, chunk/metadata narrowed to the fields any client reads,
+: consecutive single-token text frames coalesced, tool results and `values`
+: transcripts truncated. Every `tool_call_chunks` fragment is verbatim, because that
+: is where the decoder's only stateful logic lives.
+
+event: metadata
+data: {"run_id":"019fb670-c72a-7330-98be-0f52520fb23b","attempt":1}
+
+event: values
+data: {"files":{},"artifacts":{}}
+
+event: custom
+data: {"sandbox_status":{"state":"preparing","message":"Creating sandbox…"}}
+
+event: custom
+data: {"sandbox_status":{"state":"ready","message":"Sandbox ready"}}
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":"task","args":"","id":"call_pPKAQo8DBcPVGBxD2M6CDudh","index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"{\"","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"sub","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"agent","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"_type","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"\":\"","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"academic","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"_re","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"search","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"er","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"\",\"","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"description","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"\":\"","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"Find","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" the","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" canonical","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" DE","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"Seq","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"2","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" paper","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":".","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" Return","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" a","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" concise","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" citation","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" with","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" title","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":",","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" authors","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":",","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" journal","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":",","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" year","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":",","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" DOI","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":",","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" and","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" a","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" stable","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" URL","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" if","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" available","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":".","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" Also","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" state","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" in","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" one","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" sentence","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" why","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" it","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" is","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" considered","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" the","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" main","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" DE","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"Seq","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"2","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" paper","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":".\"","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"}","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"model:66b69b98-cfc0-f89d-ad49-3a454685ade7"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":"search_paper_by_title","args":"","id":"call_fuGz5U8B93CUczWsq5U8HG7m","index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"{\"","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"title","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"\":\"","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"Moder","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"ated","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" estimation","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" of","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" fold","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" change","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" and","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" dispersion","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" for","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" RNA","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"-se","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"q","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" data","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" with","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":" DE","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"Seq","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"2","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"\",\"","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"fields","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"\":\"","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"title","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":",","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"authors","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":",j","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"ournal","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":",","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"year","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":",url","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":",","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"abstract","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":",","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"publication","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"Date","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":",","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"venue","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":",is","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"Open","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"Access","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":",t","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"ldr","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":",re","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"ferences","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":",c","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"itations","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":",","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"fields","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"Of","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"Study","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":",","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"publication","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"Date","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":",","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"external","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"Ids","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"\",\"","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"publication","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"_date","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"_range","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"\":\"\",\"","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"venues","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"\":","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"\"\"","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"","type":"AIMessageChunk","name":null,"tool_call_chunks":[{"name":null,"args":"}","id":null,"index":0,"type":"tool_call_chunk"}]},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:c96a3e2f-0778-3c0d-15cb-0d4efb97d08a","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"content":"Full result (223 KB) saved to `/workspace/mcp_results/search_paper_by_title_20260730_233202.txt`.\nUse code exe …[truncated for the fixture]","type":"tool","name":"search_paper_by_title","tool_call_id":"call_fuGz5U8B93CUczWsq5U8HG7m","status":"success"},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|tools:d71ec110-68d5-f4b8-6533-c5e961483478","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"type":"AIMessageChunk","content":"{\"summary\":\"The canonical DESeq2 paper is the "},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:61d75bb5-9a32-55a4-9dae-b490ddeccfdb","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"type":"AIMessageChunk","content":"2014 Genome Biology article that introduced the DESeq2 method"},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:61d75bb5-9a32-55a4-9dae-b490ddeccfdb","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"type":"AIMessageChunk","content":" and is widely treated as the primary citation for the software and"},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:61d75bb5-9a32-55a4-9dae-b490ddeccfdb","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"type":"AIMessageChunk","content":" its statistical framework.\",\"sources\":[{\"citation\":\"Love, M"},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:61d75bb5-9a32-55a4-9dae-b490ddeccfdb","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"type":"AIMessageChunk","content":". I., Huber, W., & Anders, S"},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:61d75bb5-9a32-55a4-9dae-b490ddeccfdb","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"type":"AIMessageChunk","content":". (2014). Moderated estimation of fold change and"},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:61d75bb5-9a32-55a4-9dae-b490ddeccfdb","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"type":"AIMessageChunk","content":" dispersion for RNA-seq data with DESeq2. Genome"},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:61d75bb5-9a32-55a4-9dae-b490ddeccfdb","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"type":"AIMessageChunk","content":" Biology, 15, 550. https://doi.org"},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:61d75bb5-9a32-55a4-9dae-b490ddeccfdb","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"type":"AIMessageChunk","content":"/10.1186/s13059-014-055"},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:61d75bb5-9a32-55a4-9dae-b490ddeccfdb","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"type":"AIMessageChunk","content":"0-8\",\"relevance\":\"This is considered the main"},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:61d75bb5-9a32-55a4-9dae-b490ddeccfdb","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"type":"AIMessageChunk","content":" DESeq2 paper because it introduces the DESeq2 method"},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:61d75bb5-9a32-55a4-9dae-b490ddeccfdb","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"type":"AIMessageChunk","content":" itself, including its core statistical framework for differential expression analysis of"},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:61d75bb5-9a32-55a4-9dae-b490ddeccfdb","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"type":"AIMessageChunk","content":" RNA-seq count data.\",\"link\":\"https://doi.org"},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:61d75bb5-9a32-55a4-9dae-b490ddeccfdb","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"type":"AIMessageChunk","content":"/10.1186/s13059-014-055"},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:61d75bb5-9a32-55a4-9dae-b490ddeccfdb","lc_agent_name":"academic_researcher"}]
+
+event: messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: [{"type":"AIMessageChunk","content":"0-8\"}]}"},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb|model:61d75bb5-9a32-55a4-9dae-b490ddeccfdb","lc_agent_name":"academic_researcher"}]
+
+event: values|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb
+data: {"structured_response":{"summary":"The canonical DESeq2 paper is the 2014 Genome Biology article that introduced the DESeq2 method and is widely treated as the primary citation for the software and its statistical framework.","sources":[{"citation":"Love, M. I., Huber, W., & Anders, S. (2014). Moderated estimation of fold change and dispersion for RNA-seq data with DESeq2. Genome Biology, 15, 550. https://doi.org/10.1186/s13059-014-0550-8","relevance":"This is considered the main DESeq2 paper because it introduces the DESeq2 method itself, including its core statistical framework for differential expression analysis of RNA-seq count data.","link":"https://doi.org/10.1186/s13059-014-0550-8"}]},"files":{},"artifacts":{"datasets":[],"sources":[{"citation":"Love, M. I., Huber, W., & Anders, S. (2014). Moderated estimation of fold change and dispersion for RNA-seq data with DESeq2. Genome Biology, 15, 550. https://doi.org/10.1186/s13059-014-0550-8","relevance":"This is considered the main DESeq2 paper because it introduces the DESeq2 method itself, including its core statistical framework for differential expression analysis of RNA-seq count data.","link":"https://doi.org/10.1186/s13059-014-0550-8"}],"reports":[],"files":[],"hypotheses":[],"libraries":[],"analyses":[],"edges":[{"source":"source:https://doi.org/10.1186/s13059-014-0550-8","target":"subagent:academic_researcher","relation":"produced_by","source_kind":"source","target_kind":"subagent","source_label":"Love, M. I., Huber, W., & Anders, S. (2014). Moderated estimation of fold change and dispersion for RNA-seq data with D…","target_label":"Academic search"}],"project":{"mission":"In one short paragraph, what is your role as the Mini-Me coordinator?","completed":[],"pending":[],"suggestions":[]}}}
+
+event: messages
+data: [{"content":"{\"summary\":\"The canonical DESeq2 paper is the 2014 Genome Biology article that introduced the DESeq2 method an …[truncated for the fixture]","type":"tool","name":"task","tool_call_id":"call_pPKAQo8DBcPVGBxD2M6CDudh","status":"success"},{"langgraph_checkpoint_ns":"tools:d6c187d3-3eef-774e-4c2f-7151df99cffb"}]
+
+event: messages
+data: [{"type":"AIMessageChunk","content":"Love MI, Huber W, Anders S. 201"},{"langgraph_checkpoint_ns":"model:27ee27ea-dda1-bd14-912e-e10f3b69a421"}]
+
+event: messages
+data: [{"type":"AIMessageChunk","content":"4. **Moderated estimation of fold change and dispersion for"},{"langgraph_checkpoint_ns":"model:27ee27ea-dda1-bd14-912e-e10f3b69a421"}]
+
+event: messages
+data: [{"type":"AIMessageChunk","content":" RNA-seq data with DESeq2**. *Genome"},{"langgraph_checkpoint_ns":"model:27ee27ea-dda1-bd14-912e-e10f3b69a421"}]
+
+event: messages
+data: [{"type":"AIMessageChunk","content":" Biology* 15:550. DOI: **10."},{"langgraph_checkpoint_ns":"model:27ee27ea-dda1-bd14-912e-e10f3b69a421"}]
+
+event: messages
+data: [{"type":"AIMessageChunk","content":"1186/s13059-014-0550-8"},{"langgraph_checkpoint_ns":"model:27ee27ea-dda1-bd14-912e-e10f3b69a421"}]
+
+event: messages
+data: [{"type":"AIMessageChunk","content":"**  \nhttps://doi.org/10.1186/s"},{"langgraph_checkpoint_ns":"model:27ee27ea-dda1-bd14-912e-e10f3b69a421"}]
+
+event: messages
+data: [{"type":"AIMessageChunk","content":"13059-014-0550-8\n\nWhy this"},{"langgraph_checkpoint_ns":"model:27ee27ea-dda1-bd14-912e-e10f3b69a421"}]
+
+event: messages
+data: [{"type":"AIMessageChunk","content":" one: it is the paper that introduced DESeq2’s"},{"langgraph_checkpoint_ns":"model:27ee27ea-dda1-bd14-912e-e10f3b69a421"}]
+
+event: messages
+data: [{"type":"AIMessageChunk","content":" core statistical method and is the standard citation for the package."},{"langgraph_checkpoint_ns":"model:27ee27ea-dda1-bd14-912e-e10f3b69a421"}]
+
+event: values
+data: {"files":{},"artifacts":{"datasets":[],"sources":[{"citation":"Love, M. I., Huber, W., & Anders, S. (2014). Moderated estimation of fold change and dispersion for RNA-seq data with DESeq2. Genome Biology, 15, 550. https://doi.org/10.1186/s13059-014-0550-8","relevance":"This is considered the main DESeq2 paper because it introduces the DESeq2 method itself, including its core statistical framework for differential expression analysis of RNA-seq count data.","link":"https://doi.org/10.1186/s13059-014-0550-8"}],"reports":[],"files":[],"hypotheses":[],"libraries":[],"analyses":[],"edges":[{"source":"source:https://doi.org/10.1186/s13059-014-0550-8","target":"subagent:academic_researcher","relation":"produced_by","source_kind":"source","target_kind":"subagent","source_label":"Love, M. I., Huber, W., & Anders, S. (2014). Moderated estimation of fold change and dispersion for RNA-seq data with D…","target_label":"Academic search"}],"project":{"mission":"In one short paragraph, what is your role as the Mini-Me coordinator?","completed":["Gathered 1 academic source from the literature."],"pending":[],"suggestions":[{"title":"Synthesize theories from the literature","rationale":"You have gathered sources but not yet synthesized mechanistic or causal theories from them.","action":"Hypothesis Generator","prompt":"Use the hypothesis_generator subagent to synthesize literature-grounded theories from the sources gathered so far."}]}}}
+

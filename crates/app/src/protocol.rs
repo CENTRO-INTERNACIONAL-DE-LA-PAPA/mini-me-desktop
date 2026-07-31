@@ -8,21 +8,25 @@
 //! - `POST /threads`                   → `{"thread_id": "<uuid>"}`
 //! - `POST /threads/{id}/runs/stream`  → SSE stream of the run
 //!
-//! We ask for `stream_mode: ["messages-tuple", "values", "custom"]` and leave
-//! `stream_subgraphs` off, so we receive only the *coordinator's* token chunks
-//! with no subagent namespaces to filter:
+//! We ask for `stream_mode: ["messages-tuple", "values", "custom"]` with
+//! `stream_subgraphs: true`, so subagent work arrives too — namespaced by the
+//! event name:
 //!
 //! - `messages-tuple` → `event: messages` frames, `[chunk, metadata]` — the tokens
 //! - `values`         → full state snapshots carrying `artifacts` (and the spine
 //!                      nested at `artifacts.project`)
 //! - `custom`         → `sandbox_status` provisioning progress
+//! - `messages|tools:<uuid>` → the same, but produced *inside* a subagent
 //!
 //! Verified against a live backend that requesting all three still yields
 //! `event: messages` (asking for plain `messages` instead of `messages-tuple`
-//! degrades them to `messages/partial` frames and silently breaks tokens).
+//! degrades them to `messages/partial` frames and silently breaks tokens), and that
+//! subagent frames arrive namespaced once `stream_subgraphs` is on.
 //!
 //! In local dev the backend needs no `Authorization` header (`backend/auth.py`
 //! admits an unauthenticated `local-user`) and falls back to `OPENAI_API_KEY`.
+
+use std::collections::HashMap;
 
 use anyhow::{Context as _, Result};
 use futures::StreamExt;
@@ -36,6 +40,15 @@ pub enum TurnEvent {
     Status(String),
     /// A chunk of assistant text to append to the transcript.
     Token(String),
+    /// One line of work: a tool call, or a delegation to a subagent. `agent` is
+    /// `None` when the coordinator itself did it.
+    Step {
+        agent: Option<AgentRef>,
+        label: String,
+    },
+    /// Text streamed by a *subagent*. Kept apart from [`TurnEvent::Token`] so the
+    /// coordinator's answer stays the primary thing in the transcript.
+    SubagentToken { agent: AgentRef, text: String },
     /// A full snapshot of the run's artifacts (and the spine, which rides along).
     /// Emitted by the `values` stream mode; **replaces** prior state rather than
     /// accumulating, since each event carries the whole picture.
@@ -44,6 +57,25 @@ pub enum TurnEvent {
     Done,
     /// The run failed; the string is display-safe.
     Error(String),
+}
+
+/// One subagent invocation.
+///
+/// `ns` is the pregel checkpoint namespace carried in the SSE event name
+/// (`messages|tools:<uuid>`). It is unique per *invocation*, so two concurrent runs
+/// of the same subagent type stay in separate groups. `name` is the display name the
+/// backend hands us in the chunk metadata as `lc_agent_name`.
+///
+/// Deliberately **not** keyed on the originating `task` tool-call id: the namespace
+/// uuid is a pregel task id, and the two can only be reconciled by matching the
+/// delegation's `description` against the subgraph's first human message — a
+/// three-pass heuristic the JS SDK carries, which mis-attributes when two subagents
+/// get identical descriptions. We don't need it, because `lc_agent_name` already
+/// names the agent (plan §15b).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct AgentRef {
+    pub ns: String,
+    pub name: String,
 }
 
 /// Research outputs produced so far, as carried by a `values` event.
@@ -200,12 +232,13 @@ impl LangGraphClient {
             .error_for_status()
             .context("POST /runs/stream returned an error status")?;
 
-        let mut decoder = SseDecoder::default();
+        let mut frames = SseDecoder::default();
+        let mut turn = TurnDecoder::default();
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let bytes = chunk.context("the run stream broke mid-turn")?;
-            for event in decoder.push(&bytes) {
-                for decoded in decode_sse_event(&event) {
+            for event in frames.push(&bytes) {
+                for decoded in turn.push(&event) {
                     on_event(decoded);
                 }
             }
@@ -227,6 +260,11 @@ fn run_request_body(prompt: &str) -> Value {
         "assistant_id": "agent",
         "input": { "messages": [ { "type": "human", "content": prompt } ] },
         "stream_mode": ["messages-tuple", "values", "custom"],
+        // Without this the whole stream stops at the coordinator: a delegated turn
+        // then emits a `task` tool call and nothing else until the answer, which is
+        // the silent gap the activity trace exists to close. On a measured turn this
+        // flag is the difference between 176 and 495 message events.
+        "stream_subgraphs": true,
         // LangGraph defaults to 25 supersteps, and one turn already spends ~22 on
         // middleware alone (PII scrubbing, call limits, todos, skills, sandbox
         // sync) before any delegation -- so a multi-subagent research turn would
@@ -409,54 +447,278 @@ fn truncate_label(text: &str) -> String {
     format!("{}…", kept.trim_end())
 }
 
-/// Map one SSE event onto UI events.
+/// deepagents' delegation tool. A call to it *is* a subagent being launched.
+const DELEGATE_TOOL: &str = "task";
+
+/// Decodes one run's SSE stream into UI events.
 ///
-/// The `messages` stream mode emits a 2-element array `[message_chunk, metadata]`.
-/// Assistant text arrives as `AIMessageChunk`s whose `content` is either a plain
-/// string or a list of typed blocks.
-pub fn decode_sse_event(event: &SseEvent) -> Vec<TurnEvent> {
-    // Subagent tokens arrive as `messages|<namespace>`; we only asked for
-    // top-level, but match the prefix so a future `stream_subgraphs` still works.
-    let is_messages = event.name == "messages" || event.name.starts_with("messages|");
+/// Stateful, unlike the rest of this module, because tool calls arrive in fragments:
+/// only the **first** `tool_call_chunk` of a call carries its name and id, later
+/// fragments are keyed by `index` alone, and the JSON arguments only mean anything
+/// once they are complete. Everything else here is a pure function of one event.
+#[derive(Default)]
+pub struct TurnDecoder {
+    /// Tool calls still streaming their arguments, keyed by (namespace, index).
+    calls: HashMap<(String, i64), PendingCall>,
+}
 
-    if event.name == "error" {
-        return vec![TurnEvent::Error(summarize_error(&event.data))];
-    }
-    if event.name == "metadata" {
-        return vec![TurnEvent::Status("run started".into())];
-    }
-    if event.name == "values" {
-        return decode_values(&event.data)
-            .map(|snapshot| vec![TurnEvent::Snapshot(snapshot)])
-            .unwrap_or_default();
-    }
-    if event.name == "custom" {
-        return decode_custom(&event.data)
-            .map(|status| vec![TurnEvent::Status(status)])
-            .unwrap_or_default();
-    }
-    if !is_messages {
-        return Vec::new();
+struct PendingCall {
+    name: String,
+    args: String,
+    /// Set once a [`TurnEvent::Step`] has been emitted, so each call is reported
+    /// exactly once however many fragments it takes.
+    announced: bool,
+}
+
+impl TurnDecoder {
+    /// Map one SSE event onto UI events.
+    ///
+    /// The `messages` stream mode emits a 2-element array `[message_chunk, metadata]`.
+    /// Assistant text arrives as `AIMessageChunk`s whose `content` is either a plain
+    /// string or a list of typed blocks.
+    pub fn push(&mut self, event: &SseEvent) -> Vec<TurnEvent> {
+        match event.name.as_str() {
+            "error" => return vec![TurnEvent::Error(summarize_error(&event.data))],
+            "metadata" => return vec![TurnEvent::Status("run started".into())],
+            // Only the *top-level* snapshot. A subagent's `values|tools:…` carries
+            // the same artifacts a few events earlier (measured: `sources: 1` showed
+            // up in the subagent's snapshot three events before the coordinator's),
+            // so consuming both would render the same outputs twice.
+            "values" => {
+                return decode_values(&event.data)
+                    .map(|snapshot| vec![TurnEvent::Snapshot(snapshot)])
+                    .unwrap_or_default()
+            }
+            "custom" => {
+                return decode_custom(&event.data)
+                    .map(|status| vec![TurnEvent::Status(status)])
+                    .unwrap_or_default()
+            }
+            _ => {}
+        }
+        // Everything else we care about is a `messages` frame, either top-level or
+        // namespaced. `updates` is deliberately not requested: on a measured turn 27
+        // of 35 were middleware plumbing (`PIIMiddleware[email].before_model`,
+        // `ModelCallLimitMiddleware.*`, …), which is noise, not activity.
+        let Some(namespace) = messages_namespace(&event.name) else {
+            return Vec::new();
+        };
+        self.decode_messages(namespace, &event.data)
     }
 
-    let Ok(value) = serde_json::from_str::<Value>(&event.data) else {
-        return Vec::new();
-    };
-    // Expected shape: [chunk, metadata].
-    let Some(chunk) = value.get(0) else {
-        return Vec::new();
-    };
-    if chunk.get("type").and_then(Value::as_str) != Some("AIMessageChunk") {
-        return Vec::new();
+    fn decode_messages(&mut self, namespace: &str, data: &str) -> Vec<TurnEvent> {
+        let Ok(value) = serde_json::from_str::<Value>(data) else {
+            return Vec::new();
+        };
+        // Expected shape: [chunk, metadata].
+        let Some(chunk) = value.get(0) else {
+            return Vec::new();
+        };
+        if chunk.get("type").and_then(Value::as_str) != Some("AIMessageChunk") {
+            // `ToolMessage` frames (`type: "tool"`) also arrive here, carrying the
+            // whole tool result — up to hundreds of KB. Their content belongs to the
+            // outputs panel (via `values`), not to an activity line.
+            return Vec::new();
+        }
+
+        let agent = agent_ref(namespace, value.get(1));
+        let mut events = self.decode_tool_calls(namespace, agent.as_ref(), chunk);
+
+        let text = chunk.get("content").map(extract_text).unwrap_or_default();
+        if !text.is_empty() {
+            events.push(match &agent {
+                Some(agent) => TurnEvent::SubagentToken {
+                    agent: agent.clone(),
+                    text,
+                },
+                None => TurnEvent::Token(text),
+            });
+        }
+        events
     }
-    let text = chunk
-        .get("content")
-        .map(extract_text)
-        .unwrap_or_default();
-    if text.is_empty() {
-        return Vec::new();
+
+    /// Turn streaming `tool_call_chunks` into at most one [`TurnEvent::Step`] per call.
+    fn decode_tool_calls(
+        &mut self,
+        namespace: &str,
+        agent: Option<&AgentRef>,
+        chunk: &Value,
+    ) -> Vec<TurnEvent> {
+        let Some(fragments) = chunk.get("tool_call_chunks").and_then(Value::as_array) else {
+            return Vec::new();
+        };
+        let mut events = Vec::new();
+        for fragment in fragments {
+            let index = fragment.get("index").and_then(Value::as_i64).unwrap_or(0);
+            let key = (namespace.to_string(), index);
+
+            // A fragment carrying a name starts a fresh call at this index — which is
+            // also how a second call reusing index 0 later in the turn is handled.
+            if let Some(name) = fragment.get("name").and_then(Value::as_str) {
+                self.calls.insert(
+                    key.clone(),
+                    PendingCall {
+                        name: name.to_string(),
+                        args: String::new(),
+                        announced: false,
+                    },
+                );
+            }
+            let Some(call) = self.calls.get_mut(&key) else {
+                continue;
+            };
+            if let Some(args) = fragment.get("args").and_then(Value::as_str) {
+                call.args.push_str(args);
+            }
+            if call.announced {
+                continue;
+            }
+            // A normal tool is worth announcing the moment we know its name. A
+            // delegation waits, because its useful label ("delegating to
+            // academic_researcher") lives in arguments that are still arriving.
+            if call.name != DELEGATE_TOOL {
+                call.announced = true;
+                events.push(TurnEvent::Step {
+                    agent: agent.cloned(),
+                    label: call.name.clone(),
+                });
+                continue;
+            }
+            if let Some(label) = delegation_label(&call.args) {
+                call.announced = true;
+                events.push(TurnEvent::Step {
+                    agent: agent.cloned(),
+                    label,
+                });
+            }
+        }
+        events
     }
-    vec![TurnEvent::Token(text)]
+}
+
+/// The namespace part of a `messages` event name, or `None` for other events.
+/// Top-level frames are plain `messages`, hence the empty string.
+fn messages_namespace(event_name: &str) -> Option<&str> {
+    if event_name == "messages" {
+        return Some("");
+    }
+    event_name.strip_prefix("messages|")
+}
+
+/// Identify the subagent a frame came from, if any.
+///
+/// A subagent's events are namespaced `tools:<uuid>`; the coordinator's carry no
+/// namespace. We key on the **whole** namespace rather than the first `tools:`
+/// segment (what the JS SDK does), so a nested delegation `tools:a|tools:b` gets its
+/// own group under its own name instead of being folded into its parent's group
+/// while wearing the inner agent's name.
+///
+/// Note the metadata's own `langgraph_checkpoint_ns` is *not* usable as the
+/// discriminator: measured on a real turn, top-level coordinator frames carry
+/// `model:<uuid>` there, so it names a node, not a delegation.
+fn agent_ref(namespace: &str, metadata: Option<&Value>) -> Option<AgentRef> {
+    if !namespace
+        .split('|')
+        .any(|segment| segment.starts_with("tools:"))
+    {
+        return None;
+    }
+    let name = metadata
+        .and_then(|metadata| metadata.get("lc_agent_name"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("subagent");
+    Some(AgentRef {
+        ns: namespace.to_string(),
+        name: name.to_string(),
+    })
+}
+
+/// Label for a `task` delegation, once its streamed JSON arguments are complete.
+///
+/// Returns `None` while they are still partial — streaming JSON only parses once
+/// closed, which is exactly the "is it complete yet" signal we need, with no
+/// dependence on a `chunk_position` marker the backend leaves null. The
+/// `subagent_type` shape check is the guard the web client applies too, so a
+/// half-formed value can never become a step label.
+fn delegation_label(args: &str) -> Option<String> {
+    let parsed = serde_json::from_str::<Value>(args).ok()?;
+    let subagent = parsed.get("subagent_type").and_then(Value::as_str)?;
+    if !looks_like_subagent_type(subagent) {
+        return None;
+    }
+    let description = parsed
+        .get("description")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|description| !description.is_empty());
+    let label = match description {
+        Some(description) => format!("delegating to {subagent} — {description}"),
+        None => format!("delegating to {subagent}"),
+    };
+    Some(truncate_label(&label))
+}
+
+/// The web client's `^[a-zA-Z][a-zA-Z0-9_-]{2,49}$`, without pulling in a regex crate.
+fn looks_like_subagent_type(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    first.is_ascii_alphabetic()
+        && (3..=50).contains(&name.chars().count())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Render a subagent's streamed text for the activity trace.
+///
+/// A subagent's "text" is often not prose: measured on a real delegation (plan §15),
+/// `academic_researcher` streamed its entire answer as one JSON object — its
+/// structured response — so dumping the raw text would show the user a wall of
+/// braces. When the text parses as a JSON object we lift the readable parts out.
+/// Partial (still streaming) or plain-prose text is returned untouched, which also
+/// means the user watches the JSON assemble live and then sees it resolve into a
+/// sentence.
+pub fn summarize_agent_result(text: &str) -> String {
+    let text = text.trim();
+    let Some(object) = serde_json::from_str::<Value>(text)
+        .ok()
+        .and_then(|value| match value {
+            Value::Object(object) => Some(object),
+            _ => None,
+        })
+    else {
+        return text.to_string();
+    };
+
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(summary) = object.get("summary").and_then(Value::as_str) {
+        let summary = summary.trim();
+        if !summary.is_empty() {
+            parts.push(summary.to_string());
+        }
+    }
+    // Everything else is counted rather than dumped: a `sources` list is 20 lines of
+    // citation the outputs panel already renders properly.
+    for (key, value) in &object {
+        if key == "summary" {
+            continue;
+        }
+        if let Value::Array(items) = value {
+            if !items.is_empty() {
+                parts.push(format!("{} {key}", items.len()));
+            }
+        }
+    }
+
+    if parts.is_empty() {
+        text.to_string()
+    } else {
+        parts.join(" · ")
+    }
 }
 
 /// `content` is either a string or a list of blocks like `{"type":"text","text":…}`.
@@ -488,6 +750,44 @@ fn summarize_error(data: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Decode a single event in isolation. Anything that depends on *sequence*
+    /// (tool-call argument fragments) drives a `TurnDecoder` directly instead.
+    fn decode(event: &SseEvent) -> Vec<TurnEvent> {
+        TurnDecoder::default().push(event)
+    }
+
+    /// Build the SSE frames for one streamed tool call: the first fragment names it,
+    /// the rest carry argument text only — the shape measured on a real turn.
+    fn tool_call_frames(event_name: &str, name: &str, args: &[&str]) -> Vec<SseEvent> {
+        let mut frames = Vec::new();
+        let mut fragments: Vec<Value> = vec![json!({
+            "name": name, "args": "", "id": "call_1", "index": 0, "type": "tool_call_chunk"
+        })];
+        for arg in args {
+            fragments.push(json!({
+                "name": null, "args": arg, "id": null, "index": 0, "type": "tool_call_chunk"
+            }));
+        }
+        for fragment in fragments {
+            frames.push(SseEvent {
+                name: event_name.to_string(),
+                data: json!([
+                    {"type": "AIMessageChunk", "content": "", "tool_call_chunks": [fragment]},
+                    {"lc_agent_name": "academic_researcher"}
+                ])
+                .to_string(),
+            });
+        }
+        frames
+    }
+
+    fn drain(decoder: &mut TurnDecoder, frames: &[SseEvent]) -> Vec<TurnEvent> {
+        frames
+            .iter()
+            .flat_map(|frame| decoder.push(frame))
+            .collect()
+    }
+
     fn tokens(events: &[TurnEvent]) -> String {
         events
             .iter()
@@ -512,6 +812,9 @@ mod tests {
         assert_eq!(body["assistant_id"], "agent");
         assert_eq!(body["input"]["messages"][0]["type"], "human");
         assert_eq!(body["input"]["messages"][0]["content"], "hi");
+        // Without subgraphs a delegated turn streams nothing while the subagent
+        // works — the silent gap the activity trace exists to close.
+        assert_eq!(body["stream_subgraphs"], json!(true));
     }
 
     #[test]
@@ -533,7 +836,7 @@ mod tests {
         })
         .to_string();
 
-        let decoded = decode_sse_event(&SseEvent {
+        let decoded = decode(&SseEvent {
             name: "values".into(),
             data,
         });
@@ -558,7 +861,7 @@ mod tests {
     fn surfaces_sandbox_provisioning_as_status() {
         // Live shape (2026-07-30). Without this the first turn on a cold thread
         // looks stuck while the sandbox is created.
-        let decoded = decode_sse_event(&SseEvent {
+        let decoded = decode(&SseEvent {
             name: "custom".into(),
             data: json!({"sandbox_status": {"state": "preparing", "message": "Creating sandbox…"}})
                 .to_string(),
@@ -569,14 +872,14 @@ mod tests {
         );
 
         // Falls back to the state when no message is given.
-        let decoded = decode_sse_event(&SseEvent {
+        let decoded = decode(&SseEvent {
             name: "custom".into(),
             data: json!({"sandbox_status": {"state": "ready"}}).to_string(),
         });
         assert_eq!(decoded, vec![TurnEvent::Status("ready".into())]);
 
         // Unrelated custom payloads are ignored rather than shown as noise.
-        let decoded = decode_sse_event(&SseEvent {
+        let decoded = decode(&SseEvent {
             name: "custom".into(),
             data: json!({"something_else": 1}).to_string(),
         });
@@ -618,7 +921,7 @@ mod tests {
     fn ignores_a_values_payload_with_nothing_to_show() {
         // Must not blank an already-populated panel.
         let data = json!({"messages": [], "artifacts": {"datasets": [], "edges": []}}).to_string();
-        let decoded = decode_sse_event(&SseEvent {
+        let decoded = decode(&SseEvent {
             name: "values".into(),
             data,
         });
@@ -636,7 +939,7 @@ mod tests {
         let mut decoded = Vec::new();
         for byte in wire.as_bytes() {
             for event in decoder.push(&[*byte]) {
-                decoded.extend(decode_sse_event(&event));
+                decoded.extend(decode(&event));
             }
         }
 
@@ -655,11 +958,11 @@ mod tests {
             data: r#"[{"type":"AIMessageChunk","id":"m1","content":[{"type":"text","text":"blocks"},{"type":"other","text":"skip"}]},{}]"#.into(),
         };
         assert_eq!(
-            decode_sse_event(&string_form),
+            decode(&string_form),
             vec![TurnEvent::Token("plain".into())]
         );
         assert_eq!(
-            decode_sse_event(&block_form),
+            decode(&block_form),
             vec![TurnEvent::Token("blocks".into())]
         );
     }
@@ -674,17 +977,170 @@ mod tests {
             name: "values".into(),
             data: r#"{"messages":[]}"#.into(),
         };
-        assert!(decode_sse_event(&human).is_empty());
-        assert!(decode_sse_event(&values).is_empty());
+        assert!(decode(&human).is_empty());
+        assert!(decode(&values).is_empty());
     }
 
     #[test]
-    fn accepts_subagent_namespaced_messages() {
-        let ns = SseEvent {
-            name: "messages|theorizer:abc".into(),
-            data: r#"[{"type":"AIMessageChunk","id":"m2","content":"sub"},{}]"#.into(),
+    fn attributes_subagent_text_to_its_agent_and_leaves_coordinator_text_alone() {
+        // Namespace + `lc_agent_name` as measured on a real delegation.
+        let sub = SseEvent {
+            name: "messages|tools:d6c187d3-3eef-774e-4c2f-7151df99cffb".into(),
+            data: json!([
+                {"type": "AIMessageChunk", "id": "m2", "content": "sub"},
+                {"lc_agent_name": "academic_researcher", "langgraph_node": "model"}
+            ])
+            .to_string(),
         };
-        assert_eq!(decode_sse_event(&ns), vec![TurnEvent::Token("sub".into())]);
+        assert_eq!(
+            decode(&sub),
+            vec![TurnEvent::SubagentToken {
+                agent: AgentRef {
+                    ns: "tools:d6c187d3-3eef-774e-4c2f-7151df99cffb".into(),
+                    name: "academic_researcher".into(),
+                },
+                text: "sub".into(),
+            }]
+        );
+
+        // A top-level frame stays a plain token even though its own metadata carries
+        // a `model:<uuid>` checkpoint namespace — which is why the event name, not
+        // the metadata, is the discriminator.
+        let coordinator = SseEvent {
+            name: "messages".into(),
+            data: json!([
+                {"type": "AIMessageChunk", "id": "m1", "content": "answer"},
+                {"langgraph_checkpoint_ns": "model:27ee27ea-dda1-bd14-912e-e10f"}
+            ])
+            .to_string(),
+        };
+        assert_eq!(
+            decode(&coordinator),
+            vec![TurnEvent::Token("answer".into())]
+        );
+    }
+
+    #[test]
+    fn names_a_subagent_even_when_the_backend_omits_lc_agent_name() {
+        let sub = SseEvent {
+            name: "messages|tools:abc".into(),
+            data: json!([{"type": "AIMessageChunk", "content": "x"}, {}]).to_string(),
+        };
+        let decoded = decode(&sub);
+        let [TurnEvent::SubagentToken { agent, .. }] = decoded.as_slice() else {
+            panic!("expected a subagent token");
+        };
+        assert_eq!(agent.name, "subagent");
+    }
+
+    #[test]
+    fn groups_nested_delegations_separately_from_their_parent() {
+        // The JS SDK keys on the *first* `tools:` segment, which would file an inner
+        // agent's work under its parent's group while labelling it with the inner
+        // agent's name. We key on the whole namespace instead.
+        let outer = agent_ref("tools:aaa", Some(&json!({"lc_agent_name": "coordinator_two"})));
+        let inner = agent_ref(
+            "tools:aaa|tools:bbb",
+            Some(&json!({"lc_agent_name": "report_writer"})),
+        );
+        assert_ne!(outer.unwrap().ns, inner.unwrap().ns);
+
+        // `model:<uuid>` is a node, not a delegation.
+        assert!(agent_ref("model:abc", None).is_none());
+        assert!(agent_ref("", None).is_none());
+    }
+
+    #[test]
+    fn announces_a_delegation_only_once_its_streamed_args_are_complete() {
+        // Measured shape: `{"subagent_type":"academic_researcher","description":"…"}`
+        // arrives in fragments, and only the first one names the tool.
+        let frames = tool_call_frames(
+            "messages",
+            DELEGATE_TOOL,
+            &[
+                r#"{"subagent_type":"aca"#,
+                r#"demic_researcher","description":"Find the canonical DESeq2 paper."#,
+                r#""}"#,
+            ],
+        );
+        let mut decoder = TurnDecoder::default();
+        let events = drain(&mut decoder, &frames);
+
+        // Exactly one step, and not until the JSON closed — a partial
+        // `"subagent_type":"aca` must never become a label.
+        assert_eq!(
+            events,
+            vec![TurnEvent::Step {
+                agent: None,
+                label: "delegating to academic_researcher — Find the canonical DESeq2 paper.".into(),
+            }]
+        );
+        // Replaying the closing fragment must not announce a second time.
+        assert!(decoder.push(frames.last().unwrap()).is_empty());
+    }
+
+    #[test]
+    fn announces_an_ordinary_tool_call_on_sight_and_attributes_it() {
+        // A subagent's own tool call: the useful label is the name, which arrives in
+        // the first fragment, so there is nothing to wait for.
+        let frames = tool_call_frames(
+            "messages|tools:d6c187d3",
+            "search_paper_by_title",
+            &[r#"{"title":"Moderated estimation"#, r#""}"#],
+        );
+        let mut decoder = TurnDecoder::default();
+        assert_eq!(
+            drain(&mut decoder, &frames),
+            vec![TurnEvent::Step {
+                agent: Some(AgentRef {
+                    ns: "tools:d6c187d3".into(),
+                    name: "academic_researcher".into(),
+                }),
+                label: "search_paper_by_title".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn rejects_a_malformed_subagent_type() {
+        assert!(delegation_label(r#"{"subagent_type":"9bad"}"#).is_none());
+        assert!(delegation_label(r#"{"subagent_type":"ab"}"#).is_none());
+        assert!(delegation_label(r#"{"subagent_type":"has space"}"#).is_none());
+        assert!(delegation_label(r#"{"description":"no type"}"#).is_none());
+        assert_eq!(
+            delegation_label(r#"{"subagent_type":"report_writer"}"#).as_deref(),
+            Some("delegating to report_writer"),
+        );
+    }
+
+    #[test]
+    fn ignores_a_subagents_own_state_snapshot() {
+        // It carries the same artifacts as the coordinator's `values` a few events
+        // later; consuming both would render the outputs twice.
+        let sub = SseEvent {
+            name: "values|tools:d6c187d3".into(),
+            data: json!({"artifacts": {"sources": [{"citation": "c"}]}}).to_string(),
+        };
+        assert!(decode(&sub).is_empty(), "{:?}", decode(&sub));
+    }
+
+    #[test]
+    fn summarizes_a_structured_subagent_result_instead_of_dumping_json() {
+        // A real `academic_researcher` reply: the whole answer is one JSON object.
+        let structured = json!({
+            "summary": "The canonical DESeq2 paper is the 2014 Genome Biology article.",
+            "sources": [{"citation": "Love MI et al. 2014."}],
+        })
+        .to_string();
+        assert_eq!(
+            summarize_agent_result(&structured),
+            "The canonical DESeq2 paper is the 2014 Genome Biology article. · 1 sources",
+        );
+
+        // Prose is untouched, and so is a partial object still streaming in — which
+        // is what makes the trace look alive rather than empty.
+        assert_eq!(summarize_agent_result("  plain prose  "), "plain prose");
+        assert_eq!(summarize_agent_result(r#"{"summary":"half"#), r#"{"summary":"half"#);
     }
 
     #[test]
@@ -694,7 +1150,7 @@ mod tests {
             data: r#"{"message":"boom"}"#.into(),
         };
         assert_eq!(
-            decode_sse_event(&err),
+            decode(&err),
             vec![TurnEvent::Error("boom".into())]
         );
     }
@@ -707,7 +1163,7 @@ mod tests {
         );
         assert_eq!(events.len(), 1);
         assert_eq!(
-            decode_sse_event(&events[0]),
+            decode(&events[0]),
             vec![TurnEvent::Token("crlf".into())]
         );
     }

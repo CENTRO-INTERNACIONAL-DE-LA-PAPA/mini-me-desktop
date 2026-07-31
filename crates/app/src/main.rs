@@ -1,12 +1,13 @@
 //! Mini-Me Desktop — GPUI entry point and root workbench view.
 //!
-//! P6.2. The three-pane workbench (rail / chat / artifacts) now streams a **real
+//! P6.3. The three-pane workbench (rail / chat / artifacts) streams a **real
 //! coordinator turn** from the local Python sidecar: `Sidecar` spawns and
-//! health-checks the backend, and assistant tokens land in the transcript as
-//! they arrive over SSE.
+//! health-checks the backend, assistant tokens land in the transcript as they
+//! arrive over SSE, and the **agent activity trace** shows what subagents are doing
+//! while they do it instead of leaving a silent gap (plan §15c).
 //!
-//! Built against the published `gpui 0.2.2` (see crates/app/Cargo.toml). Rich
-//! rendering (markdown, artifacts, spine) is P6.3.
+//! Built against the published `gpui 0.2.2` (see crates/app/Cargo.toml). Markdown
+//! rendering and the command palette are still open.
 
 mod backend;
 mod composer;
@@ -15,14 +16,15 @@ mod sidecar;
 
 use std::sync::Arc;
 
+use anyhow::Context as _;
 use futures::StreamExt;
 use gpui::{
-    div, prelude::*, px, rgb, size, App, Application, Bounds, Context, Entity, Focusable, Window,
-    WindowBounds, WindowOptions,
+    div, prelude::*, px, rgb, size, App, Application, Bounds, Context, Entity, Focusable,
+    SharedString, Window, WindowBounds, WindowOptions,
 };
 
 use composer::{Composer, ComposerEvent};
-use protocol::{Bucket, Project, TurnEvent};
+use protocol::{AgentRef, Bucket, Project, TurnEvent};
 use sidecar::Sidecar;
 
 // ---- Palette (placeholder; align with the web app's tokens in P6.3) --------
@@ -41,6 +43,16 @@ const SEED_PROMPT: &str = "In one short paragraph, what is your role as the Mini
 /// A small caps-ish section heading for the side panel.
 fn section_label(text: &'static str) -> impl IntoElement {
     div().text_color(rgb(ACCENT)).text_xs().child(text)
+}
+
+/// One line of the activity trace: a tool call, or a delegation.
+fn step_line(label: &str) -> impl IntoElement {
+    div()
+        .w_full()
+        .min_w_0()
+        .text_color(rgb(MUTED))
+        .text_xs()
+        .child(format!("· {label}"))
 }
 
 /// A labelled, bulleted list of spine entries.
@@ -72,10 +84,75 @@ fn spine_list(label: &'static str, items: &[String], bullet: &'static str) -> im
     list
 }
 
-/// A single chat message in the transcript.
+/// A single chat message in the transcript, plus the agent activity behind it.
 struct Message {
     role: &'static str,
     body: String,
+    /// Coordinator-level steps (tool calls, delegations), in the order they happened.
+    steps: Vec<String>,
+    /// One group per subagent invocation.
+    agents: Vec<AgentTrace>,
+}
+
+impl Message {
+    fn new(role: &'static str, body: String) -> Self {
+        Self {
+            role,
+            body,
+            steps: Vec::new(),
+            agents: Vec::new(),
+        }
+    }
+
+    /// Nothing happened here worth keeping. A turn that produced only tool calls
+    /// still has activity, so "empty body" alone is not enough to drop a message —
+    /// that would throw away the only record of a purely delegated turn.
+    fn is_silent(&self) -> bool {
+        self.body.is_empty() && self.steps.is_empty() && self.agents.is_empty()
+    }
+}
+
+/// Live trace of one subagent invocation.
+struct AgentTrace {
+    /// The namespace from [`AgentRef`] — the grouping key, unique per invocation.
+    ns: String,
+    name: String,
+    steps: Vec<String>,
+    text: String,
+    expanded: bool,
+}
+
+/// Most text one trace keeps. A trace is a tail-followed log, and a research turn
+/// can stream far more subagent text than the answer it produces, so when a group
+/// overflows we drop from the *front*: the newest work is what the user is watching.
+const MAX_TRACE_CHARS: usize = 4_000;
+
+impl AgentTrace {
+    fn push_text(&mut self, text: &str) {
+        self.text.push_str(text);
+        let overflow = self.text.chars().count().saturating_sub(MAX_TRACE_CHARS);
+        if overflow > 0 {
+            let kept: String = self.text.chars().skip(overflow).collect();
+            self.text = format!("…{kept}");
+        }
+    }
+}
+
+/// Find (or start) the trace group for a subagent invocation.
+fn trace_for<'a>(message: &'a mut Message, agent: &AgentRef) -> &'a mut AgentTrace {
+    if let Some(index) = message.agents.iter().position(|trace| trace.ns == agent.ns) {
+        return &mut message.agents[index];
+    }
+    message.agents.push(AgentTrace {
+        ns: agent.ns.clone(),
+        name: agent.name.clone(),
+        steps: Vec::new(),
+        text: String::new(),
+        // A subagent that just started is what is happening *now*, so it opens
+        // expanded; the turn ending collapses everything so the answer stays primary.
+        expanded: true,
+    });
+    message.agents.last_mut().expect("just pushed")
 }
 
 /// Root view: the three-pane research workbench.
@@ -156,15 +233,9 @@ impl Workbench {
         self.status = "starting…".into();
         self.composer
             .update(cx, |composer, cx| composer.set_disabled(true, cx));
-        self.transcript.push(Message {
-            role: "you",
-            body: prompt.clone(),
-        });
-        // The assistant message streams into this (initially empty) entry.
-        self.transcript.push(Message {
-            role: "mini-me",
-            body: String::new(),
-        });
+        self.transcript.push(Message::new("you", prompt.clone()));
+        // The assistant message — text *and* activity — streams into this entry.
+        self.transcript.push(Message::new("mini-me", String::new()));
 
         let mut events = self.sidecar.submit(prompt);
         cx.spawn(async move |this, cx| {
@@ -192,6 +263,21 @@ impl Workbench {
             TurnEvent::Token(text) => {
                 if let Some(last) = self.transcript.last_mut() {
                     last.body.push_str(&text);
+                }
+            }
+            // Activity attaches to the in-flight assistant message, so it sits with
+            // the answer it produced instead of in a panel the user has to correlate.
+            TurnEvent::Step { agent, label } => {
+                if let Some(message) = self.transcript.last_mut() {
+                    match agent {
+                        None => message.steps.push(label),
+                        Some(agent) => trace_for(message, &agent).steps.push(label),
+                    }
+                }
+            }
+            TurnEvent::SubagentToken { agent, text } => {
+                if let Some(message) = self.transcript.last_mut() {
+                    trace_for(message, &agent).push_text(&text);
                 }
             }
             // Each `values` event is a *whole* snapshot, so replace rather than
@@ -229,13 +315,20 @@ impl Workbench {
         }
     }
 
-    /// A turn ended (either way): drop the empty assistant placeholder if no
-    /// token ever arrived, and hand the field back to the user.
+    /// A turn ended (either way): collapse its activity trace, drop the assistant
+    /// placeholder if nothing at all arrived, and hand the field back to the user.
     fn finish_turn(&mut self, cx: &mut Context<Self>) {
+        // While a turn runs the trace is the only sign of progress; once the answer
+        // is there, the answer is the point.
+        if let Some(message) = self.transcript.last_mut() {
+            for trace in &mut message.agents {
+                trace.expanded = false;
+            }
+        }
         if self
             .transcript
             .last()
-            .is_some_and(|message| message.role == "mini-me" && message.body.is_empty())
+            .is_some_and(|message| message.role == "mini-me" && message.is_silent())
         {
             self.transcript.pop();
         }
@@ -282,29 +375,38 @@ impl Workbench {
                     .child("No turns yet. Press Run to stream one from the local sidecar."),
             );
         }
-        for message in &self.transcript {
+        for (index, message) in self.transcript.iter().enumerate() {
             let label_color = if message.role == "you" { MUTED } else { ACCENT };
-            // An empty assistant body means we're still waiting on first token.
-            let body = if message.body.is_empty() && self.streaming {
+            let has_activity = !message.steps.is_empty() || !message.agents.is_empty();
+            // An empty assistant body means we're still waiting on the first token —
+            // unless a trace is already showing what's going on, which says more.
+            let body = if message.body.is_empty() && self.streaming && !has_activity {
                 "…".to_string()
             } else {
                 message.body.clone()
             };
-            col = col.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .w_full()
-                    .min_w_0()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_color(rgb(label_color))
-                            .text_sm()
-                            .child(message.role),
-                    )
-                    .child(div().w_full().text_color(rgb(TEXT)).child(body)),
-            );
+            let mut block = div()
+                .flex()
+                .flex_col()
+                .w_full()
+                .min_w_0()
+                .gap_1()
+                .child(
+                    div()
+                        .text_color(rgb(label_color))
+                        .text_sm()
+                        .child(message.role),
+                );
+            // The trace goes *above* the answer, because that is the order it
+            // happened in and because the answer should be the last thing read.
+            if has_activity {
+                block = block.child(self.activity_block(index, message, cx));
+            }
+            if !body.is_empty() {
+                col = col.child(block.child(div().w_full().text_color(rgb(TEXT)).child(body)));
+            } else {
+                col = col.child(block);
+            }
         }
 
         div()
@@ -316,6 +418,94 @@ impl Workbench {
             .child(col)
             .child(self.composer_row(cx))
             .child(self.status_bar())
+    }
+
+    /// The agent activity trace for one turn: coordinator steps as one-liners, then
+    /// a collapsible group per subagent.
+    ///
+    /// This exists because a delegated turn is otherwise *silent*: the coordinator
+    /// emits only a `task` tool call while a subagent does the real work, so the user
+    /// sees a frozen window and then an answer with no account of where it came from
+    /// (plan §15).
+    fn activity_block(
+        &self,
+        message_index: usize,
+        message: &Message,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mut block = div().flex().flex_col().w_full().min_w_0().gap_1();
+
+        for step in &message.steps {
+            block = block.child(step_line(step));
+        }
+
+        for (trace_index, trace) in message.agents.iter().enumerate() {
+            let steps = if trace.steps.len() == 1 {
+                "1 step".to_string()
+            } else {
+                format!("{} steps", trace.steps.len())
+            };
+            let header = format!(
+                "{} {} · {steps} · {} chars",
+                if trace.expanded { "▾" } else { "▸" },
+                trace.name,
+                trace.text.chars().count(),
+            );
+
+            let mut group = div()
+                .flex()
+                .flex_col()
+                .w_full()
+                .min_w_0()
+                .gap_1()
+                .pl_2()
+                .border_l_1()
+                .border_color(rgb(BORDER))
+                .child(
+                    div()
+                        // Unique per (turn, trace) so GPUI keeps each group's click
+                        // state to itself.
+                        .id(SharedString::from(format!(
+                            "trace-{message_index}-{trace_index}"
+                        )))
+                        .w_full()
+                        .min_w_0()
+                        .text_color(rgb(ACCENT))
+                        .text_xs()
+                        .hover(|style| style.cursor_pointer())
+                        .child(header)
+                        .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                            if let Some(message) = workbench.transcript.get_mut(message_index) {
+                                if let Some(trace) = message.agents.get_mut(trace_index) {
+                                    trace.expanded = !trace.expanded;
+                                }
+                            }
+                            cx.notify();
+                        })),
+                );
+
+            if trace.expanded {
+                for step in &trace.steps {
+                    group = group.child(step_line(step));
+                }
+                // Not the raw stream: a subagent's answer often arrives as one JSON
+                // object, which is unreadable as a trace line.
+                let preview = protocol::summarize_agent_result(&trace.text);
+                if !preview.is_empty() {
+                    group = group.child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .text_color(rgb(MUTED))
+                            .text_xs()
+                            .child(preview),
+                    );
+                }
+            }
+            block = block.child(group);
+        }
+
+        block
     }
 
     /// The input row: the text field plus a Send affordance.
@@ -578,6 +768,166 @@ impl Render for Workbench {
     }
 }
 
+/// Decode a whole captured SSE stream into the transcript state it would produce.
+///
+/// Shared by `--replay` and the fixture test, so both exercise the same path the
+/// window does: frame → decode → transcript, with nothing simulated in between.
+fn decode_capture(raw: &[u8], mut on_status: impl FnMut(&str)) -> (Message, Vec<Bucket>) {
+    let mut frames = protocol::SseDecoder::default();
+    let mut turn = protocol::TurnDecoder::default();
+    let mut message = Message::new("mini-me", String::new());
+    let mut outputs: Vec<Bucket> = Vec::new();
+
+    // One push: the framer handles the split, exactly as it does off the socket.
+    for frame in frames.push(raw) {
+        for event in turn.push(&frame) {
+            match event {
+                TurnEvent::Token(text) => message.body.push_str(&text),
+                TurnEvent::Step { agent, label } => match agent {
+                    None => message.steps.push(label),
+                    Some(agent) => trace_for(&mut message, &agent).steps.push(label),
+                },
+                TurnEvent::SubagentToken { agent, text } => {
+                    trace_for(&mut message, &agent).push_text(&text);
+                }
+                TurnEvent::Snapshot(snapshot) => {
+                    if !snapshot.buckets.is_empty() {
+                        outputs = snapshot.buckets;
+                    }
+                }
+                TurnEvent::Status(status) => on_status(&status),
+                TurnEvent::Error(error) => on_status(&format!("error: {error}")),
+                TurnEvent::Done => {}
+            }
+        }
+    }
+    (message, outputs)
+}
+
+/// Replay a captured SSE stream and print what the transcript would show. No
+/// backend, no window, no tokens spent.
+///
+/// The activity trace is the one feature whose input is 500 events of a real
+/// delegation, so being able to re-run a saved capture is the difference between
+/// testing it and paying for a research turn every time the decoder changes.
+fn replay(path: &str) -> anyhow::Result<()> {
+    let raw = std::fs::read(path).with_context(|| format!("could not read {path}"))?;
+    let (message, outputs) = decode_capture(&raw, |status| println!("status   : {status}"));
+
+    println!("\n--- activity ---");
+    for step in &message.steps {
+        println!("· {step}");
+    }
+    for trace in &message.agents {
+        println!(
+            "▾ {} · {} step(s) · {} chars   [{}]",
+            trace.name,
+            trace.steps.len(),
+            trace.text.chars().count(),
+            trace.ns,
+        );
+        for step in &trace.steps {
+            println!("    · {step}");
+        }
+        println!("    {}", protocol::summarize_agent_result(&trace.text));
+    }
+    println!("\n--- outputs ---");
+    for bucket in &outputs {
+        println!("{} · {}", bucket.name, bucket.items.len());
+    }
+    println!("\n--- assistant text ---\n{}", message.body.trim());
+
+    anyhow::ensure!(
+        !message.steps.is_empty() || !message.agents.is_empty(),
+        "the capture decoded no activity at all — did `stream_subgraphs` get dropped?"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A real delegated turn, reduced to fit the repo (see the fixture's header).
+    /// Replaying it is what proves the trace works on *measured* wire data rather
+    /// than on shapes hand-written from the docs.
+    const DELEGATED_TURN: &[u8] = include_bytes!("../tests/fixtures/delegated-turn.sse");
+
+    #[test]
+    fn a_real_delegated_turn_produces_one_named_trace_with_its_steps() {
+        let mut statuses = Vec::new();
+        let (message, outputs) = decode_capture(DELEGATED_TURN, |status| {
+            statuses.push(status.to_string())
+        });
+
+        // The coordinator's own line: one delegation, announced once, labelled from
+        // arguments that arrived across 60 fragments.
+        assert_eq!(
+            message.steps,
+            vec![
+                "delegating to academic_researcher — Find the canonical DESeq2 paper. Return a concise citation…"
+            ]
+        );
+
+        // One group, named by the backend, with the subagent's real tool call in it.
+        let [trace] = message.agents.as_slice() else {
+            panic!("expected exactly one subagent group, got {}", message.agents.len());
+        };
+        assert_eq!(trace.name, "academic_researcher");
+        assert!(trace.ns.starts_with("tools:"), "{}", trace.ns);
+        assert_eq!(trace.steps, vec!["search_paper_by_title"]);
+
+        // Its answer was a JSON object, so the trace shows the readable part.
+        let preview = protocol::summarize_agent_result(&trace.text);
+        assert!(preview.starts_with("The canonical DESeq2 paper"), "{preview}");
+        assert!(preview.ends_with("· 1 sources"), "{preview}");
+
+        // The coordinator's answer still arrives, and the outputs panel still fills:
+        // subagent frames must not be mistaken for either.
+        assert!(message.body.contains("Genome Biology"), "{}", message.body);
+        assert_eq!(
+            outputs.iter().map(|b| (b.name, b.items.len())).collect::<Vec<_>>(),
+            vec![("sources", 1)]
+        );
+
+        // Sandbox provisioning reaches the status line — the first turn on a cold
+        // thread waits on it, and without this the window looks stuck.
+        assert!(
+            statuses.iter().any(|status| status == "Creating sandbox…"),
+            "{statuses:?}"
+        );
+    }
+
+    #[test]
+    fn a_purely_delegated_turn_is_not_discarded_as_empty() {
+        // The web client filters tool-call-only assistant messages out of the
+        // transcript, which is precisely why a delegation there renders as nothing.
+        // Activity has to count as content or we would reproduce the same silence.
+        let mut message = Message::new("mini-me", String::new());
+        assert!(message.is_silent());
+        message.steps.push("delegating to report_writer".into());
+        assert!(!message.is_silent());
+    }
+
+    #[test]
+    fn a_trace_keeps_the_newest_text_when_it_overflows() {
+        let mut trace = AgentTrace {
+            ns: "tools:a".into(),
+            name: "academic_researcher".into(),
+            steps: Vec::new(),
+            text: String::new(),
+            expanded: true,
+        };
+        // Multi-byte on purpose: the cap counts characters, so a naive byte slice
+        // would split one and panic.
+        trace.push_text(&"á".repeat(MAX_TRACE_CHARS));
+        trace.push_text("tail");
+        assert!(trace.text.ends_with("tail"));
+        assert!(trace.text.starts_with('…'));
+        assert!(trace.text.chars().count() <= MAX_TRACE_CHARS + 1);
+    }
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -585,6 +935,22 @@ fn main() {
                 .unwrap_or_else(|_| "info".into()),
         )
         .init();
+
+    // `--replay <capture>` needs no backend at all, so it runs before one is
+    // configured.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(path) = args.iter().position(|a| a == "--replay") {
+        let Some(capture) = args.get(path + 1) else {
+            eprintln!("--replay needs a path to a captured SSE stream");
+            std::process::exit(2);
+        };
+        if let Err(error) = replay(capture) {
+            eprintln!("\nreplay: FAIL — {error:#}");
+            std::process::exit(1);
+        }
+        println!("\nreplay: PASS");
+        return;
+    }
 
     let config = backend::BackendConfig::default();
     tracing::info!(
@@ -602,10 +968,20 @@ fn main() {
 
     // `--check-backend [--stream]` exercises the sidecar without a window, so the
     // client/backend contract can be verified on a headless machine.
-    let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--check-backend") {
-        let stream = args.iter().any(|a| a == "--stream");
-        let outcome = sidecar.check(stream);
+        // `--stream` runs the seed prompt; `--prompt "…"` runs your own, which is how
+        // a delegating turn (and so the activity trace) gets verified headlessly.
+        let custom = args
+            .iter()
+            .position(|a| a == "--prompt")
+            .and_then(|at| args.get(at + 1))
+            .map(String::as_str);
+        let prompt = match (custom, args.iter().any(|a| a == "--stream")) {
+            (Some(prompt), _) => Some(prompt),
+            (None, true) => Some(SEED_PROMPT),
+            (None, false) => None,
+        };
+        let outcome = sidecar.check(prompt);
         let failed = match &outcome {
             Ok(()) => {
                 println!("\nbackend check: PASS");

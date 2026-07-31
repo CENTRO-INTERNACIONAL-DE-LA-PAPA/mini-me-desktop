@@ -6,7 +6,7 @@ This repo is the desktop **client**; the Mini-Me agent stack (the coordinator +
 Asta-backed subagents + skills) stays in Python/TypeScript and runs as a **local
 sidecar** that the client spawns and supervises.
 
-## Where we are now (updated 2026-07-30)
+## Where we are now (updated 2026-07-31)
 
 | Milestone | Status |
 |---|---|
@@ -14,7 +14,7 @@ sidecar** that the client spawns and supervises.
 | **P6.1** — buildable window *(go/no-go gate)* | ✅ **PASS** — builds green; window renders natively (verified on Windows/DirectX). §8 |
 | **P6.2** — talk to the real backend | ✅ **done** — a real coordinator turn spawned, streamed and rendered **on Windows** (2026-07-30). §9 |
 | **P6.2.5** — local-first backend (drop LangSmith/WorkOS) | 🔴 **queued** — needs sign-off on where the change lands. WSL2 runtime now working, which is its prerequisite. §10/§11/§13 |
-| **P6.3** — port the core panels | 🟡 **in progress** — composer, spine, outputs, sandbox status done; remaining: **agent activity trace** (§15) and command palette |
+| **P6.3** — port the core panels | 🟡 **in progress** — composer, spine, outputs, sandbox status, **agent activity trace** done; remaining: **command palette** |
 | **P6.4** — native affordances + shipping | ⬜ not started |
 | **P6.5** — async subagents + Jobs panel | ⬜ planned — the payoff that most justifies going native. §14 |
 
@@ -196,10 +196,12 @@ the backend), `ui` (reusable GPUI components), `sidecar` (packaging).
      (`Creating sandbox… → Sandbox ready`). This matters because the first turn on a
      cold thread blocks on that provisioning, and without it the UI looks stuck.
   5. ⬜ **Command palette** — Zed-style `Ctrl-P`: run turn, new thread, switch
-     project.
-  6. ⬜ **Agent activity trace** (§15) — stream subagent work and tool-call steps
-     instead of showing a silent gap while a subagent runs. Needs
-     `stream_subgraphs: true` plus attribution via `lc_agent_name`.
+     project. *The last open item in P6.3.*
+  6. ✅ **Agent activity trace** (§15/§15c) — a delegated turn is no longer silent.
+     `stream_subgraphs: true` is now requested, subagent frames are attributed by
+     namespace and named from `lc_agent_name`, and the transcript shows the
+     coordinator's delegation plus a collapsible group per subagent with its tool
+     calls and streamed text. *Verified live 2026-07-31.*
 - ⬜ **P6.4 — Native affordances + shipping.** Local file → analysis,
   background-run tray + notifications, **keychain-stored keys**, multi-window.
   Plus what "installable" now means: a **pinned Mini-Me checkout + venv the app
@@ -426,9 +428,12 @@ needs only `OPENAI_API_KEY`.
   transcript via `cx.spawn` + `weak.update(…)` + `cx.notify()`, with a status bar
   (backend state / errors / base URL) and a Run button. A text composer is P6.3;
   P6.2 uses one seeded prompt.
-- **`--check-backend [--stream]`** — a headless self-check that exercises
-  spawn → health → thread → stream with **no window**, so the contract is
-  testable on a headless machine (and doubles as a debug tool).
+- **`--check-backend [--stream | --prompt "…"]`** — a headless self-check that
+  exercises spawn → health → thread → stream with **no window**, so the contract is
+  testable on a headless machine (and doubles as a debug tool). `--prompt` runs an
+  arbitrary turn and reports the activity trace (§15c).
+- **`--replay <capture>`** — decodes a saved SSE capture into the transcript it would
+  produce. No backend, no window, no tokens (§15c).
 
 **Env overrides:** `MINIME_BACKEND_DIR`, `MINIME_BACKEND_PORT`,
 `MINIME_BACKEND_URL`, `MINIME_BACKEND_ATTACH_ONLY`.
@@ -997,3 +1002,87 @@ configured, *not* dropping non-text blocks is a place we can exceed the web app.
 
 *Caveat: this audit read the SDK's compiled `dist/` JavaScript, so names are
 minifier-influenced though the logic is intact.*
+
+### 15c. What was built (P6.3 step 6, shipped 2026-07-31)
+
+**The gap is closed.** Ask *"find the deseq2 paper"* and the transcript now reads:
+
+```
+mini-me
+· delegating to academic_researcher — Find the canonical DESeq2 paper. Return a concise citation…
+▾ academic_researcher · 2 steps · 722 chars
+    · search_papers_by_relevance
+    · get_paper
+    The canonical DESeq2 paper is the 2014 Genome Biology article… · 1 sources
+Love MI, Huber W, Anders S. 2014. Moderated estimation of fold change …
+```
+
+Verified against a live delegating turn (`--check-backend --prompt "find the deseq2
+paper"`, 2026-07-31): the delegation, both subagent tool calls and 722 characters of
+subagent text all arrived. Note the tools differ from the §15 capture
+(`search_papers_by_relevance` + `get_paper` vs `search_paper_by_title`) — the trace
+reports what the run actually did, it does not replay a script.
+
+**Where it lives.** `protocol::TurnDecoder` (the decoder), `TurnEvent::Step` /
+`TurnEvent::SubagentToken` (the wire→UI contract), `AgentTrace` in `main.rs` (the
+per-invocation group), `Workbench::activity_block` (the render).
+
+**Six decisions worth keeping straight:**
+
+1. **Attribution is by SSE event name, not metadata.** A subagent's frames arrive as
+   `messages|tools:<uuid>`; the coordinator's arrive as plain `messages`. The
+   metadata's own `langgraph_checkpoint_ns` is *not* usable as the discriminator —
+   measured, top-level frames carry `model:<uuid>` there, which names a node, not a
+   delegation. Display name comes from `lc_agent_name`, so §15b's
+   description-matching heuristic was never needed.
+2. **The grouping key is the whole namespace.** The JS SDK keys on the *first*
+   `tools:` segment; we keep `tools:a|tools:b` intact, so a nested delegation gets
+   its own group under its own name instead of being filed under its parent's while
+   wearing the inner agent's label.
+3. **The decoder had to become stateful.** Only the *first* `tool_call_chunk` of a
+   call carries its name and id; later fragments are keyed by `index` alone. The
+   `task` delegation's label lives in arguments that arrived across **60 fragments**,
+   so `TurnDecoder` accumulates them and announces once — using "does the JSON parse
+   yet" as the completeness signal, since the backend leaves `chunk_position` null.
+   `subagent_type` is shape-checked (`^[a-zA-Z][a-zA-Z0-9_-]{2,49}$`, as the web
+   client does) so a half-streamed value can't become a label.
+4. **A subagent's "text" is often not prose — this was the surprise.** On the
+   measured turn `academic_researcher` streamed its entire answer as *one JSON
+   object* (its structured response, 678 chars over 173 frames). Dumping it would
+   show the user a wall of braces, so `summarize_agent_result` lifts `summary` out
+   and counts the array fields (`… · 1 sources`). A partial object still streaming,
+   or genuine prose, passes through untouched — which incidentally makes the trace
+   look alive and then resolve into a sentence.
+5. **`values|tools:…` is deliberately ignored.** The subagent's own snapshot carries
+   the same artifacts as the coordinator's, three events earlier; consuming both
+   would render the outputs twice. `updates` is still not requested at all.
+6. **Activity counts as content.** `finish_turn` used to drop an assistant message
+   with an empty body. A purely delegated turn *has* an empty body (§15b), so that
+   would have thrown away the only record of the work — the condition is now
+   `is_silent()`: no text **and** no steps **and** no traces.
+
+**Cost control.** Each group caps its stored text at 4 000 characters, dropping from
+the *front* — a trace is a tail-followed log. New groups open expanded (they are what
+is happening now) and all collapse when the turn ends, so the answer stays primary.
+
+**Two new verification paths, both free:**
+
+- `--replay <capture>` decodes a saved SSE capture and prints the transcript it would
+  produce. No backend, no window, no tokens. The full 718 KB capture lives outside
+  the repo at `~/Documents/mini-me-desktop-fixtures/subagent-stream-sample.txt`.
+- `crates/app/tests/fixtures/delegated-turn.sse` (50 KB) is that capture reduced to
+  fit the repo — middleware `updates` dropped, metadata narrowed to the fields a
+  client reads, single-token text frames coalesced, tool results truncated, but
+  **every `tool_call_chunks` fragment verbatim**, because that is where the only
+  stateful logic lives. It replays to byte-identical output and is asserted by
+  `a_real_delegated_turn_produces_one_named_trace_with_its_steps`.
+- `--check-backend --prompt "…"` runs any prompt headlessly and prints steps and a
+  per-subagent tally, so the trace can be checked on the Linux box where no window
+  can open.
+
+**Still not available, and not faked:** no reasoning/thinking channel (every content
+block on the measured turns was a plain string), and **no per-subagent completion
+signal** — the terminal `task` `ToolMessage` arrives in the *main* namespace and
+can't be tied to a namespace without §15b's heuristic, so groups simply collapse when
+the turn ends rather than showing a false "done" tick. Theorizer/DataVoyager progress
+is still HTTP-polled upstream and remains unimplemented here.

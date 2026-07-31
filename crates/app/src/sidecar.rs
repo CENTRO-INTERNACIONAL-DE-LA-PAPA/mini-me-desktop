@@ -16,7 +16,20 @@ use futures::channel::mpsc;
 use tokio::sync::Mutex;
 
 use crate::backend::{BackendConfig, BackendSupervisor};
-use crate::protocol::{LangGraphClient, Project, TurnEvent};
+use crate::protocol::{AgentRef, LangGraphClient, Project, TurnEvent};
+
+/// Find (or start) the tally row for one subagent invocation, keyed by namespace so
+/// two concurrent runs of the same subagent type are counted separately.
+fn entry<'a>(
+    agents: &'a mut Vec<(String, String, usize, usize)>,
+    agent: &AgentRef,
+) -> &'a mut (String, String, usize, usize) {
+    if let Some(index) = agents.iter().position(|row| row.0 == agent.ns) {
+        return &mut agents[index];
+    }
+    agents.push((agent.ns.clone(), agent.name.clone(), 0, 0));
+    agents.last_mut().expect("just pushed")
+}
 
 /// Owns the Tokio runtime and the supervised backend process.
 pub struct Sidecar {
@@ -103,12 +116,13 @@ impl Sidecar {
     }
 
     /// Headless check of the backend path — no GPUI, no window. Verifies the
-    /// sidecar comes up and a thread can be created; with `stream` it also runs
-    /// one real coordinator turn (which calls the model, so it costs tokens).
+    /// sidecar comes up and a thread can be created; with `prompt` it also runs one
+    /// real coordinator turn (which calls the model, so it costs tokens). Pass a
+    /// prompt that delegates to exercise the activity trace end to end.
     ///
     /// Exists so the whole client/backend contract can be exercised on a
     /// headless machine, where no window can be opened.
-    pub fn check(&self, stream: bool) -> Result<()> {
+    pub fn check(&self, prompt: Option<&str>) -> Result<()> {
         let supervisor = self.supervisor.clone();
         let base_url = self.base_url.clone();
         println!("url      : {base_url}");
@@ -139,20 +153,37 @@ impl Sidecar {
                 Err(error) => println!("project  : unavailable — {error:#}"),
             }
 
-            if !stream {
+            let Some(prompt) = prompt else {
                 println!("stream   : skipped (pass --stream to run a real turn)");
                 return Ok(());
-            }
+            };
+            println!("prompt   : {prompt}");
 
             let mut text = String::new();
             let mut chunks = 0usize;
+            // (namespace, display name, steps, characters) per subagent invocation, so
+            // a regression in the activity trace fails the headless check instead of
+            // quietly emptying a panel nobody can see on this machine.
+            let mut agents: Vec<(String, String, usize, usize)> = Vec::new();
             client
-                .stream_turn(&thread_id, super::SEED_PROMPT, |event| match event {
+                .stream_turn(&thread_id, prompt, |event| match event {
                     TurnEvent::Token(token) => {
                         chunks += 1;
                         text.push_str(&token);
                     }
                     TurnEvent::Status(status) => println!("status   : {status}"),
+                    TurnEvent::Step { agent, label } => {
+                        match agent {
+                            Some(agent) => {
+                                println!("step     : {} · {label}", agent.name);
+                                entry(&mut agents, &agent).2 += 1;
+                            }
+                            None => println!("step     : {label}"),
+                        };
+                    }
+                    TurnEvent::SubagentToken { agent, text } => {
+                        entry(&mut agents, &agent).3 += text.len();
+                    }
                     // Covers the `values` decode path, so an artifacts-shape
                     // regression fails the headless check instead of quietly
                     // emptying the outputs panel.
@@ -176,6 +207,12 @@ impl Sidecar {
                 })
                 .await?;
             println!("stream   : {chunks} chunk(s), {} chars", text.len());
+            if agents.is_empty() {
+                println!("activity : no subagent ran on this prompt");
+            }
+            for (_, name, steps, chars) in &agents {
+                println!("activity : {name} · {steps} step(s) · {chars} chars");
+            }
             println!("--- assistant text ---\n{}", text.trim());
             anyhow::ensure!(!text.trim().is_empty(), "no assistant text was streamed");
             Ok(())
