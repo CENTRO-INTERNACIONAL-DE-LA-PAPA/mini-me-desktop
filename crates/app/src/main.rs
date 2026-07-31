@@ -253,6 +253,28 @@ fn match_score(query: &str, label: &str) -> Option<i32> {
     Some(score)
 }
 
+/// Fold an incoming project spine into what is already on screen.
+///
+/// **Suggestions survive a spine that doesn't mention them.** Upstream recomputes them
+/// opportunistically — `ProjectSpineMiddleware.abefore_agent` derives them from whatever
+/// artifacts the thread has, and emits a payload with mission and completed work even when
+/// it produces none. Treating each snapshot as authoritative therefore *erased* the
+/// suggestions mid-turn: they appeared, the user started reading one, the answer arrived,
+/// and the card vanished before it could be clicked (reported 2026-07-31).
+///
+/// Advisory content is different from state: a payload without suggestions means "no new
+/// advice", not "the advice is withdrawn". Everything else — mission, completed, pending —
+/// is authoritative and replaces.
+fn merge_spine(previous: Option<&Project>, incoming: Project) -> Project {
+    let mut merged = incoming;
+    if merged.suggestions.is_empty() {
+        if let Some(previous) = previous {
+            merged.suggestions = previous.suggestions.clone();
+        }
+    }
+    merged
+}
+
 /// A single chat message in the transcript, plus the agent activity behind it.
 struct Message {
     role: &'static str,
@@ -463,7 +485,10 @@ impl Workbench {
             if let Some(outcome) = results.next().await {
                 let _ = this.update(cx, |workbench, cx| {
                     match outcome {
-                        Ok(project) => workbench.project = Some(project),
+                        Ok(project) => {
+                            workbench.project =
+                                Some(merge_spine(workbench.project.as_ref(), project))
+                        }
                         // A missing spine is not worth interrupting the user for —
                         // the panel already shows an honest placeholder.
                         Err(error) => tracing::debug!(%error, "could not load the project spine"),
@@ -549,7 +574,7 @@ impl Workbench {
             // mission current without another HTTP round trip.
             TurnEvent::Snapshot(snapshot) => {
                 if let Some(project) = snapshot.project {
-                    self.project = Some(project);
+                    self.project = Some(merge_spine(self.project.as_ref(), project));
                 }
                 if !snapshot.buckets.is_empty() {
                     self.buckets = snapshot.buckets;
@@ -1647,6 +1672,11 @@ impl Workbench {
                             workbench.composer.update(cx, |composer, cx| {
                                 composer.set_text(prompt.clone(), cx);
                             });
+                            // Drop it from the list: it is in the composer now, and
+                            // leaving a duplicate to click is just confusing.
+                            if let Some(project) = workbench.project.as_mut() {
+                                project.suggestions.retain(|s| s.prompt != prompt);
+                            }
                             let focus = workbench.composer.focus_handle(cx);
                             window.focus(&focus);
                             workbench.status = "suggestion loaded — press Enter to run it".into();
@@ -1924,6 +1954,52 @@ mod tests {
         // Out-of-order letters must not match at all.
         assert!(ranked("tnur").is_empty());
         assert!(ranked("zzz").is_empty());
+    }
+
+    #[test]
+    fn a_spine_without_suggestions_does_not_erase_them() {
+        let with_advice = Project {
+            mission: "M".into(),
+            completed: vec!["a".into()],
+            pending: vec![],
+            suggestions: vec![protocol::Suggestion {
+                title: "Look for the dataset".into(),
+                rationale: "You have the paper".into(),
+                prompt: "find the dataset".into(),
+            }],
+        };
+        // Mid-turn snapshot: newer mission and completed work, no advice.
+        let mid_turn = Project {
+            mission: "M2".into(),
+            completed: vec!["a".into(), "b".into()],
+            pending: vec!["c".into()],
+            suggestions: vec![],
+        };
+        let merged = merge_spine(Some(&with_advice), mid_turn);
+        // State replaces...
+        assert_eq!(merged.mission, "M2");
+        assert_eq!(merged.completed.len(), 2);
+        assert_eq!(merged.pending, vec!["c".to_string()]);
+        // ...but the card the user was about to click survives.
+        assert_eq!(merged.suggestions.len(), 1);
+        assert_eq!(merged.suggestions[0].prompt, "find the dataset");
+
+        // Fresh advice always wins over old advice.
+        let replacement = Project {
+            suggestions: vec![protocol::Suggestion {
+                title: "New".into(),
+                rationale: String::new(),
+                prompt: "new".into(),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            merge_spine(Some(&with_advice), replacement).suggestions[0].prompt,
+            "new"
+        );
+
+        // Nothing to carry over is fine.
+        assert!(merge_spine(None, Project::default()).suggestions.is_empty());
     }
 
     #[test]
