@@ -316,8 +316,14 @@ impl BackendSupervisor {
             return Ok("attached to a running backend".into());
         }
         if self.config.attach_only {
+            // Name the variable: this mode is opt-in via the environment, and a
+            // value left over in a shell session looks exactly like a bug ("why
+            // won't it start the backend?").
             anyhow::bail!(
-                "no backend at {} and attach-only mode is on",
+                "no backend at {} and attach-only mode is on, so the app will not \
+                 start one. Unset MINIME_BACKEND_ATTACH_ONLY to let it spawn the \
+                 sidecar (PowerShell: Remove-Item Env:MINIME_BACKEND_ATTACH_ONLY), \
+                 or start the backend yourself",
                 self.config.base_url()
             );
         }
