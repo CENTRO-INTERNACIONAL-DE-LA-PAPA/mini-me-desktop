@@ -34,25 +34,59 @@ ok()  { printf '    ok  %s\n' "$1"; }
 
 mkdir -p "$(dirname "$VENDOR")"
 
-if [ -d "$VENDOR/.git" ]; then
-  say "Updating the bundled copy in $VENDOR"
-  git -C "$VENDOR" fetch --tags origin
-else
-  say "Cloning Mini-Me into $VENDOR"
-  echo "    You need GitHub access for this step — but only you, once."
-  # A local checkout is a much cheaper source than the network, when there is one.
-  for candidate in "$HOME/Documents/Mini-Me" "$HOME/Documents/GitHub/Mini-Me" "$HOME/Mini-Me"; do
+# A checkout already on this machine, if there is one.
+#
+# Cloning *from that path* is what avoids GitHub entirely. An earlier version used
+# `git clone --reference <local> <url>`, which does not: `--reference` only reuses
+# objects, so git still contacts the remote for refs and asks for credentials — which is
+# exactly the prompt this script exists to avoid, and it failed that way on first use.
+find_local_checkout() {
+  local candidate
+  for candidate in \
+      "$HOME/Documents/Mini-Me" "$HOME/Documents/GitHub/Mini-Me" "$HOME/Mini-Me" \
+      /mnt/c/Users/*/Documents/GitHub/Mini-Me /mnt/c/Users/*/Documents/Mini-Me; do
     if [ -d "$candidate/.git" ]; then
-      say "Found a local checkout at $candidate — cloning from it"
-      git clone --reference "$candidate" --dissociate "$REPO_URL" "$VENDOR"
-      break
+      printf '%s' "$candidate"
+      return 0
     fi
   done
-  [ -d "$VENDOR/.git" ] || git clone "$REPO_URL" "$VENDOR"
+  return 1
+}
+
+if [ -d "$VENDOR/.git" ]; then
+  say "Updating the bundled copy in $VENDOR"
+  # Best-effort: on a bundle cloned from a local path there may be no reachable remote,
+  # and that is fine — the pin below works from what is already here.
+  git -C "$VENDOR" fetch --tags origin 2>/dev/null || ok "no remote to fetch from (using what is here)"
+else
+  # A failed attempt can leave an empty directory behind, which blocks the clone.
+  [ -d "$VENDOR" ] && [ -z "$(ls -A "$VENDOR" 2>/dev/null)" ] && rmdir "$VENDOR"
+
+  if SOURCE="$(find_local_checkout)"; then
+    say "Copying Mini-Me from $SOURCE"
+    echo "    Local, so this needs no GitHub account and no token."
+    git clone "$SOURCE" "$VENDOR"
+    # Point at the real remote so a later `git fetch` can reach it, without having
+    # needed it now.
+    git -C "$VENDOR" remote set-url origin "$REPO_URL" 2>/dev/null || true
+  else
+    say "Downloading Mini-Me from GitHub"
+    echo "    No local checkout found, so this needs repo access. GitHub does NOT"
+    echo "    accept your account password — the prompt wants a personal access token"
+    echo "    (https://github.com/settings/tokens), or run 'gh auth login' first."
+    git clone "$REPO_URL" "$VENDOR"
+  fi
 fi
 
 say "Pinning to $REF"
-git -C "$VENDOR" checkout --detach "$REF"
+# `$REF` may only exist as a remote-tracking branch after a clone from a local path.
+if git -C "$VENDOR" rev-parse --verify --quiet "$REF" >/dev/null; then
+  git -C "$VENDOR" checkout --detach "$REF"
+elif git -C "$VENDOR" rev-parse --verify --quiet "origin/$REF" >/dev/null; then
+  git -C "$VENDOR" checkout --detach "origin/$REF"
+else
+  ok "no ref '$REF' here — bundling whatever is checked out"
+fi
 PINNED="$(git -C "$VENDOR" rev-parse --short HEAD)"
 ok "pinned at $PINNED"
 
