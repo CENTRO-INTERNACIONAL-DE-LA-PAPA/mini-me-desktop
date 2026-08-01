@@ -370,18 +370,25 @@ fn launch_command_for(
         // upstream's just before launch (docs §30). `&&`, so a generator failure stops the
         // launch instead of silently starting a server whose coordinator holds tools
         // pointing at a graph nobody serves.
-        let (prepare, config_flag) = if async_subagents {
-            let overlay = execution_env(execution, true, approve_execute)
-                .into_iter()
-                .find(|(name, _)| name == "PYTHONPATH")
-                .map(|(_, value)| value)
-                .unwrap_or_default();
-            (
-                format!("{} && ", generate_config_command(&overlay, ".venv/bin/python")),
-                format!(" --config {GENERATED_CONFIG}"),
-            )
+        let overlay = execution_env(execution, true, approve_execute)
+            .into_iter()
+            .find(|(name, _)| name == "PYTHONPATH")
+            .map(|(_, value)| value)
+            .unwrap_or_default();
+        // Always, not only for async subagents: the backend loads the *in-distro* copy,
+        // so without this an updated app keeps running the overlay it was provisioned
+        // with (see `sync_overlay_command`).
+        let mut prepare = String::new();
+        if !overlay.is_empty() {
+            prepare.push_str(&sync_overlay_command(&overlay, &wsl.dir));
+            prepare.push_str("; ");
+        }
+        let config_flag = if async_subagents {
+            prepare.push_str(&generate_config_command(&overlay, ".venv/bin/python"));
+            prepare.push_str(" && ");
+            format!(" --config {GENERATED_CONFIG}")
         } else {
-            (String::new(), String::new())
+            String::new()
         };
         argv.push(format!(
             "cd {dir} && {prepare}{exports}exec .venv/bin/langgraph dev --host 0.0.0.0 \
@@ -484,6 +491,25 @@ const GENERATED_CONFIG: &str = ".mini-me-desktop.langgraph.json";
 /// One generator, invoked identically in both modes, because the alternative was writing
 /// the JSON from Rust for the host path and from Python inside the distro for WSL — the
 /// same logic twice, which is how the two drift.
+/// Refresh the overlay copy that lives beside the checkout.
+///
+/// **The launch prefers the in-distro copy** (§25), which is what removed host execution's
+/// dependence on `/mnt/c` being reachable. The cost, unnoticed until it bit: that copy is
+/// made at *provisioning* time, so `git pull` + rebuild updated the repo's `overlay/` and
+/// the backend went on loading a months-old copy. A fix shipped in the overlay simply
+/// never ran — which is exactly how the Asta token fix appeared not to work.
+///
+/// Three small files, so copying them on every launch is cheaper than reasoning about
+/// when to. `|| true` because a *stale* overlay still beats a failed launch, and the
+/// repo's copy may genuinely be unreachable — the case the in-distro copy exists for.
+fn sync_overlay_command(source: &str, backend_dir: &str) -> String {
+    let target = quote_path(&provisioned_overlay(backend_dir));
+    format!(
+        "{{ mkdir -p {target} && cp -r {source}/. {target}/ ; }} >/dev/null 2>&1 || true",
+        source = shell_quote(source.trim_end_matches('/')),
+    )
+}
+
 fn generate_config_command(overlay: &str, python: &str) -> String {
     format!(
         "{python} {} .",
@@ -1559,6 +1585,49 @@ mod tests {
         assert!(command.contains("printf %s '/mnt/c/repo/overlay'"), "{command}");
         // And it still ends up as one assignment in front of exec.
         assert!(command.contains("fi)\" exec .venv/bin/langgraph dev"), "{command}");
+    }
+
+    #[test]
+    fn every_launch_refreshes_the_overlay_the_backend_actually_loads() {
+        // The launch prefers the copy inside the distro, so without this an updated app
+        // keeps running the overlay it was provisioned with — a fix shipped in the overlay
+        // never reaching the machine, which is exactly what happened with the Asta token.
+        let _env = env_lock::hold();
+        let argv = launch_command_for(
+            Path::new("/tmp/mini-me"),
+            2024,
+            Some(&WslTarget {
+                distro: None,
+                dir: "~/Mini-Me".into(),
+            }),
+            &Execution::Local {
+                overlay_dir: PathBuf::from(r"C:\repo\overlay"),
+            },
+            true,
+            false,
+        );
+        let command = argv.last().expect("the bash -lc payload");
+        let sync = command.find("cp -r").expect("the overlay sync");
+        let serve = command.find("exec .venv/bin/langgraph").expect("the server");
+        assert!(sync < serve, "{command}");
+        assert!(command.contains("~/'Mini-Me/.desktop-overlay'"), "{command}");
+        // Never fatal: a stale overlay beats a backend that will not start, and the repo's
+        // copy may be genuinely unreachable — the case the in-distro copy exists for.
+        assert!(command.contains("|| true"), "{command}");
+
+        // The sandbox path stays untouched: no overlay, nothing to sync.
+        let sandbox = launch_command_for(
+            Path::new("/tmp/mini-me"),
+            2024,
+            Some(&WslTarget {
+                distro: None,
+                dir: "~/Mini-Me".into(),
+            }),
+            &Execution::Sandbox,
+            true,
+            false,
+        );
+        assert!(!sandbox.last().unwrap().contains("cp -r"), "{sandbox:?}");
     }
 
     #[test]

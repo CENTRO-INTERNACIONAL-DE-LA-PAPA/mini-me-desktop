@@ -2451,3 +2451,35 @@ the buttons at a fixed size, and only the output lines scroll beneath them.
 
 Three rounds on one small panel, each found only by looking at a screenshot. Rendering is
 not something this project can reason its way to from a Linux box.
+
+## 33. The fix that never reached the machine (2026-08-01)
+
+Two rounds of Asta token work — minting it, then reading it at command time — and the
+theorizer still failed. Neither had ever run.
+
+**The backend loads the overlay copy inside the distro.** §25 made the launch prefer
+`<checkout>/.desktop-overlay`, and that was right: it removed host execution's dependence
+on `/mnt/c` being reachable, which fails *silently*. What went unnoticed is that the copy
+is made at **provisioning** time. So `git pull` + `cargo build --release` updated the
+repo's `overlay/`, the app relaunched, and the backend went on importing a copy from days
+earlier. Every overlay change since provisioning was invisible.
+
+This is the worst shape a bug can take: the fix was correct, shipped, and verified on the
+dev box, and the user watched the same failure three times. It also quietly invalidated the
+verification — "verified against the real CLI" was true of code that was not running.
+
+**Every launch now syncs it.** Three small files, so copying them unconditionally is
+cheaper than working out when to. `|| true`, because a stale overlay still beats a backend
+that will not start, and the repo's copy may be genuinely unreachable — the case the
+in-distro copy exists for. Ordered before the server, and independent of the async-subagent
+toggle, which had been gating the only other pre-launch step.
+
+**Verified in real bash:** a stale provisioned copy is replaced with the current one, and
+an unreachable source exits 0 so the launch continues. A test pins the ordering and that
+the sandbox path stays untouched.
+
+**The general lesson.** Anything the app *installs* onto the user's machine is a second
+copy with its own version, and needs a story for how it gets updated. The overlay had none.
+Worth checking the others: the generated config regenerates each launch (§30) and the
+bundled backend is refreshed by re-provisioning — but `vendor/Mini-Me` inside a shipped
+bundle has the same shape of problem, and click-to-update is still unbuilt.
