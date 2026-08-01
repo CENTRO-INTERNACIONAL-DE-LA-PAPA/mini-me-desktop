@@ -44,6 +44,13 @@ const RUNTIME_FIRST: &str = "the runtime above has to work";
 /// than the skills that drive it is how a subcommand goes missing.
 const ASTA_INSTALL_URL: &str = "git+https://github.com/allenai/asta-plugins.git@v0.101.1";
 
+/// The Asta entitlement the theorizer requires.
+///
+/// Found by decoding two real CIP tokens side by side: one account had only
+/// `access:all_endpoints`, the other also had this — and only the second could run theory
+/// generation. Being signed in says nothing about it.
+const THEORY_PERMISSION: &str = "enroll:theory_generation";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
     /// Verified present.
@@ -588,22 +595,53 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
             // `Local Token Status` is the CLI's own verdict. Checking for it rather than
             // trusting the exit code, which is 0 even when signed out.
             if token.ok && token.stdout.contains("Valid") {
-                checks.push(Check {
-                    id: "asta",
-                    label: "Asta CLI",
-                    state: State::Pass,
-                    // Who, and for how long. On a shared machine "signed in" is not enough
-                    // — someone signed in with a personal account cannot work out why
-                    // their permissions look wrong.
-                    detail: asta_identity(&token.stdout),
-                    // A button even when green: the token lasts seven days, and when the
-                    // *refresh* credential finally lapses this is the only cure.
-                    fixes: vec![Fix::Run {
-                        label: "Sign in again",
-                        argv: config.shell_argv("asta auth login"),
-                        note: "only needed if the account changes, or sign-in has lapsed",
-                    }],
-                });
+                let identity = asta_identity(&token.stdout);
+                // Being signed in is not the same as being *entitled*. The theorizer
+                // needs `enroll:theory_generation`, and an account without it fails with
+                // upstream's "the Asta theorizer returned no task id — likely a missing or
+                // expired token", which is a guess and a wrong one: the token is present,
+                // valid, and simply not enrolled. Two real CIP accounts differed on
+                // exactly this, and the error sent the user to re-authenticate for days.
+                //
+                // `print-token` without `--raw` prints the decoded payload, permissions
+                // and all, so this needs no JWT decoding of our own.
+                let claims = probe(&config.shell_argv("asta auth print-token"));
+                let sign_in = Fix::Run {
+                    label: "Sign in again",
+                    argv: config.shell_argv("asta auth login"),
+                    note: "use the account with theory-generation access",
+                };
+                if claims.ok && !claims.stdout.contains(THEORY_PERMISSION) {
+                    checks.push(Check::failing(
+                        "asta",
+                        "Asta CLI",
+                        State::Warn,
+                        format!("{identity} — this account cannot run the theorizer"),
+                        vec![
+                            sign_in,
+                            Fix::Manual(format!(
+                                "Literature search works; the theorizer needs the \
+                                 `{THEORY_PERMISSION}` permission, which this account does \
+                                 not have. Sign in with the account that does, or ask Asta \
+                                 to enrol this one."
+                            )),
+                        ],
+                    ));
+                } else {
+                    checks.push(Check {
+                        id: "asta",
+                        label: "Asta CLI",
+                        state: State::Pass,
+                        // Who, and for how long. On a shared machine "signed in" is not
+                        // enough — someone signed in with the wrong account cannot work
+                        // out why their permissions look odd.
+                        detail: identity,
+                        // A button even when green: when the *refresh* credential finally
+                        // lapses this is the only cure, and a button that appears only
+                        // once you are broken is one you cannot find.
+                        fixes: vec![sign_in],
+                    });
+                }
             } else {
                 checks.push(Check::failing(
                     "asta",
@@ -997,6 +1035,35 @@ mod tests {
 
         // A changed table format loses the label, never the check.
         assert_eq!(asta_identity("something else entirely"), "installed and signed in");
+    }
+
+    #[test]
+    fn an_account_without_theory_generation_is_detected_from_its_claims() {
+        // Two real CIP accounts, decoded side by side. Both were "signed in and valid";
+        // only the second could run the theorizer. Upstream reports the first as a missing
+        // or expired token, which sent this user re-authenticating for days.
+        let without = r#"JWT Payload:
+{
+  "https://asta.allenai.org/name": "someone@example.org",
+  "permissions": [
+    "access:all_endpoints"
+  ]
+}"#;
+        let with = r#"JWT Payload:
+{
+  "https://asta.allenai.org/name": "Piero Palacios",
+  "permissions": [
+    "access:all_endpoints",
+    "access:biopathways",
+    "enroll:asta_integration",
+    "enroll:theory_generation"
+  ]
+}"#;
+        assert!(!without.contains(THEORY_PERMISSION), "the account that could not");
+        assert!(with.contains(THEORY_PERMISSION), "the account that could");
+        // `print-token` without --raw is what carries the claims — with --raw it is opaque
+        // base64 and this check would silently always fail.
+        assert!(!"eyJhbGci.eyJzdWIi.sig".contains(THEORY_PERMISSION));
     }
 
     #[test]

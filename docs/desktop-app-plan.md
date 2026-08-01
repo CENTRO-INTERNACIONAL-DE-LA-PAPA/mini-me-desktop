@@ -2377,3 +2377,31 @@ cannot find.
 The parser splits the Rich table on `│` rather than matching prose, and is used **only to
 enrich a row that already passed**, so a change to the CLI's formatting costs a label and
 never a check. A test pins it against the real output verbatim, box-drawing and all.
+
+### 32b. It was never the token — it was the account (2026-08-01)
+
+After the minting fix, the theorizer still failed. Decoding the two access tokens the user
+had produced, side by side, settled it:
+
+| | `auth0\|69fe…` (cgiar.org) | `google-oauth2\|1142…` (cipotato.org) |
+|---|---|---|
+| permissions | `access:all_endpoints` | `access:all_endpoints`, `access:biopathways`, `enroll:asta_integration`, **`enroll:theory_generation`** |
+
+The theorizer requires **`enroll:theory_generation`**. The account signed in inside WSL was
+the first one. Its token was present, valid, server-verified and **not entitled** — and
+upstream reports that as *"no Asta task ID was returned, which usually means the access
+token is missing or expired"*.
+
+That message is a guess, and being a *plausible* guess is what made it expensive: it sent
+the user to re-authenticate, repeatedly, for something re-authenticating could never fix.
+Two rounds of work here — minting the token, then reading it at command time — were both
+real improvements aimed at the wrong target.
+
+**The check now reads the claims.** `asta auth print-token` *without* `--raw` prints the
+decoded payload, permissions and all, so no JWT decoding of our own is needed. An account
+that lacks the permission gets a warning that says so in those words, plus the sign-in
+button pointed at the account that has it.
+
+The lesson worth keeping: *"signed in"* was never the question. **Entitled** was. A
+diagnostic that reports authentication and calls it authorization will confidently send
+someone the wrong way, which is worse than reporting nothing.
