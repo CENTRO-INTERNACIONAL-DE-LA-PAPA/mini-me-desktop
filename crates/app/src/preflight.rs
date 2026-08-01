@@ -584,15 +584,26 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
             //
             // Checked **where the backend runs**: on Windows that is inside the distro, so
             // being logged in on the Windows side proves nothing at all.
-            let token = probe(&config.shell_argv(
-                "asta auth print-token --raw --refresh >/dev/null 2>&1",
-            ));
-            if token.ok {
-                checks.push(Check::pass(
-                    "asta",
-                    "Asta CLI",
-                    "installed and signed in",
-                ));
+            let token = probe(&config.shell_argv("asta auth status"));
+            // `Local Token Status` is the CLI's own verdict. Checking for it rather than
+            // trusting the exit code, which is 0 even when signed out.
+            if token.ok && token.stdout.contains("Valid") {
+                checks.push(Check {
+                    id: "asta",
+                    label: "Asta CLI",
+                    state: State::Pass,
+                    // Who, and for how long. On a shared machine "signed in" is not enough
+                    // — someone signed in with a personal account cannot work out why
+                    // their permissions look wrong.
+                    detail: asta_identity(&token.stdout),
+                    // A button even when green: the token lasts seven days, and when the
+                    // *refresh* credential finally lapses this is the only cure.
+                    fixes: vec![Fix::Run {
+                        label: "Sign in again",
+                        argv: config.shell_argv("asta auth login"),
+                        note: "only needed if the account changes, or sign-in has lapsed",
+                    }],
+                });
             } else {
                 checks.push(Check::failing(
                     "asta",
@@ -746,6 +757,49 @@ fn strip_ansi(line: &str) -> String {
         }
     }
     out
+}
+
+/// Read one field out of `asta auth status`.
+///
+/// The CLI prints a Rich table — box-drawing characters around `│ Property │ Value │` —
+/// so this splits on the vertical bar rather than matching prose. Fragile by nature, which
+/// is why it is *only* used to enrich a row that already passed: if the format changes we
+/// lose a label, never a check.
+fn status_field(output: &str, property: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let mut cells = line.split('│').map(str::trim);
+        cells.next()?; // the leading border
+        let key = cells.next()?;
+        let value = cells.next()?;
+        (key == property && !value.is_empty()).then(|| {
+            // Drop the status emoji the CLI decorates values with.
+            value
+                .trim_start_matches(['✅', '❌', '⚠'])
+                .trim()
+                .to_string()
+        })
+    })
+}
+
+/// A one-line summary of who is signed in and for how long.
+fn asta_identity(output: &str) -> String {
+    let email = status_field(output, "Email");
+    let expires = status_field(output, "Access Token Expires");
+    match (email, expires) {
+        // "2026-08-08 14:24:31 (167h 55m left)" — the parenthesised part is the useful
+        // half, so it leads.
+        (Some(email), Some(expires)) => {
+            let remaining = expires
+                .split_once('(')
+                .map(|(_, rest)| rest.trim_end_matches(')').trim().to_string());
+            match remaining {
+                Some(remaining) => format!("{email} · token {remaining}"),
+                None => format!("{email} · expires {expires}"),
+            }
+        }
+        (Some(email), None) => format!("signed in as {email}"),
+        _ => "installed and signed in".to_string(),
+    }
 }
 
 /// Render an argv the way a person would type it, for the copy button.
@@ -905,6 +959,44 @@ mod tests {
         assert!(!missing.launched);
         assert!(!missing.ok);
         assert!(!missing.message().is_empty());
+    }
+
+    /// Real `asta auth status` output, 2026-08-01. Kept verbatim, box-drawing and all,
+    /// because the parser reads that layout — a reworded copy would test nothing.
+    const REAL_STATUS: &str = "\
+                    Authentication Status                     \n\
+┏━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓\n\
+┃ Property             ┃ Value                               ┃\n\
+┡━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩\n\
+│ Local Token Status   │ ✅ Valid                            │\n\
+│ Server Verification  │ ✅ Valid                            │\n\
+│ Email                │ piero.palacios@cipotato.org         │\n\
+│ Name                 │ Piero Palacios                      │\n\
+│ Access Token Expires │ 2026-08-08 14:24:31 (167h 55m left) │\n\
+│ Refresh Token        │ ✅ Available                        │\n\
+│ Auto-Refresh         │ ✅ Enabled                          │\n\
+└──────────────────────┴─────────────────────────────────────┘";
+
+    #[test]
+    fn the_asta_row_says_who_is_signed_in_and_for_how_long() {
+        assert_eq!(
+            status_field(REAL_STATUS, "Email").as_deref(),
+            Some("piero.palacios@cipotato.org")
+        );
+        // The emoji the CLI decorates values with must not leak into the pane.
+        assert_eq!(
+            status_field(REAL_STATUS, "Refresh Token").as_deref(),
+            Some("Available")
+        );
+        assert_eq!(status_field(REAL_STATUS, "Not A Property"), None);
+
+        let identity = asta_identity(REAL_STATUS);
+        assert_eq!(identity, "piero.palacios@cipotato.org · token 167h 55m left");
+        // On a shared machine "signed in" is not enough to explain odd permissions.
+        assert!(identity.contains('@'), "{identity}");
+
+        // A changed table format loses the label, never the check.
+        assert_eq!(asta_identity("something else entirely"), "installed and signed in");
     }
 
     #[test]

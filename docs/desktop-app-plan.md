@@ -2352,3 +2352,28 @@ backend. `_command_env()` already reads `ASTA_TOKEN` at call time for exactly th
 reason — but it runs on the event loop, where `langgraph dev`'s blocking-call guard rejects
 filesystem syscalls, so the read has to move somewhere off the loop first. That also fixes
 the seven-day expiry landing mid-session rather than between launches.
+
+### Showing who is signed in, and for how long
+
+`asta auth status` reports everything worth surfacing, including — usefully —
+**`Auto-Refresh: Enabled`**, which confirms the CLI refreshes its own access token and so
+corroborates the design above. The Asta row now reads:
+
+```
+✓ Asta CLI    piero.palacios@cipotato.org · token 167h 55m left
+```
+
+Two reasons that is worth the parsing:
+
+- **Which account.** On a shared machine, or after someone signs in with a personal
+  address by mistake, "signed in" gives no way to work out why permissions look wrong.
+- **How long.** Seven days is short enough to matter and long enough to forget.
+
+The **Sign in again** button is offered even when the row is green: when the *refresh*
+credential finally lapses — not the access token, which now renews itself — that is the
+only cure, and a button that only appears once you are already broken is a button you
+cannot find.
+
+The parser splits the Rich table on `│` rather than matching prose, and is used **only to
+enrich a row that already passed**, so a change to the CLI's formatting costs a label and
+never a check. A test pins it against the real output verbatim, box-drawing and all.
