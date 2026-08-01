@@ -345,6 +345,62 @@ fn markdown_block(block: &markdown::Block) -> gpui::AnyElement {
             .text_sm()
             .child(text.clone())
             .into_any_element(),
+        Block::Table { header, rows } => {
+            // Equal-width columns via `flex_1`, rather than measuring content. GPUI has no
+            // table layout and measuring text before shaping is not something this app can
+            // do honestly; even columns are predictable and never collapse a column to
+            // nothing, which is what a naive proportional split does to a long cell.
+            let columns = block.columns();
+            let cell = |inlines: &markdown::Inlines, bold: bool| {
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .px_2()
+                    .py_1()
+                    .child(styled(inlines, if bold { TEXT } else { MUTED }))
+                    .when(bold, |row| row.font_weight(FontWeight::BOLD))
+            };
+            // Pad short rows so columns stay aligned when the source is ragged.
+            let padded = |row: &Vec<markdown::Inlines>| {
+                let mut cells: Vec<markdown::Inlines> = row.clone();
+                cells.resize_with(columns, Default::default);
+                cells
+            };
+
+            let mut table = div()
+                .flex()
+                .flex_col()
+                .w_full()
+                .min_w_0()
+                .border_1()
+                .border_color(rgb(BORDER));
+            if !header.is_empty() {
+                let mut head = div()
+                    .flex()
+                    .flex_row()
+                    .w_full()
+                    .bg(rgb(PANEL))
+                    .border_b_1()
+                    .border_color(rgb(BORDER));
+                for value in padded(header) {
+                    head = head.child(cell(&value, true));
+                }
+                table = table.child(head);
+            }
+            for (index, row) in rows.iter().enumerate() {
+                let mut line = div().flex().flex_row().w_full().min_w_0();
+                // A hairline between rows, but not under the last one — the table's own
+                // border already closes it.
+                if index + 1 < rows.len() {
+                    line = line.border_b_1().border_color(rgb(BORDER));
+                }
+                for value in padded(row) {
+                    line = line.child(cell(&value, false));
+                }
+                table = table.child(line);
+            }
+            table.into_any_element()
+        }
         Block::Rule => div()
             .w_full()
             .border_b_1()
@@ -519,6 +575,9 @@ struct Workbench {
     /// A run paused at the approval gate: the command it wants to run, awaiting a
     /// decision. While this is set the turn is *open*, not finished.
     pending_approval: Option<ApprovalRequest>,
+    /// The user approved everything remaining in *this* turn. Never persisted, and reset
+    /// by [`Workbench::finish_turn`] — see the button's comment for why it is bounded.
+    approve_rest_of_turn: bool,
     /// Set when focus must return to the composer but no `Window` is at hand — an
     /// entity subscription doesn't get one. `render` does, so it settles the debt
     /// there. Without this, activating a command with Enter would leave focus on a
@@ -595,6 +654,7 @@ impl Workbench {
             checking: false,
             running_fix: None,
             pending_approval: None,
+            approve_rest_of_turn: false,
             restore_focus: false,
         };
         // Fill the editable fields from what is stored, and open Settings on a fresh
@@ -833,6 +893,14 @@ impl Workbench {
             TurnEvent::Approval(request) => {
                 let commands = request.actions.len();
                 self.pending_approval = Some(request);
+                // Already decided for this turn: answer without asking again. The command
+                // is still recorded in the trace, so what ran remains reviewable — this
+                // removes the interruption, not the record.
+                if self.approve_rest_of_turn {
+                    self.status = "approved (rest of turn) — running…".into();
+                    self.decide(true, cx);
+                    return;
+                }
                 self.status = if commands == 1 {
                     "waiting for your approval".into()
                 } else {
@@ -893,6 +961,10 @@ impl Workbench {
     /// placeholder if nothing at all arrived, and hand the field back to the user.
     fn finish_turn(&mut self, cx: &mut Context<Self>) {
         self.pending_approval = None;
+        // Blanket approval expires with the turn it was given for. Carrying it into the
+        // next question would turn a bounded decision into a permanent one, which is
+        // exactly what the button is worded to avoid.
+        self.approve_rest_of_turn = false;
         // While a turn runs the trace is the only sign of progress; once the answer
         // is there, the answer is the point.
         if let Some(message) = self.transcript.last_mut() {
@@ -1128,6 +1200,28 @@ impl Workbench {
                         .child("Reject")
                         .on_click(cx.listener(|workbench, _event, _window, cx| {
                             workbench.decide(false, cx)
+                        })),
+                )
+                // Bounded to *this turn*, and nothing is persisted. A permanent
+                // "always allow" is how a security gate becomes a habit: the tenth
+                // identical dialog in one analysis is not read, it is dismissed, and
+                // then neither is the eleventh — which is the one that mattered.
+                // Approving the rest of one task is a decision someone can actually
+                // hold in their head, and it expires on its own.
+                .child(
+                    div()
+                        .id("approve-turn")
+                        .px_3()
+                        .py_1()
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .text_color(rgb(MUTED))
+                        .text_sm()
+                        .hover(|style| style.cursor_pointer())
+                        .child("Approve the rest of this turn")
+                        .on_click(cx.listener(|workbench, _event, _window, cx| {
+                            workbench.approve_rest_of_turn = true;
+                            workbench.decide(true, cx);
                         })),
                 ),
         )

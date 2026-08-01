@@ -1959,3 +1959,54 @@ a GitHub token they do not have.
 inside the bundle**, with no path pointing at the source tree. (First attempt reported the
 source tree — a stale binary, because `cargo test` had run but `cargo build` had not. That
 trap has now cost this project twice.)
+
+## 27. Two debts that would have grown (2026-08-01)
+
+### Tables
+
+Report subagents emit them, and they were rendering as literal pipes — the one Markdown
+gap that touched the actual deliverable.
+
+**Recognised by the separator row (`|---|`), never by pipes alone.** This coordinator
+writes about shell pipelines and alternatives constantly (`asta search | head -5`,
+`main | develop`), and a parser that treated every pipe as a cell boundary would shred
+ordinary sentences into columns. That means one line of lookahead, which is the only
+structural change the parser needed.
+
+Four decisions:
+
+- **Ragged rows keep every cell they have.** Text streams token by token, so half-written
+  tables are on screen constantly; a short row must not make the block vanish, and a long
+  one must not be truncated. Column count comes from the widest row.
+- **Escaped pipes stay inside their cell** — the agent writes regular expressions and
+  shell commands into tables.
+- **Cells are still Markdown**, because a bold verdict in a results table is the norm.
+- **Equal-width columns.** GPUI has no table layout, and measuring text before shaping is
+  not something this app can do honestly. Even columns are predictable; a naive
+  proportional split collapses a column to nothing when one cell is long.
+
+Outer pipes are optional, since models emit both GitHub styles.
+
+### Approval fatigue
+
+Every `execute` stopped and asked. In a real analysis that is ten identical dialogs, and
+the tenth is not read — it is dismissed. Then neither is the eleventh, which is the one
+that mattered. A gate that trains people to click through it is worse than no gate,
+because it also carries the appearance of review.
+
+The card now offers **"Approve the rest of this turn"**. Deliberately *not* a persistent
+"always allow": that converts one bounded decision into a permanent one, and a stale
+allowlist is invisible. One task's remaining commands is a decision someone can hold in
+their head, and it expires by itself — `finish_turn` clears it, next to where the pending
+request is cleared, so the two cannot drift.
+
+Approved commands still appear in the activity trace. This removes the *interruption*, not
+the record.
+
+### Deliberately still open
+
+**The multi-line composer.** The field is single-line at the layout level, so this is not a
+key binding — it is soft wrap, cursor movement across visual lines, and a growing input
+height. Half-implemented text editing is worse than none, and pasted newlines are still
+flattened to spaces (`composer.rs`), which is a real if minor loss when someone pastes a
+multi-paragraph question. Sized as its own piece of work rather than squeezed in here.

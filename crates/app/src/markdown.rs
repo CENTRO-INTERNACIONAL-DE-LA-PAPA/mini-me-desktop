@@ -55,7 +55,31 @@ pub enum Block {
     ListItem { marker: String, inlines: Inlines },
     /// A fenced code block, kept verbatim: no inline parsing inside code.
     Code { language: String, text: String },
+    /// A pipe table. `header` may be empty when the source had no header row.
+    ///
+    /// Rows are ragged on purpose — a malformed table should render as the cells it does
+    /// have, not vanish. Column *count* is settled by the widest row so nothing is
+    /// silently dropped.
+    Table {
+        header: Vec<Inlines>,
+        rows: Vec<Vec<Inlines>>,
+    },
     Rule,
+}
+
+impl Block {
+    /// Columns in a table, from its widest row. Zero for anything else.
+    pub fn columns(&self) -> usize {
+        match self {
+            Block::Table { header, rows } => rows
+                .iter()
+                .map(Vec::len)
+                .chain(std::iter::once(header.len()))
+                .max()
+                .unwrap_or(0),
+            _ => 0,
+        }
+    }
 }
 
 /// Split Markdown into blocks.
@@ -106,6 +130,31 @@ pub fn parse(source: &str) -> Vec<Block> {
             continue;
         }
 
+        // A table is recognised by its **separator** row (`|---|---|`), not by pipes
+        // alone: prose about `a | b` is far commoner than a one-line table, and treating
+        // every pipe as a cell boundary would shred ordinary sentences. That means
+        // looking one line ahead, which is why `lines` is peekable.
+        if looks_like_row(start)
+            && lines
+                .peek()
+                .is_some_and(|next| is_table_separator(next.trim()))
+        {
+            flush(&mut paragraph, &mut blocks);
+            let header = table_row(start);
+            lines.next(); // the separator itself carries only alignment, which we ignore
+            let mut rows = Vec::new();
+            while let Some(next) = lines.peek() {
+                let candidate = next.trim();
+                if !looks_like_row(candidate) {
+                    break;
+                }
+                rows.push(table_row(candidate));
+                lines.next();
+            }
+            blocks.push(Block::Table { header, rows });
+            continue;
+        }
+
         if let Some((marker, rest)) = list_item(start) {
             flush(&mut paragraph, &mut blocks);
             blocks.push(Block::ListItem {
@@ -119,6 +168,78 @@ pub fn parse(source: &str) -> Vec<Block> {
     }
     flush(&mut paragraph, &mut blocks);
     blocks
+}
+
+/// Whether a line could be a table row: it has a pipe that is not escaped.
+fn looks_like_row(line: &str) -> bool {
+    let mut previous = ' ';
+    for c in line.chars() {
+        if c == '|' && previous != '\\' {
+            return true;
+        }
+        previous = c;
+    }
+    false
+}
+
+/// Whether a line is the `|---|:---:|` rule under a header.
+///
+/// This is the whole basis for calling something a table, so it is strict: every cell must
+/// be dashes with optional alignment colons, and there must be at least one.
+fn is_table_separator(line: &str) -> bool {
+    let cells = split_row(line);
+    !cells.is_empty()
+        && cells.iter().all(|cell| {
+            let cell = cell.trim();
+            let body = cell.trim_start_matches(':').trim_end_matches(':');
+            !body.is_empty() && body.chars().all(|c| c == '-')
+        })
+}
+
+/// Split one row into its cells, then parse each for emphasis.
+fn table_row(line: &str) -> Vec<Inlines> {
+    split_row(line)
+        .into_iter()
+        .map(|cell| parse_inlines(cell.trim()))
+        .collect()
+}
+
+/// Cut a row on unescaped pipes, dropping the optional leading and trailing ones.
+///
+/// `\|` is how a literal pipe is written inside a cell — which matters here, because the
+/// agent writes regular expressions and shell commands into tables.
+fn split_row(line: &str) -> Vec<String> {
+    let line = line.trim();
+    let mut cells = Vec::new();
+    let mut current = String::new();
+    let mut escaped = false;
+    for c in line.chars() {
+        match c {
+            '\\' if !escaped => escaped = true,
+            '|' if !escaped => cells.push(std::mem::take(&mut current)),
+            other => {
+                if escaped && other != '|' {
+                    // Not an escape we know: keep the backslash as typed.
+                    current.push('\\');
+                }
+                escaped = false;
+                current.push(other);
+            }
+        }
+    }
+    if escaped {
+        current.push('\\');
+    }
+    cells.push(current);
+
+    // `| a | b |` yields an empty cell at each end; `a | b` yields neither.
+    if line.starts_with('|') && !cells.is_empty() {
+        cells.remove(0);
+    }
+    if line.ends_with('|') && !line.ends_with("\\|") {
+        cells.pop();
+    }
+    cells
 }
 
 /// Join the pending lines into a paragraph.
@@ -285,6 +406,97 @@ fn push_nested(out: &mut Inlines, inner: &str, emphasis: Emphasis) {
     for (range, nested_emphasis) in nested.styles {
         out.styles
             .push((start + range.start..start + range.end, nested_emphasis));
+    }
+}
+
+#[cfg(test)]
+mod tables {
+    use super::*;
+
+    fn table(source: &str) -> (Vec<Inlines>, Vec<Vec<Inlines>>) {
+        match parse(source).into_iter().find(|b| matches!(b, Block::Table { .. })) {
+            Some(Block::Table { header, rows }) => (header, rows),
+            other => panic!("expected a table, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn renders_the_shape_a_report_subagent_emits() {
+        let (header, rows) = table(
+            "| Cultivar | Yield | Notes |\n\
+             |---|---:|:--|\n\
+             | Amarilis | 32 t/ha | **resistant** |\n\
+             | Yungay | 28 t/ha | susceptible |",
+        );
+        assert_eq!(
+            header.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
+            ["Cultivar", "Yield", "Notes"]
+        );
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0][0].text, "Amarilis");
+        // Cells are still Markdown — a bold verdict in a results table is the norm.
+        assert_eq!(rows[0][2].text, "resistant");
+        assert_eq!(rows[0][2].styles.len(), 1);
+    }
+
+    #[test]
+    fn ordinary_prose_with_a_pipe_is_not_a_table() {
+        // The reason a table needs its separator row to be recognised: the coordinator
+        // writes about shell pipelines and alternatives constantly, and treating every
+        // pipe as a cell boundary would shred those sentences into columns.
+        for source in [
+            "Run `asta search | head -5` to see the first few.",
+            "Either main | develop works here.",
+            "| this line has pipes but no rule under it |",
+        ] {
+            assert!(
+                !parse(source).iter().any(|b| matches!(b, Block::Table { .. })),
+                "{source:?} must stay prose"
+            );
+            assert!(parse(source).iter().any(|b| matches!(
+                b,
+                Block::Paragraph(_) | Block::ListItem { .. }
+            )));
+        }
+    }
+
+    #[test]
+    fn a_ragged_table_keeps_every_cell_it_has() {
+        // Streaming means half-written tables are on screen constantly, and a truncated
+        // row must not make the whole block disappear.
+        let (header, rows) = table("| a | b | c |\n|---|---|---|\n| 1 | 2 |\n| 1 | 2 | 3 | 4 |");
+        assert_eq!(header.len(), 3);
+        assert_eq!(rows[0].len(), 2, "short row keeps what it has");
+        assert_eq!(rows[1].len(), 4, "long row is not truncated");
+        // Column count comes from the widest row, so nothing is silently dropped.
+        let block = Block::Table { header, rows };
+        assert_eq!(block.columns(), 4);
+    }
+
+    #[test]
+    fn an_escaped_pipe_stays_inside_its_cell() {
+        // The agent writes regular expressions and shell commands into tables.
+        let (_, rows) = table("| what | how |\n|---|---|\n| filter | `grep -E 'a\\|b'` |");
+        assert_eq!(rows[0].len(), 2, "{:?}", rows[0]);
+        assert!(rows[0][1].text.contains("a|b"), "{:?}", rows[0][1].text);
+    }
+
+    #[test]
+    fn a_table_without_surrounding_pipes_still_parses() {
+        // GitHub-style tables often omit the outer pipes, and models emit both forms.
+        let (header, rows) = table("a | b\n--- | ---\n1 | 2");
+        assert_eq!(header.len(), 2);
+        assert_eq!(rows[0][1].text, "2");
+    }
+
+    #[test]
+    fn a_table_ends_where_the_prose_resumes() {
+        let blocks = parse("| a |\n|---|\n| 1 |\n\nAnd then a sentence.");
+        assert!(matches!(blocks[0], Block::Table { .. }));
+        match &blocks[1] {
+            Block::Paragraph(inlines) => assert_eq!(inlines.text, "And then a sentence."),
+            other => panic!("expected the prose back, got {other:?}"),
+        }
     }
 }
 
