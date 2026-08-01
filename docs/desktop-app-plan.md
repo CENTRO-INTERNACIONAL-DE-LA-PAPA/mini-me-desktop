@@ -1680,8 +1680,8 @@ there panics. Every other branch is safe because it only steps past an ASCII mar
 plain-text branch had to advance by a whole character. Spanish text would have crashed the
 renderer on the first accented word — worth remembering that ~98% of users type Spanish.
 
-**Not covered:** tables (report subagents emit them; they render as literal pipes for now),
-blockquotes, nested lists, and images. Code has no monospace face — no font is bundled — so
+**Not covered:** blockquotes, nested lists, and images. (Tables were on this list and now
+render — §27.) Code has no monospace face — no font is bundled — so
 it is marked by colour instead, which is honest but not ideal.
 
 **Unverified:** never rendered. Everything here rests on unit tests over measured output.
