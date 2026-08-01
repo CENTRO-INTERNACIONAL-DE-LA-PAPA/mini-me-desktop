@@ -2003,6 +2003,19 @@ request is cleared, so the two cannot drift.
 Approved commands still appear in the activity trace. This removes the *interruption*, not
 the record.
 
+### A flaky suite, found by running it twice
+
+The packaging test creates a directory beside the test binary and sets `MINIME_OVERLAY_DIR`;
+the ownership test redirects `HOME`. `cargo test` runs tests as **threads in one process**,
+so those writes changed what every concurrently running test saw. The suite passed with
+`--test-threads=1` and failed at random otherwise — worse than a failing test, because it
+teaches people to re-run until green.
+
+Fixed with a shared `env_lock` that every environment-touching test takes first, rather
+than pinning the whole suite to one thread. Poisoning is recovered from: the guarded data
+is `()`, so one panicking test must not cascade into every other. Confirmed by running the
+suite five times.
+
 ### Deliberately still open
 
 **The multi-line composer.** The field is single-line at the layout level, so this is not a

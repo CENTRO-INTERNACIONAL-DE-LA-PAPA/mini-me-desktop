@@ -761,6 +761,7 @@ mod tests {
 
     #[test]
     fn a_missing_checkout_is_reported_with_the_command_that_fixes_it() {
+        let _env = crate::backend::env_lock::hold();
         let report = inspect(&config(), true);
         let checkout = report
             .checks
@@ -800,6 +801,7 @@ mod tests {
 
     #[test]
     fn one_missing_runtime_does_not_cascade_into_five_failures() {
+        let _env = crate::backend::env_lock::hold();
         // A machine with no WSL must be told *one* thing. Reporting a missing checkout
         // and missing dependencies as well would send the user hunting in the distro
         // they do not have.
@@ -838,6 +840,7 @@ mod tests {
 
     #[test]
     fn a_missing_key_is_the_only_thing_wrong_on_a_provisioned_machine() {
+        let _env = crate::backend::env_lock::hold();
         // The repo itself stands in for a provisioned checkout: it has no langgraph.json,
         // so instead assert the *key* row alone flips with the flag, which is the
         // first-run path — everything installed, nothing pasted yet.
@@ -856,6 +859,7 @@ mod tests {
 
     #[test]
     fn the_remote_sandbox_is_a_warning_and_never_blocks_a_turn() {
+        let _env = crate::backend::env_lock::hold();
         // Sandbox execution is still supported (`--sandbox`), so it must not show up as
         // a failure — only as a note that commands leave this machine.
         let report = inspect(&config(), true);
@@ -881,6 +885,7 @@ mod tests {
 
     #[test]
     fn the_summary_counts_every_state() {
+        let _env = crate::backend::env_lock::hold();
         let report = inspect(&config(), false);
         let summary = report.summary();
         assert!(summary.contains("ok"), "{summary}");

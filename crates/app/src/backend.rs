@@ -1090,6 +1090,31 @@ mod job {
     }
 }
 
+/// Serialising tests that touch the process environment.
+///
+/// Configuration here is resolved from environment variables, and `cargo test` runs tests
+/// as **threads in one process** — so a test setting `HOME` or `MINIME_BACKEND_DIR` changes
+/// what every concurrently running test sees. That produced a suite which passed with
+/// `--test-threads=1` and failed at random otherwise, which is worse than a failing test:
+/// it teaches people to re-run until green.
+///
+/// Every test that reads *or* writes one of these variables takes this lock first.
+#[cfg(test)]
+pub(crate) mod env_lock {
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    pub(crate) fn hold() -> MutexGuard<'static, ()> {
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            // A test that panics while holding the lock poisons it. The data is `()`, so
+            // there is nothing to be corrupted — recovering keeps one failure from
+            // cascading into every other test in the suite.
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1109,6 +1134,7 @@ mod tests {
 
     #[test]
     fn the_sandbox_path_is_left_exactly_as_it_was() {
+        let _env = env_lock::hold();
         // Regression guard: no stray variables on the default launch, so choosing
         // nothing keeps upstream's behaviour byte for byte.
         assert!(execution_env(&Execution::Sandbox, false, true).is_empty());
@@ -1131,6 +1157,7 @@ mod tests {
 
     #[test]
     fn a_packaged_build_finds_its_files_beside_the_executable() {
+        let _env = env_lock::hold();
         // A shipped copy must never reach back into a source tree that only exists on the
         // machine it was built on. `CARGO_MANIFEST_DIR` is baked in at compile time, so
         // without this the packaged app would look for the overlay under whatever path
@@ -1191,6 +1218,7 @@ mod tests {
 
     #[test]
     fn probes_are_routed_to_wherever_the_backend_runs() {
+        let _env = env_lock::hold();
         // A check that runs on the wrong side of the WSL boundary is worse than no
         // check: it reports green for a machine that cannot launch anything.
         let mut config = BackendConfig::default();
@@ -1212,6 +1240,7 @@ mod tests {
 
     #[test]
     fn the_setup_script_is_named_the_way_the_backend_shell_sees_it() {
+        let _env = env_lock::hold();
         let mut config = BackendConfig::default();
         config.wsl = Some(WslTarget {
             distro: None,
@@ -1225,6 +1254,7 @@ mod tests {
 
     #[test]
     fn the_app_only_claims_ownership_of_what_it_provisioned() {
+        let _env = env_lock::hold();
         // The whole safety property of the update story. A checkout somebody pointed us
         // at may be their working clone — the reference checkout on this developer's own
         // machine has ten local branches — so `git checkout <pin>` on it would destroy
@@ -1296,6 +1326,7 @@ mod tests {
 
     #[test]
     fn provisioning_prefers_a_bundled_copy_over_cloning_a_private_repo() {
+        let _env = env_lock::hold();
         // Mini-Me is private, so a clone wants a personal access token — a wall for the
         // people this app is for. When a copy ships with the app, the script must be told
         // where it is.
@@ -1321,6 +1352,7 @@ mod tests {
 
     #[test]
     fn a_redacted_config_carries_no_credentials() {
+        let _env = env_lock::hold();
         let mut config = BackendConfig::default();
         config.secrets = vec![("ASTA_TOKEN".into(), "super-secret".into())];
         let redacted = config.redacted();
@@ -1375,6 +1407,7 @@ mod tests {
 
     #[test]
     fn host_execution_is_the_default_and_sandbox_is_the_escape_hatch() {
+        let _env = env_lock::hold();
         // Nothing set, or anything other than `local`, must keep the sandbox: host
         // execution is not safe to default to until `execute` is human-gated (§18).
         // Unset, or anything that is not `sandbox`, is now host execution — the
