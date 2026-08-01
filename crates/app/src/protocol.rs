@@ -111,6 +111,106 @@ pub struct Snapshot {
     /// The `values` payload nests the spine under `artifacts.project`, so a turn
     /// updates the mission for free — no extra `GET /project` round trip.
     pub project: Option<Project>,
+    /// Long jobs the turn left running. See [`Job`].
+    pub jobs: Vec<Job>,
+}
+
+/// A long-running Asta job that outlived the turn that started it.
+///
+/// The theorizer (5–15 min) and DataVoyager (20–40 min) submit with `--no-wait` and return
+/// a `task_id` immediately, so a chat turn is never blocked on them. The **client** is
+/// then responsible for polling — and this client never did, which was not merely a
+/// missing panel: `persist_theory_outputs` and `persist_analysis_outputs` are called from
+/// the poll route and **nowhere else** (`backend/routes/artifacts.py:202,243`), so a
+/// completed run never wrote its results anywhere, while `prompts.py` told the
+/// coordinator they had been saved to the sandbox.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Job {
+    pub kind: JobKind,
+    pub task_id: String,
+    /// The question the job was started for — its label, and a query parameter the
+    /// theorizer route uses when persisting results.
+    pub question: String,
+    /// DataVoyager only; passed back as `ctx`.
+    pub context_id: Option<String>,
+    /// Status as of the last snapshot or poll.
+    pub status: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JobKind {
+    Theorizer,
+    Analysis,
+}
+
+impl JobKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            JobKind::Theorizer => "Theorizer",
+            JobKind::Analysis => "Data analysis",
+        }
+    }
+
+    /// Roughly how long these take, so the panel can set expectations rather than
+    /// leaving someone watching a spinner wondering if it is stuck.
+    pub fn expected(self) -> &'static str {
+        match self {
+            JobKind::Theorizer => "5–15 min",
+            JobKind::Analysis => "20–40 min",
+        }
+    }
+}
+
+impl Job {
+    /// Whether this job has stopped moving.
+    ///
+    /// `unavailable` counts: the thread's sandbox is gone, so no further poll can tell us
+    /// anything and continuing would just burn requests forever.
+    pub fn is_finished(&self) -> bool {
+        matches!(
+            self.status.as_str(),
+            "completed" | "failed" | "canceled" | "cancelled" | "unavailable" | "error"
+        )
+    }
+
+    pub fn succeeded(&self) -> bool {
+        self.status == "completed"
+    }
+
+    /// The poll route for this job, relative to the backend.
+    fn route(&self, thread_id: &str) -> String {
+        let task = urlencode(&self.task_id);
+        match self.kind {
+            JobKind::Theorizer => format!(
+                "/theorizer/{}/{task}?q={}",
+                urlencode(thread_id),
+                urlencode(&self.question)
+            ),
+            JobKind::Analysis => format!(
+                "/analyze-data/{}/{task}?ctx={}",
+                urlencode(thread_id),
+                urlencode(self.context_id.as_deref().unwrap_or_default())
+            ),
+        }
+    }
+}
+
+/// Percent-encode a path or query value.
+///
+/// Hand-rolled rather than pulling in a URL crate for one function: the values here are a
+/// UUID, a thread id and a research question, and the question is the only one that
+/// reliably contains spaces, punctuation and accented Spanish.
+fn urlencode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*byte as char)
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
 }
 
 /// One named group of outputs (datasets, sources, reports, …).
@@ -236,6 +336,36 @@ impl LangGraphClient {
         resp.json()
             .await
             .context("could not decode the project spine from GET /project")
+    }
+
+    /// Poll one long job, returning its status.
+    ///
+    /// The route does more than report: on a terminal state it **persists the outcome
+    /// into the sandbox**, which is how the agent can read the theories on a later turn.
+    /// Polling is therefore not a display nicety — it is the only thing that makes a
+    /// finished run durable (`backend/routes/artifacts.py:196-203`).
+    ///
+    /// A transport failure is *not* an error worth stopping for: the sidecar may simply be
+    /// restarting. The caller keeps the job running and tries again.
+    pub async fn poll_job(&self, thread_id: &str, job: &Job) -> Result<String> {
+        let resp = self
+            .http
+            .get(format!("{}{}", self.base_url, job.route(thread_id)))
+            .send()
+            .await
+            .context("polling a background job failed")?
+            .error_for_status()
+            .context("the job poll route returned an error status")?;
+        let value: Value = resp
+            .json()
+            .await
+            .context("could not decode the job poll response")?;
+        Ok(value
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("running")
+            .trim()
+            .to_string())
     }
 
     /// `POST /threads` → a fresh thread id.
@@ -584,10 +714,66 @@ fn decode_values(data: &str) -> Option<Snapshot> {
         .get("project")
         .and_then(|project| serde_json::from_value::<Project>(project.clone()).ok());
 
-    if buckets.is_empty() && project.is_none() {
+    let jobs = decode_jobs(artifacts);
+
+    if buckets.is_empty() && project.is_none() && jobs.is_empty() {
         return None;
     }
-    Some(Snapshot { buckets, project })
+    Some(Snapshot {
+        buckets,
+        project,
+        jobs,
+    })
+}
+
+/// Pull the still-running long jobs out of a `values` payload.
+///
+/// Fields come from `HypothesisArtifactPayload` / `DataAnalysisArtifactPayload`
+/// (`backend/schemas.py:353,388`): both carry `status` and `task_id`, and the analysis one
+/// adds `context_id`. A job with no task id cannot be polled, so it is skipped rather than
+/// shown as something the user could wait on.
+fn decode_jobs(artifacts: &Value) -> Vec<Job> {
+    let mut jobs = Vec::new();
+    for (bucket, kind) in [
+        ("hypotheses", JobKind::Theorizer),
+        ("analyses", JobKind::Analysis),
+    ] {
+        let Some(items) = artifacts.get(bucket).and_then(Value::as_array) else {
+            continue;
+        };
+        for item in items {
+            let Some(task_id) = item
+                .get("task_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+            else {
+                continue;
+            };
+            let status = item
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("running")
+                .trim()
+                .to_string();
+            jobs.push(Job {
+                kind,
+                task_id: task_id.to_string(),
+                question: item
+                    .get("question")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string(),
+                context_id: item
+                    .get("context_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                status,
+            });
+        }
+    }
+    jobs
 }
 
 /// Turn a `custom` event into status-line text.
@@ -1102,6 +1288,102 @@ mod tests {
         assert_eq!(configurable["model_config"]["default"], "openai::gpt-5.4");
         assert!(configurable["model_config"]["storage_mode"].is_null());
         assert!(configurable["__llm_keys"].is_null());
+    }
+
+    #[test]
+    fn a_running_long_job_is_found_and_pollable() {
+        // Field names from HypothesisArtifactPayload / DataAnalysisArtifactPayload
+        // (backend/schemas.py:353,388). Getting these wrong means the app silently never
+        // collects a 40-minute run — which is what it did before this existed.
+        let snapshot = decode_values(
+            &json!({
+                "artifacts": {
+                    "hypotheses": [{
+                        "question": "¿qué papa es más resistente?",
+                        "status": "running",
+                        "task_id": "1f0a2b3c-4d5e-6f70-8192-a3b4c5d6e7f8"
+                    }],
+                    "analyses": [{
+                        "question": "What drives yield?",
+                        "status": "running",
+                        "task_id": "aaaabbbb-cccc-dddd-eeee-ffff00001111",
+                        "context_id": "ctx-42"
+                    }]
+                }
+            })
+            .to_string(),
+        )
+        .expect("a snapshot");
+
+        assert_eq!(snapshot.jobs.len(), 2, "{:?}", snapshot.jobs);
+        let theorizer = &snapshot.jobs[0];
+        assert_eq!(theorizer.kind, JobKind::Theorizer);
+        assert!(!theorizer.is_finished());
+
+        // The question rides in the query string, and the theorizer route uses it when
+        // persisting results — so accented Spanish has to survive encoding intact.
+        let route = theorizer.route("thread-1");
+        assert!(route.starts_with("/theorizer/thread-1/1f0a2b3c-"), "{route}");
+        assert!(route.contains("q=%C2%BFqu%C3%A9%20papa"), "{route}");
+        assert!(!route.contains(' '), "a raw space would break the request: {route}");
+
+        let analysis = &snapshot.jobs[1];
+        assert_eq!(analysis.kind, JobKind::Analysis);
+        assert!(analysis.route("t").contains("ctx=ctx-42"), "{}", analysis.route("t"));
+    }
+
+    #[test]
+    fn a_job_with_no_task_id_is_not_offered_as_something_to_wait_for() {
+        // A completed theorizer artifact carries results but no id to poll. Listing it as
+        // a running job would leave a spinner nobody can ever resolve.
+        let snapshot = decode_values(
+            &json!({
+                "artifacts": {
+                    "hypotheses": [
+                        {"question": "done already", "status": "completed"},
+                        {"question": "no id", "status": "running", "task_id": "  "}
+                    ],
+                    "sources": [{"citation": "Love MI et al. 2014"}]
+                }
+            })
+            .to_string(),
+        )
+        .expect("a snapshot");
+        assert!(snapshot.jobs.is_empty(), "{:?}", snapshot.jobs);
+        assert_eq!(snapshot.buckets.len(), 2, "the artifacts still show up");
+    }
+
+    #[test]
+    fn every_terminal_state_the_backend_can_report_stops_the_poll() {
+        // `unavailable` is the subtle one: the thread's sandbox is gone, so no further
+        // poll can ever tell us anything and looping would burn requests forever.
+        for status in [
+            "completed",
+            "failed",
+            "canceled",
+            "unavailable",
+            "error",
+        ] {
+            let job = Job {
+                kind: JobKind::Theorizer,
+                task_id: "x".into(),
+                question: String::new(),
+                context_id: None,
+                status: status.to_string(),
+            };
+            assert!(job.is_finished(), "{status}");
+            assert_eq!(job.succeeded(), status == "completed", "{status}");
+        }
+        for status in ["running", "input-required", "submitted"] {
+            let job = Job {
+                kind: JobKind::Analysis,
+                task_id: "x".into(),
+                question: String::new(),
+                context_id: None,
+                status: status.to_string(),
+            };
+            assert!(!job.is_finished(), "{status}");
+        }
     }
 
     #[test]

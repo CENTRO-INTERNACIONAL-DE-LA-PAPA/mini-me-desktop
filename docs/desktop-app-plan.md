@@ -2077,3 +2077,76 @@ dragging a file has their eyes on the file.
 
 **Unverified:** never dropped anything. `on_drop` is wired to the root and the translation
 is tested, but no file has been dragged onto a real window.
+
+## 29. P6.5, redirected: collect the long jobs that were already running (2026-08-01)
+
+§14 planned P6.5 as **deepagents async subagents**. Reading the code before building it
+found a blocker and, more importantly, a live defect that mattered more.
+
+### The blocker
+
+Async subagents require **each async subagent to be its own graph** on the Agent Protocol
+server. Mini-Me declares exactly one (`agent` in `langgraph.json`), so this is a structural
+change to a repo we deliberately do not fork — on top of a **preview API** whose docs say
+"APIs may change", and failure modes mitigated only by upstream prompt engineering. That is
+three unsettled foundations for a feature whose user-visible payoff is "the conversation
+stays live".
+
+### The defect that was worth more than the feature
+
+The two headline research features — the theorizer (5–15 min) and DataVoyager (20–40 min)
+— **already** don't block a turn: they submit with `--no-wait`, return a `task_id`, and
+leave the **client** to poll. This client never polled. That was not a missing panel:
+
+> `persist_theory_outputs` and `persist_analysis_outputs` are called from the poll route
+> and **nowhere else** (`backend/routes/artifacts.py:202,243`).
+
+So a completed run wrote its results **nowhere**, while `prompts.py` instructs the
+coordinator that "when a theorizer run completes, its theories are saved to the sandbox" —
+and tells it to read them there on a later turn. Both headline features were quietly
+losing their output in this client, and the agent was being told otherwise.
+
+Polling therefore is not a display nicety. **It is the only thing that makes a finished run
+durable.**
+
+### What was built
+
+The same user-visible payoff async subagents were meant to deliver — background work that
+is observable and arrives on its own — using machinery that already exists upstream, with
+no fork, no preview API and no new graphs.
+
+- `Job` / `JobKind` decoded from the `values` snapshot, keyed on `task_id`. Fields taken
+  from `HypothesisArtifactPayload` / `DataAnalysisArtifactPayload`
+  (`backend/schemas.py:353,388`), not guessed.
+- `Sidecar::watch_job` polls every **20s** on the Tokio runtime, which **outlives the
+  turn**. Terminal states stop it — including `unavailable`, the subtle one: the thread's
+  sandbox is gone, so no further poll can ever say anything and looping would burn requests
+  forever.
+- A **BACKGROUND JOBS** section above OUTPUTS, showing what is running, what it was asked,
+  and *how long that kind of job usually takes* — a spinner with no expectation attached is
+  indistinguishable from a hang.
+- A finished job refreshes the spine, because the route has just written its results into
+  the sandbox as it reported them.
+
+Three details worth keeping:
+
+- **Transport failures do not end a watch.** The sidecar may be restarting, or a turn may
+  be saturating it; declaring a 40-minute job dead over one refused connection would be
+  the worst possible failure.
+- **The thread id is re-read on every poll**, not captured — "New thread" changes it, and
+  polling the old one asks about a task that thread no longer knows.
+- **A job with no `task_id` is never listed.** A completed artifact carries results but no
+  id, and showing it as running would leave a spinner nobody could resolve.
+
+### The lifetime question, answered narrowly
+
+§14 flagged "the sidecar dies with the window" as blocking background work. This does not
+need it solved: polling runs for as long as the window is open, and the job itself lives on
+Asta's hosted service, recoverable by task id. Making the backend outlive the window is a
+real design change with real costs (adoption, orphans, a second app instance) and it is not
+required to collect a result the user is waiting for. **Deferred, not dodged** — closing the
+window mid-job still means nobody persists that run.
+
+**Unverified:** no long job has been run through this. The decode and route construction are
+tested against the measured payload shapes, but the poll loop has never watched a real
+theorizer run to completion.

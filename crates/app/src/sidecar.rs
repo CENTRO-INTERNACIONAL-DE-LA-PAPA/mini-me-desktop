@@ -17,7 +17,7 @@ use tokio::sync::Mutex;
 
 use crate::backend::{BackendConfig, BackendSupervisor};
 use crate::protocol::{
-    AgentRef, Decision, LangGraphClient, ModelChoice, Project, TurnEvent, TurnOutcome,
+    AgentRef, Decision, Job, LangGraphClient, ModelChoice, Project, TurnEvent, TurnOutcome,
 };
 
 /// Find (or start) the tally row for one subagent invocation, keyed by namespace so
@@ -32,6 +32,13 @@ fn entry<'a>(
     agents.push((agent.ns.clone(), agent.name.clone(), 0, 0));
     agents.last_mut().expect("just pushed")
 }
+
+/// How often a background job is polled.
+///
+/// These runs take 5–40 minutes, and each poll shells out to the `asta` CLI inside the
+/// sandbox — so this is about noticing within a reasonable time, not about latency.
+/// Twenty seconds is roughly a hundred polls across the longest job, which is nothing.
+const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Progress from a setup fix the app is running on the user's behalf.
 #[derive(Debug, Clone)]
@@ -207,6 +214,60 @@ impl Sidecar {
                 .await
                 .map_err(|error| format!("{error:#}"));
             let _ = tx.unbounded_send(outcome);
+        });
+
+        rx
+    }
+
+    /// Watch one long job until it stops moving, reporting every status change.
+    ///
+    /// **Outlives the turn that started it.** That is the whole point: the theorizer and
+    /// DataVoyager submit with `--no-wait` and hand back a task id, so the conversation is
+    /// free again immediately — but nothing was collecting the result. Polling is also
+    /// what makes a finished run *durable*, since the route persists its output into the
+    /// sandbox on a terminal state and nothing else does (docs §29).
+    ///
+    /// Runs on the Tokio runtime, which lives as long as the window. Closing the window
+    /// ends the poll; the job itself continues on Asta's service and can be picked up
+    /// again by task id.
+    pub fn watch_job(&self, job: Job) -> mpsc::UnboundedReceiver<Job> {
+        let (tx, rx) = mpsc::unbounded();
+        let base_url = self.base_url.clone();
+        let thread = self.thread.clone();
+
+        self.runtime.spawn(async move {
+            let client = LangGraphClient::new(base_url);
+            let mut job = job;
+            loop {
+                tokio::time::sleep(POLL_INTERVAL).await;
+                // Read the thread each time rather than capturing it: "New thread" can
+                // change it, and polling the old one would ask about a task that thread
+                // no longer knows.
+                let Some(thread_id) = thread.lock().expect("thread id mutex").clone() else {
+                    return;
+                };
+                match client.poll_job(&thread_id, &job).await {
+                    Ok(status) => {
+                        if status == job.status {
+                            continue;
+                        }
+                        job.status = status;
+                        let finished = job.is_finished();
+                        if tx.unbounded_send(job.clone()).is_err() {
+                            return; // the window went away
+                        }
+                        if finished {
+                            return;
+                        }
+                    }
+                    // Transport failures are expected — the sidecar may be restarting, or
+                    // a turn may be saturating it. Keep waiting rather than declaring a
+                    // 20-minute job dead over one refused connection.
+                    Err(error) => {
+                        tracing::debug!(task = %job.task_id, %error, "job poll failed; retrying")
+                    }
+                }
+            }
         });
 
         rx

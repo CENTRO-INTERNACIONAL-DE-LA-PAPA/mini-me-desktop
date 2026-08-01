@@ -570,6 +570,9 @@ struct Workbench {
     project: Option<Project>,
     /// Research outputs, from the latest `values` snapshot of the current run.
     buckets: Vec<Bucket>,
+    /// Long jobs (theorizer, DataVoyager) started by a turn and still being watched.
+    /// Kept for the whole session so a finished one stays visible rather than vanishing.
+    jobs: Vec<protocol::Job>,
     transcript: Vec<Message>,
     sidecar: Arc<Sidecar>,
     /// Status line text (backend/stream progress, not model output).
@@ -664,6 +667,7 @@ impl Workbench {
         let mut workbench = Self {
             project: None,
             buckets: Vec::new(),
+            jobs: Vec::new(),
             transcript: Vec::new(),
             sidecar,
             status: "idle — type a prompt and press Enter".to_string(),
@@ -716,6 +720,64 @@ impl Workbench {
         // start one — see `Sidecar::fetch_project`.
         workbench.refresh_project(cx);
         workbench
+    }
+
+    /// Start watching a long job the turn left running, if it isn't already watched.
+    ///
+    /// A `values` snapshot repeats every artifact it knows about on every frame, so this
+    /// is called many times for the same job — keyed on the task id, and already-finished
+    /// jobs are recorded without spawning a poller that would have nothing to wait for.
+    fn track_job(&mut self, job: protocol::Job, cx: &mut Context<Self>) {
+        if let Some(existing) = self.jobs.iter_mut().find(|k| k.task_id == job.task_id) {
+            // Trust the snapshot for a status we don't have yet, but never let it walk a
+            // finished job back to running.
+            if !existing.is_finished() {
+                existing.status = job.status;
+            }
+            return;
+        }
+        let finished = job.is_finished();
+        self.jobs.push(job.clone());
+        if finished {
+            return;
+        }
+
+        self.status = format!(
+            "{} running in the background ({}) — you can keep working",
+            job.kind.label(),
+            job.kind.expected()
+        );
+        let mut updates = self.sidecar.watch_job(job);
+        cx.spawn(async move |this, cx| {
+            while let Some(update) = updates.next().await {
+                let carry_on = this.update(cx, |workbench, cx| {
+                    let finished = update.is_finished();
+                    let label = update.kind.label();
+                    let succeeded = update.succeeded();
+                    if let Some(tracked) =
+                        workbench.jobs.iter_mut().find(|k| k.task_id == update.task_id)
+                    {
+                        tracked.status = update.status.clone();
+                    }
+                    if finished {
+                        workbench.status = if succeeded {
+                            format!("{label} finished — its results are in the sandbox")
+                        } else {
+                            format!("{label} ended: {}", update.status)
+                        };
+                        // The route wrote the outcome into the sandbox as it reported it,
+                        // so the spine and outputs have something new to show.
+                        workbench.refresh_project(cx);
+                    }
+                    cx.notify();
+                });
+                if carry_on.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.notify();
     }
 
     /// A file was dropped on the window.
@@ -990,6 +1052,9 @@ impl Workbench {
                 }
                 if !snapshot.buckets.is_empty() {
                     self.buckets = snapshot.buckets;
+                }
+                for job in snapshot.jobs {
+                    self.track_job(job, cx);
                 }
             }
             TurnEvent::Done => {
@@ -2393,6 +2458,7 @@ impl Workbench {
                         .text_sm()
                         .child("No project loaded yet. Run a turn — the mission is derived from your first question."),
                 )
+                .child(self.jobs_section())
                 .child(self.outputs_section());
         };
 
@@ -2485,7 +2551,65 @@ impl Workbench {
             );
         }
 
-        panel.child(self.outputs_section())
+        panel.child(self.jobs_section()).child(self.outputs_section())
+    }
+
+    /// Long jobs still running, and the ones that finished this session.
+    ///
+    /// The theorizer and DataVoyager return a task id immediately and finish minutes
+    /// later, so without this the answer to "is it still going?" was nothing at all —
+    /// and, worse, nobody was collecting the result (docs §29).
+    fn jobs_section(&self) -> impl IntoElement {
+        let mut section = div().flex().flex_col().gap_2().pt_2();
+        if self.jobs.is_empty() {
+            return section;
+        }
+        section = section.child(section_label("BACKGROUND JOBS"));
+        for job in &self.jobs {
+            let (mark, colour) = if !job.is_finished() {
+                ("◐", ACCENT)
+            } else if job.succeeded() {
+                ("✓", MUTED)
+            } else {
+                ("✗", ERROR)
+            };
+            let detail = if job.is_finished() {
+                job.status.clone()
+            } else {
+                // Say how long it usually takes. A spinner with no expectation attached
+                // is indistinguishable from a hang.
+                format!("running · usually {}", job.kind.expected())
+            };
+            section = section.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .min_w_0()
+                    .gap_1()
+                    .pl_2()
+                    .border_l_1()
+                    .border_color(rgb(colour))
+                    .child(
+                        div()
+                            .text_color(rgb(TEXT))
+                            .text_sm()
+                            .child(format!("{mark} {}", job.kind.label())),
+                    )
+                    .child(div().text_color(rgb(MUTED)).text_xs().child(detail))
+                    .when(!job.question.is_empty(), |row| {
+                        row.child(
+                            div()
+                                .w_full()
+                                .min_w_0()
+                                .text_color(rgb(MUTED))
+                                .text_xs()
+                                .child(job.question.clone()),
+                        )
+                    }),
+            );
+        }
+        section
     }
 
     /// Research outputs from the current run, grouped by kind.
