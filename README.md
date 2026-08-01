@@ -91,6 +91,22 @@ extra, so plain `uv sync` leaves you with no `langgraph` entry point. Keys do **
 go in that checkout's `.env` any more: they live in your OS keychain and travel with
 each request, so the app needs no secrets on disk.
 
+## Git inside WSL asks for a password
+
+Only on the **Windows** side does git have a credential helper; inside the distro it does
+not, so `git pull` there prompts — and GitHub has not accepted account passwords since
+2021, so the prompt cannot be satisfied. Reuse Windows' credential manager:
+
+```bash
+git config --global credential.helper "/mnt/c/Program Files/Git/mingw64/libexec/git-core/git-credential-manager.exe"
+```
+
+(If that path is wrong, `ls /mnt/c/Program\ Files/Git/mingw64/libexec/git-core/ | grep credential`.)
+
+Worth knowing which repo the failure names: `bundle-backend.sh` itself needs **no**
+network, since it clones from a checkout already on the machine. A prompt mentioning
+`mini-me-desktop.git` is the `git pull` in front of it, not the bundle.
+
 ## Release builds need `fxc.exe` (Windows)
 
 A **release** build of `gpui 0.2.2` pre-compiles its HLSL shaders; a debug build does not
