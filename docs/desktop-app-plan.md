@@ -2320,7 +2320,33 @@ the wrong thing about the session.
 A successful sign-in now says so in the fix output — *"Close and reopen the app: the
 backend reads your Asta sign-in when it starts."*
 
-**The durable fix, not built:** have the overlay read the token from a small file at command
+### The three holes, and why the backend mints its own token now
+
+A restart did not fix it either. Passing the token in as an environment variable had
+**three** separate holes, any one of which is enough:
+
+1. **`_command_env()` is called once, in `__init__`.** The environment is a snapshot taken
+   when a thread's workspace is built — so a token that arrives later never reaches a
+   single command.
+2. **`ensure_running` returns early when a backend is already healthy.** The app only
+   minted while *spawning*, so attaching to a backend that was already up — including one
+   orphaned by a previous session — skipped it entirely.
+3. **On Windows it has to survive the crossing into WSL** via `WSLENV`.
+
+`current_asta_token()` in the overlay removes all three: the backend asks the CLI itself,
+in the same environment every other `asta` command runs in. If those can authenticate, so
+can this. Cached for ten minutes so it is not a subprocess per command, and refreshed from
+`_execute_with_token`, which is already inside `asyncio.to_thread` — `langgraph dev`'s
+blocking-call guard rejects subprocesses on the event loop, and that guard has aborted a
+run in this project before.
+
+An explicitly set `ASTA_TOKEN` still wins, because someone who sets one means it. Anything
+that is not JWT-shaped is ignored in both directions.
+
+**Verified against the real CLI:** mints, is JWT-shaped, caches, prefers a supplied token,
+and ignores junk in `ASTA_TOKEN` in favour of a minted one.
+
+**Superseded:** have the overlay read the token from a small file at command
 time rather than from the process environment, so the app can refresh it into a *running*
 backend. `_command_env()` already reads `ASTA_TOKEN` at call time for exactly this kind of
 reason — but it runs on the event loop, where `langgraph dev`'s blocking-call guard rejects

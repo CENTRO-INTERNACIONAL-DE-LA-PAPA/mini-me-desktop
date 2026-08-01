@@ -22,9 +22,12 @@ deepagents has no equivalent for. That is this file.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import shutil
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 from deepagents.backends.local_shell import LocalShellBackend
@@ -54,6 +57,83 @@ def workspace_root() -> Path:
     if configured:
         return Path(configured).expanduser()
     return Path.home() / ".mini-me" / "workspaces"
+
+
+logger = logging.getLogger(__name__)
+
+#: How long a minted Asta token is reused before asking the CLI again.
+#:
+#: Access tokens last seven days, so this is not about expiry — it is about not spawning
+#: `asta` once per shell command. Ten minutes means a token that lapses mid-session is
+#: replaced within ten minutes, without the researcher doing anything.
+_TOKEN_TTL_SECONDS = 600
+
+#: (token, minted_at). Module-level so every workspace in the process shares one.
+_token_cache: tuple[str | None, float] = (None, 0.0)
+
+
+def _looks_like_a_jwt(value: str) -> bool:
+    """Three non-empty base64url segments, and nothing else.
+
+    Without ``--raw`` the CLI pretty-prints a decoded header and payload; signed out it
+    prints prose. Passing either along as a credential produces an authentication failure
+    that blames the wrong thing.
+    """
+    parts = value.split(".")
+    return len(parts) == 3 and all(
+        part and all(c.isalnum() or c in "-_" for c in part) for part in parts
+    )
+
+
+def current_asta_token() -> str | None:
+    """A usable Asta access token, minted from the CLI if need be.
+
+    **Why the backend mints it rather than receiving it.** Access tokens last seven days,
+    and an expired one surfaces as "the theorizer returned no task id" — naming neither
+    the token nor the fix. Passing one in as an environment variable turned out to have
+    three separate holes: the value is captured once when a workspace is built, the app
+    only mints while *spawning* (so it never does when it attaches to a backend that is
+    already running), and on Windows it has to survive the crossing into WSL.
+
+    Asking the CLI here removes all three. It runs in the same environment as every other
+    `asta` command the agent makes, so if those can authenticate, so can this.
+
+    **Never called on the event loop** — see the call site in ``aexecute``, which is
+    already inside ``asyncio.to_thread``. ``langgraph dev``'s blocking-call guard rejects
+    subprocesses on the loop, and that guard has aborted a run in this project before.
+    """
+    global _token_cache
+
+    # An explicitly supplied token always wins: someone who set it meant it.
+    supplied = os.getenv("ASTA_TOKEN")
+    if supplied and _looks_like_a_jwt(supplied.strip()):
+        return supplied.strip()
+
+    token, minted_at = _token_cache
+    if token and (time.monotonic() - minted_at) < _TOKEN_TTL_SECONDS:
+        return token
+
+    try:
+        result = subprocess.run(
+            ["asta", "auth", "print-token", "--raw", "--refresh"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.debug("minime_local: could not run the asta CLI: %s", exc)
+        return token
+    minted = result.stdout.strip()
+    if result.returncode != 0 or not _looks_like_a_jwt(minted):
+        # Keep whatever we had: a stale token still beats none, and the failure the user
+        # sees should come from Asta, not from us handing over prose.
+        logger.debug("minime_local: asta did not return a token")
+        return token
+
+    _token_cache = (minted, time.monotonic())
+    logger.info("minime_local: refreshed the Asta access token from the CLI")
+    return minted
 
 
 def _command_env() -> dict[str, str]:
@@ -235,7 +315,21 @@ class LocalWorkspaceBackend(LocalShellBackend):
         invalid JSON.
         """
         await self.aresolve()
-        return await asyncio.to_thread(self.execute, command, timeout=timeout)
+        return await asyncio.to_thread(self._execute_with_token, command, timeout)
+
+    def _execute_with_token(self, command: str, timeout: int | None) -> ExecuteResponse:
+        """Run a command with a currently-valid Asta token in its environment.
+
+        ``self.env`` was built once when this workspace was constructed, which is the bug
+        this exists to close: a token that arrived after that — because the user signed in
+        from the Setup pane, or because the seven-day one lapsed — never reached a single
+        command. Refreshed here, where we are already off the event loop and ``asta`` may
+        safely be spawned (see :func:`current_asta_token`).
+        """
+        token = current_asta_token()
+        if token:
+            self.env["ASTA_TOKEN"] = token
+        return self.execute(command, timeout=timeout)
 
     @property
     def id(self) -> str:
