@@ -37,15 +37,6 @@ pub struct Inlines {
     pub styles: Vec<(Range<usize>, Emphasis)>,
 }
 
-impl Inlines {
-    fn plain(text: impl Into<String>) -> Self {
-        Self {
-            text: text.into(),
-            styles: Vec::new(),
-        }
-    }
-}
-
 /// One rendered block.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Block {
