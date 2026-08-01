@@ -25,3 +25,4 @@ Cargo.lock.orig
 # that actually runs the backend — the user's.
 __pycache__/
 *.py[cod]
+/dist/

@@ -1908,3 +1908,54 @@ where the backend could never see it. It worked anyway because Ubuntu's default 
 adds that directory itself. That is luck, and `asta` is precisely the tool that has to be
 found on the backend's PATH at execute time, so the script now guarantees it (guarded, so
 a distro that already handles it is left alone).
+
+## 26. Shipping it: process teardown and a folder you can send (2026-08-01)
+
+### The Job Object
+
+Windows has no process group to signal, and killing a parent leaves its children running.
+`uv run` forks the real server as a grandchild, and `wsl.exe` fronts a process living in
+another kernel — both survived `Child::kill`, kept holding port 2024, and made the next
+launch attach to a stale backend.
+
+A **Job Object** with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` is the OS-level answer: every
+process in the job dies when the last handle closes. Crucially that covers the app
+**crashing** — the handle closes with the process, so the kernel cleans up even when no
+destructor of ours runs. `taskkill /T` would only work during an orderly shutdown.
+
+**Verified by cross-compiling**, which is worth recording as a technique: the whole crate
+cannot be checked for `x86_64-pc-windows-msvc` from Linux (gpui pulls `stacker`, whose
+build script needs `windows.h`), but the `job` module can be extracted into a throwaway
+crate with only `windows-sys` and checked there. That found two missing feature gates —
+`CreateJobObjectW` is behind `Win32_Security`, `JOBOBJECT_EXTENDED_LIMIT_INFORMATION`
+behind `Win32_System_Threading` — which would otherwise have been a broken Windows build
+discovered by the user. The extraction is scripted against the real file, so what was
+checked is what ships.
+
+Known gap: there is a window between spawn and `AssignProcessToJobObject` in which a
+grandchild could escape. Closing it needs `CREATE_SUSPENDED`, which
+`std::process::Command` does not expose. The child spends its first moments importing
+Python, so the race is theoretical.
+
+### A folder, not an installer
+
+`scripts/package.sh` assembles `dist/mini-me-desktop/`: the executable beside `overlay/`,
+`scripts/` and `vendor/Mini-Me`. **Deliberately not an MSI** — no code signing, no
+notarization. The audience is a few dozen colleagues, and an unsigned installer is a
+SmartScreen warning that teaches people to click through security dialogs.
+
+What made this work is `resource()`: look at an env override, then **beside the
+executable**, then the compiled-in repo path. Before that, `CARGO_MANIFEST_DIR` was baked
+in at build time, so a shipped copy would have hunted for the overlay under a path that
+existed only on the build machine — and, because a missing overlay fails *silently*
+(§24), quietly fallen back to the remote sandbox.
+
+The script refuses to be quiet about the one thing that would break a colleague's install:
+if `vendor/Mini-Me` is absent it says so loudly, because without it the user is asked for
+a GitHub token they do not have.
+
+**Verified:** the bundle was copied to an unrelated directory with a fresh `HOME`, and
+`--preflight` resolved the overlay, the setup script and the bundled backend **entirely
+inside the bundle**, with no path pointing at the source tree. (First attempt reported the
+source tree — a stale binary, because `cargo test` had run but `cargo build` had not. That
+trap has now cost this project twice.)

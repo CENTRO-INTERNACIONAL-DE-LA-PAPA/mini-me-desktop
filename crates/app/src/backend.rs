@@ -99,11 +99,36 @@ fn resolve_execution(override_local: Option<bool>) -> Execution {
 /// compiled-in path is a real path on their machine. `MINIME_OVERLAY_DIR` overrides
 /// it for a packaged layout.
 fn overlay_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("MINIME_OVERLAY_DIR") {
+    resource("MINIME_OVERLAY_DIR", "overlay")
+}
+
+/// Find a directory that ships with the app.
+///
+/// Three places, in order:
+///
+/// 1. **An environment override**, for anything unusual.
+/// 2. **Next to the executable** — how a *packaged* build is laid out
+///    (`mini-me-desktop.exe` beside `overlay/`, `scripts/`, `vendor/`). Checked before
+///    the compiled-in path so a shipped copy never reaches back to a source tree that
+///    exists only on the machine it was built on.
+/// 3. **The repo**, resolved at compile time, which is the development case and was the
+///    only case until packaging existed.
+///
+/// Falls back to (3) unconditionally when nothing is found, so the error a user sees names
+/// a real path rather than an empty one.
+fn resource(env_var: &str, name: &str) -> PathBuf {
+    if let Some(dir) = std::env::var_os(env_var) {
         return PathBuf::from(dir);
     }
-    // `CARGO_MANIFEST_DIR` is `crates/app`; the overlay sits at the repo root.
-    normalized(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay"))
+    if let Some(beside) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join(name)))
+        .filter(|dir| dir.is_dir())
+    {
+        return beside;
+    }
+    // `CARGO_MANIFEST_DIR` is `crates/app`; these sit at the repo root.
+    normalized(Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(name))
 }
 
 /// Resolve `..` segments lexically, so a path built by joining reads like a path.
@@ -131,10 +156,7 @@ fn normalized(path: PathBuf) -> PathBuf {
 /// to be named as a path the *backend's* shell can reach — inside WSL that means
 /// `/mnt/c/…`, which is what [`BackendConfig::setup_script`] does with this.
 fn scripts_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("MINIME_SCRIPTS_DIR") {
-        return PathBuf::from(dir);
-    }
-    normalized(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts"))
+    resource("MINIME_SCRIPTS_DIR", "scripts")
 }
 
 /// A Mini-Me copy shipped with the app, if there is one.
@@ -142,9 +164,11 @@ fn scripts_dir() -> PathBuf {
 /// `vendor/Mini-Me`, populated by `scripts/bundle-backend.sh` and gitignored. Its
 /// presence is what lets provisioning skip GitHub entirely — see [`BackendConfig::setup_script`].
 fn bundled_backend_dir() -> Option<PathBuf> {
+    // The variable names the checkout itself, not the directory holding it — the default
+    // is `vendor/Mini-Me`, but someone overriding it is pointing at a specific copy.
     let dir = match std::env::var_os("MINIME_BUNDLED_BACKEND") {
         Some(dir) => PathBuf::from(dir),
-        None => normalized(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vendor/Mini-Me")),
+        None => resource("MINIME_VENDOR_DIR", "vendor").join("Mini-Me"),
     };
     dir.join("langgraph.json").is_file().then_some(dir)
 }
@@ -744,6 +768,10 @@ impl BackendConfig {
 pub struct BackendSupervisor {
     config: BackendConfig,
     child: Option<Child>,
+    /// Windows only: the Job Object holding the sidecar's whole process tree. Dropping it
+    /// is what reaps them (see [`job`]).
+    #[cfg(windows)]
+    job: Option<job::Job>,
 }
 
 impl BackendSupervisor {
@@ -751,6 +779,8 @@ impl BackendSupervisor {
         Self {
             config,
             child: None,
+            #[cfg(windows)]
+            job: None,
         }
     }
 
@@ -856,6 +886,20 @@ impl BackendSupervisor {
                 )
             }
         })?;
+
+        // Windows has no process groups to signal, so the tree is held in a Job Object
+        // that kills everything when its last handle closes — including if *we* crash.
+        #[cfg(windows)]
+        {
+            self.job = job::adopt(&child);
+            if self.job.is_none() {
+                tracing::warn!(
+                    "could not create a Job Object; closing the window may leave the \
+                     backend running and holding the port"
+                );
+            }
+        }
+
         self.child = Some(child);
         Ok(())
     }
@@ -957,13 +1001,93 @@ fn terminate(child: &mut Child) {
     let _ = child.wait();
 }
 
-/// TODO(P6.4): Windows needs a Job Object to reap a whole process tree; this
-/// kills only the direct child, which is correct for the venv entry point but
-/// would orphan a `uv run` grandchild.
+/// Stop the sidecar on Windows.
+///
+/// `Child::kill` reaps only the process we spawned. That is correct for the venv entry
+/// point, but `uv run` forks the real server as a grandchild and `wsl.exe` fronts a
+/// process living in another kernel — both would survive and keep holding the port, so
+/// the next launch attaches to a stale backend or fails outright.
+///
+/// The actual reaping is done by the **Job Object** created in
+/// [`BackendSupervisor::start`], which kills its whole tree when the last handle closes.
+/// This function just asks nicely first.
 #[cfg(not(unix))]
 fn terminate(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
+}
+
+/// Reaping the sidecar's process tree on Windows.
+///
+/// Windows has no process group to signal, and killing a parent leaves its children
+/// running. A **Job Object** with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` is the OS-level
+/// answer: every process in the job dies when the last handle to it closes. Crucially
+/// that includes the case where the app **crashes** — the handle closes with the process,
+/// so the kernel cleans up even when no destructor of ours ever runs. A `taskkill /T`
+/// would only work during an orderly shutdown.
+///
+/// Verified by cross-checking against `x86_64-pc-windows-msvc`, which is also how the two
+/// missing feature gates were found. It cannot be *run* from the Linux dev box.
+#[cfg(windows)]
+mod job {
+    use std::os::windows::io::AsRawHandle;
+    use std::process::Child;
+
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    /// An owned job handle. Dropping it kills everything inside.
+    pub struct Job(HANDLE);
+
+    // A raw HANDLE is not `Send` by default, but a job handle is just a kernel object
+    // reference with no thread affinity, and the supervisor holding it moves across
+    // threads inside the Tokio mutex.
+    unsafe impl Send for Job {}
+
+    /// Put `child` — and anything it goes on to spawn — into a fresh job.
+    ///
+    /// Returns `None` rather than failing the launch: a backend that runs and might
+    /// outlive us is much better than no backend at all, and the caller logs it.
+    pub fn adopt(child: &Child) -> Option<Job> {
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                return None;
+            }
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let set = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &limits as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            if set == 0 {
+                CloseHandle(job);
+                return None;
+            }
+            // There is a small window between spawn and this call in which the child could
+            // fork something that escapes the job. Closing it needs CREATE_SUSPENDED,
+            // which `std::process::Command` does not expose; the child here is a server
+            // that spends its first moments importing Python, so the race is theoretical.
+            if AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) == 0 {
+                CloseHandle(job);
+                return None;
+            }
+            Some(Job(job))
+        }
+    }
+
+    impl Drop for Job {
+        fn drop(&mut self) {
+            // This is the kill. Everything still in the job goes with it.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1003,6 +1127,41 @@ mod tests {
         let command = argv.last().expect("the bash -lc payload");
         assert!(!command.contains("MINIME_EXECUTION_BACKEND"), "{command}");
         assert!(command.contains("cd ~/'Mini-Me' && exec .venv/bin/langgraph dev"), "{command}");
+    }
+
+    #[test]
+    fn a_packaged_build_finds_its_files_beside_the_executable() {
+        // A shipped copy must never reach back into a source tree that only exists on the
+        // machine it was built on. `CARGO_MANIFEST_DIR` is baked in at compile time, so
+        // without this the packaged app would look for the overlay under whatever path
+        // the build machine happened to use — and silently fall back to the sandbox.
+        let exe = std::env::current_exe().expect("test binary path");
+        let beside = exe.parent().expect("a parent").join("overlay");
+        let _ = std::fs::remove_dir_all(&beside);
+
+        std::env::remove_var("MINIME_OVERLAY_DIR");
+        let from_repo = resource("MINIME_OVERLAY_DIR", "overlay");
+        assert!(
+            from_repo.ends_with("overlay") && !from_repo.starts_with(exe.parent().unwrap()),
+            "with nothing beside the exe it falls back to the repo: {}",
+            from_repo.display()
+        );
+
+        std::fs::create_dir_all(&beside).expect("packaged layout");
+        assert_eq!(
+            resource("MINIME_OVERLAY_DIR", "overlay"),
+            beside,
+            "a directory beside the executable wins"
+        );
+
+        // An explicit override still beats both.
+        std::env::set_var("MINIME_OVERLAY_DIR", "/somewhere/else");
+        assert_eq!(
+            resource("MINIME_OVERLAY_DIR", "overlay"),
+            PathBuf::from("/somewhere/else")
+        );
+        std::env::remove_var("MINIME_OVERLAY_DIR");
+        let _ = std::fs::remove_dir_all(&beside);
     }
 
     #[test]

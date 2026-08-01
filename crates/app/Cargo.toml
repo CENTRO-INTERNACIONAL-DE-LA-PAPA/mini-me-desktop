@@ -61,3 +61,17 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Signalling the sidecar's whole process group on shutdown (see backend.rs).
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Windows has no process groups to signal, so the sidecar's tree is reaped with a **Job
+# Object** instead (see `terminate` in backend.rs). Bindings only — no C, nothing to build.
+#
+# The three features are all load-bearing and were found by cross-checking, not guessed:
+# `CreateJobObjectW` is gated behind Win32_Security (it takes SECURITY_ATTRIBUTES), and
+# JOBOBJECT_EXTENDED_LIMIT_INFORMATION behind Win32_System_Threading.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
