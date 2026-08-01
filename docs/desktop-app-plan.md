@@ -19,7 +19,7 @@ sidecar** that the client spawns and supervises.
 | **Native-Windows probe** | ✅ **answered** — `cmd.exe` is ruled out by upstream's *own* tool code (POSIX pipes, `mkdir -p`, `shlex.quote`), so WSL2 stays the v1 runtime and the installer's job is guided provisioning. Native-plus-Git-Bash is a documented half-day experiment. §21 |
 | **P6.4a** — settings panel + keychain secrets | ✅ **built** — a turn runs with no provider key in the backend's `.env`; keys come from the OS keychain and ride in the run request, and `ctrl-,` opens a Settings pane (provider, model, keys, execution). **Never rendered — needs a look on Windows.** §20/§22/§22b |
 | **P6.4b** — native affordances + shipping | ✅ **ships** — `bundle-backend.sh` → `--release` → `package.sh` gives a 21 MB folder; **the packaged build ran a real turn on Windows**. Job Object reaps the process tree, resources resolve beside the executable, and **drop a file on the window** turns it into a question (the MVP's "one thing the web app can't"). Remaining: click-to-update, cancel a running fix. §24/§25/§26/§28 |
-| **P6.5** — async subagents + Jobs panel | ⬜ planned — the payoff that most justifies going native. §14 |
+| **P6.5** — background work + Jobs panel | 🟡 **jobs verified on Windows** — a real theorizer run submitted and appeared in BACKGROUND JOBS with live status; polling now also *persists* results, which nothing did before. Async subagents (a background Mini-Me, no fork) are built and **never run**. §29/§30/§31 |
 
 **Health of the bet.** The two risks that could have killed this are both down:
 **R1** (GPUI as an unstable `git` dep) — GPUI is a *published* crate, pinned at
@@ -2597,3 +2597,14 @@ was reproducing the command by hand with a deliberately bad token.
 **The lesson:** when a component reports a cause rather than an error, do not act on it.
 Reproduce the failing call directly, and vary one input at a time — including the ones the
 app itself supplies.
+
+### Verified on Windows, end to end (2026-08-01)
+
+`genera una teoria de como se forman los rayos` → the theorizer **submitted**
+(`845f8553-499c-4ea8-a3e4-6540101cb39d`), and the **BACKGROUND JOBS** panel showed it
+running with its question and expected duration. Two features proved out at once: the
+theorizer itself, and §29's job watching — which had never seen a real long job.
+
+Still to observe: the completion. The poll route persists theories into the workspace on a
+terminal state (§29), so the job should turn green and the spine refresh **without another
+turn**. That last link is the one that was silently broken before any of this.
