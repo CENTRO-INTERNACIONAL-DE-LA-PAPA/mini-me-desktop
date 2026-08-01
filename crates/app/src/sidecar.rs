@@ -33,6 +33,13 @@ fn entry<'a>(
     agents.last_mut().expect("just pushed")
 }
 
+/// Progress from a setup fix the app is running on the user's behalf.
+#[derive(Debug, Clone)]
+pub enum FixEvent {
+    Line(String),
+    Finished { ok: bool, note: String },
+}
+
 /// The conversation's thread id: created on first use, then reused.
 ///
 /// A plain `std::sync::Mutex` rather than a Tokio one because the guard is never
@@ -226,6 +233,46 @@ impl Sidecar {
                 // forever, which is the one thing a first-run diagnosis must not do.
                 Err(error) => tracing::error!(%error, "the preflight checks panicked"),
             }
+        });
+        rx
+    }
+
+    /// Run one setup fix, streaming its output to the pane.
+    ///
+    /// `spawn_blocking` again, and for a much longer stay than the probes: provisioning
+    /// clones a repository and syncs the scientific stack, so this task can live for
+    /// minutes. It must not sit on a reactor worker that a turn also needs.
+    pub fn run_fix(&self, argv: Vec<String>) -> mpsc::UnboundedReceiver<FixEvent> {
+        let (tx, rx) = mpsc::unbounded();
+        self.runtime.spawn(async move {
+            let emit = tx.clone();
+            let outcome = tokio::task::spawn_blocking(move || {
+                crate::preflight::run_streaming(&argv, |line| {
+                    let _ = emit.unbounded_send(FixEvent::Line(line));
+                })
+            })
+            .await;
+            let event = match outcome {
+                Ok(Ok(true)) => FixEvent::Finished {
+                    ok: true,
+                    note: "finished".into(),
+                },
+                Ok(Ok(false)) => FixEvent::Finished {
+                    ok: false,
+                    note: "the command reported a failure — the last lines say why".into(),
+                },
+                Ok(Err(error)) => FixEvent::Finished {
+                    ok: false,
+                    note: format!("{error:#}"),
+                },
+                // A panic here would otherwise leave the pane showing "running…" with no
+                // way out except restarting the app.
+                Err(error) => FixEvent::Finished {
+                    ok: false,
+                    note: format!("the fix crashed: {error}"),
+                },
+            };
+            let _ = tx.unbounded_send(event);
         });
         rx
     }

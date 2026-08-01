@@ -18,7 +18,7 @@ sidecar** that the client spawns and supervises.
 | **P6.3.5** — visuals pass, starting with **markdown rendering** | ✅ **verified on Windows** — emphasis, inline code, links, headings, lists and fenced code render; accented Spanish came through intact. Tables deferred by agreement. §16/§23 |
 | **Native-Windows probe** | ✅ **answered** — `cmd.exe` is ruled out by upstream's *own* tool code (POSIX pipes, `mkdir -p`, `shlex.quote`), so WSL2 stays the v1 runtime and the installer's job is guided provisioning. Native-plus-Git-Bash is a documented half-day experiment. §21 |
 | **P6.4a** — settings panel + keychain secrets | ✅ **built** — a turn runs with no provider key in the backend's `.env`; keys come from the OS keychain and ride in the run request, and `ctrl-,` opens a Settings pane (provider, model, keys, execution). **Never rendered — needs a look on Windows.** §20/§22/§22b |
-| **P6.4b** — native affordances + shipping | 🟡 **Setup pane built** — `preflight.rs` says what is missing (WSL, checkout, deps, overlay, key) with the command that fixes it, routed through the same hop the backend takes; a failed *start* opens it instead of naming a log file. `--preflight` covers it headlessly. Still to come: running the fixes with streamed output, click-to-update, Windows Job Object teardown. §24 |
+| **P6.4b** — native affordances + shipping | 🟡 **guided install works** — Setup opens itself, says what is missing, and **runs the fix** with its output on screen; the backend now ships *with the app* (`vendor/`) so a private-repo clone never blocks a non-coder, provisions into an app-**owned** dir inside the distro, and never touches a checkout it did not create. Verified end to end on Linux; **no Windows path run yet**. Remaining: cancel a running fix, a prebuilt binary, Job Object teardown. §24/§25 |
 | **P6.5** — async subagents + Jobs panel | ⬜ planned — the payoff that most justifies going native. §14 |
 
 **Health of the bet.** The two risks that could have killed this are both down:
@@ -1756,3 +1756,124 @@ button.
 stored here), and the three failure paths were run by hand — an empty checkout dir, WSL mode
 where `wsl.exe` does not exist (which is exactly what Windows-without-WSL looks like), and
 `--sandbox`. 59 tests pass. **The pane itself has never been rendered.**
+
+## 25. P6.4b part two: install it for them (2026-08-01)
+
+*"Do all the necessary so it works without complications. Remember that our users don't
+know how to code anything."* — that instruction settled several questions that had been
+open, and invalidated one thing the plan had assumed.
+
+### The thing that was wrong: a private repo cannot be cloned by a scientist
+
+Provisioning ran `git clone` against
+`CENTRO-INTERNACIONAL-DE-LA-PAPA/Mini-Me`, which is **private**. GitHub stopped
+accepting account passwords for git in 2021, so what that prompt actually wants is a
+**personal access token**. No amount of UI polish makes "create a PAT" a reasonable first
+step, and with `stdin` closed — which it must be, or the app hangs on an invisible prompt
+— the clone simply fails.
+
+So **the backend travels with the app.** `scripts/bundle-backend.sh` puts a pinned,
+unmodified checkout in `vendor/` (gitignored — the locked decision is *bundled, never
+forked*, and a vendored copy in git is a fork with extra steps), and
+`BackendConfig::setup_script` passes it as `MINIME_BUNDLED_SOURCE`. Whoever prepares a
+build needs GitHub access once; nobody else ever does. This also gives "click to update"
+its real shape: the backend is version-matched to the app, so updating the app updates the
+backend, and no user-side credentials are involved either way.
+
+### Where the checkout lives, and who owns it
+
+`~/.local/share/mini-me-desktop/backend`, **inside the distro** — not in the desktop
+repo, and not on `/mnt/c`. WSL2 reaches Windows drives over a 9p mount whose per-file cost
+is high, and a Python environment holding the scientific stack is thousands of small files
+stat'd on every interpreter start. A venv there is the one placement guaranteed to feel
+broken.
+
+More important is **ownership**, now recorded in `settings.toml` and on `BackendConfig`:
+
+| | the app may update it? |
+|---|---|
+| **Owned** — the app provisioned it | ✅ yes |
+| **Adopted** — discovered, or set via `MINIME_BACKEND_*_DIR` | ❌ never |
+
+This is not fussiness. Updating means `git checkout <pin>` + `uv sync`, and the reference
+checkout on this developer's own machine has **ten local branches, several live in
+worktrees**. Pointing an update button at a directory the app did not create is how you
+destroy someone's work. The pane says which case applies, in words, because it changes
+what the app is allowed to do to the user's files.
+
+When a checkout *is* discovered, the pane offers **"Use the one I have"** before "Install
+Mini-Me" — adopting takes a second and preserves their branches; installing a second copy
+costs gigabytes.
+
+### Fixes now run, with their output on screen
+
+`preflight::run_streaming` + `Sidecar::run_fix` spawn the command and stream it line by
+line into the pane. Three decisions:
+
+- **Streamed, not buffered.** Provisioning takes minutes. A spinner with no detail is
+  exactly the experience this pane exists to replace.
+- **stdout and stderr on separate threads.** Reading them in sequence deadlocks the moment
+  a chatty child fills the pipe nobody is draining — and `uv` writes its progress to
+  stderr, which is most of what there is to watch.
+- **`stdin` is null**, so nothing can wait on an invisible prompt, and ANSI codes are
+  stripped because GPUI renders escape sequences as the mojibake they are.
+
+A successful fix **re-checks by itself**, so the row the user just fixed turns green
+without them having to work out that "Re-check" was the next step.
+
+### The overlay stops depending on the Windows drive
+
+Provisioning copies `overlay/` to `<checkout>/.desktop-overlay`, and the launch command
+prefers that copy — decided by the distro's own shell at launch:
+
+```
+PYTHONPATH="$(if [ -f ~/'…/.desktop-overlay'/sitecustomize.py; then … else … fi)"
+```
+
+Not by probing from Windows: a `wsl.exe` round trip costs seconds on every start, and
+there is nowhere to cache the answer that would not go stale the moment the user
+re-provisioned. This retires the silent failure §24 built a check for.
+
+### Also fixed
+
+- **The `.env` template is gone.** It told users to paste keys into a file inside a Linux
+  distro — which §22 made unnecessary and this instruction makes unacceptable. The script
+  writes an intentionally empty `.env` (because `langgraph dev` auto-loads one, and its
+  absence made people think they had missed a step) whose entire content explains that
+  keys live in the app.
+- **Setup is the front door.** Preflight runs on every launch, and the *first* report
+  opens Setup when something blocks a turn — outranking the old "no key → Settings",
+  because pasting a key into an app that cannot start its backend fixes nothing. Later
+  re-checks never steal the pane; the user has seen the state of things by then.
+- **A real bug in the script:** `${BASH_SOURCE[0]}` was resolved *after* `cd "$DIR"`, so a
+  relative invocation looked for the overlay in the wrong place and silently skipped
+  installing it. Found by running the script, not by reading it.
+
+### Verified
+
+The whole loop, on the Linux dev box, with `HOME` and `MINIME_DATA_DIR` redirected to
+simulate a fresh machine:
+
+1. `--preflight` → `3 ok · 2 to fix · 1 skipped`, "not installed", with the bundled source
+   threaded into the install command.
+2. That exact command run → copies from the bundle, discards the source machine's venv,
+   installs the overlay, syncs `--extra dev`, confirms `langgraph` exists, exits 0.
+3. `--preflight` again → **`5 ok · 1 to fix`**, the overlay now resolving to the
+   provisioned copy. The only thing left is the model key, which is a Settings click.
+
+Plus: the `PYTHONPATH` expression exercised in real bash, both branches, with a space in
+the path (tilde expansion and quoting interact badly and it had to be checked, not
+assumed); and the provisioned overlay confirmed importable. 61 tests pass.
+
+**Not verified:** none of the pane has been rendered, and no Windows path has run — no
+WSL on this box. The `wsl.exe --install` fix in particular is written from documentation,
+not from a machine.
+
+### Still open
+
+- **Cancelling a running fix.** With `stdin` closed the realistic stalls are network ones,
+  and the output makes a stall visible, but there is no button to stop it.
+- **A prebuilt binary.** Users still `cargo build`, and `overlay_dir()`/`scripts_dir()` are
+  compiled-in paths that assume a checkout. `MINIME_OVERLAY_DIR`/`MINIME_SCRIPTS_DIR`
+  already exist for a packaged layout; nothing has been packaged.
+- **Windows Job Object teardown** (§9) — still the last item on P6.4b.

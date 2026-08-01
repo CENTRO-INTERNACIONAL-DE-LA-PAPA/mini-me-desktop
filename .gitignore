@@ -14,6 +14,12 @@ Cargo.lock.orig
 # Claude Code session + linked worktrees (never commit — holds build output)
 .claude/
 
+# The bundled Mini-Me checkout (scripts/bundle-backend.sh). It ships *with a build* so a
+# user with no GitHub credentials can still install — but it must never enter this repo's
+# history: the locked decision is "bundled, never forked" (docs §5), and a vendored copy in
+# git is a fork with extra steps.
+/vendor/
+
 # Python bytecode from the overlay, which the *backend* regenerates every run. Tracking
 # these made `git pull` abort with "local changes would be overwritten" on the one machine
 # that actually runs the backend — the user's.

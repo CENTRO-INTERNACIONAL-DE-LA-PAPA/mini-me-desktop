@@ -467,6 +467,19 @@ fn trace_for<'a>(message: &'a mut Message, agent: &AgentRef) -> &'a mut AgentTra
 }
 
 /// Root view: the three-pane research workbench.
+/// A setup command the app is running for the user, and its output so far.
+struct RunningFix {
+    label: String,
+    /// The last [`FIX_LOG_LINES`] lines. Capped because `uv sync` prints hundreds and
+    /// the pane is 420px wide — the tail is the part that matters.
+    lines: Vec<String>,
+    done: bool,
+    ok: bool,
+}
+
+/// How much of a fix's output the pane keeps.
+const FIX_LOG_LINES: usize = 200;
+
 struct Workbench {
     /// The project spine from `GET /project`. `None` until the first fetch lands
     /// (or if the backend isn't up yet) — the panel says so rather than lying.
@@ -500,6 +513,9 @@ struct Workbench {
     setup_open: bool,
     report: Option<preflight::Report>,
     checking: bool,
+    /// A fix the app is running for the user: what it is, and what it has printed so far.
+    /// `Some` means a command is live, which is what disables the other buttons.
+    running_fix: Option<RunningFix>,
     /// A run paused at the approval gate: the command it wants to run, awaiting a
     /// decision. While this is set the turn is *open*, not finished.
     pending_approval: Option<ApprovalRequest>,
@@ -577,6 +593,7 @@ impl Workbench {
             setup_open: false,
             report: None,
             checking: false,
+            running_fix: None,
             pending_approval: None,
             restore_focus: false,
         };
@@ -599,6 +616,13 @@ impl Workbench {
             workbench.settings_note =
                 "Add a model key to get started — it goes into your OS keychain.".to_string();
         }
+
+        // Check the machine on every launch, and let the *first* report decide which pane
+        // the user lands on. A missing key is a Settings problem; a missing WSL or backend
+        // is a Setup problem, and Setup has to win — pasting a key into an app that cannot
+        // start its backend fixes nothing, and the first thing a new user sees should be
+        // the thing actually standing in their way.
+        workbench.run_preflight(cx);
 
         // Populate the spine if a backend is already listening. This does not
         // start one — see `Sidecar::fetch_project`.
@@ -627,7 +651,16 @@ impl Workbench {
                         Some(check) => format!("setup: {} — {}", check.label, check.detail),
                         None => format!("setup: {}", report.summary()),
                     };
+                    // Only the first report may open a pane by itself. After that the user
+                    // has seen the state of things, and a background re-check yanking the
+                    // pane open under their cursor would be rude.
+                    let first = workbench.report.is_none();
+                    let blocked = !report.ready();
                     workbench.report = Some(report);
+                    if first && blocked {
+                        workbench.setup_open = true;
+                        workbench.settings_open = false;
+                    }
                     cx.notify();
                 });
             }
@@ -642,6 +675,84 @@ impl Workbench {
         self.setup_open = true;
         self.settings_open = false;
         self.run_preflight(cx);
+    }
+
+    /// Point the app at a checkout the user already has.
+    ///
+    /// Recorded as **not owned**, which is the whole point: the app will run this backend
+    /// but will never `git checkout` or re-sync it, because that would destroy work in a
+    /// clone somebody else is responsible for.
+    fn adopt_checkout(&mut self, dir: String, cx: &mut Context<Self>) {
+        let mut settings = settings::Settings::load();
+        settings.backend_dir = dir.clone();
+        settings.backend_dir_owned = false;
+        match settings.save() {
+            Ok(()) => {
+                self.draft = settings;
+                // The launch command is built at startup from this path, so it cannot
+                // take effect until the app restarts — say so plainly instead of leaving
+                // the user to wonder why the row is still red.
+                self.status = format!("using {dir} — restart the app to launch it");
+                self.settings_note = format!("Backend set to {dir}. Restart to use it.");
+            }
+            Err(error) => self.status = format!("could not save that choice: {error:#}"),
+        }
+        self.run_preflight(cx);
+    }
+
+    /// Run a fix on the user's behalf, streaming its output into the pane.
+    ///
+    /// Re-checks automatically when it finishes, so a successful install turns its own
+    /// row green without the user having to work out that they should press Re-check.
+    fn start_fix(&mut self, label: String, argv: Vec<String>, cx: &mut Context<Self>) {
+        if self.running_fix.as_ref().is_some_and(|fix| !fix.done) {
+            return;
+        }
+        self.status = format!("running: {label}");
+        self.running_fix = Some(RunningFix {
+            label,
+            lines: Vec::new(),
+            done: false,
+            ok: false,
+        });
+        let mut events = self.sidecar.run_fix(argv);
+        cx.spawn(async move |this, cx| {
+            while let Some(event) = events.next().await {
+                let update = this.update(cx, |workbench, cx| {
+                    let Some(fix) = workbench.running_fix.as_mut() else {
+                        return;
+                    };
+                    match event {
+                        sidecar::FixEvent::Line(line) => {
+                            fix.lines.push(line);
+                            if fix.lines.len() > FIX_LOG_LINES {
+                                fix.lines.remove(0);
+                            }
+                        }
+                        sidecar::FixEvent::Finished { ok, note } => {
+                            fix.done = true;
+                            fix.ok = ok;
+                            fix.lines.push(format!("— {note}"));
+                            workbench.status = format!(
+                                "{}: {note}",
+                                if ok { "done" } else { "failed" }
+                            );
+                            // Re-check on success so the row the user just fixed goes
+                            // green by itself.
+                            if ok {
+                                workbench.run_preflight(cx);
+                            }
+                        }
+                    }
+                    cx.notify();
+                });
+                if update.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.notify();
     }
 
     /// Pull the project spine in the background and swap it in when it arrives.
@@ -1481,6 +1592,16 @@ impl Workbench {
                                 .text_color(rgb(MUTED))
                                 .text_xs()
                                 .child(format!("{} · {}", report.location, report.execution)),
+                        )
+                        // Whether the app may maintain that directory. Said out loud
+                        // because it decides what the app is allowed to do to the user's
+                        // own files, and that must never be a surprise.
+                        .child(
+                            div().text_color(rgb(MUTED)).text_xs().child(if report.owned {
+                                "Installed and maintained by this app."
+                            } else {
+                                "Your own checkout — the app runs it but never modifies it."
+                            }),
                         ),
                 );
 
@@ -1519,49 +1640,99 @@ impl Workbench {
                                 .child(check.detail.clone()),
                         );
 
-                    match &check.fix {
-                        Some(preflight::Fix::Run { label, argv, note }) => {
+                    for fix in &check.fixes {
+                    match fix {
+                        preflight::Fix::Run { label, argv, note } => {
                             let command = preflight::display_argv(argv);
-                            // No "Run" button yet: these commands clone repositories and
-                            // ask for admin rights, and firing one from a click with no
-                            // visible output would be the app's least accountable moment.
-                            // Streaming them lands next (docs §24).
+                            let busy = self.running_fix.as_ref().is_some_and(|fix| !fix.done);
                             row = row
+                                // The note is not decoration: "asks for admin rights, then
+                                // needs a restart" is the difference between a user who
+                                // waits and a user who thinks it broke.
+                                .child(div().text_color(rgb(MUTED)).text_xs().child(*note))
                                 .child(
                                     div()
-                                        .text_color(rgb(MUTED))
-                                        .text_xs()
-                                        .child(format!("{label} — {note}")),
-                                )
-                                .child(
-                                    div()
-                                        .id(SharedString::from(format!("fix-{}", check.id)))
-                                        .w_full()
-                                        .min_w_0()
-                                        .p_2()
-                                        .border_1()
-                                        .border_color(rgb(BORDER))
-                                        .text_color(rgb(TEXT))
-                                        .text_xs()
-                                        .hover(|style| {
-                                            style.border_color(rgb(ACCENT)).cursor_pointer()
-                                        })
-                                        .child(format!("{command}   ⧉"))
-                                        .on_click(cx.listener({
-                                            let command = command.clone();
-                                            let id = check.id;
-                                            move |workbench, _event, _window, cx| {
-                                                cx.write_to_clipboard(ClipboardItem::new_string(
-                                                    command.clone(),
-                                                ));
-                                                workbench.status =
-                                                    format!("{id} fix copied — paste it in a terminal");
-                                                cx.notify();
-                                            }
-                                        })),
+                                        .flex()
+                                        .flex_row()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .id(SharedString::from(format!(
+                                                    "run-{}",
+                                                    check.id
+                                                )))
+                                                .px_3()
+                                                .py_1()
+                                                .border_1()
+                                                .border_color(rgb(if busy { BORDER } else { ACCENT }))
+                                                .text_color(rgb(if busy { MUTED } else { ACCENT }))
+                                                .text_sm()
+                                                .hover(|style| style.cursor_pointer())
+                                                .child(*label)
+                                                .on_click(cx.listener({
+                                                    let argv = argv.clone();
+                                                    let label = label.to_string();
+                                                    move |workbench, _event, _window, cx| {
+                                                        workbench.start_fix(
+                                                            label.clone(),
+                                                            argv.clone(),
+                                                            cx,
+                                                        );
+                                                    }
+                                                })),
+                                        )
+                                        // Kept alongside the button: someone who would
+                                        // rather run it themselves — or send it to whoever
+                                        // administers the machine — should not have to
+                                        // retype it.
+                                        .child(
+                                            div()
+                                                .id(SharedString::from(format!("copy-{}", check.id)))
+                                                .px_3()
+                                                .py_1()
+                                                .border_1()
+                                                .border_color(rgb(BORDER))
+                                                .text_color(rgb(MUTED))
+                                                .text_sm()
+                                                .hover(|style| style.cursor_pointer())
+                                                .child("Copy ⧉")
+                                                .on_click(cx.listener({
+                                                    let command = command.clone();
+                                                    move |workbench, _event, _window, cx| {
+                                                        cx.write_to_clipboard(
+                                                            ClipboardItem::new_string(
+                                                                command.clone(),
+                                                            ),
+                                                        );
+                                                        workbench.status =
+                                                            "command copied".into();
+                                                        cx.notify();
+                                                    }
+                                                })),
+                                        ),
                                 );
                         }
-                        Some(preflight::Fix::Manual(instruction)) => {
+                        preflight::Fix::Adopt { label, dir } => {
+                            row = row.child(
+                                div()
+                                    .id(SharedString::from(format!("adopt-{}", check.id)))
+                                    .px_3()
+                                    .py_1()
+                                    .border_1()
+                                    .border_color(rgb(ACCENT))
+                                    .text_color(rgb(ACCENT))
+                                    .text_sm()
+                                    .hover(|style| style.cursor_pointer())
+                                    .child(*label)
+                                    .on_click(cx.listener({
+                                        let dir = dir.clone();
+                                        move |workbench, _event, _window, cx| {
+                                            workbench.adopt_checkout(dir.clone(), cx);
+                                        }
+                                    })),
+                            );
+                        }
+                        preflight::Fix::Manual(instruction) => {
                             row = row.child(
                                 div()
                                     .w_full()
@@ -1571,11 +1742,62 @@ impl Workbench {
                                     .child(instruction.clone()),
                             );
                         }
-                        None => {}
+                    }
                     }
                     pane = pane.child(row);
                 }
             }
+        }
+
+        // What the running fix is printing. Shown *below* the checks so the list stays in
+        // one place, and only while there is something to show.
+        if let Some(fix) = &self.running_fix {
+            let mut log = div()
+                .id("fix-output")
+                .flex()
+                .flex_col()
+                .w_full()
+                .min_w_0()
+                .max_h(px(280.))
+                .overflow_y_scroll()
+                .p_2()
+                .border_1()
+                .border_color(rgb(if !fix.done {
+                    ACCENT
+                } else if fix.ok {
+                    BORDER
+                } else {
+                    ERROR
+                }))
+                .child(
+                    div()
+                        .text_color(rgb(TEXT))
+                        .text_sm()
+                        .child(if fix.done {
+                            format!("{} — {}", fix.label, if fix.ok { "done" } else { "failed" })
+                        } else {
+                            format!("{}…", fix.label)
+                        }),
+                );
+            for line in &fix.lines {
+                log = log.child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .text_color(rgb(MUTED))
+                        .text_xs()
+                        .child(line.clone()),
+                );
+            }
+            if fix.lines.is_empty() {
+                log = log.child(
+                    div()
+                        .text_color(rgb(MUTED))
+                        .text_xs()
+                        .child("starting…"),
+                );
+            }
+            pane = pane.child(log);
         }
 
         pane.child(
@@ -2625,15 +2847,19 @@ fn main() {
                 check.label,
                 check.detail
             );
-            match &check.fix {
-                Some(preflight::Fix::Run { label, argv, note }) => {
-                    println!("    fix  : {label} ({note})");
-                    println!("    run  : {}", preflight::display_argv(argv));
+            for fix in &check.fixes {
+                match fix {
+                    preflight::Fix::Run { label, argv, note } => {
+                        println!("    fix  : {label} ({note})");
+                        println!("    run  : {}", preflight::display_argv(argv));
+                    }
+                    preflight::Fix::Adopt { label, dir } => {
+                        println!("    fix  : {label} — {dir}");
+                    }
+                    preflight::Fix::Manual(instruction) => {
+                        println!("    fix  : {instruction}");
+                    }
                 }
-                Some(preflight::Fix::Manual(instruction)) => {
-                    println!("    fix  : {instruction}");
-                }
-                None => {}
             }
         }
         println!("\npreflight: {}", report.summary());

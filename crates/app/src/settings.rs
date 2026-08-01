@@ -85,6 +85,18 @@ pub struct Settings {
     /// Ask before every `execute`. Off is for automation, not a recommendation.
     pub approve_execute: bool,
     pub backend_port: u16,
+    /// Where the backend checkout lives. Empty means "the app-owned default".
+    ///
+    /// Written by the Setup pane when it adopts a checkout it found, so the discovery
+    /// probe runs once rather than on every launch.
+    pub backend_dir: String,
+    /// Whether the app created that directory.
+    ///
+    /// **Load-bearing.** Updating means `git fetch && git checkout <pin> && uv sync`, and
+    /// running that on a checkout the user cloned themselves can destroy work — the
+    /// reference checkout on this developer's own machine has ten local branches, several
+    /// live in worktrees. The app may only update what it made.
+    pub backend_dir_owned: bool,
 }
 
 impl Default for Settings {
@@ -96,6 +108,8 @@ impl Default for Settings {
             local_execution: true,
             approve_execute: true,
             backend_port: 2024,
+            backend_dir: String::new(),
+            backend_dir_owned: true,
         }
     }
 }
@@ -167,6 +181,31 @@ pub fn settings_path() -> PathBuf {
         return PathBuf::from(path);
     }
     config_dir().join("settings.toml")
+}
+
+/// Where the app keeps things it owns and provisions — the backend checkout, not
+/// configuration. Separate from [`settings_path`] because one is a file the user may
+/// reasonably open and edit, and the other is several gigabytes of Python.
+pub fn data_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("MINIME_DATA_DIR") {
+        return PathBuf::from(dir);
+    }
+    if cfg!(windows) {
+        // LOCALAPPDATA, not APPDATA: this is machine-local and must never follow a
+        // roaming profile onto another computer, where a venv full of compiled wheels
+        // would be worse than useless.
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            return PathBuf::from(local).join("mini-me-desktop");
+        }
+    }
+    if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
+        return PathBuf::from(xdg).join("mini-me-desktop");
+    }
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    home.join(".local/share/mini-me-desktop")
 }
 
 fn config_dir() -> PathBuf {
@@ -247,6 +286,8 @@ mod tests {
             local_execution: true,
             approve_execute: true,
             backend_port: 2100,
+            backend_dir: "~/Mini-Me".into(),
+            backend_dir_owned: false,
         };
         let text = toml::to_string_pretty(&settings).expect("serialise");
         assert_eq!(

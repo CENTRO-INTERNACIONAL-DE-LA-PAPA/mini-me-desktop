@@ -37,35 +37,59 @@ DirectX), while the Python backend runs **inside WSL2** — the agent stack shel
 with POSIX commands and needs `bash`/`python3`/`asta`, which don't behave under
 `cmd.exe`. Inside WSL it's just Linux, and the app reaches it over localhost.
 
-In WSL (Ubuntu):
+### For someone who is just using the app
+
+Launch it. The **Setup** pane opens by itself and says what is missing, with a button
+for each thing it can do for you — install WSL, install Mini-Me, install the Python
+packages — showing the output as it runs. Then paste a model key in **Settings**.
+Nothing needs to be typed in a terminal, and nothing needs to be edited in a file.
+
+If a step can't be automated (installing WSL needs administrator rights and a
+restart), the pane says so before you press it, and offers the command to copy.
+
+### For whoever prepares the build
+
+Run this **once**, on a machine that has GitHub access:
 
 ```bash
-bash scripts/setup-wsl.sh
+bash scripts/bundle-backend.sh
 ```
 
-That installs `uv`, clones the backend, runs `uv sync --extra dev`, and writes a
-`.env` template for your keys. Then, from Windows:
+Mini-Me is a **private** repository, so `git clone` wants a personal access token —
+a wall for the people this app is for. That script puts a pinned, unmodified copy in
+`vendor/` (gitignored), and every install after that provisions from it without ever
+contacting GitHub.
+
+### For development
 
 ```powershell
 $env:MINIME_BACKEND_WSL=1; cargo run -p mini-me-desktop-app
 ```
 
-The app launches the backend inside WSL itself. Override the checkout path with
-`MINIME_BACKEND_WSL_DIR` (default `~/Mini-Me`).
+The app launches the backend inside WSL itself. It provisions into
+`~/.local/share/mini-me-desktop/backend` — on the distro's **own** filesystem, because
+a Python venv reached over `/mnt/c` is slow enough to feel broken. Point it at your
+own checkout with `MINIME_BACKEND_WSL_DIR` (or `MINIME_BACKEND_DIR` outside WSL); the
+app will run that one but **never modify it**, since it may hold your work.
+
+To see what the pane would say, with no window:
+
+```bash
+cargo run -p mini-me-desktop-app -- --preflight
+```
 
 ## Backend prerequisite
 
-The app spawns the Mini-Me Python backend as a sidecar. In that checkout run:
+Provisioned for you by the Setup pane. By hand, it is:
 
 ```bash
-uv sync --extra dev
+bash scripts/setup-wsl.sh [target-dir]
 ```
 
-**`--extra dev` matters** — the LangGraph CLI is an optional extra, so plain
-`uv sync` leaves you with no `langgraph` entry point. Populate `.env` too
-(`OPENAI_API_KEY`, `ASTA_API_KEY`, `ASTA_TOKEN`, and for now `LANGSMITH_API_KEY`).
-The app looks for the checkout via `MINIME_BACKEND_DIR`, else
-`~/Documents/Mini-Me` or `~/Documents/GitHub/Mini-Me`.
+**`--extra dev` matters** (the script passes it) — the LangGraph CLI is an optional
+extra, so plain `uv sync` leaves you with no `langgraph` entry point. Keys do **not**
+go in that checkout's `.env` any more: they live in your OS keychain and travel with
+each request, so the app needs no secrets on disk.
 
 ## Build
 

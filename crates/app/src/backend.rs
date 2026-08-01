@@ -137,6 +137,18 @@ fn scripts_dir() -> PathBuf {
     normalized(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts"))
 }
 
+/// A Mini-Me copy shipped with the app, if there is one.
+///
+/// `vendor/Mini-Me`, populated by `scripts/bundle-backend.sh` and gitignored. Its
+/// presence is what lets provisioning skip GitHub entirely — see [`BackendConfig::setup_script`].
+fn bundled_backend_dir() -> Option<PathBuf> {
+    let dir = match std::env::var_os("MINIME_BUNDLED_BACKEND") {
+        Some(dir) => PathBuf::from(dir),
+        None => normalized(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vendor/Mini-Me")),
+    };
+    dir.join("langgraph.json").is_file().then_some(dir)
+}
+
 /// Render a path the way WSL sees it: `C:\\Users\\x` becomes `/mnt/c/Users/x`.
 ///
 /// The overlay lives in *this* repo, which on Windows is on the Windows filesystem,
@@ -180,6 +192,12 @@ pub struct BackendConfig {
     /// Whether the backend should stop and ask before every `execute`. Off is for
     /// automation, not a recommendation (docs §19).
     pub approve_execute: bool,
+    /// Whether the app provisioned the checkout, and so may update it.
+    ///
+    /// False for anything it merely *found* or was pointed at. Updating runs
+    /// `git checkout <pin>` and `uv sync`, which on someone's own working clone destroys
+    /// work — so this decides whether the update button exists at all (docs §25).
+    pub owned: bool,
 }
 
 impl BackendConfig {
@@ -189,7 +207,7 @@ impl BackendConfig {
     /// falls back to `MINIME_EXECUTION_BACKEND`.
     pub fn with_execution_override(override_local: Option<bool>) -> Self {
         let settings = crate::settings::Settings::load();
-        let mut config = Self::default();
+        let mut config = Self::with_recorded_dir(&settings);
         // Settings lose to an explicit environment variable, which is the debugging
         // escape hatch, but win over the built-in default.
         if std::env::var_os("MINIME_BACKEND_PORT").is_none() {
@@ -220,16 +238,37 @@ impl BackendConfig {
         config.secrets = crate::settings::asta_env();
         config
     }
-}
 
-impl Default for BackendConfig {
-    fn default() -> Self {
+    /// Build a configuration that honours the checkout Settings recorded.
+    ///
+    /// The Setup pane writes `backend_dir` when it adopts a checkout it discovered, so
+    /// the discovery probe — which has to shell into the distro — runs once rather than
+    /// on every launch.
+    fn with_recorded_dir(settings: &crate::settings::Settings) -> Self {
+        let recorded = Some(settings.backend_dir.trim())
+            .filter(|dir| !dir.is_empty())
+            .map(|dir| (dir.to_string(), settings.backend_dir_owned));
+        Self::build(recorded)
+    }
+
+    fn build(recorded: Option<(String, bool)>) -> Self {
         let port = std::env::var("MINIME_BACKEND_PORT")
             .ok()
             .and_then(|p| p.parse().ok())
             .unwrap_or(2024);
-        let wsl = resolve_wsl_target();
-        let project_dir = resolve_project_dir();
+        let wsl = resolve_wsl_target(recorded.clone());
+        // A recorded directory belongs to whichever side the backend runs on, so it is
+        // consumed by exactly one of these two.
+        let (project_dir, host_owned) = resolve_project_dir(
+            recorded
+                .filter(|_| wsl.is_none())
+                .map(|(dir, owned)| (PathBuf::from(dir), owned)),
+        );
+        let owned = match &wsl {
+            Some((_, owned)) => *owned,
+            None => host_owned,
+        };
+        let wsl = wsl.map(|(target, _)| target);
         let execution = resolve_execution(None);
         Self {
             port,
@@ -241,7 +280,14 @@ impl Default for BackendConfig {
             execution,
             secrets: Vec::new(),
             approve_execute: true,
+            owned,
         }
+    }
+}
+
+impl Default for BackendConfig {
+    fn default() -> Self {
+        Self::build(None)
     }
 }
 
@@ -278,7 +324,14 @@ fn launch_command_for(
         // the command line rather than on `wsl.exe`'s own environment.
         let mut exports = String::new();
         for (name, value) in execution_env(execution, true, approve_execute) {
-            exports.push_str(&format!("{name}={} ", shell_quote(&value)));
+            if name == "PYTHONPATH" {
+                exports.push_str(&format!(
+                    "PYTHONPATH=\"{}\" ",
+                    overlay_expression(&wsl.dir, &value)
+                ));
+            } else {
+                exports.push_str(&format!("{name}={} ", shell_quote(&value)));
+            }
         }
         argv.push(format!(
             "cd {dir} && {exports}exec .venv/bin/langgraph dev --host 0.0.0.0 \
@@ -323,6 +376,27 @@ fn launch_command_for(
         JOBS_PER_WORKER.to_string(),
     ]);
     argv
+}
+
+/// Where the overlay is found inside the distro, as a shell expression.
+///
+/// Provisioning copies the overlay to `<checkout>/.desktop-overlay`, and that copy is
+/// preferred over the one in this repo. The repo's copy lives on the Windows filesystem,
+/// which the distro reaches only while the app's folder still exists and the drive is
+/// still mounted — and if it *isn't* reachable, Python imports nothing, raises nothing,
+/// and the backend silently falls back to the remote sandbox (docs §24).
+///
+/// Decided by the distro's own shell at launch, not by probing from Windows: a `wsl.exe`
+/// round trip costs seconds on every start, and there would be nowhere to cache the
+/// answer that would not go stale the moment the user re-provisioned.
+fn overlay_expression(wsl_dir: &str, fallback: &str) -> String {
+    let local = quote_path(&format!("{}/.desktop-overlay", wsl_dir.trim_end_matches('/')));
+    format!(
+        "$(if [ -f {local}/sitecustomize.py ]; then printf %s {local}; \
+         else printf %s {fallback}; fi)",
+        local = local,
+        fallback = shell_quote(fallback),
+    )
 }
 
 /// The environment that switches the backend to host execution.
@@ -410,8 +484,11 @@ const JOBS_PER_WORKER: u8 = 10;
 ///
 /// `MINIME_BACKEND_WSL=1` (or `true`) uses WSL's default distro; any other value
 /// is taken as the distro name. The checkout path inside the distro comes from
-/// `MINIME_BACKEND_WSL_DIR`, defaulting to `~/Mini-Me`.
-fn resolve_wsl_target() -> Option<WslTarget> {
+/// `MINIME_BACKEND_WSL_DIR`, or from what Settings recorded, or from
+/// [`owned_wsl_dir`].
+///
+/// Returns the target and whether the app owns that directory.
+fn resolve_wsl_target(recorded: Option<(String, bool)>) -> Option<(WslTarget, bool)> {
     let raw = std::env::var("MINIME_BACKEND_WSL").unwrap_or_default();
     let raw = raw.trim();
 
@@ -433,19 +510,55 @@ fn resolve_wsl_target() -> Option<WslTarget> {
     } else {
         Some(raw.to_string())
     };
-    let dir = std::env::var("MINIME_BACKEND_WSL_DIR")
+    let (dir, owned) = match std::env::var("MINIME_BACKEND_WSL_DIR")
         .ok()
         .map(|dir| dir.trim().to_string())
         .filter(|dir| !dir.is_empty())
-        .unwrap_or_else(|| "~/Mini-Me".to_string());
-    Some(WslTarget { distro, dir })
+    {
+        // Pointed at by hand: someone else's checkout, so not ours to update.
+        Some(dir) => (dir, false),
+        None => recorded.unwrap_or_else(|| (owned_wsl_dir(), true)),
+    };
+    Some((WslTarget { distro, dir }, owned))
 }
 
-/// Where the Mini-Me Python checkout lives. `MINIME_BACKEND_DIR` wins; otherwise
-/// try the conventional sibling locations before giving up on the cwd.
-fn resolve_project_dir() -> PathBuf {
+/// The checkout the app provisions and owns, inside the WSL distro.
+///
+/// **On the distro's own filesystem, never `/mnt/c`.** WSL2 reaches Windows drives over
+/// a 9p mount whose per-file overhead is high, and a Python environment holding the
+/// scientific stack is thousands of small files that get stat'd on every interpreter
+/// start. A venv on `/mnt/c` is the one placement guaranteed to feel broken.
+pub fn owned_wsl_dir() -> String {
+    std::env::var("MINIME_OWNED_WSL_DIR")
+        .ok()
+        .map(|dir| dir.trim().to_string())
+        .filter(|dir| !dir.is_empty())
+        // A tilde path on purpose: it is expanded by the distro's own login shell, and
+        // we cannot know the Linux user's home directory from Windows.
+        .unwrap_or_else(|| "~/.local/share/mini-me-desktop/backend".to_string())
+}
+
+/// The checkout the app provisions and owns, on this machine.
+fn owned_host_dir() -> PathBuf {
+    crate::settings::data_dir().join("backend")
+}
+
+/// Where the Mini-Me Python checkout lives, and whether the app owns it.
+///
+/// Order: an explicit `MINIME_BACKEND_DIR`, then what Settings recorded, then the
+/// conventional developer locations, then the app-owned path. Only the last is *owned* —
+/// everything else is a checkout someone else is responsible for, and the app must not
+/// run destructive git on it.
+fn resolve_project_dir(recorded: Option<(PathBuf, bool)>) -> (PathBuf, bool) {
     if let Some(dir) = std::env::var_os("MINIME_BACKEND_DIR") {
-        return PathBuf::from(dir);
+        return (PathBuf::from(dir), false);
+    }
+    if let Some(recorded) = recorded {
+        return recorded;
+    }
+    let owned = owned_host_dir();
+    if owned.join("langgraph.json").is_file() {
+        return (owned, true);
     }
     let mut candidates = Vec::new();
     // Windows sets USERPROFILE, not HOME — without this the candidates below are
@@ -457,10 +570,15 @@ fn resolve_project_dir() -> PathBuf {
     }
     // A sibling of this repo, the layout a `git clone` pair produces.
     candidates.push(PathBuf::from("../Mini-Me"));
-    candidates
+    match candidates
         .into_iter()
         .find(|p| p.join("langgraph.json").is_file())
-        .unwrap_or_else(|| PathBuf::from("."))
+    {
+        Some(found) => (found, false),
+        // Nothing anywhere: name the path we would provision *into*, so the Setup pane
+        // reports "not installed here" rather than "no langgraph.json in `.`".
+        None => (owned, true),
+    }
 }
 
 impl BackendConfig {
@@ -549,18 +667,34 @@ impl BackendConfig {
     /// The provisioning command: `bash …/setup-wsl.sh <checkout>`, spelled for the
     /// backend's shell. Re-running it is safe — the script never overwrites a checkout
     /// or a `.env`.
+    ///
+    /// When a backend copy ships with the app, its path is passed in so the script
+    /// provisions from it instead of cloning. That is the difference between an install
+    /// a scientist can complete and one that stops at a GitHub token prompt, because
+    /// Mini-Me is a private repository (see `scripts/bundle-backend.sh`).
     pub fn setup_script(&self) -> String {
-        let script = scripts_dir().join("setup-wsl.sh");
-        let script = if self.wsl.is_some() {
-            wsl_path(&script)
-        } else {
-            script.to_string_lossy().into_owned()
+        let for_wsl = self.wsl.is_some();
+        let spell = |path: &Path| {
+            if for_wsl {
+                wsl_path(path)
+            } else {
+                path.to_string_lossy().into_owned()
+            }
         };
-        format!(
+        let script = spell(&scripts_dir().join("setup-wsl.sh"));
+        let mut command = String::new();
+        if let Some(bundled) = bundled_backend_dir() {
+            command.push_str(&format!(
+                "MINIME_BUNDLED_SOURCE={} ",
+                shell_quote(&spell(&bundled))
+            ));
+        }
+        command.push_str(&format!(
             "bash {} {}",
             shell_quote(&script),
             quote_path(&self.backend_dir())
-        )
+        ));
+        command
     }
 
     /// A copy with the credentials stripped.
@@ -901,6 +1035,102 @@ mod tests {
     }
 
     #[test]
+    fn the_app_only_claims_ownership_of_what_it_provisioned() {
+        // The whole safety property of the update story. A checkout somebody pointed us
+        // at may be their working clone — the reference checkout on this developer's own
+        // machine has ten local branches — so `git checkout <pin>` on it would destroy
+        // work. Ownership is what gates that, and it must never be assumed.
+        std::env::remove_var("MINIME_BACKEND_WSL_DIR");
+        std::env::remove_var("MINIME_BACKEND_DIR");
+
+        // A fresh machine — nothing recorded, nothing to discover — lands on the
+        // app-owned path and claims it. `HOME` is redirected because the developer box
+        // running this test *does* have a checkout to discover, and finding one is a
+        // different case (asserted below).
+        let empty = std::env::temp_dir().join("mini-me-fresh-machine");
+        // Cleared first: the second half of this test plants a checkout under this home,
+        // so without it the *next* run would discover that one and "fresh machine" would
+        // no longer be fresh. It failed exactly that way once.
+        let _ = std::fs::remove_dir_all(&empty);
+        std::fs::create_dir_all(&empty).expect("scratch home");
+        let real_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &empty);
+        std::env::set_var("MINIME_DATA_DIR", empty.join("data"));
+        let (dir, owned) = resolve_project_dir(None);
+        assert!(owned, "the app-owned path is ours to manage");
+        assert_eq!(dir, empty.join("data/backend"), "{}", dir.display());
+
+        // A checkout the app merely *found* is adopted, never owned — this is the case
+        // that protects a developer's working clone.
+        let theirs = empty.join("Documents/Mini-Me");
+        std::fs::create_dir_all(&theirs).expect("their checkout");
+        std::fs::write(theirs.join("langgraph.json"), "{}").expect("write");
+        let (dir, owned) = resolve_project_dir(None);
+        assert_eq!(dir, theirs);
+        assert!(!owned, "a discovered checkout belongs to whoever made it");
+
+        std::env::remove_var("MINIME_DATA_DIR");
+        match real_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+
+        // Recorded as adopted stays adopted across launches.
+        let (dir, owned) = resolve_project_dir(Some((PathBuf::from("/home/x/Mini-Me"), false)));
+        assert!(!owned);
+        assert_eq!(dir, PathBuf::from("/home/x/Mini-Me"));
+
+        // An explicit environment variable is always somebody else's checkout.
+        std::env::set_var("MINIME_BACKEND_DIR", "/srv/theirs");
+        let (dir, owned) = resolve_project_dir(None);
+        assert!(!owned, "a hand-pointed checkout is never ours");
+        assert_eq!(dir, PathBuf::from("/srv/theirs"));
+        std::env::remove_var("MINIME_BACKEND_DIR");
+
+        // Same rule inside the distro. WSL mode has to be asked for explicitly here
+        // because it is only on by default on Windows, and this runs on Linux.
+        std::env::set_var("MINIME_BACKEND_WSL", "1");
+        std::env::set_var("MINIME_BACKEND_WSL_DIR", "~/their-clone");
+        let (target, owned) = resolve_wsl_target(None).expect("wsl target");
+        assert!(!owned);
+        assert_eq!(target.dir, "~/their-clone");
+        std::env::remove_var("MINIME_BACKEND_WSL_DIR");
+
+        let (target, owned) = resolve_wsl_target(None).expect("wsl target");
+        assert!(owned);
+        assert_eq!(target.dir, owned_wsl_dir());
+        std::env::remove_var("MINIME_BACKEND_WSL");
+        // On the distro's own filesystem: a venv over /mnt/c is the placement that makes
+        // everything feel broken.
+        assert!(!owned_wsl_dir().starts_with("/mnt/"), "{}", owned_wsl_dir());
+    }
+
+    #[test]
+    fn provisioning_prefers_a_bundled_copy_over_cloning_a_private_repo() {
+        // Mini-Me is private, so a clone wants a personal access token — a wall for the
+        // people this app is for. When a copy ships with the app, the script must be told
+        // where it is.
+        let scratch = std::env::temp_dir().join("mini-me-bundle-test");
+        let _ = std::fs::create_dir_all(&scratch);
+        std::fs::write(scratch.join("langgraph.json"), "{}").expect("write");
+
+        std::env::set_var("MINIME_BUNDLED_BACKEND", &scratch);
+        let mut config = BackendConfig::default();
+        config.wsl = None;
+        config.project_dir = PathBuf::from("/opt/backend");
+        let command = config.setup_script();
+        assert!(command.starts_with("MINIME_BUNDLED_SOURCE="), "{command}");
+        assert!(command.contains("setup-wsl.sh"), "{command}");
+
+        // No bundle: the variable must be absent rather than empty, or the script would
+        // treat "" as a source and skip straight to cloning with a confusing message.
+        std::env::set_var("MINIME_BUNDLED_BACKEND", scratch.join("nope"));
+        let command = BackendConfig::default().setup_script();
+        assert!(!command.contains("MINIME_BUNDLED_SOURCE"), "{command}");
+        std::env::remove_var("MINIME_BUNDLED_BACKEND");
+    }
+
+    #[test]
     fn a_redacted_config_carries_no_credentials() {
         let mut config = BackendConfig::default();
         config.secrets = vec![("ASTA_TOKEN".into(), "super-secret".into())];
@@ -929,13 +1159,20 @@ mod tests {
         let command = argv.last().expect("the bash -lc payload");
         // Assignments must land *before* `exec`, or the server never sees them.
         assert!(
-            command.contains(
-                "MINIME_EXECUTION_BACKEND='local' MINIME_APPROVE_EXECUTE='1'                  PYTHONPATH='/mnt/c/repo/overlay' exec"
-                    .replace("                 ", "")
-                    .as_str()
-            ),
+            command.contains("MINIME_EXECUTION_BACKEND='local' MINIME_APPROVE_EXECUTE='1' PYTHONPATH="),
             "{command}"
         );
+        assert!(command.contains("PYTHONPATH=\"$(if [ -f "), "{command}");
+        // The in-distro copy is preferred, with the repo's copy on the Windows drive as
+        // the fallback — the whole point being that a working install stops depending on
+        // /mnt/c at all.
+        assert!(
+            command.contains("~/'Mini-Me/.desktop-overlay'/sitecustomize.py"),
+            "{command}"
+        );
+        assert!(command.contains("printf %s '/mnt/c/repo/overlay'"), "{command}");
+        // And it still ends up as one assignment in front of exec.
+        assert!(command.contains("fi)\" exec .venv/bin/langgraph dev"), "{command}");
     }
 
     #[test]

@@ -69,6 +69,10 @@ pub enum Fix {
     },
     /// Something only a person can do — a login, a download, pasting a key.
     Manual(String),
+    /// Point the app at a checkout it found. Not a command but a settings write, and the
+    /// *right* answer when the user already has one: adopting takes a second, while
+    /// provisioning a second copy costs gigabytes and several minutes.
+    Adopt { label: &'static str, dir: String },
 }
 
 #[derive(Debug, Clone)]
@@ -79,7 +83,10 @@ pub struct Check {
     pub state: State,
     /// What was found, or what is wrong. One line.
     pub detail: String,
-    pub fix: Option<Fix>,
+    /// In preference order — the first is what the pane leads with. More than one because
+    /// "we found a Mini-Me at ~/Mini-Me" and "install a fresh copy" are both real answers
+    /// to a missing checkout, and which one is right is the user's call, not ours.
+    pub fixes: Vec<Fix>,
 }
 
 impl Check {
@@ -89,7 +96,7 @@ impl Check {
             label,
             state: State::Pass,
             detail: detail.into(),
-            fix: None,
+            fixes: Vec::new(),
         }
     }
 
@@ -102,7 +109,7 @@ impl Check {
             label,
             state: State::Skip,
             detail: format!("not checked — {because} first"),
-            fix: None,
+            fixes: Vec::new(),
         }
     }
 
@@ -111,14 +118,14 @@ impl Check {
         label: &'static str,
         state: State,
         detail: impl Into<String>,
-        fix: Fix,
+        fixes: Vec<Fix>,
     ) -> Self {
         Self {
             id,
             label,
             state,
             detail: detail.into(),
-            fix: Some(fix),
+            fixes,
         }
     }
 }
@@ -130,6 +137,11 @@ pub struct Report {
     /// something quite different inside a distro than on this filesystem.
     pub location: String,
     pub execution: String,
+    /// Whether the app provisioned this checkout and may therefore maintain it.
+    ///
+    /// Shown to the user because it changes what the app is allowed to do to their own
+    /// files, and that should never come as a surprise.
+    pub owned: bool,
 }
 
 impl Report {
@@ -278,6 +290,48 @@ fn exists(config: &BackendConfig, relative: &str) -> bool {
     }
 }
 
+/// Look for a Mini-Me checkout somewhere other than where we are configured to find one.
+///
+/// Only ever **local to the machine the backend runs on**. A checkout on a Windows drive
+/// is deliberately not offered for adoption even though WSL can reach it at `/mnt/c`:
+/// running the venv over that mount is the placement that makes everything feel broken
+/// (see `owned_wsl_dir`). The setup script still *copies* from there, which is the right
+/// use of a Windows-side checkout — as a source, not as a home.
+fn discover_checkout(config: &BackendConfig) -> Option<String> {
+    let configured = config.backend_dir();
+    match &config.wsl {
+        Some(_) => {
+            // One probe for the whole list: each `wsl.exe` call costs seconds, so this
+            // must not become one per candidate.
+            let script = "for d in ~/Mini-Me ~/mini-me ~/Documents/Mini-Me \
+                          ~/.local/share/mini-me-desktop/backend; do \
+                          [ -f \"$d/langgraph.json\" ] && echo \"$d\" && break; done";
+            let found = probe(&config.shell_argv(script));
+            found
+                .stdout
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty() && *line != configured)
+                .map(str::to_string)
+        }
+        None => {
+            let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+            let home = std::path::PathBuf::from(home);
+            [
+                home.join("Documents/Mini-Me"),
+                home.join("Documents/GitHub/Mini-Me"),
+                home.join("Mini-Me"),
+                std::path::PathBuf::from("../Mini-Me"),
+            ]
+            .into_iter()
+            .find(|dir| {
+                dir.join("langgraph.json").is_file() && dir.to_string_lossy() != configured
+            })
+            .map(|dir| dir.to_string_lossy().into_owned())
+        }
+    }
+}
+
 /// Ask every question, in dependency order.
 ///
 /// `has_model_key` is passed in rather than read here on purpose: the Linux keychain
@@ -333,7 +387,7 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
             "WSL2 runtime",
             State::Fail,
             detail,
-            fix,
+            vec![fix],
         ));
     } else {
         checks.push(Check::failing(
@@ -341,11 +395,11 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
             "Shell",
             State::Fail,
             format!("no usable bash — {}", runtime.message()),
-            Fix::Manual(
+            vec![Fix::Manual(
                 "The backend needs a POSIX shell. On Windows that means WSL: unset \
                  MINIME_BACKEND_WSL to use it (docs §21)."
                     .into(),
-            ),
+            )],
         ));
     }
 
@@ -363,16 +417,30 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
                 format!("langgraph.json found in {}", config.backend_dir()),
             ));
         } else {
+            // Offer to adopt an existing checkout *before* offering to install a second
+            // one. Someone who already has Mini-Me on this machine should not be made to
+            // download gigabytes again — and adopting keeps their branches intact,
+            // because the app never runs destructive git on what it does not own.
+            let mut fixes = Vec::new();
+            let mut detail = format!("not installed in {}", config.backend_dir());
+            if let Some(found) = discover_checkout(config) {
+                detail = format!("not in {}, but there is one at {found}", config.backend_dir());
+                fixes.push(Fix::Adopt {
+                    label: "Use the one I have",
+                    dir: found,
+                });
+            }
+            fixes.push(Fix::Run {
+                label: "Install Mini-Me",
+                argv: config.shell_argv(&config.setup_script()),
+                note: "downloads the backend and its Python packages — 5 to 15 minutes",
+            });
             checks.push(Check::failing(
                 "checkout",
                 "Mini-Me backend",
                 State::Fail,
-                format!("no langgraph.json in {}", config.backend_dir()),
-                Fix::Run {
-                    label: "Provision the backend",
-                    argv: config.shell_argv(&config.setup_script()),
-                    note: "clones the repo and installs Python deps — several minutes",
-                },
+                detail,
+                fixes,
             ));
         }
         found
@@ -407,14 +475,14 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
                 "Python dependencies",
                 State::Fail,
                 format!("{entry} is missing — the dev extra was never synced"),
-                Fix::Run {
-                    label: "Sync dependencies",
+                vec![Fix::Run {
+                    label: "Install Python packages",
                     argv: config.shell_argv(&format!(
                         "cd {} && uv sync --extra dev",
                         quote_path(&config.backend_dir())
                     )),
-                    note: "pulls PyMC and friends on a cold venv — several minutes",
-                },
+                    note: "a few minutes on a cold environment",
+                }],
             ));
         }
     } else {
@@ -454,12 +522,12 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
                     "Host execution overlay",
                     State::Fail,
                     format!("the backend cannot see {overlay}"),
-                    Fix::Manual(format!(
+                    vec![Fix::Manual(format!(
                         "Host execution would not take effect and the backend would try \
                          the remote sandbox instead. Put this repo on a local drive, or \
                          set MINIME_OVERLAY_DIR to a path reachable from {}.",
                         if in_wsl { "the distro" } else { "the backend" }
-                    )),
+                    ))],
                 ));
             }
         } else {
@@ -471,11 +539,11 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
             "Host execution overlay",
             State::Warn,
             "off — the agent's commands go to the remote sandbox",
-            Fix::Manual(
+            vec![Fix::Manual(
                 "That needs LANGSMITH_API_KEY. Turn on \"Run code on this machine\" in \
                  Settings to use the local path instead."
                     .into(),
-            ),
+            )],
         ));
     }
 
@@ -498,11 +566,11 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
                 "Asta CLI",
                 State::Warn,
                 "not on the backend's PATH",
-                Fix::Manual(
+                vec![Fix::Manual(
                     "Literature search and the theorizer need it. Install it where the \
                      backend runs, then store ASTA_TOKEN and ASTA_API_KEY in Settings."
                         .into(),
-                ),
+                )],
             ));
         }
     } else {
@@ -522,7 +590,11 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
             "Model API key",
             State::Fail,
             "no key stored for the selected provider",
-            Fix::Manual("Open Settings (ctrl-,) and paste your key — it goes into the OS keychain, never into a file.".into()),
+            vec![Fix::Manual(
+                "Open Settings and paste your key — it goes into the OS keychain, never \
+                 into a file."
+                    .into(),
+            )],
         ));
     }
 
@@ -530,7 +602,94 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
         checks,
         location: config.location(),
         execution: config.execution_label().to_string(),
+        owned: config.owned,
     }
+}
+
+/// Run a fix, handing each line of its output to `emit` as it arrives.
+///
+/// **Streamed, not buffered.** Provisioning takes minutes — a clone, then `uv sync`
+/// pulling PyMC and scikit-learn — and a progress bar with no detail is exactly the
+/// experience this pane exists to replace. Our users do not read logs; they need to see
+/// that something is happening and, when it fails, the line that says why.
+///
+/// `stdin` is null on purpose. `git clone` of a private repository will otherwise sit
+/// waiting for a username at a prompt nobody can see, and the app would look hung
+/// forever. With no stdin it fails immediately and the reason reaches the pane.
+///
+/// stdout and stderr are read on separate threads and interleaved. Reading them in
+/// sequence would deadlock the moment a chatty child filled the pipe we were not
+/// draining — and `uv` writes its progress to stderr, which is most of what there is to
+/// watch.
+pub fn run_streaming(argv: &[String], mut emit: impl FnMut(String)) -> anyhow::Result<bool> {
+    use anyhow::Context as _;
+    use std::io::BufRead as _;
+
+    let (program, rest) = argv.split_first().context("empty command")?;
+    let mut child = Command::new(program)
+        .args(rest)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("could not start {program}"))?;
+
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let mut readers = Vec::new();
+    if let Some(pipe) = child.stdout.take() {
+        let tx = tx.clone();
+        readers.push(std::thread::spawn(move || {
+            for line in std::io::BufReader::new(pipe).lines().map_while(Result::ok) {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+    if let Some(pipe) = child.stderr.take() {
+        let tx = tx.clone();
+        readers.push(std::thread::spawn(move || {
+            for line in std::io::BufReader::new(pipe).lines().map_while(Result::ok) {
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+    // Our own sender has to go, or the loop below never ends.
+    drop(tx);
+
+    // Ends when both pipes reach EOF, which is the child exiting.
+    for line in rx {
+        emit(strip_ansi(&line));
+    }
+    for reader in readers {
+        let _ = reader.join();
+    }
+    let status = child.wait().context("could not wait for the fix to finish")?;
+    Ok(status.success())
+}
+
+/// Drop ANSI colour codes.
+///
+/// The setup script colours its own progress markers, and GPUI renders escape sequences
+/// as the mojibake they are rather than as colour.
+fn strip_ansi(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        // Skip to the end of the sequence: a letter terminates CSI.
+        for c in chars.by_ref() {
+            if c.is_ascii_alphabetic() {
+                break;
+            }
+        }
+    }
+    out
 }
 
 /// Render an argv the way a person would type it, for the copy button.
@@ -563,6 +722,7 @@ mod tests {
             execution: Execution::Sandbox,
             secrets: Vec::new(),
             approve_execute: true,
+            owned: true,
         }
     }
 
@@ -578,8 +738,12 @@ mod tests {
         assert!(!report.ready(), "a missing checkout blocks every turn");
 
         // The point of the pane: the fix is a command, not advice.
-        let Some(Fix::Run { argv, .. }) = &checkout.fix else {
-            panic!("expected a runnable fix, got {:?}", checkout.fix);
+        let Some(Fix::Run { argv, .. }) = checkout
+            .fixes
+            .iter()
+            .find(|fix| matches!(fix, Fix::Run { .. }))
+        else {
+            panic!("expected a runnable fix, got {:?}", checkout.fixes);
         };
         let command = display_argv(argv);
         assert!(command.contains("setup-wsl.sh"), "{command}");
@@ -630,7 +794,10 @@ mod tests {
                 .find(|check| check.id == id)
                 .unwrap_or_else(|| panic!("expected a {id} row"));
             assert_eq!(check.state, State::Skip, "{id} should not cascade");
-            assert!(check.fix.is_none(), "{id} should offer no fix while skipped");
+            assert!(
+                check.fixes.is_empty(),
+                "{id} should offer no fix while skipped"
+            );
         }
         // And the one real problem is still nameable in a single line.
         assert_eq!(report.first_problem().map(|c| c.id), Some("runtime"));
