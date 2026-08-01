@@ -449,6 +449,54 @@ fn prompt_for_dropped(paths: &[String], directories: &[bool]) -> String {
     }
 }
 
+/// The first `https://` URL in a line of command output.
+///
+/// Stops at whitespace and trims the punctuation a sentence tends to leave attached, so
+/// "open https://example.org/x." yields the URL without the full stop.
+fn first_url(line: &str) -> Option<String> {
+    let at = line.find("https://")?;
+    let url: String = line[at..]
+        .chars()
+        .take_while(|c| !c.is_whitespace())
+        .collect();
+    // A trailing colon is not punctuation you would expect to matter — until you see the
+    // real line, `gio: <url>: Operation not supported`, where it is what separates the URL
+    // from the error. Safe to strip: a colon is meaningful *inside* a URL (a port), never
+    // at the end of one.
+    let url = url.trim_end_matches(['.', ',', ':', ';', ')', ']', '"', '\'']);
+    // A bare scheme is not a link.
+    (url.len() > "https://".len()).then(|| url.to_string())
+}
+
+/// Open a URL in the **host's** browser.
+///
+/// Deliberately not routed through `shell_argv`: that would run inside the WSL distro,
+/// which is exactly where it does not work — `asta auth login` already tries there and
+/// reports `gio: … Operation not supported`. The browser is on Windows, so this runs on
+/// Windows.
+fn open_in_browser(url: &str) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        // The empty argument is `start`'s title parameter. Without it, a quoted URL is
+        // taken *as* the title and nothing opens.
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn()
+            .map(|_| ())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(url).spawn().map(|_| ())
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(url)
+            .spawn()
+            .map(|_| ())
+    }
+}
+
 /// Whether a turn failure is really the machine not being set up.
 ///
 /// Matching on message text is not elegant, and it is the honest option here: these
@@ -554,6 +602,10 @@ fn trace_for<'a>(message: &'a mut Message, agent: &AgentRef) -> &'a mut AgentTra
 /// A setup command the app is running for the user, and its output so far.
 struct RunningFix {
     label: String,
+    /// A sign-in URL the command printed, if any. See [`Workbench::open_link`] — the
+    /// command runs *inside the distro*, which has no browser, so the link has to be
+    /// opened out here on the host.
+    link: Option<String>,
     /// The last [`FIX_LOG_LINES`] lines. Capped because `uv sync` prints hundreds and
     /// the pane is 420px wide — the tail is the part that matters.
     lines: Vec<String>,
@@ -988,6 +1040,7 @@ impl Workbench {
         self.status = format!("running: {label}");
         self.running_fix = Some(RunningFix {
             label,
+            link: None,
             lines: Vec::new(),
             done: false,
             ok: false,
@@ -1001,6 +1054,13 @@ impl Workbench {
                     };
                     match event {
                         sidecar::FixEvent::Line(line) => {
+                            // `asta auth login` prints its device-activation URL and then
+                            // tries to open it with `gio`, which fails inside WSL: no
+                            // browser there. Catching the URL is what lets the app open it
+                            // on the host, where the browser is (docs §32c).
+                            if fix.link.is_none() {
+                                fix.link = first_url(&line);
+                            }
                             fix.lines.push(line);
                             if fix.lines.len() > FIX_LOG_LINES {
                                 fix.lines.remove(0);
@@ -2125,6 +2185,67 @@ impl Workbench {
                             format!("{}…", fix.label)
                         }),
                 );
+            // A sign-in page to open. Prominent, and above the log, because while this is
+            // showing the command is *blocked* waiting for the user to visit it — and the
+            // CLI's own attempt to open it failed inside the distro.
+            if let Some(link) = &fix.link {
+                log = log.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap_2()
+                        .child(
+                            div()
+                                .id("open-signin")
+                                .px_3()
+                                .py_1()
+                                .border_1()
+                                .border_color(rgb(ACCENT))
+                                .text_color(rgb(ACCENT))
+                                .text_sm()
+                                .hover(|style| style.cursor_pointer())
+                                .child("Open the sign-in page")
+                                .on_click(cx.listener({
+                                    let link = link.clone();
+                                    move |workbench, _event, _window, cx| {
+                                        workbench.status = match open_in_browser(&link) {
+                                            Ok(()) => "opened the sign-in page in your browser"
+                                                .to_string(),
+                                            Err(error) => {
+                                                format!("could not open a browser: {error}")
+                                            }
+                                        };
+                                        cx.notify();
+                                    }
+                                })),
+                        )
+                        // A copy, for a machine where opening a browser from here fails —
+                        // the code in that URL is short-lived, so retyping it is not an
+                        // option.
+                        .child(
+                            div()
+                                .id("copy-signin")
+                                .px_3()
+                                .py_1()
+                                .border_1()
+                                .border_color(rgb(BORDER))
+                                .text_color(rgb(MUTED))
+                                .text_sm()
+                                .hover(|style| style.cursor_pointer())
+                                .child("Copy ⧉")
+                                .on_click(cx.listener({
+                                    let link = link.clone();
+                                    move |workbench, _event, _window, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            link.clone(),
+                                        ));
+                                        workbench.status = "sign-in link copied".into();
+                                        cx.notify();
+                                    }
+                                })),
+                        ),
+                );
+            }
             for line in &fix.lines {
                 log = log.child(
                     div()
@@ -3180,6 +3301,32 @@ mod tests {
                 _ => assert!(!field.is_secret(), "{}", field.label()),
             }
         }
+    }
+
+    #[test]
+    fn the_sign_in_link_is_picked_out_of_the_cli_output() {
+        // The real line, verbatim: `asta auth login` prints the device-activation URL and
+        // then fails to open it, because there is no browser inside the distro.
+        let real = "gio: https://auth0.allenai.org/activate?user_code=DPMW-BJCG: Operation not supported";
+        assert_eq!(
+            first_url(real).as_deref(),
+            Some("https://auth0.allenai.org/activate?user_code=DPMW-BJCG"),
+            "the trailing colon and message must not come along"
+        );
+
+        // Sentence punctuation is not part of the link.
+        assert_eq!(
+            first_url("Visit https://example.org/a.").as_deref(),
+            Some("https://example.org/a")
+        );
+        assert_eq!(
+            first_url("see (https://example.org/b)").as_deref(),
+            Some("https://example.org/b")
+        );
+        // Nothing to open.
+        assert_eq!(first_url("Waiting for authentication…"), None);
+        assert_eq!(first_url("https://"), None, "a bare scheme is not a link");
+        assert_eq!(first_url("http://example.org"), None, "https only");
     }
 
     #[test]

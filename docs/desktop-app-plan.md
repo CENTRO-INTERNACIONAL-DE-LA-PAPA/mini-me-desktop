@@ -2405,3 +2405,34 @@ button pointed at the account that has it.
 The lesson worth keeping: *"signed in"* was never the question. **Entitled** was. A
 diagnostic that reports authentication and calls it authorization will confidently send
 someone the wrong way, which is worse than reporting nothing.
+
+### 32c. Opening the sign-in page where the browser actually is
+
+The **Sign in to Asta** button worked, but the real output showed why it was awkward:
+
+```
+gio: https://auth0.allenai.org/activate?user_code=DPMW-BJCG: Operation not supported
+```
+
+`asta auth login` prints its device-activation URL and then tries to open a browser — from
+**inside the distro**, which has none. The sign-in only completed because the user opened
+the link by hand.
+
+The pane now catches the URL out of the streamed output and offers **Open the sign-in
+page**, plus a copy. The opener deliberately does **not** go through `shell_argv`: routing
+it into WSL is precisely what already fails. On Windows it is `cmd /C start "" <url>` —
+with the empty title argument, without which `start` treats a quoted URL *as* the title and
+opens nothing.
+
+Prominent, and above the log, because while it is showing the command is **blocked**
+waiting for someone to visit that page.
+
+**What is deliberately not done: saving the token.** The obvious next step — "log in once,
+store the token" — is the thing three rounds of debugging just removed. Access tokens last
+seven days; a stored one is stale by definition, and `_command_env()` captured it once per
+workspace anyway. The overlay asks the CLI for a fresh token every ten minutes instead
+(§32), and the CLI's own `Auto-Refresh: Enabled` does the renewing. There is nothing to
+save that would not immediately start rotting.
+
+**The test earned its place immediately:** the first version left the trailing colon on
+`gio: <url>:` — a character worth stripping only because the real line has it there.
