@@ -678,6 +678,21 @@ struct Workbench {
     /// The user approved everything remaining in *this* turn. Never persisted, and reset
     /// by [`Workbench::finish_turn`] — see the button's comment for why it is bounded.
     approve_rest_of_turn: bool,
+    /// The user approved everything for the rest of this **conversation**, foreground and
+    /// background alike.
+    ///
+    /// Turn scope was too small in practice: one analysis is a dozen commands across
+    /// several turns, and a researcher who must click Approve twelve times stops reading
+    /// by the third. This is the wider grant they asked for — still **never persisted**,
+    /// still gone on "New thread" or a restart, and announced in the status bar the whole
+    /// time it is in force, so it cannot be in effect without being visible (docs §41).
+    approve_conversation: bool,
+    /// Background tasks whose remaining commands are pre-approved, by task id.
+    ///
+    /// Separate from the turn grant because a background worker has no turn to belong to:
+    /// it runs on its own thread for minutes, and its gate would otherwise need an answer
+    /// per command from someone who has gone back to work.
+    approve_tasks: std::collections::HashSet<String>,
     /// Set when focus must return to the composer but no `Window` is at hand — an
     /// entity subscription doesn't get one. `render` does, so it settles the debt
     /// there. Without this, activating a command with Enter would leave focus on a
@@ -757,6 +772,8 @@ impl Workbench {
             running_fix: None,
             pending_approval: None,
             approve_rest_of_turn: false,
+            approve_conversation: false,
+            approve_tasks: std::collections::HashSet::new(),
             restore_focus: false,
         };
         // Fill the editable fields from what is stored, and open Settings on a fresh
@@ -874,10 +891,23 @@ impl Workbench {
                     let finished = update.is_finished();
                     let waiting = update.needs_approval();
                     let succeeded = update.succeeded();
+                    let task_id = update.task_id.clone();
                     if let Some(tracked) =
                         workbench.tasks.iter_mut().find(|t| t.task_id == update.task_id)
                     {
                         *tracked = update;
+                    }
+                    // Already granted, for this task or for the whole conversation:
+                    // answer it rather than asking again. The command still lands in the
+                    // card, so what ran stays reviewable — this removes the interruption,
+                    // not the record.
+                    if waiting
+                        && (workbench.approve_conversation
+                            || workbench.approve_tasks.contains(&task_id))
+                    {
+                        workbench.decide_task(task_id, true, cx);
+                        cx.notify();
+                        return;
                     }
                     if waiting {
                         workbench.status =
@@ -1201,8 +1231,12 @@ impl Workbench {
                 // Already decided for this turn: answer without asking again. The command
                 // is still recorded in the trace, so what ran remains reviewable — this
                 // removes the interruption, not the record.
-                if self.approve_rest_of_turn {
-                    self.status = "approved (rest of turn) — running…".into();
+                if self.approve_rest_of_turn || self.approve_conversation {
+                    self.status = if self.approve_conversation {
+                        "approved (rest of conversation) — running…".into()
+                    } else {
+                        "approved (rest of turn) — running…".into()
+                    };
                     self.decide(true, cx);
                     return;
                 }
@@ -1388,7 +1422,7 @@ impl Workbench {
         if let Some(request) = &self.pending_approval {
             pane = pane.child(self.approval_card(request, cx));
         }
-        pane.child(self.composer_row(cx)).child(self.status_bar())
+        pane.child(self.composer_row(cx)).child(self.status_bar(cx))
     }
 
     /// Answer the pending approval and pump the continuation into the same turn.
@@ -1551,6 +1585,28 @@ impl Workbench {
                         .child("Approve the rest of this turn")
                         .on_click(cx.listener(|workbench, _event, _window, cx| {
                             workbench.approve_rest_of_turn = true;
+                            workbench.decide(true, cx);
+                        })),
+                )
+                // The wider grant, asked for because one analysis is a dozen commands
+                // across several turns and nobody reads the twelfth dialog. It covers
+                // background workers too — they are where the clicking is worst, since
+                // there is no one watching the panel. Still bounded: "New thread" or
+                // closing the app ends it, nothing is written to disk, and the status bar
+                // says so for as long as it holds (docs §41).
+                .child(
+                    div()
+                        .id("approve-conversation")
+                        .px_3()
+                        .py_1()
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .text_color(rgb(MUTED))
+                        .text_sm()
+                        .hover(|style| style.cursor_pointer())
+                        .child("Approve everything in this conversation")
+                        .on_click(cx.listener(|workbench, _event, _window, cx| {
+                            workbench.approve_conversation = true;
                             workbench.decide(true, cx);
                         })),
                 ),
@@ -2404,6 +2460,11 @@ impl Workbench {
                 self.transcript.clear();
                 self.buckets.clear();
                 self.error = None;
+                // Blanket approval is scoped to the conversation, so it ends with it —
+                // together with every per-task grant, whose tasks belonged to that
+                // conversation too. This is the line that makes the button's wording true.
+                self.approve_conversation = false;
+                self.approve_tasks.clear();
                 // The spine is thread-independent — the mission survives, so say so
                 // rather than letting the panel look stale.
                 self.status = "new thread — the project spine is kept".into();
@@ -2676,7 +2737,7 @@ impl Workbench {
             )
     }
 
-    fn status_bar(&self) -> impl IntoElement {
+    fn status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let (status_text, status_color) = match &self.error {
             Some(error) => (error.clone(), ERROR),
             None => (self.status.clone(), MUTED),
@@ -2700,6 +2761,29 @@ impl Workbench {
                     .text_sm()
                     .child(status_text),
             )
+            // A blanket grant that is in force must never be invisible — and must be
+            // revocable without starting a new conversation, or "just this once" becomes
+            // permanent by inconvenience. Click to hand the gate back.
+            .when(self.approve_conversation, |bar| {
+                bar.child(
+                    div()
+                        .id("revoke-approval")
+                        .flex_none()
+                        .px_2()
+                        .border_1()
+                        .border_color(rgb(ACCENT))
+                        .text_color(rgb(ACCENT))
+                        .text_xs()
+                        .hover(|style| style.cursor_pointer())
+                        .child("approving everything — click to stop")
+                        .on_click(cx.listener(|workbench, _event, _window, cx| {
+                            workbench.approve_conversation = false;
+                            workbench.approve_tasks.clear();
+                            workbench.status = "asking before each command again".into();
+                            cx.notify();
+                        })),
+                )
+            })
             // Say where the agent's code runs. When that is the user's own machine
             // it should be visible without opening a log (docs §18).
             .child(
@@ -2992,6 +3076,28 @@ impl Workbench {
                                     }
                                 })),
                         ),
+                );
+                // A background worker asks once per command over several minutes. Without
+                // this the researcher has to sit on the panel and answer each one, which
+                // defeats the entire point of handing the work to the background.
+                row = row.child(
+                    div()
+                        .id(SharedString::from(format!("bg-approve-task-{task_id}")))
+                        .px_3()
+                        .py_1()
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .text_color(rgb(MUTED))
+                        .text_xs()
+                        .hover(|style| style.cursor_pointer())
+                        .child("Approve the rest of this task")
+                        .on_click(cx.listener({
+                            let task_id = task_id.clone();
+                            move |workbench, _event, _window, cx| {
+                                workbench.approve_tasks.insert(task_id.clone());
+                                workbench.decide_task(task_id.clone(), true, cx);
+                            }
+                        })),
                 );
             }
             section = section.child(row);

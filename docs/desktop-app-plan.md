@@ -2827,3 +2827,42 @@ cards — the foreground one and the Jobs-panel one, which has the same failure 
 width. This is the third time the fix has been *"actions outside the scroll area,
 `flex_none` on anything that must not be squeezed"*, and the third time it was found from a
 screenshot rather than from the code.
+
+## 41. Approval scope, widened on the researcher's evidence (2026-08-01)
+
+*"I need to click too many times approve. maybe thats something scientist will dislike."*
+
+Three separate gaps, only one of which was the missing button:
+
+1. **"Approve the rest of this turn" already existed — and was unreachable.** It sat below
+   the command, and §40's card overflow pushed it off the window. The feature had been
+   there for weeks and had never been seen.
+2. **Background tasks had no blanket option at all.** A worker asks once per command over
+   several minutes, on its own thread, while the researcher has gone back to work. That is
+   the worst place to require a click each time, and it is precisely where handing work to
+   the background stops being useful.
+3. **Turn scope was too small.** One analysis is a dozen commands across several turns.
+
+Added: **"Approve everything in this conversation"** (covering background workers too) and
+**"Approve the rest of this task"** on the Jobs-panel card.
+
+### What keeps this from becoming a rubber stamp
+
+§19's original argument still stands — *"the tenth identical dialog in one analysis is not
+read, it is dismissed, and then neither is the eleventh — which is the one that mattered."*
+The answer to that is not to make people click more; it is to make the grant **bounded,
+visible and revocable**:
+
+- **Never persisted.** Nothing is written to disk. Closing the app ends it.
+- **Ends with the conversation.** "New thread" clears both the conversation grant and every
+  per-task one.
+- **Visible the whole time it holds.** The status bar shows *"approving everything — click
+  to stop"* in accent colour whenever it is in force. A blanket grant that is invisible is
+  the actual hazard.
+- **Revocable in one click**, without starting a new conversation — otherwise "just this
+  once" becomes permanent through inconvenience.
+- **Still recorded.** Auto-answered commands still appear in the card and the trace. This
+  removes the interruption, not the record.
+
+The permanent, cross-session version remains what it was: a Settings toggle the user has to
+go and find, worded *"Off is for automation, not a recommendation."*
