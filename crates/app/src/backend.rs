@@ -356,7 +356,10 @@ fn launch_command_for(
         // Host execution needs two variables set *inside* the distro, so they go in
         // the command line rather than on `wsl.exe`'s own environment.
         let mut exports = String::new();
-        for (name, value) in execution_env(execution, true, approve_execute) {
+        for (name, value) in execution_env(execution, true, approve_execute)
+            .into_iter()
+            .chain(feature_env(async_subagents))
+        {
             if name == "PYTHONPATH" {
                 exports.push_str(&format!(
                     "PYTHONPATH=\"{}\" ",
@@ -519,6 +522,18 @@ fn generate_config_command(overlay: &str, python: &str) -> String {
         "{python} {} .",
         shell_quote(&format!("{}/minime_local/make_config.py", overlay.trim_end_matches('/')))
     )
+}
+
+/// The variable that turns background work on inside the backend.
+///
+/// Separate from [`execution_env`] on purpose: that returns **nothing** for the remote
+/// sandbox, so folding this into it would silently disable background work under
+/// `--sandbox`. Kept apart, the two settings stay independent — which is what they are.
+fn feature_env(async_subagents: bool) -> Vec<(String, String)> {
+    if !async_subagents {
+        return Vec::new();
+    }
+    vec![("MINIME_ASYNC_SUBAGENTS".to_string(), "1".to_string())]
 }
 
 /// The environment that switches the backend to host execution.
@@ -950,7 +965,10 @@ impl BackendSupervisor {
         // child. (In WSL mode they are already inside the `bash -lc` string, because
         // `wsl.exe`'s own environment does not cross into the distro.)
         if self.config.wsl.is_none() {
-            for (name, value) in execution_env(&self.config.execution, false, self.config.approve_execute) {
+            for (name, value) in execution_env(&self.config.execution, false, self.config.approve_execute)
+                .into_iter()
+                .chain(feature_env(self.config.async_subagents))
+            {
                 if name == "PYTHONPATH" {
                     // Prepend rather than replace: whatever the user had still works.
                     let existing = std::env::var("PYTHONPATH").unwrap_or_default();
@@ -1588,7 +1606,11 @@ mod tests {
         );
         assert!(command.contains("printf %s '/mnt/c/repo/overlay'"), "{command}");
         // And it still ends up as one assignment in front of exec.
-        assert!(command.contains("fi)\" exec .venv/bin/langgraph dev"), "{command}");
+        // The assignments end and `exec` begins — checked without pinning the exact
+        // neighbour, so adding a variable does not fail a test about the overlay path.
+        let exports_end = command.find("fi)\"").expect("the PYTHONPATH expression");
+        let exec_at = command.find("exec .venv/bin/langgraph dev").expect("the server");
+        assert!(exports_end < exec_at, "{command}");
     }
 
     #[test]
@@ -1684,6 +1706,11 @@ mod tests {
         assert!(generate < serve, "{command}");
         assert!(command.contains("&& exec") || command.contains("&& MINIME"), "{command}");
         assert!(command.contains("--config .mini-me-desktop.langgraph.json"), "{command}");
+        // Registering the graph is only half of it: without this variable the overlay
+        // never installs the middleware, so the coordinator has no `start_async_task`
+        // and quietly delegates to a normal subagent instead — which blocks the chat,
+        // exactly what the feature exists to avoid. That was the first live result.
+        assert!(command.contains("MINIME_ASYNC_SUBAGENTS='1'"), "{command}");
 
         // And with the feature off, the launch is exactly what it always was.
         let plain = launch_command_for(
@@ -1697,6 +1724,7 @@ mod tests {
         let plain = plain.last().expect("payload");
         assert!(!plain.contains("make_config"), "{plain}");
         assert!(!plain.contains("--config"), "{plain}");
+        assert!(!plain.contains("MINIME_ASYNC_SUBAGENTS"), "{plain}");
     }
 
     #[test]

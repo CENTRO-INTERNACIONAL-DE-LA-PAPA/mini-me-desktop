@@ -2608,3 +2608,25 @@ theorizer itself, and §29's job watching — which had never seen a real long j
 Still to observe: the completion. The poll route persists theories into the workspace on a
 terminal state (§29), so the job should turn green and the spine refresh **without another
 turn**. That last link is the one that was silently broken before any of this.
+
+### 30b. Registered, but never handed over (2026-08-01)
+
+First live test of background work: the coordinator answered *"lanza esto en segundo
+plano"* by delegating to `academic_researcher` — the ordinary, **blocking** subagent — and
+the chat froze for the whole literature search. Exactly what the feature exists to prevent.
+
+`MINIME_ASYNC_SUBAGENTS` is what `async_agents.install()` checks before adding the
+middleware, and **nothing set it**. The graph was registered (the log shows
+`Importing graph profiling … graph_id=background`), the config generation worked, and the
+coordinator was never given `start_async_task`. So it used the only delegation it had.
+
+Two halves of one feature, and only one of them was wired: a Settings toggle that
+generated the config but never enabled the tools. The toggle *looked* like it worked
+because the visible half — the extra graph — did.
+
+Set now via `feature_env`, deliberately **not** folded into `execution_env`: that returns
+nothing at all for the remote sandbox, so combining them would silently disable background
+work under `--sandbox`. The two settings are independent, and are kept that way.
+
+A test asserts the variable is in the launch when the toggle is on and absent when it is
+off — registering the graph is only half of it.
