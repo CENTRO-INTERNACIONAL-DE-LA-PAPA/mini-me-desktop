@@ -2659,3 +2659,38 @@ touching data may simply hang.
 
 **Completion of an async task.** The theorizer's completion is confirmed; a *background
 worker* finishing and returning its result is not.
+
+## 37. Background runs carry no key (2026-08-01)
+
+Both background workers failed with *"The async subagent encountered an error"* — no
+further detail. The Jobs panel caught it correctly (`✗ background worker · error`), which
+is §31 working; the cause was structural and ours.
+
+```python
+run = client.runs.create(
+    thread_id=thread["thread_id"],
+    assistant_id=spec["graph_id"],
+    input={"messages": [...]},        # ← no `config`
+)
+```
+
+The middleware starts the run with **no config at all**. This app's whole key design is
+that the model choice and API key travel *in the run request* (§20/§22) — which works for
+turns we create, and cannot work for a run the backend starts by itself. So the background
+run had neither `model_config` nor `__llm_keys`, upstream fell back to the WorkOS vault
+(the `404` visible in the log all along), found nothing, and could not construct a model.
+
+**Fixed by putting the key in the backend's environment**, which LangChain reads when no
+key is passed — `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and so on per provider.
+
+**Only when background work is switched on.** With it off nothing needs this and the key
+stays out of the environment entirely, which is the stronger posture and remains the
+default. That is a real trade being made deliberately: enabling background work moves the
+key from "request-only" to "also on the backend process", the same standing `ASTA_TOKEN`
+has always had.
+
+Worth noting what this says about §30's "no fork needed" claim, which still holds — but
+the seam is thinner than it looked. Co-deploying the graph was free; the *run creation* is
+upstream's, and anything the request has to carry is out of our reach. A wrapper around
+`start_async_task` in the overlay could inject config properly, and is the better fix if a
+second such gap appears.

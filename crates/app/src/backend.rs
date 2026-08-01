@@ -267,6 +267,7 @@ impl BackendConfig {
         config.async_subagents = settings.async_subagents;
         // Read here, on the main thread: see `secret_env`.
         config.secrets = crate::settings::asta_env();
+        config.secrets.extend(crate::settings::model_key_env(&settings));
         config
     }
 
