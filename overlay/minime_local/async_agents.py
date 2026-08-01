@@ -82,17 +82,43 @@ def async_subagent_specs() -> list[dict]:
     ]
 
 
-async def background_graph():
+async def background_graph(config):
     """Build the graph the background worker runs.
 
     Upstream's own coordinator factory, with async-subagent injection suppressed for the
     duration — see `_BUILDING_BACKGROUND`.
+
+    **`config` is not optional and must be passed on.** `backend/agent.py` declares
+    `async def agent(config: RunnableConfig)`, and that argument is the whole reason this
+    app works: `_build_model_resolver(config)` reads the model and key out of it. Calling
+    it with no argument — which this did, for three rounds — raises `TypeError` while the
+    graph is being *constructed*, so the run dies before any checkpoint exists. That is
+    why the failure had no error to read anywhere: there was no state to record it in, and
+    the middleware's "The async subagent encountered an error" was all that survived
+    (docs §39).
+
+    The parameter is deliberately unannotated. The dev server classifies a factory by its
+    signature and hands a lone un-annotated parameter the `RunnableConfig`
+    (`langgraph_api/_factory_utils.py:_classify_factory`); annotating it `ServerRuntime`
+    would silently pass the wrong object instead.
     """
+    import inspect
+
     from backend.agent import agent as upstream_agent
+
+    # Adaptive rather than hardcoded, because getting this wrong is not a visible error —
+    # it is a run that dies with nothing to read. If upstream ever drops the parameter,
+    # this keeps working; if it adds one with a default, it still gets the config.
+    wants_config = bool(inspect.signature(upstream_agent).parameters)
+    if not wants_config:
+        logger.warning(
+            "minime_local: backend.agent.agent takes no config — background work cannot "
+            "be handed the researcher's model and key"
+        )
 
     token = _BUILDING_BACKGROUND.set(True)
     try:
-        return await upstream_agent()
+        return await (upstream_agent(config) if wants_config else upstream_agent())
     finally:
         _BUILDING_BACKGROUND.reset(token)
 

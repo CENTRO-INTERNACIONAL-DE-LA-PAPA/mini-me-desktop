@@ -2762,3 +2762,50 @@ signal in that derivation.
 
 This is the same lesson as §35, and it has now cost this project twice: **when a component
 reports a cause rather than an error, go get the real output before fixing anything.**
+
+## 39. Background work had never run once (2026-08-01)
+
+The cause of every failed background task, from the first:
+
+```python
+async def background_graph():          # our factory — no parameter
+    return await upstream_agent()      # TypeError: missing 1 required positional argument: 'config'
+```
+
+`backend/agent.py` declares `async def agent(config: RunnableConfig)`. Our factory took no
+parameter, so it had none to pass on. Every background run raised `TypeError` while the
+graph was being **constructed** — before a single node executed.
+
+That also explains the thing §38 could not: why there was no error text to read anywhere.
+A run that dies during construction writes no checkpoint, so `/threads/{id}/state` has no
+task to hang an error on. The middleware's placeholder was genuinely all that existed.
+
+**Fixed** — the factory takes `config` and passes it on. Verified three ways rather than by
+inspection, since inspection is what missed it twice:
+
+- against the dev server's own classifier, `_classify_factory(background_graph)` now
+  resolves to `{"config": <RunnableConfig>}` (`langgraph_api/_factory_utils.py`);
+- the graph builds — a real `CompiledStateGraph` with the full middleware stack, where
+  before it raised;
+- the built worker holds `execute` but **no** `start_async_task`, so `_BUILDING_BACKGROUND`
+  still stops a worker spawning workers.
+
+The call is adaptive (`inspect.signature`) rather than hardcoded: if upstream ever drops
+the parameter this keeps working, and it warns instead, because the failure mode of getting
+it wrong is invisible.
+
+### On the two fixes that came before this one
+
+Neither §37 nor §38 was the cause, and it is worth being exact about what they were:
+
+- **§37 (key on the environment) was simply wrong** and is reverted. It addressed a real
+  gap with the wrong mechanism.
+- **§38 (forward the config) was a real bug and is still required** — it is what makes the
+  `config` this factory now receives contain the researcher's model and key. It was also
+  the *next* failure in line: the recursion limit would have killed the worker at superstep
+  25 the moment the graph built.
+
+The pattern in all three: a placeholder error was treated as evidence. §35 recorded the
+lesson once — *recover the real output before fixing anything* — and it was not applied,
+because the "real output" here was never going to appear in a log the run never reached. The
+sharper rule: **when there is no error text anywhere, suspect the constructor, not the run.**
