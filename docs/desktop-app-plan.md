@@ -19,7 +19,7 @@ sidecar** that the client spawns and supervises.
 | **Native-Windows probe** | ✅ **answered** — `cmd.exe` is ruled out by upstream's *own* tool code (POSIX pipes, `mkdir -p`, `shlex.quote`), so WSL2 stays the v1 runtime and the installer's job is guided provisioning. Native-plus-Git-Bash is a documented half-day experiment. §21 |
 | **P6.4a** — settings panel + keychain secrets | ✅ **built** — a turn runs with no provider key in the backend's `.env`; keys come from the OS keychain and ride in the run request, and `ctrl-,` opens a Settings pane (provider, model, keys, execution). **Never rendered — needs a look on Windows.** §20/§22/§22b |
 | **P6.4b** — native affordances + shipping | ✅ **ships** — `bundle-backend.sh` → `--release` → `package.sh` gives a 21 MB folder; **the packaged build ran a real turn on Windows**. Job Object reaps the process tree, resources resolve beside the executable, and **drop a file on the window** turns it into a question (the MVP's "one thing the web app can't"). Remaining: click-to-update, cancel a running fix. §24/§25/§26/§28 |
-| **P6.5** — background work + Jobs panel | 🟡 **jobs verified on Windows** — a real theorizer run submitted and appeared in BACKGROUND JOBS with live status; polling now also *persists* results, which nothing did before. Async subagents (a background Mini-Me, no fork) are built and **never run**. §29/§30/§31 |
+| **P6.5** — background work + Jobs panel | ✅ **verified on Windows** — `start_async_task` returns control immediately, two background workers ran concurrently while the chat stayed live, and the Theorizer completed on its own (poll → persist → OUTPUTS), which nothing did before. Background *approvals* still untested. §29/§30/§31/§36 |
 
 **Health of the bet.** The two risks that could have killed this are both down:
 **R1** (GPUI as an unstable `git` dep) — GPUI is a *published* crate, pinned at
@@ -2630,3 +2630,32 @@ work under `--sandbox`. The two settings are independent, and are kept that way.
 
 A test asserts the variable is in the launch when the toggle is on and absent when it is
 off — registering the graph is only half of it.
+
+## 36. P6.5 verified on Windows (2026-08-01)
+
+**Background work runs, and the conversation stays live.**
+
+- `· start_async_task` fired, control came back immediately, and **two background workers
+  ran concurrently** while the researcher kept typing. That is the payoff §14 justified
+  going native for, delivered without forking Mini-Me (§30).
+- The **Theorizer completed by itself** — `✓ Theorizer · completed` in BACKGROUND JOBS,
+  with `sources · 11` and `hypotheses · 1` in OUTPUTS, no second turn asked for. That
+  closes §29's loop end to end: poll → terminal state → **persist**, the step that was
+  quietly doing nothing before any of this and losing every long run's results.
+- A **SUGGESTED NEXT** card offered "Synthesize theories from the literature", derived from
+  artifacts the run had just produced.
+
+One correction to §30's design note, from watching it work: the background worker is a
+*whole coordinator*, and the concern was that this made each task heavier than a
+single-purpose subagent. Running two at once cost nothing visible, and the flexibility —
+one worker doing search, another doing synthesis — is what made the test easy to write.
+
+### Still unverified
+
+**Background approvals** (§31). Both test tasks were literature work, which never touches
+`execute`, so the gate was never reached. The next test has to run code — a task that
+writes and analyses a dataset — because until that path is confirmed, any background task
+touching data may simply hang.
+
+**Completion of an async task.** The theorizer's completion is confirmed; a *background
+worker* finishing and returning its result is not.
