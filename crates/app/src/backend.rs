@@ -473,6 +473,10 @@ fn overlay_expression(wsl_dir: &str, fallback: &str) -> String {
 /// Must match `BACKGROUND_GRAPH_ID` in `overlay/minime_local/async_agents.py` — the
 /// coordinator's tool points at this id, and a mismatch fails mid-task rather than at
 /// startup.
+/// Not read at runtime — the Python side registers the graph and names the id itself.
+/// It lives here as the anchor for the test that holds all three files to the same value,
+/// which is the only thing standing between a rename and a failure that lands mid-task.
+#[allow(dead_code)]
 const BACKGROUND_GRAPH_ID: &str = "background";
 
 /// The config file the generator writes, next to upstream's own.
@@ -1585,6 +1589,28 @@ mod tests {
         assert!(command.contains("printf %s '/mnt/c/repo/overlay'"), "{command}");
         // And it still ends up as one assignment in front of exec.
         assert!(command.contains("fi)\" exec .venv/bin/langgraph dev"), "{command}");
+    }
+
+    #[test]
+    fn the_background_graph_id_is_the_same_on_both_sides() {
+        // Three files name this id: here, `make_config.py` (which registers the graph) and
+        // `async_agents.py` (whose tool points at it). They only had a comment saying they
+        // must agree — and a disagreement fails when the coordinator first delegates,
+        // mid-task and in front of the user, rather than at startup. Now it is checked.
+        //
+        // Reading the sources rather than importing them keeps this a plain unit test; the
+        // Python is not ours to run from here.
+        let overlay = normalized(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay"));
+        for file in ["minime_local/make_config.py", "minime_local/async_agents.py"] {
+            let path = overlay.join(file);
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+            assert!(
+                source.contains(&format!("BACKGROUND_GRAPH_ID = \"{BACKGROUND_GRAPH_ID}\"")),
+                "{} does not declare BACKGROUND_GRAPH_ID = {BACKGROUND_GRAPH_ID:?}",
+                path.display()
+            );
+        }
     }
 
     #[test]
