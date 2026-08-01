@@ -103,17 +103,45 @@ fn overlay_dir() -> PathBuf {
         return PathBuf::from(dir);
     }
     // `CARGO_MANIFEST_DIR` is `crates/app`; the overlay sits at the repo root.
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../overlay")
-        .components()
-        .collect()
+    normalized(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay"))
+}
+
+/// Resolve `..` segments lexically, so a path built by joining reads like a path.
+///
+/// `Path::components()` drops `.` but keeps `..`, which is why the log line and the
+/// Setup pane were showing `…/crates/app/../../overlay`. Lexical, not `canonicalize`:
+/// that hits the filesystem and fails outright on a path that does not exist yet, which
+/// is precisely the case the Setup pane has to be able to *report on*.
+fn normalized(path: PathBuf) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir if out.parent().is_some() => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Where this repo's helper scripts live, resolved the same way as [`overlay_dir`].
+///
+/// `setup-wsl.sh` is the provisioning script the Setup pane offers to run, and it has
+/// to be named as a path the *backend's* shell can reach — inside WSL that means
+/// `/mnt/c/…`, which is what [`BackendConfig::setup_script`] does with this.
+fn scripts_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("MINIME_SCRIPTS_DIR") {
+        return PathBuf::from(dir);
+    }
+    normalized(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts"))
 }
 
 /// Render a path the way WSL sees it: `C:\\Users\\x` becomes `/mnt/c/Users/x`.
 ///
 /// The overlay lives in *this* repo, which on Windows is on the Windows filesystem,
 /// while the interpreter that must import it runs inside the distro.
-fn wsl_path(path: &Path) -> String {
+pub(crate) fn wsl_path(path: &Path) -> String {
     let raw = path.to_string_lossy().replace('\\', "/");
     let mut chars = raw.chars();
     let drive = chars.next();
@@ -255,7 +283,10 @@ fn launch_command_for(
         argv.push(format!(
             "cd {dir} && {exports}exec .venv/bin/langgraph dev --host 0.0.0.0 \
              --port {port} --no-reload --no-browser --n-jobs-per-worker {jobs}",
-            dir = wsl.dir,
+            // `quote_path`, not `shell_quote`: the default is `~/Mini-Me`, and quoting
+            // the tilde would stop it expanding. A configured dir with a space in it
+            // used to split into a bogus command.
+            dir = quote_path(&wsl.dir),
             jobs = JOBS_PER_WORKER,
         ));
         return argv;
@@ -348,8 +379,21 @@ fn secret_env(secrets: &[(String, String)], wsl: bool) -> Vec<(String, String)> 
 }
 
 /// Single-quote a value for `bash -lc`, so a path with spaces survives.
-fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
+}
+
+/// Quote a path for a shell **while leaving a leading `~` able to expand**.
+///
+/// The WSL checkout defaults to `~/Mini-Me`, and `cd '~/Mini-Me'` does not work — the
+/// quotes suppress tilde expansion and bash looks for a directory literally named `~`.
+/// Quoting only the part after the tilde gets both: `~/'My Docs/Mini-Me'` expands *and*
+/// survives the space, which `Documents\My Repos\…` makes a real case on Windows.
+pub(crate) fn quote_path(path: &str) -> String {
+    match path.strip_prefix("~/") {
+        Some(rest) => format!("~/{}", shell_quote(rest)),
+        None => shell_quote(path),
+    }
 }
 
 /// Concurrent runs the sidecar may process. Modest on purpose: each run can drive
@@ -454,6 +498,80 @@ impl BackendConfig {
         match self.execution {
             Execution::Sandbox => "remote sandbox",
             Execution::Local { .. } => "host (local)",
+        }
+    }
+
+    /// Wrap a POSIX shell command so it runs **where the backend runs**.
+    ///
+    /// This is what makes the preflight checks worth trusting: looking for `langgraph`
+    /// on Windows says nothing at all when the backend lives inside a WSL distro. Every
+    /// probe and every offered fix is routed through the same hop as the launch command
+    /// itself, so a green check means green *for the process that matters*.
+    ///
+    /// A **login** shell (`-lc`), matching [`launch_command_for`]: `uv` installs itself
+    /// into `~/.local/bin`, which only a login shell has on `PATH`.
+    pub fn shell_argv(&self, script: &str) -> Vec<String> {
+        let mut argv = Vec::new();
+        if let Some(wsl) = &self.wsl {
+            argv.push("wsl.exe".to_string());
+            if let Some(distro) = &wsl.distro {
+                argv.push("-d".into());
+                argv.push(distro.clone());
+            }
+            argv.push("--".into());
+        }
+        argv.extend(["bash".to_string(), "-lc".to_string(), script.to_string()]);
+        argv
+    }
+
+    /// The checkout path **as the backend's own shell spells it** — a Linux path inside
+    /// the distro, a host path otherwise.
+    pub fn backend_dir(&self) -> String {
+        match &self.wsl {
+            Some(wsl) => wsl.dir.clone(),
+            None => self.project_dir.to_string_lossy().into_owned(),
+        }
+    }
+
+    /// The overlay path as the backend's interpreter would have to import it, or `None`
+    /// when execution is remote and there is no overlay in play.
+    pub fn overlay_for_backend(&self) -> Option<String> {
+        let Execution::Local { overlay_dir } = &self.execution else {
+            return None;
+        };
+        Some(if self.wsl.is_some() {
+            wsl_path(overlay_dir)
+        } else {
+            overlay_dir.to_string_lossy().into_owned()
+        })
+    }
+
+    /// The provisioning command: `bash …/setup-wsl.sh <checkout>`, spelled for the
+    /// backend's shell. Re-running it is safe — the script never overwrites a checkout
+    /// or a `.env`.
+    pub fn setup_script(&self) -> String {
+        let script = scripts_dir().join("setup-wsl.sh");
+        let script = if self.wsl.is_some() {
+            wsl_path(&script)
+        } else {
+            script.to_string_lossy().into_owned()
+        };
+        format!(
+            "bash {} {}",
+            shell_quote(&script),
+            quote_path(&self.backend_dir())
+        )
+    }
+
+    /// A copy with the credentials stripped.
+    ///
+    /// Anything that only needs the *shape* of the configuration takes this, so the
+    /// secrets stay in exactly one place and there is one thing to audit rather than a
+    /// clone in every struct that wanted to know the port number.
+    pub fn redacted(&self) -> Self {
+        Self {
+            secrets: Vec::new(),
+            ..self.clone()
         }
     }
 }
@@ -720,7 +838,77 @@ mod tests {
         );
         let command = argv.last().expect("the bash -lc payload");
         assert!(!command.contains("MINIME_EXECUTION_BACKEND"), "{command}");
-        assert!(command.contains("cd ~/Mini-Me && exec .venv/bin/langgraph dev"), "{command}");
+        assert!(command.contains("cd ~/'Mini-Me' && exec .venv/bin/langgraph dev"), "{command}");
+    }
+
+    #[test]
+    fn a_joined_path_reads_like_a_path() {
+        // The overlay is reached as `crates/app/../../overlay`, and that spelling was
+        // showing up verbatim in the log line and the Setup pane.
+        assert_eq!(
+            normalized(PathBuf::from("/repo/crates/app/../../overlay")),
+            PathBuf::from("/repo/overlay")
+        );
+        // A `..` that would escape the root has nowhere to go and must stay put rather
+        // than silently rewriting the path to something else.
+        assert_eq!(normalized(PathBuf::from("/..")), PathBuf::from("/.."));
+        assert_eq!(
+            normalized(PathBuf::from("relative/../overlay")),
+            PathBuf::from("overlay")
+        );
+    }
+
+    #[test]
+    fn a_checkout_path_with_a_space_still_expands_its_tilde() {
+        // `cd '~/My Repos/Mini-Me'` looks for a directory literally named `~`; quoting
+        // only what follows the tilde gets expansion *and* survives the space.
+        assert_eq!(quote_path("~/My Repos/Mini-Me"), "~/'My Repos/Mini-Me'");
+        assert_eq!(quote_path("/opt/Mini Me"), "'/opt/Mini Me'");
+    }
+
+    #[test]
+    fn probes_are_routed_to_wherever_the_backend_runs() {
+        // A check that runs on the wrong side of the WSL boundary is worse than no
+        // check: it reports green for a machine that cannot launch anything.
+        let mut config = BackendConfig::default();
+        config.wsl = Some(WslTarget {
+            distro: Some("Ubuntu".into()),
+            dir: "~/Mini-Me".into(),
+        });
+        assert_eq!(
+            config.shell_argv("echo ok"),
+            vec!["wsl.exe", "-d", "Ubuntu", "--", "bash", "-lc", "echo ok"],
+        );
+        assert_eq!(config.backend_dir(), "~/Mini-Me");
+
+        config.wsl = None;
+        config.project_dir = PathBuf::from("/home/x/Mini-Me");
+        assert_eq!(config.shell_argv("echo ok"), vec!["bash", "-lc", "echo ok"]);
+        assert_eq!(config.backend_dir(), "/home/x/Mini-Me");
+    }
+
+    #[test]
+    fn the_setup_script_is_named_the_way_the_backend_shell_sees_it() {
+        let mut config = BackendConfig::default();
+        config.wsl = Some(WslTarget {
+            distro: None,
+            dir: "~/Mini-Me".into(),
+        });
+        let command = config.setup_script();
+        assert!(command.starts_with("bash '"), "{command}");
+        assert!(command.contains("setup-wsl.sh"), "{command}");
+        assert!(command.ends_with("~/'Mini-Me'"), "{command}");
+    }
+
+    #[test]
+    fn a_redacted_config_carries_no_credentials() {
+        let mut config = BackendConfig::default();
+        config.secrets = vec![("ASTA_TOKEN".into(), "super-secret".into())];
+        let redacted = config.redacted();
+        assert!(redacted.secrets.is_empty());
+        // Everything else has to survive, or preflight would probe the wrong machine.
+        assert_eq!(redacted.port, config.port);
+        assert_eq!(redacted.backend_dir(), config.backend_dir());
     }
 
     #[test]

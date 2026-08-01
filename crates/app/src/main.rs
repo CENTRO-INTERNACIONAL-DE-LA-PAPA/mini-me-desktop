@@ -12,6 +12,7 @@
 mod backend;
 mod composer;
 mod markdown;
+mod preflight;
 mod protocol;
 mod settings;
 mod sidecar;
@@ -186,11 +187,12 @@ enum Command {
     CollapseTraces,
     CopyLastAnswer,
     OpenSettings,
+    OpenSetup,
     Quit,
 }
 
 impl Command {
-    const ALL: [Command; 8] = [
+    const ALL: [Command; 9] = [
         Command::RunTurn,
         Command::NewThread,
         Command::RefreshSpine,
@@ -198,6 +200,7 @@ impl Command {
         Command::CollapseTraces,
         Command::CopyLastAnswer,
         Command::OpenSettings,
+        Command::OpenSetup,
         Command::Quit,
     ];
 
@@ -210,6 +213,7 @@ impl Command {
             Command::CollapseTraces => "Collapse agent activity",
             Command::CopyLastAnswer => "Copy last answer",
             Command::OpenSettings => "Settings",
+            Command::OpenSetup => "Setup & diagnostics",
             Command::Quit => "Quit",
         }
     }
@@ -223,6 +227,7 @@ impl Command {
             Command::CollapseTraces => "close every subagent group",
             Command::CopyLastAnswer => "to the clipboard",
             Command::OpenSettings => "model, keys, execution (ctrl-,)",
+            Command::OpenSetup => "check what the backend still needs",
             Command::Quit => "close the window and the sidecar",
         }
     }
@@ -360,6 +365,26 @@ fn markdown_block(block: &markdown::Block) -> gpui::AnyElement {
 /// Advisory content is different from state: a payload without suggestions means "no new
 /// advice", not "the advice is withdrawn". Everything else — mission, completed, pending —
 /// is authoritative and replaces.
+/// Whether a turn failure is really the machine not being set up.
+///
+/// Matching on message text is not elegant, and it is the honest option here: these
+/// strings are raised by `BackendSupervisor` in this same crate, the test below pins
+/// them, and the alternative — a typed error threaded through the whole streaming
+/// path — would be a lot of plumbing to decide which pane to open.
+///
+/// Attach-only is deliberately *not* in the list: that mode is opt-in and its message
+/// already names its own fix, so a setup pane would be answering a question nobody asked.
+fn looks_like_a_setup_failure(message: &str) -> bool {
+    const MARKERS: [&str; 5] = [
+        "no langgraph.json",
+        "failed to launch the backend",
+        "failed to spawn the backend",
+        "backend exited during startup",
+        "did not become healthy",
+    ];
+    MARKERS.iter().any(|marker| message.contains(marker))
+}
+
 fn merge_spine(previous: Option<&Project>, incoming: Project) -> Project {
     let mut merged = incoming;
     if merged.suggestions.is_empty() {
@@ -470,6 +495,11 @@ struct Workbench {
     fields: Vec<(Field, Entity<Composer>)>,
     /// What the last save did, shown in the pane. Never contains a secret.
     settings_note: String,
+    /// Setup pane: open flag, the last report, and whether checks are in flight.
+    /// `None` before the first run — the pane says "checking…" rather than "all clear".
+    setup_open: bool,
+    report: Option<preflight::Report>,
+    checking: bool,
     /// A run paused at the approval gate: the command it wants to run, awaiting a
     /// decision. While this is set the turn is *open*, not finished.
     pending_approval: Option<ApprovalRequest>,
@@ -544,6 +574,9 @@ impl Workbench {
             draft: settings::Settings::load(),
             fields,
             settings_note: String::new(),
+            setup_open: false,
+            report: None,
+            checking: false,
             pending_approval: None,
             restore_focus: false,
         };
@@ -571,6 +604,44 @@ impl Workbench {
         // start one — see `Sidecar::fetch_project`.
         workbench.refresh_project(cx);
         workbench
+    }
+
+    /// Run the first-run checks and show the result.
+    ///
+    /// The keychain lookup happens **here**, on the main thread, and travels as a bool —
+    /// the Linux keychain client panics if called from a Tokio worker (docs §22).
+    fn run_preflight(&mut self, cx: &mut Context<Self>) {
+        if self.checking {
+            return;
+        }
+        self.checking = true;
+        let has_key = settings::secret(&settings::Settings::load().key_name()).is_some();
+        let mut results = self.sidecar.preflight(has_key);
+        cx.spawn(async move |this, cx| {
+            if let Some(report) = results.next().await {
+                let _ = this.update(cx, |workbench, cx| {
+                    workbench.checking = false;
+                    // Name the *first* blocker rather than a count: "2 to fix" still
+                    // leaves the user opening the pane to find out what.
+                    workbench.status = match report.first_problem() {
+                        Some(check) => format!("setup: {} — {}", check.label, check.detail),
+                        None => format!("setup: {}", report.summary()),
+                    };
+                    workbench.report = Some(report);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Show the Setup pane, re-checking as it opens — a stale report is worse than none,
+    /// because the whole point is to reflect what the machine is like *now*.
+    fn open_setup(&mut self, cx: &mut Context<Self>) {
+        self.setup_open = true;
+        self.settings_open = false;
+        self.run_preflight(cx);
     }
 
     /// Pull the project spine in the background and swap it in when it arrives.
@@ -689,6 +760,14 @@ impl Workbench {
                 self.streaming = false;
                 self.finish_turn(cx);
                 self.status = "failed".into();
+                // A failure to *start* is a setup problem, not a turn problem, and
+                // "backend did not become healthy within 120 attempts" tells the user
+                // nothing they can act on. Open the diagnosis instead of the log path.
+                if looks_like_a_setup_failure(&message) {
+                    self.error = Some(format!("{message} — see Setup for what is missing"));
+                    self.open_setup(cx);
+                    return;
+                }
                 // Point at the sidecar log: backend-side failures (a missing key,
                 // a bad graph import) surface there, not in the HTTP error.
                 self.error = Some(format!(
@@ -1034,6 +1113,10 @@ impl Workbench {
     fn open_settings(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
         self.draft = settings::Settings::load();
         self.settings_note.clear();
+        // Both live in the right-hand slot, so opening one closes the other. Setup's
+        // "Settings" button is the usual route here — you go there to paste the key it
+        // told you was missing.
+        self.setup_open = false;
         let values: Vec<(Field, String)> = self
             .fields
             .iter()
@@ -1341,6 +1424,224 @@ impl Workbench {
         )
     }
 
+    /// The Setup pane: one row per check, each carrying the command that fixes it.
+    ///
+    /// Deliberately not a wizard. A wizard assumes it knows the order things went wrong
+    /// in; a checklist just says what is true, which is also what makes it useful the
+    /// *second* time — when one thing broke on a machine that used to work.
+    fn setup_pane(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut pane = div()
+            .id("setup")
+            .flex()
+            .flex_col()
+            .w(px(420.))
+            .flex_none()
+            .h_full()
+            .overflow_y_scroll()
+            .bg(rgb(PANEL))
+            .border_l_1()
+            .border_color(rgb(BORDER))
+            .p_4()
+            .gap_3()
+            .child(section_label("SETUP"));
+
+        match &self.report {
+            None => {
+                pane = pane.child(
+                    div()
+                        .text_color(rgb(MUTED))
+                        .text_sm()
+                        .child("Checking this machine…"),
+                );
+            }
+            Some(report) => {
+                pane = pane.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .w_full()
+                        .min_w_0()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_color(rgb(if report.ready() { MUTED } else { ERROR }))
+                                .text_sm()
+                                .child(if self.checking {
+                                    "Re-checking…".to_string()
+                                } else if report.ready() {
+                                    format!("Ready to run · {}", report.summary())
+                                } else {
+                                    format!("Not ready yet · {}", report.summary())
+                                }),
+                        )
+                        // Where the checks ran, because "no checkout" means something
+                        // different inside a distro than on this filesystem.
+                        .child(
+                            div()
+                                .text_color(rgb(MUTED))
+                                .text_xs()
+                                .child(format!("{} · {}", report.location, report.execution)),
+                        ),
+                );
+
+                for check in &report.checks {
+                    let color = match check.state {
+                        preflight::State::Pass => MUTED,
+                        preflight::State::Warn => ACCENT,
+                        preflight::State::Fail => ERROR,
+                        preflight::State::Skip => BORDER,
+                    };
+                    let mut row = div()
+                        .flex()
+                        .flex_col()
+                        .w_full()
+                        .min_w_0()
+                        .gap_1()
+                        .pl_2()
+                        .border_l_1()
+                        .border_color(rgb(color))
+                        .child(
+                            div()
+                                .text_color(rgb(if check.state == preflight::State::Pass {
+                                    TEXT
+                                } else {
+                                    color
+                                }))
+                                .text_sm()
+                                .child(format!("{} {}", check.state.glyph(), check.label)),
+                        )
+                        .child(
+                            div()
+                                .w_full()
+                                .min_w_0()
+                                .text_color(rgb(MUTED))
+                                .text_xs()
+                                .child(check.detail.clone()),
+                        );
+
+                    match &check.fix {
+                        Some(preflight::Fix::Run { label, argv, note }) => {
+                            let command = preflight::display_argv(argv);
+                            // No "Run" button yet: these commands clone repositories and
+                            // ask for admin rights, and firing one from a click with no
+                            // visible output would be the app's least accountable moment.
+                            // Streaming them lands next (docs §24).
+                            row = row
+                                .child(
+                                    div()
+                                        .text_color(rgb(MUTED))
+                                        .text_xs()
+                                        .child(format!("{label} — {note}")),
+                                )
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!("fix-{}", check.id)))
+                                        .w_full()
+                                        .min_w_0()
+                                        .p_2()
+                                        .border_1()
+                                        .border_color(rgb(BORDER))
+                                        .text_color(rgb(TEXT))
+                                        .text_xs()
+                                        .hover(|style| {
+                                            style.border_color(rgb(ACCENT)).cursor_pointer()
+                                        })
+                                        .child(format!("{command}   ⧉"))
+                                        .on_click(cx.listener({
+                                            let command = command.clone();
+                                            let id = check.id;
+                                            move |workbench, _event, _window, cx| {
+                                                cx.write_to_clipboard(ClipboardItem::new_string(
+                                                    command.clone(),
+                                                ));
+                                                workbench.status =
+                                                    format!("{id} fix copied — paste it in a terminal");
+                                                cx.notify();
+                                            }
+                                        })),
+                                );
+                        }
+                        Some(preflight::Fix::Manual(instruction)) => {
+                            row = row.child(
+                                div()
+                                    .w_full()
+                                    .min_w_0()
+                                    .text_color(rgb(MUTED))
+                                    .text_xs()
+                                    .child(instruction.clone()),
+                            );
+                        }
+                        None => {}
+                    }
+                    pane = pane.child(row);
+                }
+            }
+        }
+
+        pane.child(
+            div()
+                .flex()
+                .flex_row()
+                .gap_3()
+                .child(
+                    div()
+                        .id("recheck")
+                        .px_3()
+                        .py_1()
+                        .border_1()
+                        .border_color(rgb(ACCENT))
+                        .text_color(rgb(ACCENT))
+                        .text_sm()
+                        .hover(|style| style.cursor_pointer())
+                        .child(if self.checking { "Checking…" } else { "Re-check" })
+                        .on_click(cx.listener(|workbench, _event, _window, cx| {
+                            workbench.run_preflight(cx)
+                        })),
+                )
+                .child(
+                    div()
+                        .id("setup-to-settings")
+                        .px_3()
+                        .py_1()
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .text_color(rgb(MUTED))
+                        .text_sm()
+                        .hover(|style| style.cursor_pointer())
+                        .child("Settings")
+                        .on_click(cx.listener(|workbench, _event, _window, cx| {
+                            workbench.setup_open = false;
+                            workbench.open_settings(None, cx);
+                        })),
+                )
+                .child(
+                    div()
+                        .id("close-setup")
+                        .px_3()
+                        .py_1()
+                        .border_1()
+                        .border_color(rgb(BORDER))
+                        .text_color(rgb(MUTED))
+                        .text_sm()
+                        .hover(|style| style.cursor_pointer())
+                        .child("Close")
+                        .on_click(cx.listener(|workbench, _event, _window, cx| {
+                            workbench.setup_open = false;
+                            workbench.restore_focus = true;
+                            cx.notify();
+                        })),
+                ),
+        )
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .text_color(rgb(MUTED))
+                .text_xs()
+                .child(format!("Sidecar log: {}", self.sidecar.log_path())),
+        )
+    }
+
     fn run_command(&mut self, command: Command, cx: &mut Context<Self>) {
         match command {
             // Same path as Enter in the composer and as the Send button.
@@ -1382,6 +1683,7 @@ impl Workbench {
                 }
             }
             Command::OpenSettings => self.open_settings(None, cx),
+            Command::OpenSetup => self.open_setup(cx),
             Command::Quit => cx.quit(),
         }
     }
@@ -1882,7 +2184,11 @@ impl Render for Workbench {
             .child(self.rail())
             .child(self.chat_pane(cx));
 
-        let root = if self.settings_open {
+        // One right-hand pane at a time: Setup wins over Settings, because the only
+        // reason it is open is that something is stopping a turn.
+        let root = if self.setup_open {
+            root.child(self.setup_pane(cx))
+        } else if self.settings_open {
             root.child(self.settings_pane(cx))
         } else {
             root.child(self.artifacts_panel(cx))
@@ -2130,6 +2436,31 @@ mod tests {
     }
 
     #[test]
+    fn a_backend_that_never_starts_opens_setup_rather_than_naming_a_log_file() {
+        // These are the exact strings `BackendSupervisor` raises. Pinned here because
+        // the routing decision reads them: if one is reworded and this is not, the app
+        // silently goes back to showing "did not become healthy" and nothing else.
+        for message in [
+            "no langgraph.json under /home/x — set MINIME_BACKEND_DIR to the Mini-Me checkout",
+            "failed to launch the backend in WSL (default distro) ~/Mini-Me",
+            "failed to spawn the backend (uv). If the LangGraph CLI is missing…",
+            "backend exited during startup with exit status: 1",
+            "backend did not become healthy within 120 attempts",
+        ] {
+            assert!(looks_like_a_setup_failure(message), "{message}");
+        }
+        // A model or graph error is not a setup problem — the sidecar log is the right
+        // pointer for those, and hijacking the pane would hide it.
+        for message in [
+            "stream failed: 500 Internal Server Error",
+            "no backend at http://127.0.0.1:2024 and attach-only mode is on",
+            "the run paused but no thread was recorded",
+        ] {
+            assert!(!looks_like_a_setup_failure(message), "{message}");
+        }
+    }
+
+    #[test]
     fn every_command_is_labelled_and_hinted() {
         // A palette row with an empty label is invisible but still selectable, which
         // is worse than a missing command.
@@ -2280,6 +2611,35 @@ fn main() {
         // Warned, not fatal: the app still opens, which is where the user fixes it.
         tracing::warn!(%problem, "settings incomplete");
     }
+    // `--preflight` prints the same checks the Setup pane shows, and exits non-zero when
+    // something blocks a turn. No window, so it works over SSH — and it is how the pane's
+    // content is verified on a machine that cannot open one.
+    if args.iter().any(|a| a == "--preflight") {
+        let has_key = model.as_ref().is_some_and(|m| m.api_key.is_some());
+        let report = preflight::inspect(&config, has_key);
+        println!("where    : {} · {}", report.location, report.execution);
+        for check in &report.checks {
+            println!(
+                "{} {:<22} {}",
+                check.state.glyph(),
+                check.label,
+                check.detail
+            );
+            match &check.fix {
+                Some(preflight::Fix::Run { label, argv, note }) => {
+                    println!("    fix  : {label} ({note})");
+                    println!("    run  : {}", preflight::display_argv(argv));
+                }
+                Some(preflight::Fix::Manual(instruction)) => {
+                    println!("    fix  : {instruction}");
+                }
+                None => {}
+            }
+        }
+        println!("\npreflight: {}", report.summary());
+        std::process::exit(if report.ready() { 0 } else { 1 });
+    }
+
     let sidecar =
         Arc::new(Sidecar::new(config, model).expect("failed to build the sidecar runtime"));
 

@@ -57,6 +57,9 @@ pub struct Sidecar {
     /// Where the agent's code runs, for the status bar. The user should be able to
     /// see at a glance that commands are landing on their own machine.
     execution: &'static str,
+    /// A **redacted** copy of the configuration, for the preflight checks — they need
+    /// to know where the backend runs, never what its credentials are.
+    config: BackendConfig,
 }
 
 impl Sidecar {
@@ -64,6 +67,7 @@ impl Sidecar {
         let base_url = config.base_url();
         let log_path = config.log_path.display().to_string();
         let execution = config.execution_label();
+        let redacted = config.redacted();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -77,6 +81,7 @@ impl Sidecar {
             base_url,
             log_path,
             execution,
+            config: redacted,
         })
     }
 
@@ -192,6 +197,36 @@ impl Sidecar {
             let _ = tx.unbounded_send(outcome);
         });
 
+        rx
+    }
+
+    /// Run the first-run checks off the UI thread.
+    ///
+    /// `spawn_blocking`, not `spawn`: every probe is a synchronous `Command` that can
+    /// take seconds (a cold WSL distro), and blocking a reactor worker would stall any
+    /// turn sharing it.
+    ///
+    /// `has_model_key` is decided by the caller on the main thread — see
+    /// [`crate::preflight::inspect`] for why a keychain read must not happen here.
+    pub fn preflight(
+        &self,
+        has_model_key: bool,
+    ) -> mpsc::UnboundedReceiver<crate::preflight::Report> {
+        let (tx, rx) = mpsc::unbounded();
+        let config = self.config.clone();
+        self.runtime.spawn(async move {
+            let report =
+                tokio::task::spawn_blocking(move || crate::preflight::inspect(&config, has_model_key))
+                    .await;
+            match report {
+                Ok(report) => {
+                    let _ = tx.unbounded_send(report);
+                }
+                // A panicking probe would otherwise leave the pane saying "checking…"
+                // forever, which is the one thing a first-run diagnosis must not do.
+                Err(error) => tracing::error!(%error, "the preflight checks panicked"),
+            }
+        });
         rx
     }
 

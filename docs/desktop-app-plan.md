@@ -15,10 +15,10 @@ sidecar** that the client spawns and supervises.
 | **P6.2** — talk to the real backend | ✅ **done** — a real coordinator turn spawned, streamed and rendered **on Windows** (2026-07-30). §9 |
 | **P6.2.5** — local-first backend (drop LangSmith/WorkOS) | ✅ **done, and now the default** — turns run on the host with no `LANGSMITH_API_KEY`/`WORKOS_*`, via a `PYTHONPATH` overlay that leaves the Mini-Me checkout untouched, and **every `execute` call waits for approval**. `--sandbox` still available. §18/§19 |
 | **P6.3** — port the core panels | ✅ **done** — composer, spine, outputs, sandbox status, agent activity trace, **command palette**; plus conversation continuity (turns used to each start a new thread) |
-| **P6.3.5** — visuals pass, starting with **markdown rendering** | 🟡 **markdown built** — emphasis, inline code, links, headings, lists and fenced code now render instead of showing their markers. Tables are still literal. **Needs a look on Windows.** §16/§23 |
+| **P6.3.5** — visuals pass, starting with **markdown rendering** | ✅ **verified on Windows** — emphasis, inline code, links, headings, lists and fenced code render; accented Spanish came through intact. Tables deferred by agreement. §16/§23 |
 | **Native-Windows probe** | ✅ **answered** — `cmd.exe` is ruled out by upstream's *own* tool code (POSIX pipes, `mkdir -p`, `shlex.quote`), so WSL2 stays the v1 runtime and the installer's job is guided provisioning. Native-plus-Git-Bash is a documented half-day experiment. §21 |
 | **P6.4a** — settings panel + keychain secrets | ✅ **built** — a turn runs with no provider key in the backend's `.env`; keys come from the OS keychain and ride in the run request, and `ctrl-,` opens a Settings pane (provider, model, keys, execution). **Never rendered — needs a look on Windows.** §20/§22/§22b |
-| **P6.4b** — native affordances + shipping | ⬜ not started — click-to-update, local file → analysis, tray notifications, Windows Job Object teardown |
+| **P6.4b** — native affordances + shipping | 🟡 **Setup pane built** — `preflight.rs` says what is missing (WSL, checkout, deps, overlay, key) with the command that fixes it, routed through the same hop the backend takes; a failed *start* opens it instead of naming a log file. `--preflight` covers it headlessly. Still to come: running the fixes with streamed output, click-to-update, Windows Job Object teardown. §24 |
 | **P6.5** — async subagents + Jobs panel | ⬜ planned — the payoff that most justifies going native. §14 |
 
 **Health of the bet.** The two risks that could have killed this are both down:
@@ -1685,3 +1685,74 @@ blockquotes, nested lists, and images. Code has no monospace face — no font is
 it is marked by colour instead, which is honest but not ideal.
 
 **Unverified:** never rendered. Everything here rests on unit tests over measured output.
+
+**Verified on Windows 2026-07-31** — bold, italics, inline code and links all render; tables
+are still literal, and the user's own Spanish (`¿qué papa es mas resisñente?`) came through
+intact, which is the accented-character path the boundary fix was for. Tables deferred by
+agreement rather than by omission.
+
+## 24. P6.4b part one: the Setup pane (2026-07-31)
+
+**The problem.** A machine that was not already provisioned produced
+`backend did not become healthy within 120 attempts` in the status bar. That is true, and
+it is useless — the real answer is always one of a short list: WSL is not installed, the
+checkout is not there, `uv sync --extra dev` was never run, the overlay is unreachable, or
+no model key is stored. §21 settled P6.4b's shape as "a guided first run"; this is the part
+that does the guiding.
+
+`preflight.rs` asks those questions and returns each answer **with the command that fixes
+it**. `ctrl-p → Setup & diagnostics` opens it, `--preflight` prints the same thing
+headlessly and exits non-zero, and a turn that fails to *start* now opens the pane instead
+of naming a log file (`looks_like_a_setup_failure`, whose marker strings are pinned by a
+test because the routing reads them).
+
+### Four things that make the checks trustworthy
+
+1. **Every probe runs where the backend runs.** `BackendConfig::shell_argv` routes through
+   `wsl.exe -- bash -lc` or plain `bash -lc`, the same hop as the launch command. Checking
+   for `langgraph` on the Windows side would report green for a machine that cannot launch
+   anything — a check on the wrong side of that boundary is worse than no check.
+2. **WSL is probed by asking the distro to answer**, not by parsing `wsl -l`: that command
+   prints **UTF-16LE**, which `from_utf8_lossy` turns into NUL-riddled nonsense. Round
+   -tripping `echo ok` through bash also proves a distro is *usable* rather than merely
+   registered. For the same reason `wsl.exe`'s own stderr is never displayed.
+3. **Nothing can hang.** `Command::output()` has no timeout and a half-installed WSL can
+   block rather than fail; probes poll `try_wait` and kill the child at 30s. A setup pane
+   that spins forever is worse than the message it replaced.
+4. **Failures never cascade.** No runtime means the checks that run *inside* it report
+   `Skip`, with the reason naming what they actually wait on.
+
+### The check that exists because the failure is silent
+
+Host execution works by putting `overlay/` on the backend's `PYTHONPATH` so
+`sitecustomize` swaps the sandbox class at interpreter startup (§18). If that path is not
+reachable from the backend — the repo on a drive the distro has not mounted, a UNC path
+`wsl_path` cannot translate — **Python imports nothing and raises nothing**, and the
+backend quietly tries the *remote* sandbox instead. The user then sees an authentication
+error about a service they thought they had stopped using. Nothing else in the app would
+have caught that, so `overlay` is its own row.
+
+### Two real defects found while building it
+
+- **`cd '~/Mini-Me'` does not work.** Quoting suppresses tilde expansion, so bash looks for
+  a directory literally named `~`. The launch command had been quoting nothing at all, so a
+  configured `MINIME_BACKEND_WSL_DIR` containing a space would have split into a bogus
+  command. `quote_path` now quotes only what follows the tilde: `~/'My Repos/Mini-Me'`
+  expands *and* survives the space, which `Documents\My Repos\…` makes a real case.
+- **A skip that named the wrong dependency.** On a machine with a working shell and no
+  checkout, the dependencies row said "the runtime above has to work first" — sending the
+  user to check WSL when the checkout was the problem. Caught by running the failure paths
+  rather than by a test, then pinned with one.
+
+### Deliberately not done yet
+
+**No "Run" button on the fixes.** These commands clone repositories and ask for admin
+rights; firing one from a click with no visible output would be the app's least accountable
+moment. Each fix is shown as a copyable command instead. Streaming the runner — with live
+output in the pane — is part two, and it is what turns "click to update" from a plan into a
+button.
+
+**Verified:** `--preflight` on the Linux dev box reports 5 ok / 1 to fix (no Anthropic key
+stored here), and the three failure paths were run by hand — an empty checkout dir, WSL mode
+where `wsl.exe` does not exist (which is exactly what Windows-without-WSL looks like), and
+`--sandbox`. 59 tests pass. **The pane itself has never been rendered.**
