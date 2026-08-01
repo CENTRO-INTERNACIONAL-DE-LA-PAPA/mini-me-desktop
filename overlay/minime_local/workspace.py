@@ -327,8 +327,19 @@ class LocalWorkspaceBackend(LocalShellBackend):
         safely be spawned (see :func:`current_asta_token`).
         """
         token = current_asta_token()
-        if token:
-            self.env["ASTA_TOKEN"] = token
+        # `_env` is deepagents' own attribute (``LocalShellBackend.__init__`` builds it and
+        # ``execute`` passes it to the subprocess). Reached defensively **because the first
+        # version of this guessed `self.env` and every command failed with
+        # `'LocalWorkspaceBackend' object has no attribute 'env'`** — turning a missing
+        # token into a total outage. If a future deepagents renames it we lose the refresh,
+        # which is a degradation; taking `execute` down with us is not.
+        env = getattr(self, "_env", None)
+        if token and isinstance(env, dict):
+            env["ASTA_TOKEN"] = token
+        elif token:
+            logger.debug(
+                "minime_local: no _env on the backend; the Asta token cannot be refreshed"
+            )
         return self.execute(command, timeout=timeout)
 
     @property

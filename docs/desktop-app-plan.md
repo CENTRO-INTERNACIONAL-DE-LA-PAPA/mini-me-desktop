@@ -2483,3 +2483,29 @@ copy with its own version, and needs a story for how it gets updated. The overla
 Worth checking the others: the generated config regenerates each launch (§30) and the
 bundled backend is refreshed by re-provisioning — but `vendor/Mini-Me` inside a shipped
 bundle has the same shape of problem, and click-to-update is still unbuilt.
+
+### 33b. And then the fix itself was wrong
+
+With the overlay finally syncing, the code ran — and failed immediately:
+
+```
+submit failed: 'LocalWorkspaceBackend' object has no attribute 'env'
+```
+
+`_execute_with_token` refreshed `self.env`. deepagents calls it **`self._env`**
+(`LocalShellBackend.__init__` builds it; `execute` passes it to the subprocess). Guessed,
+not checked — and because the refresh sits on the path *every* command takes, a wrong
+attribute name turned "the theorizer has no token" into "nothing executes at all".
+
+Now reached with `getattr(self, "_env", None)` and an `isinstance` check. If a later
+deepagents renames it we lose the token refresh, which is a degradation; taking `execute`
+down with it is not.
+
+**Verified against the real class**, in the backend's own venv: `_env` exists, `env` does
+not, and a token written into it is visible to the command that runs.
+
+Two lessons, both cheap in hindsight. **Private attributes of a pinned dependency are
+fair game, but only after looking** — this file already reads upstream internals
+deliberately (`_truncate_execute_response`), and each one was checked except this. And
+**anything on the universal path needs a failure mode that is a degradation**, because
+its blast radius is everything.
