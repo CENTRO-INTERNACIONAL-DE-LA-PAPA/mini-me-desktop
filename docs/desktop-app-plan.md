@@ -2548,3 +2548,52 @@ step.
 **The lesson worth keeping:** when a component reports a *cause* rather than an *error*,
 the first move is to recover the real output, not to act on the guess. Four fixes here were
 individually correct and aimed at a diagnosis nobody had verified.
+
+## 35. The stale token that failed silently (2026-08-01)
+
+The sidecar log finally settled it, and the culprit was our own precedence rule.
+
+Reproduced directly against the CLI:
+
+```
+ASTA_TOKEN=<valid>   asta generate-theories … --no-wait  →  exit 0, a task id
+ASTA_TOKEN=<stale>   asta generate-theories … --no-wait  →  exit 0, EMPTY OUTPUT
+```
+
+**The CLI prefers `ASTA_TOKEN` over its own stored credentials, and fails silently when
+it is bad** — exit 0, nothing on stdout, nothing on stderr. Upstream then reports "no task
+id was returned, which usually means the access token is missing or expired": correct
+about the cause, useless about the source. And an exit-0 failure walks straight past the
+failure logging added in §34, which is why that produced nothing.
+
+`ASTA_TOKEN` reaches the backend from the **OS keychain**, where a token pasted days
+earlier was still sitting. §32 had decided "an explicitly supplied token always wins —
+someone who set it meant it". That reads well and is wrong: a value in a keychain from
+last week is not an intention, and preferring it silently disabled every Asta tool.
+
+**Inverted.** The CLI is the authority — `asta auth login` leaves a refresh credential and
+the CLI renews itself, so a minted token is always at least as good as a stored one. A
+supplied value is now tried *only* when nothing can be minted, and says so loudly when it
+is used.
+
+### Why this took so long
+
+Six rounds, each a real defect, none of them this one:
+
+| | what was wrong | why it looked right |
+|---|---|---|
+| §32 | token minted only at spawn | the error said "expired" |
+| §32 | read once per workspace | ditto |
+| §32b | account lacked `enroll:theory_generation` | two accounts genuinely differed |
+| §33 | the overlay copy was months old | the fix was correct, just not running |
+| §33b | `self.env` guessed, not checked | crashed loudly, so looked like *the* bug |
+| §34 | `~/.local/bin` missing from PATH | reproduced exit 127 exactly |
+
+Every one deserved fixing. But the diagnosis driving them came from a tool that reports a
+**guess** as a cause, and a CLI that fails with **exit 0 and no output** — a combination
+that defeats both "read the error" and "log the failures". The step that actually worked
+was reproducing the command by hand with a deliberately bad token.
+
+**The lesson:** when a component reports a cause rather than an error, do not act on it.
+Reproduce the failing call directly, and vary one input at a time — including the ones the
+app itself supplies.

@@ -105,11 +105,6 @@ def current_asta_token() -> str | None:
     """
     global _token_cache
 
-    # An explicitly supplied token always wins: someone who set it meant it.
-    supplied = os.getenv("ASTA_TOKEN")
-    if supplied and _looks_like_a_jwt(supplied.strip()):
-        return supplied.strip()
-
     token, minted_at = _token_cache
     if token and (time.monotonic() - minted_at) < _TOKEN_TTL_SECONDS:
         return token
@@ -127,14 +122,38 @@ def current_asta_token() -> str | None:
         return token
     minted = result.stdout.strip()
     if result.returncode != 0 or not _looks_like_a_jwt(minted):
-        # Keep whatever we had: a stale token still beats none, and the failure the user
-        # sees should come from Asta, not from us handing over prose.
         logger.debug("minime_local: asta did not return a token")
-        return token
+        return token or _supplied_token()
 
     _token_cache = (minted, time.monotonic())
     logger.info("minime_local: refreshed the Asta access token from the CLI")
     return minted
+
+
+def _supplied_token() -> str | None:
+    """A token from the environment — the **fallback**, not the preference.
+
+    This ordering was the other way round, and it silently broke everything.
+    ``ASTA_TOKEN`` reaches the backend from the OS keychain, where a token pasted days
+    earlier is still sitting; the `asta` CLI **prefers that variable over its own stored
+    credentials**, and when it is stale the CLI exits **0 with empty output** — no error,
+    no message. Upstream then reports "no task id was returned, which usually means the
+    access token is missing or expired", which is right about the cause and useless about
+    the source. A silent exit-0 failure also slips straight past failure logging.
+
+    The CLI is the authority: `asta auth login` leaves a refresh credential and the CLI
+    renews itself, so a *minted* token is always at least as good as a stored one. A
+    supplied value is worth trying only when nothing can be minted at all.
+    """
+    supplied = (os.getenv("ASTA_TOKEN") or "").strip()
+    if supplied and _looks_like_a_jwt(supplied):
+        logger.warning(
+            "minime_local: using ASTA_TOKEN from the environment — the asta CLI could "
+            "not mint one. If Asta calls fail, this stored token is likely stale; "
+            "clear it in Settings and sign in instead."
+        )
+        return supplied
+    return None
 
 
 def _log_failure(command: str, result: Any) -> None:
