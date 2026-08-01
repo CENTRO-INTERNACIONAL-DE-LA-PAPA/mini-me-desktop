@@ -37,6 +37,17 @@ pub struct Inlines {
     pub styles: Vec<(Range<usize>, Emphasis)>,
 }
 
+/// Only the tests build `Inlines` by hand — the parser always produces them.
+#[cfg(test)]
+impl Inlines {
+    fn plain(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            styles: Vec::new(),
+        }
+    }
+}
+
 /// One rendered block.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Block {
