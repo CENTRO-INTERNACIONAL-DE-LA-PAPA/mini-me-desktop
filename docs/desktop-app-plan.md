@@ -2436,3 +2436,9 @@ save that would not immediately start rotting.
 
 **The test earned its place immediately:** the first version left the trailing colon on
 `gio: <url>:` — a character worth stripping only because the real line has it there.
+
+**And the code gets its own line.** Seen on Windows: the log box showed
+`| Visit: https://auth0.allenai.org/activate?user_code=KFDM-BQQG |` **clipped at the pane's
+edge**, with the text unselectable. A URL is a single unbreakable word — it cannot wrap at
+420px, and what falls off the end is the device code, the one part a person has to read and
+type. It is now extracted and shown large on its own line, above the link buttons.

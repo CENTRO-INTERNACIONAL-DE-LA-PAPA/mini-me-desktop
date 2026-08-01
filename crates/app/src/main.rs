@@ -468,6 +468,21 @@ fn first_url(line: &str) -> Option<String> {
     (url.len() > "https://".len()).then(|| url.to_string())
 }
 
+/// The device code out of a sign-in URL (`…?user_code=KFDM-BQQG`).
+///
+/// Worth pulling out on its own because the URL is a single unbreakable word: it cannot
+/// wrap, so in a 420px pane it runs off the edge and the code — the one part the user has
+/// to read and type on the page — is exactly what gets clipped.
+fn device_code(url: &str) -> Option<String> {
+    let code: String = url
+        .split_once("user_code=")?
+        .1
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    (!code.is_empty()).then_some(code)
+}
+
 /// Open a URL in the **host's** browser.
 ///
 /// Deliberately not routed through `shell_argv`: that would run inside the WSL distro,
@@ -2189,6 +2204,18 @@ impl Workbench {
             // showing the command is *blocked* waiting for the user to visit it — and the
             // CLI's own attempt to open it failed inside the distro.
             if let Some(link) = &fix.link {
+                // The code, big and on its own line. It is what the sign-in page asks for,
+                // and inside the full URL it is the first thing to be clipped.
+                if let Some(code) = device_code(link) {
+                    log = log.child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .text_color(rgb(ACCENT))
+                            .text_lg()
+                            .child(code),
+                    );
+                }
                 log = log.child(
                     div()
                         .flex()
@@ -3327,6 +3354,24 @@ mod tests {
         assert_eq!(first_url("Waiting for authentication…"), None);
         assert_eq!(first_url("https://"), None, "a bare scheme is not a link");
         assert_eq!(first_url("http://example.org"), None, "https only");
+    }
+
+    #[test]
+    fn the_device_code_is_pulled_out_of_the_sign_in_url() {
+        // A URL is one unbreakable word, so in a 420px pane it runs off the edge — and the
+        // code is the part that gets clipped, which is the part the user has to type.
+        // Both real lines seen from the CLI.
+        assert_eq!(
+            device_code("https://auth0.allenai.org/activate?user_code=KFDM-BQQG").as_deref(),
+            Some("KFDM-BQQG")
+        );
+        assert_eq!(
+            device_code("https://auth0.allenai.org/activate?user_code=DPMW-BJCG&x=1").as_deref(),
+            Some("DPMW-BJCG"),
+            "a following parameter must not come along"
+        );
+        assert_eq!(device_code("https://example.org/plain"), None);
+        assert_eq!(device_code("https://example.org/a?user_code="), None);
     }
 
     #[test]
