@@ -29,6 +29,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 from deepagents.backends.local_shell import LocalShellBackend
 from deepagents.backends.protocol import ExecuteResponse
@@ -136,6 +137,34 @@ def current_asta_token() -> str | None:
     return minted
 
 
+def _log_failure(command: str, result: Any) -> None:
+    """Put a failed command and its output in the sidecar log.
+
+    Tools discard what a command actually printed and report their own summary instead —
+    the theorizer's *"no task id was returned, which usually means the access token is
+    missing or expired"* is a **guess**, offered with no way to see the real error. That
+    guess has now sent this project down three wrong paths.
+
+    Whatever the command truly said lands here, in the file the Setup pane already points
+    at. Only failures, so a working session stays quiet.
+    """
+    exit_code = None
+    output = ""
+    if isinstance(result, dict):
+        exit_code, output = result.get("exit_code"), result.get("output") or ""
+    else:
+        exit_code = getattr(result, "exit_code", None)
+        output = getattr(result, "output", "") or ""
+    if exit_code in (None, 0):
+        return
+    logger.warning(
+        "minime_local: command failed (exit %s): %s\n%s",
+        exit_code,
+        command[:400],
+        output[-2000:],
+    )
+
+
 def _command_env() -> dict[str, str]:
     """Environment for executed commands.
 
@@ -154,7 +183,17 @@ def _command_env() -> dict[str, str]:
     """
     env = dict(os.environ)
     interpreter_dir = str(Path(sys.executable).parent)
-    env["PATH"] = os.pathsep.join([interpreter_dir, env.get("PATH", "")]).rstrip(os.pathsep)
+    # `~/.local/bin` is where `uv tool install` puts the **asta CLI**, and it is normally
+    # added by `~/.profile` — which `execute` never reads: commands run through `/bin/sh`
+    # with exactly the environment given here, not through a login shell. If the backend's
+    # own PATH happens to lack it, every `asta` command dies with `sh: asta: not found`,
+    # exit 127 — and the theorizer reports that as "no task id was returned, which usually
+    # means the access token is missing or expired". Which is how a PATH problem spent days
+    # masquerading as an authentication one.
+    local_bin = str(Path.home() / ".local" / "bin")
+    env["PATH"] = os.pathsep.join(
+        [interpreter_dir, local_bin, env.get("PATH", "")]
+    ).rstrip(os.pathsep)
     asta_token = os.getenv("ASTA_TOKEN")
     if asta_token:
         env["ASTA_TOKEN"] = asta_token
@@ -340,7 +379,9 @@ class LocalWorkspaceBackend(LocalShellBackend):
             logger.debug(
                 "minime_local: no _env on the backend; the Asta token cannot be refreshed"
             )
-        return self.execute(command, timeout=timeout)
+        result = self.execute(command, timeout=timeout)
+        _log_failure(command, result)
+        return result
 
     @property
     def id(self) -> str:

@@ -2509,3 +2509,42 @@ fair game, but only after looking** — this file already reads upstream interna
 deliberately (`_truncate_execute_response`), and each one was checked except this. And
 **anything on the universal path needs a failure mode that is a degradation**, because
 its blast radius is everything.
+
+## 34. A PATH problem wearing an authentication costume (2026-08-01)
+
+With the overlay finally syncing and the attribute name fixed, the theorizer *still*
+reported a missing or expired token — on an account whose token the Setup pane showed as
+valid for 167 hours, with `enroll:theory_generation`, and whose exact submit command
+returns a task id when run by hand.
+
+**`execute` runs commands through `/bin/sh` with exactly the environment we hand it.** Not
+a login shell — so `~/.profile` never runs, and `~/.local/bin` is not added. That is where
+`uv tool install` puts the **asta CLI**. If the backend's own PATH happens to lack it,
+every `asta` command exits **127, `sh: asta: not found`** — and upstream reports that as
+*"no task id was returned, which usually means the access token is missing or expired."*
+
+Proven directly against `LocalShellBackend`:
+
+```
+without ~/.local/bin : /bin/sh: 1: asta: not found   (exit 127)
+with    ~/.local/bin : asta, version 0.101.1
+```
+
+`_command_env()` now puts it on PATH. And the Setup pane could not have caught this: its
+probe runs `bash -lc`, a **login** shell, which reads `~/.profile` and finds `asta`
+perfectly — a check that passes where the thing being checked would fail.
+
+### The change that should have come first
+
+`_log_failure` now writes any non-zero command, with its output, to the sidecar log.
+
+Tools discard what a command actually printed and substitute their own summary. The
+theorizer's is a *guess*, and a plausible one — which is precisely what made it expensive:
+it named a cause, so nobody looked further. It sent this project through minting a token,
+reading it at command time, syncing the overlay and chasing account entitlements, while
+the real message — five words, `sh: asta: not found` — was being thrown away at every
+step.
+
+**The lesson worth keeping:** when a component reports a *cause* rather than an *error*,
+the first move is to recover the real output, not to act on the guess. Four fixes here were
+individually correct and aimed at a diagnosis nobody had verified.
