@@ -2220,3 +2220,55 @@ present, and byte-identical to before when the toggle is off. 73 tests.
 **Unverified — and this is the big one:** no background task has ever been started. The
 wiring is measured but the round trip (`start_async_task` → the worker runs → results come
 back) has not been exercised against a live backend.
+
+## 31. Background work you can actually answer (2026-08-01)
+
+Two gaps stood between §30's wiring and background work being usable. The first was not a
+missing feature — it was a hang.
+
+### The approval nobody could answer
+
+The overlay wraps **one** `create_deep_agent`, so the background worker inherits the same
+`execute` gate as the foreground agent. But the worker runs on its **own thread**, and the
+client only ever resumed the conversation's (`sidecar.rs:173,246`).
+
+So the first command a background task tried to run stopped it dead, waiting for a
+decision nothing in the app could deliver. It would not have failed or errored — it would
+have sat at "running" forever. Every data task (cleaning, EDA, analysis) hits `execute`;
+only literature search and writing would have worked at all.
+
+`GET /threads/{id}/state` answers everything needed in one call: its
+`tasks[].interrupts[]` carry **exactly** the payload `decode_interrupt` already parses, so
+a background approval and a foreground one are the same shape and render the same card.
+Status is *derived* rather than reported — an interrupt means waiting, an empty `next`
+with no interrupt means done, anything else is working.
+
+Answering goes to `POST /threads/{that}/runs` with `resume_request_body` — the identical
+body a foreground resume sends, so a change to the decision shape cannot fix one path and
+leave the other broken.
+
+**Not streamed into the transcript.** A background run's tokens are not the answer to
+anything the researcher asked in the chat; mixing them in is how "what am I reading?"
+happens. The Jobs panel reports it instead.
+
+### Seeing the tasks
+
+`async_tasks` is agent state, so it arrives in every `values` snapshot — no extra route.
+Each entry gives `thread_id`, `agent_name`, `status` and the description. Three details:
+
+- **`interrupted` is not terminal.** Treating it as finished would stop the watcher on the
+  exact tick that needed a person. Terminal is `success`, `error`, `timeout`, `cancelled`.
+- **Sorted by task id.** A map has no order, and the panel would otherwise reshuffle on
+  every frame.
+- **A stale snapshot never erases a pending approval.** The snapshot knows what the
+  coordinator last recorded; the watcher knows what is true now. The card the user is
+  looking at wins.
+
+Watched every **4 seconds**, much faster than the 20s Asta job poll, because someone may
+be sitting in front of the app waiting to say yes.
+
+**Verified:** decode and terminal-state handling are tested against deepagents' own
+`AsyncTask` field names. 75 tests, stable across three runs.
+
+**Unverified:** no background task has been started, so no background approval has ever
+been rendered or answered. The shape is measured; the round trip is not.

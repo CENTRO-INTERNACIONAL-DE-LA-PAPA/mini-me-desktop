@@ -573,6 +573,8 @@ struct Workbench {
     /// Long jobs (theorizer, DataVoyager) started by a turn and still being watched.
     /// Kept for the whole session so a finished one stays visible rather than vanishing.
     jobs: Vec<protocol::Job>,
+    /// Work handed to a background Mini-Me, and whether it is stopped at the gate.
+    tasks: Vec<protocol::AsyncTask>,
     transcript: Vec<Message>,
     sidecar: Arc<Sidecar>,
     /// Status line text (backend/stream progress, not model output).
@@ -668,6 +670,7 @@ impl Workbench {
             project: None,
             buckets: Vec::new(),
             jobs: Vec::new(),
+            tasks: Vec::new(),
             transcript: Vec::new(),
             sidecar,
             status: "idle — type a prompt and press Enter".to_string(),
@@ -777,6 +780,91 @@ impl Workbench {
             }
         })
         .detach();
+        cx.notify();
+    }
+
+    /// Start watching a background worker's thread, if it isn't already watched.
+    fn track_task(&mut self, task: protocol::AsyncTask, cx: &mut Context<Self>) {
+        if let Some(existing) = self.tasks.iter_mut().find(|t| t.task_id == task.task_id) {
+            // The snapshot knows the status the coordinator last recorded; the *watcher*
+            // knows whether it is stopped at the gate right now. Never let a stale
+            // snapshot erase a pending approval the user is looking at.
+            if existing.pending.is_none() && !existing.is_finished() {
+                existing.status = task.status;
+            }
+            return;
+        }
+        let finished = task.is_finished();
+        self.tasks.push(task.clone());
+        if finished {
+            return;
+        }
+
+        let mut updates = self.sidecar.watch_task(task);
+        cx.spawn(async move |this, cx| {
+            while let Some(update) = updates.next().await {
+                let carry_on = this.update(cx, |workbench, cx| {
+                    let finished = update.is_finished();
+                    let waiting = update.needs_approval();
+                    let succeeded = update.succeeded();
+                    if let Some(tracked) =
+                        workbench.tasks.iter_mut().find(|t| t.task_id == update.task_id)
+                    {
+                        *tracked = update;
+                    }
+                    if waiting {
+                        workbench.status =
+                            "a background task is waiting for your approval".into();
+                    } else if finished {
+                        workbench.status = if succeeded {
+                            "a background task finished".into()
+                        } else {
+                            "a background task stopped".into()
+                        };
+                        workbench.refresh_project(cx);
+                    }
+                    cx.notify();
+                });
+                if carry_on.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Answer a background worker's approval request.
+    fn decide_task(&mut self, task_id: String, approve: bool, cx: &mut Context<Self>) {
+        let Some(task) = self.tasks.iter_mut().find(|t| t.task_id == task_id) else {
+            return;
+        };
+        let Some(request) = task.pending.take() else {
+            return;
+        };
+        // One decision per held action, in order — the agent validates the count.
+        let decisions: Vec<Decision> = request
+            .actions
+            .iter()
+            .map(|_| {
+                if approve {
+                    Decision::Approve
+                } else {
+                    Decision::Reject {
+                        message: "The researcher declined to run this command.".to_string(),
+                    }
+                }
+            })
+            .collect();
+        let thread_id = task.thread_id.clone();
+        task.status = "running".into();
+        self.sidecar.decide_task(thread_id, decisions);
+        self.status = if approve {
+            "background task approved — running…"
+        } else {
+            "background task rejected"
+        }
+        .into();
         cx.notify();
     }
 
@@ -1055,6 +1143,9 @@ impl Workbench {
                 }
                 for job in snapshot.jobs {
                     self.track_job(job, cx);
+                }
+                for task in snapshot.tasks {
+                    self.track_task(task, cx);
                 }
             }
             TurnEvent::Done => {
@@ -2474,7 +2565,7 @@ impl Workbench {
                         .text_sm()
                         .child("No project loaded yet. Run a turn — the mission is derived from your first question."),
                 )
-                .child(self.jobs_section())
+                .child(self.jobs_section(cx))
                 .child(self.outputs_section());
         };
 
@@ -2567,7 +2658,7 @@ impl Workbench {
             );
         }
 
-        panel.child(self.jobs_section()).child(self.outputs_section())
+        panel.child(self.jobs_section(cx)).child(self.outputs_section())
     }
 
     /// Long jobs still running, and the ones that finished this session.
@@ -2575,12 +2666,122 @@ impl Workbench {
     /// The theorizer and DataVoyager return a task id immediately and finish minutes
     /// later, so without this the answer to "is it still going?" was nothing at all —
     /// and, worse, nobody was collecting the result (docs §29).
-    fn jobs_section(&self) -> impl IntoElement {
+    fn jobs_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut section = div().flex().flex_col().gap_2().pt_2();
-        if self.jobs.is_empty() {
+        if self.jobs.is_empty() && self.tasks.is_empty() {
             return section;
         }
         section = section.child(section_label("BACKGROUND JOBS"));
+
+        // Background workers first, because one of them may be *stopped waiting for you* —
+        // and until this existed that task simply hung, since the gate it hit runs on its
+        // own thread and nothing in the UI could answer it (docs §31).
+        for task in &self.tasks {
+            let (mark, colour) = if task.needs_approval() {
+                ("⏸", ACCENT)
+            } else if !task.is_finished() {
+                ("◐", ACCENT)
+            } else if task.succeeded() {
+                ("✓", MUTED)
+            } else {
+                ("✗", ERROR)
+            };
+            let mut row = div()
+                .flex()
+                .flex_col()
+                .w_full()
+                .min_w_0()
+                .gap_1()
+                .pl_2()
+                .border_l_1()
+                .border_color(rgb(colour))
+                .child(
+                    div()
+                        .text_color(rgb(TEXT))
+                        .text_sm()
+                        .child(format!("{mark} {}", task.agent_name.replace('_', " "))),
+                )
+                .child(div().text_color(rgb(MUTED)).text_xs().child(
+                    if task.needs_approval() {
+                        "waiting for your approval".to_string()
+                    } else {
+                        task.status.clone()
+                    },
+                ))
+                .when(!task.description.is_empty(), |row| {
+                    row.child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .text_color(rgb(MUTED))
+                            .text_xs()
+                            .child(task.description.clone()),
+                    )
+                });
+
+            if let Some(request) = &task.pending {
+                for action in &request.actions {
+                    // The command verbatim, exactly as the foreground card shows it: this
+                    // runs on the researcher's own machine, and the only meaningful review
+                    // is of the actual text (docs §19).
+                    row = row.child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .p_2()
+                            .border_1()
+                            .border_color(rgb(BORDER))
+                            .text_color(rgb(TEXT))
+                            .text_xs()
+                            .child(action.detail.clone()),
+                    );
+                }
+                let task_id = task.task_id.clone();
+                row = row.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap_2()
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("bg-approve-{task_id}")))
+                                .px_3()
+                                .py_1()
+                                .border_1()
+                                .border_color(rgb(ACCENT))
+                                .text_color(rgb(ACCENT))
+                                .text_sm()
+                                .hover(|style| style.cursor_pointer())
+                                .child("Approve")
+                                .on_click(cx.listener({
+                                    let task_id = task_id.clone();
+                                    move |workbench, _event, _window, cx| {
+                                        workbench.decide_task(task_id.clone(), true, cx);
+                                    }
+                                })),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("bg-reject-{task_id}")))
+                                .px_3()
+                                .py_1()
+                                .border_1()
+                                .border_color(rgb(BORDER))
+                                .text_color(rgb(MUTED))
+                                .text_sm()
+                                .hover(|style| style.cursor_pointer())
+                                .child("Reject")
+                                .on_click(cx.listener({
+                                    let task_id = task_id.clone();
+                                    move |workbench, _event, _window, cx| {
+                                        workbench.decide_task(task_id.clone(), false, cx);
+                                    }
+                                })),
+                        ),
+                );
+            }
+            section = section.child(row);
+        }
         for job in &self.jobs {
             let (mark, colour) = if !job.is_finished() {
                 ("◐", ACCENT)

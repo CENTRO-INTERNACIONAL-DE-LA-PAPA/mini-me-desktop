@@ -113,6 +113,8 @@ pub struct Snapshot {
     pub project: Option<Project>,
     /// Long jobs the turn left running. See [`Job`].
     pub jobs: Vec<Job>,
+    /// Work handed to a background worker. See [`AsyncTask`].
+    pub tasks: Vec<AsyncTask>,
 }
 
 /// A long-running Asta job that outlived the turn that started it.
@@ -193,6 +195,95 @@ impl Job {
             ),
         }
     }
+}
+
+/// A task the coordinator handed to a background worker.
+///
+/// Fields from `deepagents.middleware.async_subagents.AsyncTask`, carried in agent state
+/// under `async_tasks` (a `task_id → task` map) and so arriving in every `values`
+/// snapshot. `thread_id` is the load-bearing one: the background worker runs on its **own**
+/// thread, which is why its approval requests were invisible — the client only ever
+/// resumed the conversation's thread.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AsyncTask {
+    pub task_id: String,
+    pub thread_id: String,
+    pub agent_name: String,
+    pub status: String,
+    /// What the worker was asked to do, when the middleware recorded it.
+    pub description: String,
+    /// Set when the background run has stopped at the approval gate. Until this existed,
+    /// such a task simply hung — nothing in the UI could answer it (docs §31).
+    pub pending: Option<ApprovalRequest>,
+}
+
+impl AsyncTask {
+    /// Whether the task has stopped for good.
+    ///
+    /// LangGraph run statuses: `pending`, `running`, `error`, `success`, `timeout`,
+    /// `interrupted`. Only the last three of those are terminal — `interrupted` is *not*,
+    /// because it is a task waiting for a person.
+    pub fn is_finished(&self) -> bool {
+        matches!(
+            self.status.as_str(),
+            "success" | "error" | "timeout" | "cancelled" | "canceled"
+        )
+    }
+
+    pub fn succeeded(&self) -> bool {
+        self.status == "success"
+    }
+
+    /// Whether it is stopped, waiting on a decision.
+    pub fn needs_approval(&self) -> bool {
+        self.pending.is_some()
+    }
+}
+
+/// Pull background tasks out of a `values` payload.
+fn decode_async_tasks(artifacts: &Value, root: &Value) -> Vec<AsyncTask> {
+    // The middleware writes to agent state, which in a `values` frame sits at the top
+    // level — but the same payload nests artifacts, so check both rather than guessing.
+    let map = root
+        .get("async_tasks")
+        .or_else(|| artifacts.get("async_tasks"))
+        .and_then(Value::as_object);
+    let Some(map) = map else {
+        return Vec::new();
+    };
+    let mut tasks: Vec<AsyncTask> = map
+        .values()
+        .filter_map(|task| {
+            let thread_id = task.get("thread_id").and_then(Value::as_str)?;
+            Some(AsyncTask {
+                task_id: task
+                    .get("task_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or(thread_id)
+                    .to_string(),
+                thread_id: thread_id.to_string(),
+                agent_name: task
+                    .get("agent_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("background_worker")
+                    .to_string(),
+                status: task
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("running")
+                    .to_string(),
+                description: task
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                pending: None,
+            })
+        })
+        .collect();
+    // A map has no order; without this the panel would reshuffle on every frame.
+    tasks.sort_by(|a, b| a.task_id.cmp(&b.task_id));
+    tasks
 }
 
 /// Percent-encode a path or query value.
@@ -366,6 +457,91 @@ impl LangGraphClient {
             .unwrap_or("running")
             .trim()
             .to_string())
+    }
+
+    /// Read a background worker's thread: is it running, finished, or waiting on a person?
+    ///
+    /// `GET /threads/{id}/state` answers all three at once. Its `tasks[].interrupts[]`
+    /// carry exactly the payload `decode_interrupt` already understands, so a background
+    /// approval and a foreground one are the same shape — which is what lets the pane
+    /// render one card for both.
+    ///
+    /// Returns `(status, pending_approval)`. `status` is derived rather than reported: an
+    /// interrupted thread is *waiting*, an empty `next` with no interrupt is *done*, and
+    /// anything else is still working.
+    pub async fn thread_state(&self, thread_id: &str) -> Result<(String, Option<ApprovalRequest>)> {
+        let resp = self
+            .http
+            .get(format!(
+                "{}/threads/{}/state",
+                self.base_url,
+                urlencode(thread_id)
+            ))
+            .send()
+            .await
+            .context("reading a background task's thread failed")?
+            .error_for_status()
+            .context("the thread-state route returned an error status")?;
+        let state: Value = resp
+            .json()
+            .await
+            .context("could not decode the background thread's state")?;
+
+        // Interrupts live on the pending tasks; the same payload also shows up under
+        // `values.__interrupt__` in some versions, so both are checked.
+        // Reshaped into the `{"__interrupt__": [...]}` envelope `decode_interrupt` already
+        // parses, rather than writing a second parser for the same payload.
+        let from_tasks: Vec<Value> = state
+            .get("tasks")
+            .and_then(Value::as_array)
+            .map(|tasks| {
+                tasks
+                    .iter()
+                    .filter_map(|task| task.get("interrupts").and_then(Value::as_array))
+                    .flatten()
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        let pending = decode_interrupt(&json!({"__interrupt__": from_tasks}))
+            .or_else(|| state.get("values").and_then(decode_interrupt));
+
+        let next_is_empty = state
+            .get("next")
+            .and_then(Value::as_array)
+            .is_some_and(|next| next.is_empty());
+        let status = if pending.is_some() {
+            "interrupted"
+        } else if next_is_empty {
+            "success"
+        } else {
+            "running"
+        };
+        Ok((status.to_string(), pending))
+    }
+
+    /// Answer a background worker's approval request, on **its** thread.
+    ///
+    /// Deliberately not streamed into the transcript: the background run's tokens are not
+    /// the answer to anything the researcher asked in the chat, and mixing them into the
+    /// conversation is how "what did I just read?" happens. The Jobs panel reports it.
+    pub async fn resume_background(&self, thread_id: &str, decisions: &[Decision]) -> Result<()> {
+        // The same body a foreground resume sends — one definition, so a change to the
+        // decision shape cannot fix one path and leave the other broken.
+        let payload = resume_request_body(decisions, self.model.as_ref());
+        self.http
+            .post(format!(
+                "{}/threads/{}/runs",
+                self.base_url,
+                urlencode(thread_id)
+            ))
+            .json(&payload)
+            .send()
+            .await
+            .context("resuming a background task failed")?
+            .error_for_status()
+            .context("resuming a background task returned an error status")?;
+        Ok(())
     }
 
     /// `POST /threads` → a fresh thread id.
@@ -715,14 +891,16 @@ fn decode_values(data: &str) -> Option<Snapshot> {
         .and_then(|project| serde_json::from_value::<Project>(project.clone()).ok());
 
     let jobs = decode_jobs(artifacts);
+    let tasks = decode_async_tasks(artifacts, &value);
 
-    if buckets.is_empty() && project.is_none() && jobs.is_empty() {
+    if buckets.is_empty() && project.is_none() && jobs.is_empty() && tasks.is_empty() {
         return None;
     }
     Some(Snapshot {
         buckets,
         project,
         jobs,
+        tasks,
     })
 }
 
@@ -1288,6 +1466,72 @@ mod tests {
         assert_eq!(configurable["model_config"]["default"], "openai::gpt-5.4");
         assert!(configurable["model_config"]["storage_mode"].is_null());
         assert!(configurable["__llm_keys"].is_null());
+    }
+
+    #[test]
+    fn background_tasks_are_found_with_the_thread_that_can_answer_them() {
+        // `thread_id` is the whole point: the worker runs on its own thread, and until the
+        // client watched *that* thread a background task that hit the execute gate simply
+        // hung — the approval was real, on a thread nothing in the UI ever looked at.
+        // Field names from deepagents' AsyncTask.
+        let snapshot = decode_values(
+            &json!({
+                "artifacts": {},
+                "async_tasks": {
+                    "th-2": {
+                        "task_id": "th-2", "thread_id": "th-2",
+                        "agent_name": "background_worker", "status": "running",
+                        "description": "Analyse the yield data"
+                    },
+                    "th-1": {
+                        "task_id": "th-1", "thread_id": "th-1",
+                        "agent_name": "background_worker", "status": "success"
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("a snapshot");
+
+        assert_eq!(snapshot.tasks.len(), 2);
+        // A map has no order; the panel must not reshuffle every frame.
+        assert_eq!(snapshot.tasks[0].task_id, "th-1");
+        assert!(snapshot.tasks[0].is_finished() && snapshot.tasks[0].succeeded());
+        assert!(!snapshot.tasks[1].is_finished());
+        assert_eq!(snapshot.tasks[1].thread_id, "th-2");
+        assert_eq!(snapshot.tasks[1].description, "Analyse the yield data");
+        // Nothing is waiting until a thread poll says so.
+        assert!(!snapshot.tasks[1].needs_approval());
+    }
+
+    #[test]
+    fn an_interrupted_background_task_is_not_mistaken_for_a_finished_one() {
+        // `interrupted` means "waiting for a person", not "over". Treating it as terminal
+        // would stop the watcher on the exact tick that needed a human.
+        let waiting = AsyncTask {
+            task_id: "t".into(),
+            thread_id: "t".into(),
+            agent_name: "background_worker".into(),
+            status: "interrupted".into(),
+            description: String::new(),
+            pending: None,
+        };
+        assert!(!waiting.is_finished(), "interrupted is not terminal");
+        for status in ["success", "error", "timeout", "cancelled"] {
+            let done = AsyncTask {
+                status: status.to_string(),
+                ..waiting.clone()
+            };
+            assert!(done.is_finished(), "{status}");
+            assert_eq!(done.succeeded(), status == "success", "{status}");
+        }
+        for status in ["running", "pending"] {
+            let going = AsyncTask {
+                status: status.to_string(),
+                ..waiting.clone()
+            };
+            assert!(!going.is_finished(), "{status}");
+        }
     }
 
     #[test]

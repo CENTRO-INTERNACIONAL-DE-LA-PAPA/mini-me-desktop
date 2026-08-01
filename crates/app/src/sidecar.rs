@@ -17,7 +17,7 @@ use tokio::sync::Mutex;
 
 use crate::backend::{BackendConfig, BackendSupervisor};
 use crate::protocol::{
-    AgentRef, Decision, Job, LangGraphClient, ModelChoice, Project, TurnEvent, TurnOutcome,
+    AgentRef, AsyncTask, Decision, Job, LangGraphClient, ModelChoice, Project, TurnEvent, TurnOutcome,
 };
 
 /// Find (or start) the tally row for one subagent invocation, keyed by namespace so
@@ -39,6 +39,12 @@ fn entry<'a>(
 /// sandbox — so this is about noticing within a reasonable time, not about latency.
 /// Twenty seconds is roughly a hundred polls across the longest job, which is nothing.
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// How often a *background worker's* thread is checked.
+///
+/// Faster than the Asta jobs above, because this poll is what surfaces an approval
+/// request — and someone may be sitting in front of the app waiting to answer it.
+const TASK_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(4);
 
 /// Progress from a setup fix the app is running on the user's behalf.
 #[derive(Debug, Clone)]
@@ -271,6 +277,63 @@ impl Sidecar {
         });
 
         rx
+    }
+
+    /// Watch a background worker's thread: progress, and the moment it needs a person.
+    ///
+    /// **This is what makes background work usable at all.** The worker inherits the same
+    /// `execute` gate as the foreground agent (the overlay wraps one `create_deep_agent`
+    /// for both), but it runs on its own thread — and the client only ever resumed the
+    /// conversation's. So the first command a background task tried to run stopped it
+    /// dead, waiting for an approval nothing could deliver. It simply looked hung.
+    ///
+    /// Polled faster than the Asta jobs because a person may be sitting in front of it
+    /// waiting to say yes.
+    pub fn watch_task(&self, task: AsyncTask) -> mpsc::UnboundedReceiver<AsyncTask> {
+        let (tx, rx) = mpsc::unbounded();
+        let base_url = self.base_url.clone();
+
+        self.runtime.spawn(async move {
+            let client = LangGraphClient::new(base_url);
+            let mut task = task;
+            loop {
+                tokio::time::sleep(TASK_POLL_INTERVAL).await;
+                match client.thread_state(&task.thread_id).await {
+                    Ok((status, pending)) => {
+                        let changed = status != task.status || pending != task.pending;
+                        task.status = status;
+                        task.pending = pending;
+                        if !changed {
+                            continue;
+                        }
+                        let finished = task.is_finished();
+                        if tx.unbounded_send(task.clone()).is_err() {
+                            return;
+                        }
+                        if finished {
+                            return;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::debug!(thread = %task.thread_id, %error, "task poll failed; retrying")
+                    }
+                }
+            }
+        });
+
+        rx
+    }
+
+    /// Answer a background worker's approval request on its own thread.
+    pub fn decide_task(&self, thread_id: String, decisions: Vec<Decision>) {
+        let base_url = self.base_url.clone();
+        let model = self.model.lock().expect("model mutex").clone();
+        self.runtime.spawn(async move {
+            let client = LangGraphClient::new(base_url).with_model(model);
+            if let Err(error) = client.resume_background(&thread_id, &decisions).await {
+                tracing::error!(%thread_id, %error, "could not answer a background task");
+            }
+        });
     }
 
     /// Run the first-run checks off the UI thread.
