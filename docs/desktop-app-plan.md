@@ -2150,3 +2150,73 @@ window mid-job still means nobody persists that run.
 **Unverified:** no long job has been run through this. The decode and route construction are
 tested against the measured payload shapes, but the poll loop has never watched a real
 theorizer run to completion.
+
+## 30. Async subagents, without forking Mini-Me (2026-08-01)
+
+Requested explicitly, with a fork authorised if needed. **It turned out not to be**, and
+that is worth recording, because §14 had this filed as a structural upstream change.
+
+### The three facts that made it an extension
+
+1. **`AsyncSubAgent` is a reference, not an agent** — `{name, description, graph_id, url}`
+   — and **`url=None` selects the in-process ASGI transport** (verified in
+   `deepagents/middleware/async_subagents.py:_ClientCache.get_async`). No second server,
+   no port, no credentials. The sync path *does* raise on `url=None`, so this only works
+   because our stack is async throughout, which §18 already forced.
+2. **`langgraph dev` accepts `--config PATH`**, and the desktop app builds the launch
+   command. So extra graphs can be declared from the **client** side.
+3. **`backend/agent.py:agent` is an async factory.** A second graph id can point at the
+   same factory, so the background worker is a real Mini-Me with every tool and subagent
+   it normally has.
+
+### Why a background *coordinator*, not one graph per subagent
+
+The obvious reading of the docs is "one graph per async subagent". Building those would
+mean replicating `_build_runtime_subagents` — its MCP tool fetches, model resolution and
+per-subagent middleware — inside our overlay. That is exactly the duplicated logic that
+becomes merge debt the first time upstream touches it.
+
+Delegating to a background **coordinator** reuses upstream's assembly verbatim, and is
+strictly more capable: the worker can chain subagents, run its own analysis and write a
+report. It works here specifically because execution is **local** (§19) — the background
+worker shares the researcher's filesystem, so files it writes are simply *there*. Under
+the remote sandbox each thread gets its own and the results would land somewhere the
+user's thread cannot see.
+
+### The pieces
+
+- `overlay/minime_local/async_agents.py` — declares the async subagent (`url=None`),
+  builds the background graph from upstream's own factory, and injects
+  `AsyncSubAgentMiddleware` by wrapping `create_deep_agent`, the same patch point the
+  approval gate uses (§18). Installed *after* approval, so the background worker inherits
+  the same gate.
+- `overlay/minime_local/make_config.py` — reads upstream's `langgraph.json` and writes
+  `.mini-me-desktop.langgraph.json` beside it with the extra graph. **Beside it**, because
+  every path in that file is relative to the file. **Extends rather than reconstructs**,
+  because it carries `dependencies`, `env` and the `http` block that mounts the spine and
+  job-poll routes. **Every launch**, because a copy generated once goes stale after a
+  backend update.
+- The launch joins them with `&&`, so a generator failure stops the launch instead of
+  starting a coordinator whose tools point at a graph nobody serves.
+
+### Two guards
+
+**No recursion.** A background worker built by the same wrapped `create_deep_agent` would
+be handed `start_async_task` too, and could spawn another, and so on — a runaway that
+bills the user's model key. A `ContextVar` set while the background graph is built
+suppresses the injection.
+
+**Off by default.** It rests on a preview API whose docs say "APIs may change", and it
+only functions when the generated config is in play. A coordinator holding tools for a
+graph the server does not serve fails *mid-task, in front of the user* rather than at
+startup, so `MINIME_ASYNC_SUBAGENTS` must be set and the Settings toggle
+("Let work run in the background") is opt-in.
+
+**Verified:** the config generator run against the real `langgraph.json` — `auth`,
+`dependencies`, `env`, `http` and `python_version` all preserved, upstream's `agent` graph
+untouched. The launch command is pinned by a test: generator before server, `--config`
+present, and byte-identical to before when the toggle is off. 73 tests.
+
+**Unverified — and this is the big one:** no background task has ever been started. The
+wiring is measured but the round trip (`start_async_task` → the worker runs → results come
+back) has not been exercised against a live backend.

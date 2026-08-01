@@ -216,6 +216,11 @@ pub struct BackendConfig {
     /// Whether the backend should stop and ask before every `execute`. Off is for
     /// automation, not a recommendation (docs §19).
     pub approve_execute: bool,
+    /// Let the coordinator delegate whole pieces of work to a background Mini-Me.
+    ///
+    /// When on, the launch regenerates an extended LangGraph config declaring a second
+    /// graph — see `generate_config_command` and docs §30.
+    pub async_subagents: bool,
     /// Whether the app provisioned the checkout, and so may update it.
     ///
     /// False for anything it merely *found* or was pointed at. Updating runs
@@ -255,9 +260,11 @@ impl BackendConfig {
                 config.wsl.as_ref(),
                 &execution,
                 settings.approve_execute,
+                settings.async_subagents,
             );
         config.execution = execution;
         config.approve_execute = settings.approve_execute;
+        config.async_subagents = settings.async_subagents;
         // Read here, on the main thread: see `secret_env`.
         config.secrets = crate::settings::asta_env();
         config
@@ -296,7 +303,7 @@ impl BackendConfig {
         let execution = resolve_execution(None);
         Self {
             port,
-            launch_command: launch_command_for(&project_dir, port, wsl.as_ref(), &execution, true),
+            launch_command: launch_command_for(&project_dir, port, wsl.as_ref(), &execution, true, false),
             project_dir,
             wsl,
             attach_only: std::env::var_os("MINIME_BACKEND_ATTACH_ONLY").is_some(),
@@ -304,6 +311,7 @@ impl BackendConfig {
             execution,
             secrets: Vec::new(),
             approve_execute: true,
+            async_subagents: false,
             owned,
         }
     }
@@ -327,6 +335,7 @@ fn launch_command_for(
     wsl: Option<&WslTarget>,
     execution: &Execution,
     approve_execute: bool,
+    async_subagents: bool,
 ) -> Vec<String> {
     if let Some(wsl) = wsl {
         let mut argv = vec!["wsl.exe".to_string()];
@@ -357,9 +366,26 @@ fn launch_command_for(
                 exports.push_str(&format!("{name}={} ", shell_quote(&value)));
             }
         }
+        // Background work needs a second graph, declared in a config we generate from
+        // upstream's just before launch (docs §30). `&&`, so a generator failure stops the
+        // launch instead of silently starting a server whose coordinator holds tools
+        // pointing at a graph nobody serves.
+        let (prepare, config_flag) = if async_subagents {
+            let overlay = execution_env(execution, true, approve_execute)
+                .into_iter()
+                .find(|(name, _)| name == "PYTHONPATH")
+                .map(|(_, value)| value)
+                .unwrap_or_default();
+            (
+                format!("{} && ", generate_config_command(&overlay, ".venv/bin/python")),
+                format!(" --config {GENERATED_CONFIG}"),
+            )
+        } else {
+            (String::new(), String::new())
+        };
         argv.push(format!(
-            "cd {dir} && {exports}exec .venv/bin/langgraph dev --host 0.0.0.0 \
-             --port {port} --no-reload --no-browser --n-jobs-per-worker {jobs}",
+            "cd {dir} && {prepare}{exports}exec .venv/bin/langgraph dev --host 0.0.0.0 \
+             --port {port}{config_flag} --no-reload --no-browser --n-jobs-per-worker {jobs}",
             // `quote_path`, not `shell_quote`: the default is `~/Mini-Me`, and quoting
             // the tilde would stop it expanding. A configured dir with a space in it
             // used to split into a bogus command.
@@ -399,6 +425,10 @@ fn launch_command_for(
         "--n-jobs-per-worker".into(),
         JOBS_PER_WORKER.to_string(),
     ]);
+    if async_subagents {
+        argv.push("--config".into());
+        argv.push(GENERATED_CONFIG.into());
+    }
     argv
 }
 
@@ -428,6 +458,36 @@ fn overlay_expression(wsl_dir: &str, fallback: &str) -> String {
          else printf %s {fallback}; fi)",
         local = local,
         fallback = shell_quote(fallback),
+    )
+}
+
+/// The graph id the background worker is served under.
+///
+/// Must match `BACKGROUND_GRAPH_ID` in `overlay/minime_local/async_agents.py` — the
+/// coordinator's tool points at this id, and a mismatch fails mid-task rather than at
+/// startup.
+const BACKGROUND_GRAPH_ID: &str = "background";
+
+/// The config file the generator writes, next to upstream's own.
+///
+/// **Next to it, not elsewhere.** Every path inside `langgraph.json` is relative to the
+/// file itself, so a copy written somewhere else silently breaks `dependencies` and the
+/// `http.app` route module that serves the spine and the job-poll routes.
+const GENERATED_CONFIG: &str = ".mini-me-desktop.langgraph.json";
+
+/// The shell fragment that regenerates the extended config before launching.
+///
+/// Run **every** launch rather than once at provisioning: upstream's `langgraph.json` is
+/// what it extends, and a stale copy would quietly serve yesterday's dependencies after a
+/// backend update.
+///
+/// One generator, invoked identically in both modes, because the alternative was writing
+/// the JSON from Rust for the host path and from Python inside the distro for WSL — the
+/// same logic twice, which is how the two drift.
+fn generate_config_command(overlay: &str, python: &str) -> String {
+    format!(
+        "{python} {} .",
+        shell_quote(&format!("{}/minime_local/make_config.py", overlay.trim_end_matches('/')))
     )
 }
 
@@ -1166,6 +1226,7 @@ mod tests {
             }),
             &Execution::Sandbox,
             true,
+            false,
         );
         let command = argv.last().expect("the bash -lc payload");
         assert!(!command.contains("MINIME_EXECUTION_BACKEND"), "{command}");
@@ -1393,6 +1454,7 @@ mod tests {
             }),
             &execution,
             true,
+            true,
         );
         let command = argv.last().expect("the bash -lc payload");
         // Assignments must land *before* `exec`, or the server never sees them.
@@ -1411,6 +1473,49 @@ mod tests {
         assert!(command.contains("printf %s '/mnt/c/repo/overlay'"), "{command}");
         // And it still ends up as one assignment in front of exec.
         assert!(command.contains("fi)\" exec .venv/bin/langgraph dev"), "{command}");
+    }
+
+    #[test]
+    fn background_work_registers_its_graph_before_the_server_starts() {
+        let _env = env_lock::hold();
+        let execution = Execution::Local {
+            overlay_dir: PathBuf::from(r"C:\repo\overlay"),
+        };
+        let wsl = WslTarget {
+            distro: None,
+            dir: "~/Mini-Me".into(),
+        };
+        let argv = launch_command_for(
+            Path::new("/tmp/mini-me"),
+            2024,
+            Some(&wsl),
+            &execution,
+            true,
+            true,
+        );
+        let command = argv.last().expect("the bash -lc payload");
+
+        // The generator runs *before* the server, joined with `&&` — if it fails the
+        // launch must stop, not start a coordinator holding tools that point at a graph
+        // nobody serves.
+        let generate = command.find("make_config.py").expect("the generator");
+        let serve = command.find("exec .venv/bin/langgraph").expect("the server");
+        assert!(generate < serve, "{command}");
+        assert!(command.contains("&& exec") || command.contains("&& MINIME"), "{command}");
+        assert!(command.contains("--config .mini-me-desktop.langgraph.json"), "{command}");
+
+        // And with the feature off, the launch is exactly what it always was.
+        let plain = launch_command_for(
+            Path::new("/tmp/mini-me"),
+            2024,
+            Some(&wsl),
+            &execution,
+            true,
+            false,
+        );
+        let plain = plain.last().expect("payload");
+        assert!(!plain.contains("make_config"), "{plain}");
+        assert!(!plain.contains("--config"), "{plain}");
     }
 
     #[test]

@@ -755,6 +755,7 @@ mod tests {
             execution: Execution::Sandbox,
             secrets: Vec::new(),
             approve_execute: true,
+            async_subagents: false,
             owned: true,
         }
     }

@@ -46,9 +46,12 @@ def local_execution_requested() -> bool:
 def _patch(module) -> None:
     """Apply whichever patch this module needs."""
     if module.__name__ == _AGENT_MODULE:
-        from minime_local import approval
+        from minime_local import approval, async_agents
 
         approval.install(module)
+        # After approval, so the background worker inherits the same gate: its wrapper
+        # calls whatever `create_deep_agent` is current, which is the gated one.
+        async_agents.install(module)
         return
     _patch_sandbox(module)
 

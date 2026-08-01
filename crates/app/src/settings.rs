@@ -90,6 +90,12 @@ pub struct Settings {
     /// Written by the Setup pane when it adopts a checkout it found, so the discovery
     /// probe runs once rather than on every launch.
     pub backend_dir: String,
+    /// Let the coordinator hand whole pieces of work to a background Mini-Me.
+    ///
+    /// Off by default: it rests on a **preview** deepagents API whose docs say "APIs may
+    /// change", and it needs the extra graph the app generates into the checkout's config.
+    /// Opt-in keeps a bad interaction from being everyone's first experience.
+    pub async_subagents: bool,
     /// Whether the app created that directory.
     ///
     /// **Load-bearing.** Updating means `git fetch && git checkout <pin> && uv sync`, and
@@ -109,6 +115,7 @@ impl Default for Settings {
             approve_execute: true,
             backend_port: 2024,
             backend_dir: String::new(),
+            async_subagents: false,
             backend_dir_owned: true,
         }
     }
@@ -287,6 +294,7 @@ mod tests {
             approve_execute: true,
             backend_port: 2100,
             backend_dir: "~/Mini-Me".into(),
+            async_subagents: true,
             backend_dir_owned: false,
         };
         let text = toml::to_string_pretty(&settings).expect("serialise");

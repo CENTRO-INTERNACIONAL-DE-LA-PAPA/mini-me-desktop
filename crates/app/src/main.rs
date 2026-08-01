@@ -1662,6 +1662,13 @@ impl Workbench {
                 0usize,
             ),
             ("Ask before every command", self.draft.approve_execute, 1),
+            // Preview API, and it needs the generated graph config — so opt-in, and
+            // labelled by what it does rather than by what it is called upstream.
+            (
+                "Let work run in the background",
+                self.draft.async_subagents,
+                2,
+            ),
         ] {
             pane = pane.child(
                 div()
@@ -1675,10 +1682,19 @@ impl Workbench {
                     .hover(|style| style.cursor_pointer())
                     .child(format!("{} {label}", if value { "☑" } else { "☐" }))
                     .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                        if toggle == 0 {
-                            workbench.draft.local_execution = !workbench.draft.local_execution;
-                        } else {
-                            workbench.draft.approve_execute = !workbench.draft.approve_execute;
+                        match toggle {
+                            0 => {
+                                workbench.draft.local_execution =
+                                    !workbench.draft.local_execution
+                            }
+                            1 => {
+                                workbench.draft.approve_execute =
+                                    !workbench.draft.approve_execute
+                            }
+                            _ => {
+                                workbench.draft.async_subagents =
+                                    !workbench.draft.async_subagents
+                            }
                         }
                         cx.notify();
                     })),
