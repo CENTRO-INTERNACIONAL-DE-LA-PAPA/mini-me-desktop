@@ -578,11 +578,34 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
     if can_probe {
         let found = probe(&config.shell_argv("command -v asta"));
         if found.ok {
-            checks.push(Check::pass(
-                "asta",
-                "Asta CLI",
-                found.stdout.trim().lines().next().unwrap_or("found").to_string(),
+            // Installed is not the same as usable. Asta access tokens last seven days, and
+            // an expired login surfaces as "the theorizer returned no task id" — which
+            // names neither the token nor the fix. Ask the CLI directly instead.
+            //
+            // Checked **where the backend runs**: on Windows that is inside the distro, so
+            // being logged in on the Windows side proves nothing at all.
+            let token = probe(&config.shell_argv(
+                "asta auth print-token --raw --refresh >/dev/null 2>&1",
             ));
+            if token.ok {
+                checks.push(Check::pass(
+                    "asta",
+                    "Asta CLI",
+                    "installed and signed in",
+                ));
+            } else {
+                checks.push(Check::failing(
+                    "asta",
+                    "Asta CLI",
+                    State::Warn,
+                    "installed, but not signed in where the backend runs",
+                    vec![Fix::Run {
+                        label: "Sign in to Asta",
+                        argv: config.shell_argv("asta auth login"),
+                        note: "opens a browser; the app refreshes the token itself after this",
+                    }],
+                ));
+            }
         } else {
             checks.push(Check::failing(
                 "asta",

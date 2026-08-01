@@ -903,7 +903,16 @@ impl BackendSupervisor {
 
         // Secrets always go on the process environment, in both modes — see
         // `secret_env` for why they must not travel on the command line.
-        for (name, value) in secret_env(&self.config.secrets, self.config.wsl.is_some()) {
+        let mut secrets = self.config.secrets.clone();
+        // A minted token beats a stored one. Asta access tokens last **seven days**
+        // (measured: `exp - iat` = 604800), so a token pasted into Settings becomes a
+        // weekly chore — and its expiry surfaces as "the theorizer returned no task id",
+        // which names neither the token nor the fix.
+        if let Some(token) = mint_asta_token(&self.config) {
+            secrets.retain(|(name, _)| name != "ASTA_TOKEN");
+            secrets.push(("ASTA_TOKEN".to_string(), token));
+        }
+        for (name, value) in secret_env(&secrets, self.config.wsl.is_some()) {
             command.env(name, value);
         }
 
@@ -1054,6 +1063,62 @@ impl Drop for BackendSupervisor {
             }
         }
     }
+}
+
+/// Ask the `asta` CLI for a fresh access token, where the backend runs.
+///
+/// **Why the app does this instead of the user.** Asta access tokens last seven days
+/// (`exp - iat` = 604800 on a real one), so storing one in the keychain means re-pasting
+/// it every week — and when it lapses the failure reads "the Asta theorizer returned no
+/// task id", which names neither the token nor the fix. `asta auth login` already leaves a
+/// *refresh* credential behind, and `print-token --refresh` turns that into a valid access
+/// token on demand. So the app mints one per launch and the researcher logs in once.
+///
+/// Run at spawn rather than at window-open: this can cost seconds on a cold WSL distro,
+/// and by here we are already starting the backend, which the user is waiting on anyway.
+///
+/// `None` on any failure — no CLI, not logged in, a changed flag. The stored token (if
+/// any) still applies, and the Setup pane reports a missing `asta` separately.
+fn mint_asta_token(config: &BackendConfig) -> Option<String> {
+    if std::env::var_os("MINIME_NO_ASTA_MINT").is_some() {
+        return None;
+    }
+    let argv = config.shell_argv("asta auth print-token --raw --refresh 2>/dev/null");
+    let (program, rest) = argv.split_first()?;
+    let output = Command::new(program)
+        .args(rest)
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // A JWT and nothing else. The CLI prints a decoded header/payload without `--raw`, and
+    // a friendly "please log in" on stderr — neither of which is a credential, and both of
+    // which would otherwise be handed to the backend as if they were one.
+    if !looks_like_a_jwt(&token) {
+        tracing::debug!("asta did not return a token; using whatever is stored");
+        return None;
+    }
+    tracing::info!("minted a fresh Asta token from the CLI");
+    Some(token)
+}
+
+/// Whether a string is shaped like a JWT: three dot-separated base64url segments.
+///
+/// Never logs or returns the value — this is only ever asked *about* a secret.
+fn looks_like_a_jwt(value: &str) -> bool {
+    let mut parts = value.split('.');
+    let shaped = |part: Option<&str>| {
+        part.is_some_and(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        })
+    };
+    shaped(parts.next()) && shaped(parts.next()) && shaped(parts.next()) && parts.next().is_none()
 }
 
 /// Stop the sidecar and everything it spawned.
@@ -1426,6 +1491,27 @@ mod tests {
         let command = BackendConfig::default().setup_script();
         assert!(!command.contains("MINIME_BUNDLED_SOURCE"), "{command}");
         std::env::remove_var("MINIME_BUNDLED_BACKEND");
+    }
+
+    #[test]
+    fn only_something_shaped_like_a_token_is_treated_as_one() {
+        // Without `--raw` the CLI pretty-prints a decoded header and payload, and when
+        // nobody is logged in it prints prose. Handing either to the backend as a
+        // credential produces an authentication failure that blames the wrong thing.
+        assert!(looks_like_a_jwt(
+            "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJhYmMifQ.c2ln-bmF0dXJl_x"
+        ));
+        for not_a_token in [
+            "",
+            "JWT Header:",
+            "{\n  \"alg\": \"RS256\"\n}",
+            "Not logged in. Run `asta auth login`.",
+            "one.two",
+            "one.two.three.four",
+            "has spaces.in it.here",
+        ] {
+            assert!(!looks_like_a_jwt(not_a_token), "{not_a_token:?}");
+        }
     }
 
     #[test]

@@ -2272,3 +2272,37 @@ be sitting in front of the app waiting to say yes.
 
 **Unverified:** no background task has been started, so no background approval has ever
 been rendered or answered. The shape is measured; the round trip is not.
+
+## 32. The Asta token expires every seven days — so the app mints it (2026-08-01)
+
+**Reported symptom:** the theorizer failing repeatedly with *"The Asta theorizer returned
+no task id — likely cause: missing or expired Asta access token"*, on a machine where
+`asta auth print-token` worked perfectly.
+
+Both were true. Decoding a real token: `exp - iat` = **604800 seconds — seven days**. So a
+token pasted into Settings is a weekly chore, and when it lapses the failure names neither
+the token nor the fix. Worse under WSL: being signed in on the *Windows* side proves
+nothing, because the backend runs inside the distro.
+
+`asta auth login` already leaves a **refresh** credential behind, and
+`asta auth print-token --raw --refresh` turns it into a valid access token on demand. So
+the app now mints one **per launch**, and the researcher signs in once.
+
+Three details:
+
+- **At spawn, not at window-open.** This can cost seconds on a cold WSL distro, and by
+  then the user is already waiting on a backend start.
+- **Shape-checked before use.** Without `--raw` the CLI pretty-prints a decoded header and
+  payload; with nobody signed in it prints prose. Handing either to the backend as a
+  credential produces an authentication failure that blames the wrong thing, so only a
+  three-segment base64url JWT is accepted — asked *about* the value, never logging it.
+- **Silent fallback.** No CLI, not signed in, a changed flag — the stored token still
+  applies and the Setup pane reports the real problem separately.
+
+The preflight check was upgraded to match: `command -v asta` said *installed*, which is not
+*usable*. It now asks the CLI for a token, so an expired login is caught at the pane with a
+**Sign in to Asta** button rather than in the middle of a research question.
+
+**Verified:** the mint command run against a real CLI returns a 1015-character
+three-segment JWT and nothing else; the non-raw form begins `JWT Header:` and is rejected
+by the guard. The pane reports "installed and signed in". 76 tests.
