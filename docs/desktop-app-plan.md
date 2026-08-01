@@ -2306,3 +2306,23 @@ The preflight check was upgraded to match: `command -v asta` said *installed*, w
 **Verified:** the mint command run against a real CLI returns a 1015-character
 three-segment JWT and nothing else; the non-raw form begins `JWT Header:` and is rejected
 by the guard. The pane reports "installed and signed in". 76 tests.
+
+### The gap signing in from the pane exposed
+
+On Windows the **Sign in to Asta** button worked — browser, Auth0, "Authentication
+successful", and the pane went to **6 ok**. The theorizer still failed.
+
+Because the token is minted when the backend **starts**, and the backend had been running
+since before the sign-in. Every check was green and the thing still did not work, which is
+the worst state a diagnostic pane can be in: it was telling the truth about the machine and
+the wrong thing about the session.
+
+A successful sign-in now says so in the fix output — *"Close and reopen the app: the
+backend reads your Asta sign-in when it starts."*
+
+**The durable fix, not built:** have the overlay read the token from a small file at command
+time rather than from the process environment, so the app can refresh it into a *running*
+backend. `_command_env()` already reads `ASTA_TOKEN` at call time for exactly this kind of
+reason — but it runs on the event loop, where `langgraph dev`'s blocking-call guard rejects
+filesystem syscalls, so the read has to move somewhere off the loop first. That also fixes
+the seven-day expiry landing mid-session rather than between launches.

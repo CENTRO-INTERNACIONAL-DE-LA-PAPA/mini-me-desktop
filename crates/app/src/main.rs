@@ -1010,6 +1010,19 @@ impl Workbench {
                             fix.done = true;
                             fix.ok = ok;
                             fix.lines.push(format!("— {note}"));
+                            // Credentials are read into the backend's environment when it
+                            // *starts*, so signing in while it runs changes nothing until
+                            // it is restarted. Saying so is the difference between a fix
+                            // that works and one that looks broken — signing in from this
+                            // pane and then watching the same failure is exactly what
+                            // happened the first time (docs §32).
+                            if ok && fix.label.contains("Sign in") {
+                                fix.lines.push(
+                                    "— Close and reopen the app: the backend reads your \
+                                     Asta sign-in when it starts."
+                                        .into(),
+                                );
+                            }
                             workbench.status = format!(
                                 "{}: {note}",
                                 if ok { "done" } else { "failed" }
