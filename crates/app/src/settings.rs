@@ -33,11 +33,6 @@ pub struct Provider {
     /// A model id that actually exists, so a fresh install has something that works
     /// rather than an empty field.
     pub suggested_model: &'static str,
-    /// The environment variable LangChain reads for this provider's key.
-    ///
-    /// Normally unused — the key travels in the run request (§20). It matters for runs
-    /// the backend starts *itself*, which cannot carry one: see `background_key_env`.
-    pub key_env: &'static str,
 }
 
 pub const PROVIDERS: [Provider; 5] = [
@@ -46,35 +41,30 @@ pub const PROVIDERS: [Provider; 5] = [
         label: "Anthropic",
         needs_base_url: false,
         suggested_model: "claude-sonnet-4-5",
-        key_env: "ANTHROPIC_API_KEY",
     },
     Provider {
         id: "openai",
         label: "OpenAI",
         needs_base_url: false,
         suggested_model: "gpt-5.4",
-        key_env: "OPENAI_API_KEY",
     },
     Provider {
         id: "google",
         label: "Google",
         needs_base_url: false,
         suggested_model: "gemini-2.5-pro",
-        key_env: "GOOGLE_API_KEY",
     },
     Provider {
         id: "mistral",
         label: "Mistral",
         needs_base_url: false,
         suggested_model: "mistral-large-latest",
-        key_env: "MISTRAL_API_KEY",
     },
     Provider {
         id: "custom",
         label: "Custom (OpenAI-compatible)",
         needs_base_url: true,
         suggested_model: "openai/gpt-4o-mini",
-        key_env: "OPENAI_API_KEY",
     },
 ];
 
@@ -281,34 +271,14 @@ pub fn keychain_status() -> Result<()> {
 /// The two Asta credentials, which — unlike the model key — genuinely have to reach the
 /// backend as environment variables: the `asta` CLI reads them from its environment when
 /// `execute` runs a command, so there is no in-request path for them (docs §20).
+///
+/// **The model key is deliberately not on this list, and background work is not an
+/// exception.** It briefly was, to feed runs the async-subagent middleware starts itself
+/// with no config; the overlay now forwards the conversation's own config onto those runs
+/// instead (docs §38). That is both more correct — a `custom` endpoint needs its
+/// `base_url`, which no environment variable carries — and safer, since the environment
+/// here is one the agent's own `execute` tool can read.
 pub const ASTA_SECRETS: [&str; 2] = ["ASTA_TOKEN", "ASTA_API_KEY"];
-
-/// The model key as an **environment variable**, for runs the backend starts itself.
-///
-/// Normally the key travels in the run request and never touches the environment (§20) —
-/// which is right for turns *we* create. Background work is different: the async-subagent
-/// middleware calls `client.runs.create(thread_id, assistant_id, input=…)` with **no
-/// config at all**, so the run it starts carries neither `model_config` nor `__llm_keys`.
-/// Upstream then falls back to the WorkOS vault, which this app deliberately does not
-/// have, and the run dies with "The async subagent encountered an error" (docs §37).
-///
-/// LangChain reads the provider's own variable when no key is passed, so putting it on the
-/// backend process is what lets a background run resolve a model.
-///
-/// **Only when background work is on.** With it off, nothing needs this and the key stays
-/// out of the environment entirely, which is the stronger posture and the default.
-pub fn model_key_env(settings: &Settings) -> Vec<(String, String)> {
-    if !settings.async_subagents {
-        return Vec::new();
-    }
-    let Some(spec) = provider(&settings.provider) else {
-        return Vec::new();
-    };
-    match secret(&settings.key_name()) {
-        Some(key) => vec![(spec.key_env.to_string(), key)],
-        None => Vec::new(),
-    }
-}
 
 pub fn asta_env() -> Vec<(String, String)> {
     ASTA_SECRETS
@@ -385,27 +355,6 @@ mod tests {
             ..Default::default()
         };
         assert!(!nonsense.problems(true).is_empty());
-    }
-
-    #[test]
-    fn the_model_key_reaches_the_environment_only_for_background_work() {
-        // With background work off the key stays out of the environment entirely — the
-        // stronger posture, and the default. With it on the key must be there, because a
-        // run the middleware starts carries no config and cannot be handed one.
-        let off = Settings {
-            async_subagents: false,
-            ..Default::default()
-        };
-        assert!(model_key_env(&off).is_empty());
-
-        // Every provider names a variable LangChain actually reads.
-        for provider in &PROVIDERS {
-            assert!(provider.key_env.ends_with("_API_KEY"), "{}", provider.id);
-        }
-        // `custom` is an OpenAI-compatible endpoint, so it uses OpenAI's variable —
-        // matching `PROVIDER_SPECS` upstream, where its lc_provider is `openai`.
-        assert_eq!(super::provider("custom").unwrap().key_env, "OPENAI_API_KEY");
-        assert_eq!(super::provider("google").unwrap().key_env, "GOOGLE_API_KEY");
     }
 
     #[test]

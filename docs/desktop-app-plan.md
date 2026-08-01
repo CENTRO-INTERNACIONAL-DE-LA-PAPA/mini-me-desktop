@@ -2694,3 +2694,71 @@ the seam is thinner than it looked. Co-deploying the graph was free; the *run cr
 upstream's, and anything the request has to carry is out of our reach. A wrapper around
 `start_async_task` in the overlay could inject config properly, and is the better fix if a
 second such gap appears.
+
+## 38. The real reason background work failed — and it was never the key (2026-08-01)
+
+§37 was right about the mechanism and wrong about the consequence. `client.runs.create()`
+does pass no config, but the missing key was the *smaller* half of what that costs. The
+larger half is on the very next line of our own code:
+
+```rust
+// protocol.rs — the config every foreground turn sends
+"recursion_limit": 10_000,
+```
+
+with the comment we wrote ourselves months ago: *"LangGraph defaults to 25 supersteps, and
+one turn already spends ~22 on middleware alone before any delegation."* A background
+worker **is a whole Mini-Me coordinator** (§30). Started with no config it gets the default
+25, spends ~22 on middleware, and dies before doing any work — on any provider, with or
+without a key. That is why §37's fix changed nothing.
+
+### Wrapping `start_async_task`, as §37 predicted
+
+The overlay now replaces exactly one of the middleware's five tools. The other four
+address a run by id and need nothing we have. The replacement reads the *live* run's config
+via `langgraph.config.get_config()` and forwards it onto the background run:
+
+```python
+FORWARDED_CONFIG_KEYS = ("model_config", "__llm_keys", "__is_for_execution__")
+```
+
+An **allowlist, not a copy** — `configurable` also holds `thread_id`, `checkpoint_ns` and
+`run_id`, and forwarding those would point the background run at the conversation's own
+thread. Verified against a fake client: the run is created on the `background` graph with
+the researcher's model, their key, `recursion_limit: 10000`, and no trace of the chat's
+thread id.
+
+This is strictly better than §37's environment variable, which is now **reverted**:
+
+- it carries `base_url`, so a `custom` (OpenRouter/Groq/Ollama) endpoint works — no
+  environment variable can express that;
+- it uses the model the researcher actually picked, rather than upstream's
+  `MINIME_DEFAULT_MODEL` fallback of `openai::gpt-5.4` (`backend/models.py:24`);
+- it keeps the key **out of an environment the agent's own `execute` tool can read**.
+
+So the key stays request-only whether background work is on or off, and §37's "deliberate
+trade" is withdrawn — there was no need to make it.
+
+### The placeholder that cost two rounds
+
+*"The async subagent encountered an error"* is not upstream being unhelpful; it is upstream
+having nothing to say:
+
+```python
+error_detail = run.get("error")
+result["error"] = str(error_detail) if error_detail else "The async subagent encountered an error."
+```
+
+The dev server records no `error` on the run record, so that branch always fires. The real
+text **is** available — on the thread's pending task, which `/threads/{id}/state` returns
+and this app was already fetching for approvals. `thread_state` now reads it, and the Jobs
+panel shows the exception line instead of the word "error".
+
+That fixes a second defect found while looking: the watcher derived `success` from an empty
+`next`, and a *failed* run leaves its task pending — so `next` is never empty and a dead
+worker read as **running forever**. It only ever showed "error" because the researcher
+happened to ask, which routed through `check_async_task`. Failure now beats every other
+signal in that derivation.
+
+This is the same lesson as §35, and it has now cost this project twice: **when a component
+reports a cause rather than an error, go get the real output before fixing anything.**

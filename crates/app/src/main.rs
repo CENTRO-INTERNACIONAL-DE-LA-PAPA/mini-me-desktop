@@ -2874,13 +2874,21 @@ impl Workbench {
                         .text_sm()
                         .child(format!("{mark} {}", task.agent_name.replace('_', " "))),
                 )
-                .child(div().text_color(rgb(MUTED)).text_xs().child(
-                    if task.needs_approval() {
-                        "waiting for your approval".to_string()
-                    } else {
-                        task.status.clone()
-                    },
-                ))
+                .child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        // The failure the server recorded, in place of the bare word
+                        // "error" — which is all this said while two rounds went into
+                        // guessing what had actually happened (docs §38).
+                        .text_color(rgb(if task.error.is_some() { ERROR } else { MUTED }))
+                        .text_xs()
+                        .child(match (&task.error, task.needs_approval()) {
+                            (Some(error), _) => error.clone(),
+                            (None, true) => "waiting for your approval".to_string(),
+                            (None, false) => task.status.clone(),
+                        }),
+                )
                 .when(!task.description.is_empty(), |row| {
                     row.child(
                         div()

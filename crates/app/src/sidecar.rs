@@ -299,10 +299,13 @@ impl Sidecar {
             loop {
                 tokio::time::sleep(TASK_POLL_INTERVAL).await;
                 match client.thread_state(&task.thread_id).await {
-                    Ok((status, pending)) => {
-                        let changed = status != task.status || pending != task.pending;
-                        task.status = status;
-                        task.pending = pending;
+                    Ok(state) => {
+                        let changed = state.status != task.status
+                            || state.pending != task.pending
+                            || state.error != task.error;
+                        task.status = state.status;
+                        task.pending = state.pending;
+                        task.error = state.error;
                         if !changed {
                             continue;
                         }

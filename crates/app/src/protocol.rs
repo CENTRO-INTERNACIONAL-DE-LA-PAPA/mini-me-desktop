@@ -215,6 +215,14 @@ pub struct AsyncTask {
     /// Set when the background run has stopped at the approval gate. Until this existed,
     /// such a task simply hung — nothing in the UI could answer it (docs §31).
     pub pending: Option<ApprovalRequest>,
+    /// What actually went wrong, read off the worker's own thread.
+    ///
+    /// Not the same thing as the middleware's report. `check_async_task` looks for an
+    /// `error` on the *run* record, the dev server does not put one there, and so it says
+    /// "The async subagent encountered an error" — a placeholder that cost this project
+    /// two rounds of guessing (docs §38). The server does record the failure on the
+    /// thread's pending task; this is that text.
+    pub error: Option<String>,
 }
 
 impl AsyncTask {
@@ -238,6 +246,41 @@ impl AsyncTask {
     pub fn needs_approval(&self) -> bool {
         self.pending.is_some()
     }
+}
+
+/// What a background worker's own thread reports about itself.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ThreadState {
+    /// Derived, not reported: `error` beats a pending approval beats an empty `next`.
+    pub status: String,
+    pub pending: Option<ApprovalRequest>,
+    pub error: Option<String>,
+}
+
+/// The failure text out of a thread task's `error`, whatever shape it arrives in.
+///
+/// A string in the versions measured, but LangGraph has shipped an `{message, type}`
+/// object here too, and a panel that renders `[object]` teaches the user nothing.
+fn error_text(value: &Value) -> Option<String> {
+    let text = match value {
+        Value::Null => return None,
+        Value::String(text) => text.clone(),
+        Value::Object(fields) => fields
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| value.to_string()),
+        other => other.to_string(),
+    };
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    // Python tracebacks arrive whole. The last line is the exception itself, which is the
+    // part that names the cause; the frames above it are the backend's business, and the
+    // panel is a column roughly forty characters wide.
+    let last = text.lines().rev().find(|line| !line.trim().is_empty())?;
+    Some(last.trim().to_string())
 }
 
 /// Pull background tasks out of a `values` payload.
@@ -278,6 +321,7 @@ fn decode_async_tasks(artifacts: &Value, root: &Value) -> Vec<AsyncTask> {
                     .unwrap_or_default()
                     .to_string(),
                 pending: None,
+                error: None,
             })
         })
         .collect();
@@ -469,7 +513,7 @@ impl LangGraphClient {
     /// Returns `(status, pending_approval)`. `status` is derived rather than reported: an
     /// interrupted thread is *waiting*, an empty `next` with no interrupt is *done*, and
     /// anything else is still working.
-    pub async fn thread_state(&self, thread_id: &str) -> Result<(String, Option<ApprovalRequest>)> {
+    pub async fn thread_state(&self, thread_id: &str) -> Result<ThreadState> {
         let resp = self
             .http
             .get(format!(
@@ -506,18 +550,40 @@ impl LangGraphClient {
         let pending = decode_interrupt(&json!({"__interrupt__": from_tasks}))
             .or_else(|| state.get("values").and_then(decode_interrupt));
 
+        // The same tasks carry the failure, when there is one. This is the only place the
+        // real text is available: the run record has no `error` field on the dev server,
+        // which is why the middleware falls back to a placeholder (docs §38).
+        let error = state
+            .get("tasks")
+            .and_then(Value::as_array)
+            .and_then(|tasks| {
+                tasks
+                    .iter()
+                    .filter_map(|task| task.get("error"))
+                    .find_map(error_text)
+            });
+
         let next_is_empty = state
             .get("next")
             .and_then(Value::as_array)
             .is_some_and(|next| next.is_empty());
-        let status = if pending.is_some() {
+        // Failure first. A run that died leaves its task pending, so `next` is *not*
+        // empty — without this the watcher reported "running" forever and the panel only
+        // ever learned of a failure when the researcher happened to ask.
+        let status = if error.is_some() {
+            "error"
+        } else if pending.is_some() {
             "interrupted"
         } else if next_is_empty {
             "success"
         } else {
             "running"
         };
-        Ok((status.to_string(), pending))
+        Ok(ThreadState {
+            status: status.to_string(),
+            pending,
+            error,
+        })
     }
 
     /// Answer a background worker's approval request, on **its** thread.
@@ -1505,6 +1571,31 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_background_run_reports_what_went_wrong() {
+        // The shape `/threads/{id}/state` returns: the failure hangs off the pending task,
+        // and `next` is *not* empty because the task that died is still pending. Both
+        // matter — reading only `next` is what made a dead worker read as "running", and
+        // reading only the run record is why the middleware says "The async subagent
+        // encountered an error" and nothing else (docs §38).
+        let traceback = "Traceback (most recent call last):\n  File \"agent.py\", line 9\n\
+             langgraph.errors.GraphRecursionError: Recursion limit of 25 reached";
+        assert_eq!(
+            error_text(&json!(traceback)).as_deref(),
+            Some("langgraph.errors.GraphRecursionError: Recursion limit of 25 reached"),
+            "the exception line is the part that names the cause"
+        );
+
+        // An object-shaped error must not render as JSON at the user.
+        assert_eq!(
+            error_text(&json!({"message": "no API key configured", "type": "ValueError"})).as_deref(),
+            Some("no API key configured")
+        );
+        // A task that simply has not failed contributes nothing.
+        assert_eq!(error_text(&json!(null)), None);
+        assert_eq!(error_text(&json!("   ")), None);
+    }
+
+    #[test]
     fn an_interrupted_background_task_is_not_mistaken_for_a_finished_one() {
         // `interrupted` means "waiting for a person", not "over". Treating it as terminal
         // would stop the watcher on the exact tick that needed a human.
@@ -1515,6 +1606,7 @@ mod tests {
             status: "interrupted".into(),
             description: String::new(),
             pending: None,
+            error: None,
         };
         assert!(!waiting.is_finished(), "interrupted is not terminal");
         for status in ["success", "error", "timeout", "cancelled"] {
