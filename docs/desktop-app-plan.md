@@ -2809,3 +2809,21 @@ The pattern in all three: a placeholder error was treated as evidence. §35 reco
 lesson once — *recover the real output before fixing anything* — and it was not applied,
 because the "real output" here was never going to appear in a log the run never reached. The
 sharper rule: **when there is no error text anywhere, suspect the constructor, not the run.**
+
+## 40. Background work verified end to end (2026-08-01)
+
+`✓ background worker · success` on Windows, and the **approval gate fired** — the path §31
+built and that nothing had ever exercised, because both earlier tests were literature work
+that never touches `execute`. A background worker now generates data, asks permission on
+its own thread, and the answer reaches it. P6.5 is done.
+
+One defect surfaced the moment it worked: the approval card grew with the command. An
+agent-written script is hundreds of lines, the card took all of it, and Approve/Reject —
+along with the composer beneath them — were pushed off the bottom of the window. A gate
+whose buttons cannot be reached is worse than no gate: it hangs the task and hides why.
+
+The command now scrolls inside a capped region and the decision sits outside it, in **both**
+cards — the foreground one and the Jobs-panel one, which has the same failure at a narrower
+width. This is the third time the fix has been *"actions outside the scroll area,
+`flex_none` on anything that must not be squeezed"*, and the third time it was found from a
+screenshot rather than from the code.

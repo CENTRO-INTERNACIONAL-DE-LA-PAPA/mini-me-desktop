@@ -1437,9 +1437,13 @@ impl Workbench {
     /// runs on the researcher's own machine with their permissions, and the only
     /// meaningful review is of the actual text (docs §19).
     fn approval_card(&self, request: &ApprovalRequest, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut card = div()
+        let card = div()
             .flex()
             .flex_col()
+            // Natural height, never stretched and never squeezed. Without this the card
+            // grew with the command and pushed its own buttons — and the composer — off
+            // the bottom of the window, which is exactly the review it exists to force.
+            .flex_none()
             .w_full()
             .min_w_0()
             .gap_2()
@@ -1454,21 +1458,36 @@ impl Workbench {
                     .child("RUN THIS ON YOUR MACHINE?"),
             );
 
+        // The command scrolls; the decision does not. An agent-written script runs to
+        // hundreds of lines, and the whole point of this gate is that Approve and Reject
+        // stay reachable no matter how long the thing being approved is.
+        let mut commands = div()
+            .id("approval-commands")
+            .flex()
+            .flex_col()
+            .gap_2()
+            .w_full()
+            .min_w_0()
+            .max_h(px(260.))
+            .overflow_y_scroll();
+
         for action in &request.actions {
             if !action.description.is_empty() {
-                card = card.child(
+                commands = commands.child(
                     div()
                         .w_full()
                         .min_w_0()
+                        .flex_none()
                         .text_color(rgb(MUTED))
                         .text_xs()
                         .child(action.description.clone()),
                 );
             }
-            card = card.child(
+            commands = commands.child(
                 div()
                     .w_full()
                     .min_w_0()
+                    .flex_none()
                     .p_2()
                     .border_1()
                     .border_color(rgb(BORDER))
@@ -1478,7 +1497,7 @@ impl Workbench {
             );
         }
 
-        card.child(
+        card.child(commands).child(
             div()
                 .flex()
                 .flex_row()
@@ -2901,14 +2920,28 @@ impl Workbench {
                 });
 
             if let Some(request) = &task.pending {
+                let task_id = task.task_id.clone();
+                // Capped and scrollable, for the same reason the foreground card is: a
+                // background worker writes long scripts, and a command tall enough to push
+                // Approve out of the panel is a gate the researcher cannot answer.
+                let mut commands = div()
+                    .id(SharedString::from(format!("bg-commands-{task_id}")))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .w_full()
+                    .min_w_0()
+                    .max_h(px(200.))
+                    .overflow_y_scroll();
                 for action in &request.actions {
                     // The command verbatim, exactly as the foreground card shows it: this
                     // runs on the researcher's own machine, and the only meaningful review
                     // is of the actual text (docs §19).
-                    row = row.child(
+                    commands = commands.child(
                         div()
                             .w_full()
                             .min_w_0()
+                            .flex_none()
                             .p_2()
                             .border_1()
                             .border_color(rgb(BORDER))
@@ -2917,7 +2950,7 @@ impl Workbench {
                             .child(action.detail.clone()),
                     );
                 }
-                let task_id = task.task_id.clone();
+                row = row.child(commands);
                 row = row.child(
                     div()
                         .flex()
