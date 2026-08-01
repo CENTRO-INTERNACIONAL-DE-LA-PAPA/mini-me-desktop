@@ -1877,3 +1877,34 @@ not from a machine.
   compiled-in paths that assume a checkout. `MINIME_OVERLAY_DIR`/`MINIME_SCRIPTS_DIR`
   already exist for a packaged layout; nothing has been packaged.
 - **Windows Job Object teardown** (§9) — still the last item on P6.4b.
+
+### 25b. What rendering it on Windows found (2026-08-01)
+
+The Setup pane ran on Windows and the guided install worked: **5 ok · 1 optional**, the
+backend provisioned into `~/.local/share/mini-me-desktop/backend` inside the distro, with
+the streamed output ending in "Done — Mini-Me is ready." Three things the screenshot
+exposed, none of which a test would have.
+
+**The pane named a different overlay than the launch would use.** It reported
+`/mnt/c/Users/…/mini-me-desktop/overlay` while the launch command was already preferring
+the copy provisioning had installed inside the distro. A check that reports a different
+path from the one in use is worse than no check — it sends anyone debugging to the wrong
+file. Both now come from `BackendConfig::overlay_candidates()`, one definition, so they
+cannot drift again.
+
+**The Asta CLI is a button now.** `allenai/asta-plugins` is **public** (Apache 2.0) —
+unlike Mini-Me — so unlike the backend it needs no credentials and really can be installed
+in one click: `uv tool install git+…@v0.101.1 && uv tool update-shell`. Pinned to the
+version the Asta plugin itself pins (`skills/asta-cli/SKILL.md`), with the tag verified
+against the remote and the install actually run end to end (it produced a working
+`asta 0.101.1`). Bump both together — a CLI newer than the skills driving it is how a
+subcommand goes missing.
+
+**A PATH hazard that was working by luck.** The app launches the backend with `bash -lc`
+— a login shell that is *not* interactive — which reads `~/.profile` and **never**
+`~/.bashrc`, because Ubuntu's `.bashrc` returns in its first few lines when `$-` has no
+`i`. The setup script had been writing its `~/.local/bin` PATH line only to `.bashrc`,
+where the backend could never see it. It worked anyway because Ubuntu's default `.profile`
+adds that directory itself. That is luck, and `asta` is precisely the tool that has to be
+found on the backend's PATH at execute time, so the script now guarantees it (guarded, so
+a distro that already handles it is left alone).

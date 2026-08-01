@@ -378,6 +378,14 @@ fn launch_command_for(
     argv
 }
 
+/// The overlay copy that provisioning installs next to the checkout.
+///
+/// One definition, used by both the launch expression and the Setup pane's check — the
+/// two spelled it separately and immediately disagreed.
+fn provisioned_overlay(backend_dir: &str) -> String {
+    format!("{}/.desktop-overlay", backend_dir.trim_end_matches('/'))
+}
+
 /// Where the overlay is found inside the distro, as a shell expression.
 ///
 /// Provisioning copies the overlay to `<checkout>/.desktop-overlay`, and that copy is
@@ -390,7 +398,7 @@ fn launch_command_for(
 /// round trip costs seconds on every start, and there would be nowhere to cache the
 /// answer that would not go stale the moment the user re-provisioned.
 fn overlay_expression(wsl_dir: &str, fallback: &str) -> String {
-    let local = quote_path(&format!("{}/.desktop-overlay", wsl_dir.trim_end_matches('/')));
+    let local = quote_path(&provisioned_overlay(wsl_dir));
     format!(
         "$(if [ -f {local}/sitecustomize.py ]; then printf %s {local}; \
          else printf %s {fallback}; fi)",
@@ -662,6 +670,28 @@ impl BackendConfig {
         } else {
             overlay_dir.to_string_lossy().into_owned()
         })
+    }
+
+    /// Where the overlay might be, **in the order the launch command prefers**.
+    ///
+    /// Exists so the Setup pane and the launch cannot drift apart. They did: the pane
+    /// reported the copy on the Windows drive while the launch was already preferring the
+    /// one provisioning had installed inside the distro — a check that reports a different
+    /// path from the one actually used is worse than no check.
+    ///
+    /// Host mode has one candidate on purpose. Provisioning copies the overlay there too,
+    /// but on a host run the repo's own copy is always reachable, so preferring one over
+    /// the other would add a branch that can never change the outcome.
+    pub fn overlay_candidates(&self) -> Vec<String> {
+        let Some(fallback) = self.overlay_for_backend() else {
+            return Vec::new();
+        };
+        let mut candidates = Vec::new();
+        if self.wsl.is_some() {
+            candidates.push(provisioned_overlay(&self.backend_dir()));
+        }
+        candidates.push(fallback);
+        candidates
     }
 
     /// The provisioning command: `bash …/setup-wsl.sh <checkout>`, spelled for the

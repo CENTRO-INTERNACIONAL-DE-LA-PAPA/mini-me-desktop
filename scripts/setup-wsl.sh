@@ -50,16 +50,31 @@ if ! command -v git >/dev/null 2>&1; then
 fi
 ok "git $(git --version | awk '{print $3}')"
 
+# Make ~/.local/bin reachable by the shell the *app* launches the backend with.
+#
+# That shell is `bash -lc` — a login shell that is NOT interactive — and it reads
+# ~/.profile, never ~/.bashrc: Ubuntu's .bashrc returns in its first few lines when
+# `$-` has no `i`. So a PATH line written only to .bashrc is invisible to the backend,
+# which is where `asta` has to be found when a command runs. Ubuntu's default .profile
+# happens to add this directory already; that is luck, and this makes it a guarantee.
+ensure_local_bin_on_path() {
+  local file
+  for file in "$HOME/.profile" "$HOME/.bashrc"; do
+    [ -e "$file" ] || : > "$file"
+    if ! grep -qsF '.local/bin' "$file"; then
+      printf '\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "$file"
+      ok "added ~/.local/bin to PATH in $(basename "$file")"
+    fi
+  done
+}
+
 if ! command -v uv >/dev/null 2>&1; then
   say "Installing uv (the Python package manager)"
   curl -LsSf https://astral.sh/uv/install.sh | sh
-  # uv lands in ~/.local/bin; make it visible to this script and to future shells.
+  # Visible to the rest of *this* script, too.
   export PATH="$HOME/.local/bin:$PATH"
-  if ! grep -qs '\.local/bin' "$HOME/.bashrc"; then
-    echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
-    ok "added ~/.local/bin to PATH in ~/.bashrc"
-  fi
 fi
+ensure_local_bin_on_path
 ok "uv $(uv --version | awk '{print $2}')"
 
 # ------------------------------------------------- where the source comes from

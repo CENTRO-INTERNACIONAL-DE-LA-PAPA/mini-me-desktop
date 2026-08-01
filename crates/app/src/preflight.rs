@@ -24,7 +24,7 @@ use std::io::Read as _;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::backend::{quote_path, BackendConfig, Execution};
+use crate::backend::{quote_path, shell_quote, BackendConfig, Execution};
 
 /// Ceiling for one probe. Generous because a **cold** WSL distro genuinely takes
 /// several seconds to boot on the first `wsl.exe` call of a session, and reporting
@@ -33,6 +33,16 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Why a check was skipped when the runtime itself never answered.
 const RUNTIME_FIRST: &str = "the runtime above has to work";
+
+/// Where the `asta` CLI comes from.
+///
+/// **Public** (`allenai/asta-plugins`, Apache 2.0), unlike Mini-Me itself — so this one
+/// really can be a button: no token, no account, nothing to ask the user for.
+///
+/// Pinned to the version the Asta plugin pins (`skills/asta-cli/SKILL.md`), and the tag
+/// was checked against the remote rather than assumed. Bump both together: a CLI newer
+/// than the skills that drive it is how a subcommand goes missing.
+const ASTA_INSTALL_URL: &str = "git+https://github.com/allenai/asta-plugins.git@v0.101.1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
@@ -354,8 +364,10 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
         checks.push(Check::pass(
             "runtime",
             if in_wsl { "WSL2 runtime" } else { "Shell" },
+            // Not the full location — the header already carries it, and repeating a long
+            // path in a 420px pane pushed everything else off the useful part of the row.
             if in_wsl {
-                format!("a distro answered ({})", config.location())
+                "a distro started and answered".to_string()
             } else {
                 "bash is available on this machine".to_string()
             },
@@ -502,19 +514,30 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
     // `wsl_path` cannot translate — Python simply imports nothing, no error is raised,
     // and the backend quietly tries the *remote* sandbox instead. The user sees an
     // authentication failure about a service they thought they had stopped using.
-    if let Some(overlay) = config.overlay_for_backend() {
+    let candidates = config.overlay_candidates();
+    if let Some(overlay) = candidates.last().cloned() {
         if can_probe {
-            let marker = format!("{}/sitecustomize.py", overlay.trim_end_matches('/'));
-            let found = if in_wsl {
-                probe(&config.shell_argv(&format!("test -f {}", quote_path(&marker)))).ok
-            } else {
-                std::path::Path::new(&marker).is_file()
-            };
-            if found {
+            // In the launch command's own preference order, so the pane names the copy the
+            // backend will actually import. Reporting a different path from the one in use
+            // is worse than reporting nothing — it sends anyone debugging to the wrong file.
+            let found = candidates.iter().find(|candidate| {
+                let marker = format!("{}/sitecustomize.py", candidate.trim_end_matches('/'));
+                if in_wsl {
+                    probe(&config.shell_argv(&format!("test -f {}", quote_path(&marker)))).ok
+                } else {
+                    std::path::Path::new(&marker).is_file()
+                }
+            });
+            if let Some(found) = found {
+                let installed = found != &overlay;
                 checks.push(Check::pass(
                     "overlay",
                     "Host execution overlay",
-                    format!("reachable at {overlay}"),
+                    if installed {
+                        format!("installed with the backend: {found}")
+                    } else {
+                        format!("reachable at {found}")
+                    },
                 ));
             } else {
                 checks.push(Check::failing(
@@ -565,12 +588,22 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
                 "asta",
                 "Asta CLI",
                 State::Warn,
-                "not on the backend's PATH",
-                vec![Fix::Manual(
-                    "Literature search and the theorizer need it. Install it where the \
-                     backend runs, then store ASTA_TOKEN and ASTA_API_KEY in Settings."
-                        .into(),
-                )],
+                "not installed — literature search and the theorizer need it",
+                vec![
+                    Fix::Run {
+                        label: "Install the Asta CLI",
+                        argv: config.shell_argv(&format!(
+                            "uv tool install {} && uv tool update-shell",
+                            shell_quote(ASTA_INSTALL_URL)
+                        )),
+                        note: "about a minute",
+                    },
+                    Fix::Manual(
+                        "Afterwards, paste ASTA_TOKEN and ASTA_API_KEY in Settings — the \
+                         CLI reads them from its environment when a command runs."
+                            .into(),
+                    ),
+                ],
             ));
         }
     } else {
