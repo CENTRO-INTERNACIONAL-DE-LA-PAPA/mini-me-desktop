@@ -421,6 +421,34 @@ fn markdown_block(block: &markdown::Block) -> gpui::AnyElement {
 /// Advisory content is different from state: a payload without suggestions means "no new
 /// advice", not "the advice is withdrawn". Everything else — mission, completed, pending —
 /// is authoritative and replaces.
+/// Turn dropped files into a prompt the researcher can edit before sending.
+///
+/// **Loaded into the composer, never sent.** Dropping a file is a clumsy gesture — it
+/// happens by accident — and the same rule already governs the suggestion cards: the app
+/// prepares the question, the person asks it (docs §12).
+///
+/// Directories are named as directories, because "analyse this folder of readings" is a
+/// real request and the agent can list it itself.
+fn prompt_for_dropped(paths: &[String], directories: &[bool]) -> String {
+    match paths {
+        [] => String::new(),
+        [one] => {
+            if directories.first().copied().unwrap_or(false) {
+                format!("Have a look at the files in {one} and tell me what is there.")
+            } else {
+                format!("Analyse the data in {one}. Start by describing what it contains.")
+            }
+        }
+        many => format!(
+            "Analyse these files together:\n{}",
+            many.iter()
+                .map(|path| format!("- {path}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ),
+    }
+}
+
 /// Whether a turn failure is really the machine not being set up.
 ///
 /// Matching on message text is not elegant, and it is the honest option here: these
@@ -688,6 +716,45 @@ impl Workbench {
         // start one — see `Sidecar::fetch_project`.
         workbench.refresh_project(cx);
         workbench
+    }
+
+    /// A file was dropped on the window.
+    ///
+    /// The one thing the web app cannot do: the researcher's data is already on this
+    /// machine, and this is the whole distance between "here is my CSV" and an analysis —
+    /// no upload, no copy, no bucket.
+    fn files_dropped(&mut self, paths: &[std::path::PathBuf], cx: &mut Context<Self>) {
+        if paths.is_empty() {
+            return;
+        }
+        if self.streaming {
+            self.status = "finish this turn before adding files".into();
+            cx.notify();
+            return;
+        }
+        // Translated to the backend's view of the filesystem — on Windows the agent runs
+        // inside WSL, where `C:\…` is `/mnt/c/…`.
+        let translated: Vec<String> = paths
+            .iter()
+            .map(|path| self.sidecar.path_for_backend(path))
+            .collect();
+        let directories: Vec<bool> = paths.iter().map(|path| path.is_dir()).collect();
+
+        let prompt = prompt_for_dropped(&translated, &directories);
+        self.composer
+            .update(cx, |composer, cx| composer.set_text(prompt, cx));
+        self.restore_focus = true;
+        self.status = match paths.len() {
+            1 => format!(
+                "added {} — edit the question and press Enter",
+                paths[0]
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| translated[0].clone())
+            ),
+            n => format!("added {n} files — edit the question and press Enter"),
+        };
+        cx.notify();
     }
 
     /// Run the first-run checks and show the result.
@@ -2490,6 +2557,9 @@ impl Render for Workbench {
         // `relative` so the palette's `absolute` overlay is positioned against the
         // window rather than the page origin.
         let root = div()
+            // An id makes the root a drop target; without one the platform's file-drop
+            // event has nowhere to land.
+            .id("workbench")
             .relative()
             .flex()
             .size_full()
@@ -2497,6 +2567,13 @@ impl Render for Workbench {
             .text_color(rgb(TEXT))
             .on_action(cx.listener(Self::toggle_palette))
             .on_action(cx.listener(Self::toggle_settings))
+            // Anywhere on the window, not a designated strip: someone dragging a file has
+            // their eyes on the file, not on a target.
+            .on_drop(cx.listener(
+                |workbench, paths: &gpui::ExternalPaths, _window, cx| {
+                    workbench.files_dropped(paths.paths(), cx);
+                },
+            ))
             .child(self.rail())
             .child(self.chat_pane(cx));
 
@@ -2749,6 +2826,40 @@ mod tests {
                 _ => assert!(!field.is_secret(), "{}", field.label()),
             }
         }
+    }
+
+    #[test]
+    fn a_dropped_file_becomes_a_question_the_backend_can_act_on() {
+        // The path has to be spelled the way the *agent* would open it. On Windows the
+        // agent lives inside WSL, so a prompt naming `C:\…` would send it looking for a
+        // file that does not exist there — and the researcher would have no idea why.
+        let _env = backend::env_lock::hold();
+        let mut config = backend::BackendConfig::default();
+        config.wsl = Some(backend::WslTarget {
+            distro: None,
+            dir: "~/Mini-Me".into(),
+        });
+        let translated =
+            config.path_for_backend(std::path::Path::new(r"C:\Users\LENOVO\Documents\yield.csv"));
+        assert_eq!(translated, "/mnt/c/Users/LENOVO/Documents/yield.csv");
+
+        let prompt = prompt_for_dropped(&[translated.clone()], &[false]);
+        assert!(prompt.contains(&translated), "{prompt}");
+        assert!(!prompt.contains('\\'), "no Windows path survives: {prompt}");
+
+        // A directory is a different request from a file.
+        let folder = prompt_for_dropped(&["/mnt/c/readings".into()], &[true]);
+        assert!(folder.contains("files in"), "{folder}");
+
+        // Several files are one question about all of them, not several questions.
+        let many = prompt_for_dropped(
+            &["/mnt/c/a.csv".into(), "/mnt/c/b.csv".into()],
+            &[false, false],
+        );
+        assert!(many.contains("/mnt/c/a.csv") && many.contains("/mnt/c/b.csv"), "{many}");
+        assert_eq!(many.matches("- ").count(), 2, "{many}");
+
+        assert!(prompt_for_dropped(&[], &[]).is_empty());
     }
 
     #[test]

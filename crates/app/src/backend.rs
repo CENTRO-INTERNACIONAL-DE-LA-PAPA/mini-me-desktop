@@ -751,6 +751,23 @@ impl BackendConfig {
         command
     }
 
+    /// Spell a path on *this* machine the way the backend would have to open it.
+    ///
+    /// This is what makes "drop a file on the window" work at all on Windows: the file is
+    /// at `C:\Users\…\yield.csv`, and the agent lives inside a distro where that same file
+    /// is `/mnt/c/Users/…/yield.csv`. The researcher should never have to know that.
+    ///
+    /// The file is **referenced, not copied**. Keeping a scientist's data where they put
+    /// it is most of the point of a desktop app; copying it into a working directory
+    /// creates a second version that goes stale the moment they edit the first.
+    pub fn path_for_backend(&self, path: &Path) -> String {
+        if self.wsl.is_some() {
+            wsl_path(path)
+        } else {
+            path.to_string_lossy().into_owned()
+        }
+    }
+
     /// A copy with the credentials stripped.
     ///
     /// Anything that only needs the *shape* of the configuration takes this, so the

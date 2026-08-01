@@ -57,7 +57,16 @@ if [ -d "$VENDOR/.git" ]; then
   say "Updating the bundled copy in $VENDOR"
   # Best-effort: on a bundle cloned from a local path there may be no reachable remote,
   # and that is fine — the pin below works from what is already here.
-  git -C "$VENDOR" fetch --tags origin 2>/dev/null || ok "no remote to fetch from (using what is here)"
+  #
+  # `GIT_TERMINAL_PROMPT=0` is the load-bearing part. Redirecting stderr does *not*
+  # suppress git's credential prompt — that is written straight to the terminal — so
+  # without this the script stops and asks for a GitHub password it cannot use, which is
+  # precisely the thing it exists to avoid.
+  if GIT_TERMINAL_PROMPT=0 git -C "$VENDOR" fetch --tags origin >/dev/null 2>&1; then
+    ok "fetched the latest from GitHub"
+  else
+    ok "no reachable remote — using the copy already here"
+  fi
 else
   # A failed attempt can leave an empty directory behind, which blocks the clone.
   [ -d "$VENDOR" ] && [ -z "$(ls -A "$VENDOR" 2>/dev/null)" ] && rmdir "$VENDOR"

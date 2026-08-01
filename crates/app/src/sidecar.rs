@@ -96,6 +96,11 @@ impl Sidecar {
         &self.base_url
     }
 
+    /// A dropped file's path, as the backend would have to open it.
+    pub fn path_for_backend(&self, path: &std::path::Path) -> String {
+        self.config.path_for_backend(path)
+    }
+
     pub fn execution(&self) -> &'static str {
         self.execution
     }

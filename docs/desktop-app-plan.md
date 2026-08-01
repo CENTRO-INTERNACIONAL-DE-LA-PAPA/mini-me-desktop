@@ -18,7 +18,7 @@ sidecar** that the client spawns and supervises.
 | **P6.3.5** — visuals pass, starting with **markdown rendering** | ✅ **verified on Windows** — emphasis, inline code, links, headings, lists and fenced code render; accented Spanish came through intact. Tables deferred by agreement. §16/§23 |
 | **Native-Windows probe** | ✅ **answered** — `cmd.exe` is ruled out by upstream's *own* tool code (POSIX pipes, `mkdir -p`, `shlex.quote`), so WSL2 stays the v1 runtime and the installer's job is guided provisioning. Native-plus-Git-Bash is a documented half-day experiment. §21 |
 | **P6.4a** — settings panel + keychain secrets | ✅ **built** — a turn runs with no provider key in the backend's `.env`; keys come from the OS keychain and ride in the run request, and `ctrl-,` opens a Settings pane (provider, model, keys, execution). **Never rendered — needs a look on Windows.** §20/§22/§22b |
-| **P6.4b** — native affordances + shipping | 🟡 **guided install works** — Setup opens itself, says what is missing, and **runs the fix** with its output on screen; the backend now ships *with the app* (`vendor/`) so a private-repo clone never blocks a non-coder, provisions into an app-**owned** dir inside the distro, and never touches a checkout it did not create. Verified end to end on Linux; **no Windows path run yet**. Remaining: cancel a running fix, a prebuilt binary, Job Object teardown. §24/§25 |
+| **P6.4b** — native affordances + shipping | ✅ **ships** — `bundle-backend.sh` → `--release` → `package.sh` gives a 21 MB folder; **the packaged build ran a real turn on Windows**. Job Object reaps the process tree, resources resolve beside the executable, and **drop a file on the window** turns it into a question (the MVP's "one thing the web app can't"). Remaining: click-to-update, cancel a running fix. §24/§25/§26/§28 |
 | **P6.5** — async subagents + Jobs panel | ⬜ planned — the payoff that most justifies going native. §14 |
 
 **Health of the bet.** The two risks that could have killed this are both down:
@@ -2023,3 +2023,57 @@ key binding — it is soft wrap, cursor movement across visual lines, and a grow
 height. Half-implemented text editing is worse than none, and pasted newlines are still
 flattened to spaces (`composer.rs`), which is a real if minor loss when someone pastes a
 multi-paragraph question. Sized as its own piece of work rather than squeezed in here.
+
+## 28. It ships, and it does the thing the web app can't (2026-08-01)
+
+### Verified on Windows, end to end
+
+`bundle-backend.sh` → `cargo build --release` → `package.sh` → a **21 MB** folder, and the
+packaged binary ran a real coordinator turn with the spine populating beside it. That is
+P6.4b's core proven on the target platform, not inferred from Linux.
+
+Two corrections to what this plan assumed:
+
+- **Size: 21 MB, not the 1–2 GB estimated.** That figure came from the *debug* binary
+  (718 MB); release strips it to 18 MB, and the backend source is 3.5 MB. The bulk lands
+  on the user's machine at install time, when `uv sync` builds the environment — which is
+  the right place for it, since those wheels are machine-specific anyway.
+- **Release builds need `fxc.exe`.** gpui pre-compiles its HLSL shaders only when
+  `debug_assertions` is off (`build.rs:259`), so `cargo build` works for months and the
+  build that actually ships fails. Its search is `GPUI_FXC_PATH`, then `PATH`, then **one
+  hardcoded SDK version** — a different Windows SDK is enough to fail. Build-time only:
+  the bytecode is `include!`d into the binary, so nobody receiving the zip needs an SDK.
+
+Two papercuts fixed along the way, both the same shape — *a prompt that cannot be
+satisfied*. `git clone --reference <local> <url>` still contacts the remote for refs, so
+the bundle asked for a GitHub password despite existing to avoid one; and redirecting
+stderr does **not** suppress git's credential prompt, which is written straight to the
+terminal, so the update path asked again. `GIT_TERMINAL_PROMPT=0` is the fix for the
+second. Git inside WSL has no credential helper at all, which is a third variant, now
+documented.
+
+### Local file → analysis
+
+The MVP bar was "one thing the web app can't do" (§5). This is it: **drop a file on the
+window** and the question is prepared for you. No upload, no bucket, no copy — the
+researcher's data is already on this machine, and that is the entire advantage of being
+native.
+
+Three decisions:
+
+- **The path is translated to the backend's view.** On Windows the agent lives inside WSL,
+  where `C:\Users\…\yield.csv` is `/mnt/c/Users/…/yield.csv`. A prompt naming the Windows
+  path would send it looking for a file that does not exist there, and the researcher
+  would have no idea why. `path_for_backend` does this once, and a test asserts no
+  backslash survives.
+- **Referenced, never copied.** Keeping a scientist's data where they put it is most of
+  the point; a copy in a working directory goes stale the moment they edit the original.
+- **Loaded into the composer, not sent.** Dropping a file is a clumsy gesture that happens
+  by accident, and this is the same rule the suggestion cards already follow — the app
+  prepares the question, the person asks it.
+
+Dropping is accepted anywhere on the window rather than on a designated strip: someone
+dragging a file has their eyes on the file.
+
+**Unverified:** never dropped anything. `on_drop` is wired to the root and the translation
+is tested, but no file has been dragged onto a real window.
