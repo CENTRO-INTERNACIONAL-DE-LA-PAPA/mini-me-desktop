@@ -91,6 +91,36 @@ extra, so plain `uv sync` leaves you with no `langgraph` entry point. Keys do **
 go in that checkout's `.env` any more: they live in your OS keychain and travel with
 each request, so the app needs no secrets on disk.
 
+## Release builds need `fxc.exe` (Windows)
+
+A **release** build of `gpui 0.2.2` pre-compiles its HLSL shaders; a debug build does not
+(`build.rs:259` gates the step on `#[cfg(not(debug_assertions))]`). So `cargo build` can
+work for months and `cargo build --release` still fail with:
+
+```
+Failed to find fxc.exe
+```
+
+`fxc.exe` is the DirectX shader compiler from the **Windows SDK**. gpui looks for it in
+`GPUI_FXC_PATH`, then on `PATH`, then at one hardcoded SDK version
+(`10.0.26100.0`) — so having a *different* SDK version installed is enough to fail.
+
+Point it at yours (PowerShell):
+
+```powershell
+$env:GPUI_FXC_PATH = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter fxc.exe -ErrorAction SilentlyContinue | Sort-Object { $_.FullName -notmatch '\\x64\\' }, FullName -Descending | Select-Object -First 1).FullName
+```
+
+Check it found something (`echo $env:GPUI_FXC_PATH`), then build. To avoid repeating it
+every session:
+
+```powershell
+setx GPUI_FXC_PATH "$env:GPUI_FXC_PATH"
+```
+
+If the search comes back empty there is no SDK on the machine: install **Windows 11 SDK**
+from the Visual Studio Installer (Individual components), then try again.
+
 ## Build
 
 On Linux (Ubuntu 22.04), install the GPUI system dev headers once:
