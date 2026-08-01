@@ -2173,14 +2173,17 @@ impl Workbench {
         // What the running fix is printing. Shown *below* the checks so the list stays in
         // one place, and only while there is something to show.
         if let Some(fix) = &self.running_fix {
+            // The actions sit **outside** the scrolling log. They were inside it, and the
+            // box — a flex child, so shrinkable — squeezed until "Open the sign-in page"
+            // was cut in half and unreadable. A button you cannot read is worse than no
+            // button: the user knows something is there and cannot use it.
             let mut log = div()
-                .id("fix-output")
                 .flex()
                 .flex_col()
                 .w_full()
                 .min_w_0()
-                .max_h(px(280.))
-                .overflow_y_scroll()
+                .flex_none()
+                .gap_2()
                 .p_2()
                 .border_1()
                 .border_color(rgb(if !fix.done {
@@ -2273,8 +2276,17 @@ impl Workbench {
                         ),
                 );
             }
+            let mut output = div()
+                .id("fix-output")
+                .flex()
+                .flex_col()
+                .w_full()
+                .min_w_0()
+                .flex_none()
+                .max_h(px(200.))
+                .overflow_y_scroll();
             for line in &fix.lines {
-                log = log.child(
+                output = output.child(
                     div()
                         .w_full()
                         .min_w_0()
@@ -2284,14 +2296,14 @@ impl Workbench {
                 );
             }
             if fix.lines.is_empty() {
-                log = log.child(
+                output = output.child(
                     div()
                         .text_color(rgb(MUTED))
                         .text_xs()
                         .child("starting…"),
                 );
             }
-            pane = pane.child(log);
+            pane = pane.child(log.child(output));
         }
 
         pane.child(

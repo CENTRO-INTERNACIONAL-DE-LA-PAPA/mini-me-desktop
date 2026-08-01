@@ -2442,3 +2442,12 @@ save that would not immediately start rotting.
 edge**, with the text unselectable. A URL is a single unbreakable word — it cannot wrap at
 420px, and what falls off the end is the device code, the one part a person has to read and
 type. It is now extracted and shown large on its own line, above the link buttons.
+
+**And the actions moved out of the scroll area.** The buttons were children of the log box
+— a flex child, therefore shrinkable — so it squeezed until "Open the sign-in page" was
+sliced in half and unreadable. A button you cannot read is worse than no button: the user
+can see something is there and cannot use it. The block now holds the header, the code and
+the buttons at a fixed size, and only the output lines scroll beneath them.
+
+Three rounds on one small panel, each found only by looking at a screenshot. Rendering is
+not something this project can reason its way to from a Linux box.
