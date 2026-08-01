@@ -16,13 +16,14 @@ mod preflight;
 mod protocol;
 mod settings;
 mod sidecar;
+mod workspace;
 
 use std::sync::Arc;
 
 use anyhow::Context as _;
 use futures::StreamExt;
 use gpui::{
-    actions, div, prelude::*, px, rgb, size, App, Application, Bounds, ClipboardItem, Context,
+    actions, div, img, prelude::*, px, rgb, size, App, Application, Bounds, ClipboardItem, Context,
     Entity, Focusable, FontStyle, FontWeight, HighlightStyle, KeyBinding, SharedString, StyledText,
     Window, WindowBounds, WindowOptions,
 };
@@ -550,6 +551,13 @@ struct Message {
     steps: Vec<String>,
     /// One group per subagent invocation.
     agents: Vec<AgentTrace>,
+    /// Figures this turn drew, shown inline beneath the answer.
+    ///
+    /// Found by diffing the thread's workspace across the turn rather than reported by the
+    /// agent: a plot is usually written by a `matplotlib` script inside `execute`, which
+    /// registers no artifact and tells the client nothing. The file appearing on disk is
+    /// the only signal there is (docs §42).
+    plots: Vec<std::path::PathBuf>,
 }
 
 impl Message {
@@ -559,6 +567,7 @@ impl Message {
             body,
             steps: Vec::new(),
             agents: Vec::new(),
+            plots: Vec::new(),
         }
     }
 
@@ -687,6 +696,9 @@ struct Workbench {
     /// still gone on "New thread" or a restart, and announced in the status bar the whole
     /// time it is in force, so it cannot be in effect without being visible (docs §41).
     approve_conversation: bool,
+    /// The figures present when the current turn started, so what it drew can be told
+    /// apart from what was already on disk.
+    plots_before_turn: Vec<std::path::PathBuf>,
     /// Background tasks whose remaining commands are pre-approved, by task id.
     ///
     /// Separate from the turn grant because a background worker has no turn to belong to:
@@ -773,6 +785,7 @@ impl Workbench {
             pending_approval: None,
             approve_rest_of_turn: false,
             approve_conversation: false,
+            plots_before_turn: Vec::new(),
             approve_tasks: std::collections::HashSet::new(),
             restore_focus: false,
         };
@@ -1185,6 +1198,9 @@ impl Workbench {
         self.transcript.push(Message::new("you", prompt.clone()));
         // The assistant message — text *and* activity — streams into this entry.
         self.transcript.push(Message::new("mini-me", String::new()));
+        // The figures that already existed. Whatever is there at the end and not here now
+        // is what this turn drew — see `Message::plots`.
+        self.plots_before_turn = self.workspace_images();
 
         let mut events = self.sidecar.submit(prompt);
         cx.spawn(async move |this, cx| {
@@ -1304,7 +1320,46 @@ impl Workbench {
 
     /// A turn ended (either way): collapse its activity trace, drop the assistant
     /// placeholder if nothing at all arrived, and hand the field back to the user.
+    /// The thread's own output directory, or `None` before the first turn creates one.
+    fn thread_workspace(&self) -> Option<std::path::PathBuf> {
+        self.sidecar
+            .thread_id()
+            .map(|thread_id| workspace::thread_dir(&thread_id))
+    }
+
+    /// Every figure currently in this thread's workspace.
+    fn workspace_images(&self) -> Vec<std::path::PathBuf> {
+        self.thread_workspace()
+            .map(|dir| workspace::images(&dir))
+            .unwrap_or_default()
+    }
+
+    /// Attach whatever this turn drew to the message that drew it.
+    ///
+    /// A diff rather than a report, because nothing reports it: a figure is written by a
+    /// plotting script inside `execute`, which registers no artifact (docs §42).
+    fn collect_plots(&mut self) {
+        let before: std::collections::HashSet<_> = self.plots_before_turn.drain(..).collect();
+        let drawn: Vec<_> = self
+            .workspace_images()
+            .into_iter()
+            .filter(|path| !before.contains(path))
+            .collect();
+        if drawn.is_empty() {
+            return;
+        }
+        if let Some(message) = self
+            .transcript
+            .iter_mut()
+            .rev()
+            .find(|message| message.role == "mini-me")
+        {
+            message.plots = drawn;
+        }
+    }
+
     fn finish_turn(&mut self, cx: &mut Context<Self>) {
+        self.collect_plots();
         self.pending_approval = None;
         // Blanket approval expires with the turn it was given for. Carrying it into the
         // next question would turn a bounded decision into a permanent one, which is
@@ -1406,6 +1461,45 @@ impl Workbench {
                     }
                     block = block.child(rendered);
                 }
+            }
+            // Figures last: the answer explains them, so it should be read first.
+            for (plot, path) in message.plots.iter().enumerate() {
+                let name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let opened = path.clone();
+                block = block.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .w_full()
+                        .min_w_0()
+                        .gap_1()
+                        .child(
+                            // Capped, not scaled to the pane: a 2000px figure would
+                            // otherwise push the transcript's width around as it loads.
+                            img(path.clone())
+                                .max_w_full()
+                                .max_h(px(420.))
+                                .object_fit(gpui::ObjectFit::Contain),
+                        )
+                        .child(
+                            div()
+                                .id(("plot", index * 64 + plot))
+                                .text_color(rgb(MUTED))
+                                .text_xs()
+                                .hover(|style| style.cursor_pointer())
+                                .child(format!("{name} — click to open"))
+                                .on_click(move |_event, _window, _cx| {
+                                    // The figure at full size, in whatever the researcher
+                                    // normally views images with.
+                                    if let Err(error) = workspace::open(&opened) {
+                                        tracing::warn!(%error, "could not open a figure");
+                                    }
+                                }),
+                        ),
+                );
             }
             col = col.child(block);
         }
@@ -2989,7 +3083,13 @@ impl Workbench {
                         .child(match (&task.error, task.needs_approval()) {
                             (Some(error), _) => error.clone(),
                             (None, true) => "waiting for your approval".to_string(),
-                            (None, false) => task.status.clone(),
+                            // What it is *doing*, not just that it is doing something —
+                            // "running" for ten minutes tells a researcher nothing about
+                            // whether to wait (docs §42).
+                            (None, false) => match (&task.activity, task.is_finished()) {
+                                (Some(activity), false) => format!("{} · {activity}", task.status),
+                                _ => task.status.clone(),
+                            },
                         }),
                 )
                 .when(!task.description.is_empty(), |row| {
@@ -3162,6 +3262,30 @@ impl Workbench {
             .border_t_1()
             .border_color(rgb(BORDER))
             .child(section_label("OUTPUTS"));
+
+        // Everything this conversation wrote, in one folder the researcher already owns.
+        // This *is* "download all the documents": the files are in their own Documents
+        // directory (`workspace.rs`), so there is nothing to package — the ask was only
+        // ever for a way to get at them.
+        if let Some(dir) = self.thread_workspace() {
+            section = section.child(
+                div()
+                    .id("open-workspace")
+                    .px_2()
+                    .py_1()
+                    .border_1()
+                    .border_color(rgb(ACCENT))
+                    .text_color(rgb(ACCENT))
+                    .text_xs()
+                    .hover(|style| style.cursor_pointer())
+                    .child("Open this conversation's files")
+                    .on_click(move |_event, _window, _cx| {
+                        if let Err(error) = workspace::open(&dir) {
+                            tracing::warn!(%error, "could not open the workspace folder");
+                        }
+                    }),
+            );
+        }
 
         if self.buckets.is_empty() {
             return section.child(

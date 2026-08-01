@@ -194,6 +194,14 @@ impl Sidecar {
         rx
     }
 
+    /// The thread this conversation is on, once a turn has created one.
+    ///
+    /// `None` before the first turn. The workspace directory is named after it, so this is
+    /// what lets the app find the files a conversation produced.
+    pub fn thread_id(&self) -> Option<String> {
+        self.thread.lock().expect("thread id mutex").clone()
+    }
+
     /// Forget the current thread, so the next turn starts a fresh conversation.
     ///
     /// The backend keeps the old thread — nothing is deleted; we simply stop adding
@@ -302,10 +310,12 @@ impl Sidecar {
                     Ok(state) => {
                         let changed = state.status != task.status
                             || state.pending != task.pending
-                            || state.error != task.error;
+                            || state.error != task.error
+                            || state.activity != task.activity;
                         task.status = state.status;
                         task.pending = state.pending;
                         task.error = state.error;
+                        task.activity = state.activity;
                         if !changed {
                             continue;
                         }

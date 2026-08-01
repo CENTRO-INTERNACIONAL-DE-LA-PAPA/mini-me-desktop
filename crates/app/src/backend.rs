@@ -549,12 +549,24 @@ fn execution_env(execution: &Execution, for_wsl: bool, approve: bool) -> Vec<(St
     } else {
         overlay_dir.to_string_lossy().into_owned()
     };
+    // Where a turn's files land. Chosen by the *app* rather than left to the backend's
+    // default of `~/.mini-me/workspaces`, which inside WSL is a place a Windows researcher
+    // cannot reach — see `workspace.rs` for why that one decision is what makes outputs
+    // findable, downloadable and renderable at all.
+    let workspace_root = crate::workspace::root();
+    let workspace = if for_wsl {
+        wsl_path(&workspace_root)
+    } else {
+        workspace_root.to_string_lossy().into_owned()
+    };
+
     vec![
         ("MINIME_EXECUTION_BACKEND".to_string(), "local".to_string()),
         (
             "MINIME_APPROVE_EXECUTE".to_string(),
             if approve { "1" } else { "0" }.to_string(),
         ),
+        (crate::workspace::WORKSPACE_ENV.to_string(), workspace),
         // Python imports `sitecustomize` from here at startup; that is the whole
         // injection mechanism. Prepended, so an existing PYTHONPATH survives.
         ("PYTHONPATH".to_string(), overlay),
@@ -1576,6 +1588,17 @@ mod tests {
 
     #[test]
     fn local_execution_reaches_the_interpreter_inside_wsl() {
+        let _env = env_lock::hold();
+        // Pinned, or this test reads whichever `Documents` the machine running it has.
+        // A Windows-shaped path on purpose: the distro cannot open `C:\…`, so the
+        // translation to `/mnt/c/…` is the part that has to work.
+        // SAFETY: the lock above serialises every test that touches the environment.
+        unsafe {
+            std::env::set_var(
+                crate::workspace::WORKSPACE_ENV,
+                r"C:\Users\Researcher\Documents\Mini-Me",
+            )
+        };
         let execution = Execution::Local {
             overlay_dir: PathBuf::from(r"C:\repo\overlay"),
         };
@@ -1592,10 +1615,21 @@ mod tests {
         );
         let command = argv.last().expect("the bash -lc payload");
         // Assignments must land *before* `exec`, or the server never sees them.
-        assert!(
-            command.contains("MINIME_EXECUTION_BACKEND='local' MINIME_APPROVE_EXECUTE='1' PYTHONPATH="),
-            "{command}"
-        );
+        let exec_at = command.find("exec ").expect("an exec");
+        for assignment in [
+            "MINIME_EXECUTION_BACKEND='local'",
+            "MINIME_APPROVE_EXECUTE='1'",
+            // The workspace the *app* chose, spelled the way the distro can open it —
+            // this is what puts the researcher's outputs somewhere Explorer can reach
+            // and the chat can render (docs §42).
+            "MINIME_LOCAL_WORKSPACE='/mnt/c/Users/Researcher/Documents/Mini-Me'",
+            "PYTHONPATH=",
+        ] {
+            let at = command
+                .find(assignment)
+                .unwrap_or_else(|| panic!("{assignment} missing from: {command}"));
+            assert!(at < exec_at, "{assignment} lands after exec: {command}");
+        }
         assert!(command.contains("PYTHONPATH=\"$(if [ -f "), "{command}");
         // The in-distro copy is preferred, with the repo's copy on the Windows drive as
         // the fallback — the whole point being that a working install stops depending on

@@ -223,6 +223,9 @@ pub struct AsyncTask {
     /// two rounds of guessing (docs §38). The server does record the failure on the
     /// thread's pending task; this is that text.
     pub error: Option<String>,
+    /// The subagent or tool the worker is on right now, so "running" for ten minutes says
+    /// something about *what* is running (docs §42).
+    pub activity: Option<String>,
 }
 
 impl AsyncTask {
@@ -255,6 +258,46 @@ pub struct ThreadState {
     pub status: String,
     pub pending: Option<ApprovalRequest>,
     pub error: Option<String>,
+    /// What the worker is doing right now — the subagent it delegated to, or the tool it
+    /// is running. `None` when nothing has been called yet.
+    pub activity: Option<String>,
+}
+
+/// What the worker is busy with, from the last tool call in its thread.
+///
+/// A background worker is a whole coordinator, so "running" alone says nothing: it might
+/// be reading papers, running a script or writing a report, for ten minutes, and the panel
+/// showed the same word throughout. The `task` tool carries the subagent's name in its
+/// arguments, which is the interesting case; every other tool is reported by its own name.
+fn last_activity(state: &Value) -> Option<String> {
+    let messages = state
+        .get("values")
+        .and_then(|values| values.get("messages"))
+        .and_then(Value::as_array)?;
+
+    for message in messages.iter().rev() {
+        let Some(calls) = message.get("tool_calls").and_then(Value::as_array) else {
+            continue;
+        };
+        let Some(call) = calls.last() else { continue };
+        let name = call.get("name").and_then(Value::as_str)?.trim();
+        if name.is_empty() {
+            continue;
+        }
+        // Delegation: `task(subagent_type=…)` is deepagents' own subagent tool, and the
+        // subagent's name is the only part of this a researcher cares about.
+        let delegated = call
+            .get("args")
+            .and_then(|args| args.get("subagent_type").or_else(|| args.get("agent_type")))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|agent| !agent.is_empty());
+        return Some(match delegated {
+            Some(agent) => agent.replace('_', " "),
+            None => name.replace('_', " "),
+        });
+    }
+    None
 }
 
 /// The failure text out of a thread task's `error`, whatever shape it arrives in.
@@ -322,6 +365,7 @@ fn decode_async_tasks(artifacts: &Value, root: &Value) -> Vec<AsyncTask> {
                     .to_string(),
                 pending: None,
                 error: None,
+                activity: None,
             })
         })
         .collect();
@@ -583,6 +627,7 @@ impl LangGraphClient {
             status: status.to_string(),
             pending,
             error,
+            activity: last_activity(&state),
         })
     }
 
@@ -1571,6 +1616,39 @@ mod tests {
     }
 
     #[test]
+    fn a_background_worker_says_which_subagent_it_is_running() {
+        // Delegation: `task(subagent_type=…)`. The subagent's name is the only part of
+        // this a researcher cares about — "running" alone said nothing for ten minutes.
+        let delegating = json!({"values": {"messages": [
+            {"tool_calls": [{"name": "write_todos", "args": {}}]},
+            {"tool_calls": [{"name": "task", "args": {"subagent_type": "academic_researcher"}}]},
+        ]}});
+        assert_eq!(
+            last_activity(&delegating).as_deref(),
+            Some("academic researcher"),
+            "the newest call wins, and underscores are not for reading"
+        );
+
+        // A plain tool is reported under its own name.
+        let executing = json!({"values": {"messages": [
+            {"tool_calls": [{"name": "execute", "args": {"command": "python3 fit.py"}}]},
+        ]}});
+        assert_eq!(last_activity(&executing).as_deref(), Some("execute"));
+
+        // Messages with no tool calls are skipped rather than ending the search — the
+        // worker's own commentary sits between its calls.
+        let chatty = json!({"values": {"messages": [
+            {"tool_calls": [{"name": "read_file", "args": {}}]},
+            {"content": "Let me look at that."},
+        ]}});
+        assert_eq!(last_activity(&chatty).as_deref(), Some("read file"));
+
+        // Nothing has run yet, and a state with no messages at all.
+        assert_eq!(last_activity(&json!({"values": {"messages": []}})), None);
+        assert_eq!(last_activity(&json!({})), None);
+    }
+
+    #[test]
     fn a_failed_background_run_reports_what_went_wrong() {
         // The shape `/threads/{id}/state` returns: the failure hangs off the pending task,
         // and `next` is *not* empty because the task that died is still pending. Both
@@ -1607,6 +1685,7 @@ mod tests {
             description: String::new(),
             pending: None,
             error: None,
+            activity: None,
         };
         assert!(!waiting.is_finished(), "interrupted is not terminal");
         for status in ["success", "error", "timeout", "cancelled"] {

@@ -2866,3 +2866,43 @@ visible and revocable**:
 
 The permanent, cross-session version remains what it was: a Settings toggle the user has to
 go and find, worded *"Off is for automation, not a recommendation."*
+
+## 42. Outputs a researcher can actually see (2026-08-01)
+
+Three requests, one root cause: **the app did not know where the agent's files went.**
+
+The backend writes each thread's files to `~/.mini-me/workspaces/<thread>` — inside the WSL
+distro, which on Windows means `\\wsl.localhost\Ubuntu\home\<user>\…`. For a user base that
+is ~98% Windows and none of whom are expected to code, files they cannot find are files
+that do not exist.
+
+So the app now **chooses** that directory instead of letting the backend default, and puts
+it on the Windows side: `Documents\Mini-Me\<thread>`, passed in as `MINIME_LOCAL_WORKSPACE`.
+All three requests fall out of that one decision:
+
+1. **"A button to download all the documents."** There is nothing to package — the files
+   are already in the researcher's own Documents. *Open this conversation's files* in the
+   OUTPUTS panel opens the folder in Explorer.
+2. **"Generated plots should show in the chat."** The app can now read them. Figures appear
+   under the answer that produced them, capped at 420px, and clicking one opens it full
+   size. They are found by **diffing the workspace across the turn**, not by being
+   reported: a plot is written by a `matplotlib` script inside `execute`, which registers
+   no artifact and tells the client nothing. The file appearing on disk is the only signal
+   that exists.
+3. **"I cannot see which subagent is doing the job."** Separate fix: `thread_state` now
+   reads the last tool call off the worker's own thread, so the panel shows
+   `running · academic researcher` rather than `running` for ten minutes. `task` calls
+   report the subagent they delegated to; everything else reports the tool.
+
+The cost of the move is that writes cross WSL's 9p mount, which is genuinely slow for
+*many small* files — it is why the backend venv stays inside the distro (§25). A turn's
+outputs are a handful of CSVs, figures and reports, and being able to find them is worth
+more than the milliseconds.
+
+**Migration:** files written before this change stay where they are, under
+`~/.mini-me/workspaces` in the distro. Nothing is moved or deleted; new conversations use
+the new location.
+
+Also verified this round, and long outstanding: **the Windows Job Object works.** After
+closing the app, `wsl -- pgrep -af "langgraph dev"` prints nothing — the backend dies with
+its parent, so no orphaned server holds the port (§26).
