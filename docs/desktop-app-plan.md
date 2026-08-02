@@ -3180,3 +3180,74 @@ part still rendered flat and unbounded.
 
 Still ahead in P6.7, unchanged in priority: **visible scrollbars** (the highest-value single
 fix), a theme struct, and a component vocabulary.
+
+## 48. P6.7: a palette, a history, and files you can reach (2026-08-01)
+
+*"In general looks awful."* Four things named: a colour palette, conversations in the left
+panel with renaming, how to show a thread's files, and interactivity. Researched first —
+the sources are cited where they changed a decision.
+
+### The palette was one orange doing six jobs
+
+`main.rs` held seven `const`s, and the brand orange was used for section headings, links,
+buttons, the running mark, the host-execution warning and any border wanting attention.
+When everything is emphasised nothing is. That, more than any individual panel, is why the
+app read as amateur.
+
+`theme.rs` replaces them with **roles**, on the model every dark-mode system converges on
+([Muzli](https://muz.li/blog/dark-mode-design-systems-a-complete-guide-to-patterns-tokens-and-hierarchy/),
+[Imperavi](https://imperavi.com/blog/designing-semantic-colors-for-your-system/)):
+
+- **A surface ladder** — `BG` → `SURFACE` → `RAISED` → `OVERLAY`, so panels, rows and
+  popovers separate by *elevation* instead of by drawing more borders.
+- **Three text weights**, all AA: `TEXT`, `TEXT_MUTED`, `TEXT_FAINT`.
+- **Status colours of their own** — `SUCCESS`, `WARNING`, `ERROR`, `RUNNING` — so "finished"
+  and "clickable" stop looking identical.
+- **One rule for the accent: orange means you can act on this, and nothing else.**
+
+Two tests enforce it rather than trusting the eye: one computes WCAG contrast for every
+ink/surface pair and fails below 4.5:1, the other asserts the ladder actually ascends and
+that hover lifts. **The contrast test failed on first run** — `ERROR` on `RAISED` was
+4.30:1, and `TEXT_FAINT` 4.17:1 — so both shipped values are ones the build chose, not ones
+that looked fine.
+
+### The conversations existed all along
+
+The left rail was 64px holding one glyph. Meanwhile the backend had stored **every thread
+since the first launch** — the app simply never asked, so each session looked like the
+first and past work was unreachable, which for the researcher is the same as lost.
+
+`POST /threads/search` lists them; `PATCH /threads/{id}` names them. The sidebar is now
+220px with: newest-first list, click to reopen (transcript rebuilt from the thread's stored
+messages, figures re-read off disk), a **New** button, and **rename in place** — the row
+becomes a text field, the pattern chat apps use because it keeps the name next to the thing
+being named.
+
+**Auto-titling from the first prompt**, because a list of "New conversation" is a list of
+nothing — the convention across ChatGPT, Claude and Codex, all of which also allow manual
+rename, which is why both exist here
+([thefrontkit](https://thefrontkit.com/blogs/ai-chat-ui-best-practices),
+[codex#12564](https://github.com/openai/codex/issues/12564)).
+
+Titles live in **thread metadata**, not a local file: the name belongs to the conversation,
+survives a reinstall, and cannot drift out of sync with what it names.
+
+### Files, grouped by what you would do with them
+
+OUTPUTS now lists the thread's actual files above the agent-declared buckets, grouped
+**Figures → Data → Documents → Other** — categories about use, not format. Read off disk
+for the same reason plots are (§42): a file written by a script inside `execute` registers
+no artifact, and those are most of them. Each row shows a size and opens in whatever the
+researcher normally uses; figures first, because those are the ones you want to *look* at.
+
+### Interactivity
+
+Every row now responds to the pointer — `RAISED` on hover, `ACCENT_SOFT` for the selected
+conversation, and the rename control appears only on the row under the cursor via
+`group_hover`, so the list stays a list of names rather than a wall of controls.
+
+### Still ahead
+
+**Visible scrollbars** remain the highest-value single fix, and are still not done —
+`overflow_y_scroll` draws nothing, so scrollable content reads as cut off (§40). Then a
+`Button` component to end the copy-pasted eight-call button, bundled fonts, and SVG icons.

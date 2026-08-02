@@ -17,7 +17,8 @@ use tokio::sync::Mutex;
 
 use crate::backend::{BackendConfig, BackendSupervisor};
 use crate::protocol::{
-    AgentRef, AsyncTask, Decision, Job, LangGraphClient, ModelChoice, Project, TurnEvent, TurnOutcome,
+    AgentRef, AsyncTask, Conversation, Decision, Job, LangGraphClient, ModelChoice, Project,
+    TurnEvent, TurnOutcome,
 };
 
 /// Find (or start) the tally row for one subagent invocation, keyed by namespace so
@@ -231,6 +232,58 @@ impl Sidecar {
         });
 
         rx
+    }
+
+    /// The researcher's past conversations, newest first.
+    pub fn list_conversations(&self) -> mpsc::UnboundedReceiver<Vec<Conversation>> {
+        let (tx, rx) = mpsc::unbounded();
+        let base_url = self.base_url.clone();
+        self.runtime.spawn(async move {
+            let client = LangGraphClient::new(base_url);
+            // 200 is far past what the sidebar can usefully show and still one request.
+            match client.list_conversations(200).await {
+                Ok(conversations) => {
+                    let _ = tx.unbounded_send(conversations);
+                }
+                // Not an error the researcher needs: an empty sidebar says the same thing,
+                // and a backend that is still starting will answer the next refresh.
+                Err(error) => tracing::debug!(%error, "could not list conversations"),
+            }
+        });
+        rx
+    }
+
+    /// Reopen a conversation: switch to its thread and hand back its messages.
+    pub fn open_conversation(
+        &self,
+        thread_id: String,
+    ) -> mpsc::UnboundedReceiver<Vec<(String, String)>> {
+        let (tx, rx) = mpsc::unbounded();
+        let base_url = self.base_url.clone();
+        // Switch first, so a turn sent before the history arrives still lands on the right
+        // thread rather than silently starting a new one.
+        *self.thread.lock().expect("thread id mutex") = Some(thread_id.clone());
+        self.runtime.spawn(async move {
+            let client = LangGraphClient::new(base_url);
+            match client.conversation_messages(&thread_id).await {
+                Ok(messages) => {
+                    let _ = tx.unbounded_send(messages);
+                }
+                Err(error) => tracing::warn!(%error, "could not read a conversation"),
+            }
+        });
+        rx
+    }
+
+    /// Name a conversation. Fire-and-forget: the sidebar already shows the new name.
+    pub fn rename_conversation(&self, thread_id: String, title: String) {
+        let base_url = self.base_url.clone();
+        self.runtime.spawn(async move {
+            let client = LangGraphClient::new(base_url);
+            if let Err(error) = client.rename_conversation(&thread_id, &title).await {
+                tracing::warn!(%error, "could not rename a conversation");
+            }
+        });
     }
 
     /// Watch one long job until it stops moving, reporting every status change.

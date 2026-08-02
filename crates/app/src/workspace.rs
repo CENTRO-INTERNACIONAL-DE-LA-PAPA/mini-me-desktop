@@ -75,6 +75,120 @@ pub fn images(dir: &Path) -> Vec<PathBuf> {
     found.into_iter().map(|(_, path)| path).collect()
 }
 
+/// One file a conversation produced.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Output {
+    pub path: PathBuf,
+    pub name: String,
+    /// What it is, in the researcher's terms — the grouping key in the panel.
+    pub kind: Kind,
+    pub bytes: u64,
+}
+
+/// The kinds of output worth telling apart.
+///
+/// Deliberately about *what a researcher does with it*, not about file format: a figure is
+/// something you look at, data is something you open in a spreadsheet or load in a script,
+/// a document is something you read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Kind {
+    Figure,
+    Data,
+    Document,
+    Other,
+}
+
+impl Kind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Kind::Figure => "Figures",
+            Kind::Data => "Data",
+            Kind::Document => "Documents",
+            Kind::Other => "Other files",
+        }
+    }
+
+    fn of(path: &Path) -> Self {
+        let extension = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if IMAGE_EXTENSIONS.contains(&extension.as_str()) || extension == "svg" {
+            Kind::Figure
+        } else if matches!(extension.as_str(), "csv" | "tsv" | "xlsx" | "json" | "parquet") {
+            Kind::Data
+        } else if matches!(extension.as_str(), "md" | "txt" | "pdf" | "docx" | "html") {
+            Kind::Document
+        } else {
+            Kind::Other
+        }
+    }
+}
+
+/// Everything a conversation produced, grouped and newest first within each group.
+///
+/// Reads the directory rather than the agent's own artifact list, for the same reason
+/// plots are diffed off disk (§42): a file written by a script inside `execute` registers
+/// no artifact, and those are most of them.
+pub fn outputs(dir: &Path) -> Vec<(Kind, Vec<Output>)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(std::time::SystemTime, Output)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let metadata = entry.metadata().ok()?;
+            if !metadata.is_file() {
+                return None;
+            }
+            let name = path.file_name()?.to_str()?.to_string();
+            // Dotfiles are the agent's business, not the researcher's.
+            if name.starts_with('.') {
+                return None;
+            }
+            Some((
+                metadata.modified().ok()?,
+                Output {
+                    kind: Kind::of(&path),
+                    path,
+                    name,
+                    bytes: metadata.len(),
+                },
+            ))
+        })
+        .collect();
+    // Newest first: the file someone wants is nearly always the one just written.
+    found.sort_by(|a, b| b.0.cmp(&a.0));
+
+    let mut groups: Vec<(Kind, Vec<Output>)> = Vec::new();
+    for kind in [Kind::Figure, Kind::Data, Kind::Document, Kind::Other] {
+        let items: Vec<Output> = found
+            .iter()
+            .filter(|(_, output)| output.kind == kind)
+            .map(|(_, output)| output.clone())
+            .collect();
+        if !items.is_empty() {
+            groups.push((kind, items));
+        }
+    }
+    groups
+}
+
+/// A size a person can read at a glance.
+pub fn human_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{} KB", bytes.div_ceil(KB))
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 /// Open a folder in the platform's file manager.
 ///
 /// The whole of "download everything the agent made": the files are already sitting in the
@@ -138,6 +252,41 @@ mod tests {
 
         // A directory that does not exist is the normal state before the first write.
         assert!(images(&dir.join("nothing-here")).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn outputs_are_grouped_by_what_the_researcher_would_do_with_them() {
+        let dir = std::env::temp_dir().join(format!("minime-outputs-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a temp dir");
+        for name in [
+            "plot_yield.png",
+            "papas.csv",
+            "informe.md",
+            "model.pkl",
+            ".hidden",
+        ] {
+            std::fs::write(dir.join(name), b"xx").expect("write");
+        }
+
+        let groups = outputs(&dir);
+        let labels: Vec<&str> = groups.iter().map(|(kind, _)| kind.label()).collect();
+        // Figures first: they are the outputs someone wants to *see*.
+        assert_eq!(labels, vec!["Figures", "Data", "Documents", "Other files"]);
+
+        let names: Vec<&str> = groups
+            .iter()
+            .flat_map(|(_, items)| items.iter().map(|o| o.name.as_str()))
+            .collect();
+        assert!(names.contains(&"plot_yield.png"));
+        assert!(names.contains(&"papas.csv"));
+        // Dotfiles are the agent's business, not the researcher's.
+        assert!(!names.contains(&".hidden"), "{names:?}");
+
+        assert_eq!(human_size(512), "512 B");
+        assert_eq!(human_size(2048), "2 KB");
+        assert_eq!(human_size(5 * 1024 * 1024), "5.0 MB");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

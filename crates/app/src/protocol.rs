@@ -251,6 +251,104 @@ impl AsyncTask {
     }
 }
 
+/// One past conversation, for the sidebar.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Conversation {
+    pub thread_id: String,
+    /// What to call it in the list. Never empty — see [`decode_conversation`].
+    pub title: String,
+    /// ISO-8601, as the server reports it. Used for grouping, not for display.
+    pub updated_at: String,
+}
+
+/// A thread from `POST /threads/search`, or `None` if it has no usable id.
+fn decode_conversation(thread: &Value) -> Option<Conversation> {
+    let thread_id = thread
+        .get("thread_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())?;
+    let metadata = thread.get("metadata");
+    // A title the researcher set wins. Failing that, the first thing they asked — which
+    // is what every chat app does, and is very nearly always the better label anyway.
+    let title = metadata
+        .and_then(|m| m.get("title"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| "New conversation".to_string());
+    Some(Conversation {
+        thread_id: thread_id.to_string(),
+        title,
+        updated_at: thread
+            .get("updated_at")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    })
+}
+
+/// One stored message as `(role, text)`, or `None` if it is not worth showing.
+///
+/// Tool messages and empty assistant turns are dropped: reopening a conversation should
+/// look like the conversation, not like its plumbing.
+fn decode_stored_message(message: &Value) -> Option<(String, String)> {
+    let kind = message
+        .get("type")
+        .or_else(|| message.get("role"))
+        .and_then(Value::as_str)?;
+    let role = match kind {
+        "human" | "user" => "you",
+        "ai" | "assistant" => "mini-me",
+        _ => return None,
+    };
+    // Content is a string, or a list of blocks in the newer content-block shape.
+    let content = message.get("content")?;
+    let text = match content {
+        Value::String(text) => text.clone(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|block| block.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join(""),
+        _ => return None,
+    };
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some((role.to_string(), text.to_string()))
+}
+
+/// A conversation's name, from the first thing the researcher asked.
+///
+/// Chat apps auto-title from the opening prompt because a list of "New conversation" is a
+/// list of nothing. Truncated on a word boundary so a title ends mid-sentence rather than
+/// mid-word.
+pub fn title_from_prompt(prompt: &str) -> String {
+    const LIMIT: usize = 48;
+    let cleaned = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    if cleaned.chars().count() <= LIMIT {
+        return cleaned;
+    }
+    let mut title = String::new();
+    for word in cleaned.split(' ') {
+        if title.chars().count() + word.chars().count() + 1 > LIMIT {
+            break;
+        }
+        if !title.is_empty() {
+            title.push(' ');
+        }
+        title.push_str(word);
+    }
+    // A single word longer than the limit leaves nothing; cut it rather than give up.
+    if title.is_empty() {
+        title = cleaned.chars().take(LIMIT).collect();
+    }
+    format!("{title}…")
+}
+
 /// What a background worker's own thread reports about itself.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThreadState {
@@ -671,6 +769,87 @@ impl LangGraphClient {
             .await
             .context("could not decode the thread_id from POST /threads")?;
         Ok(created.thread_id)
+    }
+
+    /// The researcher's past conversations, most recently touched first.
+    ///
+    /// The backend has stored every thread all along; the app simply never asked, so each
+    /// launch looked like the first. `POST /threads/search` is the list route
+    /// (`langgraph_sdk.ThreadsClient.search`).
+    pub async fn list_conversations(&self, limit: usize) -> Result<Vec<Conversation>> {
+        let resp = self
+            .http
+            .post(format!("{}/threads/search", self.base_url))
+            .json(&json!({
+                "limit": limit,
+                "sort_by": "updated_at",
+                "sort_order": "desc",
+            }))
+            .send()
+            .await
+            .context("listing conversations failed")?
+            .error_for_status()
+            .context("the thread-search route returned an error status")?;
+        let threads: Value = resp
+            .json()
+            .await
+            .context("could not decode the conversation list")?;
+        Ok(threads
+            .as_array()
+            .map(|threads| threads.iter().filter_map(decode_conversation).collect())
+            .unwrap_or_default())
+    }
+
+    /// Give a conversation a name, stored on the thread itself.
+    ///
+    /// Metadata rather than a local file: the title belongs with the conversation, so it
+    /// survives a reinstall and cannot drift out of sync with the thread it names.
+    pub async fn rename_conversation(&self, thread_id: &str, title: &str) -> Result<()> {
+        self.http
+            .patch(format!(
+                "{}/threads/{}",
+                self.base_url,
+                urlencode(thread_id)
+            ))
+            .json(&json!({ "metadata": { "title": title } }))
+            .send()
+            .await
+            .context("renaming the conversation failed")?
+            .error_for_status()
+            .context("the thread-update route returned an error status")?;
+        Ok(())
+    }
+
+    /// The messages of an existing conversation, for reopening it.
+    ///
+    /// Only role and text: the activity trace is not replayable — it was assembled from a
+    /// stream that is over — and pretending otherwise would show an empty trace next to a
+    /// real answer, which reads as a bug rather than as history.
+    pub async fn conversation_messages(&self, thread_id: &str) -> Result<Vec<(String, String)>> {
+        let resp = self
+            .http
+            .get(format!(
+                "{}/threads/{}/state",
+                self.base_url,
+                urlencode(thread_id)
+            ))
+            .send()
+            .await
+            .context("reading the conversation failed")?
+            .error_for_status()
+            .context("the thread-state route returned an error status")?;
+        let state: Value = resp
+            .json()
+            .await
+            .context("could not decode the conversation")?;
+        let Some(messages) = state
+            .get("values")
+            .and_then(|values| values.get("messages"))
+            .and_then(Value::as_array)
+        else {
+            return Ok(Vec::new());
+        };
+        Ok(messages.iter().filter_map(decode_stored_message).collect())
     }
 
     /// Stream one coordinator turn, invoking `on_event` for each decoded event.
@@ -1613,6 +1792,61 @@ mod tests {
         assert_eq!(snapshot.tasks[1].description, "Analyse the yield data");
         // Nothing is waiting until a thread poll says so.
         assert!(!snapshot.tasks[1].needs_approval());
+    }
+
+    #[test]
+    fn a_conversation_is_named_by_its_first_question() {
+        // Short enough to stand as the title unchanged.
+        assert_eq!(title_from_prompt("What drives yield?"), "What drives yield?");
+        // Whitespace from a pasted prompt would otherwise reach the sidebar verbatim.
+        assert_eq!(title_from_prompt("  many\n\n spaces  "), "many spaces");
+
+        // Long prompts are cut on a word boundary — a title ending mid-word looks like a
+        // rendering bug rather than an abbreviation.
+        let long = "Genera un dataset sintético de 400 parcelas de papa y ajusta un modelo";
+        let title = title_from_prompt(long);
+        assert!(title.ends_with('…'), "{title}");
+        assert!(title.chars().count() <= 49, "{title}");
+        assert!(long.starts_with(title.trim_end_matches('…').trim()), "{title}");
+
+        // One unbroken word longer than the limit still has to produce something.
+        let wall = "x".repeat(200);
+        let title = title_from_prompt(&wall);
+        assert!(title.chars().count() <= 49, "{title}");
+        assert!(title.ends_with('…'));
+    }
+
+    #[test]
+    fn a_stored_conversation_reduces_to_what_is_worth_showing() {
+        // The shape `POST /threads/search` returns. A researcher's own name wins; a
+        // thread that has none is labelled rather than left blank.
+        let named = json!({"thread_id": "t1", "metadata": {"title": "Potato yield"}, "updated_at": "2026-08-01T10:00:00Z"});
+        let decoded = decode_conversation(&named).expect("a conversation");
+        assert_eq!(decoded.title, "Potato yield");
+        assert_eq!(decoded.thread_id, "t1");
+
+        let unnamed = json!({"thread_id": "t2", "metadata": {}});
+        assert_eq!(
+            decode_conversation(&unnamed).expect("a conversation").title,
+            "New conversation"
+        );
+        // No id, nothing to open.
+        assert_eq!(decode_conversation(&json!({"metadata": {}})), None);
+
+        // Reopening shows the conversation, not its plumbing: tool traffic and empty
+        // assistant turns are dropped, and both content shapes are understood.
+        assert_eq!(
+            decode_stored_message(&json!({"type": "human", "content": "hola"})),
+            Some(("you".to_string(), "hola".to_string()))
+        );
+        assert_eq!(
+            decode_stored_message(
+                &json!({"type": "ai", "content": [{"type": "text", "text": "hi "}, {"type": "text", "text": "there"}]})
+            ),
+            Some(("mini-me".to_string(), "hi there".to_string()))
+        );
+        assert_eq!(decode_stored_message(&json!({"type": "tool", "content": "{}"})), None);
+        assert_eq!(decode_stored_message(&json!({"type": "ai", "content": "  "})), None);
     }
 
     #[test]

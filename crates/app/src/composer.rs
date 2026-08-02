@@ -32,7 +32,7 @@ use gpui::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::{ACCENT, MUTED};
+use crate::theme::{ACCENT, TEXT_MUTED};
 
 actions!(
     composer,
@@ -590,7 +590,7 @@ impl Element for ComposerElement {
         let style = window.text_style();
 
         let (display_text, text_color) = if content.is_empty() {
-            (composer.placeholder.clone(), rgb(MUTED).into())
+            (composer.placeholder.clone(), rgb(TEXT_MUTED).into())
         } else {
             (content, style.color)
         };
