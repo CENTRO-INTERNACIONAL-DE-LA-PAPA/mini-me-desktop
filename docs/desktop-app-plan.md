@@ -30,8 +30,9 @@ splits three ways: **shipping it to anyone else**, **paying down the UI debt tha
 causing the same bug**, and **friction that is felt but not blocking**.
 
 **Blocks a second person using it**
-- 🟡 **The download link.** `scripts/release.sh` is written and dry-run verified (§45/§46).
-  **Remaining: run it on Windows, install from the zip on another machine, publish.**
+- 🟡 **The download link.** **CI builds the Windows app green** (§56) — 21m33s on
+  `windows-latest`, including the `fxc.exe` lookup and the private-backend clone.
+  **Remaining: install the artifact on a machine that did not build it, then tag.**
 - ⬜ **Code signing.** SmartScreen shows "Windows protected your PC" and most researchers
   stop there. An organizational decision on a certificate; the release notes and README
   say which two words to click in the meantime.
@@ -3581,3 +3582,28 @@ prose is how someone waits ten minutes for a turn that was never delegated.
 
 Sequenced after the release link and the component work, because it is an accelerator for
 people already using the app, and nobody outside this machine can install it yet.
+
+## 56. The build no longer needs anyone's laptop (2026-08-02)
+
+`release` #1, manually run, **green in 21m33s** on the first attempt — which is not what I
+expected, having written the workflow without being able to run it.
+
+The two steps I flagged as most likely to fail both passed:
+
+- **`fxc.exe`** — found in the Windows SDK on the runner and exported as `GPUI_FXC_PATH`,
+  so GPUI compiled its release shaders (§26).
+- **The private backend** — cloned with the `MINIME_BACKEND_TOKEN` secret, so the bundle
+  can install itself without the researcher having a GitHub account (§25).
+
+`workflow_dispatch` was the right default: the run produced a downloadable artifact and
+created no release, so the pipeline could be proved before anything public existed.
+
+**What this changes.** A release stops depending on one person's Windows machine being
+free, and stops depending on the state of that machine — the packaged zip is now built from
+a clean checkout every time, which is the only way "it works on mine" ever gets ruled out.
+`scripts/release.sh` remains as the local path and as the thing that documented what the
+pipeline had to do.
+
+**Still not proven:** nobody has installed this zip on a machine that did not build it.
+That is the next step and the one that matters — the first-run WSL path has never executed
+anywhere.
