@@ -3317,3 +3317,64 @@ things. A grey canvas with white cards gets the same rule everywhere.
 Settings is still a right-hand pane rather than a modal — the picker component now exists,
 so moving it is small, but it is a change to a pane that works and this batch was already
 large. **Visible scrollbars** remain undone and remain the highest-value single fix.
+
+## 50. P6.7 step two: three bugs, and Zed's gallery (2026-08-01)
+
+Screenshots of Zed alongside the app, and six things wrong. Three were bugs.
+
+### The bugs
+
+**"Open outside" did nothing for any file.** `workspace::open` was written for folders and
+began with `create_dir_all`, so on a *file* — which exists — it failed with `AlreadyExists`
+and returned before Explorer was ever launched. It now only conjures a directory that is
+missing. One line, and it had broken every file-open in the app.
+
+**The conversation list was empty until the first question.** The backend spawned lazily on
+the first turn, so at launch there was nothing to list and the app looked as though it had
+never been used. It now warms up at startup, which pays twice: the sidebar has content
+immediately, and the 20–40 second agent build happens while the researcher reads the window
+instead of while they wait on an answer.
+
+**Clicking the top-left mark reset the palette.** `open_settings` reloaded the whole draft
+from disk *and* reapplied its theme, so opening the pane discarded the theme being looked
+at. The live palette and the saved one are now separate: opening never touches the screen,
+clicking a theme applies it, and **Close** — not open — puts the saved one back.
+
+### Themes: a list, and Zed's whole gallery
+
+The cycle button was wrong twice over — the only way to find a palette was to click through
+every one, and there was no way to see what existed. Now every theme is listed with a
+**five-dot swatch** of its background, panel, accent, text and error, so they can be
+compared side by side. GPUI 0.2.2 has hover *styling* but no hover *event*, so a true live
+preview needs a custom element; the swatch does the same job and shows all of them at once
+rather than one at a time.
+
+**Zed theme files load directly.** A Zed theme is JSON, so anything from
+[zed.dev/extensions](https://zed.dev/extensions) can be dropped into `themes/` and used.
+The importer maps the fifteen keys that mean something here out of the 142 in the published
+schema (`zed.dev/schema/themes/v0.2.0.json`), falls back per field so a partial theme still
+loads, and derives a hover shade Zed does not define.
+
+What we **cannot** use is a Zed *extension*: those are WASM compiled against Zed's own
+extension API, and running one would mean implementing Zed. The theme JSON inside them is
+portable, and that is the part worth having — a distinction worth stating plainly rather
+than promising "install Zed extensions" and shipping something that does not.
+
+### Rainbow CSV, from the theme rather than a fixed rainbow
+
+CSV cells are coloured by column index — the `rainbow-csv` trick — but cycling **the
+palette's own roles** instead of a fixed spectrum. Those colours are already contrast-checked
+against every surface, so a wide table stays readable in the light theme too, where a fixed
+rainbow would wash out. Without column *layout*, which GPUI 0.2.2 lacks, colour is the only
+thing that makes a wide CSV readable at all.
+
+### Rounded panels
+
+Panels are now rounded cards with a margin, sitting on the window background, rather than
+full-bleed slabs meeting at a hairline — which is what the Zed screenshots show and most of
+why they look finished.
+
+### Still not done
+
+Settings remains a right-hand pane rather than a centred modal, and **visible scrollbars**
+remain undone and remain the highest-value single fix.

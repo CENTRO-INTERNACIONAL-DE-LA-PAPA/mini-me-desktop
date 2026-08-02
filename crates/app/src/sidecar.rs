@@ -234,6 +234,33 @@ impl Sidecar {
         rx
     }
 
+    /// Start the backend now, rather than waiting for the first question.
+    ///
+    /// It used to spawn lazily on the first turn, which cost twice: the sidebar had
+    /// nothing to list until the researcher had already typed something — so the app
+    /// opened looking as though it had no history — and the 20-40 second build then
+    /// happened while they waited on an answer instead of while they read the window
+    /// (docs §50).
+    pub fn warm_up(&self) -> mpsc::UnboundedReceiver<String> {
+        let (tx, rx) = mpsc::unbounded();
+        let supervisor = self.supervisor.clone();
+        let base_url = self.base_url.clone();
+        self.runtime.spawn(async move {
+            let client = LangGraphClient::new(base_url);
+            let mut supervisor = supervisor.lock().await;
+            match supervisor.ensure_running(&client).await {
+                Ok(status) => {
+                    let _ = tx.unbounded_send(status);
+                }
+                // Deliberately quiet. Setup problems are the Setup pane's job to explain,
+                // and an error before the researcher has done anything is not how they
+                // should learn that WSL is missing.
+                Err(error) => tracing::debug!(%error, "backend not ready at launch"),
+            }
+        });
+        rx
+    }
+
     /// The researcher's past conversations, newest first.
     pub fn list_conversations(&self) -> mpsc::UnboundedReceiver<Vec<Conversation>> {
         let (tx, rx) = mpsc::unbounded();

@@ -224,10 +224,13 @@ pub fn head(path: &Path, lines: usize) -> Result<String> {
 /// The whole of "download everything the agent made": the files are already sitting in the
 /// researcher's own Documents, so there is nothing to package — only somewhere to point.
 pub fn open(path: &Path) -> Result<()> {
-    // Create it first. A researcher who clicks this before a turn has written anything
-    // should get an empty folder and learn where things go, not an error.
-    std::fs::create_dir_all(path)
-        .with_context(|| format!("could not create {}", path.display()))?;
+    // Only conjure a *missing* directory. Calling this on a file that exists — which is
+    // every "open outside" click — made `create_dir_all` fail with AlreadyExists, and the
+    // error return meant Explorer was never launched at all (docs §50).
+    if !path.exists() {
+        std::fs::create_dir_all(path)
+            .with_context(|| format!("could not create {}", path.display()))?;
+    }
 
     let mut command = if cfg!(windows) {
         // Through `explorer.exe` directly rather than `cmd /c start`, which would flash a

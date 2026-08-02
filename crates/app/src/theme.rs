@@ -296,6 +296,52 @@ mod tests {
     }
 
     #[test]
+    fn a_zed_theme_file_loads() {
+        // The shape Zed publishes: a family with several themes, each with an appearance
+        // and a style object of the 142 keys we take fifteen of.
+        let family = serde_json::json!({
+            "name": "Example Family",
+            "themes": [
+                {
+                    "name": "Example Dark",
+                    "appearance": "dark",
+                    "style": {
+                        "background": "#101014ff",
+                        "panel.background": "#16161bff",
+                        "elevated_surface.background": "#1e1e25ff",
+                        "text": "#e0e0e6ff",
+                        "text.muted": "#a0a0aaff",
+                        "border": "#2a2a32ff",
+                        "accent": "#7aa2f7ff",
+                        "error": "#f77070ff",
+                        "unknown.key.we.ignore": "#123456ff"
+                    }
+                },
+                { "name": "Example Light", "appearance": "light", "style": {"background": "#fafafaff"} }
+            ]
+        });
+        let themes = from_zed_family(&family);
+        assert_eq!(themes.len(), 2);
+
+        let (name, dark) = &themes[0];
+        assert_eq!(name, "Example Dark");
+        assert_eq!(dark.background, 0x101014, "alpha is dropped, not parsed as colour");
+        assert_eq!(dark.surface, 0x16161b);
+        assert_eq!(dark.accent, 0x7aa2f7);
+        // A key Zed does not define falls back rather than landing on black.
+        assert_eq!(dark.warning, MINI_ME_DARK.warning);
+        // A derived hover has to actually differ, and move away from the background.
+        assert!(luminance(dark.accent_hover) > luminance(dark.accent));
+
+        // A light theme falls back to the light built-in, not the dark one.
+        let (_, light) = &themes[1];
+        assert_eq!(light.text, PAPER.text);
+
+        // Anything that is not a theme family yields nothing rather than erroring.
+        assert!(from_zed_family(&serde_json::json!({"nope": 1})).is_empty());
+    }
+
+    #[test]
     fn applying_a_theme_changes_what_the_next_frame_reads() {
         apply(&SLATE);
         assert_eq!(accent(), SLATE.accent);
@@ -305,4 +351,96 @@ mod tests {
         assert!(is_light(&current()));
         apply(&MINI_ME_DARK);
     }
+}
+
+/// Import palettes from a **Zed theme file**.
+///
+/// Zed's gallery is the answer to "I want more than four themes", and a Zed theme is just
+/// JSON — so a researcher can download any of them and drop it in `themes/`. What we
+/// cannot use is a Zed *extension*: those are WASM against Zed's own API, and installing
+/// one here would mean implementing Zed. The theme JSON inside them is portable, and that
+/// is the part worth having.
+///
+/// Keys are from the published schema (`zed.dev/schema/themes/v0.2.0.json`), which carries
+/// 142 style properties — this maps the fifteen that mean something to this app and lets
+/// the rest go. Every field falls back, so a partial theme loads rather than failing.
+pub fn from_zed_family(json: &serde_json::Value) -> Vec<(String, Theme)> {
+    let Some(themes) = json.get("themes").and_then(|t| t.as_array()) else {
+        return Vec::new();
+    };
+    themes
+        .iter()
+        .filter_map(|entry| {
+            let name = entry.get("name")?.as_str()?.trim().to_string();
+            let style = entry.get("style")?;
+            // Which built-in to fall back to, so a missing key lands somewhere sane
+            // rather than on black.
+            let base = match entry.get("appearance").and_then(|a| a.as_str()) {
+                Some("light") => PAPER,
+                _ => MINI_ME_DARK,
+            };
+            let pick = |key: &str, fallback: u32| -> u32 {
+                style
+                    .get(key)
+                    .and_then(|value| value.as_str())
+                    .and_then(parse_hex)
+                    .unwrap_or(fallback)
+            };
+            let accent = pick("accent", base.accent);
+            let background = pick("background", base.background);
+            let surface = pick("panel.background", pick("surface.background", base.surface));
+            Some((
+                name,
+                Theme {
+                    background,
+                    surface,
+                    elevated: pick("elevated_surface.background", base.elevated),
+                    // Zed has no separate overlay role; its elevated surface is what
+                    // modals sit on, nudged so our ladder still ascends.
+                    overlay: nudge(pick("elevated_surface.background", base.overlay), background),
+                    accent_soft: pick("element.selected", base.accent_soft),
+                    text: pick("text", base.text),
+                    text_muted: pick("text.muted", base.text_muted),
+                    text_faint: pick("text.placeholder", pick("text.muted", base.text_faint)),
+                    border: pick("border", base.border),
+                    border_strong: pick("border.focused", pick("border", base.border_strong)),
+                    accent,
+                    // Zed states no hover colour for the accent, so derive one that moves
+                    // away from the background — lighter on dark, darker on light.
+                    accent_hover: nudge(accent, background),
+                    success: pick("success", base.success),
+                    warning: pick("warning", base.warning),
+                    error: pick("error", base.error),
+                    running: pick("info", base.running),
+                },
+            ))
+        })
+        .collect()
+}
+
+/// `#rrggbb` or `#rrggbbaa` → `0xrrggbb`. Alpha is dropped: GPUI composites these as
+/// solid fills here, and a half-transparent panel over a half-transparent panel is how
+/// text stops meeting its contrast ratio.
+fn parse_hex(value: &str) -> Option<u32> {
+    let hex = value.trim().trim_start_matches('#');
+    if hex.len() < 6 || !hex.is_char_boundary(6) {
+        return None;
+    }
+    u32::from_str_radix(&hex[..6], 16).ok()
+}
+
+/// `colour`, moved one step further from `background`.
+///
+/// Lighter on a dark theme, darker on a light one — so a derived hover state is visible
+/// whichever way the palette runs.
+fn nudge(colour: u32, background: u32) -> u32 {
+    let towards_light = luminance(background) < 0.5;
+    let shift = |channel: u32| -> u32 {
+        if towards_light {
+            (channel + 26).min(255)
+        } else {
+            channel.saturating_sub(26)
+        }
+    };
+    (shift((colour >> 16) & 0xff) << 16) | (shift((colour >> 8) & 0xff) << 8) | shift(colour & 0xff)
 }

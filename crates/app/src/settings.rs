@@ -224,18 +224,40 @@ pub fn available_themes() -> Vec<(String, crate::theme::Theme)> {
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
-        match serde_json::from_str::<crate::theme::Theme>(&text) {
-            Ok(theme) => match themes
-                .iter_mut()
-                .find(|(existing, _)| existing.eq_ignore_ascii_case(name))
-            {
-                Some(slot) => slot.1 = theme,
-                None => themes.push((name.to_string(), theme)),
-            },
+        // Two formats. Ours is one theme per file, named by the file. Zed's is a whole
+        // *family* in one file, each theme named inside it — which is what a researcher
+        // downloads from zed.dev/extensions, so it has to work without editing.
+        let parsed: serde_json::Value = match serde_json::from_str(&text) {
+            Ok(value) => value,
             // A broken palette must never stop the app opening — the researcher would
             // have no way back in to fix it.
             Err(error) => {
                 tracing::warn!(path = %path.display(), %error, "could not read a theme");
+                continue;
+            }
+        };
+
+        let found: Vec<(String, crate::theme::Theme)> = if parsed.get("themes").is_some() {
+            crate::theme::from_zed_family(&parsed)
+        } else {
+            match serde_json::from_value::<crate::theme::Theme>(parsed) {
+                Ok(theme) => vec![(name.to_string(), theme)],
+                Err(error) => {
+                    tracing::warn!(path = %path.display(), %error, "could not read a theme");
+                    continue;
+                }
+            }
+        };
+
+        for (found_name, theme) in found {
+            match themes
+                .iter_mut()
+                .find(|(existing, _)| existing.eq_ignore_ascii_case(&found_name))
+            {
+                // A file naming a built-in replaces it: how someone tweaks the default
+                // rather than ending up with two entries a letter apart.
+                Some(slot) => slot.1 = theme,
+                None => themes.push((found_name, theme)),
             }
         }
     }

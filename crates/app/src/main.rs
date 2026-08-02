@@ -54,6 +54,29 @@ fn step_line(label: &str) -> impl IntoElement {
         .child(format!("· {label}"))
 }
 
+/// Whether a file is column-separated, and so worth colouring by column.
+fn is_delimited(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.ends_with(".csv") || name.ends_with(".tsv")
+}
+
+/// The colour for one CSV column.
+///
+/// Cycles the theme's own roles rather than inventing a rainbow: colours already checked
+/// against every surface for contrast, so a wide table stays readable in every palette —
+/// including the light one, where a fixed rainbow would wash out.
+fn column_colour(column: usize) -> u32 {
+    const WHEEL: [fn() -> u32; 6] = [
+        theme::text,
+        theme::accent,
+        theme::running,
+        theme::success,
+        theme::warning,
+        theme::text_muted,
+    ];
+    WHEEL[column % WHEEL.len()]()
+}
+
 /// Consecutive identical steps folded into one line with a count.
 ///
 /// An agent hunting for a file emits `glob` eight times in a row, and eight identical lines
@@ -726,6 +749,9 @@ struct Workbench {
     /// still gone on "New thread" or a restart, and announced in the status bar the whole
     /// time it is in force, so it cannot be in effect without being visible (docs §41).
     approve_conversation: bool,
+    /// The palette on screen right now, which is not always the saved one: the picker
+    /// applies as you point at it so a theme can be judged by looking at it.
+    applied_theme: String,
     /// Whether the conversation sidebar is showing. A researcher deep in one thread
     /// wants the screen, not the list.
     sidebar_open: bool,
@@ -845,6 +871,7 @@ impl Workbench {
             pending_approval: None,
             approve_rest_of_turn: false,
             approve_conversation: false,
+            applied_theme: settings::Settings::load().theme,
             sidebar_open: true,
             panel_open: true,
             conversation_query,
@@ -886,9 +913,10 @@ impl Workbench {
         // Populate the spine if a backend is already listening. This does not
         // start one — see `Sidecar::fetch_project`.
         workbench.refresh_project(cx);
-        // And the researcher's own history, so the window opens on their work rather
-        // than on a blank slate that implies there is none.
-        workbench.refresh_conversations(cx);
+        // Start the backend now and list the history once it answers. Both matter for the
+        // first ten seconds: the sidebar was empty until the researcher had already asked
+        // something, which made the app look as if it had never been used (docs §50).
+        workbench.warm_up(cx);
         workbench
     }
 
@@ -1400,6 +1428,27 @@ impl Workbench {
     /// Cheap, and called whenever a turn ends or a name changes, because a sidebar that
     /// is only correct at launch is worse than none: it teaches the researcher to distrust
     /// it, and then they stop looking.
+    /// Bring the backend up at launch, then show the history it has.
+    fn warm_up(&mut self, cx: &mut Context<Self>) {
+        self.status = "starting the agent…".into();
+        let mut ready = self.sidecar.warm_up();
+        cx.spawn(async move |this, cx| {
+            let status = ready.next().await;
+            let _ = this.update(cx, |workbench, cx| {
+                if let Some(status) = status {
+                    workbench.status = status;
+                }
+                workbench.refresh_conversations(cx);
+                workbench.refresh_project(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+        // Also ask straight away: a backend left running from a previous session answers
+        // immediately, and waiting on the spawn would hide the list for no reason.
+        self.refresh_conversations(cx);
+    }
+
     fn refresh_conversations(&mut self, cx: &mut Context<Self>) {
         let mut updates = self.sidecar.list_conversations();
         cx.spawn(async move |this, cx| {
@@ -1703,10 +1752,16 @@ impl Workbench {
         div()
             .flex()
             .flex_col()
-            .w(px(220.))
+            .w(px(240.))
             .h_full()
+            .flex_none()
+            // A rounded card on the window background, the way Zed's panels sit, rather
+            // than a full-bleed slab meeting the next panel at a hairline (docs §50).
+            .m_1()
+            .rounded_lg()
+            .overflow_hidden()
             .bg(rgb(theme::surface()))
-            .border_r_1()
+            .border_1()
             .border_color(rgb(theme::border()))
             .child(
                 div()
@@ -1764,6 +1819,100 @@ impl Workbench {
             .child(list)
     }
 
+    /// Every palette at once, each showing what it looks like.
+    ///
+    /// The cycle button was wrong twice over: the only way to find a palette was to click
+    /// through all of them, and there was no way to see what existed. Zed shows the whole
+    /// list and previews on hover, so a theme is judged by looking rather than by reading
+    /// its name (docs §50).
+    ///
+    /// GPUI 0.2.2 has hover *styling* but no hover *event*, so a true live preview would
+    /// need a custom element. The swatch does the same job in miniature and is arguably
+    /// better here: every theme is visible side by side, rather than one at a time.
+    fn theme_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut list = div().flex().flex_col().w_full().gap_1();
+
+        for (name, palette) in settings::available_themes() {
+            let selected = name.eq_ignore_ascii_case(&self.applied_theme);
+            let chosen = name.clone();
+
+            // Enough of the palette to tell warm from cool and light from dark at a
+            // glance, which is what someone is actually choosing between.
+            let mut swatch = div().flex().flex_row().flex_none().gap_px();
+            for colour in [
+                palette.background,
+                palette.surface,
+                palette.accent,
+                palette.text,
+                palette.error,
+            ] {
+                swatch = swatch.child(
+                    div()
+                        .w(px(12.))
+                        .h(px(12.))
+                        .rounded_sm()
+                        .bg(rgb(colour))
+                        .border_1()
+                        .border_color(rgb(palette.border)),
+                );
+            }
+
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("theme-{name}")))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .w_full()
+                    .min_w_0()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(if selected {
+                        theme::accent()
+                    } else {
+                        theme::border()
+                    }))
+                    .when(selected, |row| row.bg(rgb(theme::accent_soft())))
+                    .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
+                    .child(
+                        div()
+                            .flex_grow()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(rgb(if selected {
+                                theme::text()
+                            } else {
+                                theme::text_muted()
+                            }))
+                            .text_sm()
+                            .child(name.clone()),
+                    )
+                    .child(swatch)
+                    .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                        workbench.draft.theme = chosen.clone();
+                        workbench.applied_theme = chosen.clone();
+                        // Immediately, so the choice is judged by the window it changes.
+                        settings::apply_theme(&workbench.draft);
+                        cx.notify();
+                    })),
+            );
+        }
+
+        list.child(
+            div()
+                .text_color(rgb(theme::text_faint()))
+                .text_xs()
+                .child(format!(
+                    "Drop a Zed theme .json in {} to add your own.",
+                    settings::themes_dir().display()
+                )),
+        )
+    }
+
     /// A file, shown in the middle of the window.
     ///
     /// The shape is Zed's picker: a centred panel floating over a dimmed workbench, which
@@ -1799,10 +1948,30 @@ impl Workbench {
                             body = body.child(markdown_block(&parsed));
                         }
                     }
+                    Ok(text) if is_delimited(&output.name) => {
+                        // Rainbow columns, the trick the `rainbow-csv` editor extensions
+                        // use: colour by column index so the eye can follow one field
+                        // down the rows. Without column *layout* — which GPUI 0.2.2 does
+                        // not have — colour is the only thing that makes a wide CSV
+                        // readable at all (docs §50).
+                        let delimiter = if output.name.ends_with(".tsv") { '\t' } else { ',' };
+                        for (row, line) in text.lines().enumerate() {
+                            let mut cells = div().flex().flex_row().flex_wrap().w_full().gap_2();
+                            for (column, cell) in line.split(delimiter).enumerate() {
+                                cells = cells.child(
+                                    div()
+                                        .flex_none()
+                                        .text_color(rgb(column_colour(column)))
+                                        // The header row is what you read first.
+                                        .when(row == 0, |cell| cell.font_weight(FontWeight::BOLD))
+                                        .text_xs()
+                                        .child(cell.trim().to_string()),
+                                );
+                            }
+                            body = body.child(cells);
+                        }
+                    }
                     Ok(text) => {
-                        // CSV and everything else, as lines — a real table needs column
-                        // layout GPUI 0.2.2 does not have, and misaligned columns read
-                        // worse than honest plain text.
                         for line in text.lines() {
                             body = body.child(
                                 div()
@@ -2027,6 +2196,12 @@ impl Workbench {
             .flex_grow()
             .min_w_0()
             .h_full()
+            .m_1()
+            .rounded_lg()
+            .overflow_hidden()
+            .bg(rgb(theme::background()))
+            .border_1()
+            .border_color(rgb(theme::border()))
             .child(col);
         // Above the composer, so the decision sits where the user's attention already
         // is and cannot be scrolled out of view.
@@ -2092,10 +2267,12 @@ impl Workbench {
             .w_full()
             .min_w_0()
             .gap_2()
+            .m_2()
             .p_3()
-            .border_t_1()
+            .rounded_lg()
+            .border_1()
             .border_color(rgb(theme::accent()))
-            .bg(rgb(theme::surface()))
+            .bg(rgb(theme::elevated()))
             .child(
                 div()
                     .text_color(rgb(theme::accent()))
@@ -2314,8 +2491,10 @@ impl Workbench {
     /// your key.
     fn open_settings(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
         self.draft = settings::Settings::load();
-        // Reverts a theme that was being previewed but not saved.
-        settings::apply_theme(&self.draft);
+        // The *live* palette, not the saved one. Reloading the whole draft used to reset
+        // the screen to whatever was last saved the instant the pane opened, so clicking
+        // the mark at top-left threw away the theme being looked at (docs §50).
+        self.draft.theme = self.applied_theme.clone();
         self.settings_note.clear();
         // Both live in the right-hand slot, so opening one closes the other. Setup's
         // "Settings" button is the usual route here — you go there to paste the key it
@@ -2439,40 +2618,20 @@ impl Workbench {
             .flex_none()
             .h_full()
             .overflow_y_scroll()
+            .m_1()
+            .rounded_lg()
             .bg(rgb(theme::surface()))
-            .border_l_1()
+            .border_1()
             .border_color(rgb(theme::border()))
             .p_4()
             .gap_3()
             .child(section_label("SETTINGS"))
-            // Applied on click, not on save: a palette is judged by looking at it, so
-            // waiting for a Save button to see it would be the wrong loop entirely.
-            .child(
-                div()
-                    .id("theme")
-                    .w_full()
-                    .p_2()
-                    .border_1()
-                    .border_color(rgb(theme::border()))
-                    .text_color(rgb(theme::text()))
-                    .text_sm()
-                    .hover(|style| style.border_color(rgb(theme::accent())).cursor_pointer())
-                    .child(format!("Theme: {}  ⟳", self.draft.theme))
-                    .on_click(cx.listener(|workbench, _event, _window, cx| {
-                        let themes = settings::available_themes();
-                        if themes.is_empty() {
-                            return;
-                        }
-                        let current = themes
-                            .iter()
-                            .position(|(name, _)| name.eq_ignore_ascii_case(&workbench.draft.theme))
-                            .unwrap_or(0);
-                        let (name, theme) = &themes[(current + 1) % themes.len()];
-                        workbench.draft.theme = name.clone();
-                        theme::apply(theme);
-                        cx.notify();
-                    })),
-            )
+            // A list, not a cycle button. Cycling meant the only way to find a palette was
+            // to click through every one, and there was no way to see what was available —
+            // Zed shows all of them and previews on *hover*, which is the whole point: a
+            // palette is judged by looking at it, not by reading its name (docs §50).
+            .child(section_label("THEME"))
+            .child(self.theme_list(cx))
             // Clicking cycles: five providers do not need a dropdown, and a dropdown in
             // GPUI is a whole widget we would have to build.
             .child(
@@ -2653,6 +2812,11 @@ impl Workbench {
                         .hover(|style| style.cursor_pointer())
                         .child("Close")
                         .on_click(cx.listener(|workbench, _event, _window, cx| {
+                            // Closing without saving puts the saved palette back — the
+                            // preview was a look, not a change.
+                            let saved = settings::Settings::load();
+                            workbench.applied_theme = saved.theme.clone();
+                            settings::apply_theme(&saved);
                             workbench.settings_open = false;
                             workbench.restore_focus = true;
                             cx.notify();
@@ -2686,8 +2850,10 @@ impl Workbench {
             .flex_none()
             .h_full()
             .overflow_y_scroll()
+            .m_1()
+            .rounded_lg()
             .bg(rgb(theme::surface()))
-            .border_l_1()
+            .border_1()
             .border_color(rgb(theme::border()))
             .p_4()
             .gap_3()
@@ -3557,8 +3723,10 @@ impl Workbench {
             .flex_none()
             .h_full()
             .overflow_y_scroll()
+            .m_1()
+            .rounded_lg()
             .bg(rgb(theme::surface()))
-            .border_l_1()
+            .border_1()
             .border_color(rgb(theme::border()))
             .p_4()
             .gap_4()
@@ -4188,6 +4356,28 @@ fn replay(path: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn csv_columns_get_distinct_colours_from_the_live_palette() {
+        assert!(is_delimited("papas.csv"));
+        assert!(is_delimited("MODELO.TSV"), "case is not a format");
+        assert!(!is_delimited("informe.md"));
+
+        // Adjacent columns must differ, or the colouring does nothing for the eye.
+        for column in 0..12 {
+            assert_ne!(
+                column_colour(column),
+                column_colour(column + 1),
+                "columns {column} and {} share a colour",
+                column + 1
+            );
+        }
+        // And they follow the theme, so a light palette does not get dark-theme inks.
+        theme::apply(&theme::PAPER);
+        assert_eq!(column_colour(0), theme::PAPER.text);
+        theme::apply(&theme::MINI_ME_DARK);
+        assert_eq!(column_colour(0), theme::MINI_ME_DARK.text);
+    }
 
     #[test]
     fn repeated_steps_fold_but_the_order_survives() {
