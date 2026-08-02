@@ -189,6 +189,36 @@ pub fn human_size(bytes: u64) -> String {
     }
 }
 
+/// The first `lines` lines of a text file.
+///
+/// Bounded on purpose. A dataset can be hundreds of megabytes, and a preview that reads
+/// the whole thing would pull it into memory and lay it out on the UI thread — the file
+/// most worth previewing being exactly the one that would freeze the window.
+pub fn head(path: &Path, lines: usize) -> Result<String> {
+    use std::io::{BufRead, BufReader};
+
+    let file = std::fs::File::open(path)
+        .with_context(|| format!("could not open {}", path.display()))?;
+    let mut reader = BufReader::new(file);
+    let mut text = String::new();
+    let mut buffer = String::new();
+    for taken in 0..lines {
+        buffer.clear();
+        // Not UTF-8 (a spreadsheet export, say) is a preview problem, not a crash.
+        match reader.read_line(&mut buffer) {
+            Ok(0) => break,
+            Ok(_) => text.push_str(&buffer),
+            Err(error) => {
+                if taken == 0 {
+                    return Err(error).with_context(|| format!("could not read {}", path.display()));
+                }
+                break;
+            }
+        }
+    }
+    Ok(text)
+}
+
 /// Open a folder in the platform's file manager.
 ///
 /// The whole of "download everything the agent made": the files are already sitting in the

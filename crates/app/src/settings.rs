@@ -96,6 +96,13 @@ pub struct Settings {
     /// change", and it needs the extra graph the app generates into the checkout's config.
     /// Opt-in keeps a bad interaction from being everyone's first experience.
     pub async_subagents: bool,
+    /// Which palette to draw with, by name (`theme.rs`), or the stem of a JSON file in
+    /// `themes/` beside `settings.toml`.
+    ///
+    /// A setting rather than a constant because a fixed palette is a bet on everyone's
+    /// taste *and* everyone's room — the same charcoal that reads well at a desk is
+    /// unusable on a projector (docs §49).
+    pub theme: String,
     /// Whether the app created that directory.
     ///
     /// **Load-bearing.** Updating means `git fetch && git checkout <pin> && uv sync`, and
@@ -116,6 +123,7 @@ impl Default for Settings {
             backend_port: 2024,
             backend_dir: String::new(),
             async_subagents: false,
+            theme: "Mini-Me Dark".to_string(),
             backend_dir_owned: true,
         }
     }
@@ -179,6 +187,69 @@ impl Settings {
         let text = toml::to_string_pretty(self).context("could not serialise settings")?;
         std::fs::write(&path, text).with_context(|| format!("could not write {}", path.display()))
     }
+}
+
+/// Where a researcher's own palettes live: one JSON file per theme, named by its file
+/// stem, using the field names of `theme::Theme`.
+///
+/// This is the flexibility Zed gets from theme extensions, minus the registry — dropping a
+/// file in a folder is the whole install step.
+pub fn themes_dir() -> PathBuf {
+    settings_path()
+        .parent()
+        .map(|dir| dir.join("themes"))
+        .unwrap_or_else(|| PathBuf::from("themes"))
+}
+
+/// Every palette the researcher can choose: the built-ins, then any of their own.
+///
+/// A file whose name matches a built-in replaces it, which is how someone tweaks the
+/// default rather than being stuck with it.
+pub fn available_themes() -> Vec<(String, crate::theme::Theme)> {
+    let mut themes: Vec<(String, crate::theme::Theme)> = crate::theme::THEMES
+        .iter()
+        .map(|(name, theme)| (name.to_string(), *theme))
+        .collect();
+    let Ok(entries) = std::fs::read_dir(themes_dir()) else {
+        return themes;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        match serde_json::from_str::<crate::theme::Theme>(&text) {
+            Ok(theme) => match themes
+                .iter_mut()
+                .find(|(existing, _)| existing.eq_ignore_ascii_case(name))
+            {
+                Some(slot) => slot.1 = theme,
+                None => themes.push((name.to_string(), theme)),
+            },
+            // A broken palette must never stop the app opening — the researcher would
+            // have no way back in to fix it.
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "could not read a theme");
+            }
+        }
+    }
+    themes
+}
+
+/// Apply the configured palette. Falls back to the default rather than failing.
+pub fn apply_theme(settings: &Settings) {
+    let chosen = available_themes()
+        .into_iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(&settings.theme))
+        .map(|(_, theme)| theme)
+        .unwrap_or(crate::theme::MINI_ME_DARK);
+    crate::theme::apply(&chosen);
 }
 
 /// Where `settings.toml` lives. `MINIME_SETTINGS` overrides it, which is also how the
@@ -292,6 +363,52 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_researchers_own_palette_can_replace_a_built_in() {
+        let _env = crate::backend::env_lock::hold();
+        let dir = std::env::temp_dir().join(format!("minime-theme-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("themes")).expect("a temp dir");
+        // SAFETY: the lock above serialises every test that touches the environment.
+        unsafe { std::env::set_var("MINIME_SETTINGS", dir.join("settings.toml")) };
+
+        // The built-ins are always offered, even with no themes directory of one's own.
+        assert!(available_themes().len() >= crate::theme::THEMES.len());
+
+        // A file named after a built-in *replaces* it — how someone tweaks the default
+        // rather than being stuck beside it.
+        let mut mine = crate::theme::MINI_ME_DARK;
+        mine.accent = 0x00ff00;
+        std::fs::write(
+            dir.join("themes").join("Mini-Me Dark.json"),
+            serde_json::to_string(&mine).expect("serialise"),
+        )
+        .expect("write");
+        let themes = available_themes();
+        assert_eq!(themes.len(), crate::theme::THEMES.len(), "replaced, not appended");
+        let replaced = themes
+            .iter()
+            .find(|(name, _)| name == "Mini-Me Dark")
+            .expect("the built-in name");
+        assert_eq!(replaced.1.accent, 0x00ff00);
+
+        // A broken palette must never stop the app opening: the researcher would have no
+        // way back in to fix it.
+        std::fs::write(dir.join("themes").join("Broken.json"), "{ not json").expect("write");
+        assert!(available_themes().iter().all(|(name, _)| name != "Broken"));
+
+        // An unknown name falls back rather than failing.
+        let settings = Settings {
+            theme: "Does Not Exist".into(),
+            ..Default::default()
+        };
+        apply_theme(&settings);
+        assert_eq!(crate::theme::current(), crate::theme::MINI_ME_DARK);
+
+        unsafe { std::env::remove_var("MINIME_SETTINGS") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn round_trips_through_toml() {
         let settings = Settings {
             provider: "custom".into(),
@@ -302,6 +419,7 @@ mod tests {
             backend_port: 2100,
             backend_dir: "~/Mini-Me".into(),
             async_subagents: true,
+            theme: "Slate".into(),
             backend_dir_owned: false,
         };
         let text = toml::to_string_pretty(&settings).expect("serialise");

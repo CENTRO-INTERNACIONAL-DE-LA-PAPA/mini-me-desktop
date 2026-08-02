@@ -24,13 +24,12 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use futures::StreamExt;
 use gpui::{
-    actions, div, img, prelude::*, px, rgb, size, App, Application, Bounds, ClipboardItem, Context,
+    actions, div, img, AnimationExt as _, prelude::*, px, rgb, size, App, Application, Bounds, ClipboardItem, Context,
     Entity, Focusable, FontStyle, FontWeight, HighlightStyle, KeyBinding, SharedString, StyledText,
     Window, WindowBounds, WindowOptions,
 };
 
 use composer::{Composer, ComposerEvent};
-use theme::*;
 use protocol::{AgentRef, ApprovalRequest, Bucket, Decision, Project, TurnEvent};
 use sidecar::Sidecar;
 
@@ -42,7 +41,7 @@ const SEED_PROMPT: &str = "In one short paragraph, what is your role as the Mini
 
 /// A small caps-ish section heading for the side panel.
 fn section_label(text: &'static str) -> impl IntoElement {
-    div().text_color(rgb(ACCENT)).text_xs().child(text)
+    div().text_color(rgb(theme::accent())).text_xs().child(text)
 }
 
 /// One line of the activity trace: a tool call, or a delegation.
@@ -50,7 +49,7 @@ fn step_line(label: &str) -> impl IntoElement {
     div()
         .w_full()
         .min_w_0()
-        .text_color(rgb(TEXT_MUTED))
+        .text_color(rgb(theme::text_muted()))
         .text_xs()
         .child(format!("· {label}"))
 }
@@ -98,12 +97,12 @@ fn spine_list(label: &'static str, items: &[String], bullet: &'static str) -> im
                 .w_full()
                 .min_w_0()
                 .gap_2()
-                .child(div().flex_none().text_color(rgb(TEXT_MUTED)).text_sm().child(bullet))
+                .child(div().flex_none().text_color(rgb(theme::text_muted())).text_sm().child(bullet))
                 .child(
                     div()
                         .flex_grow()
                         .min_w_0()
-                        .text_color(rgb(TEXT))
+                        .text_color(rgb(theme::text()))
                         .text_sm()
                         .child(item.clone()),
                 ),
@@ -308,11 +307,11 @@ fn markdown_block(block: &markdown::Block) -> gpui::AnyElement {
                     // No monospace family is bundled yet, so code is marked by colour.
                     // Honest and legible; a real code face is a follow-up.
                     Emphasis::Code => HighlightStyle {
-                        color: Some(rgb(ACCENT).into()),
+                        color: Some(rgb(theme::accent()).into()),
                         ..Default::default()
                     },
                     Emphasis::Link => HighlightStyle {
-                        color: Some(rgb(ACCENT).into()),
+                        color: Some(rgb(theme::accent()).into()),
                         underline: Some(gpui::UnderlineStyle {
                             thickness: px(1.),
                             ..Default::default()
@@ -320,7 +319,7 @@ fn markdown_block(block: &markdown::Block) -> gpui::AnyElement {
                         ..Default::default()
                     },
                     Emphasis::Url => HighlightStyle {
-                        color: Some(rgb(TEXT_MUTED).into()),
+                        color: Some(rgb(theme::text_muted()).into()),
                         ..Default::default()
                     },
                 };
@@ -334,7 +333,7 @@ fn markdown_block(block: &markdown::Block) -> gpui::AnyElement {
 
     match block {
         Block::Heading { level, inlines } => {
-            let element = styled(inlines, TEXT);
+            let element = styled(inlines, theme::text());
             // Only two sizes: an answer is not a document, and six heading levels of
             // typography would be noise.
             if *level <= 2 {
@@ -343,7 +342,7 @@ fn markdown_block(block: &markdown::Block) -> gpui::AnyElement {
                 element.into_any_element()
             }
         }
-        Block::Paragraph(inlines) => styled(inlines, TEXT).into_any_element(),
+        Block::Paragraph(inlines) => styled(inlines, theme::text()).into_any_element(),
         Block::ListItem { marker, inlines } => div()
             .flex()
             .flex_row()
@@ -353,19 +352,19 @@ fn markdown_block(block: &markdown::Block) -> gpui::AnyElement {
             .child(
                 div()
                     .flex_none()
-                    .text_color(rgb(TEXT_MUTED))
+                    .text_color(rgb(theme::text_muted()))
                     .child(marker.clone()),
             )
-            .child(styled(inlines, TEXT))
+            .child(styled(inlines, theme::text()))
             .into_any_element(),
         Block::Code { text, .. } => div()
             .w_full()
             .min_w_0()
             .p_2()
-            .bg(rgb(SURFACE))
+            .bg(rgb(theme::surface()))
             .border_1()
-            .border_color(rgb(BORDER))
-            .text_color(rgb(TEXT))
+            .border_color(rgb(theme::border()))
+            .text_color(rgb(theme::text()))
             .text_sm()
             .child(text.clone())
             .into_any_element(),
@@ -381,7 +380,7 @@ fn markdown_block(block: &markdown::Block) -> gpui::AnyElement {
                     .min_w_0()
                     .px_2()
                     .py_1()
-                    .child(styled(inlines, if bold { TEXT } else { TEXT_MUTED }))
+                    .child(styled(inlines, if bold { theme::text() } else { theme::text_muted() }))
                     .when(bold, |row| row.font_weight(FontWeight::BOLD))
             };
             // Pad short rows so columns stay aligned when the source is ragged.
@@ -397,15 +396,15 @@ fn markdown_block(block: &markdown::Block) -> gpui::AnyElement {
                 .w_full()
                 .min_w_0()
                 .border_1()
-                .border_color(rgb(BORDER));
+                .border_color(rgb(theme::border()));
             if !header.is_empty() {
                 let mut head = div()
                     .flex()
                     .flex_row()
                     .w_full()
-                    .bg(rgb(SURFACE))
+                    .bg(rgb(theme::surface()))
                     .border_b_1()
-                    .border_color(rgb(BORDER));
+                    .border_color(rgb(theme::border()));
                 for value in padded(header) {
                     head = head.child(cell(&value, true));
                 }
@@ -416,7 +415,7 @@ fn markdown_block(block: &markdown::Block) -> gpui::AnyElement {
                 // A hairline between rows, but not under the last one — the table's own
                 // border already closes it.
                 if index + 1 < rows.len() {
-                    line = line.border_b_1().border_color(rgb(BORDER));
+                    line = line.border_b_1().border_color(rgb(theme::border()));
                 }
                 for value in padded(row) {
                     line = line.child(cell(&value, false));
@@ -428,7 +427,7 @@ fn markdown_block(block: &markdown::Block) -> gpui::AnyElement {
         Block::Rule => div()
             .w_full()
             .border_b_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(theme::border()))
             .into_any_element(),
     }
 }
@@ -727,6 +726,15 @@ struct Workbench {
     /// still gone on "New thread" or a restart, and announced in the status bar the whole
     /// time it is in force, so it cannot be in effect without being visible (docs §41).
     approve_conversation: bool,
+    /// Whether the conversation sidebar is showing. A researcher deep in one thread
+    /// wants the screen, not the list.
+    sidebar_open: bool,
+    /// Whether the research panel on the right is showing.
+    panel_open: bool,
+    /// What the sidebar's search box holds. Empty means "show everything".
+    conversation_query: Entity<Composer>,
+    /// A file being previewed in the centre, if any.
+    preview: Option<workspace::Output>,
     /// The researcher's past conversations, newest first.
     conversations: Vec<protocol::Conversation>,
     /// A name to give the current conversation once its thread exists.
@@ -763,6 +771,12 @@ impl Workbench {
             ComposerEvent::Submit(text) => workbench.start_turn(text.clone(), cx),
         })
         .detach();
+
+        // Filtering the conversation list. Never submits — it filters as you type, which
+        // is what "fast" means for a list this small.
+        let conversation_query = cx.new(|cx| Composer::new(cx, "Search conversations"));
+        cx.observe(&conversation_query, |_workbench, _query, cx| cx.notify())
+            .detach();
 
         // Renaming a conversation. Submit commits the new name; the sidebar row is
         // replaced by this field while it is in force.
@@ -831,6 +845,10 @@ impl Workbench {
             pending_approval: None,
             approve_rest_of_turn: false,
             approve_conversation: false,
+            sidebar_open: true,
+            panel_open: true,
+            conversation_query,
+            preview: None,
             conversations: Vec::new(),
             pending_title: None,
             renaming: None,
@@ -1567,6 +1585,22 @@ impl Workbench {
     /// the researcher is the same thing (docs §48).
     fn rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let current = self.sidecar.thread_id();
+        // The same scorer the command palette uses, so "pap" finds "Rendimiento de papa"
+        // and typing feels the way Zed's file finder does rather than like a substring
+        // match that misses the obvious (docs §49).
+        let query = self.conversation_query.read(cx).text().to_string();
+        let mut ranked: Vec<(i32, &protocol::Conversation)> = self
+            .conversations
+            .iter()
+            .filter_map(|conversation| {
+                match_score(&query, &conversation.title).map(|score| (score, conversation))
+            })
+            .collect();
+        if !query.trim().is_empty() {
+            ranked.sort_by(|a, b| b.0.cmp(&a.0));
+        }
+        let matched: Vec<&protocol::Conversation> =
+            ranked.into_iter().map(|(_, conversation)| conversation).collect();
 
         let mut list = div()
             .id("conversations")
@@ -1578,17 +1612,21 @@ impl Workbench {
             .p_1()
             .gap_px();
 
-        if self.conversations.is_empty() {
+        if matched.is_empty() {
             list = list.child(
                 div()
                     .p_2()
-                    .text_color(rgb(TEXT_FAINT))
+                    .text_color(rgb(theme::text_faint()))
                     .text_xs()
-                    .child("Conversations you start will appear here."),
+                    .child(if self.conversations.is_empty() {
+                        "Conversations you start will appear here."
+                    } else {
+                        "Nothing matches that."
+                    }),
             );
         }
 
-        for conversation in &self.conversations {
+        for conversation in matched {
             let thread_id = conversation.thread_id.clone();
             let selected = current.as_deref() == Some(thread_id.as_str());
             let renaming = self.renaming.as_deref() == Some(thread_id.as_str());
@@ -1603,7 +1641,7 @@ impl Workbench {
                         .px_2()
                         .py_1()
                         .border_1()
-                        .border_color(rgb(ACCENT))
+                        .border_color(rgb(theme::accent()))
                         .child(self.rename_editor.clone()),
                 );
                 continue;
@@ -1623,16 +1661,16 @@ impl Workbench {
                     .min_w_0()
                     .px_2()
                     .py_1()
-                    .when(selected, |row| row.bg(rgb(ACCENT_SOFT)))
+                    .when(selected, |row| row.bg(rgb(theme::accent_soft())))
                     // Every row reacts to the pointer. A list that does not respond to
                     // the cursor does not read as a list of *buttons*.
-                    .hover(|style| style.bg(rgb(RAISED)).cursor_pointer())
+                    .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
                     .child(
                         div()
                             .flex_grow()
                             .min_w_0()
                             .truncate()
-                            .text_color(rgb(if selected { TEXT } else { TEXT_MUTED }))
+                            .text_color(rgb(if selected { theme::text() } else { theme::text_muted() }))
                             .text_xs()
                             .child(conversation.title.clone()),
                     )
@@ -1648,9 +1686,9 @@ impl Workbench {
                                 |style| style.visible(),
                             )
                             .px_1()
-                            .text_color(rgb(TEXT_FAINT))
+                            .text_color(rgb(theme::text_faint()))
                             .text_xs()
-                            .hover(|style| style.text_color(rgb(ACCENT)).cursor_pointer())
+                            .hover(|style| style.text_color(rgb(theme::accent())).cursor_pointer())
                             .child("rename")
                             .on_click(cx.listener(move |workbench, _event, window, cx| {
                                 workbench.start_rename(rename.clone(), window, cx);
@@ -1667,9 +1705,9 @@ impl Workbench {
             .flex_col()
             .w(px(220.))
             .h_full()
-            .bg(rgb(SURFACE))
+            .bg(rgb(theme::surface()))
             .border_r_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(theme::border()))
             .child(
                 div()
                     .flex()
@@ -1680,21 +1718,32 @@ impl Workbench {
                     .px_3()
                     .py_2()
                     .border_b_1()
-                    .border_color(rgb(BORDER))
-                    .child(div().text_color(rgb(ACCENT)).child("◎"))
+                    .border_color(rgb(theme::border()))
+                    .child(
+                        div()
+                            .id("open-settings")
+                            .text_color(rgb(theme::accent()))
+                            .hover(|style| {
+                                style.text_color(rgb(theme::accent_hover())).cursor_pointer()
+                            })
+                            .child("◎")
+                            .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                workbench.run_command(Command::OpenSettings, cx);
+                            })),
+                    )
                     .child(
                         div()
                             .id("new-conversation")
                             .px_2()
                             .py_1()
                             .border_1()
-                            .border_color(rgb(BORDER_STRONG))
-                            .text_color(rgb(TEXT_MUTED))
+                            .border_color(rgb(theme::border_strong()))
+                            .text_color(rgb(theme::text_muted()))
                             .text_xs()
                             .hover(|style| {
                                 style
-                                    .text_color(rgb(ACCENT))
-                                    .border_color(rgb(ACCENT))
+                                    .text_color(rgb(theme::accent()))
+                                    .border_color(rgb(theme::accent()))
                                     .cursor_pointer()
                             })
                             .child("New")
@@ -1703,7 +1752,167 @@ impl Workbench {
                             })),
                     ),
             )
+            .child(
+                div()
+                    .flex_none()
+                    .px_2()
+                    .py_1()
+                    .border_b_1()
+                    .border_color(rgb(theme::border()))
+                    .child(self.conversation_query.clone()),
+            )
             .child(list)
+    }
+
+    /// A file, shown in the middle of the window.
+    ///
+    /// The shape is Zed's picker: a centred panel floating over a dimmed workbench, which
+    /// they use for all fifty-odd of their modals. It suits this exactly — opening a
+    /// figure or a report is something you do, look at, and dismiss, not somewhere you
+    /// navigate to and have to find your way back from (docs §49).
+    fn preview_modal(&self, output: workspace::Output, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut body = div()
+            .id("preview-body")
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w_0()
+            .flex_grow()
+            .overflow_y_scroll()
+            .p_3()
+            .gap_2();
+
+        match output.kind {
+            workspace::Kind::Figure => {
+                body = body.child(
+                    img(output.path.clone())
+                        .max_w_full()
+                        .object_fit(gpui::ObjectFit::Contain),
+                );
+            }
+            _ => {
+                // Read a bounded prefix. A 200 MB CSV would otherwise be pulled into
+                // memory and laid out as one paragraph, on the UI thread.
+                match workspace::head(&output.path, 400) {
+                    Ok(text) if output.name.ends_with(".md") => {
+                        for parsed in markdown::parse(&text) {
+                            body = body.child(markdown_block(&parsed));
+                        }
+                    }
+                    Ok(text) => {
+                        // CSV and everything else, as lines — a real table needs column
+                        // layout GPUI 0.2.2 does not have, and misaligned columns read
+                        // worse than honest plain text.
+                        for line in text.lines() {
+                            body = body.child(
+                                div()
+                                    .w_full()
+                                    .min_w_0()
+                                    .text_color(rgb(theme::text_muted()))
+                                    .text_xs()
+                                    .child(line.to_string()),
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        body = body.child(
+                            div()
+                                .text_color(rgb(theme::error()))
+                                .text_xs()
+                                .child(format!("{error:#}")),
+                        );
+                    }
+                }
+            }
+        }
+
+        let opened = output.path.clone();
+        div()
+            .id("preview-backdrop")
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            // The dim is the affordance: it says the workbench is still there and that
+            // clicking away comes back to it.
+            .bg(if theme::is_light(&theme::current()) {
+                gpui::rgba(0x33333366)
+            } else {
+                gpui::rgba(0x00000099)
+            })
+            .child(
+                div()
+                    .id("preview")
+                    .flex()
+                    .flex_col()
+                    .w(px(760.))
+                    .max_h(px(620.))
+                    .bg(rgb(theme::overlay()))
+                    .border_1()
+                    .border_color(rgb(theme::border_strong()))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .flex_none()
+                            .px_3()
+                            .py_2()
+                            .border_b_1()
+                            .border_color(rgb(theme::border()))
+                            .child(
+                                div()
+                                    .flex_grow()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(rgb(theme::text()))
+                                    .text_sm()
+                                    .child(output.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .id("preview-open")
+                                    .flex_none()
+                                    .px_2()
+                                    .text_color(rgb(theme::text_muted()))
+                                    .text_xs()
+                                    .hover(|style| {
+                                        style.text_color(rgb(theme::accent())).cursor_pointer()
+                                    })
+                                    .child("open outside")
+                                    .on_click(move |_event, _window, _cx| {
+                                        if let Err(error) = workspace::open(&opened) {
+                                            tracing::warn!(%error, "could not open a file");
+                                        }
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .id("preview-close")
+                                    .flex_none()
+                                    .px_2()
+                                    .text_color(rgb(theme::text_muted()))
+                                    .text_xs()
+                                    .hover(|style| {
+                                        style.text_color(rgb(theme::accent())).cursor_pointer()
+                                    })
+                                    .child("✕")
+                                    .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                        workbench.preview = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(body),
+            )
+            .on_click(cx.listener(|workbench, _event, _window, cx| {
+                // Clicking the dimmed backdrop closes it, the way every modal does.
+                workbench.preview = None;
+                cx.notify();
+            }))
     }
 
     fn chat_pane(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1726,12 +1935,12 @@ impl Workbench {
         if self.transcript.is_empty() {
             col = col.child(
                 div()
-                    .text_color(rgb(TEXT_MUTED))
+                    .text_color(rgb(theme::text_muted()))
                     .child("No turns yet. Press Run to stream one from the local sidecar."),
             );
         }
         for (index, message) in self.transcript.iter().enumerate() {
-            let label_color = if message.role == "you" { TEXT_MUTED } else { ACCENT };
+            let label_color = if message.role == "you" { theme::text_muted() } else { theme::accent() };
             let has_activity = !message.steps.is_empty() || !message.agents.is_empty();
             // An empty assistant body means we're still waiting on the first token —
             // unless a trace is already showing what's going on, which says more.
@@ -1761,7 +1970,7 @@ impl Workbench {
                 // The user's own text is shown as typed — they wrote it, and reinterpreting
                 // their asterisks would be presumptuous. Assistant text is Markdown.
                 if message.role == "you" {
-                    block = block.child(div().w_full().text_color(rgb(TEXT)).child(body));
+                    block = block.child(div().w_full().text_color(rgb(theme::text())).child(body));
                 } else {
                     let mut rendered = div().flex().flex_col().w_full().min_w_0().gap_2();
                     for parsed in markdown::parse(&body) {
@@ -1795,7 +2004,7 @@ impl Workbench {
                         .child(
                             div()
                                 .id(("plot", index * 64 + plot))
-                                .text_color(rgb(TEXT_MUTED))
+                                .text_color(rgb(theme::text_muted()))
                                 .text_xs()
                                 .hover(|style| style.cursor_pointer())
                                 .child(format!("{name} — click to open"))
@@ -1885,11 +2094,11 @@ impl Workbench {
             .gap_2()
             .p_3()
             .border_t_1()
-            .border_color(rgb(ACCENT))
-            .bg(rgb(SURFACE))
+            .border_color(rgb(theme::accent()))
+            .bg(rgb(theme::surface()))
             .child(
                 div()
-                    .text_color(rgb(ACCENT))
+                    .text_color(rgb(theme::accent()))
                     .text_xs()
                     .child("RUN THIS ON YOUR MACHINE?"),
             );
@@ -1914,7 +2123,7 @@ impl Workbench {
                         .w_full()
                         .min_w_0()
                         .flex_none()
-                        .text_color(rgb(TEXT_MUTED))
+                        .text_color(rgb(theme::text_muted()))
                         .text_xs()
                         .child(action.description.clone()),
                 );
@@ -1926,8 +2135,8 @@ impl Workbench {
                     .flex_none()
                     .p_2()
                     .border_1()
-                    .border_color(rgb(BORDER))
-                    .text_color(rgb(TEXT))
+                    .border_color(rgb(theme::border()))
+                    .text_color(rgb(theme::text()))
                     .text_sm()
                     .child(action.detail.clone()),
             );
@@ -1944,8 +2153,8 @@ impl Workbench {
                         .px_3()
                         .py_1()
                         .border_1()
-                        .border_color(rgb(ACCENT))
-                        .text_color(rgb(ACCENT))
+                        .border_color(rgb(theme::accent()))
+                        .text_color(rgb(theme::accent()))
                         .text_sm()
                         .hover(|style| style.cursor_pointer())
                         .child("Approve")
@@ -1959,8 +2168,8 @@ impl Workbench {
                         .px_3()
                         .py_1()
                         .border_1()
-                        .border_color(rgb(BORDER))
-                        .text_color(rgb(TEXT_MUTED))
+                        .border_color(rgb(theme::border()))
+                        .text_color(rgb(theme::text_muted()))
                         .text_sm()
                         .hover(|style| style.cursor_pointer())
                         .child("Reject")
@@ -1980,8 +2189,8 @@ impl Workbench {
                         .px_3()
                         .py_1()
                         .border_1()
-                        .border_color(rgb(BORDER))
-                        .text_color(rgb(TEXT_MUTED))
+                        .border_color(rgb(theme::border()))
+                        .text_color(rgb(theme::text_muted()))
                         .text_sm()
                         .hover(|style| style.cursor_pointer())
                         .child("Approve the rest of this turn")
@@ -2002,8 +2211,8 @@ impl Workbench {
                         .px_3()
                         .py_1()
                         .border_1()
-                        .border_color(rgb(BORDER))
-                        .text_color(rgb(TEXT_MUTED))
+                        .border_color(rgb(theme::border()))
+                        .text_color(rgb(theme::text_muted()))
                         .text_sm()
                         .hover(|style| style.cursor_pointer())
                         .child("Approve everything in this conversation")
@@ -2105,6 +2314,8 @@ impl Workbench {
     /// your key.
     fn open_settings(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
         self.draft = settings::Settings::load();
+        // Reverts a theme that was being previewed but not saved.
+        settings::apply_theme(&self.draft);
         self.settings_note.clear();
         // Both live in the right-hand slot, so opening one closes the other. Setup's
         // "Settings" button is the usual route here — you go there to paste the key it
@@ -2228,12 +2439,40 @@ impl Workbench {
             .flex_none()
             .h_full()
             .overflow_y_scroll()
-            .bg(rgb(SURFACE))
+            .bg(rgb(theme::surface()))
             .border_l_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(theme::border()))
             .p_4()
             .gap_3()
             .child(section_label("SETTINGS"))
+            // Applied on click, not on save: a palette is judged by looking at it, so
+            // waiting for a Save button to see it would be the wrong loop entirely.
+            .child(
+                div()
+                    .id("theme")
+                    .w_full()
+                    .p_2()
+                    .border_1()
+                    .border_color(rgb(theme::border()))
+                    .text_color(rgb(theme::text()))
+                    .text_sm()
+                    .hover(|style| style.border_color(rgb(theme::accent())).cursor_pointer())
+                    .child(format!("Theme: {}  ⟳", self.draft.theme))
+                    .on_click(cx.listener(|workbench, _event, _window, cx| {
+                        let themes = settings::available_themes();
+                        if themes.is_empty() {
+                            return;
+                        }
+                        let current = themes
+                            .iter()
+                            .position(|(name, _)| name.eq_ignore_ascii_case(&workbench.draft.theme))
+                            .unwrap_or(0);
+                        let (name, theme) = &themes[(current + 1) % themes.len()];
+                        workbench.draft.theme = name.clone();
+                        theme::apply(theme);
+                        cx.notify();
+                    })),
+            )
             // Clicking cycles: five providers do not need a dropdown, and a dropdown in
             // GPUI is a whole widget we would have to build.
             .child(
@@ -2242,10 +2481,10 @@ impl Workbench {
                     .w_full()
                     .p_2()
                     .border_1()
-                    .border_color(rgb(BORDER))
-                    .text_color(rgb(TEXT))
+                    .border_color(rgb(theme::border()))
+                    .text_color(rgb(theme::text()))
                     .text_sm()
-                    .hover(|style| style.border_color(rgb(ACCENT)).cursor_pointer())
+                    .hover(|style| style.border_color(rgb(theme::accent())).cursor_pointer())
                     .child(format!("Provider: {provider_label}  ⟳"))
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
                         let current = settings::PROVIDERS
@@ -2293,7 +2532,7 @@ impl Workbench {
                     .gap_1()
                     .child(
                         div()
-                            .text_color(rgb(TEXT_MUTED))
+                            .text_color(rgb(theme::text_muted()))
                             .text_xs()
                             .child(format!("{}{status}", field.label())),
                     )
@@ -2303,7 +2542,7 @@ impl Workbench {
                             .min_w_0()
                             .p_2()
                             .border_1()
-                            .border_color(rgb(BORDER))
+                            .border_color(rgb(theme::border()))
                             .child(composer.clone()),
                     ),
             );
@@ -2332,8 +2571,8 @@ impl Workbench {
                     .w_full()
                     .p_2()
                     .border_1()
-                    .border_color(rgb(if value { ACCENT } else { BORDER }))
-                    .text_color(rgb(if value { TEXT } else { TEXT_MUTED }))
+                    .border_color(rgb(if value { theme::accent() } else { theme::border() }))
+                    .text_color(rgb(if value { theme::text() } else { theme::text_muted() }))
                     .text_sm()
                     .hover(|style| style.cursor_pointer())
                     .child(format!("{} {label}", if value { "☑" } else { "☐" }))
@@ -2365,7 +2604,7 @@ impl Workbench {
                 div()
                     .w_full()
                     .min_w_0()
-                    .text_color(rgb(ERROR))
+                    .text_color(rgb(theme::error()))
                     .text_xs()
                     .child(problem),
             );
@@ -2376,7 +2615,7 @@ impl Workbench {
                 div()
                     .w_full()
                     .min_w_0()
-                    .text_color(rgb(TEXT_MUTED))
+                    .text_color(rgb(theme::text_muted()))
                     .text_xs()
                     .child(self.settings_note.clone()),
             );
@@ -2393,8 +2632,8 @@ impl Workbench {
                         .px_3()
                         .py_1()
                         .border_1()
-                        .border_color(rgb(ACCENT))
-                        .text_color(rgb(ACCENT))
+                        .border_color(rgb(theme::accent()))
+                        .text_color(rgb(theme::accent()))
                         .text_sm()
                         .hover(|style| style.cursor_pointer())
                         .child("Save")
@@ -2408,8 +2647,8 @@ impl Workbench {
                         .px_3()
                         .py_1()
                         .border_1()
-                        .border_color(rgb(BORDER))
-                        .text_color(rgb(TEXT_MUTED))
+                        .border_color(rgb(theme::border()))
+                        .text_color(rgb(theme::text_muted()))
                         .text_sm()
                         .hover(|style| style.cursor_pointer())
                         .child("Close")
@@ -2424,7 +2663,7 @@ impl Workbench {
             div()
                 .w_full()
                 .min_w_0()
-                .text_color(rgb(TEXT_MUTED))
+                .text_color(rgb(theme::text_muted()))
                 .text_xs()
                 .child(format!(
                     "Keys live in your OS keychain, never in a file. Settings: {}",
@@ -2447,9 +2686,9 @@ impl Workbench {
             .flex_none()
             .h_full()
             .overflow_y_scroll()
-            .bg(rgb(SURFACE))
+            .bg(rgb(theme::surface()))
             .border_l_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(theme::border()))
             .p_4()
             .gap_3()
             .child(section_label("SETUP"));
@@ -2458,7 +2697,7 @@ impl Workbench {
             None => {
                 pane = pane.child(
                     div()
-                        .text_color(rgb(TEXT_MUTED))
+                        .text_color(rgb(theme::text_muted()))
                         .text_sm()
                         .child("Checking this machine…"),
                 );
@@ -2473,7 +2712,7 @@ impl Workbench {
                         .gap_1()
                         .child(
                             div()
-                                .text_color(rgb(if report.ready() { TEXT_MUTED } else { ERROR }))
+                                .text_color(rgb(if report.ready() { theme::text_muted() } else { theme::error() }))
                                 .text_sm()
                                 .child(if self.checking {
                                     "Re-checking…".to_string()
@@ -2487,7 +2726,7 @@ impl Workbench {
                         // different inside a distro than on this filesystem.
                         .child(
                             div()
-                                .text_color(rgb(TEXT_MUTED))
+                                .text_color(rgb(theme::text_muted()))
                                 .text_xs()
                                 .child(format!("{} · {}", report.location, report.execution)),
                         )
@@ -2495,7 +2734,7 @@ impl Workbench {
                         // because it decides what the app is allowed to do to the user's
                         // own files, and that must never be a surprise.
                         .child(
-                            div().text_color(rgb(TEXT_MUTED)).text_xs().child(if report.owned {
+                            div().text_color(rgb(theme::text_muted())).text_xs().child(if report.owned {
                                 "Installed and maintained by this app."
                             } else {
                                 "Your own checkout — the app runs it but never modifies it."
@@ -2505,10 +2744,10 @@ impl Workbench {
 
                 for check in &report.checks {
                     let color = match check.state {
-                        preflight::State::Pass => TEXT_MUTED,
-                        preflight::State::Warn => ACCENT,
-                        preflight::State::Fail => ERROR,
-                        preflight::State::Skip => BORDER,
+                        preflight::State::Pass => theme::text_muted(),
+                        preflight::State::Warn => theme::accent(),
+                        preflight::State::Fail => theme::error(),
+                        preflight::State::Skip => theme::border(),
                     };
                     let mut row = div()
                         .flex()
@@ -2522,7 +2761,7 @@ impl Workbench {
                         .child(
                             div()
                                 .text_color(rgb(if check.state == preflight::State::Pass {
-                                    TEXT
+                                    theme::text()
                                 } else {
                                     color
                                 }))
@@ -2533,7 +2772,7 @@ impl Workbench {
                             div()
                                 .w_full()
                                 .min_w_0()
-                                .text_color(rgb(TEXT_MUTED))
+                                .text_color(rgb(theme::text_muted()))
                                 .text_xs()
                                 .child(check.detail.clone()),
                         );
@@ -2547,7 +2786,7 @@ impl Workbench {
                                 // The note is not decoration: "asks for admin rights, then
                                 // needs a restart" is the difference between a user who
                                 // waits and a user who thinks it broke.
-                                .child(div().text_color(rgb(TEXT_MUTED)).text_xs().child(*note))
+                                .child(div().text_color(rgb(theme::text_muted())).text_xs().child(*note))
                                 .child(
                                     div()
                                         .flex()
@@ -2562,8 +2801,8 @@ impl Workbench {
                                                 .px_3()
                                                 .py_1()
                                                 .border_1()
-                                                .border_color(rgb(if busy { BORDER } else { ACCENT }))
-                                                .text_color(rgb(if busy { TEXT_MUTED } else { ACCENT }))
+                                                .border_color(rgb(if busy { theme::border() } else { theme::accent() }))
+                                                .text_color(rgb(if busy { theme::text_muted() } else { theme::accent() }))
                                                 .text_sm()
                                                 .hover(|style| style.cursor_pointer())
                                                 .child(*label)
@@ -2589,8 +2828,8 @@ impl Workbench {
                                                 .px_3()
                                                 .py_1()
                                                 .border_1()
-                                                .border_color(rgb(BORDER))
-                                                .text_color(rgb(TEXT_MUTED))
+                                                .border_color(rgb(theme::border()))
+                                                .text_color(rgb(theme::text_muted()))
                                                 .text_sm()
                                                 .hover(|style| style.cursor_pointer())
                                                 .child("Copy ⧉")
@@ -2617,8 +2856,8 @@ impl Workbench {
                                     .px_3()
                                     .py_1()
                                     .border_1()
-                                    .border_color(rgb(ACCENT))
-                                    .text_color(rgb(ACCENT))
+                                    .border_color(rgb(theme::accent()))
+                                    .text_color(rgb(theme::accent()))
                                     .text_sm()
                                     .hover(|style| style.cursor_pointer())
                                     .child(*label)
@@ -2635,7 +2874,7 @@ impl Workbench {
                                 div()
                                     .w_full()
                                     .min_w_0()
-                                    .text_color(rgb(TEXT_MUTED))
+                                    .text_color(rgb(theme::text_muted()))
                                     .text_xs()
                                     .child(instruction.clone()),
                             );
@@ -2664,15 +2903,15 @@ impl Workbench {
                 .p_2()
                 .border_1()
                 .border_color(rgb(if !fix.done {
-                    ACCENT
+                    theme::accent()
                 } else if fix.ok {
-                    BORDER
+                    theme::border()
                 } else {
-                    ERROR
+                    theme::error()
                 }))
                 .child(
                     div()
-                        .text_color(rgb(TEXT))
+                        .text_color(rgb(theme::text()))
                         .text_sm()
                         .child(if fix.done {
                             format!("{} — {}", fix.label, if fix.ok { "done" } else { "failed" })
@@ -2691,7 +2930,7 @@ impl Workbench {
                         div()
                             .w_full()
                             .min_w_0()
-                            .text_color(rgb(ACCENT))
+                            .text_color(rgb(theme::accent()))
                             .text_lg()
                             .child(code),
                     );
@@ -2707,8 +2946,8 @@ impl Workbench {
                                 .px_3()
                                 .py_1()
                                 .border_1()
-                                .border_color(rgb(ACCENT))
-                                .text_color(rgb(ACCENT))
+                                .border_color(rgb(theme::accent()))
+                                .text_color(rgb(theme::accent()))
                                 .text_sm()
                                 .hover(|style| style.cursor_pointer())
                                 .child("Open the sign-in page")
@@ -2735,8 +2974,8 @@ impl Workbench {
                                 .px_3()
                                 .py_1()
                                 .border_1()
-                                .border_color(rgb(BORDER))
-                                .text_color(rgb(TEXT_MUTED))
+                                .border_color(rgb(theme::border()))
+                                .text_color(rgb(theme::text_muted()))
                                 .text_sm()
                                 .hover(|style| style.cursor_pointer())
                                 .child("Copy ⧉")
@@ -2767,7 +3006,7 @@ impl Workbench {
                     div()
                         .w_full()
                         .min_w_0()
-                        .text_color(rgb(TEXT_MUTED))
+                        .text_color(rgb(theme::text_muted()))
                         .text_xs()
                         .child(line.clone()),
                 );
@@ -2775,7 +3014,7 @@ impl Workbench {
             if fix.lines.is_empty() {
                 output = output.child(
                     div()
-                        .text_color(rgb(TEXT_MUTED))
+                        .text_color(rgb(theme::text_muted()))
                         .text_xs()
                         .child("starting…"),
                 );
@@ -2794,8 +3033,8 @@ impl Workbench {
                         .px_3()
                         .py_1()
                         .border_1()
-                        .border_color(rgb(ACCENT))
-                        .text_color(rgb(ACCENT))
+                        .border_color(rgb(theme::accent()))
+                        .text_color(rgb(theme::accent()))
                         .text_sm()
                         .hover(|style| style.cursor_pointer())
                         .child(if self.checking { "Checking…" } else { "Re-check" })
@@ -2809,8 +3048,8 @@ impl Workbench {
                         .px_3()
                         .py_1()
                         .border_1()
-                        .border_color(rgb(BORDER))
-                        .text_color(rgb(TEXT_MUTED))
+                        .border_color(rgb(theme::border()))
+                        .text_color(rgb(theme::text_muted()))
                         .text_sm()
                         .hover(|style| style.cursor_pointer())
                         .child("Settings")
@@ -2825,8 +3064,8 @@ impl Workbench {
                         .px_3()
                         .py_1()
                         .border_1()
-                        .border_color(rgb(BORDER))
-                        .text_color(rgb(TEXT_MUTED))
+                        .border_color(rgb(theme::border()))
+                        .text_color(rgb(theme::text_muted()))
                         .text_sm()
                         .hover(|style| style.cursor_pointer())
                         .child("Close")
@@ -2841,7 +3080,7 @@ impl Workbench {
             div()
                 .w_full()
                 .min_w_0()
-                .text_color(rgb(TEXT_MUTED))
+                .text_color(rgb(theme::text_muted()))
                 .text_xs()
                 .child(format!("Sidecar log: {}", self.sidecar.log_path())),
         )
@@ -2922,7 +3161,7 @@ impl Workbench {
             list = list.child(
                 div()
                     .p_2()
-                    .text_color(rgb(TEXT_MUTED))
+                    .text_color(rgb(theme::text_muted()))
                     .text_sm()
                     .child("No matching command."),
             );
@@ -2942,19 +3181,19 @@ impl Workbench {
                     .gap_3()
                     .px_2()
                     .py_1()
-                    .when(is_selected, |row| row.bg(rgb(BORDER)))
-                    .hover(|style| style.bg(rgb(BORDER)).cursor_pointer())
+                    .when(is_selected, |row| row.bg(rgb(theme::border())))
+                    .hover(|style| style.bg(rgb(theme::border())).cursor_pointer())
                     .child(
                         div()
                             .flex_grow()
                             .min_w_0()
-                            .text_color(rgb(if is_selected { TEXT } else { TEXT_MUTED }))
+                            .text_color(rgb(if is_selected { theme::text() } else { theme::text_muted() }))
                             .child(command.label()),
                     )
                     .child(
                         div()
                             .flex_none()
-                            .text_color(rgb(TEXT_MUTED))
+                            .text_color(rgb(theme::text_muted()))
                             .text_xs()
                             .child(command.hint()),
                     )
@@ -2990,14 +3229,14 @@ impl Workbench {
                     .w(px(520.))
                     .flex()
                     .flex_col()
-                    .bg(rgb(SURFACE))
+                    .bg(rgb(theme::surface()))
                     .border_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(theme::border()))
                     .child(
                         div()
                             .p_2()
                             .border_b_1()
-                            .border_color(rgb(BORDER))
+                            .border_color(rgb(theme::border()))
                             .child(self.palette_query.clone()),
                     )
                     .child(list)
@@ -3006,8 +3245,8 @@ impl Workbench {
                             .px_2()
                             .py_1()
                             .border_t_1()
-                            .border_color(rgb(BORDER))
-                            .text_color(rgb(TEXT_MUTED))
+                            .border_color(rgb(theme::border()))
+                            .text_color(rgb(theme::text_muted()))
                             .text_xs()
                             .child("↑↓ select · ⏎ run · esc close"),
                     ),
@@ -3040,7 +3279,7 @@ impl Workbench {
                     .id(SharedString::from(format!("steps-{message_index}")))
                     .w_full()
                     .min_w_0()
-                    .text_color(rgb(TEXT_MUTED))
+                    .text_color(rgb(theme::text_muted()))
                     .text_xs()
                     .hover(|style| style.cursor_pointer())
                     .child(format!(
@@ -3083,7 +3322,7 @@ impl Workbench {
                 .gap_1()
                 .pl_2()
                 .border_l_1()
-                .border_color(rgb(BORDER))
+                .border_color(rgb(theme::border()))
                 .child(
                     div()
                         // Unique per (turn, trace) so GPUI keeps each group's click
@@ -3093,7 +3332,7 @@ impl Workbench {
                         )))
                         .w_full()
                         .min_w_0()
-                        .text_color(rgb(ACCENT))
+                        .text_color(rgb(theme::accent()))
                         .text_xs()
                         .hover(|style| style.cursor_pointer())
                         .child(header)
@@ -3119,7 +3358,7 @@ impl Workbench {
                         div()
                             .w_full()
                             .min_w_0()
-                            .text_color(rgb(TEXT_MUTED))
+                            .text_color(rgb(theme::text_muted()))
                             .text_xs()
                             .child(preview),
                     );
@@ -3134,9 +3373,9 @@ impl Workbench {
     /// The input row: the text field plus a Send affordance.
     fn composer_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let (send_label, send_color) = if self.streaming {
-            ("Streaming…", TEXT_MUTED)
+            ("Streaming…", theme::text_muted())
         } else {
-            ("Send ⏎", ACCENT)
+            ("Send ⏎", theme::accent())
         };
 
         div()
@@ -3146,8 +3385,8 @@ impl Workbench {
             .gap_3()
             .p_3()
             .border_t_1()
-            .border_color(rgb(BORDER))
-            .bg(rgb(SURFACE))
+            .border_color(rgb(theme::border()))
+            .bg(rgb(theme::surface()))
             .child(self.composer.clone())
             .child(
                 div()
@@ -3173,11 +3412,35 @@ impl Workbench {
 
     fn status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let (status_text, status_color) = match &self.error {
-            Some(error) => (error.clone(), ERROR),
-            None => (self.status.clone(), TEXT_MUTED),
+            Some(error) => (error.clone(), theme::error()),
+            None => (self.status.clone(), theme::text_muted()),
         };
 
         div()
+            // A moving mark while anything is running. The first turn after launch spends
+            // 20–40 seconds building the agent — MCP tool fetches, middleware, model
+            // construction — and a still window during that reads as a hang, which is the
+            // single most common reason someone kills an app that was working fine.
+            .when(self.streaming || self.running_fix.is_some(), |bar| {
+                bar.child(
+                    div()
+                        .flex_none()
+                        .text_color(rgb(theme::accent()))
+                        .text_sm()
+                        .with_animation(
+                            "working",
+                            gpui::Animation::new(std::time::Duration::from_millis(1200))
+                                .repeat(),
+                            |label, delta| {
+                                // Four frames of a braille spinner: no font dependency,
+                                // no SVG to ship, and it reads as motion at any size.
+                                const FRAMES: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
+                                let frame = (delta * FRAMES.len() as f32) as usize;
+                                label.child(FRAMES[frame.min(FRAMES.len() - 1)])
+                            },
+                        ),
+                )
+            })
             .flex()
             .flex_row()
             .items_center()
@@ -3185,8 +3448,8 @@ impl Workbench {
             .px_3()
             .py_1()
             .border_t_1()
-            .border_color(rgb(BORDER))
-            .bg(rgb(SURFACE))
+            .border_color(rgb(theme::border()))
+            .bg(rgb(theme::surface()))
             .child(
                 div()
                     .flex_grow()
@@ -3205,8 +3468,8 @@ impl Workbench {
                         .flex_none()
                         .px_2()
                         .border_1()
-                        .border_color(rgb(ACCENT))
-                        .text_color(rgb(ACCENT))
+                        .border_color(rgb(theme::accent()))
+                        .text_color(rgb(theme::accent()))
                         .text_xs()
                         .hover(|style| style.cursor_pointer())
                         .child("approving everything — click to stop")
@@ -3218,15 +3481,51 @@ impl Workbench {
                         })),
                 )
             })
+            // Panel toggles. Both always present, so a closed panel is never a one-way
+            // door — the commonest way a collapsible panel becomes a bug report.
+            .child(
+                div()
+                    .id("toggle-sidebar")
+                    .flex_none()
+                    .text_color(rgb(if self.sidebar_open {
+                        theme::accent()
+                    } else {
+                        theme::text_faint()
+                    }))
+                    .text_xs()
+                    .hover(|style| style.text_color(rgb(theme::accent_hover())).cursor_pointer())
+                    .child("▤ conversations")
+                    .on_click(cx.listener(|workbench, _event, _window, cx| {
+                        workbench.sidebar_open = !workbench.sidebar_open;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div()
+                    .id("toggle-panel")
+                    .flex_none()
+                    .text_color(rgb(if self.panel_open {
+                        theme::accent()
+                    } else {
+                        theme::text_faint()
+                    }))
+                    .text_xs()
+                    .hover(|style| style.text_color(rgb(theme::accent_hover())).cursor_pointer())
+                    .child("▥ research")
+                    .on_click(cx.listener(|workbench, _event, _window, cx| {
+                        workbench.panel_open = !workbench.panel_open;
+                        cx.notify();
+                    })),
+            )
             // Say where the agent's code runs. When that is the user's own machine
             // it should be visible without opening a log (docs §18).
             .child(
                 div()
                     .flex_none()
                     .text_color(rgb(if self.sidecar.execution() == "host (local)" {
-                        ACCENT
+                        theme::accent()
                     } else {
-                        TEXT_MUTED
+                        theme::text_muted()
                     }))
                     .text_xs()
                     .child(self.sidecar.execution()),
@@ -3236,13 +3535,13 @@ impl Workbench {
             .child(
                 div()
                     .flex_none()
-                    .text_color(rgb(TEXT_MUTED))
+                    .text_color(rgb(theme::text_muted()))
                     .text_xs()
                     .child("ctrl-p commands"),
             )
             .child(
                 div()
-                    .text_color(rgb(TEXT_MUTED))
+                    .text_color(rgb(theme::text_muted()))
                     .text_sm()
                     .child(self.sidecar.base_url().to_string()),
             )
@@ -3258,9 +3557,9 @@ impl Workbench {
             .flex_none()
             .h_full()
             .overflow_y_scroll()
-            .bg(rgb(SURFACE))
+            .bg(rgb(theme::surface()))
             .border_l_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(theme::border()))
             .p_4()
             .gap_4()
             .child(section_label("RESEARCH PROJECT"));
@@ -3271,23 +3570,23 @@ impl Workbench {
             return panel
                 .child(
                     div()
-                        .text_color(rgb(TEXT_MUTED))
+                        .text_color(rgb(theme::text_muted()))
                         .text_sm()
                         .child("No project loaded yet. Run a turn — the mission is derived from your first question."),
                 )
                 .child(self.jobs_section(cx))
-                .child(self.outputs_section());
+                .child(self.outputs_section(cx));
         };
 
         panel = panel.child(if project.mission.is_empty() {
             div()
-                .text_color(rgb(TEXT_MUTED))
+                .text_color(rgb(theme::text_muted()))
                 .text_sm()
                 .child("No mission yet — it comes from your first question.")
         } else {
             div()
                 .w_full()
-                .text_color(rgb(TEXT))
+                .text_color(rgb(theme::text()))
                 .child(project.mission.clone())
         });
 
@@ -3318,19 +3617,19 @@ impl Workbench {
                         .gap_1()
                         .p_2()
                         .border_1()
-                        .border_color(rgb(BORDER))
-                        .hover(|style| style.border_color(rgb(ACCENT)).cursor_pointer())
+                        .border_color(rgb(theme::border()))
+                        .hover(|style| style.border_color(rgb(theme::accent())).cursor_pointer())
                         .child(
                             div()
                                 .w_full()
-                                .text_color(rgb(TEXT))
+                                .text_color(rgb(theme::text()))
                                 .text_sm()
                                 .child(suggestion.title.clone()),
                         )
                         .child(
                             div()
                                 .w_full()
-                                .text_color(rgb(TEXT_MUTED))
+                                .text_color(rgb(theme::text_muted()))
                                 .text_xs()
                                 .child(suggestion.rationale.clone()),
                         )
@@ -3362,13 +3661,13 @@ impl Workbench {
         if project.completed.is_empty() && project.pending.is_empty() {
             panel = panel.child(
                 div()
-                    .text_color(rgb(TEXT_MUTED))
+                    .text_color(rgb(theme::text_muted()))
                     .text_xs()
                     .child("Completed and pending work will appear here as the project grows."),
             );
         }
 
-        panel.child(self.jobs_section(cx)).child(self.outputs_section())
+        panel.child(self.jobs_section(cx)).child(self.outputs_section(cx))
     }
 
     /// Long jobs still running, and the ones that finished this session.
@@ -3388,13 +3687,13 @@ impl Workbench {
         // own thread and nothing in the UI could answer it (docs §31).
         for task in &self.tasks {
             let (mark, colour) = if task.needs_approval() {
-                ("⏸", ACCENT)
+                ("⏸", theme::accent())
             } else if !task.is_finished() {
-                ("◐", RUNNING)
+                ("◐", theme::running())
             } else if task.succeeded() {
-                ("✓", SUCCESS)
+                ("✓", theme::success())
             } else {
-                ("✗", ERROR)
+                ("✗", theme::error())
             };
             let mut row = div()
                 .flex()
@@ -3407,7 +3706,7 @@ impl Workbench {
                 .border_color(rgb(colour))
                 .child(
                     div()
-                        .text_color(rgb(TEXT))
+                        .text_color(rgb(theme::text()))
                         .text_sm()
                         .child(format!("{mark} {}", task.agent_name.replace('_', " "))),
                 )
@@ -3418,7 +3717,13 @@ impl Workbench {
                         // The failure the server recorded, in place of the bare word
                         // "error" — which is all this said while two rounds went into
                         // guessing what had actually happened (docs §38).
-                        .text_color(rgb(if task.error.is_some() { ERROR } else { TEXT_MUTED }))
+                        .text_color(rgb(if task.error.is_some() {
+                            theme::error()
+                        } else if task.needs_approval() {
+                            theme::warning()
+                        } else {
+                            theme::text_muted()
+                        }))
                         .text_xs()
                         .child(match (&task.error, task.needs_approval()) {
                             (Some(error), _) => error.clone(),
@@ -3437,7 +3742,7 @@ impl Workbench {
                         div()
                             .w_full()
                             .min_w_0()
-                            .text_color(rgb(TEXT_MUTED))
+                            .text_color(rgb(theme::text_muted()))
                             .text_xs()
                             .child(task.description.clone()),
                     )
@@ -3468,8 +3773,8 @@ impl Workbench {
                             .flex_none()
                             .p_2()
                             .border_1()
-                            .border_color(rgb(BORDER))
-                            .text_color(rgb(TEXT))
+                            .border_color(rgb(theme::border()))
+                            .text_color(rgb(theme::text()))
                             .text_xs()
                             .child(action.detail.clone()),
                     );
@@ -3486,8 +3791,8 @@ impl Workbench {
                                 .px_3()
                                 .py_1()
                                 .border_1()
-                                .border_color(rgb(ACCENT))
-                                .text_color(rgb(ACCENT))
+                                .border_color(rgb(theme::accent()))
+                                .text_color(rgb(theme::accent()))
                                 .text_sm()
                                 .hover(|style| style.cursor_pointer())
                                 .child("Approve")
@@ -3504,8 +3809,8 @@ impl Workbench {
                                 .px_3()
                                 .py_1()
                                 .border_1()
-                                .border_color(rgb(BORDER))
-                                .text_color(rgb(TEXT_MUTED))
+                                .border_color(rgb(theme::border()))
+                                .text_color(rgb(theme::text_muted()))
                                 .text_sm()
                                 .hover(|style| style.cursor_pointer())
                                 .child("Reject")
@@ -3536,8 +3841,8 @@ impl Workbench {
                             .px_3()
                             .py_1()
                             .border_1()
-                            .border_color(rgb(BORDER))
-                            .text_color(rgb(TEXT_MUTED))
+                            .border_color(rgb(theme::border()))
+                            .text_color(rgb(theme::text_muted()))
                             .text_xs()
                             .hover(|style| style.cursor_pointer())
                             .child(label)
@@ -3559,11 +3864,11 @@ impl Workbench {
         }
         for job in &self.jobs {
             let (mark, colour) = if !job.is_finished() {
-                ("◐", RUNNING)
+                ("◐", theme::running())
             } else if job.succeeded() {
-                ("✓", SUCCESS)
+                ("✓", theme::success())
             } else {
-                ("✗", ERROR)
+                ("✗", theme::error())
             };
             let detail = if job.is_finished() {
                 job.status.clone()
@@ -3584,17 +3889,17 @@ impl Workbench {
                     .border_color(rgb(colour))
                     .child(
                         div()
-                            .text_color(rgb(TEXT))
+                            .text_color(rgb(theme::text()))
                             .text_sm()
                             .child(format!("{mark} {}", job.kind.label())),
                     )
-                    .child(div().text_color(rgb(TEXT_MUTED)).text_xs().child(detail))
+                    .child(div().text_color(rgb(theme::text_muted())).text_xs().child(detail))
                     .when(!job.question.is_empty(), |row| {
                         row.child(
                             div()
                                 .w_full()
                                 .min_w_0()
-                                .text_color(rgb(TEXT_MUTED))
+                                .text_color(rgb(theme::text_muted()))
                                 .text_xs()
                                 .child(job.question.clone()),
                         )
@@ -3608,14 +3913,14 @@ impl Workbench {
     ///
     /// Fed by the `values` stream event, so it fills in as a turn produces papers,
     /// datasets, theories and reports — not only at the end.
-    fn outputs_section(&self) -> impl IntoElement {
+    fn outputs_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut section = div()
             .flex()
             .flex_col()
             .gap_2()
             .pt_2()
             .border_t_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(theme::border()))
             .child(section_label("OUTPUTS"));
 
         // Everything this conversation wrote, in one folder the researcher already owns.
@@ -3629,8 +3934,8 @@ impl Workbench {
                     .px_2()
                     .py_1()
                     .border_1()
-                    .border_color(rgb(ACCENT))
-                    .text_color(rgb(ACCENT))
+                    .border_color(rgb(theme::accent()))
+                    .text_color(rgb(theme::accent()))
                     .text_xs()
                     .hover(|style| style.cursor_pointer())
                     .child("Open this conversation's files")
@@ -3653,12 +3958,12 @@ impl Workbench {
             section = section.child(
                 div()
                     .pt_1()
-                    .text_color(rgb(TEXT_FAINT))
+                    .text_color(rgb(theme::text_faint()))
                     .text_xs()
                     .child(kind.label()),
             );
             for output in items {
-                let opened = output.path.clone();
+                let shown = output.clone();
                 section = section.child(
                     div()
                         .id(SharedString::from(format!("file-{}", output.name)))
@@ -3670,30 +3975,29 @@ impl Workbench {
                         .w_full()
                         .min_w_0()
                         .px_1()
-                        .hover(|style| style.bg(rgb(RAISED)).cursor_pointer())
+                        .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
                         .child(
                             div()
                                 .flex_grow()
                                 .min_w_0()
                                 .truncate()
-                                .text_color(rgb(TEXT))
+                                .text_color(rgb(theme::text()))
                                 .text_xs()
                                 .child(output.name.clone()),
                         )
                         .child(
                             div()
                                 .flex_none()
-                                .text_color(rgb(TEXT_FAINT))
+                                .text_color(rgb(theme::text_faint()))
                                 .text_xs()
                                 .child(workspace::human_size(output.bytes)),
                         )
-                        .on_click(move |_event, _window, _cx| {
-                            // Opens in whatever the researcher normally uses for that
-                            // kind of file — a CSV in Excel, a figure in the viewer.
-                            if let Err(error) = workspace::open(&opened) {
-                                tracing::warn!(%error, "could not open an output file");
-                            }
-                        }),
+                        .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                            // In the window first. Leaving the app to look at a 4 KB CSV
+                            // is a context switch out of the work, and back is not free.
+                            workbench.preview = Some(shown.clone());
+                            cx.notify();
+                        })),
                 );
             }
         }
@@ -3701,7 +4005,7 @@ impl Workbench {
         if self.buckets.is_empty() && files.is_empty() {
             return section.child(
                 div()
-                    .text_color(rgb(TEXT_MUTED))
+                    .text_color(rgb(theme::text_muted()))
                     .text_xs()
                     .child("Papers, datasets, theories and reports show up here as a turn produces them."),
             );
@@ -3713,7 +4017,7 @@ impl Workbench {
             const MAX_SHOWN: usize = 4;
             let mut group = div().flex().flex_col().gap_1().child(
                 div()
-                    .text_color(rgb(TEXT))
+                    .text_color(rgb(theme::text()))
                     .text_sm()
                     .child(format!("{} · {}", bucket.name, bucket.items.len())),
             );
@@ -3722,7 +4026,7 @@ impl Workbench {
                     div()
                         .w_full()
                         .min_w_0()
-                        .text_color(rgb(TEXT_MUTED))
+                        .text_color(rgb(theme::text_muted()))
                         .text_xs()
                         .child(item.clone()),
                 );
@@ -3730,7 +4034,7 @@ impl Workbench {
             if bucket.items.len() > MAX_SHOWN {
                 group = group.child(
                     div()
-                        .text_color(rgb(TEXT_MUTED))
+                        .text_color(rgb(theme::text_muted()))
                         .text_xs()
                         .child(format!("+{} more", bucket.items.len() - MAX_SHOWN)),
                 );
@@ -3759,8 +4063,8 @@ impl Render for Workbench {
             .relative()
             .flex()
             .size_full()
-            .bg(rgb(BG))
-            .text_color(rgb(TEXT))
+            .bg(rgb(theme::background()))
+            .text_color(rgb(theme::text()))
             .on_action(cx.listener(Self::toggle_palette))
             .on_action(cx.listener(Self::toggle_settings))
             // Anywhere on the window, not a designated strip: someone dragging a file has
@@ -3770,7 +4074,7 @@ impl Render for Workbench {
                     workbench.files_dropped(paths.paths(), cx);
                 },
             ))
-            .child(self.rail(cx))
+            .when(self.sidebar_open, |root| root.child(self.rail(cx)))
             .child(self.chat_pane(cx));
 
         // One right-hand pane at a time: Setup wins over Settings, because the only
@@ -3779,8 +4083,17 @@ impl Render for Workbench {
             root.child(self.setup_pane(cx))
         } else if self.settings_open {
             root.child(self.settings_pane(cx))
-        } else {
+        } else if self.panel_open {
             root.child(self.artifacts_panel(cx))
+        } else {
+            root
+        };
+
+        // The preview floats over everything except the palette: it is a thing you open,
+        // look at, and dismiss, not a place you navigate to (docs §49).
+        let root = match &self.preview {
+            Some(output) => root.child(self.preview_modal(output.clone(), cx)),
+            None => root,
         };
 
         if self.palette_open {
@@ -4248,6 +4561,10 @@ fn main() {
                 .unwrap_or_else(|_| "info".into()),
         )
         .init();
+
+    // The researcher's palette, before the first frame — so the window never opens in
+    // one theme and repaints into another.
+    settings::apply_theme(&settings::Settings::load());
 
     // `--replay <capture>` needs no backend at all, so it runs before one is
     // configured.

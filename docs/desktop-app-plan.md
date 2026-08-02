@@ -3251,3 +3251,69 @@ conversation, and the rename control appears only on the row under the cursor vi
 **Visible scrollbars** remain the highest-value single fix, and are still not done —
 `overflow_y_scroll` draws nothing, so scrollable content reads as cut off (§40). Then a
 `Button` component to end the copy-pasted eight-call button, bundled fonts, and SVG icons.
+
+## 49. P6.7 continued: themes, panels, search, preview (2026-08-01)
+
+Six requests. Researching Zed first collapsed three of them into one component.
+
+### One pattern answers three requests
+
+Zed has **over fifty picker modals**, all the same shape: a centred floating panel over a
+dimmed workbench, list on one side, preview on the other, the editor still visible behind
+([zed#59604](https://github.com/zed-industries/zed/pull/59604),
+[Zed blog](https://zed.dev/blog/hidden-gems-part-1)). That shape is the answer to *view a
+file in the middle*, *settings as a floating window*, and *fast search* — they are one
+component with three contents, not three features.
+
+The **file preview** is built on it: centred, dimmed backdrop, click-away to close,
+figures rendered inline, Markdown through the existing renderer, everything else as text.
+Reads a **bounded 400 lines** — the file most worth previewing is a big dataset, which is
+exactly the one that would freeze the UI thread if read whole.
+
+### Themes, adapted from Zed rather than copied
+
+Zed ships theme *families* as JSON with semantic keys — `background`, `text`, `accent`,
+`border`, `elevated_surface.background` — and loads more from extensions whose ids must end
+in `-theme` ([Zed docs](https://zed.dev/docs/extensions/themes)). We took the shape and
+dropped the registry: a researcher wants to pick a palette, not publish one.
+
+- `theme::Theme` is that struct; colours are read through functions backed by **atomics**,
+  so switching is a store the next frame sees — and the free rendering helpers, which have
+  no `Context` to reach a GPUI global through, can still ask.
+- **Four built-ins**: *Mini-Me Dark*, *Slate* (cool, blue accent, for people who do not
+  want an orange app), *Paper* (light — the one case where a dark UI genuinely fails, on a
+  projector), *High Contrast*.
+- **Any JSON file in `themes/`** beside `settings.toml` is offered too, and a file named
+  after a built-in *replaces* it — how someone tweaks the default instead of living with it.
+  A malformed palette is logged and skipped, never fatal: a researcher locked out by their
+  own theme file has no way back in to fix it.
+- Clicking the picker **applies immediately**; cancelling Settings reverts. A palette is
+  judged by looking at it, so a Save button between the click and the result is the wrong
+  loop.
+
+The contrast test now runs over **every** theme, so a palette added later cannot be added
+unreadable. It failed twice while writing them — `Slate`'s error red at 4.35:1 and three of
+`Paper`'s inks — and both shipped sets are values the build chose.
+
+Writing `Paper` also exposed a rule worth stating: **elevation always raises luminance**.
+The first attempt inverted it for light themes, which made "elevated" mean two different
+things. A grey canvas with white cards gets the same rule everywhere.
+
+### The rest
+
+- **Conversation search** reuses the command palette's own fuzzy scorer, so `pap` finds
+  *Rendimiento de papa*. Same behaviour as Zed's file finder, no new matching code.
+- **Both panels toggle** from the status bar, and both toggles stay visible when their
+  panel is closed — a collapsed panel with no way back is the commonest way this feature
+  becomes a bug report.
+- **A spinner while anything runs.** The first turn after launch spends 20–40 seconds
+  building the agent, and a still window reads as a hang — the most common reason someone
+  kills an app that was working. Four braille frames on GPUI's own animation: no font to
+  ship, no SVG, reads as motion at any size.
+- **The ◎ at top-left opens Settings**, as asked.
+
+### Not done
+
+Settings is still a right-hand pane rather than a modal — the picker component now exists,
+so moving it is small, but it is a change to a pane that works and this batch was already
+large. **Visible scrollbars** remain undone and remain the highest-value single fix.

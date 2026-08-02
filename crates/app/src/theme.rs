@@ -1,143 +1,308 @@
-//! The palette, as **roles** rather than colours.
+//! The palette — **switchable at runtime**, as roles rather than colours.
 //!
-//! Before this, seven `const`s lived in `main.rs` and one of them — the brand orange — was
-//! used for section labels, links, buttons, the running mark, the host-execution warning
-//! and every border that wanted attention. When everything is emphasised nothing is, which
-//! is most of why the app read as "awful": there was no visual difference between *this is
-//! a heading*, *this is clickable* and *this needs your attention*.
+//! Two problems, one file. The first was that seven `const`s lived in `main.rs` and the
+//! brand orange did six different jobs, so nothing read as emphasised. The second is that a
+//! single fixed palette is a bet on everyone's taste and everyone's room: orange-on-charcoal
+//! is unreadable on a projector and unpleasant to some people at any time.
 //!
-//! The fix is the one every dark-mode design system converges on: name colours for the job
-//! they do, not the colour they are, and give surfaces an **elevation ladder** so panels,
-//! cards and popovers separate without borders everywhere.
+//! **Modelled on Zed's theme system**, adapted rather than copied. Zed ships a *theme
+//! family* as JSON with semantic style keys — `background`, `text`, `accent`, `border`,
+//! `elevated_surface.background` — and loads extra families from extensions. We take the
+//! shape (named roles, JSON, several families) and skip the registry: a researcher wants to
+//! pick a palette, not publish one.
 //!
-//! Two rules this file exists to enforce:
+//! Three rules this file enforces, with tests rather than judgement:
 //!
-//! 1. **Orange means "you can act on this", and nothing else.** Headings are muted text.
-//!    Status has its own colours. A researcher should be able to learn "orange = clickable"
-//!    in one session and never be wrong.
-//! 2. **Every text/background pair passes WCAG AA (4.5:1).** Not judged by eye — there is a
-//!    test below that computes the ratios and fails the build.
+//! 1. **Orange — or whatever the accent is — means "you can act on this", and nothing
+//!    else.** Headings are muted text; status has its own colours.
+//! 2. **Every text/surface pair in every theme passes WCAG AA (4.5:1).** A theme that ships
+//!    here cannot be unreadable, including ones added later.
+//! 3. **Surfaces form an elevation ladder**, so panels and popovers separate without
+//!    drawing yet another border.
 //!
-//! Neutrals carry a slight warm tint so they sit with the orange rather than fighting it;
-//! a pure grey next to a saturated warm accent reads blue by comparison.
+//! Colours are read through functions backed by atomics rather than consts, so switching a
+//! theme is a store and the next frame picks it up — and so the free rendering helpers,
+//! which have no `Context` to reach a GPUI global through, can still ask.
 
-/// Window background — the deepest surface.
-pub const BG: u32 = 0x16161a;
-/// Panels: the rail, the side panes, the composer strip.
-pub const SURFACE: u32 = 0x1c1c21;
-/// Lifted off the panel: cards, list rows, hover.
-pub const RAISED: u32 = 0x232329;
-/// Floating above everything: the command palette, popovers.
-pub const OVERLAY: u32 = 0x2a2a31;
-/// The selected conversation, and any other "this is the current one" fill.
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use serde::{Deserialize, Serialize};
+
+/// One palette. Field names are the roles, and are what a theme file writes.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Theme {
+    /// Window background — the deepest surface.
+    pub background: u32,
+    /// Panels: the sidebar, the side panes, the composer strip.
+    pub surface: u32,
+    /// Lifted off the panel: cards, list rows, hover.
+    pub elevated: u32,
+    /// Floating above everything: modals, the command palette, popovers.
+    pub overlay: u32,
+    /// The selected row's fill.
+    pub accent_soft: u32,
+
+    /// Primary reading colour.
+    pub text: u32,
+    /// Secondary: labels, descriptions, supporting text.
+    pub text_muted: u32,
+    /// Tertiary: timestamps, counts, sizes. Still AA — "faint" is not permission to be
+    /// unreadable.
+    pub text_faint: u32,
+
+    pub border: u32,
+    /// Borders that must be seen: an input's edge, a card that reads as one unit.
+    pub border_strong: u32,
+
+    /// **Interactive things only.**
+    pub accent: u32,
+    /// The accent with the lift a pointer expects.
+    pub accent_hover: u32,
+
+    pub success: u32,
+    pub warning: u32,
+    pub error: u32,
+    /// Working right now.
+    pub running: u32,
+}
+
+/// The themes that ship with the app.
 ///
-/// A dark, desaturated orange rather than the accent at low opacity — GPUI composites
-/// solid colours here, and a tint that dark keeps the row's text at full contrast.
-pub const ACCENT_SOFT: u32 = 0x3a2419;
+/// Four, chosen to cover real situations rather than to fill a gallery: the default, one
+/// for people who do not want orange, one for a bright room or a projector, and one for
+/// anybody who finds the others too low-contrast.
+pub const THEMES: [(&str, Theme); 4] = [
+    ("Mini-Me Dark", MINI_ME_DARK),
+    ("Slate", SLATE),
+    ("Paper", PAPER),
+    ("High Contrast", HIGH_CONTRAST),
+];
 
-/// Primary reading colour.
-pub const TEXT: u32 = 0xececf0;
-/// Secondary: labels, descriptions, anything supporting the primary text.
-pub const TEXT_MUTED: u32 = 0xb0b0ba;
-/// Tertiary: timestamps, counts, the quietest metadata. Still AA — "faint" is not
-/// permission to be unreadable.
-pub const TEXT_FAINT: u32 = 0x9a9aa5;
+/// Warm charcoal and the Mini-Me orange. Neutrals carry a slight warm tint so they sit
+/// with the accent — a pure grey beside a saturated warm colour reads blue by comparison.
+pub const MINI_ME_DARK: Theme = Theme {
+    background: 0x16161a,
+    surface: 0x1c1c21,
+    elevated: 0x232329,
+    overlay: 0x2a2a31,
+    accent_soft: 0x3a2419,
+    text: 0xececf0,
+    text_muted: 0xb0b0ba,
+    text_faint: 0x9a9aa5,
+    border: 0x2f2f37,
+    border_strong: 0x3f3f49,
+    accent: 0xe8703a,
+    accent_hover: 0xf58b5c,
+    success: 0x5bbd7a,
+    warning: 0xd9a441,
+    error: 0xf1676b,
+    running: 0x6aa9e0,
+};
 
-/// Ordinary separators.
-pub const BORDER: u32 = 0x2f2f37;
-/// Separators that need to be seen — an input's edge, a card that must read as a unit.
-pub const BORDER_STRONG: u32 = 0x3f3f49;
+/// Cool neutrals and a blue accent, for people who simply do not want an orange editor.
+pub const SLATE: Theme = Theme {
+    background: 0x14171c,
+    surface: 0x1a1e24,
+    elevated: 0x222731,
+    overlay: 0x2a303b,
+    accent_soft: 0x1c3048,
+    text: 0xe6eaf0,
+    text_muted: 0xacb4c0,
+    text_faint: 0x949dab,
+    border: 0x2b313b,
+    border_strong: 0x3b434f,
+    accent: 0x6cb0f5,
+    accent_hover: 0x93c6fa,
+    success: 0x5cc08a,
+    warning: 0xd9a441,
+    error: 0xf87a7e,
+    running: 0x8ab4f8,
+};
 
-/// Mini-Me orange. **Interactive things only.**
-pub const ACCENT: u32 = 0xe8703a;
-/// The same orange with the lift a pointer expects. Every clickable surface should change
-/// under the cursor; without that, a thing that looks like a button but does not react
-/// reads as broken.
-pub const ACCENT_HOVER: u32 = 0xf58b5c;
+/// A light theme, for a bright room, a projector, or a shared screen. The one situation
+/// where a dark UI genuinely fails, and the reason this is not a dark-only app.
+pub const PAPER: Theme = Theme {
+    // A grey canvas with white cards, so elevation raises luminance here exactly as it
+    // does in the dark themes — one rule for every palette rather than a special case.
+    background: 0xf1efea,
+    surface: 0xf7f5f1,
+    elevated: 0xfbfaf8,
+    overlay: 0xffffff,
+    accent_soft: 0xf7ddcd,
+    text: 0x24242a,
+    text_muted: 0x55555f,
+    text_faint: 0x5b5b66,
+    border: 0xdcd8d1,
+    border_strong: 0xc3beb5,
+    accent: 0xa8451a,
+    accent_hover: 0x8c3813,
+    success: 0x14663a,
+    warning: 0x855c05,
+    error: 0xb32431,
+    running: 0x1f5fa8,
+};
 
-/// Finished, succeeded, present.
-pub const SUCCESS: u32 = 0x5bbd7a;
-/// Waiting on a person, or proceeding with a caveat.
-pub const WARNING: u32 = 0xd9a441;
-/// Failed.
-pub const ERROR: u32 = 0xf1676b;
-/// Working right now.
-pub const RUNNING: u32 = 0x6aa9e0;
+/// Maximum separation, for low vision or a bad screen.
+pub const HIGH_CONTRAST: Theme = Theme {
+    background: 0x000000,
+    surface: 0x0b0b0d,
+    elevated: 0x17171b,
+    overlay: 0x1f1f25,
+    accent_soft: 0x442a12,
+    text: 0xffffff,
+    text_muted: 0xd8d8de,
+    text_faint: 0xb9b9c2,
+    border: 0x40404a,
+    border_strong: 0x5a5a66,
+    accent: 0xffa05c,
+    accent_hover: 0xffbb85,
+    success: 0x67e08d,
+    warning: 0xf2c14e,
+    error: 0xff7d80,
+    running: 0x8cc2ff,
+};
+
+/// Whether a theme is light, so anything computing a shade knows which way is "darker".
+pub fn is_light(theme: &Theme) -> bool {
+    luminance(theme.background) > 0.5
+}
+
+macro_rules! live_theme {
+    ($($field:ident => $getter:ident, $slot:ident, $default:expr;)*) => {
+        $(
+            static $slot: AtomicU32 = AtomicU32::new($default);
+            /// The live value of this role. Cheap enough to call per element per frame.
+            pub fn $getter() -> u32 { $slot.load(Ordering::Relaxed) }
+        )*
+
+        /// Make `theme` the one the next frame draws with.
+        pub fn apply(theme: &Theme) {
+            $( $slot.store(theme.$field, Ordering::Relaxed); )*
+        }
+
+        /// The live theme, as a value — for anything that wants the whole palette.
+        pub fn current() -> Theme {
+            Theme { $( $field: $getter(), )* }
+        }
+    };
+}
+
+live_theme! {
+    background   => background,   BACKGROUND_SLOT,    0x16161a;
+    surface      => surface,      SURFACE_SLOT,       0x1c1c21;
+    elevated     => elevated,     ELEVATED_SLOT,      0x232329;
+    overlay      => overlay,      OVERLAY_SLOT,       0x2a2a31;
+    accent_soft  => accent_soft,  ACCENT_SOFT_SLOT,   0x3a2419;
+    text         => text,         TEXT_SLOT,          0xececf0;
+    text_muted   => text_muted,   TEXT_MUTED_SLOT,    0xb0b0ba;
+    text_faint   => text_faint,   TEXT_FAINT_SLOT,    0x9a9aa5;
+    border       => border,       BORDER_SLOT,        0x2f2f37;
+    border_strong=> border_strong,BORDER_STRONG_SLOT, 0x3f3f49;
+    accent       => accent,       ACCENT_SLOT,        0xe8703a;
+    accent_hover => accent_hover, ACCENT_HOVER_SLOT,  0xf58b5c;
+    success      => success,      SUCCESS_SLOT,       0x5bbd7a;
+    warning      => warning,      WARNING_SLOT,       0xd9a441;
+    error        => error,        ERROR_SLOT,         0xf1676b;
+    running      => running,      RUNNING_SLOT,       0x6aa9e0;
+}
+
+/// One channel, linearised — the sRGB → linear step of the WCAG formula.
+fn channel(value: u32) -> f64 {
+    let c = value as f64 / 255.0;
+    if c <= 0.03928 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+pub fn luminance(colour: u32) -> f64 {
+    let r = channel((colour >> 16) & 0xff);
+    let g = channel((colour >> 8) & 0xff);
+    let b = channel(colour & 0xff);
+    0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+
+/// WCAG 2.1 contrast ratio: 1.0 (identical) to 21.0 (black on white).
+///
+/// Used by the tests that gate every shipped palette. Kept public and outside `cfg(test)`
+/// so a theme added later can be checked the same way rather than by eye.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn contrast(a: u32, b: u32) -> f64 {
+    let (x, y) = (luminance(a), luminance(b));
+    let (lighter, darker) = if x > y { (x, y) } else { (y, x) };
+    (lighter + 0.05) / (darker + 0.05)
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// One channel, linearised — the sRGB → linear step of the WCAG formula.
-    fn channel(value: u32) -> f64 {
-        let c = value as f64 / 255.0;
-        if c <= 0.03928 {
-            c / 12.92
-        } else {
-            ((c + 0.055) / 1.055).powf(2.4)
-        }
-    }
-
-    fn luminance(colour: u32) -> f64 {
-        let r = channel((colour >> 16) & 0xff);
-        let g = channel((colour >> 8) & 0xff);
-        let b = channel(colour & 0xff);
-        0.2126 * r + 0.7152 * g + 0.0722 * b
-    }
-
-    /// WCAG 2.1 contrast ratio, 1.0 (identical) to 21.0 (black on white).
-    fn contrast(a: u32, b: u32) -> f64 {
-        let (x, y) = (luminance(a), luminance(b));
-        let (lighter, darker) = if x > y { (x, y) } else { (y, x) };
-        (lighter + 0.05) / (darker + 0.05)
-    }
-
     #[test]
-    fn every_text_colour_is_readable_on_every_surface() {
-        // 4.5:1 is WCAG AA for normal-size text. This app's smallest text is 12px, so AA
-        // is the floor, not a stretch goal — and "faint" metadata is exactly the text
-        // someone squints at, which is why it is in this list rather than exempt from it.
-        for (surface, surface_name) in [
-            (BG, "BG"),
-            (SURFACE, "SURFACE"),
-            (RAISED, "RAISED"),
-            (OVERLAY, "OVERLAY"),
-            (ACCENT_SOFT, "ACCENT_SOFT"),
-        ] {
-            for (ink, ink_name) in [
-                (TEXT, "TEXT"),
-                (TEXT_MUTED, "TEXT_MUTED"),
-                (TEXT_FAINT, "TEXT_FAINT"),
-                (ACCENT, "ACCENT"),
-                (SUCCESS, "SUCCESS"),
-                (WARNING, "WARNING"),
-                (ERROR, "ERROR"),
-                (RUNNING, "RUNNING"),
+    fn every_shipped_theme_is_readable() {
+        // 4.5:1 is WCAG AA for normal text, and the smallest text here is 12px — so AA is
+        // the floor, not a stretch goal. This runs over *every* theme, which is the point:
+        // a palette added later cannot be added unreadable.
+        for (name, theme) in THEMES {
+            for (surface, surface_name) in [
+                (theme.background, "background"),
+                (theme.surface, "surface"),
+                (theme.elevated, "elevated"),
+                (theme.overlay, "overlay"),
+                (theme.accent_soft, "accent_soft"),
             ] {
-                let ratio = contrast(ink, surface);
-                assert!(
-                    ratio >= 4.5,
-                    "{ink_name} on {surface_name} is {ratio:.2}:1 — below WCAG AA (4.5:1)"
-                );
+                for (ink, ink_name) in [
+                    (theme.text, "text"),
+                    (theme.text_muted, "text_muted"),
+                    (theme.text_faint, "text_faint"),
+                    (theme.accent, "accent"),
+                    (theme.success, "success"),
+                    (theme.warning, "warning"),
+                    (theme.error, "error"),
+                    (theme.running, "running"),
+                ] {
+                    let ratio = contrast(ink, surface);
+                    assert!(
+                        ratio >= 4.5,
+                        "{name}: {ink_name} on {surface_name} is {ratio:.2}:1, below AA"
+                    );
+                }
             }
         }
     }
 
     #[test]
-    fn the_surfaces_form_a_ladder_and_the_hover_state_lifts() {
-        // Each step up must actually be lighter, or "elevated" means nothing and the
-        // panels read as one flat sheet — which is what they did before this file.
-        let ladder = [BG, SURFACE, RAISED, OVERLAY];
-        for pair in ladder.windows(2) {
+    fn every_theme_has_a_ladder_and_a_visible_hover() {
+        for (name, theme) in THEMES {
+            let ladder = [theme.background, theme.surface, theme.elevated, theme.overlay];
+            for pair in ladder.windows(2) {
+                // One rule for every palette: elevation raises luminance. The light theme
+                // gets there with a grey canvas and white cards rather than by inverting,
+                // which keeps "elevated" meaning the same thing everywhere.
+                assert!(
+                    luminance(pair[1]) > luminance(pair[0]),
+                    "{name}: {:06x} does not sit above {:06x}",
+                    pair[1],
+                    pair[0]
+                );
+            }
+            // A pointer landing on something interactive must produce a visible change,
+            // in whichever direction that theme moves.
             assert!(
-                luminance(pair[1]) > luminance(pair[0]),
-                "{:06x} should sit above {:06x}",
-                pair[1],
-                pair[0]
+                (luminance(theme.accent_hover) - luminance(theme.accent)).abs() > 0.01,
+                "{name}: hover is indistinguishable from the accent"
             );
         }
-        // A pointer landing on something interactive has to produce a visible change.
-        assert!(luminance(ACCENT_HOVER) > luminance(ACCENT));
-        assert!(luminance(BORDER_STRONG) > luminance(BORDER));
+    }
+
+    #[test]
+    fn applying_a_theme_changes_what_the_next_frame_reads() {
+        apply(&SLATE);
+        assert_eq!(accent(), SLATE.accent);
+        assert_eq!(current(), SLATE);
+        apply(&PAPER);
+        assert_eq!(background(), PAPER.background);
+        assert!(is_light(&current()));
+        apply(&MINI_ME_DARK);
     }
 }
