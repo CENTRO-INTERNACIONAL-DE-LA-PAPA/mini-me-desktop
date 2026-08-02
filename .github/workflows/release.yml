@@ -1,0 +1,109 @@
+# Build the Windows app and attach it to a GitHub Release.
+#
+# Why this exists: the `.exe` can only be built on Windows, so until now every release
+# depended on one person's laptop being free. Tagging is enough now.
+#
+# The release is created as a **draft**. Nobody has installed this app from a zip on a
+# machine that did not build it, and a draft can be deleted where a downloaded release
+# cannot.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  # So the build can be proved green without cutting a release.
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # GPUI compiles its shaders in release builds and needs `fxc.exe` from the Windows
+      # SDK, which is installed on these runners but not on PATH (docs §26).
+      - name: Locate fxc.exe
+        shell: pwsh
+        run: |
+          $fxc = Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin" `
+            -Recurse -Filter fxc.exe -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -like "*x64*" } |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $fxc) { throw "fxc.exe not found — GPUI cannot build in release" }
+          echo "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
+          echo "found $($fxc.FullName)"
+
+      - name: Build
+        run: cargo build --release -p mini-me-desktop-app
+
+      - name: Test
+        run: cargo test --release
+
+      # The backend is a *private* repo, so this needs a token the workflow is given
+      # explicitly. Without it the bundle cannot install itself and the packaged app would
+      # ask a researcher for a GitHub account they do not have (docs §25) — so the job
+      # fails rather than shipping something broken.
+      - name: Bundle the backend
+        shell: bash
+        env:
+          BACKEND_TOKEN: ${{ secrets.MINIME_BACKEND_TOKEN }}
+        run: |
+          if [ -z "$BACKEND_TOKEN" ]; then
+            echo "::error::MINIME_BACKEND_TOKEN is not set. Add a PAT with read access to"
+            echo "::error::the Mini-Me repository under Settings → Secrets → Actions."
+            exit 1
+          fi
+          git config --global url."https://x-access-token:${BACKEND_TOKEN}@github.com/".insteadOf "https://github.com/"
+          bash scripts/bundle-backend.sh
+
+      - name: Package
+        shell: bash
+        run: bash scripts/package.sh
+
+      - name: Zip
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if (-not $tag.StartsWith("v")) { $tag = "v0.0.0-dev" }
+          Compress-Archive -Path dist/mini-me-desktop `
+            -DestinationPath "dist/mini-me-desktop-$tag-windows-x64.zip" -Force
+          echo "ZIP=dist/mini-me-desktop-$tag-windows-x64.zip" >> $env:GITHUB_ENV
+
+      # Always available, so a workflow_dispatch run can be downloaded and tried without
+      # a tag or a release.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mini-me-desktop-windows
+          path: ${{ env.ZIP }}
+
+      - name: Draft the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: ${{ env.ZIP }}
+          body: |
+            Mini-Me Desktop for Windows — a research workbench that runs on your own machine.
+
+            ## Install
+
+            1. Download the zip below and unzip it anywhere.
+            2. Double-click **mini-me-desktop-app.exe**.
+            3. Windows will say *"Windows protected your PC"* — this build is not
+               code-signed. Click **More info**, then **Run anyway**.
+            4. The Setup pane opens and tells you what is missing. Press the buttons.
+            5. Open Settings (ctrl-,) and paste a model API key.
+
+            No terminal, no GitHub account, no Python install. The backend is included.
+
+            ## Notes
+
+            - Keys go in Windows Credential Manager, never in a file.
+            - Files the agent creates land in **Documents\Mini-Me**, one folder per conversation.
+            - Commands the agent wants to run wait for your approval first.

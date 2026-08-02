@@ -3529,3 +3529,55 @@ All three were one `grep` or one `curl` away, and all three had been asserted co
 in the opposite direction. Same shape as §35's seven-round theorizer failure and §39's
 `TypeError`: **the expensive errors in this project have all been things assumed rather
 than checked.**
+
+## 55. Multi-line prompts, and a design for naming a subagent (2026-08-02)
+
+### The composer is a real field now
+
+`Enter` still sends — rebinding that in a chat window would surprise everyone — and
+**Shift-Enter** inserts a line break. That required making the element genuinely
+multi-line, not just accepting a `\n` the renderer swallows:
+
+- one `ShapedLine` per line, since GPUI's `shape_line` is exactly that, one line;
+- height follows the content, capped at **8 lines**, so a pasted script enlarges the
+  composer instead of eating the transcript;
+- the caret finds its row, and a selection spanning lines paints **one rectangle per line**
+  — a single box from start to end would paint over the text in between;
+- hit-testing maps a click to a row and then along it;
+- IME runs are **sliced per line**, or marked text would underline the wrong characters.
+
+### P7 proposal — `/subagent` commands
+
+The request: `/eda-subagent make an EDA of data.csv`, `/research-paper search this topic`,
+`/report-write write a report from these papers`. Today the coordinator decides what to
+delegate; this would let the researcher say it outright.
+
+**What makes this cheap:** the machinery already exists. `start_async_task(description,
+subagent_type)` takes the subagent by name, this app already wraps that tool (§38), and the
+Jobs panel already tracks, approves and reports whatever it starts (§31, §42). A slash
+command is a *front end* to a call we already make.
+
+**Shape:**
+
+1. **A registry of what can be named**, read from the backend rather than hardcoded — the
+   coordinator's own subagent list is already in the graph, so a hardcoded list here would
+   drift the first time upstream renames one.
+2. **Completion in the composer.** Typing `/` opens the same fuzzy picker the command
+   palette and conversation search use (`match_score`), showing each subagent's
+   description. Nothing new to build but the trigger.
+3. **Two dispatch modes**, and the difference matters:
+   - **Foreground** — the turn runs as now, with the prompt prefixed to name the subagent.
+     Right for a quick literature lookup.
+   - **Background** — straight to `start_async_task` with `subagent_type` set, returning a
+     task id immediately. Right for an EDA or a report, and the reason this is worth
+     building: it is the only way to run three of them at once.
+4. **The gate still applies.** A named subagent is still an agent running commands on the
+   researcher's machine, and `/eda-subagent` must not become a way around the approval
+   gate (§19, §41).
+
+**The open question** is what happens when a named subagent does not exist — a typo, or an
+upstream rename. Failing loudly at send is right; silently sending `/eda-subagent …` as
+prose is how someone waits ten minutes for a turn that was never delegated.
+
+Sequenced after the release link and the component work, because it is an accelerator for
+people already using the app, and nobody outside this machine can install it yet.

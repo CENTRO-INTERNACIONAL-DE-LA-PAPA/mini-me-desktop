@@ -51,6 +51,7 @@ actions!(
         Cut,
         Copy,
         Submit,
+        Newline,
     ]
 );
 
@@ -68,6 +69,11 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("home", Home, ctx),
         KeyBinding::new("end", End, ctx),
         KeyBinding::new("enter", Submit, ctx),
+        // Shift-Enter for a line break. Enter still sends, because sending is what a
+        // chat field is for and rebinding it would surprise everyone — but a prompt
+        // carrying a script, a table or a list could not be pasted or typed at all
+        // before this (docs §55).
+        KeyBinding::new("shift-enter", Newline, ctx),
     ];
     // Bind both modifiers: `cmd` on macOS, `ctrl` everywhere else. Registering
     // both is harmless — only one exists on a given keyboard.
@@ -95,8 +101,15 @@ pub struct Composer {
     marked_range: Option<Range<usize>>,
     /// Last shaped line + bounds, cached by the element so mouse hit-testing
     /// and IME rect queries can map coordinates back to string offsets.
-    last_layout: Option<ShapedLine>,
+    /// One shaped line per `\n`-separated line, with the byte offset it starts at.
+    ///
+    /// Was a single `ShapedLine`. A prompt carrying a script or a list has to be typeable,
+    /// and that means the field has to be genuinely multi-line — caret, selection and
+    /// hit-testing included, not just a `\n` the renderer swallows (docs §55).
+    last_layout: Vec<(usize, ShapedLine)>,
     last_bounds: Option<Bounds<Pixels>>,
+    /// The line height the last frame drew with, so mouse rows can be worked out.
+    line_height: Pixels,
     is_selecting: bool,
     /// Whether Enter on an *empty* field still counts as a submission. False for the
     /// chat composer (an empty prompt is nothing to send); true for the command
@@ -120,8 +133,9 @@ impl Composer {
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
-            last_layout: None,
+            last_layout: Vec::new(),
             last_bounds: None,
+            line_height: px(20.),
             is_selecting: false,
             submits_empty: false,
             masked: false,
@@ -174,6 +188,16 @@ impl Composer {
 
     fn submit(&mut self, _: &Submit, _window: &mut Window, cx: &mut Context<Self>) {
         self.submit_now(cx);
+    }
+
+    /// A line break, without sending.
+    fn newline(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
+        if self.disabled {
+            return;
+        }
+        // Straight through the same path typing takes, so the caret, the selection and
+        // the undo-shaped behaviour of a replaced selection all stay consistent.
+        self.replace_text_in_range(None, "\n", window, cx);
     }
 
     /// Submit the current text, if any. Exposed so a Send button can do exactly
@@ -326,17 +350,38 @@ impl Composer {
         if self.content.is_empty() {
             return 0;
         }
-        let (Some(bounds), Some(line)) = (self.last_bounds.as_ref(), self.last_layout.as_ref())
-        else {
+        let Some(bounds) = self.last_bounds.as_ref() else {
             return 0;
         };
+        if self.last_layout.is_empty() {
+            return 0;
+        }
         if position.y < bounds.top() {
             return 0;
         }
         if position.y > bounds.bottom() {
             return self.content.len();
         }
-        line.closest_index_for_x(position.x - bounds.left())
+        // Which visual line the pointer is on, then where along it.
+        let row = ((position.y - bounds.top()) / self.line_height).floor() as usize;
+        let row = row.min(self.last_layout.len().saturating_sub(1));
+        let (start, line) = &self.last_layout[row];
+        start + line.closest_index_for_x(position.x - bounds.left())
+    }
+
+    /// Where a byte offset sits on screen, as (line index, x within the line).
+    fn position_for_offset(&self, offset: usize) -> Option<(usize, Pixels)> {
+        for (row, (start, line)) in self.last_layout.iter().enumerate() {
+            let end = start + line.len();
+            // `<=` so the caret at the very end of a line lands on that line rather
+            // than falling through to the next one.
+            if offset <= end {
+                return Some((row, line.x_for_index(offset.saturating_sub(*start))));
+            }
+        }
+        self.last_layout
+            .last()
+            .map(|(start, line)| (self.last_layout.len() - 1, line.x_for_index(offset.saturating_sub(*start))))
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -503,17 +548,17 @@ impl EntityInputHandler for Composer {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        let last_layout = self.last_layout.as_ref()?;
         let range = self.range_from_utf16(&range_utf16);
+        let (start_row, start_x) = self.position_for_offset(range.start)?;
+        let (end_row, end_x) = self.position_for_offset(range.end)?;
+        // The IME panel wants one rectangle; for a marked range spanning lines the
+        // sensible answer is the first line's, which is where the caret is.
+        let top = bounds.top() + self.line_height * start_row as f32;
+        let bottom = top + self.line_height;
+        let end_x = if end_row == start_row { end_x } else { start_x };
         Some(Bounds::from_corners(
-            point(
-                bounds.left() + last_layout.x_for_index(range.start),
-                bounds.top(),
-            ),
-            point(
-                bounds.left() + last_layout.x_for_index(range.end),
-                bounds.bottom(),
-            ),
+            point(bounds.left() + start_x, top),
+            point(bounds.left() + end_x, bottom),
         ))
     }
 
@@ -523,9 +568,9 @@ impl EntityInputHandler for Composer {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
-        let line_point = self.last_bounds?.localize(&point)?;
-        let last_layout = self.last_layout.as_ref()?;
-        let utf8_index = last_layout.index_for_x(point.x - line_point.x)?;
+        let bounds = self.last_bounds?;
+        let _ = bounds.localize(&point)?;
+        let utf8_index = self.index_for_mouse_position(point);
         Some(self.offset_to_utf16(utf8_index))
     }
 }
@@ -536,9 +581,41 @@ struct ComposerElement {
 }
 
 struct PrepaintState {
-    line: Option<ShapedLine>,
+    lines: Vec<(usize, ShapedLine)>,
     cursor: Option<PaintQuad>,
-    selection: Option<PaintQuad>,
+    /// One rectangle per line a selection covers — a selection spanning three lines is
+    /// three quads, not one box swallowing the text between them.
+    selection: Vec<PaintQuad>,
+}
+
+/// How tall the field is allowed to grow before it simply stops.
+///
+/// A pasted script should make the composer bigger, not eat the transcript. Eight lines is
+/// enough to see a short command in full and still leave the conversation on screen.
+const MAX_VISIBLE_LINES: usize = 8;
+
+/// Slice global text runs down to one line's byte range.
+///
+/// Runs exist to carry the IME's underline for marked text, and they are expressed over
+/// the whole string — so each line needs its own view of them or CJK input would underline
+/// the wrong characters.
+fn runs_for(runs: &[TextRun], start: usize, end: usize) -> Vec<TextRun> {
+    let mut sliced = Vec::new();
+    let mut cursor = 0usize;
+    for run in runs {
+        let run_start = cursor;
+        let run_end = cursor + run.len;
+        cursor = run_end;
+        let from = run_start.max(start);
+        let to = run_end.min(end);
+        if from < to {
+            sliced.push(TextRun {
+                len: to - from,
+                ..run.clone()
+            });
+        }
+    }
+    sliced
 }
 
 impl IntoElement for ComposerElement {
@@ -568,9 +645,18 @@ impl Element for ComposerElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
+        // Height follows the content, capped. Counting newlines here rather than in
+        // prepaint because layout has to know the size before anything is shaped.
+        let lines = self
+            .composer
+            .read(cx)
+            .display_content()
+            .matches('\n')
+            .count()
+            + 1;
         let mut style = Style::default();
         style.size.width = relative(1.).into();
-        style.size.height = window.line_height().into();
+        style.size.height = (window.line_height() * lines.min(MAX_VISIBLE_LINES) as f32).into();
         (window.request_layout(style, [], cx), ())
     }
 
@@ -633,43 +719,82 @@ impl Element for ComposerElement {
         };
 
         let font_size = style.font_size.to_pixels(window.rem_size());
-        let line = window
-            .text_system()
-            .shape_line(display_text, font_size, &runs, None);
+        let line_height = window.line_height();
 
-        let cursor_pos = line.x_for_index(cursor);
-        let (selection, cursor) = if selected_range.is_empty() {
-            (
+        // One shaped line per `\n`. GPUI's `shape_line` is exactly that — one line — so
+        // multi-line means doing the splitting ourselves and placing each row.
+        let mut lines: Vec<(usize, ShapedLine)> = Vec::new();
+        let mut offset = 0usize;
+        for segment in display_text.split('\n') {
+            let end = offset + segment.len();
+            let shaped = window.text_system().shape_line(
+                SharedString::from(segment.to_string()),
+                font_size,
+                &runs_for(&runs, offset, end),
                 None,
+            );
+            lines.push((offset, shaped));
+            // +1 for the newline itself, so offsets keep matching the real string.
+            offset = end + 1;
+        }
+
+        let row_top = |row: usize| bounds.top() + line_height * row as f32;
+        let position = |target: usize| -> (usize, Pixels) {
+            for (row, (start, line)) in lines.iter().enumerate() {
+                if target <= start + line.len() {
+                    return (row, line.x_for_index(target.saturating_sub(*start)));
+                }
+            }
+            match lines.last() {
+                Some((start, line)) => (
+                    lines.len().saturating_sub(1),
+                    line.x_for_index(target.saturating_sub(*start)),
+                ),
+                None => (0, px(0.)),
+            }
+        };
+
+        let (selection, cursor) = if selected_range.is_empty() {
+            let (row, x) = position(cursor);
+            (
+                Vec::new(),
                 Some(fill(
                     Bounds::new(
-                        point(bounds.left() + cursor_pos, bounds.top()),
-                        gpui::size(px(2.), bounds.bottom() - bounds.top()),
+                        point(bounds.left() + x, row_top(row)),
+                        gpui::size(px(2.), line_height),
                     ),
                     rgb(theme::accent()),
                 )),
             )
         } else {
-            (
-                Some(fill(
+            // A rectangle per covered line. One box from start to end would paint over
+            // the text on every line in between.
+            let (first_row, start_x) = position(selected_range.start);
+            let (last_row, end_x) = position(selected_range.end);
+            let mut quads = Vec::new();
+            for row in first_row..=last_row {
+                let (_, line) = &lines[row.min(lines.len().saturating_sub(1))];
+                let from = if row == first_row { start_x } else { px(0.) };
+                let to = if row == last_row {
+                    end_x
+                } else {
+                    // To the end of the text on that line, plus a little, so a selected
+                    // line break is visible rather than invisible.
+                    line.width + px(4.)
+                };
+                quads.push(fill(
                     Bounds::from_corners(
-                        point(
-                            bounds.left() + line.x_for_index(selected_range.start),
-                            bounds.top(),
-                        ),
-                        point(
-                            bounds.left() + line.x_for_index(selected_range.end),
-                            bounds.bottom(),
-                        ),
+                        point(bounds.left() + from, row_top(row)),
+                        point(bounds.left() + to, row_top(row) + line_height),
                     ),
                     rgba(0xe8703a40),
-                )),
-                None,
-            )
+                ));
+            }
+            (quads, None)
         };
 
         PrepaintState {
-            line: Some(line),
+            lines,
             cursor,
             selection,
         }
@@ -692,12 +817,14 @@ impl Element for ComposerElement {
             ElementInputHandler::new(bounds, self.composer.clone()),
             cx,
         );
-        if let Some(selection) = prepaint.selection.take() {
-            window.paint_quad(selection)
+        for selection in prepaint.selection.drain(..) {
+            window.paint_quad(selection);
         }
-        let line = prepaint.line.take().unwrap();
-        line.paint(bounds.origin, window.line_height(), window, cx)
-            .unwrap();
+        let line_height = window.line_height();
+        for (row, (_, line)) in prepaint.lines.iter().enumerate() {
+            let origin = point(bounds.origin.x, bounds.origin.y + line_height * row as f32);
+            line.paint(origin, line_height, window, cx).unwrap();
+        }
 
         // Caret only when focused. (Nested `if`s, not a let-chain: those need
         // edition 2024 and this crate is on 2021.)
@@ -708,8 +835,9 @@ impl Element for ComposerElement {
         }
 
         self.composer.update(cx, |composer, _cx| {
-            composer.last_layout = Some(line);
+            composer.last_layout = std::mem::take(&mut prepaint.lines);
             composer.last_bounds = Some(bounds);
+            composer.line_height = line_height;
         });
     }
 }
@@ -724,6 +852,7 @@ impl Render for Composer {
             .track_focus(&self.focus_handle(cx))
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(Self::submit))
+            .on_action(cx.listener(Self::newline))
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::left))
@@ -755,5 +884,61 @@ impl Render for Composer {
 impl Focusable for Composer {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(len: usize) -> TextRun {
+        TextRun {
+            len,
+            font: gpui::Font {
+                family: "x".into(),
+                features: Default::default(),
+                fallbacks: None,
+                weight: Default::default(),
+                style: Default::default(),
+            },
+            color: gpui::black(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }
+    }
+
+    #[test]
+    fn runs_are_sliced_to_each_line() {
+        // "ab\ncd" with an IME marking "b\nc": a run before, the marked run, a run after.
+        // Each line needs its own view of these or the underline lands on the wrong
+        // characters — the reason this splitting exists at all.
+        let runs = vec![run(1), run(3), run(1)];
+
+        // First line is bytes 0..2: one whole run, one byte of the marked one.
+        assert_eq!(
+            runs_for(&runs, 0, 2).iter().map(|r| r.len).collect::<Vec<_>>(),
+            vec![1, 1]
+        );
+        // Second line is bytes 3..5: the tail of the marked run, then the last run.
+        assert_eq!(
+            runs_for(&runs, 3, 5).iter().map(|r| r.len).collect::<Vec<_>>(),
+            vec![1, 1]
+        );
+        // A range past the end contributes nothing — never a zero-length run, which
+        // `shape_line` treats as malformed.
+        assert!(runs_for(&runs, 9, 12).is_empty());
+        assert!(runs_for(&runs, 2, 2).is_empty());
+    }
+
+    #[test]
+    fn the_field_grows_with_its_lines_but_stops() {
+        // The rule the element's layout applies, checked here because layout itself
+        // needs a Window: a pasted script makes the composer taller, up to a point,
+        // and then stops rather than eating the transcript.
+        let rows = |text: &str| (text.matches('\n').count() + 1).min(MAX_VISIBLE_LINES);
+        assert_eq!(rows("one line"), 1);
+        assert_eq!(rows("one\ntwo\nthree"), 3);
+        assert_eq!(rows(&"x\n".repeat(40)), MAX_VISIBLE_LINES);
     }
 }

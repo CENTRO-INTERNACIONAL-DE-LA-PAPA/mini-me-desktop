@@ -853,7 +853,7 @@ struct Workbench {
 impl Workbench {
     fn new(sidecar: Arc<Sidecar>, cx: &mut Context<Self>) -> Self {
         let composer = cx.new(|cx| {
-            let mut composer = Composer::new(cx, "Ask Mini-Me…  (Enter to send)");
+            let mut composer = Composer::new(cx, "Ask Mini-Me…  (Enter to send, Shift-Enter for a new line)");
             composer.set_text(SEED_PROMPT, cx);
             composer
         });
