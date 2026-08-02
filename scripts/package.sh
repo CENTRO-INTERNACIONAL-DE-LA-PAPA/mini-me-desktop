@@ -88,8 +88,15 @@ Mini-Me Desktop
 ===============
 
 1. Double-click mini-me-desktop-app.exe
-2. The Setup pane opens and tells you what is missing. Press the buttons.
-3. When it asks for a model API key, open Settings and paste one.
+
+2. Windows will say "Windows protected your PC" and offer only a "Don't run"
+   button. This is expected: the app is not code-signed yet, and Windows says
+   this about every program it has not seen before.
+
+   Click "More info", then "Run anyway".
+
+3. The Setup pane opens and tells you what is missing. Press the buttons.
+4. When it asks for a model API key, open Settings and paste one.
 
 That is all. Nothing here needs a terminal.
 

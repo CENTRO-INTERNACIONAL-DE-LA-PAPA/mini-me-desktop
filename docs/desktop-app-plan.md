@@ -29,11 +29,13 @@ Every milestone above is closed. What remains is not "finish the build" — it i
 being used.
 
 **Blocks a colleague installing it**
-- ⬜ **A download link.** No GitHub Release exists; today "install it" means `git clone` +
-  `cargo build`, which rules out every non-technical user. Needs `package.sh` output
-  attached to a tagged release. *(This is the single biggest gap.)*
-- ⬜ **Code signing.** Unsigned, SmartScreen shows "Windows protected your PC" and most
-  researchers will stop there. Needs an organizational decision on a certificate.
+- 🟡 **A download link.** `scripts/release.sh` is built and dry-run verified (§45): it
+  validates the bundle, zips it, and creates a draft GitHub release. **Remaining: run it on
+  the Windows machine** — the `.exe` cannot be built anywhere else — then install from the
+  zip and publish.
+- ⬜ **Code signing.** Needs an organizational decision on a certificate. Until then the
+  release notes and bundled README say exactly what SmartScreen will show and which two
+  words to click (§45) — words are not a substitute, but silence is worse.
 - ⬜ **Click-to-update.** The app can detect a stale checkout but cannot update itself;
   only app-owned directories may ever be touched (§27).
 - ⬜ **First-run on a machine that has never had WSL.** `setup-wsl.sh` exists and the Setup
@@ -3048,3 +3050,52 @@ conversation ends or they click *stop* in the status bar (§41).
 
 The narrower grant stays contextual, because its scope genuinely differs: *this turn* only
 exists in the chat, *this task* only exists in the panel.
+
+## 45. The download link (2026-08-01)
+
+The largest remaining gap was not a feature. Installing meant `git clone` and
+`cargo build` — which excludes, precisely and completely, every researcher this was built
+for. `package.sh` already produced a folder; nobody could get at it.
+
+`scripts/release.sh` closes that: it validates the bundle, zips it, checksums it, writes
+release notes aimed at the person downloading, and creates the GitHub release.
+
+**Version is now `0.1.0`**, not `0.0.0` and deliberately not `1.0`: WSL provisioning has
+never run on a machine that never had WSL, and the executable is unsigned.
+
+### It refuses to publish a bundle that would waste someone's afternoon
+
+Each check is a way a colleague's first ten minutes get destroyed, and hearing about it
+from them is the expensive way to find out:
+
+- **a Linux binary in a Windows bundle** — easy to do from WSL, and useless to the entire
+  audience;
+- **`vendor/Mini-Me` missing** — the installer then asks for a GitHub token for a *private*
+  repository, which is the exact wall the bundle exists to remove (§25);
+- **`overlay/` missing** — host execution silently would not work;
+- **a dirty working tree** — the tag would not describe what is in the zip.
+
+`--dry-run` runs all of it, builds the zip, and prints the release note without touching
+GitHub. Verified here end to end against a simulated Windows bundle: guards fire, the zip
+builds, the checksum computes, the note reads correctly.
+
+### Draft by default
+
+Nobody has ever installed this app from a zip. A draft can be deleted; a published release
+someone already downloaded cannot. Publishing is one printed command, to be run *after*
+installing from the zip on a machine that is not the build machine.
+
+### SmartScreen is addressed with words, since it cannot be addressed with a certificate
+
+Unsigned, Windows shows *"Windows protected your PC"* with only a **Don't run** button
+visible — and most researchers stop there, which would make every other fix in this
+document irrelevant. Both the release notes and the bundled `README.txt` now say exactly
+what will appear and which two words to click. Signing remains an organizational decision;
+this is the honest interim.
+
+### Not done: CI
+
+A `windows-latest` workflow would remove the "build it on your own machine" step, but it
+needs a token for the private backend repo and a Windows SDK with `fxc.exe` for the release
+build (§26) — neither testable from here. A script that works today beats an untested
+workflow that might.

@@ -3,7 +3,9 @@ resolver = "2"
 members = ["crates/app"]
 
 [workspace.package]
-version = "0.0.0"
+# 0.1.0 is the first build handed to someone who did not write it. Not 1.0: WSL
+# provisioning has never run on a clean Windows machine, and the executable is unsigned.
+version = "0.1.0"
 edition = "2021"
 license = "MIT"
 authors = ["CIP Mini-Me"]
