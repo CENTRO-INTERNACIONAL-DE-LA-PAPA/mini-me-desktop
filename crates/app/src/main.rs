@@ -1810,9 +1810,12 @@ impl Workbench {
             .child(
                 div()
                     .flex_none()
+                    .m_2()
                     .px_2()
                     .py_1()
-                    .border_b_1()
+                    .rounded_md()
+                    .bg(rgb(theme::background()))
+                    .border_1()
                     .border_color(rgb(theme::border()))
                     .child(self.conversation_query.clone()),
             )
@@ -2105,7 +2108,7 @@ impl Workbench {
             col = col.child(
                 div()
                     .text_color(rgb(theme::text_muted()))
-                    .child("No turns yet. Press Run to stream one from the local sidecar."),
+                    .child("Ask a question below to begin. Files you drop on this window become part of the question."),
             );
         }
         for (index, message) in self.transcript.iter().enumerate() {
@@ -2610,19 +2613,20 @@ impl Workbench {
         let needs_base_url = provider.is_some_and(|p| p.needs_base_url);
         let key_name = self.draft.key_name();
 
+        // A centred modal, not a column. As a column it took 420px off the chat for as
+        // long as it was open, and settings are something you visit and leave — the same
+        // argument that makes Zed's fifty pickers modal rather than panels (docs §51).
         let mut pane = div()
             .id("settings")
             .flex()
             .flex_col()
-            .w(px(420.))
-            .flex_none()
-            .h_full()
+            .w(px(520.))
+            .max_h(px(720.))
             .overflow_y_scroll()
-            .m_1()
             .rounded_lg()
-            .bg(rgb(theme::surface()))
+            .bg(rgb(theme::overlay()))
             .border_1()
-            .border_color(rgb(theme::border()))
+            .border_color(rgb(theme::border_strong()))
             .p_4()
             .gap_3()
             .child(section_label("SETTINGS"))
@@ -2780,7 +2784,7 @@ impl Workbench {
             );
         }
 
-        pane.child(
+        let pane = pane.child(
             div()
                 .flex()
                 .flex_row()
@@ -2833,7 +2837,23 @@ impl Workbench {
                     "Keys live in your OS keychain, never in a file. Settings: {}",
                     settings::settings_path().display()
                 )),
-        )
+        );
+
+        // Centred over a dimmed workbench, so the chat stays visible behind it and
+        // clicking away is the obvious exit.
+        div()
+            .id("settings-backdrop")
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(if theme::is_light(&theme::current()) {
+                gpui::rgba(0x33333366)
+            } else {
+                gpui::rgba(0x00000099)
+            })
+            .child(pane)
     }
 
     /// The Setup pane: one row per check, each carrying the command that fixes it.
@@ -3583,6 +3603,10 @@ impl Workbench {
         };
 
         div()
+            // Never squeezed. It is the last child of a column whose transcript grows, and
+            // a flex child shrinks by default — which is how the toggles and the host
+            // indicator ended up cut off at the bottom edge (docs §51).
+            .flex_none()
             // A moving mark while anything is running. The first turn after launch spends
             // 20–40 seconds building the agent — MCP tool fetches, middleware, model
             // construction — and a still window during that reads as a hang, which is the
@@ -4249,10 +4273,16 @@ impl Render for Workbench {
         // reason it is open is that something is stopping a turn.
         let root = if self.setup_open {
             root.child(self.setup_pane(cx))
-        } else if self.settings_open {
-            root.child(self.settings_pane(cx))
         } else if self.panel_open {
             root.child(self.artifacts_panel(cx))
+        } else {
+            root
+        };
+
+        // Settings floats rather than displacing a panel, so opening it no longer costs
+        // the chat 420px for as long as it is open.
+        let root = if self.settings_open {
+            root.child(self.settings_pane(cx))
         } else {
             root
         };

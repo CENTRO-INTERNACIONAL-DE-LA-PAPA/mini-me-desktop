@@ -251,6 +251,14 @@ impl AsyncTask {
     }
 }
 
+/// Metadata key marking a thread as a conversation the researcher started.
+///
+/// The distinguishing fact is *who created it*: this app tags what it creates, and nothing
+/// else does — not the async-subagent middleware, not the theorizer. Filtering on the tag
+/// is therefore exact, where filtering on "has messages" or "has a title" would be a guess
+/// that keeps being wrong.
+const CONVERSATION_TAG: &str = "minime_conversation";
+
 /// One past conversation, for the sidebar.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Conversation {
@@ -758,7 +766,10 @@ impl LangGraphClient {
         let resp = self
             .http
             .post(format!("{}/threads", self.base_url))
-            .json(&json!({}))
+            // Marked as *ours*. Every background worker creates a thread of its own
+            // (§43), and without this the sidebar filled with dozens of "New
+            // conversation" rows that were machinery, not conversations (docs §51).
+            .json(&json!({ "metadata": { CONVERSATION_TAG: true } }))
             .send()
             .await
             .context("POST /threads failed (is the sidecar running?)")?
@@ -784,6 +795,9 @@ impl LangGraphClient {
                 "limit": limit,
                 "sort_by": "updated_at",
                 "sort_order": "desc",
+                // Only threads this app started as a conversation. A background worker's
+                // thread is real, and is deliberately not one of these.
+                "metadata": { CONVERSATION_TAG: true },
             }))
             .send()
             .await

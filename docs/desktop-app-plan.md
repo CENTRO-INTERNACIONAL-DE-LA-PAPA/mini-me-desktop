@@ -3378,3 +3378,35 @@ why they look finished.
 
 Settings remains a right-hand pane rather than a centred modal, and **visible scrollbars**
 remain undone and remain the highest-value single fix.
+
+## 51. Thirty conversations that were not conversations (2026-08-01)
+
+The sidebar worked, and immediately showed what was wrong with it: **thirty rows reading
+"New conversation"**, above the two real ones.
+
+They were not conversations. Every background worker creates a **thread of its own** (§43) —
+that is what makes it a background worker — and `POST /threads/search` returns every thread
+the backend has. The list was machinery, correctly listed.
+
+Fixed by tagging what this app creates: `POST /threads` now writes
+`metadata.minime_conversation`, and the search filters on it. The distinguishing fact is
+**who created the thread**, and only this app tags what it creates — so the filter is exact,
+where "has messages" or "has a title" would be guesses that keep being wrong. A background
+worker's thread is real and deliberately is not one of these.
+
+**Threads created before this change will not appear.** They are almost entirely the
+"New conversation" rows; the two real ones are lost from the list, which is the cheaper
+mistake than a list nobody trusts.
+
+### Also from the same screenshot
+
+- **The status bar was clipped off the bottom edge.** It is the last child of a column whose
+  transcript grows, and a flex child shrinks by default — the third time `flex_none` has
+  been the answer (§40, §48).
+- **The empty state named a Run button** that has not existed since the composer landed
+  (§12) — the first sentence a new user reads, describing a UI from weeks ago.
+- **Settings became a centred modal.** As a column it took 420px off the chat for as long
+  as it was open; it is somewhere you visit and leave, which is the same argument that
+  makes Zed's fifty pickers modal rather than panels. This closes the last of the six
+  requests from §49.
+- The search field now looks like a field: rounded, its own background, a border.
