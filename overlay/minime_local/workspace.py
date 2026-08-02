@@ -52,12 +52,42 @@ _NO_PRACTICAL_CAP = 64 * 1024 * 1024
 _DEFAULT_TIMEOUT = 300
 
 
+#: Config key naming the thread whose workspace a run should share.
+#:
+#: A background worker runs on its **own** LangGraph thread, so by default it would get its
+#: own workspace directory — and everything it produced would be invisible: the app looks in
+#: the conversation's directory, and the coordinator, asked for the report afterwards, could
+#: only hunt for it with `ls` and `glob` (docs §43). This pins the worker to the
+#: conversation's workspace so a file it writes is simply *there*, at the same relative
+#: path, for everyone who goes looking.
+WORKSPACE_THREAD_KEY = "__workspace_thread__"
+
+
 def workspace_root() -> Path:
     """The directory that holds one subdirectory per thread."""
     configured = os.getenv(WORKSPACE_ROOT_ENV)
     if configured:
         return Path(configured).expanduser()
     return Path.home() / ".mini-me" / "workspaces"
+
+
+def workspace_thread(default: str) -> str:
+    """Which thread's workspace this run should use.
+
+    ``default`` (the run's own thread) unless something pinned it — see
+    :data:`WORKSPACE_THREAD_KEY`. Read from the live run config rather than passed in,
+    because upstream constructs the backend as ``LazyLangsmithSandbox(thread_id)`` at two
+    call sites this overlay deliberately does not touch.
+    """
+    try:
+        from langgraph.config import get_config
+
+        configurable = (get_config() or {}).get("configurable") or {}
+    except Exception:  # noqa: BLE001  # no runnable context: a read-only graph load
+        return default
+    pinned = configurable.get(WORKSPACE_THREAD_KEY)
+    pinned = str(pinned).strip() if pinned else ""
+    return pinned or default
 
 
 logger = logging.getLogger(__name__)
@@ -254,8 +284,10 @@ class LocalWorkspaceBackend(LocalShellBackend):
     """
 
     def __init__(self, thread_id: str):
-        self._thread_id = thread_id
-        self._work_dir = workspace_root() / thread_id
+        # Not necessarily this run's own thread: a background worker shares the
+        # conversation's workspace, or its output would land where nobody looks.
+        self._thread_id = workspace_thread(thread_id)
+        self._work_dir = workspace_root() / self._thread_id
         self._announced = False
         super().__init__(
             root_dir=self._work_dir,

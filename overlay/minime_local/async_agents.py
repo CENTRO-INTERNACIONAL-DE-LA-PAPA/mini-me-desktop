@@ -228,6 +228,18 @@ def _forwarded_config() -> dict:
 
     configurable = config.get("configurable") or {}
     forwarded = {key: configurable[key] for key in FORWARDED_CONFIG_KEYS if configurable.get(key)}
+
+    # Share the conversation's workspace. Note this is *not* forwarding `thread_id` — that
+    # would point the run itself at the wrong thread and corrupt it. It is a separate key
+    # read only when choosing a directory, so the worker's files land where the researcher
+    # and the coordinator already look (docs §43). An existing pin wins, so a worker
+    # started by a worker still writes to the conversation's folder rather than its
+    # parent's.
+    from minime_local.workspace import WORKSPACE_THREAD_KEY
+
+    pinned = configurable.get(WORKSPACE_THREAD_KEY) or configurable.get("thread_id")
+    if pinned:
+        forwarded[WORKSPACE_THREAD_KEY] = pinned
     if "model_config" not in forwarded:
         # Worth saying out loud: the run will still start, and will still fail later on a
         # model it could not build. This line is the difference between a diagnosable

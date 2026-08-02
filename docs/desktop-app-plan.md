@@ -39,6 +39,14 @@ being used.
 - ⬜ **First-run on a machine that has never had WSL.** `setup-wsl.sh` exists and the Setup
   pane guides it, but nobody has run it on a clean Windows install.
 
+**P6.7 — the UI itself (§43).** Named by the user: *"our current app is really awful."*
+- ⬜ **Visible scrollbars** — the highest-value single fix; invisible scroll is why the
+  approval card read as broken.
+- ⬜ **A theme struct + a component vocabulary** (`Button`, `Label`, `IconButton`), so
+  panels stop drifting.
+- ⬜ **Bundle a font**, **SVG icons**, **tooltips**, **`uniform_list`** for the transcript,
+  focus rings, resizable panels, toasts.
+
 **Daily-use friction (felt, not hypothetical)**
 - ⬜ **Multi-line composer.** Enter sends; a script or a long prompt cannot be pasted with
   its line breaks intact.
@@ -2946,3 +2954,69 @@ the new location.
 Also verified this round, and long outstanding: **the Windows Job Object works.** After
 closing the app, `wsl -- pgrep -af "langgraph dev"` prints nothing — the backend dies with
 its parent, so no orphaned server holds the port (§26).
+
+## 43. Two bugs the plots exposed, and a UI debt worth naming (2026-08-01)
+
+### The background worker was writing where nobody looked
+
+A screenshot showed the coordinator running `ls`, `ls`, `ls`, `glob` ×8, `read_file` ×3 and
+then admitting *"the files weren't at the root path I first tried"* — before printing three
+absolute paths as text. No figure rendered.
+
+The cause: **a background worker runs on its own LangGraph thread**, and the workspace is
+one directory per thread (`workspace.py`). So the worker wrote to *its* directory, while
+the app looked in the conversation's and the coordinator looked in its own. Three
+components, three different folders, and the only one that could find anything was the
+worker itself.
+
+Fixed by pinning the worker to the conversation's workspace: `start_async_task` forwards
+`__workspace_thread__`, and `LocalWorkspaceBackend` prefers it over the run's own thread
+id. Note this is deliberately **not** forwarding `thread_id` — that would point the run at
+the wrong thread and corrupt it; this is a separate key read only when choosing a
+directory. An existing pin wins, so a worker started by a worker still writes to the
+conversation's folder.
+
+### Plots were diffed against the wrong moment
+
+§42 snapshotted the figures at turn *start* and diffed at turn *end*. A background worker
+finishes on its own schedule — usually between turns, sometimes minutes after the turn that
+started it — so its figures fell outside every window and were never attached.
+
+Now the diff is against **what the transcript already shows**, which makes `collect_plots`
+safe to call from anywhere; it also runs when a background task completes.
+
+### P6.7 — take the UI seriously
+
+Stated plainly by the person using it: *"our current app is really awful hehe."* That is
+fair, and it is not a mystery — every panel here was built to prove a mechanism worked, and
+none was built to be looked at. Buttons are hand-rolled `div()`s with eight style calls
+copy-pasted per site, which is exactly why they drift.
+
+**What is actually borrowable.** GPUI *is* Zed's framework, but Zed's `ui` and `theme`
+crates are monorepo-only — unlike `gpui` itself they are not published. So this is adopting
+**patterns**, not adding dependencies. `gpui 0.2.2` already ships the primitives needed:
+`svg`, `uniform_list`, `list`, `anchored`, `deferred`, `canvas`, `div().tooltip()`,
+`ScrollHandle`, animation and an image cache — almost none of which this app uses.
+
+In rough value order:
+
+1. **Visible scrollbars.** `overflow_y_scroll` draws nothing, so content that scrolls looks
+   like content that is cut off — the direct cause of "I cannot go to the bottom to approve
+   or reject" (§40). Zed draws its own; so should we.
+2. **A `Theme` struct with semantic roles** (`text`, `text_muted`, `border`,
+   `element_hover`, `status_error`) replacing the scattered `const` hex in `main.rs`. One
+   source of truth, and the precondition for a light theme.
+3. **A component vocabulary** — `Button`, `IconButton`, `Label`, `Divider`, `Tooltip` — so a
+   button is one call, not eight, and every card looks the same because it *is* the same.
+4. **Bundle a font.** We ship none, so fenced code renders in Segoe UI. Register a mono at
+   startup via the text system.
+5. **Icons as `svg()`** tinted by the theme, replacing the text glyphs `◐ ✓ ✗ ◎`.
+6. **Tooltips** — the framework has them; this app uses none.
+7. **`uniform_list` for the transcript.** Every message is currently laid out every frame;
+   a long session will crawl.
+8. **Focus rings and a tab order.** One focusable field today, and no visible focus.
+9. **Resizable/collapsible panels.** The right panel is a fixed width nobody chose.
+10. **Toasts** instead of one status line that overwrites itself.
+
+Deliberately *not* on this list: **text selection**, which needs a custom element and is the
+one thing here GPUI genuinely makes hard (§16).

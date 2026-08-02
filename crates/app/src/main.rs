@@ -696,9 +696,6 @@ struct Workbench {
     /// still gone on "New thread" or a restart, and announced in the status bar the whole
     /// time it is in force, so it cannot be in effect without being visible (docs §41).
     approve_conversation: bool,
-    /// The figures present when the current turn started, so what it drew can be told
-    /// apart from what was already on disk.
-    plots_before_turn: Vec<std::path::PathBuf>,
     /// Background tasks whose remaining commands are pre-approved, by task id.
     ///
     /// Separate from the turn grant because a background worker has no turn to belong to:
@@ -785,7 +782,6 @@ impl Workbench {
             pending_approval: None,
             approve_rest_of_turn: false,
             approve_conversation: false,
-            plots_before_turn: Vec::new(),
             approve_tasks: std::collections::HashSet::new(),
             restore_focus: false,
         };
@@ -931,6 +927,7 @@ impl Workbench {
                         } else {
                             "a background task stopped".into()
                         };
+                        workbench.collect_plots();
                         workbench.refresh_project(cx);
                     }
                     cx.notify();
@@ -1198,9 +1195,6 @@ impl Workbench {
         self.transcript.push(Message::new("you", prompt.clone()));
         // The assistant message — text *and* activity — streams into this entry.
         self.transcript.push(Message::new("mini-me", String::new()));
-        // The figures that already existed. Whatever is there at the end and not here now
-        // is what this turn drew — see `Message::plots`.
-        self.plots_before_turn = self.workspace_images();
 
         let mut events = self.sidecar.submit(prompt);
         cx.spawn(async move |this, cx| {
@@ -1334,16 +1328,26 @@ impl Workbench {
             .unwrap_or_default()
     }
 
-    /// Attach whatever this turn drew to the message that drew it.
+    /// Attach any figure not already on screen to the newest answer.
     ///
     /// A diff rather than a report, because nothing reports it: a figure is written by a
     /// plotting script inside `execute`, which registers no artifact (docs §42).
+    ///
+    /// Diffed against **what the transcript already shows**, not against a snapshot taken
+    /// when the turn began. A background worker finishes on its own schedule — often
+    /// between turns, sometimes minutes after the turn that started it — and a
+    /// start-of-turn snapshot simply missed those (docs §43). This way the call is safe to
+    /// make from anywhere, as often as we like.
     fn collect_plots(&mut self) {
-        let before: std::collections::HashSet<_> = self.plots_before_turn.drain(..).collect();
+        let shown: std::collections::HashSet<_> = self
+            .transcript
+            .iter()
+            .flat_map(|message| message.plots.iter().cloned())
+            .collect();
         let drawn: Vec<_> = self
             .workspace_images()
             .into_iter()
-            .filter(|path| !before.contains(path))
+            .filter(|path| !shown.contains(path))
             .collect();
         if drawn.is_empty() {
             return;
@@ -1354,7 +1358,7 @@ impl Workbench {
             .rev()
             .find(|message| message.role == "mini-me")
         {
-            message.plots = drawn;
+            message.plots.extend(drawn);
         }
     }
 
