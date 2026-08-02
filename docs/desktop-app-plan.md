@@ -6,7 +6,7 @@ This repo is the desktop **client**; the Mini-Me agent stack (the coordinator +
 Asta-backed subagents + skills) stays in Python/TypeScript and runs as a **local
 sidecar** that the client spawns and supervises.
 
-## Where we are now (updated 2026-07-31)
+## Where we are now (updated 2026-08-01)
 
 | Milestone | Status |
 |---|---|
@@ -18,8 +18,48 @@ sidecar** that the client spawns and supervises.
 | **P6.3.5** — visuals pass, starting with **markdown rendering** | ✅ **verified on Windows** — emphasis, inline code, links, headings, lists and fenced code render; accented Spanish came through intact. Tables deferred by agreement. §16/§23 |
 | **Native-Windows probe** | ✅ **answered** — `cmd.exe` is ruled out by upstream's *own* tool code (POSIX pipes, `mkdir -p`, `shlex.quote`), so WSL2 stays the v1 runtime and the installer's job is guided provisioning. Native-plus-Git-Bash is a documented half-day experiment. §21 |
 | **P6.4a** — settings panel + keychain secrets | ✅ **built** — a turn runs with no provider key in the backend's `.env`; keys come from the OS keychain and ride in the run request, and `ctrl-,` opens a Settings pane (provider, model, keys, execution). **Never rendered — needs a look on Windows.** §20/§22/§22b |
-| **P6.4b** — native affordances + shipping | ✅ **ships** — `bundle-backend.sh` → `--release` → `package.sh` gives a 21 MB folder; **the packaged build ran a real turn on Windows**. Job Object reaps the process tree, resources resolve beside the executable, and **drop a file on the window** turns it into a question (the MVP's "one thing the web app can't"). Remaining: click-to-update, cancel a running fix. §24/§25/§26/§28 |
-| **P6.5** — background work + Jobs panel | ✅ **verified on Windows** — `start_async_task` returns control immediately, two background workers ran concurrently while the chat stayed live, and the Theorizer completed on its own (poll → persist → OUTPUTS), which nothing did before. Background *approvals* still untested. §29/§30/§31/§36 |
+| **P6.4b** — native affordances + shipping | ✅ **ships** — `bundle-backend.sh` → `--release` → `package.sh` gives a 21 MB folder; **the packaged build ran a real turn on Windows**. **Job Object verified 2026-08-01** — after closing the app, `wsl -- pgrep -af "langgraph dev"` prints nothing. Resources resolve beside the executable, and **drop a file on the window** turns it into a question. Remaining: click-to-update, cancel a running fix. §24/§25/§26/§28 |
+| **P6.5** — background work + Jobs panel | ✅ **done, end to end (2026-08-01)** — background work had in fact never run until §39: our graph factory took no `config` and raised `TypeError` at construction. Now a worker generates data, **stops at the approval gate on its own thread**, and the answer reaches it. Failures report the real exception, and the panel shows which subagent is running. §29–§31/§36–§42 |
+| **P6.6** — outputs the researcher can see | ✅ **done** — files land in `Documents\Mini-Me\<thread>`, figures render in the chat, and OUTPUTS opens the folder. §42 |
+
+### What is left (2026-08-01)
+
+Every milestone above is closed. What remains is not "finish the build" — it is
+**getting it onto other people's machines**, which is now the only thing between this and
+being used.
+
+**Blocks a colleague installing it**
+- ⬜ **A download link.** No GitHub Release exists; today "install it" means `git clone` +
+  `cargo build`, which rules out every non-technical user. Needs `package.sh` output
+  attached to a tagged release. *(This is the single biggest gap.)*
+- ⬜ **Code signing.** Unsigned, SmartScreen shows "Windows protected your PC" and most
+  researchers will stop there. Needs an organizational decision on a certificate.
+- ⬜ **Click-to-update.** The app can detect a stale checkout but cannot update itself;
+  only app-owned directories may ever be touched (§27).
+- ⬜ **First-run on a machine that has never had WSL.** `setup-wsl.sh` exists and the Setup
+  pane guides it, but nobody has run it on a clean Windows install.
+
+**Daily-use friction (felt, not hypothetical)**
+- ⬜ **Multi-line composer.** Enter sends; a script or a long prompt cannot be pasted with
+  its line breaks intact.
+- ⬜ **Cancel a running turn.** Nothing stops a turn that has gone wrong except closing the
+  app.
+- ⬜ **Cancel a running setup fix** (§28's known remainder).
+- ⬜ **No monospace font is bundled**, so fenced code renders in the UI font.
+- ⬜ **Markdown gaps:** blockquotes, nested lists, images. Tables landed in §23.
+
+**Known deferrals, still deliberate**
+- ⬜ **Text selection / copy from the transcript.** GPUI 0.2.2 has no selectable text; the
+  palette's *Copy last answer* is the workaround.
+- ⬜ **Old workspaces are not migrated** — files written before §42 stay inside the distro.
+- ⬜ **Async subagents remain opt-in**, resting on a preview deepagents API.
+
+**Owed upstream** (bugs found here that belong in Mini-Me, not this app)
+- ⬜ `guardrails.py` claims sandbox isolation that host execution does not provide (§18).
+- ⬜ The theorizer reports a *guess* instead of the command's real output (§35) — the
+  single most expensive defect of this project, at seven rounds.
+- ⬜ `deepagents`' `start_async_task` passes no config, so a self-hosted deployment cannot
+  hand a background run its model, key or recursion limit (§38).
 
 **Health of the bet.** The two risks that could have killed this are both down:
 **R1** (GPUI as an unstable `git` dep) — GPUI is a *published* crate, pinned at
