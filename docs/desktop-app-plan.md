@@ -6,7 +6,7 @@ This repo is the desktop **client**; the Mini-Me agent stack (the coordinator +
 Asta-backed subagents + skills) stays in Python/TypeScript and runs as a **local
 sidecar** that the client spawns and supervises.
 
-## Where we are now (updated 2026-08-01)
+## Where we are now (updated 2026-08-02)
 
 | Milestone | Status |
 |---|---|
@@ -21,55 +21,54 @@ sidecar** that the client spawns and supervises.
 | **P6.4b** — native affordances + shipping | ✅ **ships** — `bundle-backend.sh` → `--release` → `package.sh` gives a 21 MB folder; **the packaged build ran a real turn on Windows**. **Job Object verified 2026-08-01** — after closing the app, `wsl -- pgrep -af "langgraph dev"` prints nothing. Resources resolve beside the executable, and **drop a file on the window** turns it into a question. Remaining: click-to-update, cancel a running fix. §24/§25/§26/§28 |
 | **P6.5** — background work + Jobs panel | ✅ **done, end to end (2026-08-01)** — background work had in fact never run until §39: our graph factory took no `config` and raised `TypeError` at construction. Now a worker generates data, **stops at the approval gate on its own thread**, and the answer reaches it. Failures report the real exception, and the panel shows which subagent is running. §29–§31/§36–§42 |
 | **P6.6** — outputs the researcher can see | ✅ **done** — files land in `Documents\Mini-Me\<thread>`, figures render in the chat, and OUTPUTS opens the folder. §42 |
+| **P6.7** — the UI itself | ✅ **done, verified on Windows** — a role-based palette with four built-ins **and Zed's whole theme gallery** installable in-app; conversation sidebar with fuzzy search and rename; collapsible panels; a file preview modal; visible scrollbars; rainbow CSV; a three-state send button; rounded panels and a window-wide status bar. §43/§47–§53 |
 
-### What is left (2026-08-01)
+### What is left (2026-08-02)
 
-Every milestone above is closed. What remains is not "finish the build" — it is
-**getting it onto other people's machines**, which is now the only thing between this and
-being used.
+Every milestone is closed and the app is in daily use by its first researcher. What remains
+splits three ways: **shipping it to anyone else**, **paying down the UI debt that keeps
+causing the same bug**, and **friction that is felt but not blocking**.
 
-**Blocks a colleague installing it**
-- 🟡 **A download link.** `scripts/release.sh` is built and dry-run verified (§45): it
-  validates the bundle, zips it, and creates a draft GitHub release. **Remaining: run it on
-  the Windows machine** — the `.exe` cannot be built anywhere else — then install from the
-  zip and publish.
-- ⬜ **Code signing.** Needs an organizational decision on a certificate. Until then the
-  release notes and bundled README say exactly what SmartScreen will show and which two
-  words to click (§45) — words are not a substitute, but silence is worse.
-- ⬜ **Click-to-update.** The app can detect a stale checkout but cannot update itself;
-  only app-owned directories may ever be touched (§27).
-- ⬜ **First-run on a machine that has never had WSL.** `setup-wsl.sh` exists and the Setup
-  pane guides it, but nobody has run it on a clean Windows install.
+**Blocks a second person using it**
+- 🟡 **The download link.** `scripts/release.sh` is written and dry-run verified (§45/§46).
+  **Remaining: run it on Windows, install from the zip on another machine, publish.**
+- ⬜ **Code signing.** SmartScreen shows "Windows protected your PC" and most researchers
+  stop there. An organizational decision on a certificate; the release notes and README
+  say which two words to click in the meantime.
+- ⬜ **First run where WSL has never existed.** `setup-wsl.sh` and the Setup pane exist and
+  have never been exercised on a clean machine. **The highest-risk unknown left.**
+- ⬜ **Click-to-update.** The app detects a stale checkout but cannot update itself (§27).
 
-**P6.7 — the UI itself (§43).** Named by the user: *"our current app is really awful."*
-- ⬜ **Visible scrollbars** — the highest-value single fix; invisible scroll is why the
-  approval card read as broken.
-- ⬜ **A theme struct + a component vocabulary** (`Button`, `Label`, `IconButton`), so
-  panels stop drifting.
-- ⬜ **Bundle a font**, **SVG icons**, **tooltips**, **`uniform_list`** for the transcript,
-  focus rings, resizable panels, toasts.
+**UI debt — the same bug, four times now**
+- ⬜ **A `Button` / `Modal` / `Panel` component set.** `flex_none` / `min_h_0` has caused
+  four separate layout bugs (§40, §48, §51, §53) and "actions inside the scroll area" has
+  caused three (§40, §41, §52). Both are call-site mistakes that a wrapped primitive makes
+  impossible. **This is now worth more than any new feature.**
+- ⬜ **Bundle a font** — fenced code still renders in the UI font.
+- ⬜ **SVG icons** instead of the text glyphs `◎ ▤ ▥ ⏎`.
+- ⬜ **`uniform_list` for the transcript** — every message is laid out every frame.
+- ⬜ **Focus rings and a tab order**; **resizable panels**; **toasts** instead of one
+  overwriting status line.
 
-**Daily-use friction (felt, not hypothetical)**
-- ⬜ **Multi-line composer.** Enter sends; a script or a long prompt cannot be pasted with
-  its line breaks intact.
-- ⬜ **Cancel a running turn.** Nothing stops a turn that has gone wrong except closing the
-  app.
-- ⬜ **Cancel a running setup fix** (§28's known remainder).
-- ⬜ **No monospace font is bundled**, so fenced code renders in the UI font.
-- ⬜ **Markdown gaps:** blockquotes, nested lists, images. Tables landed in §23.
+**Felt friction**
+- ⬜ **Multi-line composer.** Enter sends, so a script cannot be pasted with line breaks.
+- ⬜ **Cancel a running turn.** The stop button exists and says so honestly (§52).
+- ⬜ **Cancel a running setup fix** (§28).
+- ⬜ **Markdown gaps:** blockquotes, nested lists, images.
 
-**Known deferrals, still deliberate**
-- ⬜ **Text selection / copy from the transcript.** GPUI 0.2.2 has no selectable text; the
-  palette's *Copy last answer* is the workaround.
-- ⬜ **Old workspaces are not migrated** — files written before §42 stay inside the distro.
-- ⬜ **Async subagents remain opt-in**, resting on a preview deepagents API.
+**Deliberate deferrals**
+- ⬜ **Text selection in the transcript** — GPUI 0.2.2 cannot; *Copy last answer* is the
+  workaround, and this is the one thing here the framework genuinely makes hard.
+- ⬜ **Old workspaces are not migrated** (§42), and **threads from before §51's tag do not
+  appear** in the sidebar.
+- ⬜ **Async subagents stay opt-in**, on a preview deepagents API.
 
-**Owed upstream** (bugs found here that belong in Mini-Me, not this app)
-- ⬜ `guardrails.py` claims sandbox isolation that host execution does not provide (§18).
-- ⬜ The theorizer reports a *guess* instead of the command's real output (§35) — the
-  single most expensive defect of this project, at seven rounds.
-- ⬜ `deepagents`' `start_async_task` passes no config, so a self-hosted deployment cannot
-  hand a background run its model, key or recursion limit (§38).
+**Owed upstream** (found here, belongs in Mini-Me)
+- ⬜ `guardrails.py` claims sandbox isolation host execution does not provide (§18).
+- ⬜ The theorizer reports a *guess* instead of the command's real output (§35) — seven
+  rounds, the most expensive defect of this project.
+- ⬜ `deepagents`' `start_async_task` passes no config, so no self-hosted deployment can
+  give a background run its model, key or recursion limit (§38/§39).
 
 **Health of the bet.** The two risks that could have killed this are both down:
 **R1** (GPUI as an unstable `git` dep) — GPUI is a *published* crate, pinned at
@@ -3490,3 +3489,43 @@ below its content, so without it the row pushed the status bar off the bottom ed
 bugs from one default is a strong argument that the layout primitives should be wrapped
 once, correctly, rather than re-specified at every call site — which is the `Button` and
 `Modal` work P6.7 still owes.
+
+## 54. P6.7 closed (2026-08-02)
+
+Verified on Windows: Catppuccin installed from Zed's gallery inside the app, panels
+collapse without the status bar's controls moving, the composer reads as one field with a
+live send control, and the sidebar remembers conversations across launches.
+
+**Every milestone from P6.0 to P6.7 is now closed.** What the app does is done; what
+remains is getting it to a second person, and paying down the debt underneath the UI.
+
+### The debt, stated plainly, because it is now the top item
+
+Two mistakes have each been made three or four times:
+
+| Mistake | Where | Cost |
+|---|---|---|
+| A flex child shrinking or growing when it must not (`flex_none`, `min_h_0`) | §40, §48, §51, §53 | Four bugs |
+| Actions placed *inside* a scrolling region | §40, §41, §52 | Three bugs |
+
+The third and fourth occurrences happened **after** the lesson was written down, and one of
+them was inside the component built to fix the first. Writing it down is evidently not the
+mechanism. A wrapped `Button`, `Modal` and `Panel` — where the scroll region and the action
+row cannot be mis-nested because the type does not allow it — is the mechanism, and it is
+now worth more than any new feature.
+
+### What was learned about researching before building
+
+Three times this batch, checking the artefact beat reasoning about it:
+
+- `on_hover` **exists** in GPUI 0.2.2 — I had said a live theme preview needed a custom
+  element (§52).
+- Zed **theme** extensions are pure data (`wasm_api_version: null`), not WASM — I had said
+  the gallery was unusable (§52).
+- `ScrollHandle` exposes `bounds()` and `max_offset()`, which is all a scrollbar needs — I
+  had listed scrollbars as a large piece for weeks.
+
+All three were one `grep` or one `curl` away, and all three had been asserted confidently
+in the opposite direction. Same shape as §35's seven-round theorizer failure and §39's
+`TypeError`: **the expensive errors in this project have all been things assumed rather
+than checked.**
