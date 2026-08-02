@@ -11,6 +11,7 @@
 
 mod backend;
 mod composer;
+mod gallery;
 mod markdown;
 mod preflight;
 mod protocol;
@@ -52,6 +53,63 @@ fn step_line(label: &str) -> impl IntoElement {
         .text_color(rgb(theme::text_muted()))
         .text_xs()
         .child(format!("· {label}"))
+}
+
+/// A scrollbar for a `ScrollHandle`, or nothing when there is nothing to scroll.
+///
+/// `overflow_y_scroll` draws no scrollbar at all, so a long transcript looked *cut off*
+/// rather than scrollable — which is why the approval card read as broken (§40) and why
+/// nobody found the buttons below the fold in Settings (§52). A wheel that works is not an
+/// affordance; a visible bar is.
+///
+/// Positioned absolutely, so the caller's container must be `relative()`. `bounds()` is
+/// only meaningful after the first paint, hence the zero check: on frame one there is
+/// simply no bar, and from frame two there is.
+fn scrollbar(handle: &gpui::ScrollHandle) -> Option<impl IntoElement> {
+    let overflow = handle.max_offset().height;
+    let viewport = handle.bounds().size.height;
+    if overflow <= px(0.) || viewport <= px(0.) {
+        return None;
+    }
+    let content = viewport + overflow;
+    // Floored, so a very long transcript still leaves something big enough to see.
+    let thumb = (viewport * (viewport / content)).max(px(28.));
+    let travel = viewport - thumb;
+    let progress = (-handle.offset().y / overflow).clamp(0.0, 1.0);
+
+    Some(
+        div()
+            .absolute()
+            .top(travel * progress)
+            .right(px(2.))
+            .w(px(6.))
+            .h(thumb)
+            .rounded_full()
+            .bg(rgb(theme::border_strong())),
+    )
+}
+
+/// A one-line tooltip.
+///
+/// GPUI wants a whole view for a tooltip, so this is the smallest one that renders text —
+/// and having it means a control can be an icon without becoming a guess.
+struct Hint {
+    text: SharedString,
+}
+
+impl Render for Hint {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .bg(rgb(theme::overlay()))
+            .border_1()
+            .border_color(rgb(theme::border_strong()))
+            .text_color(rgb(theme::text()))
+            .text_xs()
+            .child(self.text.clone())
+    }
 }
 
 /// Whether a file is column-separated, and so worth colouring by column.
@@ -749,6 +807,14 @@ struct Workbench {
     /// still gone on "New thread" or a restart, and announced in the status bar the whole
     /// time it is in force, so it cannot be in effect without being visible (docs §41).
     approve_conversation: bool,
+    /// What the gallery search box holds, and what it found.
+    gallery_query: Entity<Composer>,
+    gallery_results: Vec<gallery::Listing>,
+    gallery_note: String,
+    /// Scroll positions we draw scrollbars from. GPUI keeps the offset itself; these let
+    /// us *read* it, which is what a visible bar needs.
+    transcript_scroll: gpui::ScrollHandle,
+    panel_scroll: gpui::ScrollHandle,
     /// The palette on screen right now, which is not always the saved one: the picker
     /// applies as you point at it so a theme can be judged by looking at it.
     applied_theme: String,
@@ -795,6 +861,14 @@ impl Workbench {
         // "run a coordinator turn" stays here.
         cx.subscribe(&composer, |workbench, _composer, event, cx| match event {
             ComposerEvent::Submit(text) => workbench.start_turn(text.clone(), cx),
+        })
+        .detach();
+
+        // Searching Zed's theme gallery. Submits rather than filtering as you type: each
+        // keystroke would be an HTTP request to somebody else's server.
+        let gallery_query = cx.new(|cx| Composer::new(cx, "Search Zed's theme gallery"));
+        cx.subscribe(&gallery_query, |workbench, _query, event, cx| match event {
+            ComposerEvent::Submit(text) => workbench.search_gallery(text.clone(), cx),
         })
         .detach();
 
@@ -871,6 +945,11 @@ impl Workbench {
             pending_approval: None,
             approve_rest_of_turn: false,
             approve_conversation: false,
+            gallery_query,
+            gallery_results: Vec::new(),
+            gallery_note: String::new(),
+            transcript_scroll: gpui::ScrollHandle::new(),
+            panel_scroll: gpui::ScrollHandle::new(),
             applied_theme: settings::Settings::load().theme,
             sidebar_open: true,
             panel_open: true,
@@ -1822,6 +1901,56 @@ impl Workbench {
             .child(list)
     }
 
+    /// Look for themes in Zed's gallery.
+    fn search_gallery(&mut self, query: String, cx: &mut Context<Self>) {
+        if query.trim().is_empty() {
+            return;
+        }
+        self.gallery_note = "searching…".into();
+        let mut results = self.sidecar.search_themes(query);
+        cx.spawn(async move |this, cx| {
+            if let Some(outcome) = results.next().await {
+                let _ = this.update(cx, |workbench, cx| {
+                    match outcome {
+                        Ok(found) => {
+                            workbench.gallery_note = if found.is_empty() {
+                                "no themes matched".into()
+                            } else {
+                                format!("{} themes", found.len())
+                            };
+                            workbench.gallery_results = found;
+                        }
+                        // Most likely a proxy or no network, which is a normal state on a
+                        // work laptop and not a reason for anything to look broken.
+                        Err(error) => workbench.gallery_note = error,
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Download one, then show it in the list above.
+    fn install_theme(&mut self, id: String, cx: &mut Context<Self>) {
+        self.gallery_note = format!("installing {id}…");
+        let mut done = self.sidecar.install_theme(id);
+        cx.spawn(async move |this, cx| {
+            if let Some(outcome) = done.next().await {
+                let _ = this.update(cx, |workbench, cx| {
+                    workbench.gallery_note = match outcome {
+                        Ok(names) => format!("installed {} palettes", names.len()),
+                        Err(error) => error,
+                    };
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
     /// Every palette at once, each showing what it looks like.
     ///
     /// The cycle button was wrong twice over: the only way to find a palette was to click
@@ -1838,6 +1967,7 @@ impl Workbench {
         for (name, palette) in settings::available_themes() {
             let selected = name.eq_ignore_ascii_case(&self.applied_theme);
             let chosen = name.clone();
+            let previewed = name.clone();
 
             // Enough of the palette to tell warm from cool and light from dark at a
             // glance, which is what someone is actually choosing between.
@@ -1881,6 +2011,25 @@ impl Workbench {
                     }))
                     .when(selected, |row| row.bg(rgb(theme::accent_soft())))
                     .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
+                    // The live preview: pointing at a theme applies it to the whole
+                    // window, and leaving puts back whatever was chosen. GPUI does have a
+                    // hover *event* — `InteractiveElement::on_hover` — so this needed no
+                    // custom element after all (docs §52).
+                    .on_hover(cx.listener(move |workbench, hovering: &bool, _window, cx| {
+                        let showing = if *hovering {
+                            previewed.clone()
+                        } else {
+                            workbench.applied_theme.clone()
+                        };
+                        let palette = settings::available_themes()
+                            .into_iter()
+                            .find(|(name, _)| name.eq_ignore_ascii_case(&showing))
+                            .map(|(_, palette)| palette);
+                        if let Some(palette) = palette {
+                            theme::apply(&palette);
+                            cx.notify();
+                        }
+                    }))
                     .child(
                         div()
                             .flex_grow()
@@ -1905,12 +2054,100 @@ impl Workbench {
             );
         }
 
-        list.child(
+        // The gallery. Zed's theme extensions are pure data — the registry marks every
+        // one `wasm_api_version: null` — so they can be fetched and read here, unlike the
+        // language extensions this app genuinely cannot run (docs §52).
+        let mut gallery = div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .gap_1()
+            .pt_2()
+            .child(section_label("GET MORE"))
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(theme::background()))
+                    .border_1()
+                    .border_color(rgb(theme::border()))
+                    .child(self.gallery_query.clone()),
+            );
+
+        if !self.gallery_note.is_empty() {
+            gallery = gallery.child(
+                div()
+                    .text_color(rgb(theme::text_faint()))
+                    .text_xs()
+                    .child(self.gallery_note.clone()),
+            );
+        }
+
+        for listing in self.gallery_results.iter().take(12) {
+            let id = listing.id.clone();
+            // Author and source shown because these are other people's work under their
+            // own licences, and a gallery that hides authorship is not a gallery.
+            let by = listing.authors.first().cloned().unwrap_or_default();
+            gallery = gallery.child(
+                div()
+                    .id(SharedString::from(format!("gallery-{}", listing.id)))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .w_full()
+                    .min_w_0()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(theme::border()))
+                    .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_grow()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_color(rgb(theme::text()))
+                                    .text_sm()
+                                    .child(listing.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_color(rgb(theme::text_faint()))
+                                    .text_xs()
+                                    .child(format!(
+                                        "{by} · {} installs",
+                                        listing.download_count
+                                    )),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(rgb(theme::accent()))
+                            .text_xs()
+                            .child("install"),
+                    )
+                    .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                        workbench.install_theme(id.clone(), cx);
+                    })),
+            );
+        }
+
+        list.child(gallery).child(
             div()
                 .text_color(rgb(theme::text_faint()))
                 .text_xs()
                 .child(format!(
-                    "Drop a Zed theme .json in {} to add your own.",
+                    "Or drop a Zed theme .json in {}.",
                     settings::themes_dir().display()
                 )),
         )
@@ -2101,6 +2338,7 @@ impl Workbench {
             .flex_grow()
             .min_w_0()
             .overflow_y_scroll()
+            .track_scroll(&self.transcript_scroll)
             .p_4()
             .gap_3();
 
@@ -2205,7 +2443,17 @@ impl Workbench {
             .bg(rgb(theme::background()))
             .border_1()
             .border_color(rgb(theme::border()))
-            .child(col);
+            .child(
+                div()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .flex_grow()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(col)
+                    .children(scrollbar(&self.transcript_scroll)),
+            );
         // Above the composer, so the decision sits where the user's attention already
         // is and cannot be scrolled out of view.
         if let Some(request) = &self.pending_approval {
@@ -2617,19 +2865,15 @@ impl Workbench {
         // long as it was open, and settings are something you visit and leave — the same
         // argument that makes Zed's fifty pickers modal rather than panels (docs §51).
         let mut pane = div()
-            .id("settings")
+            .id("settings-body")
             .flex()
             .flex_col()
-            .w(px(520.))
-            .max_h(px(720.))
+            .w_full()
+            .min_w_0()
+            .flex_grow()
             .overflow_y_scroll()
-            .rounded_lg()
-            .bg(rgb(theme::overlay()))
-            .border_1()
-            .border_color(rgb(theme::border_strong()))
             .p_4()
             .gap_3()
-            .child(section_label("SETTINGS"))
             // A list, not a cycle button. Cycling meant the only way to find a palette was
             // to click through every one, and there was no way to see what was available —
             // Zed shows all of them and previews on *hover*, which is the whole point: a
@@ -2784,11 +3028,14 @@ impl Workbench {
             );
         }
 
-        let pane = pane.child(
-            div()
+        let actions = div()
                 .flex()
                 .flex_row()
                 .gap_3()
+                .flex_none()
+                .p_4()
+                .border_t_1()
+                .border_color(rgb(theme::border()))
                 .child(
                     div()
                         .id("save-settings")
@@ -2825,22 +3072,12 @@ impl Workbench {
                             workbench.restore_focus = true;
                             cx.notify();
                         })),
-                ),
-        )
-        .child(
-            div()
-                .w_full()
-                .min_w_0()
-                .text_color(rgb(theme::text_muted()))
-                .text_xs()
-                .child(format!(
-                    "Keys live in your OS keychain, never in a file. Settings: {}",
-                    settings::settings_path().display()
-                )),
-        );
+                );
 
         // Centred over a dimmed workbench, so the chat stays visible behind it and
-        // clicking away is the obvious exit.
+        // clicking away is the obvious exit. Title and actions are fixed; only the middle
+        // scrolls — Save and Close were below the fold, which is the same defect the
+        // approval card had in §40 and the third time it has been this (docs §52).
         div()
             .id("settings-backdrop")
             .absolute()
@@ -2853,7 +3090,39 @@ impl Workbench {
             } else {
                 gpui::rgba(0x00000099)
             })
-            .child(pane)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .w(px(520.))
+                    .max_h(px(720.))
+                    .rounded_lg()
+                    .overflow_hidden()
+                    .bg(rgb(theme::overlay()))
+                    .border_1()
+                    .border_color(rgb(theme::border_strong()))
+                    .child(
+                        div()
+                            .flex_none()
+                            .px_4()
+                            .pt_4()
+                            .child(section_label("SETTINGS")),
+                    )
+                    .child(pane)
+                    .child(actions)
+                    .child(
+                        div()
+                            .flex_none()
+                            .px_4()
+                            .pb_3()
+                            .text_color(rgb(theme::text_faint()))
+                            .text_xs()
+                            .child(format!(
+                                "Keys live in your OS keychain, never in a file. {}",
+                                settings::settings_path().display()
+                            )),
+                    ),
+            )
     }
 
     /// The Setup pane: one row per check, each carrying the command that fixes it.
@@ -3558,37 +3827,77 @@ impl Workbench {
 
     /// The input row: the text field plus a Send affordance.
     fn composer_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (send_label, send_color) = if self.streaming {
-            ("Streaming…", theme::text_muted())
+        // Three states, which is what every shipped chat composer converged on: a filled
+        // circular button that sends, the same button greyed when there is nothing to
+        // send, and a stop control while a turn streams. Empty-means-disabled is the
+        // near-universal rule, and a send/stop toggle in the composer is how the running
+        // state is expressed without adding a second control (docs §52).
+        let has_text = !self.composer.read(cx).text().trim().is_empty();
+        let (glyph, fill, ink, hint) = if self.streaming {
+            ("■", theme::elevated(), theme::error(), "stop")
+        } else if has_text {
+            ("↑", theme::accent(), theme::background(), "send")
         } else {
-            ("Send ⏎", theme::accent())
+            ("↑", theme::elevated(), theme::text_faint(), "type a question first")
         };
 
         div()
             .flex()
             .flex_row()
             .items_center()
-            .gap_3()
-            .p_3()
-            .border_t_1()
-            .border_color(rgb(theme::border()))
+            .gap_2()
+            .flex_none()
+            .m_2()
+            .p_2()
+            .rounded_lg()
+            // The composer reads as one field with a control inside it, rather than a
+            // text box sitting next to an unrelated button.
             .bg(rgb(theme::surface()))
+            .border_1()
+            .border_color(rgb(theme::border_strong()))
             .child(self.composer.clone())
             .child(
                 div()
                     .id("send-turn")
                     .flex_none()
-                    .px_3()
-                    .py_1()
-                    .border_1()
-                    .border_color(rgb(send_color))
-                    .text_color(rgb(send_color))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(30.))
+                    .h(px(30.))
+                    // Circular, so it reads as a control and not as a word in a box.
+                    .rounded_full()
+                    .bg(rgb(fill))
+                    .text_color(rgb(ink))
                     .text_sm()
-                    .child(send_label)
+                    .tooltip({
+                        let hint = hint.to_string();
+                        move |_window, cx| {
+                            cx.new(|_| Hint {
+                                text: hint.clone().into(),
+                            })
+                            .into()
+                        }
+                    })
+                    .when(has_text && !self.streaming, |button| {
+                        button.hover(|style| style.bg(rgb(theme::accent_hover())).cursor_pointer())
+                    })
+                    .when(self.streaming, |button| {
+                        button.hover(|style| style.cursor_pointer())
+                    })
+                    .child(glyph)
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
-                        // Same path as Enter. Calling the entity directly rather
-                        // than dispatching an action keeps this working regardless
-                        // of where focus is when the button is clicked.
+                        if workbench.streaming {
+                            // Nothing to cancel a run with yet, so say so rather than
+                            // pretending the click did something (docs §52).
+                            workbench.status =
+                                "cancelling a running turn is not built yet".into();
+                            cx.notify();
+                            return;
+                        }
+                        // Same path as Enter. Calling the entity directly rather than
+                        // dispatching an action keeps this working regardless of where
+                        // focus is when the button is clicked.
                         workbench
                             .composer
                             .update(cx, |composer, cx| composer.submit_now(cx));
@@ -3738,20 +4047,38 @@ impl Workbench {
     }
 
     /// The project spine: mission, what's done, what's queued, what's suggested.
+    /// The panel's card, with the scrolling contents inside it and a bar beside them.
+    ///
+    /// Split from the contents because the scrollbar must sit *outside* the scrolling
+    /// element — inside, it would scroll along with what it measures.
     fn artifacts_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut panel = div()
-            .id("spine")
+        div()
+            .relative()
             .flex()
             .flex_col()
             .w(px(320.))
             .flex_none()
             .h_full()
-            .overflow_y_scroll()
             .m_1()
             .rounded_lg()
+            .overflow_hidden()
             .bg(rgb(theme::surface()))
             .border_1()
             .border_color(rgb(theme::border()))
+            .child(self.artifacts_contents(cx))
+            .children(scrollbar(&self.panel_scroll))
+    }
+
+    fn artifacts_contents(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut panel = div()
+            .id("spine")
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w_0()
+            .flex_grow()
+            .overflow_y_scroll()
+            .track_scroll(&self.panel_scroll)
             .p_4()
             .gap_4()
             .child(section_label("RESEARCH PROJECT"));

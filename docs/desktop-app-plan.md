@@ -3410,3 +3410,64 @@ mistake than a list nobody trusts.
   makes Zed's fifty pickers modal rather than panels. This closes the last of the six
   requests from §49.
 - The search field now looks like a field: rounded, its own background, a border.
+
+## 52. Scrollbars, a real theme gallery, and a correction (2026-08-01)
+
+### The correction first
+
+I told the researcher that Zed extensions are WASM compiled against Zed's own API and so
+could not be used here. That is true of **language** extensions and false of **theme**
+extensions, and the registry says so plainly:
+
+```json
+{"id":"catppuccin","provides":["themes"],"wasm_api_version":null,"download_count":964535}
+```
+
+`wasm_api_version: null` — pure data, a `.tar.gz` of JSON. I generalised from the kind of
+extension I had read about to all of them, and made a feasible feature sound impossible.
+The lesson is the one from §35 and §39 in a new costume: **check the thing itself before
+asserting what it is.** Two public endpoints and one `curl` would have settled it.
+
+I also said the live theme preview needed a custom GPUI element. `InteractiveElement`
+has **`on_hover`**. Same mistake, same size, found the same way — by looking.
+
+### The gallery
+
+`gallery.rs` searches `api.zed.dev/extensions`, keeps only entries whose `provides`
+contains `themes`, sorts by installs, downloads the archive and writes `themes/*.json` into
+the same directory a researcher can drop files into by hand. Author and install count are
+shown because these are other people's work under their own licences.
+
+It reads **only** `themes/*.json` and builds the write path from the *file name*, never the
+archive's own path — the classic tar traversal, worth ruling out even from a registry we
+trust. Everything else in the archive (licence, manifest, readme) is not ours to interpret.
+
+It is a **theme** installer, not an extension installer, and the module says so: promising
+the latter and shipping the former would be worse than naming which one this is.
+
+### Scrollbars, at last
+
+`overflow_y_scroll` draws nothing, which is why the approval card read as broken (§40) and
+why nobody found Save below the fold in Settings. `ScrollHandle` exposes `offset()`,
+`max_offset()` and `bounds()` — enough to size and place a thumb, with no custom element.
+It sits *outside* the scrolling div, in a `relative()` wrapper; inside, it would scroll
+along with the thing it measures.
+
+### The send button
+
+Researched rather than invented. Shipped composers converge on three states, and the
+button now has all three: a filled circular control that **sends**, the same control greyed
+when the field is empty — *empty means disabled* is near-universal — and a **stop** while a
+turn streams. Clicking stop currently says cancelling is not built yet, which is at least
+honest; the control is where it will live.
+
+The composer and its button are now one bordered, rounded field rather than a text box next
+to an unrelated button.
+
+### Settings, again
+
+The modal scrolled *as a whole*, so **Save and Close were below the fold** — the same
+defect as the approval card in §40, in the component built to fix that class of problem.
+Title and actions are now fixed and only the middle scrolls. Third occurrence; the lesson
+is evidently not learned by writing it down, which is an argument for the `Button` and
+`Modal` components P6.7 still owes.

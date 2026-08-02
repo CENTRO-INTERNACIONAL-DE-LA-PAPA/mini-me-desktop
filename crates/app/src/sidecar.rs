@@ -234,6 +234,36 @@ impl Sidecar {
         rx
     }
 
+    /// Search Zed's theme gallery.
+    ///
+    /// On the sidecar's runtime because that is where this app's HTTP lives; it has
+    /// nothing to do with the backend, which may not even be running.
+    pub fn search_themes(&self, query: String) -> mpsc::UnboundedReceiver<Result<Vec<crate::gallery::Listing>, String>> {
+        let (tx, rx) = mpsc::unbounded();
+        self.runtime.spawn(async move {
+            let client = reqwest::Client::new();
+            let outcome = crate::gallery::search(&client, &query)
+                .await
+                .map_err(|error| format!("{error:#}"));
+            let _ = tx.unbounded_send(outcome);
+        });
+        rx
+    }
+
+    /// Install one theme extension into the researcher's `themes/` directory.
+    pub fn install_theme(&self, id: String) -> mpsc::UnboundedReceiver<Result<Vec<String>, String>> {
+        let (tx, rx) = mpsc::unbounded();
+        let dir = crate::settings::themes_dir();
+        self.runtime.spawn(async move {
+            let client = reqwest::Client::new();
+            let outcome = crate::gallery::install(&client, &id, &dir)
+                .await
+                .map_err(|error| format!("{error:#}"));
+            let _ = tx.unbounded_send(outcome);
+        });
+        rx
+    }
+
     /// Start the backend now, rather than waiting for the first question.
     ///
     /// It used to spawn lazily on the first turn, which cost twice: the sidebar had

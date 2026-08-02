@@ -33,6 +33,12 @@ futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# Reading a Zed theme extension, which ships as a .tar.gz. Both are pure-Rust and tiny;
+# `flate2`'s rust_backend keeps a C toolchain out of the build, which matters because a
+# fresh `cargo build` on a colleague's Windows machine has to just work.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+tar = "0.4"
+
 # OS keychain for model/API keys instead of a plaintext dotfile. Native backends on
 # Windows and macOS; on Linux the **zbus** Secret Service client (`async-secret-service`
 # + `crypto-rust`) rather than the libdbus one, so building needs no `libdbus-1-dev` and
