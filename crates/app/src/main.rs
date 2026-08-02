@@ -3184,25 +3184,40 @@ impl Workbench {
                 // A background worker asks once per command over several minutes. Without
                 // this the researcher has to sit on the panel and answer each one, which
                 // defeats the entire point of handing the work to the background.
-                row = row.child(
-                    div()
-                        .id(SharedString::from(format!("bg-approve-task-{task_id}")))
-                        .px_3()
-                        .py_1()
-                        .border_1()
-                        .border_color(rgb(BORDER))
-                        .text_color(rgb(MUTED))
-                        .text_xs()
-                        .hover(|style| style.cursor_pointer())
-                        .child("Approve the rest of this task")
-                        .on_click(cx.listener({
-                            let task_id = task_id.clone();
-                            move |workbench, _event, _window, cx| {
-                                workbench.approve_tasks.insert(task_id.clone());
-                                workbench.decide_task(task_id.clone(), true, cx);
-                            }
-                        })),
-                );
+                //
+                // Both blanket grants appear here, and the conversation-wide one is worded
+                // *identically* to the chat's. They are two gates — the coordinator asks
+                // below the composer, a worker asks in this panel — and which one appears
+                // depends on who happened to need permission. A grant offered in one place
+                // and not the other reads as the button moving around at random (docs §44).
+                for (suffix, label, conversation_wide) in [
+                    ("task", "Approve the rest of this task", false),
+                    ("conv", "Approve everything in this conversation", true),
+                ] {
+                    row = row.child(
+                        div()
+                            .id(SharedString::from(format!("bg-approve-{suffix}-{task_id}")))
+                            .px_3()
+                            .py_1()
+                            .border_1()
+                            .border_color(rgb(BORDER))
+                            .text_color(rgb(MUTED))
+                            .text_xs()
+                            .hover(|style| style.cursor_pointer())
+                            .child(label)
+                            .on_click(cx.listener({
+                                let task_id = task_id.clone();
+                                move |workbench, _event, _window, cx| {
+                                    if conversation_wide {
+                                        workbench.approve_conversation = true;
+                                    } else {
+                                        workbench.approve_tasks.insert(task_id.clone());
+                                    }
+                                    workbench.decide_task(task_id.clone(), true, cx);
+                                }
+                            })),
+                    );
+                }
             }
             section = section.child(row);
         }

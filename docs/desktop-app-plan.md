@@ -3020,3 +3020,31 @@ In rough value order:
 
 Deliberately *not* on this list: **text selection**, which needs a custom element and is the
 one thing here GPUI genuinely makes hard (§16).
+
+## 44. Why the approval button appeared to move (2026-08-01)
+
+*"Sometimes the button approve for all the conversation appears bottom and sometimes in the
+background panel."*
+
+It was not moving. There are **two gates**, and which one you see depends on *who* needs
+permission:
+
+| Who asks | Where it appears |
+|---|---|
+| The coordinator, on the conversation's thread | The card above the composer |
+| A background worker, on **its own** thread | The BACKGROUND JOBS panel |
+
+That distinction is load-bearing — a background worker runs on a different thread and must
+be answered there (§31) — but it was invisible, and the two cards offered **different
+grants**: the chat card had *rest of this turn* and *everything in this conversation*, the
+panel had only *rest of this task*. So the same intention had a different button, with
+different wording, depending on which component happened to ask. That is indistinguishable
+from a button that wanders.
+
+Fixed by offering the conversation-wide grant in **both** places, worded identically. It
+means the same thing in both — it is one flag — so wherever the researcher meets it, one
+click ends the interruptions everywhere, foreground and background alike, until the
+conversation ends or they click *stop* in the status bar (§41).
+
+The narrower grant stays contextual, because its scope genuinely differs: *this turn* only
+exists in the chat, *this task* only exists in the panel.
