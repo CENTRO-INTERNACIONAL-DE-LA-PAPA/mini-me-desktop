@@ -3099,3 +3099,33 @@ A `windows-latest` workflow would remove the "build it on your own machine" step
 needs a token for the private backend repo and a Windows SDK with `fxc.exe` for the release
 build (§26) — neither testable from here. A script that works today beats an untested
 workflow that might.
+
+## 46. Three shells, three spellings of a path (2026-08-01)
+
+The first real release attempt died at the zip:
+
+```
+Compress-Archive : La ruta de acceso "\mnt\c\Users\...\dist" no existe
+```
+
+`release.sh` assumed **Git Bash** and reached for `cygpath`. It was run from **WSL**, where
+`cygpath` does not exist, so the fallback handed PowerShell WSL's own spelling of the path —
+which Windows cannot resolve. Neither shell ships `zip`, so the PowerShell branch is the one
+that actually runs on the target machine, and it was the untested one.
+
+Three shells, three spellings of the same directory:
+
+| Shell | Path |
+|---|---|
+| WSL | `/mnt/c/Users/…/dist` |
+| Git Bash | `/c/Users/…/dist` |
+| PowerShell | `C:\Users\…\dist` |
+
+`win_path()` now tries `wslpath -w`, then `cygpath -w`, then a transform that handles both
+POSIX forms — verified against all three. It translates the **parent directory**, because
+`wslpath` resolves paths that exist and the zip does not exist yet.
+
+Worth naming the testing gap honestly: `--dry-run` passed here because Linux *has* `zip`, so
+the branch that fails on Windows was never reached. A dry run that exercises a different code
+path than the real one is not a dry run of the real thing — the guards it did verify were
+real, but this one it structurally could not.

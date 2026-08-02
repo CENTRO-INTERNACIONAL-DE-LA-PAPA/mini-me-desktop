@@ -24,6 +24,28 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 
+# A path as *Windows* spells it.
+#
+# This script runs from three different shells and each has its own idea of a path: WSL
+# says `/mnt/c/…`, Git Bash says `/c/…`, PowerShell wants `C:\…`. Anything handed to
+# `powershell.exe` has to be translated first — passing WSL's spelling straight through is
+# what broke the first real release attempt (docs §46).
+#
+# Translated via the parent directory, because `wslpath` resolves a path that exists and
+# the zip does not exist yet.
+win_path() {
+  local path="$1"
+  if command -v wslpath >/dev/null 2>&1; then
+    wslpath -w "$path" 2>/dev/null && return 0
+  fi
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -w "$path" 2>/dev/null && return 0
+  fi
+  # Last resort, for a shell that offers neither: /mnt/c/x → C:\x, /c/x → C:\x.
+  printf '%s' "$path" | sed -E 's|^/mnt/([a-zA-Z])/|\1:/|; s|^/([a-zA-Z])/|\1:/|' \
+    | sed -E 's|^(.)|\U\1|; s|/|\\|g'
+}
+
 say()  { printf '\n==> %s\n' "$1"; }
 ok()   { printf '    ok  %s\n' "$1"; }
 bad()  { printf '    !!  %s\n' "$1"; }
@@ -96,11 +118,16 @@ rm -f "$ZIP"
 if command -v zip >/dev/null 2>&1; then
   ( cd "$ROOT/dist" && zip -qr "$(basename "$ZIP")" "$(basename "$BUNDLE")" )
 else
-  # Git Bash ships no `zip`. Windows has had Compress-Archive since PowerShell 5.
-  powershell.exe -NoProfile -Command \
-    "Compress-Archive -Path '$(cygpath -w "$BUNDLE" 2>/dev/null || echo "$BUNDLE")' \
-     -DestinationPath '$(cygpath -w "$ZIP" 2>/dev/null || echo "$ZIP")' -Force" \
-    || die "could not create the zip"
+  # Neither Git Bash nor a default WSL ships `zip`. Windows has had Compress-Archive
+  # since PowerShell 5, and it is already there on every machine this targets.
+  DIST_WIN="$(win_path "$ROOT/dist")"
+  DIST_WIN="${DIST_WIN%\\}"
+  # Naming the folder (not `dir\*`) keeps `mini-me-desktop/` as the root inside the zip,
+  # so unzipping produces one folder rather than scattering 30 files into Downloads.
+  powershell.exe -NoProfile -NonInteractive -Command \
+    "Compress-Archive -Path '$DIST_WIN\\$(basename "$BUNDLE")' \
+     -DestinationPath '$DIST_WIN\\$(basename "$ZIP")' -Force" \
+    || die "could not create the zip. Path handed to PowerShell: $DIST_WIN"
 fi
 [ -f "$ZIP" ] || die "the zip was not created"
 ok "$(du -h "$ZIP" | cut -f1)"
@@ -110,8 +137,7 @@ ok "$(du -h "$ZIP" | cut -f1)"
 if command -v sha256sum >/dev/null 2>&1; then
   SHA="$(sha256sum "$ZIP" | cut -d' ' -f1)"
 else
-  SHA="$(certutil -hashfile "$(cygpath -w "$ZIP" 2>/dev/null || echo "$ZIP")" SHA256 \
-        | sed -n 2p | tr -d ' \r')"
+  SHA="$(certutil.exe -hashfile "$(win_path "$ZIP")" SHA256 | sed -n 2p | tr -d ' \r')"
 fi
 ok "sha256 ${SHA:0:16}…"
 
