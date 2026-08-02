@@ -3129,3 +3129,54 @@ Worth naming the testing gap honestly: `--dry-run` passed here because Linux *ha
 the branch that fails on Windows was never reached. A dry run that exercises a different code
 path than the real one is not a dry run of the real thing — the guards it did verify were
 real, but this one it structurally could not.
+
+## 47. P6.7 begins: showing an agent's work without burying its answer (2026-08-01)
+
+A screenshot of a real turn:
+
+```
+· read_file  · read_file  · read_file  · ls  · ls  · ls
+· glob ×8 (as eight separate lines)  · ls  · ls  · read_file ×3
+The files weren't at the root path I first tried...
+```
+
+Twenty-plus lines of process, then the answer — below the fold. The activity trace was
+built in §15 to close a "silent gap" during long delegated turns, and it did. But it was
+written for a turn that *works*; a turn that struggles emits the same call repeatedly, and
+nothing folded it.
+
+### What the field has already settled
+
+Researched rather than guessed, and three sources converge:
+
+- **Zed's own agent panel** proposes rendering each spawned subagent as a **collapsible
+  sub-thread** — in the parent, one compact card (*"→ Subagent … (12 tool calls, 4.2s)"*)
+  rather than the whole inlined timeline
+  ([zed#57481](https://github.com/zed-industries/zed/discussions/57481)).
+- A second Zed proposal names the temporal pattern exactly: **expand a turn live while the
+  agent works, then collapse it on completion**
+  ([zed#58314](https://github.com/zed-industries/zed/discussions/58314)).
+- Luke Wroblewski's survey of shipped agent UIs reports the same lesson learned the
+  expensive way: fully-disclosed tool calls proved *"too much information"*, and iterations
+  *"focused on reducing the visual weight of tools and showing less process by default"* —
+  the more tools an agent has, the more this matters
+  ([lukew.com](https://lukew.com/ff/entry.asp?2142=)).
+
+This app had already arrived at half of it: subagent groups have been collapsible with a
+`▸ name · N steps · N chars` header since §15c. The **coordinator's own steps** were the
+part still rendered flat and unbounded.
+
+### What changed
+
+- **Consecutive identical steps fold** — `glob ×8` on one line. Only *consecutive* runs:
+  `read_file ×3, ls ×2, read_file ×3` is a different story from `read_file ×6`, and
+  flattening the order would erase it. Applied to subagent steps too.
+- **The coordinator's steps get the same disclosure the subagents had** — a
+  `▾ 24 steps` header, open while the turn runs, **closed the moment it ends**. During a
+  two-minute wait the steps are the only sign of progress; afterwards the answer is the
+  point.
+- *Expand / collapse agent activity* in the palette now reaches these too, rather than
+  leaving half the activity shut.
+
+Still ahead in P6.7, unchanged in priority: **visible scrollbars** (the highest-value single
+fix), a theme struct, and a component vocabulary.

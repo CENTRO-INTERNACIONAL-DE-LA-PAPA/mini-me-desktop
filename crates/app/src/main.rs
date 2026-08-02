@@ -60,6 +60,34 @@ fn step_line(label: &str) -> impl IntoElement {
         .child(format!("· {label}"))
 }
 
+/// Consecutive identical steps folded into one line with a count.
+///
+/// An agent hunting for a file emits `glob` eight times in a row, and eight identical lines
+/// carry exactly as much information as one — while costing eight lines of the answer's
+/// screen space. `glob ×8` says the same thing and reads as one glance.
+///
+/// Only *consecutive* runs are folded. `read_file ×3, ls ×2, read_file ×3` is a different
+/// story from `read_file ×6`, and flattening the order would erase it.
+fn fold_steps(steps: &[String]) -> Vec<String> {
+    let mut folded: Vec<(String, usize)> = Vec::new();
+    for step in steps {
+        match folded.last_mut() {
+            Some((label, count)) if label == step => *count += 1,
+            _ => folded.push((step.clone(), 1)),
+        }
+    }
+    folded
+        .into_iter()
+        .map(|(label, count)| {
+            if count > 1 {
+                format!("{label} ×{count}")
+            } else {
+                label
+            }
+        })
+        .collect()
+}
+
 /// A labelled, bulleted list of spine entries.
 fn spine_list(label: &'static str, items: &[String], bullet: &'static str) -> impl IntoElement {
     let mut list = div()
@@ -551,6 +579,13 @@ struct Message {
     steps: Vec<String>,
     /// One group per subagent invocation.
     agents: Vec<AgentTrace>,
+    /// Whether the coordinator's own steps are showing.
+    ///
+    /// Open while the turn runs, because during a two-minute wait the steps *are* the only
+    /// sign of progress; closed once it ends, because then the answer is the point. Zed's
+    /// agent panel converged on the same shape, and the pattern has a name — expand live,
+    /// collapse on completion (docs §47).
+    steps_expanded: bool,
     /// Figures this turn drew, shown inline beneath the answer.
     ///
     /// Found by diffing the thread's workspace across the turn rather than reported by the
@@ -567,6 +602,7 @@ impl Message {
             body,
             steps: Vec::new(),
             agents: Vec::new(),
+            steps_expanded: true,
             plots: Vec::new(),
         }
     }
@@ -1375,6 +1411,7 @@ impl Workbench {
             for trace in &mut message.agents {
                 trace.expanded = false;
             }
+            message.steps_expanded = false;
         }
         if self
             .transcript
@@ -2596,6 +2633,7 @@ impl Workbench {
 
     fn set_all_traces_expanded(&mut self, expanded: bool) {
         for message in &mut self.transcript {
+            message.steps_expanded = expanded;
             for trace in &mut message.agents {
                 trace.expanded = expanded;
             }
@@ -2722,8 +2760,37 @@ impl Workbench {
     ) -> impl IntoElement {
         let mut block = div().flex().flex_col().w_full().min_w_0().gap_1();
 
-        for step in &message.steps {
-            block = block.child(step_line(step));
+        // The coordinator's own steps, behind the same disclosure the subagent groups have
+        // had all along. Flat and unbounded, they ran to twenty lines of `read_file`, `ls`
+        // and `glob` and pushed the actual answer off the screen (docs §47).
+        let folded = fold_steps(&message.steps);
+        if !folded.is_empty() {
+            let count = message.steps.len();
+            block = block.child(
+                div()
+                    .id(SharedString::from(format!("steps-{message_index}")))
+                    .w_full()
+                    .min_w_0()
+                    .text_color(rgb(MUTED))
+                    .text_xs()
+                    .hover(|style| style.cursor_pointer())
+                    .child(format!(
+                        "{} {count} {}",
+                        if message.steps_expanded { "▾" } else { "▸" },
+                        if count == 1 { "step" } else { "steps" },
+                    ))
+                    .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                        if let Some(message) = workbench.transcript.get_mut(message_index) {
+                            message.steps_expanded = !message.steps_expanded;
+                        }
+                        cx.notify();
+                    })),
+            );
+            if message.steps_expanded {
+                for step in &folded {
+                    block = block.child(step_line(step));
+                }
+            }
         }
 
         for (trace_index, trace) in message.agents.iter().enumerate() {
@@ -2772,7 +2839,7 @@ impl Workbench {
                 );
 
             if trace.expanded {
-                for step in &trace.steps {
+                for step in &fold_steps(&trace.steps) {
                     group = group.child(step_line(step));
                 }
                 // Not the raw stream: a subagent's answer often arrives as one JSON
@@ -3483,6 +3550,30 @@ fn replay(path: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_steps_fold_but_the_order_survives() {
+        // Straight from a screenshot: the coordinator hunting for a file it could not
+        // find. Twenty lines of this pushed the answer off the screen (docs §47).
+        let hunting: Vec<String> = ["read_file", "read_file", "read_file", "ls", "ls", "ls"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(fold_steps(&hunting), vec!["read_file ×3", "ls ×3"]);
+
+        // Only *consecutive* runs fold. Going back to a tool after using another one is a
+        // different story from using it six times, and collapsing both to one line would
+        // erase the difference.
+        let alternating: Vec<String> = ["glob", "read_file", "glob"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(fold_steps(&alternating), vec!["glob", "read_file", "glob"]);
+
+        // A lone step keeps its plain label — "×1" is noise.
+        assert_eq!(fold_steps(&["execute".to_string()]), vec!["execute"]);
+        assert!(fold_steps(&[]).is_empty());
+    }
 
     /// A real delegated turn, reduced to fit the repo (see the fixture's header).
     /// Replaying it is what proves the trace works on *measured* wire data rather
