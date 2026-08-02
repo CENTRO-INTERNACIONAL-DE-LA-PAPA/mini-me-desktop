@@ -2459,7 +2459,7 @@ impl Workbench {
         if let Some(request) = &self.pending_approval {
             pane = pane.child(self.approval_card(request, cx));
         }
-        pane.child(self.composer_row(cx)).child(self.status_bar(cx))
+        pane.child(self.composer_row(cx))
     }
 
     /// Answer the pending approval and pump the continuation into the same turn.
@@ -3944,6 +3944,7 @@ impl Workbench {
             .flex_row()
             .items_center()
             .gap_3()
+            .w_full()
             .px_3()
             .py_1()
             .border_t_1()
@@ -3953,6 +3954,7 @@ impl Workbench {
                 div()
                     .flex_grow()
                     .min_w_0()
+                    .truncate()
                     .text_color(rgb(status_color))
                     .text_sm()
                     .child(status_text),
@@ -4575,12 +4577,41 @@ impl Render for Workbench {
 
         // `relative` so the palette's `absolute` overlay is positioned against the
         // window rather than the page origin.
+        // The panels sit in a row; the status bar spans the **window** beneath them.
+        //
+        // It used to live inside the chat pane, so it was only as wide as the chat and its
+        // controls slid left and right whenever a panel was collapsed. A status bar that
+        // moves is one you have to look for. Zed's runs the full width for the same
+        // reason, and its buttons are always in the same place (docs §53).
+        let mut body = div()
+            .flex()
+            .flex_row()
+            .flex_grow()
+            // Without this the row refuses to shrink below its content and pushes the
+            // status bar off the bottom — the flex default that has now cost four
+            // separate bugs (§40, §48, §51).
+            .min_h_0()
+            .w_full()
+            .when(self.sidebar_open, |body| body.child(self.rail(cx)))
+            .child(self.chat_pane(cx));
+
+        // One right-hand pane at a time: Setup wins over the research panel, because the
+        // only reason it is open is that something is stopping a turn.
+        body = if self.setup_open {
+            body.child(self.setup_pane(cx))
+        } else if self.panel_open {
+            body.child(self.artifacts_panel(cx))
+        } else {
+            body
+        };
+
         let root = div()
             // An id makes the root a drop target; without one the platform's file-drop
             // event has nowhere to land.
             .id("workbench")
             .relative()
             .flex()
+            .flex_col()
             .size_full()
             .bg(rgb(theme::background()))
             .text_color(rgb(theme::text()))
@@ -4593,18 +4624,8 @@ impl Render for Workbench {
                     workbench.files_dropped(paths.paths(), cx);
                 },
             ))
-            .when(self.sidebar_open, |root| root.child(self.rail(cx)))
-            .child(self.chat_pane(cx));
-
-        // One right-hand pane at a time: Setup wins over Settings, because the only
-        // reason it is open is that something is stopping a turn.
-        let root = if self.setup_open {
-            root.child(self.setup_pane(cx))
-        } else if self.panel_open {
-            root.child(self.artifacts_panel(cx))
-        } else {
-            root
-        };
+            .child(body)
+            .child(self.status_bar(cx));
 
         // Settings floats rather than displacing a panel, so opening it no longer costs
         // the chat 420px for as long as it is open.

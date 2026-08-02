@@ -3471,3 +3471,22 @@ defect as the approval card in §40, in the component built to fix that class of
 Title and actions are now fixed and only the middle scrolls. Third occurrence; the lesson
 is evidently not learned by writing it down, which is an argument for the `Button` and
 `Modal` components P6.7 still owes.
+
+## 53. The status bar belongs to the window, not the chat (2026-08-01)
+
+Catppuccin installed from the gallery and applied — the §52 path works end to end. One
+thing left over from the layout:
+
+The status bar lived *inside* the chat pane, so it was only as wide as the chat, and its
+controls slid left and right every time a panel was collapsed. **A status bar that moves is
+one you have to look for**, which defeats the point of putting the panel toggles there.
+
+Zed's runs the full width of the window for exactly this reason. The layout is now a column
+— panels in a row on top, status bar spanning the window beneath — so the toggles, the
+execution indicator and the URL stay where they are whatever is open.
+
+`min_h_0` on the row, for the fourth time (§40, §48, §51): a flex child refuses to shrink
+below its content, so without it the row pushed the status bar off the bottom edge. Four
+bugs from one default is a strong argument that the layout primitives should be wrapped
+once, correctly, rather than re-specified at every call site — which is the `Button` and
+`Modal` work P6.7 still owes.
