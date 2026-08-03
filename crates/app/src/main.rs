@@ -3471,7 +3471,14 @@ impl Workbench {
                     div()
                         .text_color(rgb(theme::text_muted()))
                         .text_xs()
-                        .child("starting…"),
+                        // Said plainly when a *finished* fix produced nothing, because
+                        // "the last lines say why" over an empty box is worse than
+                        // admitting there are none (docs §57).
+                        .child(if fix.done {
+                            "The command printed nothing. The sidecar log below may have more."
+                        } else {
+                            "starting…"
+                        }),
                 );
             }
             pane = pane.child(log.child(output));

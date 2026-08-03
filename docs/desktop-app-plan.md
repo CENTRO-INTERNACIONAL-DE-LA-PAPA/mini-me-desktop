@@ -3607,3 +3607,62 @@ pipeline had to do.
 **Still not proven:** nobody has installed this zip on a machine that did not build it.
 That is the next step and the one that matters — the first-run WSL path has never executed
 anywhere.
+
+## 57. The first clean machine, and the blindness it exposed (2026-08-02)
+
+A colleague ran the CI build on a laptop that had never had this app. **Most of it worked
+on the first try** — the window rendered, the Setup pane opened, the checks ran, and it
+correctly diagnosed *"WSL is present but no distro answered"* and offered the fix.
+
+Then the fix failed, and reported:
+
+```
+Install Ubuntu — failed
+— the command reported a failure — the last lines say why
+```
+
+**There were no lines.** The box was empty.
+
+### Two defects, and the second is worse than the first
+
+**`wsl --install` needs administrator rights.** The app is not elevated and must not be, and
+a process cannot elevate itself — so the command failed instantly. The check's own note even
+said *"asks for admin rights"*, and nothing acted on it. Fixed by wrapping it in
+`Start-Process -Verb RunAs`, which is Windows asking the researcher rather than us pretending
+we can. `-Wait` so "finished" means finished, and `exit $p.ExitCode` so a **refused** UAC
+prompt reports failure instead of success.
+
+**The log was empty because we could not read it.** This line:
+
+```rust
+for line in BufReader::new(pipe).lines().map_while(Result::ok)
+```
+
+`lines()` yields an error on the first byte that is not UTF-8, and `map_while` **stops at the
+first error**. `wsl.exe` writes **UTF-16LE** — a fact already recorded in this project's own
+notes about `wsl -l` — so every line was an error and the iterator ended before yielding
+anything. Every fix that failed with a UTF-16 message has been reporting *nothing* since
+`run_streaming` was written.
+
+Now the pipe is read as **bytes**, the encoding is detected once from the first chunk (BOM,
+or ASCII padded with NULs), and lines are split on `0A 00` or `0A` accordingly — cutting a
+UTF-16 stream on a bare `0A` would leave the stray `00` at the head of the next line and
+shift every character after it. A trailing line with no newline is kept, because that is
+often the only line a failing command produces.
+
+### The pattern, for the fourth time
+
+*"The last lines say why"* over an empty box is exactly §35's theorizer reporting a guess,
+§38's *"The async subagent encountered an error"*, and §39's silent `TypeError`. **Four
+times this project has told someone a reason exists while showing them nothing.** The note
+now says only *"the command reported a failure"*, and the card says plainly *"The command
+printed nothing"* when that is the truth.
+
+The rule, stated as a rule this time: **never write a message that promises output unless
+the code path that produces it has been seen to produce output.**
+
+### What this run proved
+
+The packaging, the CI build, the unsigned-binary path past SmartScreen, the window, the
+preflight checks and the diagnosis all work on a machine that did not build them. The
+remaining unknown is now narrow: whether the elevated install actually completes.

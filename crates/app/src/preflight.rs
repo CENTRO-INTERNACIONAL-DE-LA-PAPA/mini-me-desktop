@@ -387,8 +387,8 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
                 "WSL is present but no distro answered".to_string(),
                 Fix::Run {
                     label: "Install Ubuntu",
-                    argv: vec!["wsl.exe".into(), "--install".into(), "-d".into(), "Ubuntu".into()],
-                    note: "asks for admin rights; may need a restart",
+                    argv: elevated(&["wsl.exe", "--install", "-d", "Ubuntu"]),
+                    note: "Windows will ask for admin rights; may need a restart",
                 },
             )
         } else {
@@ -396,8 +396,8 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
                 "wsl.exe was not found — WSL is not installed".to_string(),
                 Fix::Run {
                     label: "Install WSL",
-                    argv: vec!["wsl.exe".into(), "--install".into()],
-                    note: "asks for admin rights, then needs a restart",
+                    argv: elevated(&["wsl.exe", "--install"]),
+                    note: "Windows will ask for admin rights, then needs a restart",
                 },
             )
         };
@@ -722,13 +722,144 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
 /// waiting for a username at a prompt nobody can see, and the app would look hung
 /// forever. With no stdin it fails immediately and the reason reaches the pane.
 ///
+/// Either of a child's output pipes, so both can go through one reader.
+enum PipeOut {
+    Stdout(std::process::ChildStdout),
+    Stderr(std::process::ChildStderr),
+}
+
+impl std::io::Read for PipeOut {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            PipeOut::Stdout(pipe) => pipe.read(buffer),
+            PipeOut::Stderr(pipe) => pipe.read(buffer),
+        }
+    }
+}
+
+/// Read lines from a child's pipe, **whatever encoding it writes in**.
+///
+/// This replaces `BufReader::lines().map_while(Result::ok)`, which looks harmless and is
+/// not: `lines()` yields an error on the first byte that is not UTF-8, and `map_while`
+/// stops at the first error. `wsl.exe` writes **UTF-16LE** on Windows, so every line was an
+/// error and the iterator ended immediately — the fix log captured *nothing*, and the app
+/// then told a researcher "the command reported a failure — the last lines say why" with no
+/// lines at all (docs §57).
+///
+/// `read` returns false to stop, which is how a dropped receiver ends the thread.
+fn read_lines(mut pipe: impl std::io::Read, mut send: impl FnMut(String) -> bool) {
+    let mut buffered: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let mut wide: Option<bool> = None;
+
+    loop {
+        let read = match pipe.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(_) => break,
+        };
+        buffered.extend_from_slice(&chunk[..read]);
+        // Decided once, from the first bytes that arrive: mixing separators mid-stream
+        // would slice a UTF-16 line in half and garble everything after it.
+        if wide.is_none() {
+            wide = Some(looks_utf16(&buffered));
+        }
+        let wide = wide.unwrap_or(false);
+        // In UTF-16LE a newline is `0A 00`, so cutting on a bare `0A` would leave the
+        // stray `00` at the head of the next line and shift every character after it.
+        let step = if wide { 2 } else { 1 };
+        while let Some(at) = find_newline(&buffered, wide) {
+            let line: Vec<u8> = buffered.drain(..at).collect();
+            buffered.drain(..step.min(buffered.len()));
+            if !send(decode(&line, wide)) {
+                return;
+            }
+        }
+    }
+    // Whatever the child wrote without a trailing newline — often the only line a failing
+    // command produces.
+    if !buffered.is_empty() {
+        let wide = wide.unwrap_or(false);
+        send(decode(&buffered, wide));
+    }
+}
+
+/// Whether these bytes look like UTF-16LE: a BOM, or ASCII padded with NULs.
+fn looks_utf16(bytes: &[u8]) -> bool {
+    if bytes.starts_with(&[0xff, 0xfe]) {
+        return true;
+    }
+    // ASCII in UTF-16LE is every other byte zero. Two of the first eight is already a
+    // pattern no UTF-8 text produces.
+    let window = &bytes[..bytes.len().min(16)];
+    window.iter().skip(1).step_by(2).filter(|b| **b == 0).count() >= 2
+}
+
+fn find_newline(bytes: &[u8], wide: bool) -> Option<usize> {
+    if wide {
+        bytes
+            .windows(2)
+            .position(|pair| pair == [0x0a, 0x00])
+            .map(|at| at)
+    } else {
+        bytes.iter().position(|byte| *byte == 0x0a)
+    }
+}
+
+fn decode(bytes: &[u8], wide: bool) -> String {
+    let text = if wide {
+        let units: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        String::from_utf16_lossy(&units)
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    };
+    // The BOM and the CR are not content.
+    text.trim_start_matches('\u{feff}').trim_end_matches('\r').to_string()
+}
+
 /// stdout and stderr are read on separate threads and interleaved. Reading them in
 /// sequence would deadlock the moment a chatty child filled the pipe we were not
 /// draining — and `uv` writes its progress to stderr, which is most of what there is to
 /// watch.
+/// A command that needs administrator rights, wrapped so Windows actually asks.
+///
+/// `wsl --install` requires elevation. Run from the app — which is not elevated, and must
+/// not be — it fails immediately, and on the first clean machine it ever met it did exactly
+/// that (docs §57). A process cannot elevate itself, so the only honest options were to ask
+/// the researcher to open an admin terminal, or to let Windows ask them. `Start-Process
+/// -Verb RunAs` is that prompt.
+///
+/// `-Wait` so the fix's own "finished" means finished, and `$p.ExitCode` so a refused UAC
+/// prompt reports failure rather than success.
+fn elevated(argv: &[&str]) -> Vec<String> {
+    if !cfg!(windows) {
+        return argv.iter().map(|part| part.to_string()).collect();
+    }
+    let (program, rest) = argv.split_first().expect("a program");
+    // Single-quoted for PowerShell, doubling any quote inside — none of these arguments
+    // contain one today, and a future one must not be able to break out of the string.
+    let args = rest
+        .iter()
+        .map(|arg| format!("'{}'", arg.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(",");
+    let script = format!(
+        "$p = Start-Process -FilePath '{program}' -ArgumentList {args} -Verb RunAs -Wait -PassThru; exit $p.ExitCode"
+    );
+    vec![
+        "powershell.exe".into(),
+        "-NoProfile".into(),
+        "-NonInteractive".into(),
+        "-Command".into(),
+        script,
+    ]
+}
+
 pub fn run_streaming(argv: &[String], mut emit: impl FnMut(String)) -> anyhow::Result<bool> {
     use anyhow::Context as _;
-    use std::io::BufRead as _;
 
     let (program, rest) = argv.split_first().context("empty command")?;
     let mut child = Command::new(program)
@@ -741,24 +872,16 @@ pub fn run_streaming(argv: &[String], mut emit: impl FnMut(String)) -> anyhow::R
 
     let (tx, rx) = std::sync::mpsc::channel::<String>();
     let mut readers = Vec::new();
-    if let Some(pipe) = child.stdout.take() {
+    for pipe in [
+        child.stdout.take().map(PipeOut::Stdout),
+        child.stderr.take().map(PipeOut::Stderr),
+    ]
+    .into_iter()
+    .flatten()
+    {
         let tx = tx.clone();
         readers.push(std::thread::spawn(move || {
-            for line in std::io::BufReader::new(pipe).lines().map_while(Result::ok) {
-                if tx.send(line).is_err() {
-                    break;
-                }
-            }
-        }));
-    }
-    if let Some(pipe) = child.stderr.take() {
-        let tx = tx.clone();
-        readers.push(std::thread::spawn(move || {
-            for line in std::io::BufReader::new(pipe).lines().map_while(Result::ok) {
-                if tx.send(line).is_err() {
-                    break;
-                }
-            }
+            read_lines(pipe, |line| tx.send(line).is_ok());
         }));
     }
     // Our own sender has to go, or the loop below never ends.
@@ -1073,5 +1196,70 @@ mod tests {
         let summary = report.summary();
         assert!(summary.contains("ok"), "{summary}");
         assert!(summary.contains("to fix"), "{summary}");
+    }
+}
+
+#[cfg(test)]
+mod encoding_tests {
+    use super::*;
+
+    /// UTF-16LE bytes for a string, as `wsl.exe` writes them.
+    fn utf16(text: &str) -> Vec<u8> {
+        text.encode_utf16().flat_map(u16::to_le_bytes).collect()
+    }
+
+    fn lines_of(bytes: Vec<u8>) -> Vec<String> {
+        let mut out = Vec::new();
+        read_lines(std::io::Cursor::new(bytes), |line| {
+            out.push(line);
+            true
+        });
+        out
+    }
+
+    #[test]
+    fn utf16_output_is_read_rather_than_dropped() {
+        // The exact failure from the first clean machine: `wsl.exe` writes UTF-16LE, and
+        // `BufReader::lines().map_while(Result::ok)` ended at the first line — so the fix
+        // log was empty and the app claimed the last lines said why (docs §57).
+        let mut bytes = vec![0xff, 0xfe]; // BOM, as Windows tools emit
+        bytes.extend(utf16("Installing: Ubuntu\r\n"));
+        bytes.extend(utf16("Error: 0x80070005 access denied\r\n"));
+        assert_eq!(
+            lines_of(bytes),
+            vec!["Installing: Ubuntu", "Error: 0x80070005 access denied"]
+        );
+    }
+
+    #[test]
+    fn utf8_output_still_reads_normally() {
+        // Everything else — uv, git, python — writes UTF-8, including non-ASCII.
+        let bytes = b"Resolved 42 packages\ncreando el entorno\n".to_vec();
+        assert_eq!(lines_of(bytes), vec!["Resolved 42 packages", "creando el entorno"]);
+    }
+
+    #[test]
+    fn a_last_line_without_a_newline_is_not_lost() {
+        // Often the *only* line a failing command produces, so losing it loses the reason.
+        assert_eq!(lines_of(b"fatal: no such distro".to_vec()), vec!["fatal: no such distro"]);
+        assert_eq!(lines_of(utf16("access denied")), vec!["access denied"]);
+    }
+
+    #[test]
+    fn elevation_wraps_the_command_for_windows_only() {
+        let argv = elevated(&["wsl.exe", "--install", "-d", "Ubuntu"]);
+        if cfg!(windows) {
+            assert_eq!(argv[0], "powershell.exe");
+            let script = argv.last().expect("the script");
+            // `RunAs` is the UAC prompt; `-Wait` makes "finished" mean finished; the exit
+            // code is what turns a refused prompt into a reported failure.
+            assert!(script.contains("-Verb RunAs"), "{script}");
+            assert!(script.contains("-Wait"), "{script}");
+            assert!(script.contains("exit $p.ExitCode"), "{script}");
+            assert!(script.contains("'--install','-d','Ubuntu'"), "{script}");
+        } else {
+            // Everywhere else it must stay the plain command, or the Linux dev path breaks.
+            assert_eq!(argv, vec!["wsl.exe", "--install", "-d", "Ubuntu"]);
+        }
     }
 }

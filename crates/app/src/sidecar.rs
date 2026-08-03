@@ -511,7 +511,11 @@ impl Sidecar {
                 },
                 Ok(Ok(false)) => FixEvent::Finished {
                     ok: false,
-                    note: "the command reported a failure — the last lines say why".into(),
+                    // Never promise output that may not exist: on the first clean machine this
+                    // said "the last lines say why" above an empty log, because nothing had
+                    // been captured at all (docs §57). The card adds the lines when there
+                    // are lines.
+                    note: "the command reported a failure".into(),
                 },
                 Ok(Err(error)) => FixEvent::Finished {
                     ok: false,
