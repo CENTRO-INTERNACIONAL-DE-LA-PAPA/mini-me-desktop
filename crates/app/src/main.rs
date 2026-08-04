@@ -749,6 +749,13 @@ struct RunningFix {
     /// The last [`FIX_LOG_LINES`] lines. Capped because `uv sync` prints hundreds and
     /// the pane is 420px wide — the tail is the part that matters.
     lines: Vec<String>,
+    /// What *we* have to say about the run — the verdict, and what to do next. Kept apart
+    /// from `lines` because it is not output: pushing "— finished" in with the command's own
+    /// lines is why a fix that printed nothing showed a box containing one dash instead of
+    /// admitting there was nothing to show (docs §60).
+    notes: Vec<String>,
+    /// Which check this fix belongs to, so a re-check can tell whether it worked.
+    check_id: &'static str,
     done: bool,
     ok: bool,
 }
@@ -794,6 +801,9 @@ struct Workbench {
     setup_open: bool,
     report: Option<preflight::Report>,
     checking: bool,
+    /// Set when a fix has just succeeded, so the re-check it triggered is compared against
+    /// the row it was meant to fix. See [`Workbench::judge_finished_fix`].
+    judge_after_recheck: bool,
     /// A fix the app is running for the user: what it is, and what it has printed so far.
     /// `Some` means a command is live, which is what disables the other buttons.
     running_fix: Option<RunningFix>,
@@ -962,6 +972,7 @@ impl Workbench {
             setup_open: false,
             report: None,
             checking: false,
+            judge_after_recheck: false,
             running_fix: None,
             pending_approval: None,
             approve_rest_of_turn: false,
@@ -1247,6 +1258,9 @@ impl Workbench {
                     let first = workbench.report.is_none();
                     let blocked = !report.ready();
                     workbench.report = Some(report);
+                    if std::mem::take(&mut workbench.judge_after_recheck) {
+                        workbench.judge_finished_fix();
+                    }
                     if first && blocked {
                         workbench.setup_open = true;
                         workbench.settings_open = false;
@@ -1290,11 +1304,83 @@ impl Workbench {
         self.run_preflight(cx);
     }
 
+    /// Whether the named row is still not passing, according to the latest report.
+    fn still_unfixed(&self, check_id: &str) -> bool {
+        self.report.as_ref().is_some_and(|report| {
+            report
+                .checks
+                .iter()
+                .any(|check| check.id == check_id && check.state != preflight::State::Pass)
+        })
+    }
+
+    /// What colour the app's own remarks about a fix should be.
+    ///
+    /// Read from the current report rather than stored, so "restart Windows" is amber while
+    /// it is still true and goes quiet by itself once the row it names turns green.
+    fn fix_tone(&self, fix: &RunningFix) -> u32 {
+        if !fix.done {
+            theme::text_muted()
+        } else if !fix.ok {
+            theme::error()
+        } else if self.still_unfixed(fix.check_id) {
+            theme::warning()
+        } else {
+            theme::text_muted()
+        }
+    }
+
+    /// Say so when a fix reported success and changed nothing.
+    ///
+    /// A machine with WSL but no distro ran `wsl --install -d Ubuntu`, which installed the
+    /// WSL runtime, exited 0 — and left the distro unregistered until Windows restarts. The
+    /// pane said "Install Ubuntu — done" directly above the same red row it had started
+    /// from, which reads as a bug in the app rather than as a step the user still has to
+    /// take (docs §60).
+    ///
+    /// The verdict is drawn from the re-check, never from the command's own words: `wsl.exe`
+    /// speaks the system language — the machine this came from printed *"Descargando:
+    /// Subsistema de Windows para Linux"* — so matching on "restart" would have failed for
+    /// exactly the user who needed it.
+    fn judge_finished_fix(&mut self) {
+        let check_id = match &self.running_fix {
+            Some(fix) if fix.ok => fix.check_id,
+            _ => return,
+        };
+        if !self.still_unfixed(check_id) {
+            return;
+        }
+        let Some(fix) = self.running_fix.as_mut() else {
+            return;
+        };
+        // Only the runtime row installs WSL itself, and only Windows reboots for it.
+        if check_id == "runtime" && cfg!(windows) {
+            fix.notes.push(
+                "— That installed WSL, but Windows has to restart before a distro can \
+                 start. Restart this machine, open the app again, and this row should be \
+                 green."
+                    .into(),
+            );
+        } else {
+            fix.notes.push(
+                "— It reported success but the check still fails. The output above is the \
+                 best clue; the sidecar log below has the rest."
+                    .into(),
+            );
+        }
+    }
+
     /// Run a fix on the user's behalf, streaming its output into the pane.
     ///
     /// Re-checks automatically when it finishes, so a successful install turns its own
     /// row green without the user having to work out that they should press Re-check.
-    fn start_fix(&mut self, label: String, argv: Vec<String>, cx: &mut Context<Self>) {
+    fn start_fix(
+        &mut self,
+        label: String,
+        argv: Vec<String>,
+        check_id: &'static str,
+        cx: &mut Context<Self>,
+    ) {
         if self.running_fix.as_ref().is_some_and(|fix| !fix.done) {
             return;
         }
@@ -1303,6 +1389,8 @@ impl Workbench {
             label,
             link: None,
             lines: Vec::new(),
+            notes: Vec::new(),
+            check_id,
             done: false,
             ok: false,
         });
@@ -1330,7 +1418,7 @@ impl Workbench {
                         sidecar::FixEvent::Finished { ok, note } => {
                             fix.done = true;
                             fix.ok = ok;
-                            fix.lines.push(format!("— {note}"));
+                            fix.notes.push(format!("— {note}"));
                             // Credentials are read into the backend's environment when it
                             // *starts*, so signing in while it runs changes nothing until
                             // it is restarted. Saying so is the difference between a fix
@@ -1338,7 +1426,7 @@ impl Workbench {
                             // pane and then watching the same failure is exactly what
                             // happened the first time (docs §32).
                             if ok && fix.label.contains("Sign in") {
-                                fix.lines.push(
+                                fix.notes.push(
                                     "— Close and reopen the app: the backend reads your \
                                      Asta sign-in when it starts."
                                         .into(),
@@ -1349,8 +1437,10 @@ impl Workbench {
                                 if ok { "done" } else { "failed" }
                             );
                             // Re-check on success so the row the user just fixed goes
-                            // green by itself.
+                            // green by itself — and so that a fix which succeeded without
+                            // fixing anything gets found out. See `judge_finished_fix`.
                             if ok {
+                                workbench.judge_after_recheck = true;
                                 workbench.run_preflight(cx);
                             }
                         }
@@ -3597,10 +3687,12 @@ impl Workbench {
                                                 .on_click(cx.listener({
                                                     let argv = argv.clone();
                                                     let label = label.to_string();
+                                                    let check_id = check.id;
                                                     move |workbench, _event, _window, cx| {
                                                         workbench.start_fix(
                                                             label.clone(),
                                                             argv.clone(),
+                                                            check_id,
                                                             cx,
                                                         );
                                                     }
@@ -3815,7 +3907,21 @@ impl Workbench {
                         }),
                 );
             }
-            pane = pane.child(log.child(output));
+            let mut log = log.child(output);
+            // Outside the scrolling box: the verdict and what to do next are the two things
+            // that must not be scrolled out of sight by a chatty command.
+            let tone = self.fix_tone(fix);
+            for note in &fix.notes {
+                log = log.child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .text_color(rgb(tone))
+                        .text_xs()
+                        .child(note.clone()),
+                );
+            }
+            pane = pane.child(log);
         }
 
         pane.child(

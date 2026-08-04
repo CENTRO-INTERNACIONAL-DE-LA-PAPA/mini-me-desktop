@@ -34,11 +34,13 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   artifact on a laptop that had never had it (§57) — window, Setup pane, checks and
   diagnosis all correct on the first try. **Remaining: one elevated `wsl --install` that
   completes, then tag `v0.1.0`.**
-- 🟡 **First run where WSL has never existed.** Half-proven: the pane correctly diagnosed
-  *"WSL present, no distro"*, then the fix failed silently — no elevation, and
-  `map_while(Result::ok)` truncated `wsl.exe`'s UTF-16LE output so the log was empty.
-  Both fixed (§57, `95a857e`). **Awaiting a retry on that machine — the narrowest and
-  highest-value unknown left.**
+- 🟡 **First run where WSL has never existed.** Two rounds in. §57 fixed elevation, and a
+  screenshot proved it works — a real elevated `wsl.exe` installing WSL 2.7.11. But its
+  output went to *its own console*, never to our pipes, so the pane said "done" with an empty
+  log over a still-red row (§60). Now the elevated command redirects to a file the app follows
+  live, a fix that succeeds without fixing anything says so, and `--no-launch` keeps the
+  install from stopping on an invisible username prompt. **Awaiting a third run on that
+  machine — still the narrowest and highest-value unknown left.**
 - ⬜ **Code signing.** SmartScreen shows "Windows protected your PC" and most researchers
   stop there. An organizational decision on a certificate; the release notes and README
   say which two words to click in the meantime.
@@ -3746,3 +3748,64 @@ Two smaller things the same screenshot showed:
 
 This is the sixth call-site mistake in two days, and the second where the correct pattern was
 already in the same file. Not a knowledge problem — a repetition problem.
+
+## 60. What a screenshot of a blank console proved (2026-08-04)
+
+A machine that had WSL but no distro clicked **Install Ubuntu**. Two screenshots came back.
+
+The first showed a real elevated `wsl.exe` console downloading *"Subsistema de Windows para
+Linux 2.7.11"* — so §57's elevation fix works. The second, taken after it finished, showed the
+Setup pane saying **"Install Ubuntu — done"** with a body containing exactly one line, `—
+finished`, directly above the same red **✗ WSL2 runtime** row it had started from.
+
+Three separate defects, and the first one is the interesting one.
+
+**The output was never ours to read.** `-Verb RunAs` elevates through ShellExecute, which
+cannot be handed the pipes we opened: the elevated child gets a console of its own. That is
+the window in the second screenshot. We captured the PowerShell wrapper, which prints nothing.
+§57 fixed the *encoding* of output we were never receiving — a correct fix to the wrong
+layer, and it looked verified because the code path it repaired was real.
+
+So the elevated command now runs through `cmd.exe` purely to get `> "<log>" 2>&1`, into a path
+in the user's own temp directory, and `run_streaming` **follows that file while it grows**
+rather than draining it at the end — `wsl --install` downloads for minutes, and a pane reading
+"starting…" for four of them is a pane a researcher reads as stuck. A terminated line goes out
+immediately; only an unterminated tail waits, because it may be half-written.
+
+**"Done" over a red row.** The install exited 0 having replaced the WSL runtime, and Windows
+will not register a distro until it restarts. The app had no way to notice, so it congratulated
+itself and contradicted itself in the same card. Now a fix that succeeds is compared against
+the row it was meant to fix, and when that row is still failing the card says so — for the
+runtime row, that Windows has to restart first.
+
+That verdict is drawn from the re-check, **never from the command's own words**. This machine
+printed *Descargando*, not *Downloading*: `wsl.exe` speaks the system language, so matching
+output for "restart" would have failed for precisely the user who needed it. Roughly 98% of
+this app's users are on Windows and not all of them are on an English one.
+
+**A dash where an admission should have been.** `— finished` was pushed into the same `Vec` as
+the command's own output, so the "this command printed nothing" message could never fire — the
+note itself made the list non-empty. Notes now live apart from output and render *outside* the
+scrolling box, since the verdict and the next step are the two things a chatty command must not
+be able to scroll out of sight.
+
+**One hazard the fix introduced, caught before shipping.** Redirecting stdout would have made
+`wsl --install -d Ubuntu`'s interactive prompt for a UNIX username *invisible* — a blank window
+waiting forever on input. It now passes `--no-launch`. A researcher who cannot code should not
+have to invent a Linux password to read a paper; unlaunched, the distro answers as root, which
+is all the sidecar needs.
+
+Two smaller notes:
+
+- Writing the live-progress test is what found the hold-back bug: every complete line was
+  waiting for the *next* one, which would have shown `wsl.exe`'s progress permanently one step
+  behind. The test failed for the right reason before the feature was wrong in front of a user.
+- The first two attempts at that test failed by racing each other over `elevated_log()`, a
+  single fixed path. That path is correct — the app runs one fix at a time — so they are now
+  one test, which is also the honest shape: three facts about one mechanism.
+
+And once more for the record: I claimed `theme::danger()` existed on the strength of a grep
+that was matching **my own uncommitted edit**. The compiler caught it in seconds. That is the
+fifth confident claim about this artefact to dissolve on contact (§52 has three, the
+text-selection claim has one) — and the first where the false evidence was something I had just
+written myself.

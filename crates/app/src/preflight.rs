@@ -387,7 +387,14 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
                 "WSL is present but no distro answered".to_string(),
                 Fix::Run {
                     label: "Install Ubuntu",
-                    argv: elevated(&["wsl.exe", "--install", "-d", "Ubuntu"]),
+                    // `--no-launch` because the default is to start the new distro and ask,
+                    // interactively, for a UNIX username and password. With the elevated
+                    // output redirected to a file (see `elevated_log`) that prompt would be
+                    // invisible and the window would simply hang — and a researcher who
+                    // cannot code should not have to invent a Linux password to read a
+                    // paper. Unlaunched, the distro answers as root, which is all the
+                    // sidecar needs.
+                    argv: elevated(&["wsl.exe", "--install", "-d", "Ubuntu", "--no-launch"]),
                     note: "Windows will ask for admin rights; may need a restart",
                 },
             )
@@ -396,7 +403,7 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
                 "wsl.exe was not found — WSL is not installed".to_string(),
                 Fix::Run {
                     label: "Install WSL",
-                    argv: elevated(&["wsl.exe", "--install"]),
+                    argv: elevated(&["wsl.exe", "--install", "--no-launch"]),
                     note: "Windows will ask for admin rights, then needs a restart",
                 },
             )
@@ -784,6 +791,20 @@ fn read_lines(mut pipe: impl std::io::Read, mut send: impl FnMut(String) -> bool
     }
 }
 
+/// Every line in a block of bytes already in hand, decoded the same way a pipe would be.
+///
+/// The elevated fix log is a file, not a stream, but it is written by the same Windows tools
+/// in the same UTF-16LE — so it goes through [`read_lines`] rather than a second decoder
+/// that could drift away from it.
+fn lines_of(bytes: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    read_lines(std::io::Cursor::new(bytes), |line| {
+        out.push(line);
+        true
+    });
+    out
+}
+
 /// Whether these bytes look like UTF-16LE: a BOM, or ASCII padded with NULs.
 fn looks_utf16(bytes: &[u8]) -> bool {
     if bytes.starts_with(&[0xff, 0xfe]) {
@@ -834,20 +855,25 @@ fn decode(bytes: &[u8], wide: bool) -> String {
 ///
 /// `-Wait` so the fix's own "finished" means finished, and `$p.ExitCode` so a refused UAC
 /// prompt reports failure rather than success.
+///
+/// The command is run *through `cmd.exe`* only to get `> log 2>&1`. See [`elevated_log`]:
+/// an elevated child cannot write into our pipes, so redirecting to a file is the only way
+/// to find out what it said.
 fn elevated(argv: &[&str]) -> Vec<String> {
     if !cfg!(windows) {
         return argv.iter().map(|part| part.to_string()).collect();
     }
-    let (program, rest) = argv.split_first().expect("a program");
-    // Single-quoted for PowerShell, doubling any quote inside — none of these arguments
-    // contain one today, and a future one must not be able to break out of the string.
-    let args = rest
-        .iter()
-        .map(|arg| format!("'{}'", arg.replace('\'', "''")))
-        .collect::<Vec<_>>()
-        .join(",");
+    // Every part here is a compile-time constant without spaces, so only the log path —
+    // which runs through the user's account name — needs quoting for cmd. Leaving the
+    // first token unquoted also keeps cmd's "strip the outer pair" rule out of it.
+    let command = argv.join(" ");
+    let log = elevated_log().display().to_string();
+    let inner = format!("/c {command} > \"{log}\" 2>&1");
+    // Single-quoted for PowerShell, doubling any quote inside — nothing here contains one
+    // today, and a future path must not be able to break out of the string.
     let script = format!(
-        "$p = Start-Process -FilePath '{program}' -ArgumentList {args} -Verb RunAs -Wait -PassThru; exit $p.ExitCode"
+        "$p = Start-Process -FilePath 'cmd.exe' -ArgumentList '{}' -Verb RunAs -Wait -PassThru; exit $p.ExitCode",
+        inner.replace('\'', "''")
     );
     vec![
         "powershell.exe".into(),
@@ -858,10 +884,75 @@ fn elevated(argv: &[&str]) -> Vec<String> {
     ]
 }
 
+/// Where an elevated fix leaves its output.
+///
+/// `-Verb RunAs` elevates through ShellExecute, which cannot be handed our pipes: the
+/// elevated child gets a console window of its own. On the first machine that had no distro
+/// the researcher watched `wsl.exe` download WSL 2.7.11 in *that* window while our pane
+/// showed a fix which had, as far as the app could tell, printed nothing at all — then said
+/// "done" over a red row (docs §60). Fixing the encoding in §57 could not have helped; the
+/// bytes were never ours to decode.
+///
+/// So the elevated command redirects here, and [`run_streaming`] follows the file while it
+/// grows. In the user's own temp directory rather than a shared one, because the unelevated
+/// app has to be able to delete it; an elevated writer carries the Administrators group and
+/// can write there regardless of which account approved the prompt.
+pub fn elevated_log() -> std::path::PathBuf {
+    std::env::temp_dir().join("mini-me-desktop-elevated.log")
+}
+
+/// Follow the elevated log while the command is still running.
+///
+/// Redirecting the elevated child's output to a file leaves its console blank, and
+/// `wsl --install` downloads for minutes — so without this the pane would sit on "starting…"
+/// with nothing to show for the wait, which is the state a researcher reads as *stuck*.
+/// Re-reading the whole file each pass rather than framing UTF-16 incrementally: it is a few
+/// kilobytes, and a half-decoded surrogate is not worth the cleverness.
+fn tail_file(
+    path: &std::path::Path,
+    done: &std::sync::atomic::AtomicBool,
+    mut send: impl FnMut(String) -> bool,
+) {
+    use std::sync::atomic::Ordering;
+
+    let mut emitted = 0usize;
+    loop {
+        let finished = done.load(Ordering::SeqCst);
+        if let Ok(bytes) = std::fs::read(path) {
+            let lines = lines_of(&bytes);
+            // A line the writer has already terminated is complete and goes out at once —
+            // holding every line back until the next one arrived would show `wsl.exe`'s
+            // progress one step behind for the whole download. Only an *unterminated* tail
+            // waits, because it may be half-written. `Start-Process -Wait` means the writer
+            // is gone before `finished` is set, so nothing is held back forever.
+            let terminated = bytes.ends_with(&[0x0a]) || bytes.ends_with(&[0x0a, 0x00]);
+            let ready = if finished || terminated {
+                lines.len()
+            } else {
+                lines.len().saturating_sub(1)
+            };
+            for line in lines.iter().take(ready).skip(emitted) {
+                if !send(strip_ansi(line)) {
+                    return;
+                }
+            }
+            emitted = emitted.max(ready);
+        }
+        if finished {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
 pub fn run_streaming(argv: &[String], mut emit: impl FnMut(String)) -> anyhow::Result<bool> {
     use anyhow::Context as _;
 
     let (program, rest) = argv.split_first().context("empty command")?;
+    // Before the child, so a previous elevated fix's output can never be read as this
+    // one's. After this, the file existing at all means this run wrote it.
+    let elevated_log = elevated_log();
+    let _ = std::fs::remove_file(&elevated_log);
     let mut child = Command::new(program)
         .args(rest)
         .stdin(Stdio::null())
@@ -884,6 +975,26 @@ pub fn run_streaming(argv: &[String], mut emit: impl FnMut(String)) -> anyhow::R
             read_lines(pipe, |line| tx.send(line).is_ok());
         }));
     }
+
+    // Waited off this thread so the tailer below knows when to stop while we are still
+    // draining lines. The pipes have their own readers, so nothing can fill and block.
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let waiter = {
+        let done = std::sync::Arc::clone(&done);
+        std::thread::spawn(move || {
+            let status = child.wait();
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+            status
+        })
+    };
+    readers.push({
+        let tx = tx.clone();
+        let done = std::sync::Arc::clone(&done);
+        let log = elevated_log.clone();
+        std::thread::spawn(move || {
+            tail_file(&log, &done, |line| tx.send(line).is_ok());
+        })
+    });
     // Our own sender has to go, or the loop below never ends.
     drop(tx);
 
@@ -894,7 +1005,10 @@ pub fn run_streaming(argv: &[String], mut emit: impl FnMut(String)) -> anyhow::R
     for reader in readers {
         let _ = reader.join();
     }
-    let status = child.wait().context("could not wait for the fix to finish")?;
+    let status = waiter
+        .join()
+        .map_err(|_| anyhow::anyhow!("the thread waiting on the fix panicked"))?
+        .context("could not wait for the fix to finish")?;
     Ok(status.success())
 }
 
@@ -1208,15 +1322,6 @@ mod encoding_tests {
         text.encode_utf16().flat_map(u16::to_le_bytes).collect()
     }
 
-    fn lines_of(bytes: Vec<u8>) -> Vec<String> {
-        let mut out = Vec::new();
-        read_lines(std::io::Cursor::new(bytes), |line| {
-            out.push(line);
-            true
-        });
-        out
-    }
-
     #[test]
     fn utf16_output_is_read_rather_than_dropped() {
         // The exact failure from the first clean machine: `wsl.exe` writes UTF-16LE, and
@@ -1226,7 +1331,7 @@ mod encoding_tests {
         bytes.extend(utf16("Installing: Ubuntu\r\n"));
         bytes.extend(utf16("Error: 0x80070005 access denied\r\n"));
         assert_eq!(
-            lines_of(bytes),
+            lines_of(&bytes),
             vec!["Installing: Ubuntu", "Error: 0x80070005 access denied"]
         );
     }
@@ -1235,19 +1340,19 @@ mod encoding_tests {
     fn utf8_output_still_reads_normally() {
         // Everything else — uv, git, python — writes UTF-8, including non-ASCII.
         let bytes = b"Resolved 42 packages\ncreando el entorno\n".to_vec();
-        assert_eq!(lines_of(bytes), vec!["Resolved 42 packages", "creando el entorno"]);
+        assert_eq!(lines_of(&bytes), vec!["Resolved 42 packages", "creando el entorno"]);
     }
 
     #[test]
     fn a_last_line_without_a_newline_is_not_lost() {
         // Often the *only* line a failing command produces, so losing it loses the reason.
-        assert_eq!(lines_of(b"fatal: no such distro".to_vec()), vec!["fatal: no such distro"]);
-        assert_eq!(lines_of(utf16("access denied")), vec!["access denied"]);
+        assert_eq!(lines_of(b"fatal: no such distro"), vec!["fatal: no such distro"]);
+        assert_eq!(lines_of(&utf16("access denied")), vec!["access denied"]);
     }
 
     #[test]
     fn elevation_wraps_the_command_for_windows_only() {
-        let argv = elevated(&["wsl.exe", "--install", "-d", "Ubuntu"]);
+        let argv = elevated(&["wsl.exe", "--install", "-d", "Ubuntu", "--no-launch"]);
         if cfg!(windows) {
             assert_eq!(argv[0], "powershell.exe");
             let script = argv.last().expect("the script");
@@ -1256,10 +1361,59 @@ mod encoding_tests {
             assert!(script.contains("-Verb RunAs"), "{script}");
             assert!(script.contains("-Wait"), "{script}");
             assert!(script.contains("exit $p.ExitCode"), "{script}");
-            assert!(script.contains("'--install','-d','Ubuntu'"), "{script}");
+            assert!(script.contains("wsl.exe --install -d Ubuntu --no-launch"), "{script}");
+            // The whole point of going through cmd: an elevated child has its own console,
+            // so without this redirect its output is lost and the pane has nothing to show
+            // (docs §60).
+            let log = elevated_log().display().to_string();
+            assert!(script.contains(&format!("> \"{log}\" 2>&1")), "{script}");
         } else {
             // Everywhere else it must stay the plain command, or the Linux dev path breaks.
-            assert_eq!(argv, vec!["wsl.exe", "--install", "-d", "Ubuntu"]);
+            assert_eq!(argv, vec!["wsl.exe", "--install", "-d", "Ubuntu", "--no-launch"]);
         }
+    }
+
+    /// The elevated child writes to a file because its console is not ours (docs §60). Three
+    /// things have to hold: a previous fix's output is never served up as this one's, the
+    /// lines arrive *while* the command runs, and they arrive in order.
+    ///
+    /// One test rather than three because [`elevated_log`] is a single fixed path — which is
+    /// right for an app that runs one fix at a time, and means separate tests would race each
+    /// other over the same file.
+    #[cfg(unix)]
+    #[test]
+    fn an_elevated_fix_log_is_followed_live_and_never_stale() {
+        let log = elevated_log().display().to_string();
+        std::fs::write(&log, b"left over from the last fix\n").expect("seed a stale log");
+
+        let started = Instant::now();
+        let mut seen: Vec<(String, Duration)> = Vec::new();
+        let ok = run_streaming(
+            &[
+                "sh".into(),
+                "-c".into(),
+                // Stands in for the elevated child: writes only to the file, never to the
+                // pipes we hold — which is exactly `wsl.exe` behind a UAC prompt.
+                format!(
+                    "printf 'Descargando: WSL 2.7.11\\n' > '{log}'; sleep 2; \
+                     printf 'Instalando: WSL 2.7.11\\n' >> '{log}'"
+                ),
+            ],
+            |line| seen.push((line, started.elapsed())),
+        )
+        .expect("the command ran");
+        let total = started.elapsed();
+
+        assert!(ok);
+        let lines: Vec<&str> = seen.iter().map(|(line, _)| line.as_str()).collect();
+        assert_eq!(lines, vec!["Descargando: WSL 2.7.11", "Instalando: WSL 2.7.11"]);
+        // The first line has to reach the pane while the command is still going, or the
+        // tailing does nothing that draining at the end would not have done.
+        let first = seen[0].1;
+        assert!(
+            first + Duration::from_secs(1) < total,
+            "the first line arrived at {first:?} of {total:?} — that is not live"
+        );
+        let _ = std::fs::remove_file(&log);
     }
 }
