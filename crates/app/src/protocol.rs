@@ -834,6 +834,27 @@ impl LangGraphClient {
         Ok(())
     }
 
+    /// Delete a conversation and everything the backend stored for it.
+    ///
+    /// **Irreversible, and the caller must have asked first.** This is why the sidebar
+    /// makes it a two-step: a conversation is somebody's work, and there is no undo on the
+    /// server side (docs §58). Files the turn wrote are *not* touched — those live in the
+    /// researcher's own Documents and are not ours to remove.
+    pub async fn delete_conversation(&self, thread_id: &str) -> Result<()> {
+        self.http
+            .delete(format!(
+                "{}/threads/{}",
+                self.base_url,
+                urlencode(thread_id)
+            ))
+            .send()
+            .await
+            .context("deleting the conversation failed")?
+            .error_for_status()
+            .context("the thread-delete route returned an error status")?;
+        Ok(())
+    }
+
     /// The messages of an existing conversation, for reopening it.
     ///
     /// Only role and text: the activity trace is not replayable — it was assembled from a

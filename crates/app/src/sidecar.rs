@@ -332,6 +332,17 @@ impl Sidecar {
         rx
     }
 
+    /// Delete a conversation. The caller has already confirmed and removed the row.
+    pub fn delete_conversation(&self, thread_id: String) {
+        let base_url = self.base_url.clone();
+        self.runtime.spawn(async move {
+            let client = LangGraphClient::new(base_url);
+            if let Err(error) = client.delete_conversation(&thread_id).await {
+                tracing::warn!(%error, "could not delete a conversation");
+            }
+        });
+    }
+
     /// Name a conversation. Fire-and-forget: the sidebar already shows the new name.
     pub fn rename_conversation(&self, thread_id: String, title: String) {
         let base_url = self.base_url.clone();

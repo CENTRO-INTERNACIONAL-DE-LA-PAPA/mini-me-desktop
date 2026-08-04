@@ -33,6 +33,13 @@ pub struct Provider {
     /// A model id that actually exists, so a fresh install has something that works
     /// rather than an empty field.
     pub suggested_model: &'static str,
+    /// Models worth offering as a list, newest first.
+    ///
+    /// A short curated set, not a catalogue: nobody should have to remember whether it is
+    /// `claude-sonnet-4-5` or `claude-4.5-sonnet` to get started. The field stays editable,
+    /// because a list here can only ever be out of date — a provider ships a model the day
+    /// after a release and typing it must still work (docs §58).
+    pub models: &'static [&'static str],
 }
 
 pub const PROVIDERS: [Provider; 5] = [
@@ -41,30 +48,47 @@ pub const PROVIDERS: [Provider; 5] = [
         label: "Anthropic",
         needs_base_url: false,
         suggested_model: "claude-sonnet-4-5",
+        models: &[
+            "claude-opus-4-5",
+            "claude-sonnet-4-5",
+            "claude-haiku-4-5",
+            "claude-3-7-sonnet-latest",
+        ],
     },
     Provider {
         id: "openai",
         label: "OpenAI",
         needs_base_url: false,
         suggested_model: "gpt-5.4",
+        models: &["gpt-5.4", "gpt-5", "gpt-4.1", "gpt-4o", "o4-mini"],
     },
     Provider {
         id: "google",
         label: "Google",
         needs_base_url: false,
         suggested_model: "gemini-2.5-pro",
+        models: &["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"],
     },
     Provider {
         id: "mistral",
         label: "Mistral",
         needs_base_url: false,
         suggested_model: "mistral-large-latest",
+        models: &["mistral-large-latest", "mistral-small-latest", "codestral-latest"],
     },
     Provider {
         id: "custom",
         label: "Custom (OpenAI-compatible)",
         needs_base_url: true,
         suggested_model: "openai/gpt-4o-mini",
+        // An OpenAI-compatible endpoint could be anything, so these are only examples of
+        // the *shape* an OpenRouter or Ollama id takes.
+        models: &[
+            "openai/gpt-4o-mini",
+            "anthropic/claude-sonnet-4.5",
+            "meta-llama/llama-3.3-70b-instruct",
+            "qwen2.5-coder:14b",
+        ],
     },
 ];
 

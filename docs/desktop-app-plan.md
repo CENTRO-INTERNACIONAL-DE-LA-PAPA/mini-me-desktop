@@ -3666,3 +3666,37 @@ the code path that produces it has been seen to produce output.**
 The packaging, the CI build, the unsigned-binary path past SmartScreen, the window, the
 preflight checks and the diagnosis all work on a machine that did not build them. The
 remaining unknown is now narrow: whether the elevated install actually completes.
+
+## 58. Six things that only appear once the app is used (2026-08-02)
+
+Catppuccin installed and applied, and with eleven palettes in the list the design started
+failing in ways four never could.
+
+- **The theme list is scrollable and filterable.** Eleven entries already crowded the modal;
+  a hundred would push Save out of it. Capped at 260px with its own scrollbar, and a filter
+  using the same fuzzy scorer as everywhere else, so `mocha` finds *Catppuccin Mocha*. The
+  cure for a long list is a filter, not a taller list.
+- **The model is a scrollable list, not a remembered string.** Nobody should have to know
+  whether it is `claude-sonnet-4-5` or `claude-4.5-sonnet`. A short curated set per
+  provider, and **the field stays editable** — a list here can only ever be out of date, and
+  a provider shipping a model the day after a release must not make the app unusable.
+- **Providers are pills, not a cycle button.** Five fit on one row, and a cycle button hides
+  four of the five — the same complaint the theme list had just answered.
+- **Escape closes things.** It was bound *only* inside the palette's key context, and focus
+  is almost always in the composer, so it never reached a modal. Now bound with **no**
+  context, closing inside-out: preview, then a rename in progress, then Settings, then
+  Setup. From a preview over Settings it returns to Settings, not to nothing.
+- **Conversations can be deleted**, in two steps. There is no undo on the server and a
+  conversation is somebody's work, so a stray click on a `✕` in a list must not destroy it.
+  Files the turn wrote are deliberately **not** removed: those live in the researcher's own
+  Documents and are not ours to delete.
+- **Square corners are gone** — twelve buttons, the bordered inputs and the fix log now
+  match the panels rounded in §50.
+
+### The debt this keeps proving
+
+Every one of these was a call-site mistake: a list without a cap, a control without
+rounding, a binding with the wrong scope. None was a hard problem, and all of them were
+invisible until someone used the app with real data in it. That is the fifth argument in this
+document for the `Button` / `Modal` / `Panel` set — a `Button` cannot be square, and a
+`Modal` body cannot grow past its frame, if the type is the only way to make one.

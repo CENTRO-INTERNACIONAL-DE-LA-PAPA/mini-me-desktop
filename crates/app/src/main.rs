@@ -194,7 +194,7 @@ fn spine_list(label: &'static str, items: &[String], bullet: &'static str) -> im
 
 actions!(
     workbench,
-    [TogglePalette, PaletteNext, PalettePrev, PaletteDismiss, ToggleSettings]
+    [TogglePalette, PaletteNext, PalettePrev, PaletteDismiss, ToggleSettings, Dismiss]
 );
 
 /// The editable fields in Settings, in the order they are shown.
@@ -269,6 +269,11 @@ fn workbench_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("escape", PaletteDismiss, palette),
         KeyBinding::new("down", PaletteNext, palette),
         KeyBinding::new("up", PalettePrev, palette),
+        // Escape everywhere else. Bound with **no** key context, because the composer
+        // almost always has focus and a binding scoped to the workbench would never be
+        // reached from there — the reason Escape did nothing to a modal (docs §58). The
+        // palette's own binding above is more specific, so it still wins while it is open.
+        KeyBinding::new("escape", Dismiss, None),
     ];
     for modifier in ["cmd", "ctrl"] {
         bindings.push(KeyBinding::new(&format!("{modifier}-p"), TogglePalette, None));
@@ -807,6 +812,11 @@ struct Workbench {
     /// still gone on "New thread" or a restart, and announced in the status bar the whole
     /// time it is in force, so it cannot be in effect without being visible (docs §41).
     approve_conversation: bool,
+    /// Filters the *installed* theme list. With a hundred palettes installed, a list you
+    /// can only scroll is a list you cannot use.
+    theme_filter: Entity<Composer>,
+    theme_scroll: gpui::ScrollHandle,
+    model_scroll: gpui::ScrollHandle,
     /// What the gallery search box holds, and what it found.
     gallery_query: Entity<Composer>,
     gallery_results: Vec<gallery::Listing>,
@@ -833,6 +843,11 @@ struct Workbench {
     pending_title: Option<String>,
     /// The thread whose name is being edited, if any.
     renaming: Option<String>,
+    /// The thread whose delete has been clicked once and not yet confirmed.
+    ///
+    /// Two steps because there is no undo on the server: a conversation is somebody's
+    /// work, and a stray click on a `✕` in a list is exactly how it would be lost.
+    confirming_delete: Option<String>,
     /// The field that edits it. One shared editor rather than one per row — only one
     /// name can be edited at a time, and a Composer per conversation would be an entity
     /// per row for a list that can run to hundreds.
@@ -863,6 +878,12 @@ impl Workbench {
             ComposerEvent::Submit(text) => workbench.start_turn(text.clone(), cx),
         })
         .detach();
+
+        // Filtering installed themes, as you type — this one is local, so every keystroke
+        // is free.
+        let theme_filter = cx.new(|cx| Composer::new(cx, "Filter themes"));
+        cx.observe(&theme_filter, |_workbench, _field, cx| cx.notify())
+            .detach();
 
         // Searching Zed's theme gallery. Submits rather than filtering as you type: each
         // keystroke would be an HTTP request to somebody else's server.
@@ -945,6 +966,9 @@ impl Workbench {
             pending_approval: None,
             approve_rest_of_turn: false,
             approve_conversation: false,
+            theme_filter,
+            theme_scroll: gpui::ScrollHandle::new(),
+            model_scroll: gpui::ScrollHandle::new(),
             gallery_query,
             gallery_results: Vec::new(),
             gallery_note: String::new(),
@@ -958,6 +982,7 @@ impl Workbench {
             conversations: Vec::new(),
             pending_title: None,
             renaming: None,
+            confirming_delete: None,
             rename_editor,
             approve_tasks: std::collections::HashSet::new(),
             restore_focus: false,
@@ -1584,6 +1609,25 @@ impl Workbench {
         cx.notify();
     }
 
+    /// Delete a conversation, after the row has asked.
+    fn delete_conversation(&mut self, thread_id: String, cx: &mut Context<Self>) {
+        self.confirming_delete = None;
+        self.conversations
+            .retain(|conversation| conversation.thread_id != thread_id);
+        // If it was the open one, leave an empty slate rather than a transcript whose
+        // thread no longer exists.
+        if self.sidecar.thread_id().as_deref() == Some(thread_id.as_str()) {
+            self.sidecar.reset_thread();
+            self.transcript.clear();
+            self.buckets.clear();
+            self.tasks.clear();
+            self.jobs.clear();
+        }
+        self.sidecar.delete_conversation(thread_id);
+        self.status = "conversation deleted".into();
+        cx.notify();
+    }
+
     /// Begin renaming a conversation, with its current name in the field.
     fn start_rename(&mut self, thread_id: String, window: &mut Window, cx: &mut Context<Self>) {
         let current = self
@@ -1775,8 +1819,68 @@ impl Workbench {
                 continue;
             }
 
+            // Asked once, then confirmed in place. Nothing about a row of names should be
+            // able to destroy work on one click.
+            if self.confirming_delete.as_deref() == Some(thread_id.as_str()) {
+                let confirmed = thread_id.clone();
+                list = list.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .w_full()
+                        .min_w_0()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgb(theme::error()))
+                        .child(
+                            div()
+                                .flex_grow()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(rgb(theme::text_muted()))
+                                .text_xs()
+                                .child("Delete this conversation?"),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("del-yes-{thread_id}")))
+                                .flex_none()
+                                .px_2()
+                                .rounded_md()
+                                .text_color(rgb(theme::error()))
+                                .text_xs()
+                                .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
+                                .child("delete")
+                                .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                                    workbench.delete_conversation(confirmed.clone(), cx);
+                                })),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("del-no-{thread_id}")))
+                                .flex_none()
+                                .px_2()
+                                .rounded_md()
+                                .text_color(rgb(theme::text_muted()))
+                                .text_xs()
+                                .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
+                                .child("keep")
+                                .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                    workbench.confirming_delete = None;
+                                    cx.notify();
+                                })),
+                        ),
+                );
+                continue;
+            }
+
             let open = thread_id.clone();
             let rename = thread_id.clone();
+            let remove = thread_id.clone();
             list = list.child(
                 div()
                     .id(SharedString::from(format!("conv-{thread_id}")))
@@ -1789,6 +1893,7 @@ impl Workbench {
                     .min_w_0()
                     .px_2()
                     .py_1()
+                    .rounded_md()
                     .when(selected, |row| row.bg(rgb(theme::accent_soft())))
                     // Every row reacts to the pointer. A list that does not respond to
                     // the cursor does not read as a list of *buttons*.
@@ -1820,6 +1925,26 @@ impl Workbench {
                             .child("rename")
                             .on_click(cx.listener(move |workbench, _event, window, cx| {
                                 workbench.start_rename(rename.clone(), window, cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("delete-{thread_id}")))
+                            .flex_none()
+                            .invisible()
+                            .group_hover(
+                                SharedString::from(format!("conv-group-{thread_id}")),
+                                |style| style.visible(),
+                            )
+                            .px_1()
+                            .rounded_md()
+                            .text_color(rgb(theme::text_faint()))
+                            .text_xs()
+                            .hover(|style| style.text_color(rgb(theme::error())).cursor_pointer())
+                            .child("✕")
+                            .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                                workbench.confirming_delete = Some(remove.clone());
+                                cx.notify();
                             })),
                     )
                     .on_click(cx.listener(move |workbench, _event, _window, cx| {
@@ -1868,6 +1993,7 @@ impl Workbench {
                     .child(
                         div()
                             .id("new-conversation")
+                        .rounded_md()
                             .px_2()
                             .py_1()
                             .border_1()
@@ -1951,6 +2077,139 @@ impl Workbench {
         cx.notify();
     }
 
+    /// The five providers, as pills rather than a cycle button.
+    ///
+    /// Five fit on one row, so there is no reason to make someone click through them —
+    /// and a cycle button hides four of the five, which is the same complaint the theme
+    /// list just answered (docs §58).
+    fn provider_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut row = div().flex().flex_row().flex_wrap().w_full().gap_1();
+        for spec in &settings::PROVIDERS {
+            let selected = spec.id == self.draft.provider;
+            row = row.child(
+                div()
+                    .id(SharedString::from(format!("provider-{}", spec.id)))
+                    .flex_none()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(if selected {
+                        theme::accent()
+                    } else {
+                        theme::border()
+                    }))
+                    .when(selected, |pill| pill.bg(rgb(theme::accent_soft())))
+                    .text_color(rgb(if selected {
+                        theme::text()
+                    } else {
+                        theme::text_muted()
+                    }))
+                    .text_xs()
+                    .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
+                    .child(spec.label)
+                    .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                        workbench.draft.provider = spec.id.to_string();
+                        // Suggest a model that exists for the provider just chosen, rather
+                        // than leaving one that does not.
+                        workbench.set_field(Field::ModelId, spec.suggested_model, cx);
+                        cx.notify();
+                    })),
+            );
+        }
+        row
+    }
+
+    /// The provider's models, as a scrollable list that fills the field.
+    ///
+    /// Curated, not a catalogue, and the field below stays editable — a list here can only
+    /// ever be out of date, and a provider shipping a model the day after a release must
+    /// not make the app unusable.
+    fn model_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let current = self.field_text_or(Field::ModelId, &self.draft.model_id, cx);
+        let models = settings::provider(&self.draft.provider)
+            .map(|spec| spec.models)
+            .unwrap_or(&[]);
+
+        let mut list = div()
+            .id("model-rows")
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w_0()
+            .gap_px()
+            // Capped, because `custom` could list anything and a long list would push the
+            // API-key field out of the modal.
+            .max_h(px(150.))
+            .overflow_y_scroll()
+            .track_scroll(&self.model_scroll);
+
+        for model in models {
+            let selected = *model == current;
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("model-{model}")))
+                    .w_full()
+                    .min_w_0()
+                    .truncate()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .when(selected, |row| {
+                        row.bg(rgb(theme::accent_soft()))
+                            .border_1()
+                            .border_color(rgb(theme::accent()))
+                    })
+                    .text_color(rgb(if selected {
+                        theme::text()
+                    } else {
+                        theme::text_muted()
+                    }))
+                    .text_xs()
+                    .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
+                    .child(model.to_string())
+                    .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                        workbench.set_field(Field::ModelId, model, cx);
+                        cx.notify();
+                    })),
+            );
+        }
+
+        div()
+            .relative()
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w_0()
+            .child(list)
+            .children(scrollbar(&self.model_scroll))
+    }
+
+    /// Put text into one of the Settings fields.
+    fn set_field(&mut self, field: Field, text: &str, cx: &mut Context<Self>) {
+        let Some((_, composer)) = self.fields.iter().find(|(name, _)| *name == field) else {
+            return;
+        };
+        let composer = composer.clone();
+        let text = text.to_string();
+        composer.update(cx, |composer, cx| composer.set_text(text, cx));
+    }
+
+    /// What a Settings field currently holds, falling back when it is empty.
+    fn field_text_or(&self, field: Field, fallback: &str, cx: &App) -> String {
+        let text = self
+            .fields
+            .iter()
+            .find(|(name, _)| *name == field)
+            .map(|(_, composer)| composer.read(cx).text().to_string())
+            .unwrap_or_default();
+        if text.trim().is_empty() {
+            fallback.to_string()
+        } else {
+            text
+        }
+    }
+
     /// Every palette at once, each showing what it looks like.
     ///
     /// The cycle button was wrong twice over: the only way to find a palette was to click
@@ -1962,9 +2221,31 @@ impl Workbench {
     /// need a custom element. The swatch does the same job in miniature and is arguably
     /// better here: every theme is visible side by side, rather than one at a time.
     fn theme_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut list = div().flex().flex_col().w_full().gap_1();
+        // The same fuzzy scorer as everywhere else, so `mocha` finds Catppuccin Mocha.
+        let query = self.theme_filter.read(cx).text().to_string();
+        let mut matched: Vec<(i32, String, theme::Theme)> = settings::available_themes()
+            .into_iter()
+            .filter_map(|(name, palette)| {
+                match_score(&query, &name).map(|score| (score, name, palette))
+            })
+            .collect();
+        if !query.trim().is_empty() {
+            matched.sort_by(|a, b| b.0.cmp(&a.0));
+        }
 
-        for (name, palette) in settings::available_themes() {
+        // Capped and scrollable: four built-ins fit, a hundred installed palettes do not,
+        // and a list that grows without bound pushes Save off the modal (docs §58).
+        let mut list = div()
+            .id("theme-rows")
+            .flex()
+            .flex_col()
+            .w_full()
+            .gap_1()
+            .max_h(px(260.))
+            .overflow_y_scroll()
+            .track_scroll(&self.theme_scroll);
+
+        for (_, name, palette) in matched {
             let selected = name.eq_ignore_ascii_case(&self.applied_theme);
             let chosen = name.clone();
             let previewed = name.clone();
@@ -2142,15 +2423,42 @@ impl Workbench {
             );
         }
 
-        list.child(gallery).child(
-            div()
-                .text_color(rgb(theme::text_faint()))
-                .text_xs()
-                .child(format!(
-                    "Or drop a Zed theme .json in {}.",
-                    settings::themes_dir().display()
-                )),
-        )
+        div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .gap_1()
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .bg(rgb(theme::background()))
+                    .border_1()
+                    .border_color(rgb(theme::border()))
+                    .child(self.theme_filter.clone()),
+            )
+            // The scrollbar lives outside the scrolling list, in a relative wrapper.
+            .child(
+                div()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .min_w_0()
+                    .child(list)
+                    .children(scrollbar(&self.theme_scroll)),
+            )
+            .child(gallery)
+            .child(
+                div()
+                    .text_color(rgb(theme::text_faint()))
+                    .text_xs()
+                    .child(format!(
+                        "Or drop a Zed theme .json in {}.",
+                        settings::themes_dir().display()
+                    )),
+            )
     }
 
     /// A file, shown in the middle of the window.
@@ -2284,6 +2592,7 @@ impl Workbench {
                             .child(
                                 div()
                                     .id("preview-open")
+                        .rounded_md()
                                     .flex_none()
                                     .px_2()
                                     .text_color(rgb(theme::text_muted()))
@@ -2301,6 +2610,7 @@ impl Workbench {
                             .child(
                                 div()
                                     .id("preview-close")
+                        .rounded_md()
                                     .flex_none()
                                     .px_2()
                                     .text_color(rgb(theme::text_muted()))
@@ -2562,6 +2872,7 @@ impl Workbench {
                     .min_w_0()
                     .flex_none()
                     .p_2()
+                    .rounded_md()
                     .border_1()
                     .border_color(rgb(theme::border()))
                     .text_color(rgb(theme::text()))
@@ -2578,6 +2889,7 @@ impl Workbench {
                 .child(
                     div()
                         .id("approve")
+                        .rounded_md()
                         .px_3()
                         .py_1()
                         .border_1()
@@ -2593,6 +2905,7 @@ impl Workbench {
                 .child(
                     div()
                         .id("reject")
+                        .rounded_md()
                         .px_3()
                         .py_1()
                         .border_1()
@@ -2614,6 +2927,7 @@ impl Workbench {
                 .child(
                     div()
                         .id("approve-turn")
+                        .rounded_md()
                         .px_3()
                         .py_1()
                         .border_1()
@@ -2636,6 +2950,7 @@ impl Workbench {
                 .child(
                     div()
                         .id("approve-conversation")
+                        .rounded_md()
                         .px_3()
                         .py_1()
                         .border_1()
@@ -2723,6 +3038,37 @@ impl Workbench {
     }
 
     // ---- Settings ---------------------------------------------------------------
+
+    /// Escape: close the innermost thing that is open.
+    ///
+    /// One at a time and inside-out, which is what the key means everywhere else: from a
+    /// file preview it returns to Settings if that was open behind it, not to nothing.
+    fn dismiss(&mut self, _: &Dismiss, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.preview.take().is_some() {
+            cx.notify();
+            return;
+        }
+        if self.renaming.take().is_some() {
+            self.restore_focus = true;
+            cx.notify();
+            return;
+        }
+        if self.settings_open {
+            // Same as Close: an unsaved palette was a look, not a change.
+            let saved = settings::Settings::load();
+            self.applied_theme = saved.theme.clone();
+            settings::apply_theme(&saved);
+            self.settings_open = false;
+            self.restore_focus = true;
+            cx.notify();
+            return;
+        }
+        if self.setup_open {
+            self.setup_open = false;
+            self.restore_focus = true;
+            cx.notify();
+        }
+    }
 
     fn toggle_settings(&mut self, _: &ToggleSettings, window: &mut Window, cx: &mut Context<Self>) {
         if self.settings_open {
@@ -2857,7 +3203,6 @@ impl Workbench {
     /// The Settings pane, in place of the artifacts panel.
     fn settings_pane(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let provider = settings::provider(&self.draft.provider);
-        let provider_label = provider.map(|p| p.label).unwrap_or("unknown");
         let needs_base_url = provider.is_some_and(|p| p.needs_base_url);
         let key_name = self.draft.key_name();
 
@@ -2880,40 +3225,9 @@ impl Workbench {
             // palette is judged by looking at it, not by reading its name (docs §50).
             .child(section_label("THEME"))
             .child(self.theme_list(cx))
-            // Clicking cycles: five providers do not need a dropdown, and a dropdown in
-            // GPUI is a whole widget we would have to build.
-            .child(
-                div()
-                    .id("provider")
-                    .w_full()
-                    .p_2()
-                    .border_1()
-                    .border_color(rgb(theme::border()))
-                    .text_color(rgb(theme::text()))
-                    .text_sm()
-                    .hover(|style| style.border_color(rgb(theme::accent())).cursor_pointer())
-                    .child(format!("Provider: {provider_label}  ⟳"))
-                    .on_click(cx.listener(|workbench, _event, _window, cx| {
-                        let current = settings::PROVIDERS
-                            .iter()
-                            .position(|p| p.id == workbench.draft.provider)
-                            .unwrap_or(0);
-                        let next = &settings::PROVIDERS[(current + 1) % settings::PROVIDERS.len()];
-                        workbench.draft.provider = next.id.to_string();
-                        // Suggest a model that exists for the provider just chosen,
-                        // rather than leaving one that does not.
-                        let suggested = next.suggested_model.to_string();
-                        if let Some((_, composer)) = workbench
-                            .fields
-                            .iter()
-                            .find(|(field, _)| *field == Field::ModelId)
-                        {
-                            let composer = composer.clone();
-                            composer.update(cx, |composer, cx| composer.set_text(suggested, cx));
-                        }
-                        cx.notify();
-                    })),
-            );
+            .child(section_label("MODEL"))
+            .child(self.provider_row(cx))
+            .child(self.model_list(cx));
 
         for (field, composer) in &self.fields {
             if *field == Field::BaseUrl && !needs_base_url {
@@ -3039,6 +3353,7 @@ impl Workbench {
                 .child(
                     div()
                         .id("save-settings")
+                        .rounded_md()
                         .px_3()
                         .py_1()
                         .border_1()
@@ -3054,6 +3369,7 @@ impl Workbench {
                 .child(
                     div()
                         .id("close-settings")
+                        .rounded_md()
                         .px_3()
                         .py_1()
                         .border_1()
@@ -3356,6 +3672,7 @@ impl Workbench {
                 .flex_none()
                 .gap_2()
                 .p_2()
+                .rounded_lg()
                 .border_1()
                 .border_color(rgb(if !fix.done {
                     theme::accent()
@@ -3492,6 +3809,7 @@ impl Workbench {
                 .child(
                     div()
                         .id("recheck")
+                        .rounded_md()
                         .px_3()
                         .py_1()
                         .border_1()
@@ -3523,6 +3841,7 @@ impl Workbench {
                 .child(
                     div()
                         .id("close-setup")
+                        .rounded_md()
                         .px_3()
                         .py_1()
                         .border_1()
@@ -4459,6 +4778,7 @@ impl Workbench {
             section = section.child(
                 div()
                     .id("open-workspace")
+                        .rounded_md()
                     .px_2()
                     .py_1()
                     .border_1()
@@ -4624,6 +4944,7 @@ impl Render for Workbench {
             .text_color(rgb(theme::text()))
             .on_action(cx.listener(Self::toggle_palette))
             .on_action(cx.listener(Self::toggle_settings))
+            .on_action(cx.listener(Self::dismiss))
             // Anywhere on the window, not a designated strip: someone dragging a file has
             // their eyes on the file, not on a target.
             .on_drop(cx.listener(
