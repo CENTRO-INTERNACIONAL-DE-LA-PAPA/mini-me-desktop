@@ -23,28 +23,35 @@ sidecar** that the client spawns and supervises.
 | **P6.6** — outputs the researcher can see | ✅ **done** — files land in `Documents\Mini-Me\<thread>`, figures render in the chat, and OUTPUTS opens the folder. §42 |
 | **P6.7** — the UI itself | ✅ **done, verified on Windows** — a role-based palette with four built-ins **and Zed's whole theme gallery** installable in-app; conversation sidebar with fuzzy search and rename; collapsible panels; a file preview modal; visible scrollbars; rainbow CSV; a three-state send button; rounded panels and a window-wide status bar. §43/§47–§53 |
 
-### What is left (2026-08-02)
+### What is left (updated 2026-08-03)
 
-Every milestone is closed and the app is in daily use by its first researcher. What remains
-splits three ways: **shipping it to anyone else**, **paying down the UI debt that keeps
-causing the same bug**, and **friction that is felt but not blocking**.
+Every milestone P6.0–P6.7 is closed and the app is in daily use by its first researcher.
+What remains splits three ways: **shipping it to anyone else**, **paying down the UI debt
+that keeps causing the same bug**, and **friction that is felt but not blocking**.
 
 **Blocks a second person using it**
-- 🟡 **The download link.** **CI builds the Windows app green** (§56) — 21m33s on
-  `windows-latest`, including the `fxc.exe` lookup and the private-backend clone.
-  **Remaining: install the artifact on a machine that did not build it, then tag.**
+- 🟡 **The download link.** CI builds the Windows app green (§56) and a colleague ran that
+  artifact on a laptop that had never had it (§57) — window, Setup pane, checks and
+  diagnosis all correct on the first try. **Remaining: one elevated `wsl --install` that
+  completes, then tag `v0.1.0`.**
+- 🟡 **First run where WSL has never existed.** Half-proven: the pane correctly diagnosed
+  *"WSL present, no distro"*, then the fix failed silently — no elevation, and
+  `map_while(Result::ok)` truncated `wsl.exe`'s UTF-16LE output so the log was empty.
+  Both fixed (§57, `95a857e`). **Awaiting a retry on that machine — the narrowest and
+  highest-value unknown left.**
 - ⬜ **Code signing.** SmartScreen shows "Windows protected your PC" and most researchers
   stop there. An organizational decision on a certificate; the release notes and README
   say which two words to click in the meantime.
-- ⬜ **First run where WSL has never existed.** `setup-wsl.sh` and the Setup pane exist and
-  have never been exercised on a clean machine. **The highest-risk unknown left.**
 - ⬜ **Click-to-update.** The app detects a stale checkout but cannot update itself (§27).
 
-**UI debt — the same bug, four times now**
-- ⬜ **A `Button` / `Modal` / `Panel` component set.** `flex_none` / `min_h_0` has caused
-  four separate layout bugs (§40, §48, §51, §53) and "actions inside the scroll area" has
-  caused three (§40, §41, §52). Both are call-site mistakes that a wrapped primitive makes
-  impossible. **This is now worth more than any new feature.**
+**UI debt — the same call-site mistake, six times now**
+- ⬜ **A `Button` / `Label` / `Modal` / `Panel` component set.** `flex_none` / `min_h_0` has
+  caused four layout bugs (§40, §48, §51, §53), "actions inside the scroll area" three
+  (§40, §41, §52), and §58/§59 added a list without a cap, twelve square buttons and a
+  `truncate()` on the wrong element. **Twice the correct pattern was already in the same
+  file** — so this is a repetition problem, not a knowledge one, and writing the lesson
+  down has now demonstrably failed three times. A wrapped primitive is the only mechanism
+  left. **Worth more than any new feature.**
 - ⬜ **Bundle a font** — fenced code still renders in the UI font.
 - ⬜ **SVG icons** instead of the text glyphs `◎ ▤ ▥ ⏎`.
 - ⬜ **`uniform_list` for the transcript** — every message is laid out every frame.
@@ -52,17 +59,32 @@ causing the same bug**, and **friction that is felt but not blocking**.
   overwriting status line.
 
 **Felt friction**
-- ⬜ **Multi-line composer.** Enter sends, so a script cannot be pasted with line breaks.
+- ✅ **Multi-line composer** — Shift-Enter inserts a break, Enter still sends (§55).
+- ✅ **Escape closes things**, inside-out; **conversations can be deleted** in two steps;
+  **theme and model are filterable lists**; **corners are rounded** (§58/§59).
+- 🔜 **Text selection in the transcript** — *next up.* See the correction below.
 - ⬜ **Cancel a running turn.** The stop button exists and says so honestly (§52).
 - ⬜ **Cancel a running setup fix** (§28).
 - ⬜ **Markdown gaps:** blockquotes, nested lists, images.
 
+**Proposed — P7**
+- ⬜ **`/subagent` slash commands** (`/eda-subagent`, `/research-paper`, `/report-write`),
+  designed in §55: a registry read from the backend, the existing fuzzy picker as the
+  trigger, foreground *or* background dispatch, and the approval gate still applying.
+  Sequenced after the release and the component set.
+
 **Deliberate deferrals**
-- ⬜ **Text selection in the transcript** — GPUI 0.2.2 cannot; *Copy last answer* is the
-  workaround, and this is the one thing here the framework genuinely makes hard.
 - ⬜ **Old workspaces are not migrated** (§42), and **threads from before §51's tag do not
   appear** in the sidebar.
 - ⬜ **Async subagents stay opt-in**, on a preview deepagents API.
+
+**A correction, since it changes what is possible.** This document said text selection was
+"the one thing the framework genuinely makes hard — GPUI 0.2.2 cannot." That is **wrong**:
+`TextLayout::index_for_position` exists (`gpui-0.2.2/src/elements/text.rs:483`, and
+`line_layout.rs:283`), and §55's multi-line composer already built per-line hit-testing and
+per-line selection quads against it. Checked, not assumed — which is the fourth time in this
+project a confident claim about the artefact dissolved on one `grep` (§52 has the other
+three).
 
 **Owed upstream** (found here, belongs in Mini-Me)
 - ⬜ `guardrails.py` claims sandbox isolation host execution does not provide (§18).
