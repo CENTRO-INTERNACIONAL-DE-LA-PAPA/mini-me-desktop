@@ -225,7 +225,7 @@ impl Field {
 
     fn label(self) -> &'static str {
         match self {
-            Field::ModelId => "Model",
+            Field::ModelId => "Or type any model id",
             Field::BaseUrl => "Base URL",
             Field::ApiKey => "API key",
             Field::AstaToken => "Asta token",
@@ -236,7 +236,7 @@ impl Field {
 
     fn placeholder(self) -> &'static str {
         match self {
-            Field::ModelId => "model id",
+            Field::ModelId => "e.g. a model released after this build",
             Field::BaseUrl => "https://… (custom providers only)",
             Field::ApiKey => "paste to set — stored in the OS keychain",
             Field::AstaToken => "paste to set",
@@ -2149,25 +2149,42 @@ impl Workbench {
             list = list.child(
                 div()
                     .id(SharedString::from(format!("model-{model}")))
+                    .flex()
+                    .flex_row()
+                    .items_center()
                     .w_full()
-                    .min_w_0()
-                    .truncate()
                     .px_2()
                     .py_1()
                     .rounded_md()
-                    .when(selected, |row| {
-                        row.bg(rgb(theme::accent_soft()))
-                            .border_1()
-                            .border_color(rgb(theme::accent()))
-                    })
-                    .text_color(rgb(if selected {
-                        theme::text()
-                    } else {
-                        theme::text_muted()
-                    }))
-                    .text_xs()
+                    // Background only, no border: a border on the selected row alone made
+                    // it taller than its neighbours, so the list jumped as you moved down.
+                    .when(selected, |row| row.bg(rgb(theme::accent_soft())))
                     .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
-                    .child(model.to_string())
+                    .child(
+                        // The label truncates, not the row. `truncate` on the flex item
+                        // itself gave it zero intrinsic width, so every model rendered as
+                        // a bare "…" (docs §59).
+                        div()
+                            .flex_grow()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(rgb(if selected {
+                                theme::accent()
+                            } else {
+                                theme::text_muted()
+                            }))
+                            .text_xs()
+                            .child(model.to_string()),
+                    )
+                    .when(selected, |row| {
+                        row.child(
+                            div()
+                                .flex_none()
+                                .text_color(rgb(theme::accent()))
+                                .text_xs()
+                                .child("✓"),
+                        )
+                    })
                     .on_click(cx.listener(move |workbench, _event, _window, cx| {
                         workbench.set_field(Field::ModelId, model, cx);
                         cx.notify();

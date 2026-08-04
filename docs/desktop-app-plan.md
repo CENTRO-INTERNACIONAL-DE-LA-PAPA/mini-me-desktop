@@ -3700,3 +3700,27 @@ rounding, a binding with the wrong scope. None was a hard problem, and all of th
 invisible until someone used the app with real data in it. That is the fifth argument in this
 document for the `Button` / `Modal` / `Panel` set — a `Button` cannot be square, and a
 `Modal` body cannot grow past its frame, if the type is the only way to make one.
+
+## 59. Every model rendered as "…" (2026-08-02)
+
+The model list shipped in §58 showed five rows, each reading exactly `…`.
+
+`.truncate()` was on the **row** — the flex item itself — together with `min_w_0`. That
+combination gives the element zero intrinsic width, so there is nothing to truncate *to* and
+the ellipsis is all that survives. Every other truncating label in this file happens to sit
+in an inner div with `flex_grow().min_w_0()`, which is why none of them showed this and why I
+did not notice writing it a sixth time.
+
+Fixed by matching that pattern: the row lays out, the **label** truncates.
+
+Two smaller things the same screenshot showed:
+
+- The selected row had a border and its neighbours did not, so it was a pixel taller and the
+  list **jumped** as the pointer moved down it. Selection is now background and colour only,
+  with a `✓` — no geometry change.
+- The free-text field beneath the list was labelled *"Model"*, which read as a second control
+  contradicting the first. It now says **"Or type any model id"**, which is what it is for:
+  the list is curated and will go stale, and typing has to keep working.
+
+This is the sixth call-site mistake in two days, and the second where the correct pattern was
+already in the same file. Not a knowledge problem — a repetition problem.
