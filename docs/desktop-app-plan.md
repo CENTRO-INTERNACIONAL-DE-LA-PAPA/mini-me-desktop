@@ -3855,3 +3855,71 @@ and issue tracker settled it. And it was a change made to a command that had *ju
 to work* — speculative hardening on a proven path, which is a worse trade than the hazard it
 was guarding against. §60 counted five confident claims that dissolved on contact; this is the
 sixth, and the first one I found before a user did.
+
+## 62. Text selection, the thing this document said was impossible (2026-08-05)
+
+For two months the plan recorded that selecting text in the transcript "is the one thing here
+the framework genuinely makes hard — GPUI 0.2.2 cannot." §59's follow-up already corrected the
+claim; this is the feature.
+
+`gpui::TextLayout` exposes `index_for_position` (`elements/text.rs:483`) and its inverse
+`position_for_index` (`:517`) — a hit-test and a caret position, which between them are
+everything selection needs. What GPUI genuinely does *not* provide is selection **state and
+painting**: nothing under `gpui/src/elements/` mentions the word, and `InteractiveText` offers
+click and hover indices only. So the missing half is `crates/app/src/selection.rs`, and the
+original claim was two thirds wrong.
+
+**Not one big element.** The transcript is a tree of divs — headings, paragraphs, list items,
+table cells, code blocks — each holding a `StyledText`. Replacing that with a single custom
+element would have meant re-implementing Markdown layout, so instead each run of text is
+wrapped in a `Selectable` that delegates layout and paint to the `StyledText` it holds and adds
+exactly two things: it registers its `TextLayout` in a shared registry under an index assigned
+in document order, and it paints the part of the selection that falls inside it. Bold, links,
+inline code and rainbow CSV columns all still work *because nothing about them changed*.
+
+Selection quads are painted **before** the glyphs. Painted after, the highlight covers the words
+it is meant to highlight.
+
+The registry is rebuilt every frame. Layouts move when the window resizes, when the transcript
+scrolls and on every streamed token, and a rectangle from the last frame is a highlight over the
+wrong words. The *selection* survives, because it belongs to the user — except when the
+transcript is emptied, where it is cleared at all three sites: span indices are positions in one
+conversation, and keeping one across a thread switch would highlight whatever text happened to
+land in the same place.
+
+**Copy, without stealing a key.** `ctrl-c` is bound with no key context, the same reasoning as
+Escape in §58: focus lives in the composer almost always, so a workbench-scoped binding would
+never be reached. The composer's own `ctrl-c` is more specific and still wins — it just calls
+`cx.propagate()` when it has nothing selected, handing the shortcut down. So copying out of the
+transcript needs no click to move focus first, and copying out of the composer is unchanged.
+"Select everything" is `ctrl-shift-a`, not `ctrl-a`: that one belongs to the composer, where it
+selects the prompt being typed. Both are also in the command palette, because a reader who has
+never met this app will not guess either.
+
+### What is tested, and what a person still has to look at
+
+Twelve tests. The selection algebra — a click with no drag selects nothing, dragging upwards
+selects the same text as dragging down, a span passed straight through is covered end to end, an
+offset past the end of a span is clamped rather than panicking, a new frame keeps the selection
+and drops the rectangles.
+
+And the geometry, which is the part that cannot be eyeballed on a headless machine: `rows_between`
+was split out of the painting so it could be tested with plain numbers — one line is one
+rectangle between the two points, a wrapped selection runs to the edge on every line but the
+last, a selection ending exactly at a line start draws no sliver, and a zero line height does not
+loop forever. Counted rows rather than `y += line_height` until it passes `to.y`: that compares
+f32s against a bound it can overshoot, and a selection that drops or doubles its last line is a
+bug that only appears on the one paragraph that wraps.
+
+Three assumptions were checked against the pinned crate rather than assumed, since the whole
+premise of this section is a claim that was not: `StyledText::prepaint` does set
+`element_state.bounds` (so `TextLayout::bounds()`, which unwraps twice, cannot panic on a span
+registered after its inner prepaint); `chat_pane` is called exactly once per render (so span
+indices are handed out in document order and cannot collide); and `cx.propagate()` exists
+(`app.rs:1720`), which is what the `ctrl-c` handoff rests on.
+
+**Unverified: everything a person sees.** This machine has no display, so no one has yet dragged
+across a paragraph and watched the highlight appear. The algebra and the geometry are tested, the
+panics are reasoned out against the crate source, and the failure modes left are visual — a tint
+too faint, a highlight a pixel off a descender, a drag that feels wrong at the edges of a table
+cell. Those need the researcher's eyes, and saying so is more use than claiming they are done.

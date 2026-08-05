@@ -314,11 +314,17 @@ impl Composer {
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.selected_range.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(
-                self.content[self.selected_range.clone()].to_string(),
-            ));
+        if self.selected_range.is_empty() {
+            // Hand `ctrl-c` on. Focus lives here almost all the time, so consuming the
+            // shortcut with nothing selected would make copying out of the transcript
+            // impossible without first clicking somewhere to move focus — which is not
+            // something a reader should have to know (docs §62).
+            cx.propagate();
+            return;
         }
+        cx.write_to_clipboard(ClipboardItem::new_string(
+            self.content[self.selected_range.clone()].to_string(),
+        ));
     }
 
     fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {

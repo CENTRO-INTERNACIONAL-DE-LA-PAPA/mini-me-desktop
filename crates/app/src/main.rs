@@ -15,6 +15,7 @@ mod gallery;
 mod markdown;
 mod preflight;
 mod protocol;
+mod selection;
 mod settings;
 mod sidecar;
 mod theme;
@@ -194,7 +195,16 @@ fn spine_list(label: &'static str, items: &[String], bullet: &'static str) -> im
 
 actions!(
     workbench,
-    [TogglePalette, PaletteNext, PalettePrev, PaletteDismiss, ToggleSettings, Dismiss]
+    [
+        TogglePalette,
+        PaletteNext,
+        PalettePrev,
+        PaletteDismiss,
+        ToggleSettings,
+        Dismiss,
+        CopySelection,
+        SelectAllTranscript
+    ]
 );
 
 /// The editable fields in Settings, in the order they are shown.
@@ -278,6 +288,17 @@ fn workbench_key_bindings() -> Vec<KeyBinding> {
     for modifier in ["cmd", "ctrl"] {
         bindings.push(KeyBinding::new(&format!("{modifier}-p"), TogglePalette, None));
         bindings.push(KeyBinding::new(&format!("{modifier}-,"), ToggleSettings, None));
+        // Also unscoped, and for the same reason Escape is: focus lives in the composer,
+        // so a workbench-scoped binding would never be reached. The composer's own
+        // `ctrl-c` is more specific and still wins — it just declines the action when it
+        // has nothing selected, which is what lets a transcript selection be copied
+        // without first clicking somewhere to move focus (docs §62).
+        bindings.push(KeyBinding::new(&format!("{modifier}-c"), CopySelection, None));
+        bindings.push(KeyBinding::new(
+            &format!("{modifier}-shift-a"),
+            SelectAllTranscript,
+            None,
+        ));
     }
     bindings
 }
@@ -295,19 +316,23 @@ enum Command {
     ExpandTraces,
     CollapseTraces,
     CopyLastAnswer,
+    CopySelected,
+    SelectWhole,
     OpenSettings,
     OpenSetup,
     Quit,
 }
 
 impl Command {
-    const ALL: [Command; 9] = [
+    const ALL: [Command; 11] = [
         Command::RunTurn,
         Command::NewThread,
         Command::RefreshSpine,
         Command::ExpandTraces,
         Command::CollapseTraces,
         Command::CopyLastAnswer,
+        Command::CopySelected,
+        Command::SelectWhole,
         Command::OpenSettings,
         Command::OpenSetup,
         Command::Quit,
@@ -321,6 +346,8 @@ impl Command {
             Command::ExpandTraces => "Expand agent activity",
             Command::CollapseTraces => "Collapse agent activity",
             Command::CopyLastAnswer => "Copy last answer",
+            Command::CopySelected => "Copy selected text",
+            Command::SelectWhole => "Select the whole conversation",
             Command::OpenSettings => "Settings",
             Command::OpenSetup => "Setup & diagnostics",
             Command::Quit => "Quit",
@@ -335,6 +362,8 @@ impl Command {
             Command::ExpandTraces => "open every subagent group",
             Command::CollapseTraces => "close every subagent group",
             Command::CopyLastAnswer => "to the clipboard",
+            Command::CopySelected => "what you dragged over in the transcript (ctrl-c)",
+            Command::SelectWhole => "every message, ready to copy (ctrl-shift-a)",
             Command::OpenSettings => "model, keys, execution (ctrl-,)",
             Command::OpenSetup => "check what the backend still needs",
             Command::Quit => "close the window and the sidecar",
@@ -373,7 +402,15 @@ fn match_score(query: &str, label: &str) -> Option<i32> {
 ///
 /// Emphasis becomes a `HighlightStyle` run rather than a nested element, which is how GPUI
 /// wants inline styling: one shaped line per block, with ranges carrying the differences.
-fn markdown_block(block: &markdown::Block) -> gpui::AnyElement {
+/// Render one Markdown block.
+///
+/// `selectable` is the transcript's span registry when this block is part of a conversation,
+/// and `None` when it is not — the file preview renders the same blocks, and a drag there
+/// must not run through the transcript's spans as if the two were one document.
+fn markdown_block(
+    block: &markdown::Block,
+    selectable: Option<&selection::Transcript>,
+) -> gpui::AnyElement {
     use markdown::{Block, Emphasis};
 
     let styled = |inlines: &markdown::Inlines, base: u32| {
@@ -412,9 +449,16 @@ fn markdown_block(block: &markdown::Block) -> gpui::AnyElement {
                 (range.clone(), style)
             })
             .collect();
-        div().w_full().min_w_0().text_color(rgb(base)).child(
-            StyledText::new(inlines.text.clone()).with_highlights(highlights),
-        )
+        let text = StyledText::new(inlines.text.clone()).with_highlights(highlights);
+        let element = div().w_full().min_w_0().text_color(rgb(base));
+        match selectable {
+            Some(transcript) => element.child(selection::Selectable::new(
+                transcript,
+                inlines.text.clone(),
+                text,
+            )),
+            None => element.child(text),
+        }
     };
 
     match block {
@@ -443,17 +487,29 @@ fn markdown_block(block: &markdown::Block) -> gpui::AnyElement {
             )
             .child(styled(inlines, theme::text()))
             .into_any_element(),
-        Block::Code { text, .. } => div()
-            .w_full()
-            .min_w_0()
-            .p_2()
-            .bg(rgb(theme::surface()))
-            .border_1()
-            .border_color(rgb(theme::border()))
-            .text_color(rgb(theme::text()))
-            .text_sm()
-            .child(text.clone())
-            .into_any_element(),
+        Block::Code { text, .. } => {
+            let block = div()
+                .w_full()
+                .min_w_0()
+                .p_2()
+                .bg(rgb(theme::surface()))
+                .border_1()
+                .border_color(rgb(theme::border()))
+                .text_color(rgb(theme::text()))
+                .text_sm();
+            // Selectable like any other run, and arguably the one that matters most: a
+            // snippet is written to be copied.
+            match selectable {
+                Some(transcript) => block
+                    .child(selection::Selectable::new(
+                        transcript,
+                        text.clone(),
+                        StyledText::new(text.clone()),
+                    ))
+                    .into_any_element(),
+                None => block.child(text.clone()).into_any_element(),
+            }
+        }
         Block::Table { header, rows } => {
             // Equal-width columns via `flex_1`, rather than measuring content. GPUI has no
             // table layout and measuring text before shaping is not something this app can
@@ -834,6 +890,9 @@ struct Workbench {
     /// Scroll positions we draw scrollbars from. GPUI keeps the offset itself; these let
     /// us *read* it, which is what a visible bar needs.
     transcript_scroll: gpui::ScrollHandle,
+    /// Selected transcript text, and the span registry a drag hit-tests against.
+    /// See [`selection`] — the registry is rebuilt every frame, the selection is not.
+    text_selection: selection::Transcript,
     panel_scroll: gpui::ScrollHandle,
     /// The palette on screen right now, which is not always the saved one: the picker
     /// applies as you point at it so a theme can be judged by looking at it.
@@ -984,6 +1043,7 @@ impl Workbench {
             gallery_results: Vec::new(),
             gallery_note: String::new(),
             transcript_scroll: gpui::ScrollHandle::new(),
+            text_selection: selection::Transcript::default(),
             panel_scroll: gpui::ScrollHandle::new(),
             applied_theme: settings::Settings::load().theme,
             sidebar_open: true,
@@ -1302,6 +1362,57 @@ impl Workbench {
             Err(error) => self.status = format!("could not save that choice: {error:#}"),
         }
         self.run_preflight(cx);
+    }
+
+    /// Copy the selected transcript text.
+    ///
+    /// Reached from `ctrl-c` when the composer declines it, so the ordinary shortcut works on
+    /// the transcript without the user having to click somewhere first to move focus.
+    fn copy_selection(&mut self, _: &CopySelection, _window: &mut Window, cx: &mut Context<Self>) {
+        self.copy_selected_text(cx);
+    }
+
+    /// The work behind [`Self::copy_selection`], without the `Window` an action handler is
+    /// handed — so the command palette, which has none, can run it too.
+    fn copy_selected_text(&mut self, cx: &mut Context<Self>) {
+        let Some(text) = self.text_selection.selected_text() else {
+            // Nothing selected here either. Say nothing rather than claiming a copy — an
+            // empty clipboard reported as success is worse than silence.
+            return;
+        };
+        let lines = text.lines().count();
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.status = format!(
+            "copied {lines} line{} from the transcript",
+            if lines == 1 { "" } else { "s" }
+        );
+        cx.notify();
+    }
+
+    /// Select the whole transcript.
+    ///
+    /// `ctrl-shift-a`, not `ctrl-a`: that one belongs to the composer, where it selects the
+    /// prompt being typed, and taking it would break the field people use constantly to fix
+    /// what they are writing.
+    fn select_all_transcript(
+        &mut self,
+        _: &SelectAllTranscript,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_whole_transcript(cx);
+    }
+
+    fn select_whole_transcript(&mut self, cx: &mut Context<Self>) {
+        self.text_selection.select_all();
+        // Only reports a count once there is something to count: on the very first frame the
+        // registry is still empty, and "selected 0 messages" would be a lie about a feature
+        // rather than a fact about the conversation.
+        self.status = match self.text_selection.selected_text() {
+            Some(text) => format!("selected {} lines — ctrl-c to copy", text.lines().count()),
+            None => "there is nothing in the transcript to select yet".into(),
+        };
+        cx.notify();
     }
 
     /// Whether the named row is still not passing, according to the latest report.
@@ -1668,6 +1779,7 @@ impl Workbench {
         // Clear what belongs to the conversation being left. The spine is
         // thread-independent, so it stays — same rule as `New thread`.
         self.transcript.clear();
+        self.text_selection.update(|selection| selection.clear());
         self.buckets.clear();
         self.tasks.clear();
         self.jobs.clear();
@@ -1709,6 +1821,7 @@ impl Workbench {
         if self.sidecar.thread_id().as_deref() == Some(thread_id.as_str()) {
             self.sidecar.reset_thread();
             self.transcript.clear();
+            self.text_selection.update(|selection| selection.clear());
             self.buckets.clear();
             self.tasks.clear();
             self.jobs.clear();
@@ -2600,7 +2713,7 @@ impl Workbench {
                 match workspace::head(&output.path, 400) {
                     Ok(text) if output.name.ends_with(".md") => {
                         for parsed in markdown::parse(&text) {
-                            body = body.child(markdown_block(&parsed));
+                            body = body.child(markdown_block(&parsed, None));
                         }
                     }
                     Ok(text) if is_delimited(&output.name) => {
@@ -2748,6 +2861,10 @@ impl Workbench {
         // flowing down.
         // `id` + `overflow_y_scroll` is what lets a long transcript scroll; GPUI
         // keeps the scroll offset keyed on that id across re-renders.
+        // Last frame's span rectangles go now, before this frame registers its own: the
+        // transcript moves under a scroll, a resize and every streamed token, and a highlight
+        // painted from stale bounds is a highlight over the wrong words.
+        self.text_selection.begin_frame();
         let mut col = div()
             .id("transcript")
             .flex()
@@ -2757,7 +2874,52 @@ impl Workbench {
             .overflow_y_scroll()
             .track_scroll(&self.transcript_scroll)
             .p_4()
-            .gap_3();
+            .gap_3()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|workbench, event: &gpui::MouseDownEvent, _window, cx| {
+                    workbench.text_selection.update(|selection| selection.clear());
+                    if let Some(spot) = workbench.text_selection.spot_at(event.position) {
+                        workbench
+                            .text_selection
+                            .update(|selection| selection.begin(spot));
+                    }
+                    cx.notify();
+                }),
+            )
+            .on_mouse_move(cx.listener(
+                |workbench, event: &gpui::MouseMoveEvent, _window, cx| {
+                    if !workbench.text_selection.selection().dragging() {
+                        return;
+                    }
+                    if let Some(spot) = workbench.text_selection.spot_at(event.position) {
+                        workbench
+                            .text_selection
+                            .update(|selection| selection.extend(spot));
+                        cx.notify();
+                    }
+                },
+            ))
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(|workbench, _event: &gpui::MouseUpEvent, _window, cx| {
+                    workbench
+                        .text_selection
+                        .update(|selection| selection.finish());
+                    cx.notify();
+                }),
+            )
+            // Releasing outside the transcript has to end the drag too, or the selection
+            // keeps following the pointer after the button is long since up.
+            .on_mouse_up_out(
+                gpui::MouseButton::Left,
+                cx.listener(|workbench, _event: &gpui::MouseUpEvent, _window, cx| {
+                    workbench
+                        .text_selection
+                        .update(|selection| selection.finish());
+                    cx.notify();
+                }),
+            );
 
         if self.transcript.is_empty() {
             col = col.child(
@@ -2797,11 +2959,21 @@ impl Workbench {
                 // The user's own text is shown as typed — they wrote it, and reinterpreting
                 // their asterisks would be presumptuous. Assistant text is Markdown.
                 if message.role == "you" {
-                    block = block.child(div().w_full().text_color(rgb(theme::text())).child(body));
+                    block = block.child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .text_color(rgb(theme::text()))
+                            .child(selection::Selectable::new(
+                                &self.text_selection,
+                                body.clone(),
+                                StyledText::new(body),
+                            )),
+                    );
                 } else {
                     let mut rendered = div().flex().flex_col().w_full().min_w_0().gap_2();
                     for parsed in markdown::parse(&body) {
-                        rendered = rendered.child(markdown_block(&parsed));
+                        rendered = rendered.child(markdown_block(&parsed, Some(&self.text_selection)));
                     }
                     block = block.child(rendered);
                 }
@@ -4003,6 +4175,7 @@ impl Workbench {
                 }
                 self.sidecar.reset_thread();
                 self.transcript.clear();
+                self.text_selection.update(|selection| selection.clear());
                 self.buckets.clear();
                 self.error = None;
                 // Blanket approval is scoped to the conversation, so it ends with it —
@@ -4037,6 +4210,11 @@ impl Workbench {
                     None => self.status = "no answer to copy yet".into(),
                 }
             }
+            // Both reachable by keyboard already; here so they can be *found*, which for a
+            // reader who has never met this app is the difference between a feature that
+            // exists and one that does not.
+            Command::CopySelected => self.copy_selected_text(cx),
+            Command::SelectWhole => self.select_whole_transcript(cx),
             Command::OpenSettings => self.open_settings(None, cx),
             Command::OpenSetup => self.open_setup(cx),
             Command::Quit => cx.quit(),
@@ -5068,6 +5246,8 @@ impl Render for Workbench {
             .on_action(cx.listener(Self::toggle_palette))
             .on_action(cx.listener(Self::toggle_settings))
             .on_action(cx.listener(Self::dismiss))
+            .on_action(cx.listener(Self::copy_selection))
+            .on_action(cx.listener(Self::select_all_transcript))
             // Anywhere on the window, not a designated strip: someone dragging a file has
             // their eyes on the file, not on a target.
             .on_drop(cx.listener(
