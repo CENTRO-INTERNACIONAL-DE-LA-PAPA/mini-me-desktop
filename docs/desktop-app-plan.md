@@ -35,9 +35,10 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   green without anyone typing a command. Took three rounds: §57 fixed elevation, §60 made the
   elevated output readable and stopped the app claiming "done" over a red row, §61 reverted a
   `--no-launch` flag that could have unregistered the distro.
-- 🟡 **The download link.** CI builds the Windows app green (§56) and the artifact now runs
-  from nothing to *4 ok* on a machine that had never had WSL (§61). **Remaining: tag
-  `v0.1.0`** — the gate this was waiting on is met.
+- 🟡 **The download link.** `v0.1.0` is tagged, built green, and attached as
+  `mini-me-desktop-v0.1.0-windows-x64.zip`. The release is a **draft** — deliberately, since
+  a draft can be deleted where a published release cannot. **Remaining: someone decides to
+  publish it**, which is a call about who is allowed to have this, not an engineering step.
 - ⬜ **Code signing.** SmartScreen shows "Windows protected your PC" and most researchers
   stop there. An organizational decision on a certificate; the release notes and README
   say which two words to click in the meantime.
