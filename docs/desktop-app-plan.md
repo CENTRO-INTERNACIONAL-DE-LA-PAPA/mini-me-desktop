@@ -61,7 +61,10 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
 - ✅ **Multi-line composer** — Shift-Enter inserts a break, Enter still sends (§55).
 - ✅ **Escape closes things**, inside-out; **conversations can be deleted** in two steps;
   **theme and model are filterable lists**; **corners are rounded** (§58/§59).
-- 🔜 **Text selection in the transcript** — *next up.* See the correction below.
+- 🟡 **Text selection in the transcript** — built and tested (§62): drag to select across
+  paragraphs, code blocks and table cells, `ctrl-c` to copy, `ctrl-shift-a` for everything,
+  both also in the palette. **Awaiting the one thing a headless machine cannot do — someone
+  looking at it.**
 - ⬜ **Cancel a running turn.** The stop button exists and says so honestly (§52).
 - ⬜ **Cancel a running setup fix** (§28).
 - ⬜ **Markdown gaps:** blockquotes, nested lists, images.
