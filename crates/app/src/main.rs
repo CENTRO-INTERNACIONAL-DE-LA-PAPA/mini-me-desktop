@@ -723,6 +723,11 @@ struct Message {
     /// agent panel converged on the same shape, and the pattern has a name — expand live,
     /// collapse on completion (docs §47).
     steps_expanded: bool,
+    /// Whether the reader stopped this turn before it finished.
+    ///
+    /// Shown, because a cut-off answer and a complete one are otherwise the same thing on
+    /// screen — and the difference decides whether it can be trusted (docs §63).
+    stopped: bool,
     /// Figures this turn drew, shown inline beneath the answer.
     ///
     /// Found by diffing the thread's workspace across the turn rather than reported by the
@@ -740,6 +745,7 @@ impl Message {
             steps: Vec::new(),
             agents: Vec::new(),
             steps_expanded: true,
+            stopped: false,
             plots: Vec::new(),
         }
     }
@@ -748,7 +754,10 @@ impl Message {
     /// still has activity, so "empty body" alone is not enough to drop a message —
     /// that would throw away the only record of a purely delegated turn.
     fn is_silent(&self) -> bool {
-        self.body.is_empty() && self.steps.is_empty() && self.agents.is_empty()
+        // A stopped turn counts as content even with nothing in it: "you stopped this" is
+        // the whole record of what happened, and pruning it would leave a question that
+        // appears never to have been answered for no stated reason (docs §63).
+        self.body.is_empty() && self.steps.is_empty() && self.agents.is_empty() && !self.stopped
     }
 }
 
@@ -1792,9 +1801,47 @@ impl Workbench {
         cx.notify();
     }
 
+    /// Stop the turn in flight.
+    ///
+    /// Closes the turn here *and* asks the backend to abandon the run. Only aborting our own
+    /// stream would leave the graph running with nobody reading it — `on_disconnect` defaults
+    /// to `continue` — which for an agent that spends tokens per step is the expensive kind
+    /// of silence (docs §63).
+    ///
+    /// Whatever already streamed in stays. It is real work, the reader may well want it, and
+    /// deleting the thing they were reading is not what stop means anywhere else.
+    fn stop_turn(&mut self, cx: &mut Context<Self>) {
+        let told_backend = self.sidecar.cancel_turn();
+        self.streaming = false;
+        self.pending_approval = None;
+        self.composer
+            .update(cx, |composer, cx| composer.set_disabled(false, cx));
+        if let Some(message) = self.transcript.last_mut() {
+            if message.role == "mini-me" {
+                message.stopped = true;
+                // The steps are why it was still going; leave them open on a stopped turn so
+                // the reason is on screen rather than one click away.
+                message.steps_expanded = true;
+            }
+        }
+        // Said differently in the two cases because they are different: one stopped the run,
+        // the other only stopped us watching it.
+        self.status = if told_backend {
+            "turn stopped".into()
+        } else {
+            "stopped watching — the run had not reported an id yet, so the backend may still \
+             be finishing it"
+                .into()
+        };
+        cx.notify();
+    }
+
     fn apply(&mut self, event: TurnEvent, cx: &mut Context<Self>) {
         match event {
             TurnEvent::Status(status) => self.status = status,
+            // Recorded by the sidecar as it passes; nothing here needs it, and putting a
+            // uuid in the status line would only push out something a person can read.
+            TurnEvent::Started { .. } => {}
             TurnEvent::Token(text) => {
                 if let Some(last) = self.transcript.last_mut() {
                     last.body.push_str(&text);
@@ -3147,6 +3194,18 @@ impl Workbench {
                     }
                     block = block.child(rendered);
                 }
+            }
+            // Marked, not hidden. A truncated answer looks exactly like a finished one, and
+            // whether it was cut off decides whether it can be relied on (docs §63).
+            if message.stopped {
+                block = block.child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .text_color(rgb(theme::warning()))
+                        .text_xs()
+                        .child("— you stopped this turn; the answer above is incomplete"),
+                );
             }
             // Figures last: the answer explains them, so it should be read first.
             for (plot, path) in message.plots.iter().enumerate() {
@@ -4636,7 +4695,7 @@ impl Workbench {
         // state is expressed without adding a second control (docs §52).
         let has_text = !self.composer.read(cx).text().trim().is_empty();
         let (glyph, fill, ink, hint) = if self.streaming {
-            ("■", theme::elevated(), theme::error(), "stop")
+            ("■", theme::elevated(), theme::error(), "stop this turn")
         } else if has_text {
             ("↑", theme::accent(), theme::background(), "send")
         } else {
@@ -4696,11 +4755,7 @@ impl Workbench {
                     .child(glyph)
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
                         if workbench.streaming {
-                            // Nothing to cancel a run with yet, so say so rather than
-                            // pretending the click did something (docs §52).
-                            workbench.status =
-                                "cancelling a running turn is not built yet".into();
-                            cx.notify();
+                            workbench.stop_turn(cx);
                             return;
                         }
                         // Same path as Enter. Calling the entity directly rather than
@@ -5483,6 +5538,9 @@ fn decode_capture(raw: &[u8], mut on_status: impl FnMut(&str)) -> (Message, Vec<
     for frame in frames.push(raw) {
         for event in turn.push(&frame) {
             match event {
+                // A replay rebuilds the transcript, and the transcript has no use for the
+                // run's id — only a live turn does, to be able to stop it.
+                TurnEvent::Started { .. } => {}
                 TurnEvent::Token(text) => message.body.push_str(&text),
                 TurnEvent::Step { agent, label } => match agent {
                     None => message.steps.push(label),

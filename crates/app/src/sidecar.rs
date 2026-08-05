@@ -81,6 +81,20 @@ pub struct Sidecar {
     /// A **redacted** copy of the configuration, for the preflight checks — they need
     /// to know where the backend runs, never what its credentials are.
     config: BackendConfig,
+    /// The turn currently in flight, so it can be stopped. See [`Sidecar::cancel_turn`].
+    running: Arc<SyncMutex<Option<RunningTurn>>>,
+}
+
+/// A turn being streamed right now.
+#[derive(Default)]
+struct RunningTurn {
+    /// The task pumping the SSE stream. Aborting it drops the HTTP response, which closes
+    /// the connection — the client half of a cancel.
+    task: Option<tokio::task::JoinHandle<()>>,
+    /// LangGraph's id for the run, from its first `metadata` frame. `None` for the few
+    /// milliseconds before that frame arrives, and the reason `cancel_turn` reports whether
+    /// it could reach the server at all.
+    run_id: Option<String>,
 }
 
 impl Sidecar {
@@ -103,6 +117,7 @@ impl Sidecar {
             log_path,
             execution,
             config: redacted,
+            running: Arc::new(SyncMutex::new(None)),
         })
     }
 
@@ -134,10 +149,21 @@ impl Sidecar {
         let base_url = self.base_url.clone();
         let model = self.model.lock().expect("model mutex").clone();
 
-        self.runtime.spawn(async move {
+        let running = self.running.clone();
+        let record = running.clone();
+        let task = self.runtime.spawn(async move {
             let client = LangGraphClient::new(base_url).with_model(model);
             // Send failures just mean the UI dropped the receiver (window closed).
             let mut emit = |event: TurnEvent| {
+                // Noted on the way past rather than asked for separately: this is the only
+                // moment LangGraph names the run, and `cancel_turn` needs that name.
+                if let TurnEvent::Started { run_id } = &event {
+                    if let Ok(mut slot) = record.lock() {
+                        if let Some(turn) = slot.as_mut() {
+                            turn.run_id = Some(run_id.clone());
+                        }
+                    }
+                }
                 let _ = tx.unbounded_send(event);
             };
 
@@ -151,9 +177,60 @@ impl Sidecar {
                 // actionable part of these failures lives.
                 Err(error) => emit(TurnEvent::Error(format!("{error:#}"))),
             }
+            // However it ended, there is nothing left to cancel.
+            if let Ok(mut slot) = running.lock() {
+                *slot = None;
+            }
         });
+        self.register(task);
 
         rx
+    }
+
+    /// Remember the task streaming the current turn, so it can be stopped.
+    ///
+    /// Replaces whatever was there: the UI refuses to start a turn while one is running, so
+    /// two live at once would be a bug elsewhere — and keeping the newer one is the reading
+    /// that cannot strand the stop button on a task that has already finished.
+    fn register(&self, task: tokio::task::JoinHandle<()>) {
+        if let Ok(mut slot) = self.running.lock() {
+            *slot = Some(RunningTurn {
+                task: Some(task),
+                run_id: slot.as_mut().and_then(|turn| turn.run_id.take()),
+            });
+        }
+    }
+
+    /// Stop the turn in flight, both here and on the backend.
+    ///
+    /// Returns whether the *server* could be told. Aborting our stream task closes the
+    /// connection, but `on_disconnect` defaults to `continue`, so on its own that would only
+    /// stop us listening while the graph carried on spending tokens. The run id from the
+    /// first metadata frame is what makes the difference, and for the moment before it
+    /// arrives the honest answer is `false`.
+    pub fn cancel_turn(&self) -> bool {
+        let Some(turn) = self.running.lock().ok().and_then(|mut slot| slot.take()) else {
+            return false;
+        };
+        if let Some(task) = turn.task {
+            task.abort();
+        }
+        let Some(run_id) = turn.run_id else {
+            return false;
+        };
+        let Some(thread_id) = self.thread.lock().expect("thread id mutex").clone() else {
+            return false;
+        };
+        let base_url = self.base_url.clone();
+        // Detached: the click should not wait on a round trip, and there is nothing useful
+        // to do with a failure the user has already moved on from.
+        self.runtime.spawn(async move {
+            let client = LangGraphClient::new(base_url);
+            if let Err(error) = client.cancel_run(&thread_id, &run_id).await {
+                tracing::warn!(%error, run_id, "could not cancel the run");
+            }
+        });
+        true
     }
 
     /// Swap the model/key the next turn will use. No restart, because the backend
@@ -172,9 +249,21 @@ impl Sidecar {
         let base_url = self.base_url.clone();
         let model = self.model.lock().expect("model mutex").clone();
 
-        self.runtime.spawn(async move {
+        // A resumed continuation is as cancellable as the turn that started it: an approved
+        // command can be the slowest part of a run, and that is exactly when someone reaches
+        // for stop.
+        let running = self.running.clone();
+        let record = running.clone();
+        let task = self.runtime.spawn(async move {
             let client = LangGraphClient::new(base_url).with_model(model);
             let mut emit = |event: TurnEvent| {
+                if let TurnEvent::Started { run_id } = &event {
+                    if let Ok(mut slot) = record.lock() {
+                        if let Some(turn) = slot.as_mut() {
+                            turn.run_id = Some(run_id.clone());
+                        }
+                    }
+                }
                 let _ = tx.unbounded_send(event);
             };
             let Some(thread_id) = thread.lock().expect("thread id mutex").clone() else {
@@ -190,7 +279,11 @@ impl Sidecar {
                 Ok(TurnOutcome::Finished) => emit(TurnEvent::Done),
                 Err(error) => emit(TurnEvent::Error(format!("{error:#}"))),
             }
+            if let Ok(mut slot) = running.lock() {
+                *slot = None;
+            }
         });
+        self.register(task);
 
         rx
     }
@@ -611,6 +704,7 @@ impl Sidecar {
                         text.push_str(&token);
                     }
                     TurnEvent::Status(status) => println!("status   : {status}"),
+                    TurnEvent::Started { run_id } => println!("run      : {run_id}"),
                     TurnEvent::Step { agent, label } => match agent {
                         Some(agent) => {
                             println!("step     : {} · {label}", agent.name);

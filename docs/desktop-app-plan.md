@@ -3926,3 +3926,75 @@ across a paragraph and watched the highlight appear. The algebra and the geometr
 panics are reasoned out against the crate source, and the failure modes left are visual — a tint
 too faint, a highlight a pixel off a descender, a drag that feels wrong at the edges of a table
 cell. Those need the researcher's eyes, and saying so is more use than claiming they are done.
+
+## 63. A stop button that stops something (2026-08-05)
+
+Since §52 the stop button has been honest and useless: it said *"cancelling a running turn is
+not built yet"* and meant it. What it needed was a name for the thing to stop.
+
+**The run id was arriving all along and being thrown away.** The first frame of every stream is
+`event: metadata`, and `tests/fixtures/delegated-turn.sse` — captured from a real turn — shows
+its payload is `{"run_id":"019fb670-…","attempt":1}`. The decoder mapped that frame to
+`Status("run started")` and dropped the rest. It now also emits `TurnEvent::Started { run_id }`,
+which the sidecar notes on the way past.
+
+**Aborting our own stream is not cancelling.** This is the part that would have made a
+half-finished feature look finished. Dropping the SSE response closes the connection, and
+LangGraph's `on_disconnect` defaults to `continue` — so the graph keeps running, and an agent
+that spends tokens per step keeps spending them, with nobody reading the answer. Stop therefore
+does both: `POST /threads/{id}/runs/{id}/cancel` and then aborts the local task.
+
+Both facts came from the SDK vendored in the reference checkout rather than from memory:
+`DisconnectMode = "cancel" | "continue"` and `cancel(threadId, runId, wait?, action?)`, whose
+default action is `interrupt`. `interrupt` is the right one here — `rollback` would erase the
+partial answer the reader is looking at, which is real work and quite possibly the reason they
+pressed stop.
+
+Three smaller decisions, each about not lying:
+
+- **The partial answer stays**, and is *marked*: "you stopped this turn; the answer above is
+  incomplete". A truncated answer and a complete one are otherwise identical on screen, and the
+  difference decides whether the thing can be relied on. A stopped message with no body at all
+  also stops counting as silent, so the pruner cannot delete the only record that it happened.
+- **Resumed continuations are cancellable too.** An approved command is often the slowest part
+  of a run, which is exactly when someone reaches for stop.
+- **The window where there is no id** — the few milliseconds before the first frame — reports
+  *"stopped watching — the run had not reported an id yet, so the backend may still be
+  finishing it"*, rather than "turn stopped". Two different things happened; they get two
+  different sentences.
+
+## 64. Right-click, and a paste that had been broken since §55 (2026-08-05)
+
+§62 gave the transcript something worth copying and then asked the reader to know that `ctrl-c`
+is how. A right-click is what everyone tries first.
+
+GPUI ships no menu widget, the same way it ships no text input. It does ship `anchored`, which
+places a child at a point in the window and keeps it inside the frame, and `deferred`, which
+paints it after everything else so it is not clipped by the pane it opened over. Those two are
+the whole mechanism.
+
+No menu item decides what it does — each names a method that already exists and is already on a
+key, so the menu is a second door onto the same room rather than a second implementation. Cut
+and Paste are **absent** from the transcript rather than greyed, because it is not editable and
+never will be; inside the composer they are always present and greyed when unavailable, because
+there they are only temporarily out of reach. Every row shows its own binding, and Select all
+shows a *different* one per target, because it genuinely is a different key.
+
+Escape closes the menu before anything else, innermost-first per §58. A right-click elsewhere is
+handled only by the opener: closing on click-out as well would race it, and which won would
+depend on paint order — sometimes leaving no menu at all.
+
+**And the thing this turned up.** Wiring Paste meant reading the composer's paste handler, which
+still said *"Newlines would break single-line layout; flatten them"* and replaced every `\n`
+with a space. That comment was true when it was written and stopped being true in §55, which
+made the composer genuinely multi-line — for the express purpose of accepting "a prompt carrying
+a script, a table or a list". So for two months pasting exactly that silently ran it all
+together, and the module header still described the field as "single-line by design".
+
+Both fixed. `\r\n` is normalised on the way in, because a Windows clipboard is full of it and a
+stray `\r` shapes as a box.
+
+Worth naming as a category: this is the third defect found by *reading code adjacent to the one
+being changed* rather than by testing the change — §60's empty-log message and §59's
+already-correct-pattern-in-the-same-file being the others. A stale comment describing behaviour
+that has since changed is not a documentation problem; it is a bug with a note attached.

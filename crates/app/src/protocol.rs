@@ -56,6 +56,13 @@ pub enum TurnEvent {
     /// Emitted by the `values` stream mode; **replaces** prior state rather than
     /// accumulating, since each event carries the whole picture.
     Snapshot(Snapshot),
+    /// The run is live, and this is the id LangGraph filed it under.
+    ///
+    /// Carried in the first `event: metadata` frame — verified against the captured stream
+    /// in `tests/fixtures/delegated-turn.sse`, whose first metadata frame is
+    /// `{"run_id":"019fb670-…","attempt":1}`. It used to be discarded, which is why the stop
+    /// button had nothing to stop with: cancelling needs a run to name (docs §63).
+    Started { run_id: String },
     /// The run finished cleanly.
     Done,
     /// The run failed; the string is display-safe.
@@ -917,6 +924,31 @@ impl LangGraphClient {
         .await
     }
 
+    /// Stop a run the server is still working on.
+    ///
+    /// Dropping our end of the SSE stream is *not* enough: `on_disconnect` defaults to
+    /// `continue`, so the graph keeps running — and keeps spending tokens — with nobody
+    /// reading the answer. Verified against the SDK in the reference checkout:
+    /// `cancel(threadId, runId, wait?, action?)` posts to this path, and the default action
+    /// is `interrupt` (docs §63).
+    ///
+    /// `interrupt` rather than `rollback`: the partial answer already on screen is real work,
+    /// and rolling the thread back would erase what the reader is looking at.
+    pub async fn cancel_run(&self, thread_id: &str, run_id: &str) -> Result<()> {
+        self.http
+            .post(format!(
+                "{}/threads/{}/runs/{}/cancel",
+                self.base_url, thread_id, run_id
+            ))
+            .query(&[("action", "interrupt")])
+            .send()
+            .await
+            .context("POST /runs/{id}/cancel failed")?
+            .error_for_status()
+            .context("POST /runs/{id}/cancel returned an error status")?;
+        Ok(())
+    }
+
     async fn stream(
         &self,
         thread_id: &str,
@@ -1394,7 +1426,24 @@ impl TurnDecoder {
     pub fn push(&mut self, event: &SseEvent) -> Vec<TurnEvent> {
         match event.name.as_str() {
             "error" => return vec![TurnEvent::Error(summarize_error(&event.data))],
-            "metadata" => return vec![TurnEvent::Status("run started".into())],
+            "metadata" => {
+                let mut events = vec![TurnEvent::Status("run started".into())];
+                // A frame without an id is still a started run — worth saying so, even
+                // though the stop button will then have nothing to cancel by name.
+                if let Some(run_id) = serde_json::from_str::<Value>(&event.data)
+                    .ok()
+                    .as_ref()
+                    .and_then(|data| data.get("run_id"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                {
+                    events.push(TurnEvent::Started {
+                        run_id: run_id.to_string(),
+                    });
+                }
+                return events;
+            }
             // Only the *top-level* snapshot. A subagent's `values|tools:…` carries
             // the same artifacts a few events earlier (measured: `sources: 1` showed
             // up in the subagent's snapshot three events before the coordinator's),
@@ -1676,6 +1725,49 @@ mod tests {
 
     /// Decode a single event in isolation. Anything that depends on *sequence*
     /// (tool-call argument fragments) drives a `TurnDecoder` directly instead.
+    /// The run id is the only thing that makes the stop button able to stop anything, and it
+    /// arrives exactly once, in the first frame. Shape taken from the captured stream in
+    /// `tests/fixtures/delegated-turn.sse`, not from the documentation (docs §63).
+    #[test]
+    fn the_first_metadata_frame_names_the_run() {
+        let events = decode(&SseEvent {
+            name: "metadata".into(),
+            data: r#"{"run_id":"019fb670-c72a-7330-98be-0f52520fb23b","attempt":1}"#.into(),
+        });
+        assert!(events.iter().any(|event| matches!(
+            event,
+            TurnEvent::Started { run_id } if run_id == "019fb670-c72a-7330-98be-0f52520fb23b"
+        )), "{events:?}");
+        // Still says the run started, because that is what the status line shows.
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, TurnEvent::Status(_))));
+    }
+
+    #[test]
+    fn a_metadata_frame_without_an_id_still_reports_a_started_run() {
+        // Then the stop button can only stop us listening, and `stop_turn` says so rather
+        // than claiming the backend was told.
+        for data in [r#"{"attempt":1}"#, r#"{"run_id":""}"#, "not json at all"] {
+            let events = decode(&SseEvent {
+                name: "metadata".into(),
+                data: data.into(),
+            });
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, TurnEvent::Started { .. })),
+                "{data}"
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, TurnEvent::Status(_))),
+                "{data}"
+            );
+        }
+    }
+
     fn decode(event: &SseEvent) -> Vec<TurnEvent> {
         TurnDecoder::default().push(event)
     }
