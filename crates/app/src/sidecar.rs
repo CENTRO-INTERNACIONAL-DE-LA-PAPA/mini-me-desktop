@@ -226,8 +226,13 @@ impl Sidecar {
         // to do with a failure the user has already moved on from.
         self.runtime.spawn(async move {
             let client = LangGraphClient::new(base_url);
-            if let Err(error) = client.cancel_run(&thread_id, &run_id).await {
-                tracing::warn!(%error, run_id, "could not cancel the run");
+            match client.cancel_run(&thread_id, &run_id).await {
+                // Logged on success too, not only on failure. Whether the *backend* actually
+                // stopped is the one part of stop a person cannot see, and a log that only
+                // speaks up when something breaks cannot be used to confirm it worked —
+                // silence would mean both "cancelled" and "never tried".
+                Ok(()) => tracing::info!(run_id, "cancelled the run on the backend"),
+                Err(error) => tracing::warn!(%error, run_id, "could not cancel the run"),
             }
         });
         true

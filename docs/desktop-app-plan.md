@@ -61,15 +61,16 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
 - ✅ **Multi-line composer** — Shift-Enter inserts a break, Enter still sends (§55).
 - ✅ **Escape closes things**, inside-out; **conversations can be deleted** in two steps;
   **theme and model are filterable lists**; **corners are rounded** (§58/§59).
-- 🟡 **Text selection in the transcript** — built and tested (§62): drag to select across
-  paragraphs, code blocks and table cells, `ctrl-c` to copy, `ctrl-shift-a` for everything,
-  both also in the palette. **Awaiting the one thing a headless machine cannot do — someone
-  looking at it.**
-- 🟡 **Cancel a running turn** — built (§63): stop posts to LangGraph's cancel endpoint *and*
+- ✅ **Text selection in the transcript** (§62) — drag across paragraphs, code blocks and table
+  cells; `ctrl-c` copies, `ctrl-shift-a` takes everything, both also in the palette.
+  Confirmed on a real window.
+- ✅ **Cancel a running turn** (§63) — confirmed on a real turn stopped three steps in: the
+  partial trace stayed, marked incomplete. Stop posts to LangGraph's cancel endpoint *and*
   aborts the stream, so the graph stops spending tokens rather than just losing its audience.
-  The partial answer stays, marked incomplete. **Awaiting a real turn stopped mid-flight.**
-- 🟡 **Right-click menu** — built (§64): copy/select-all in the transcript, cut/copy/paste in
-  the composer, each row showing its own binding. **Awaiting eyes.**
+  The cancel now logs on success as well as failure, since whether the *backend* stopped is
+  the one part nobody can see.
+- ✅ **Right-click menu** (§64) — confirmed: copy/select-all in the transcript, cut/copy/paste
+  in the composer, rows greyed when they would do nothing, each showing its own binding.
 - ⬜ **Cancel a running setup fix** (§28).
 - ⬜ **Markdown gaps:** blockquotes, nested lists, images.
 
