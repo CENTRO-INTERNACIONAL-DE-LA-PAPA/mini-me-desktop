@@ -162,13 +162,15 @@ pub fn parse(source: &str) -> Vec<Block> {
             let mut body = vec![first.to_string()];
             while let Some(next) = lines.peek() {
                 match quote_line(next.trim()) {
-                    // A `>` on its own ends the paragraph inside the quote; treat it as a
-                    // space rather than starting a second block.
-                    Some((_, rest)) => {
+                    // Only lines at the *same* depth keep folding. A `>>` after a `>` is a
+                    // quote inside a quote and has to become its own block — folding it in
+                    // would silently flatten it into the outer one, which is exactly what it
+                    // did on the first real answer that contained one (docs §66).
+                    Some((next_depth, rest)) if next_depth == depth => {
                         body.push(rest.to_string());
                         lines.next();
                     }
-                    None => break,
+                    _ => break,
                 }
             }
             blocks.push(Block::Quote {
@@ -672,6 +674,44 @@ mod tables {
                 depth: 2,
                 inlines: Inlines::plain("twice removed"),
             }
+        );
+    }
+
+    #[test]
+    fn a_quote_inside_a_quote_is_its_own_block() {
+        // The first real answer containing one showed both lines run together on a single
+        // depth-1 rule: the fold collected every consecutive quoted line but kept only the
+        // first one's depth, so the nesting silently vanished (docs §66).
+        let blocks = parse("> First quoted line\n>> Nested second-level quote\n> back out");
+        assert_eq!(
+            blocks,
+            vec![
+                Block::Quote {
+                    depth: 1,
+                    inlines: Inlines::plain("First quoted line"),
+                },
+                Block::Quote {
+                    depth: 2,
+                    inlines: Inlines::plain("Nested second-level quote"),
+                },
+                Block::Quote {
+                    depth: 1,
+                    inlines: Inlines::plain("back out"),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn lines_at_the_same_depth_still_fold_into_one_quote() {
+        // The other half of the same rule: an ordinary two-line quote must not become two
+        // rules stacked on top of each other.
+        assert_eq!(
+            parse("> one\n> two"),
+            vec![Block::Quote {
+                depth: 1,
+                inlines: Inlines::plain("one two"),
+            }]
         );
     }
 
