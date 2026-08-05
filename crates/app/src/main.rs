@@ -13,6 +13,7 @@ mod backend;
 mod composer;
 mod gallery;
 mod markdown;
+mod menu;
 mod preflight;
 mod protocol;
 mod selection;
@@ -893,6 +894,8 @@ struct Workbench {
     /// Selected transcript text, and the span registry a drag hit-tests against.
     /// See [`selection`] — the registry is rebuilt every frame, the selection is not.
     text_selection: selection::Transcript,
+    /// An open right-click menu, if any.
+    context_menu: Option<menu::ContextMenu>,
     panel_scroll: gpui::ScrollHandle,
     /// The palette on screen right now, which is not always the saved one: the picker
     /// applies as you point at it so a theme can be judged by looking at it.
@@ -1044,6 +1047,7 @@ impl Workbench {
             gallery_note: String::new(),
             transcript_scroll: gpui::ScrollHandle::new(),
             text_selection: selection::Transcript::default(),
+            context_menu: None,
             panel_scroll: gpui::ScrollHandle::new(),
             applied_theme: settings::Settings::load().theme,
             sidebar_open: true,
@@ -1362,6 +1366,164 @@ impl Workbench {
             Err(error) => self.status = format!("could not save that choice: {error:#}"),
         }
         self.run_preflight(cx);
+    }
+
+    /// Open the right-click menu at a point, over whatever was clicked.
+    fn open_context_menu(
+        &mut self,
+        at: gpui::Point<gpui::Pixels>,
+        target: menu::Target,
+        cx: &mut Context<Self>,
+    ) {
+        self.context_menu = Some(menu::ContextMenu::new(at, target));
+        cx.notify();
+    }
+
+    /// Whether an item would actually do something if it were clicked.
+    ///
+    /// Drives the greying, and is checked again when the item runs — the two must agree, so
+    /// they read the same state rather than each deciding for themselves.
+    fn menu_item_enabled(&self, item: menu::Item, target: menu::Target, cx: &App) -> bool {
+        match (item, target) {
+            (menu::Item::Copy, menu::Target::Transcript) => {
+                self.text_selection.selected_text().is_some()
+            }
+            (menu::Item::Copy, menu::Target::Composer)
+            | (menu::Item::Cut, menu::Target::Composer) => {
+                let composer = self.composer.read(cx);
+                composer.has_selection() && (item == menu::Item::Copy || composer.is_editable())
+            }
+            // Not whether the clipboard has anything — reading it on every frame to grey a
+            // row is a syscall for a cosmetic, and a paste of nothing is harmless.
+            (menu::Item::Paste, _) => self.composer.read(cx).is_editable(),
+            (menu::Item::SelectAll, menu::Target::Composer) => {
+                !self.composer.read(cx).text().is_empty()
+            }
+            (menu::Item::SelectAll, menu::Target::Transcript) => !self.transcript.is_empty(),
+            (menu::Item::CopyLastAnswer, _) => self
+                .transcript
+                .iter()
+                .any(|message| message.role == "mini-me" && !message.body.is_empty()),
+            // Cut in the transcript is never offered; see `ContextMenu::items`.
+            (menu::Item::Cut, menu::Target::Transcript) => false,
+        }
+    }
+
+    fn run_menu_item(
+        &mut self,
+        item: menu::Item,
+        target: menu::Target,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.context_menu = None;
+        match (item, target) {
+            (menu::Item::Copy, menu::Target::Transcript) => self.copy_selected_text(cx),
+            (menu::Item::SelectAll, menu::Target::Transcript) => self.select_whole_transcript(cx),
+            (menu::Item::CopyLastAnswer, _) => self.run_command(Command::CopyLastAnswer, cx),
+            (menu::Item::Copy, menu::Target::Composer) => {
+                self.composer.update(cx, |composer, cx| {
+                    composer.copy_to_clipboard(cx);
+                });
+            }
+            (menu::Item::Cut, menu::Target::Composer) => {
+                self.composer.update(cx, |composer, cx| {
+                    composer.cut_to_clipboard(window, cx);
+                });
+            }
+            (menu::Item::Paste, _) => {
+                self.composer.update(cx, |composer, cx| {
+                    composer.paste_from_clipboard(window, cx);
+                });
+            }
+            (menu::Item::SelectAll, menu::Target::Composer) => {
+                self.composer.update(cx, |composer, cx| {
+                    composer.select_all_text(cx);
+                });
+            }
+            (menu::Item::Cut, menu::Target::Transcript) => {}
+        }
+        // A menu item that edited or selected the prompt should leave the caret where the
+        // user can carry on typing.
+        if target == menu::Target::Composer {
+            self.composer.read(cx).focus_handle(cx).focus(window);
+        }
+        cx.notify();
+    }
+
+    fn context_menu(&self, open: menu::ContextMenu, cx: &mut Context<Self>) -> impl IntoElement {
+        let target = open.target;
+        let mut panel = div()
+            .flex()
+            .flex_col()
+            .min_w(px(190.))
+            .py_1()
+            .rounded_md()
+            .bg(rgb(theme::elevated()))
+            .border_1()
+            .border_color(rgb(theme::border_strong()))
+            // Swallow the press so the click that chooses an item does not also land on the
+            // transcript underneath and start a fresh selection there.
+            .on_mouse_down(gpui::MouseButton::Left, |_event, _window, cx| {
+                cx.stop_propagation();
+            });
+
+        for &item in open.items() {
+            let enabled = self.menu_item_enabled(item, target, cx);
+            let shortcut = item.shortcut(target);
+            panel = panel.child(
+                div()
+                    .id(SharedString::from(format!("menu-{}", item.label())))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap_4()
+                    .px_3()
+                    .py_1()
+                    .text_sm()
+                    .text_color(rgb(if enabled {
+                        theme::text()
+                    } else {
+                        theme::text_faint()
+                    }))
+                    .when(enabled, |row| {
+                        row.hover(|style| {
+                            style.bg(rgb(theme::accent_soft())).cursor_pointer()
+                        })
+                        .on_click(cx.listener(move |workbench, _event, window, cx| {
+                            workbench.run_menu_item(item, target, window, cx);
+                        }))
+                    })
+                    .child(item.label())
+                    .child(
+                        div()
+                            .text_color(rgb(theme::text_faint()))
+                            .text_xs()
+                            .child(shortcut),
+                    ),
+            );
+        }
+
+        // Clicking anywhere else closes it, which is the only way out most people look for.
+        gpui::deferred(
+            gpui::anchored()
+                .position(open.at)
+                .snap_to_window()
+                .child(panel.on_mouse_down_out(cx.listener(
+                    |workbench, event: &gpui::MouseDownEvent, _window, cx| {
+                        // A right-click elsewhere re-opens the menu at the new spot, and
+                        // that handler is the only one that should decide. Closing here as
+                        // well would race it, and which one won would depend on paint
+                        // order — sometimes leaving no menu at all.
+                        if event.button == gpui::MouseButton::Right {
+                            return;
+                        }
+                        workbench.context_menu = None;
+                        cx.notify();
+                    },
+                ))),
+        )
     }
 
     /// Copy the selected transcript text.
@@ -2919,6 +3081,14 @@ impl Workbench {
                         .update(|selection| selection.finish());
                     cx.notify();
                 }),
+            )
+            // Deliberately leaves the selection alone: right-clicking a shade off the text
+            // you just highlighted, in order to copy it, must not be what throws it away.
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(|workbench, event: &gpui::MouseDownEvent, _window, cx| {
+                    workbench.open_context_menu(event.position, menu::Target::Transcript, cx);
+                }),
             );
 
         if self.transcript.is_empty() {
@@ -3323,6 +3493,11 @@ impl Workbench {
     /// One at a time and inside-out, which is what the key means everywhere else: from a
     /// file preview it returns to Settings if that was open behind it, not to nothing.
     fn dismiss(&mut self, _: &Dismiss, _window: &mut Window, cx: &mut Context<Self>) {
+        // Innermost first, the rule §58 settled: a menu open over a modal closes the menu.
+        if self.context_menu.take().is_some() {
+            cx.notify();
+            return;
+        }
         if self.preview.take().is_some() {
             cx.notify();
             return;
@@ -4482,6 +4657,12 @@ impl Workbench {
             .bg(rgb(theme::surface()))
             .border_1()
             .border_color(rgb(theme::border_strong()))
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(|workbench, event: &gpui::MouseDownEvent, _window, cx| {
+                    workbench.open_context_menu(event.position, menu::Target::Composer, cx);
+                }),
+            )
             .child(self.composer.clone())
             .child(
                 div()
@@ -5273,10 +5454,17 @@ impl Render for Workbench {
             None => root,
         };
 
-        if self.palette_open {
+        let root = if self.palette_open {
             root.child(self.palette(cx))
         } else {
             root
+        };
+
+        // Last, and `deferred` inside, so it paints over every pane it might open across
+        // instead of being clipped by the one it opened in.
+        match &self.context_menu {
+            Some(open) => root.child(self.context_menu(open.clone(), cx)),
+            None => root,
         }
     }
 }

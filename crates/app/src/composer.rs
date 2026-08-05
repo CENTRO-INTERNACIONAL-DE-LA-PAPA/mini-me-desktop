@@ -18,8 +18,8 @@
 //! - Rewritten without let-chains, which need edition 2024; we build on 2021.
 //! - Submission is ignored while empty, so Enter can't post a blank turn.
 //!
-//! Single-line by design: `shape_line` lays out one line, so a multi-line
-//! composer (soft wrap, `shift-enter` for a newline) is a P6.3+ follow-up.
+//! Multi-line since §55: `shape_line` lays out exactly one line, so the element shapes one
+//! per `\n` itself and hit-tests per line. `shift-enter` inserts a break; Enter still sends.
 
 use std::ops::Range;
 
@@ -243,8 +243,59 @@ impl Composer {
     }
 
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_all_text(cx);
+    }
+
+    /// Whether anything is selected.
+    ///
+    /// A right-click menu has to know before it offers Cut and Copy: an item that looks
+    /// available and does nothing is worse than one that is visibly greyed out.
+    pub fn has_selection(&self) -> bool {
+        !self.selected_range.is_empty()
+    }
+
+    /// Whether the field accepts edits — false while a turn is running.
+    pub fn is_editable(&self) -> bool {
+        !self.disabled
+    }
+
+    pub fn select_all_text(&mut self, cx: &mut Context<Self>) {
         self.move_to(0, cx);
         self.select_to(self.content.len(), cx)
+    }
+
+    /// Copy the selection, reporting whether there was anything to copy.
+    pub fn copy_to_clipboard(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.selected_range.is_empty() {
+            return false;
+        }
+        cx.write_to_clipboard(ClipboardItem::new_string(
+            self.content[self.selected_range.clone()].to_string(),
+        ));
+        true
+    }
+
+    pub fn cut_to_clipboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.copy_to_clipboard(cx) || self.disabled {
+            return;
+        }
+        self.replace_text_in_range(None, "", window, cx)
+    }
+
+    pub fn paste_from_clipboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.disabled {
+            return;
+        }
+        let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+            return;
+        };
+        // Line breaks are kept. They were flattened to spaces while this field really was
+        // one line, and that line outlived §55's multi-line rewrite — so pasting the very
+        // thing §55 existed for, a script or a table, silently ran it all together. `\r\n`
+        // is normalised because a Windows clipboard is full of it and a stray `\r` shapes
+        // as a box.
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        self.replace_text_in_range(None, &text, window, cx);
     }
 
     fn home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
@@ -304,39 +355,21 @@ impl Composer {
     }
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
-        if self.disabled {
-            return;
-        }
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            // Newlines would break single-line layout; flatten them.
-            self.replace_text_in_range(None, &text.replace('\n', " "), window, cx);
-        }
+        self.paste_from_clipboard(window, cx);
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
-        if self.selected_range.is_empty() {
+        if !self.copy_to_clipboard(cx) {
             // Hand `ctrl-c` on. Focus lives here almost all the time, so consuming the
             // shortcut with nothing selected would make copying out of the transcript
             // impossible without first clicking somewhere to move focus — which is not
             // something a reader should have to know (docs §62).
             cx.propagate();
-            return;
         }
-        cx.write_to_clipboard(ClipboardItem::new_string(
-            self.content[self.selected_range.clone()].to_string(),
-        ));
     }
 
     fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selected_range.is_empty() {
-            return;
-        }
-        cx.write_to_clipboard(ClipboardItem::new_string(
-            self.content[self.selected_range.clone()].to_string(),
-        ));
-        if !self.disabled {
-            self.replace_text_in_range(None, "", window, cx)
-        }
+        self.cut_to_clipboard(window, cx);
     }
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
