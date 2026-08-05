@@ -403,6 +403,21 @@ fn match_score(query: &str, label: &str) -> Option<i32> {
 ///
 /// Emphasis becomes a `HighlightStyle` run rather than a nested element, which is how GPUI
 /// wants inline styling: one shaped line per block, with ranges carrying the differences.
+/// The gutter glyph for a list item at a given depth.
+///
+/// Only bullets change. A numbered item keeps the number the author wrote — renumbering it, or
+/// swapping it for a bullet because it happens to be nested, would change what the answer says.
+fn nested_marker(marker: &str, depth: usize) -> String {
+    if marker.ends_with('.') {
+        return marker.to_string();
+    }
+    match depth {
+        0 => "·".to_string(),
+        1 => "‣".to_string(),
+        _ => "–".to_string(),
+    }
+}
+
 /// Render one Markdown block.
 ///
 /// `selectable` is the transcript's span registry when this block is part of a conversation,
@@ -474,19 +489,71 @@ fn markdown_block(
             }
         }
         Block::Paragraph(inlines) => styled(inlines, theme::text()).into_any_element(),
-        Block::ListItem { marker, inlines } => div()
+        Block::ListItem {
+            marker,
+            inlines,
+            depth,
+        } => div()
             .flex()
             .flex_row()
             .w_full()
             .min_w_0()
             .gap_2()
+            // Indent per level. Capped at four because past that the text column is
+            // narrower than the gutter, and a plan nested five deep is a plan nobody reads.
+            .pl(px(16. * (*depth).min(4) as f32))
             .child(
                 div()
                     .flex_none()
                     .text_color(rgb(theme::text_muted()))
-                    .child(marker.clone()),
+                    // A different glyph per level, so nesting survives a screenshot and a
+                    // reader who cannot see the indentation of a wrapped line. A numbered
+                    // item keeps its own number at any depth.
+                    .child(nested_marker(marker, *depth)),
             )
             .child(styled(inlines, theme::text()))
+            .into_any_element(),
+        Block::Quote { depth, inlines } => div()
+            .flex()
+            .flex_row()
+            .w_full()
+            .min_w_0()
+            .pl(px(12. * (*depth).min(3) as f32))
+            // A rule down the left, which is what a quote looks like everywhere. The text is
+            // muted, because a quote is something the answer is *referring* to.
+            .border_l_2()
+            .border_color(rgb(theme::border_strong()))
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .pl_3()
+                    .child(styled(inlines, theme::text_muted())),
+            )
+            .into_any_element(),
+        Block::Image { alt, url } => div()
+            .flex()
+            .flex_row()
+            .w_full()
+            .min_w_0()
+            .gap_2()
+            .child(div().flex_none().child("🖼"))
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .text_color(rgb(theme::text_muted()))
+                    .text_xs()
+                    // Named, not fetched. See [`markdown::Block::Image`]: the path lives in
+                    // the distro and figures the agent really produced are already shown
+                    // below, found on the host (§42). Saying which file it meant is the
+                    // useful part; pretending to display it would not be.
+                    .child(if alt.trim().is_empty() {
+                        url.clone()
+                    } else {
+                        format!("{alt} — {url}")
+                    }),
+            )
             .into_any_element(),
         Block::Code { text, .. } => {
             let block = div()

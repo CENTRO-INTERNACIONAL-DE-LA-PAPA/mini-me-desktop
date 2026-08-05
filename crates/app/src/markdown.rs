@@ -7,10 +7,13 @@
 //!
 //! **Hand-written rather than a parser crate.** GPUI has no Markdown element, so the block
 //! layer had to be built either way; the inline layer is then a few hundred lines against a
-//! measured subset — emphasis, inline code, links, headings, lists, fenced code — which is
-//! smaller than the API surface of a full CommonMark AST and has no dependency to track.
-//! If tables or nested structures start mattering, that is the point to reconsider
-//! (§16 records `gpui-component` as the alternative).
+//! measured subset — emphasis, inline code, links, headings, lists, fenced code, tables,
+//! blockquotes, nested lists — which is smaller than the API surface of a full CommonMark AST
+//! and has no dependency to track. §16 recorded "if tables or nested structures start
+//! mattering, reconsider"; both now do, and both fit. What would genuinely justify
+//! `gpui-component` is a **nested block tree** — a list inside a quote, a table inside a list.
+//! Nesting here is a `depth` number on a flat block, which renders those cases as their text
+//! rather than their structure, and is the deliberate edge of this subset.
 //!
 //! Ranges produced here are **byte offsets into the block's text**, and GPUI asserts they
 //! land on `char` boundaries — hence the care with multi-byte input throughout.
@@ -54,7 +57,29 @@ pub enum Block {
     Heading { level: u8, inlines: Inlines },
     Paragraph(Inlines),
     /// A list item. `marker` is what to draw in the gutter — a bullet, or `3.`.
-    ListItem { marker: String, inlines: Inlines },
+    ///
+    /// `depth` is how deeply nested it is, counted from the *indents actually seen* in this
+    /// list rather than by dividing spaces by two: agents write both two- and four-space
+    /// nesting, sometimes in the same answer, and a fixed divisor renders one of them wrong.
+    ListItem {
+        marker: String,
+        inlines: Inlines,
+        depth: usize,
+    },
+    /// A blockquote. `depth` counts the `>` markers, so a quoted quote still reads as one.
+    ///
+    /// Consecutive quoted lines fold into a single block, the same way paragraph lines do —
+    /// a quote containing several paragraphs collapses to one, which is a limit worth having
+    /// over a nested block tree nothing in this app produces.
+    Quote { depth: usize, inlines: Inlines },
+    /// An image reference, alone on its line.
+    ///
+    /// The **path is not loaded**. It would have to be translated out of the distro's
+    /// filesystem into one Windows can open, and no such translation exists in this direction
+    /// (§46 records the three spellings). Figures the agent actually produced already appear
+    /// beneath the answer, found by diffing the thread's output directory on the host (§42) —
+    /// so this block exists to stop `![](…)` rendering as punctuation, not to duplicate them.
+    Image { alt: String, url: String },
     /// A fenced code block, kept verbatim: no inline parsing inside code.
     Code { language: String, text: String },
     /// A pipe table. `header` may be empty when the source had no header row.
@@ -89,15 +114,20 @@ pub fn parse(source: &str) -> Vec<Block> {
     let mut blocks = Vec::new();
     let mut paragraph: Vec<&str> = Vec::new();
     let mut lines = source.lines().peekable();
+    // The indents seen so far in the list being built, shallowest first. Its length is the
+    // current depth. Emptied by anything that ends the list.
+    let mut list_indents: Vec<usize> = Vec::new();
 
     while let Some(line) = lines.next() {
         let trimmed = line.trim_end();
         let start = trimmed.trim_start();
+        let indent = indent_of(trimmed);
 
         // A fence swallows lines verbatim until it closes, so nothing inside a code block
         // is mistaken for a heading or a list.
         if let Some(language) = start.strip_prefix("```") {
             flush(&mut paragraph, &mut blocks);
+            list_indents.clear();
             let mut body = Vec::new();
             while let Some(next) = lines.next() {
                 if next.trim_start().starts_with("```") {
@@ -119,12 +149,46 @@ pub fn parse(source: &str) -> Vec<Block> {
 
         if is_rule(start) {
             flush(&mut paragraph, &mut blocks);
+            list_indents.clear();
             blocks.push(Block::Rule);
+            continue;
+        }
+
+        // A blockquote runs until a line that is not quoted. Folded like a paragraph, because
+        // the coordinator quotes a sentence or two — never a document.
+        if let Some((depth, first)) = quote_line(start) {
+            flush(&mut paragraph, &mut blocks);
+            list_indents.clear();
+            let mut body = vec![first.to_string()];
+            while let Some(next) = lines.peek() {
+                match quote_line(next.trim()) {
+                    // A `>` on its own ends the paragraph inside the quote; treat it as a
+                    // space rather than starting a second block.
+                    Some((_, rest)) => {
+                        body.push(rest.to_string());
+                        lines.next();
+                    }
+                    None => break,
+                }
+            }
+            blocks.push(Block::Quote {
+                depth,
+                inlines: parse_inlines(body.join(" ").trim()),
+            });
+            continue;
+        }
+
+        // An image on a line of its own. Inside a sentence it is handled inline instead.
+        if let Some((alt, url)) = lone_image(start) {
+            flush(&mut paragraph, &mut blocks);
+            list_indents.clear();
+            blocks.push(Block::Image { alt, url });
             continue;
         }
 
         if let Some((level, rest)) = heading(start) {
             flush(&mut paragraph, &mut blocks);
+            list_indents.clear();
             blocks.push(Block::Heading {
                 level,
                 inlines: parse_inlines(rest),
@@ -142,6 +206,7 @@ pub fn parse(source: &str) -> Vec<Block> {
                 .is_some_and(|next| is_table_separator(next.trim()))
         {
             flush(&mut paragraph, &mut blocks);
+            list_indents.clear();
             let header = table_row(start);
             lines.next(); // the separator itself carries only alignment, which we ignore
             let mut rows = Vec::new();
@@ -162,14 +227,79 @@ pub fn parse(source: &str) -> Vec<Block> {
             blocks.push(Block::ListItem {
                 marker,
                 inlines: parse_inlines(rest),
+                depth: nest(&mut list_indents, indent),
             });
             continue;
         }
 
+        // Prose ends a list. An indented paragraph is a continuation in CommonMark, but
+        // treating it as one here would mean carrying a depth across a blank line and
+        // guessing which item it belonged to — predictable is worth more.
+        list_indents.clear();
         paragraph.push(trimmed);
     }
     flush(&mut paragraph, &mut blocks);
     blocks
+}
+
+/// How far a line is indented, counting a tab as four columns.
+///
+/// Tabs because agents emit them and a tab measured as one column would sort a tab-indented
+/// child *above* a two-space one.
+fn indent_of(line: &str) -> usize {
+    line.chars()
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .map(|c| if c == '\t' { 4 } else { 1 })
+        .sum()
+}
+
+/// Depth for a list item at `indent`, updating the stack of indents seen.
+///
+/// Deeper than the current level opens one; shallower closes as many as it has to. This is
+/// what makes two-space and four-space nesting render the same, and it cannot invent a level
+/// the source did not indent for.
+fn nest(indents: &mut Vec<usize>, indent: usize) -> usize {
+    while indents.last().is_some_and(|&open| indent < open) {
+        indents.pop();
+    }
+    if indents.last().is_none_or(|&open| indent > open) {
+        indents.push(indent);
+    }
+    indents.len().saturating_sub(1)
+}
+
+/// A quoted line: how many `>` deep, and what follows them.
+fn quote_line(line: &str) -> Option<(usize, &str)> {
+    let mut rest = line.strip_prefix('>')?;
+    let mut depth = 1;
+    loop {
+        let trimmed = rest.trim_start();
+        match trimmed.strip_prefix('>') {
+            Some(next) => {
+                depth += 1;
+                rest = next;
+            }
+            None => return Some((depth, trimmed)),
+        }
+    }
+}
+
+/// `![alt](url)` occupying a whole line, and nothing else.
+///
+/// Whole-line only: mid-sentence it is inline text, and promoting it to a block there would
+/// tear the sentence in half.
+fn lone_image(line: &str) -> Option<(String, String)> {
+    let rest = line.strip_prefix("![")?;
+    let close = rest.find("](")?;
+    let url_end = rest[close + 2..].find(')')?;
+    // Anything after the closing paren means it is part of a sentence.
+    if rest[close + 2 + url_end + 1..].trim().is_empty() {
+        return Some((
+            rest[..close].to_string(),
+            rest[close + 2..close + 2 + url_end].to_string(),
+        ));
+    }
+    None
 }
 
 /// Whether a line could be a table row: it has a pipe that is not escaped.
@@ -343,6 +473,21 @@ pub fn parse_inlines(source: &str) -> Inlines {
                 }
             }
         }
+        // `![alt](url)` inside a sentence. Handled before `[` so the `!` is dropped rather
+        // than left stranded in front of the text — which is what it used to do, because the
+        // prose scan stopped at the bracket and pushed the bang as ordinary text.
+        if bytes[at] == b'!' && source[at + 1..].starts_with('[') {
+            if let Some((alt, url)) = inline_image(&source[at..]) {
+                let consumed = alt.len() + url.len() + 5; // `!`, `[`, `](`, `)`
+                push(&mut out, &alt, Some(Emphasis::Link));
+                if !url.is_empty() {
+                    push(&mut out, " ", None);
+                    push(&mut out, &url, Some(Emphasis::Url));
+                }
+                at += consumed;
+                continue;
+            }
+        }
         // `[text](url)` — the text is styled, the URL kept beside it.
         if bytes[at] == b'[' {
             if let Some(close) = source[at..].find("](") {
@@ -369,13 +514,24 @@ pub fn parse_inlines(source: &str) -> Inlines {
         // past an ASCII marker.
         let after = at + source[at..].chars().next().map_or(1, char::len_utf8);
         let next = source[after..]
-            .find(['`', '*', '_', '['])
+            .find(['`', '*', '_', '[', '!'])
             .map(|offset| after + offset)
             .unwrap_or(source.len());
         push(&mut out, &source[at..next], None);
         at = next;
     }
     out
+}
+
+/// `![alt](url)` at the start of `source`, if it is there.
+fn inline_image(source: &str) -> Option<(String, String)> {
+    let rest = source.strip_prefix("![")?;
+    let close = rest.find("](")?;
+    let url_end = rest[close + 2..].find(')')?;
+    Some((
+        rest[..close].to_string(),
+        rest[close + 2..close + 2 + url_end].to_string(),
+    ))
 }
 
 fn preceded_by_word(source: &str, at: usize) -> bool {
@@ -419,6 +575,158 @@ mod tables {
         match parse(source).into_iter().find(|b| matches!(b, Block::Table { .. })) {
             Some(Block::Table { header, rows }) => (header, rows),
             other => panic!("expected a table, got {other:?}"),
+        }
+    }
+
+    /// Just the list items, as `(marker, text, depth)`.
+    fn items(source: &str) -> Vec<(String, String, usize)> {
+        parse(source)
+            .into_iter()
+            .filter_map(|block| match block {
+                Block::ListItem {
+                    marker,
+                    inlines,
+                    depth,
+                } => Some((marker, inlines.text, depth)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn two_space_and_four_space_nesting_produce_the_same_shape() {
+        // The reason depth is a stack of the indents actually seen rather than spaces
+        // divided by two: agents emit both, and a fixed divisor renders one of them flat or
+        // twice as deep as written (docs §65).
+        let two = items("- top\n  - child\n    - grandchild\n- second");
+        let four = items("- top\n    - child\n        - grandchild\n- second");
+        let depths: Vec<usize> = two.iter().map(|(_, _, depth)| *depth).collect();
+        assert_eq!(depths, vec![0, 1, 2, 0]);
+        assert_eq!(depths, four.iter().map(|(_, _, d)| *d).collect::<Vec<_>>());
+        assert_eq!(two[1].1, "child");
+    }
+
+    #[test]
+    fn a_tab_indents_as_deeply_as_the_spaces_beside_it() {
+        // A tab counted as one column would sort a tab-indented child *above* a two-space
+        // one, putting it at the wrong level in a list that mixes them.
+        let mixed = items("- top\n\t- tabbed\n- back");
+        assert_eq!(
+            mixed.iter().map(|(_, _, d)| *d).collect::<Vec<_>>(),
+            vec![0, 1, 0]
+        );
+    }
+
+    #[test]
+    fn closing_a_nested_level_returns_to_the_one_it_came_from() {
+        let list = items("- a\n  - b\n    - c\n  - d\n- e");
+        assert_eq!(
+            list.iter().map(|(_, _, d)| *d).collect::<Vec<_>>(),
+            vec![0, 1, 2, 1, 0]
+        );
+    }
+
+    #[test]
+    fn a_numbered_item_keeps_its_own_number_when_nested() {
+        // Renumbering, or swapping in a bullet because it happens to be indented, would
+        // change what the answer says — steps are often referred to by number.
+        let list = items("1. first\n   2) second\n");
+        assert_eq!(list[0].0, "1.");
+        assert_eq!(list[1].0, "2.");
+        assert_eq!(list[1].2, 1);
+    }
+
+    #[test]
+    fn prose_between_two_lists_starts_the_second_one_over() {
+        let blocks = parse("- a\n  - b\n\nSome prose.\n\n- c");
+        let depths: Vec<usize> = blocks
+            .iter()
+            .filter_map(|block| match block {
+                Block::ListItem { depth, .. } => Some(*depth),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(depths, vec![0, 1, 0], "{blocks:?}");
+    }
+
+    #[test]
+    fn a_blockquote_folds_its_lines_and_counts_its_markers() {
+        let blocks = parse("> Moderated estimation of fold change\n> and dispersion.\n\nAfter.");
+        assert_eq!(
+            blocks[0],
+            Block::Quote {
+                depth: 1,
+                inlines: Inlines::plain("Moderated estimation of fold change and dispersion."),
+            }
+        );
+        // The quote ends where the quoting stops.
+        assert_eq!(blocks[1], Block::Paragraph(Inlines::plain("After.")));
+    }
+
+    #[test]
+    fn a_quoted_quote_is_deeper_but_still_one_block() {
+        let blocks = parse(">> twice removed");
+        assert_eq!(
+            blocks[0],
+            Block::Quote {
+                depth: 2,
+                inlines: Inlines::plain("twice removed"),
+            }
+        );
+    }
+
+    #[test]
+    fn emphasis_inside_a_quote_is_still_parsed() {
+        match &parse("> see **table 2**")[0] {
+            Block::Quote { inlines, .. } => {
+                assert_eq!(inlines.text, "see table 2");
+                assert_eq!(inlines.styles, vec![(4..11, Emphasis::Strong)]);
+            }
+            other => panic!("expected a quote, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_image_on_its_own_line_becomes_a_block() {
+        assert_eq!(
+            parse("![Yield by cultivar](outputs/yield.png)")[0],
+            Block::Image {
+                alt: "Yield by cultivar".into(),
+                url: "outputs/yield.png".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn an_image_inside_a_sentence_stays_in_the_sentence() {
+        // Promoting it would tear the sentence in half. What it must not do is leave the
+        // `!` stranded in front of the text, which is what happened before: the prose scan
+        // stopped at the bracket and pushed the bang as ordinary text (docs §65).
+        let blocks = parse("See ![the plot](p.png) for detail.");
+        match &blocks[0] {
+            Block::Paragraph(inlines) => {
+                assert!(!inlines.text.contains('!'), "{:?}", inlines.text);
+                assert!(inlines.text.starts_with("See the plot"), "{:?}", inlines.text);
+                assert!(inlines.text.ends_with("for detail."), "{:?}", inlines.text);
+                assert!(inlines.text.contains("p.png"), "the path is kept");
+            }
+            other => panic!("expected a paragraph, got {other:?}"),
+        }
+        assert_eq!(blocks.len(), 1, "{blocks:?}");
+    }
+
+    #[test]
+    fn a_bang_that_is_not_an_image_is_left_alone() {
+        // `!` is ordinary punctuation far more often than it is a marker, and adding it to
+        // the scan set means every one of them now reaches that branch.
+        for source in ["Done! Next?", "Careful! [see here](x)", "a ! b", "!"] {
+            let blocks = parse(source);
+            match &blocks[0] {
+                Block::Paragraph(inlines) => {
+                    assert!(inlines.text.contains('!'), "{source}: {:?}", inlines.text)
+                }
+                other => panic!("{source}: expected a paragraph, got {other:?}"),
+            }
         }
     }
 
@@ -606,14 +914,16 @@ mod tests {
             blocks[2],
             Block::ListItem {
                 marker: "·".into(),
-                inlines: Inlines::plain("one")
+                inlines: Inlines::plain("one"),
+                depth: 0
             }
         );
         assert_eq!(
             blocks[4],
             Block::ListItem {
                 marker: "3.".into(),
-                inlines: Inlines::plain("three")
+                inlines: Inlines::plain("three"),
+                depth: 0
             }
         );
         assert_eq!(

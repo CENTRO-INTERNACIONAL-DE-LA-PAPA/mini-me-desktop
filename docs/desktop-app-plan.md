@@ -72,7 +72,10 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
 - ✅ **Right-click menu** (§64) — confirmed: copy/select-all in the transcript, cut/copy/paste
   in the composer, rows greyed when they would do nothing, each showing its own binding.
 - ⬜ **Cancel a running setup fix** (§28).
-- ⬜ **Markdown gaps:** blockquotes, nested lists, images.
+- 🟡 **Markdown gaps** — built (§65): blockquotes with depth, nested lists whose depth comes
+  from the indents actually seen (so 2- and 4-space sources agree), and images that no longer
+  render their own punctuation. Eleven tests. Inline images are *named, not loaded* — the path
+  lives in the distro and §42 already shows real figures from the host. **Awaiting eyes.**
 
 **Proposed — P7**
 - ⬜ **`/subagent` slash commands** (`/eda-subagent`, `/research-paper`, `/report-write`),
@@ -4003,3 +4006,54 @@ Worth naming as a category: this is the third defect found by *reading code adja
 being changed* rather than by testing the change — §60's empty-log message and §59's
 already-correct-pattern-in-the-same-file being the others. A stale comment describing behaviour
 that has since changed is not a documentation problem; it is a bug with a note attached.
+
+## 65. Blockquotes, nested lists, and an image that was showing its punctuation (2026-08-05)
+
+The last of the Markdown gaps. All three are what a coordinator writing a report actually emits,
+and until now all three rendered as source.
+
+**Nested lists are depth from a stack, not from arithmetic.** The obvious implementation is
+`indent / 2`, and it is wrong: agents write two-space *and* four-space nesting, sometimes in the
+same answer, so a fixed divisor renders one of them flat and the other twice as deep as written.
+Instead the parser keeps the indents it has actually seen in the current list, shallowest first;
+its length is the depth. Deeper than the top opens a level, shallower closes as many as it must.
+Two-space and four-space sources therefore produce identical trees, and no level can be invented
+that the source did not indent for. A tab counts as four columns, because counted as one it
+would sort a tab-indented child *above* a two-space one.
+
+A numbered item keeps the number its author wrote at any depth. Renumbering it — or swapping in
+a bullet because it happens to be indented — would change what the answer says, and steps get
+referred to by number.
+
+**Blockquotes** fold consecutive quoted lines into one block and count their `>` markers, so a
+quoted quote still reads as one. Emphasis inside is parsed normally. Rendered as a rule down the
+left in muted text, because a quote is something the answer is *referring* to.
+
+**The image was leaking its own syntax.** `![alt](url)` rendered as `!alt url`: the inline scan
+stopped at `[`, so the bang was pushed as ordinary prose before the link branch ever saw it.
+Adding `!` to the scan set is what fixes it — which then puts every exclamation mark in ordinary
+writing through that branch, hence a test over `Done! Next?`, `Careful! [see here](x)`, `a ! b`
+and a bare `!`.
+
+An image alone on a line becomes a block; inside a sentence it stays inline, because promoting
+it would tear the sentence in half.
+
+**What the image block deliberately does not do is load the picture.** The path points into the
+distro's filesystem, and translating it into something Windows can open does not exist in that
+direction — §46 recorded the three spellings a path has here, and this is the missing fourth.
+Meanwhile figures the agent really produced already appear beneath the answer, found by diffing
+the thread's output directory *on the host* (§42). So the block names the file and stops. Showing
+a broken image, or a path the reader cannot open, would be worse than a caption.
+
+Eleven tests, which is the point of having done this one now: every claim above is checkable
+without a window, unlike the UI debt sitting above it in the list.
+
+### Why the component set is still not next
+
+`Button`/`Label`/`Modal`/`Panel` has been top of the UI-debt list since §58, and it stays there
+for now on a straight risk trade. It is a sweeping restyle of every control in a 6,000-line file,
+its whole value is preventing a *visual* class of bug, and it cannot be verified from a machine
+with no display — right after the app first worked end to end on someone else's laptop. The six
+call-site mistakes it would prevent were each caught within a day. Blocking a release-adjacent
+week on a blind refactor to prevent a bug class that is currently being caught cheaply is the
+wrong order. It goes next to a window someone can look at.
