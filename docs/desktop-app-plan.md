@@ -65,7 +65,11 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   paragraphs, code blocks and table cells, `ctrl-c` to copy, `ctrl-shift-a` for everything,
   both also in the palette. **Awaiting the one thing a headless machine cannot do — someone
   looking at it.**
-- ⬜ **Cancel a running turn.** The stop button exists and says so honestly (§52).
+- 🟡 **Cancel a running turn** — built (§63): stop posts to LangGraph's cancel endpoint *and*
+  aborts the stream, so the graph stops spending tokens rather than just losing its audience.
+  The partial answer stays, marked incomplete. **Awaiting a real turn stopped mid-flight.**
+- 🟡 **Right-click menu** — built (§64): copy/select-all in the transcript, cut/copy/paste in
+  the composer, each row showing its own binding. **Awaiting eyes.**
 - ⬜ **Cancel a running setup fix** (§28).
 - ⬜ **Markdown gaps:** blockquotes, nested lists, images.
 
