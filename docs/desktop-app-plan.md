@@ -30,17 +30,14 @@ What remains splits three ways: **shipping it to anyone else**, **paying down th
 that keeps causing the same bug**, and **friction that is felt but not blocking**.
 
 **Blocks a second person using it**
-- 🟡 **The download link.** CI builds the Windows app green (§56) and a colleague ran that
-  artifact on a laptop that had never had it (§57) — window, Setup pane, checks and
-  diagnosis all correct on the first try. **Remaining: one elevated `wsl --install` that
-  completes, then tag `v0.1.0`.**
-- 🟡 **First run where WSL has never existed.** Two rounds in. §57 fixed elevation, and a
-  screenshot proved it works — a real elevated `wsl.exe` installing WSL 2.7.11. But its
-  output went to *its own console*, never to our pipes, so the pane said "done" with an empty
-  log over a still-red row (§60). Now the elevated command redirects to a file the app follows
-  live, a fix that succeeds without fixing anything says so, and `--no-launch` keeps the
-  install from stopping on an invisible username prompt. **Awaiting a third run on that
-  machine — still the narrowest and highest-value unknown left.**
+- ✅ **First run where WSL has never existed.** Proven on a third laptop (§61): elevated
+  install, restart, reopen — **4 ok**, with the runtime, checkout, `uv sync` and overlay all
+  green without anyone typing a command. Took three rounds: §57 fixed elevation, §60 made the
+  elevated output readable and stopped the app claiming "done" over a red row, §61 reverted a
+  `--no-launch` flag that could have unregistered the distro.
+- 🟡 **The download link.** CI builds the Windows app green (§56) and the artifact now runs
+  from nothing to *4 ok* on a machine that had never had WSL (§61). **Remaining: tag
+  `v0.1.0`** — the gate this was waiting on is met.
 - ⬜ **Code signing.** SmartScreen shows "Windows protected your PC" and most researchers
   stop there. An organizational decision on a certificate; the release notes and README
   say which two words to click in the meantime.
@@ -3809,3 +3806,52 @@ that was matching **my own uncommitted edit**. The compiler caught it in seconds
 fifth confident claim about this artefact to dissolve on contact (§52 has three, the
 text-selection claim has one) — and the first where the false evidence was something I had just
 written myself.
+
+## 61. A machine that had no WSL, working (2026-08-05)
+
+A third laptop, and the answer the last three sections were waiting for. Elevated install,
+restart, reopen — **4 ok · 1 to fix · 1 optional**:
+
+- ✓ WSL2 runtime — *a distro started and answered*
+- ✓ Mini-Me backend — *langgraph.json found in ~/.local/share/mini-me-desktop/backend*
+- ✓ Python dependencies — *.venv/bin/langgraph is installed*
+- ✓ Host execution overlay — *installed with the backend*
+- ! Asta CLI — signed out, and mid-device-code as the screenshot was taken
+- ✗ Model API key — the one thing left, and it is a paste
+
+Nobody typed a command. The app installed WSL, provisioned the checkout, ran `uv sync`, put the
+overlay in place, and then diagnosed the two things only a person can supply. **This closes the
+item that has been top of "blocks a second person using it" since §45** — a first run on a
+machine that had never had any of this now works, and the remaining two rows are a sign-in and
+a key.
+
+The restart is the part worth remembering: on both machines that lacked WSL, `wsl --install`
+replaced the WSL runtime and Windows would not register a distro until it rebooted. §60 taught
+the app to say so. This laptop confirms that once it does reboot, everything downstream lands.
+
+### The correction: `--no-launch` was a mistake, and it was mine
+
+§60 added `--no-launch` to the install, reasoning that the post-install launch asks for a UNIX
+username and that with output redirected the question would be invisible. The reasoning about
+the hazard was right. The flag was wrong.
+
+`--no-launch` is documented, and it also has a documented failure: it can install the distro
+**without registering it** under `HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss`, so
+`wsl -l -v` does not list it and the only cure is to run the install again *without* the flag
+([microsoft/WSL#10646](https://github.com/microsoft/WSL/issues/10646)). Our runtime probe asks a
+distro to answer. An unregistered distro does not answer. The flag could therefore have
+manufactured the exact state the button exists to escape — on the very path this laptop had
+just proven.
+
+Reverted. The hazard is handled where it belongs, by denying stdin: `< NUL` on the elevated
+command. At EOF the username prompt gives up instead of waiting forever, the install and
+registration follow the ordinary proven path, and the distro answers as root — which is all the
+sidecar needs. An elevated fix can never be interactive anyway; its console is not one we can
+put a question in.
+
+Two things about how this was caught. It was caught by **research, before shipping**, because
+this project's standing rule is that research is mandatory and one `WebFetch` of the WSL docs
+and issue tracker settled it. And it was a change made to a command that had *just been proven
+to work* — speculative hardening on a proven path, which is a worse trade than the hazard it
+was guarding against. §60 counted five confident claims that dissolved on contact; this is the
+sixth, and the first one I found before a user did.

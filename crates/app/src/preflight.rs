@@ -387,14 +387,14 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
                 "WSL is present but no distro answered".to_string(),
                 Fix::Run {
                     label: "Install Ubuntu",
-                    // `--no-launch` because the default is to start the new distro and ask,
-                    // interactively, for a UNIX username and password. With the elevated
-                    // output redirected to a file (see `elevated_log`) that prompt would be
-                    // invisible and the window would simply hang — and a researcher who
-                    // cannot code should not have to invent a Linux password to read a
-                    // paper. Unlaunched, the distro answers as root, which is all the
-                    // sidecar needs.
-                    argv: elevated(&["wsl.exe", "--install", "-d", "Ubuntu", "--no-launch"]),
+                    // Deliberately *not* `--no-launch`, though it looks made for this: it
+                    // can install the distro without registering it under
+                    // `HKCU\...\Lxss`, so `wsl -l -v` does not list it and the only cure is
+                    // to run the install again without the flag
+                    // (microsoft/WSL#10646). That failure is indistinguishable from the
+                    // state this button exists to escape. The launch it would have
+                    // suppressed is handled by denying stdin instead — see `elevated`.
+                    argv: elevated(&["wsl.exe", "--install", "-d", "Ubuntu"]),
                     note: "Windows will ask for admin rights; may need a restart",
                 },
             )
@@ -403,7 +403,7 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
                 "wsl.exe was not found — WSL is not installed".to_string(),
                 Fix::Run {
                     label: "Install WSL",
-                    argv: elevated(&["wsl.exe", "--install", "--no-launch"]),
+                    argv: elevated(&["wsl.exe", "--install"]),
                     note: "Windows will ask for admin rights, then needs a restart",
                 },
             )
@@ -868,7 +868,13 @@ fn elevated(argv: &[&str]) -> Vec<String> {
     // first token unquoted also keeps cmd's "strip the outer pair" rule out of it.
     let command = argv.join(" ");
     let log = elevated_log().display().to_string();
-    let inner = format!("/c {command} > \"{log}\" 2>&1");
+    // `< NUL` matters as much as the redirect. `wsl --install -d Ubuntu` finishes by
+    // launching the new distro, which asks — interactively — for a UNIX username and
+    // password. With stdout going to a file that question is *invisible*, and the window
+    // would sit there forever looking finished. At EOF the prompt gives up instead, leaving
+    // a distro that answers as root, which is all the sidecar needs. An elevated fix can
+    // never be interactive anyway: its console is not one we can put a question in.
+    let inner = format!("/c {command} < NUL > \"{log}\" 2>&1");
     // Single-quoted for PowerShell, doubling any quote inside — nothing here contains one
     // today, and a future path must not be able to break out of the string.
     let script = format!(
@@ -1352,7 +1358,7 @@ mod encoding_tests {
 
     #[test]
     fn elevation_wraps_the_command_for_windows_only() {
-        let argv = elevated(&["wsl.exe", "--install", "-d", "Ubuntu", "--no-launch"]);
+        let argv = elevated(&["wsl.exe", "--install", "-d", "Ubuntu"]);
         if cfg!(windows) {
             assert_eq!(argv[0], "powershell.exe");
             let script = argv.last().expect("the script");
@@ -1361,7 +1367,12 @@ mod encoding_tests {
             assert!(script.contains("-Verb RunAs"), "{script}");
             assert!(script.contains("-Wait"), "{script}");
             assert!(script.contains("exit $p.ExitCode"), "{script}");
-            assert!(script.contains("wsl.exe --install -d Ubuntu --no-launch"), "{script}");
+            assert!(script.contains("wsl.exe --install -d Ubuntu"), "{script}");
+            // Not `--no-launch`, which can leave the distro unregistered
+            // (microsoft/WSL#10646) — the interactive prompt is denied stdin instead, or an
+            // invisible question hangs the window forever (docs §61).
+            assert!(!script.contains("--no-launch"), "{script}");
+            assert!(script.contains("< NUL"), "{script}");
             // The whole point of going through cmd: an elevated child has its own console,
             // so without this redirect its output is lost and the pane has nothing to show
             // (docs §60).
@@ -1369,7 +1380,7 @@ mod encoding_tests {
             assert!(script.contains(&format!("> \"{log}\" 2>&1")), "{script}");
         } else {
             // Everywhere else it must stay the plain command, or the Linux dev path breaks.
-            assert_eq!(argv, vec!["wsl.exe", "--install", "-d", "Ubuntu", "--no-launch"]);
+            assert_eq!(argv, vec!["wsl.exe", "--install", "-d", "Ubuntu"]);
         }
     }
 
