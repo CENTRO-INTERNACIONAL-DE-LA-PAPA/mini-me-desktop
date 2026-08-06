@@ -50,9 +50,13 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   the Setup pane. `rounded_md` and `flex_none` are no longer reachable to omit, `disabled` is
   one flag rather than a colour plus a guard, and `Label::ellipsis()` cannot produce §59's
   collapse. Three controls stay hand-written, each with a comment saying why. **Awaiting eyes.**
-- ⬜ **`Modal` and `Panel`** — the other half, and the other bug class: "actions inside the
-  scroll area", three times (§40, §41, §52). Needs thirteen scrolling panes migrated, whose
-  only proof is visual — so it wants a window open.
+- 🟡 **`Modal`** — built (§68), and Setup moved into it: one preferences window with a nav rail
+  (Appearance, Model, Research, Backend, Setup) instead of a modal plus a right-hand column
+  that hid the research panel. `body` and `actions` are separate slots, so "actions inside the
+  scroll area" has nowhere left to happen. Toggles are now Zed-style rows with a description
+  and a real switch. **Awaiting eyes.**
+- ⬜ **The theme picker as a dropdown**, the way Zed does it: a button that opens a *searchable
+  popup*, not an always-open inline list. `anchored` + `deferred` from §64 is the machinery.
 - ⬜ **Bundle a font** — fenced code still renders in the UI font.
 - ⬜ **SVG icons** instead of the text glyphs `◎ ▤ ▥ ⏎`.
 - ⬜ **`uniform_list` for the transcript** — every message is laid out every frame.
@@ -4133,3 +4137,49 @@ this type deliberately does not cover, and a tone with no caller is a design voc
 ahead of the design.
 
 That is the next increment, and it wants a window open.
+
+## 68. Setup stops being a pane and becomes a page (2026-08-05)
+
+Four screenshots of Zed's settings window settled a question this app had been answering badly:
+**where does configuration live?** Zed's answer is one floating window with a nav rail down the
+left, a page on the right, and every row shaped the same — title and description on one side,
+the control that changes it on the other.
+
+Ours had Settings as a centred modal and Setup as a 420px column in the right-hand slot. That
+slot belongs to the research panel, so **opening Setup hid the outputs you were diagnosing it
+about**, and Setup's own "Settings" button existed only to get from one to the other.
+
+Both are now pages of one window: Appearance, Model, Research, Backend, Setup. Reaching Setup is
+a click in the rail, and the button that used to shuttle between them is gone. The first blocked
+report still opens the window by itself, on the page that says what is wrong — the guided first
+run, unchanged in behaviour and no longer costing the chat 420px.
+
+**`ui::Modal` is what made this cheap, and it is a shape rather than a style.** Actions inside
+the scroll area is three separate bugs (§40, §41, §52) and the fix each time was moving one
+`div` out of one container. Here `body` and `actions` are separate slots, so a Save button has
+nowhere to scroll away to; `min_h_0` on the body is inside the component, so a long page cannot
+push the buttons off the bottom (§40, §48, §51, §53). Both defects are now unreachable rather
+than remembered.
+
+Read out of `settings_ui.rs` rather than guessed from the pictures: Zed builds the rail from a
+two-level `NavBarEntry` tree, and a row is `h_flex().justify_between()` with a title-and-
+description stack against the control. The rail here is flat, because two levels is one more
+than this app has sections for.
+
+**The toggles gained a sentence each, and that is the real change.** They were `☑ Run code on
+this machine` — one element that read the same way, which was the argument for them in the first
+place and was true. But it made a setting's *name* and its *state* the same piece of text, so
+nothing could say what the setting **did** without lengthening the line. Split into
+`ui::setting_row` plus `ui::Toggle`, the description has somewhere to live: "Run code on this
+machine" is a sentence about trust, not a preference, and the name alone never said so.
+
+`ui::Toggle` is two flex boxes — `justify_end` moves the knob — rather than absolute positioning,
+so there is no arithmetic to get wrong at a size nobody re-measures. It also retires one of the
+three hand-written exceptions from §67: the checkbox row was only an exception because it was
+full width, and a row that is a *row* plus a control that is `flex_none` is the shape that was
+wanted all along.
+
+**Still to do, and named so it does not quietly lapse:** Zed's theme picker is a dropdown
+*button* that opens a searchable popup, and ours is still an always-open inline list. The
+machinery for it exists — `anchored` + `deferred`, from the right-click menu in §64 — and it is
+the next thing on this pane. The scrollbar, checked in the same pass, is fine.

@@ -215,6 +215,54 @@ actions!(
 /// the panel says "stored" or "not set" beside them. A field left blank on save keeps
 /// whatever is already in the keychain; that is what lets someone change their model
 /// without re-pasting a key.
+/// A page of the preferences window.
+///
+/// Setup is one of these rather than a pane of its own. It used to live in the right-hand
+/// slot, which meant opening it *closed the research panel* and cost the chat 420px for as
+/// long as it was open — and it is the same kind of thing as the rest of this window: something
+/// you visit, change, and leave. Zed puts every one of these behind one nav rail, and the
+/// screenshots of it are what settled the shape (docs §68).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum Section {
+    Appearance,
+    #[default]
+    Model,
+    Research,
+    Backend,
+    Setup,
+}
+
+impl Section {
+    /// In rail order.
+    const ALL: [Section; 5] = [
+        Section::Appearance,
+        Section::Model,
+        Section::Research,
+        Section::Backend,
+        Section::Setup,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Section::Appearance => "Appearance",
+            Section::Model => "Model",
+            Section::Research => "Research",
+            Section::Backend => "Backend",
+            Section::Setup => "Setup",
+        }
+    }
+
+    fn id(self) -> &'static str {
+        match self {
+            Section::Appearance => "appearance",
+            Section::Model => "model",
+            Section::Research => "research",
+            Section::Backend => "backend",
+            Section::Setup => "setup",
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Field {
     ModelId,
@@ -243,6 +291,15 @@ impl Field {
             Field::AstaToken => "Asta token",
             Field::AstaApiKey => "Asta API key",
             Field::Port => "Backend port",
+        }
+    }
+
+    /// Which page of the preferences window this field appears on.
+    fn section(self) -> Section {
+        match self {
+            Field::ModelId | Field::BaseUrl | Field::ApiKey => Section::Model,
+            Field::AstaToken | Field::AstaApiKey => Section::Research,
+            Field::Port => Section::Backend,
         }
     }
 
@@ -932,7 +989,8 @@ struct Workbench {
     settings_note: String,
     /// Setup pane: open flag, the last report, and whether checks are in flight.
     /// `None` before the first run — the pane says "checking…" rather than "all clear".
-    setup_open: bool,
+    /// Which page of the preferences window is showing.
+    settings_section: Section,
     report: Option<preflight::Report>,
     checking: bool,
     /// Set when a fix has just succeeded, so the re-check it triggered is compared against
@@ -1108,7 +1166,7 @@ impl Workbench {
             draft: settings::Settings::load(),
             fields,
             settings_note: String::new(),
-            setup_open: false,
+            settings_section: Section::default(),
             report: None,
             checking: false,
             judge_after_recheck: false,
@@ -1403,8 +1461,10 @@ impl Workbench {
                         workbench.judge_finished_fix();
                     }
                     if first && blocked {
-                        workbench.setup_open = true;
-                        workbench.settings_open = false;
+                        // The first report is the guided first run: open the window on the
+                        // page that says what is wrong.
+                        workbench.settings_section = Section::Setup;
+                        workbench.settings_open = true;
                     }
                     cx.notify();
                 });
@@ -1417,8 +1477,8 @@ impl Workbench {
     /// Show the Setup pane, re-checking as it opens — a stale report is worse than none,
     /// because the whole point is to reflect what the machine is like *now*.
     fn open_setup(&mut self, cx: &mut Context<Self>) {
-        self.setup_open = true;
-        self.settings_open = false;
+        self.settings_section = Section::Setup;
+        self.settings_open = true;
         self.run_preflight(cx);
     }
 
@@ -3598,11 +3658,6 @@ impl Workbench {
             cx.notify();
             return;
         }
-        if self.setup_open {
-            self.setup_open = false;
-            self.restore_focus = true;
-            cx.notify();
-        }
     }
 
     fn toggle_settings(&mut self, _: &ToggleSettings, window: &mut Window, cx: &mut Context<Self>) {
@@ -3628,10 +3683,11 @@ impl Workbench {
         // the mark at top-left threw away the theme being looked at (docs §50).
         self.draft.theme = self.applied_theme.clone();
         self.settings_note.clear();
-        // Both live in the right-hand slot, so opening one closes the other. Setup's
-        // "Settings" button is the usual route here — you go there to paste the key it
-        // told you was missing.
-        self.setup_open = false;
+        // Opened by the keyboard or the palette rather than from Setup, so it lands on the
+        // page most people came for. Reaching Setup is now one click in the rail.
+        if self.settings_section == Section::Setup {
+            self.settings_section = Section::Model;
+        }
         let values: Vec<(Field, String)> = self
             .fields
             .iter()
@@ -3736,7 +3792,104 @@ impl Workbench {
     }
 
     /// The Settings pane, in place of the artifacts panel.
-    fn settings_pane(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The preferences window: rail on the left, the chosen page on the right.
+    ///
+    /// Every page goes through here, so the frame, the scrolling and the pinned actions are
+    /// decided once. `ui::Modal` is what enforces that the actions cannot end up inside the
+    /// part that scrolls.
+    fn preferences_window(
+        &self,
+        body: impl IntoElement,
+        actions: impl IntoElement,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let current = self.settings_section;
+        let mut rail = ui::nav_rail();
+        for section in Section::ALL {
+            rail = rail.child(
+                ui::NavEntry::new(section.id(), section.label(), section == current).on_click(
+                    cx.listener(move |workbench, _event, _window, cx| {
+                        workbench.settings_section = section;
+                        // Landing on Setup should show what is true *now*: a stale report is
+                        // the one thing worse than none (the reason `open_setup` re-checks).
+                        if section == Section::Setup {
+                            workbench.run_preflight(cx);
+                        }
+                        cx.notify();
+                    }),
+                ),
+            );
+        }
+
+        let mut footer = div().flex().flex_col().gap_1();
+        // What is still missing, before the user finds out from a failed turn. Shown on every
+        // page, because the page you are on is rarely the one with the problem.
+        let has_key = settings::secret(&self.draft.key_name()).is_some()
+            || !self.field_text(Field::ApiKey, cx).is_empty();
+        for problem in self.draft.problems(has_key) {
+            footer = footer.child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .text_color(rgb(theme::error()))
+                    .text_xs()
+                    .child(problem),
+            );
+        }
+        if !self.settings_note.is_empty() {
+            footer = footer.child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .text_color(rgb(theme::text_muted()))
+                    .text_xs()
+                    .child(self.settings_note.clone()),
+            );
+        }
+        footer = footer.child(
+            div()
+                .text_color(rgb(theme::text_faint()))
+                .text_xs()
+                .child(format!(
+                    "Keys live in your OS keychain, never in a file. {}",
+                    settings::settings_path().display()
+                )),
+        );
+
+        ui::Modal::new("settings", "SETTINGS")
+            // Wider than the 520px column it replaces: the rail takes 150 of it, and the
+            // Setup page has a check, a reason and two buttons to fit on a line.
+            .width(760.)
+            .nav(rail)
+            .body(body)
+            .actions(actions)
+            .footer(footer)
+            .into_any_element()
+    }
+
+    /// The buttons for the Setup page. Re-check is its Save.
+    fn setup_actions(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        ui::actions()
+            .child(
+                ui::Button::new(
+                    "recheck",
+                    if self.checking { "Checking…" } else { "Re-check" },
+                )
+                .tone(ui::Tone::Accent)
+                .on_click(
+                    cx.listener(|workbench, _event, _window, cx| workbench.run_preflight(cx)),
+                ),
+            )
+            .child(ui::Button::new("close-setup", "Close").on_click(cx.listener(
+                |workbench, _event, _window, cx| {
+                    workbench.settings_open = false;
+                    workbench.restore_focus = true;
+                    cx.notify();
+                },
+            )))
+    }
+
+    fn settings_pane(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let provider = settings::provider(&self.draft.provider);
         let needs_base_url = provider.is_some_and(|p| p.needs_base_url);
         let key_name = self.draft.key_name();
@@ -3744,27 +3897,28 @@ impl Workbench {
         // A centred modal, not a column. As a column it took 420px off the chat for as
         // long as it was open, and settings are something you visit and leave — the same
         // argument that makes Zed's fifty pickers modal rather than panels (docs §51).
-        let mut pane = div()
-            .id("settings-body")
-            .flex()
-            .flex_col()
-            .w_full()
-            .min_w_0()
-            .flex_grow()
-            .overflow_y_scroll()
-            .p_4()
-            .gap_3()
+        let section = self.settings_section;
+        // Setup is a page like any other, and brings its own content.
+        if section == Section::Setup {
+            return self.preferences_window(self.setup_pane(cx), self.setup_actions(cx), cx);
+        }
+
+        let mut pane = div().flex().flex_col().w_full().min_w_0().gap_3();
+        if section == Section::Appearance {
             // A list, not a cycle button. Cycling meant the only way to find a palette was
             // to click through every one, and there was no way to see what was available —
             // Zed shows all of them and previews on *hover*, which is the whole point: a
             // palette is judged by looking at it, not by reading its name (docs §50).
-            .child(section_label("THEME"))
-            .child(self.theme_list(cx))
-            .child(section_label("MODEL"))
-            .child(self.provider_row(cx))
-            .child(self.model_list(cx));
+            pane = pane.child(self.theme_list(cx));
+        }
+        if section == Section::Model {
+            pane = pane.child(self.provider_row(cx)).child(self.model_list(cx));
+        }
 
         for (field, composer) in &self.fields {
+            if field.section() != section {
+                continue;
+            }
             if *field == Field::BaseUrl && !needs_base_url {
                 continue;
             }
@@ -3804,159 +3958,79 @@ impl Workbench {
             );
         }
 
-        // Toggles, as rows rather than checkboxes — a row is one element and reads the
-        // same way.
-        for (label, value, toggle) in [
-            (
-                "Run code on this machine",
-                self.draft.local_execution,
-                0usize,
-            ),
-            ("Ask before every command", self.draft.approve_execute, 1),
-            // Preview API, and it needs the generated graph config — so opt-in, and
-            // labelled by what it does rather than by what it is called upstream.
-            (
-                "Let work run in the background",
-                self.draft.async_subagents,
-                2,
-            ),
-        ] {
-            pane = pane.child(
-                // A checkbox row, not a button: full width by design, where every
-                // `ui::Button` is `flex_none`. Making it one would break the Settings layout.
-                div()
-                    .id(SharedString::from(format!("toggle-{toggle}")))
-                    .w_full()
-                    .p_2()
-                    .border_1()
-                    .border_color(rgb(if value { theme::accent() } else { theme::border() }))
-                    .text_color(rgb(if value { theme::text() } else { theme::text_muted() }))
-                    .text_sm()
-                    .hover(|style| style.cursor_pointer())
-                    .child(format!("{} {label}", if value { "☑" } else { "☐" }))
-                    .on_click(cx.listener(move |workbench, _event, _window, cx| {
+        // Each setting says what it does. Half of these are things a researcher has no reason
+        // to have an opinion about until someone tells them — "Run code on this machine" is a
+        // sentence about trust, not a preference, and the name alone never said so.
+        for (label, description, value, toggle) in if section == Section::Backend {
+            vec![
+                (
+                    "Run code on this machine",
+                    "Commands run in your own WSL distro rather than a remote sandbox.",
+                    self.draft.local_execution,
+                    0usize,
+                ),
+                (
+                    "Ask before every command",
+                    "Pause and show each command, so nothing runs without you seeing it.",
+                    self.draft.approve_execute,
+                    1,
+                ),
+                // Preview API, and it needs the generated graph config — so opt-in, and
+                // labelled by what it does rather than by what it is called upstream.
+                (
+                    "Let work run in the background",
+                    "Long jobs keep going while you carry on asking questions.",
+                    self.draft.async_subagents,
+                    2,
+                ),
+            ]
+        } else {
+            Vec::new()
+        } {
+            pane = pane.child(ui::setting_row(
+                label,
+                description,
+                ui::Toggle::new(SharedString::from(format!("toggle-{toggle}")), value).on_click(
+                    cx.listener(move |workbench, _event, _window, cx| {
                         match toggle {
                             0 => {
-                                workbench.draft.local_execution =
-                                    !workbench.draft.local_execution
+                                workbench.draft.local_execution = !workbench.draft.local_execution
                             }
                             1 => {
-                                workbench.draft.approve_execute =
-                                    !workbench.draft.approve_execute
+                                workbench.draft.approve_execute = !workbench.draft.approve_execute
                             }
                             _ => {
-                                workbench.draft.async_subagents =
-                                    !workbench.draft.async_subagents
+                                workbench.draft.async_subagents = !workbench.draft.async_subagents
                             }
                         }
                         cx.notify();
-                    })),
-            );
+                    }),
+                ),
+            ));
         }
 
-        // What is still missing, before the user finds out from a failed turn.
-        let has_key = settings::secret(&key_name).is_some()
-            || !self.field_text(Field::ApiKey, cx).is_empty();
-        for problem in self.draft.problems(has_key) {
-            pane = pane.child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .text_color(rgb(theme::error()))
-                    .text_xs()
-                    .child(problem),
-            );
-        }
-
-        if !self.settings_note.is_empty() {
-            pane = pane.child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .text_color(rgb(theme::text_muted()))
-                    .text_xs()
-                    .child(self.settings_note.clone()),
-            );
-        }
-
-        let actions = div()
-                .flex()
-                .flex_row()
-                .gap_3()
-                .flex_none()
-                .p_4()
-                .border_t_1()
-                .border_color(rgb(theme::border()))
-                .child(
-                    ui::Button::new("save-settings", "Save")
-                        .tone(ui::Tone::Accent)
-                        .on_click(cx.listener(|workbench, _event, _window, cx| {
-                            workbench.save_settings(cx)
-                        })),
-                )
-                .child(
-                    ui::Button::new("close-settings", "Close")
-                        .on_click(cx.listener(|workbench, _event, _window, cx| {
-                            // Closing without saving puts the saved palette back — the
-                            // preview was a look, not a change.
-                            let saved = settings::Settings::load();
-                            workbench.applied_theme = saved.theme.clone();
-                            settings::apply_theme(&saved);
-                            workbench.settings_open = false;
-                            workbench.restore_focus = true;
-                            cx.notify();
-                        })),
-                );
-
-        // Centred over a dimmed workbench, so the chat stays visible behind it and
-        // clicking away is the obvious exit. Title and actions are fixed; only the middle
-        // scrolls — Save and Close were below the fold, which is the same defect the
-        // approval card had in §40 and the third time it has been this (docs §52).
-        div()
-            .id("settings-backdrop")
-            .absolute()
-            .inset_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .bg(if theme::is_light(&theme::current()) {
-                gpui::rgba(0x33333366)
-            } else {
-                gpui::rgba(0x00000099)
-            })
+        let actions = ui::actions()
             .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .w(px(520.))
-                    .max_h(px(720.))
-                    .rounded_lg()
-                    .overflow_hidden()
-                    .bg(rgb(theme::overlay()))
-                    .border_1()
-                    .border_color(rgb(theme::border_strong()))
-                    .child(
-                        div()
-                            .flex_none()
-                            .px_4()
-                            .pt_4()
-                            .child(section_label("SETTINGS")),
-                    )
-                    .child(pane)
-                    .child(actions)
-                    .child(
-                        div()
-                            .flex_none()
-                            .px_4()
-                            .pb_3()
-                            .text_color(rgb(theme::text_faint()))
-                            .text_xs()
-                            .child(format!(
-                                "Keys live in your OS keychain, never in a file. {}",
-                                settings::settings_path().display()
-                            )),
+                ui::Button::new("save-settings", "Save")
+                    .tone(ui::Tone::Accent)
+                    .on_click(
+                        cx.listener(|workbench, _event, _window, cx| workbench.save_settings(cx)),
                     ),
             )
+            .child(ui::Button::new("close-settings", "Close").on_click(cx.listener(
+                |workbench, _event, _window, cx| {
+                    // Closing without saving puts the saved palette back — the preview was a
+                    // look, not a change.
+                    let saved = settings::Settings::load();
+                    workbench.applied_theme = saved.theme.clone();
+                    settings::apply_theme(&saved);
+                    workbench.settings_open = false;
+                    workbench.restore_focus = true;
+                    cx.notify();
+                },
+            )));
+
+        self.preferences_window(pane, actions, cx)
     }
 
     /// The Setup pane: one row per check, each carrying the command that fixes it.
@@ -3965,22 +4039,10 @@ impl Workbench {
     /// in; a checklist just says what is true, which is also what makes it useful the
     /// *second* time — when one thing broke on a machine that used to work.
     fn setup_pane(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut pane = div()
-            .id("setup")
-            .flex()
-            .flex_col()
-            .w(px(420.))
-            .flex_none()
-            .h_full()
-            .overflow_y_scroll()
-            .m_1()
-            .rounded_lg()
-            .bg(rgb(theme::surface()))
-            .border_1()
-            .border_color(rgb(theme::border()))
-            .p_4()
-            .gap_3()
-            .child(section_label("SETUP"));
+        // A page inside the preferences window: no frame, no scroll container and no action
+        // row of its own. `ui::Modal` owns all three, which is what stops Re-check ending up
+        // inside the scrolling part again (§40, §41, §52).
+        let mut pane = div().flex().flex_col().w_full().min_w_0().gap_3();
 
         match &self.report {
             None => {
@@ -4295,34 +4357,7 @@ impl Workbench {
             pane = pane.child(log);
         }
 
-        pane.child(
-            div()
-                .flex()
-                .flex_row()
-                .gap_3()
-                .child(
-                    ui::Button::new("recheck", if self.checking { "Checking…" } else { "Re-check" })
-                        .tone(ui::Tone::Accent)
-                        .on_click(cx.listener(|workbench, _event, _window, cx| {
-                            workbench.run_preflight(cx)
-                        })),
-                )
-                .child(
-                    ui::Button::new("setup-to-settings", "Settings")
-                        .on_click(cx.listener(|workbench, _event, _window, cx| {
-                            workbench.setup_open = false;
-                            workbench.open_settings(None, cx);
-                        })),
-                )
-                .child(
-                    ui::Button::new("close-setup", "Close")
-                        .on_click(cx.listener(|workbench, _event, _window, cx| {
-                            workbench.setup_open = false;
-                            workbench.restore_focus = true;
-                            cx.notify();
-                        })),
-                ),
-        )
+        pane
         .child(
             div()
                 .w_full()
@@ -5357,11 +5392,9 @@ impl Render for Workbench {
             .when(self.sidebar_open, |body| body.child(self.rail(cx)))
             .child(self.chat_pane(cx));
 
-        // One right-hand pane at a time: Setup wins over the research panel, because the
-        // only reason it is open is that something is stopping a turn.
-        body = if self.setup_open {
-            body.child(self.setup_pane(cx))
-        } else if self.panel_open {
+        // The right-hand slot belongs to the research panel alone. Setup used to take it,
+        // which meant diagnosing a problem hid the outputs you were diagnosing it about.
+        body = if self.panel_open {
             body.child(self.artifacts_panel(cx))
         } else {
             body

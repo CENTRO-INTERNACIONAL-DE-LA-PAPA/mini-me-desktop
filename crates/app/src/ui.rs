@@ -26,9 +26,10 @@
 //! button is meant to change nothing on screen — except where a site was missing a property
 //! it should always have had.
 //!
-//! There is no `Modal` or `Panel` here yet. Both are about *where actions sit relative to a
-//! scroll area* — the other repeated bug — and migrating thirteen scrolling panes is a change
-//! whose only proof is visual. That is the next increment, in front of a window.
+//! [`Modal`] is the other half, and the other bug class: **actions inside the scroll area**,
+//! three times (§40, §41, §52). It is not a style — it is a *shape*. The body scrolls, the
+//! header and the actions do not, and because they are separate slots there is no way to put a
+//! Save button somewhere it can scroll out of reach.
 //!
 //! It also deliberately does not try to cover the **twenty-three borderless clickables** —
 //! sidebar entries, menu rows, gallery cards. Those are rows with their own layout, not
@@ -280,6 +281,323 @@ pub fn actions() -> Div {
         .gap_3()
         .w_full()
         .min_w_0()
+}
+
+/// A floating window over a dimmed workbench: header, a scrolling middle, pinned actions.
+///
+/// # The shape is the point
+///
+/// Approve/Reject scrolled out of reach in §40, Save and Close did the same in §52, and both
+/// times the fix was to move one `div` out of the scrolling container. Here the slots are
+/// separate arguments, so the mistake has nowhere to happen: whatever goes in [`Modal::body`]
+/// scrolls and whatever goes in [`Modal::actions`] is pinned, and a caller cannot swap them
+/// without noticing.
+///
+/// `min_h_0` on the body is the other half. A flex child refuses to shrink below its content,
+/// so without it a long body pushes the actions off the bottom instead of scrolling — four
+/// bugs (§40, §48, §51, §53), and not something a call site should have to remember.
+///
+/// The optional [`Modal::nav`] rail is Zed's settings shape: sections down the left, the chosen
+/// one on the right. Zed builds it from a two-level `NavBarEntry` tree; this is the same idea
+/// with the tree flattened, because two levels is one more than this app has sections for.
+#[derive(IntoElement, Default)]
+pub struct Modal {
+    id: SharedString,
+    title: SharedString,
+    width: f32,
+    nav: Option<gpui::AnyElement>,
+    body: Option<gpui::AnyElement>,
+    actions: Option<gpui::AnyElement>,
+    footer: Option<gpui::AnyElement>,
+}
+
+impl Modal {
+    pub fn new(id: impl Into<SharedString>, title: impl Into<SharedString>) -> Self {
+        Self {
+            id: id.into(),
+            title: title.into(),
+            width: 520.,
+            ..Default::default()
+        }
+    }
+
+    pub fn width(mut self, width: f32) -> Self {
+        self.width = width;
+        self
+    }
+
+    /// A rail of sections down the left. Fixed width and never scrolled with the content.
+    pub fn nav(mut self, nav: impl IntoElement) -> Self {
+        self.nav = Some(nav.into_any_element());
+        self
+    }
+
+    /// The part that scrolls. Everything else is pinned.
+    pub fn body(mut self, body: impl IntoElement) -> Self {
+        self.body = Some(body.into_any_element());
+        self
+    }
+
+    /// Buttons along the bottom. Cannot scroll away — that is the whole reason this is a
+    /// separate slot rather than the last child of `body`.
+    pub fn actions(mut self, actions: impl IntoElement) -> Self {
+        self.actions = Some(actions.into_any_element());
+        self
+    }
+
+    /// A muted line under the actions: where files live, what a key is for.
+    pub fn footer(mut self, footer: impl IntoElement) -> Self {
+        self.footer = Some(footer.into_any_element());
+        self
+    }
+}
+
+impl RenderOnce for Modal {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let scrolling = div()
+            .id(SharedString::from(format!("{}-body", self.id)))
+            .flex()
+            .flex_col()
+            .flex_grow()
+            // Without this the body pushes the actions off the bottom instead of scrolling.
+            .min_h_0()
+            .min_w_0()
+            .overflow_y_scroll()
+            .p_4()
+            .gap_3()
+            .children(self.body);
+
+        let mut card = div()
+            .flex()
+            .flex_col()
+            .w(gpui::px(self.width))
+            .max_h(gpui::px(720.))
+            .min_h_0()
+            .rounded_lg()
+            .overflow_hidden()
+            .bg(rgb(theme::overlay()))
+            .border_1()
+            .border_color(rgb(theme::border_strong()))
+            .child(
+                div()
+                    .flex_none()
+                    .px_4()
+                    .pt_4()
+                    .text_color(rgb(theme::accent()))
+                    .text_xs()
+                    .child(self.title),
+            );
+
+        // With a rail, the middle of the card is a row: sections left, content right.
+        card = match self.nav {
+            Some(nav) => card.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_grow()
+                    .min_h_0()
+                    .min_w_0()
+                    .child(nav)
+                    .child(scrolling),
+            ),
+            None => card.child(scrolling),
+        };
+
+        for pinned in [self.actions, self.footer].into_iter().flatten() {
+            card = card.child(div().flex_none().px_4().pb_3().child(pinned));
+        }
+
+        // Dimmed, so the conversation stays visible behind it and clicking away is the
+        // obvious exit.
+        div()
+            .id(SharedString::from(format!("{}-backdrop", self.id)))
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(if theme::is_light(&theme::current()) {
+                gpui::rgba(0x33333366)
+            } else {
+                gpui::rgba(0x00000099)
+            })
+            .child(card)
+    }
+}
+
+/// One entry in a [`Modal::nav`] rail.
+///
+/// A row, not a [`Button`]: it is full width and marks a *chosen* state, which is the same
+/// reason the provider pill and the settings toggle stayed hand-written.
+#[derive(IntoElement)]
+pub struct NavEntry {
+    id: ElementId,
+    label: SharedString,
+    selected: bool,
+    on_click: Option<OnClick>,
+}
+
+impl NavEntry {
+    pub fn new(id: impl Into<ElementId>, label: impl Into<SharedString>, selected: bool) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            selected,
+            on_click: None,
+        }
+    }
+
+    pub fn on_click(
+        mut self,
+        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_click = Some(Box::new(handler));
+        self
+    }
+}
+
+impl RenderOnce for NavEntry {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let row = div()
+            .id(self.id)
+            .w_full()
+            .min_w_0()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .text_sm()
+            .text_color(rgb(if self.selected {
+                theme::text()
+            } else {
+                theme::text_muted()
+            }))
+            .when(self.selected, |row| row.bg(rgb(theme::elevated())))
+            .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
+            .child(self.label);
+        match self.on_click {
+            Some(handler) => row.on_click(move |event, window, cx| handler(event, window, cx)),
+            None => row,
+        }
+    }
+}
+
+/// The rail those entries sit in.
+pub fn nav_rail() -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .flex_none()
+        .w(gpui::px(150.))
+        .gap_1()
+        .p_2()
+        .border_r_1()
+        .border_color(rgb(theme::border()))
+}
+
+/// A settings row: what it is on the left, the control that changes it on the right.
+///
+/// Zed's shape — `h_flex().justify_between()` with a title-and-description stack on one side
+/// and the control on the other — read off `settings_ui.rs` rather than guessed from a
+/// screenshot. The description matters: half of these settings are things a researcher has no
+/// reason to have an opinion about until someone says what they do.
+pub fn setting_row(
+    title: impl Into<SharedString>,
+    description: impl Into<SharedString>,
+    control: impl IntoElement,
+) -> Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap_4()
+        .w_full()
+        .min_w_0()
+        .py_2()
+        .border_b_1()
+        .border_color(rgb(theme::border()))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_grow()
+                .min_w_0()
+                .gap_1()
+                .child(Label::new(title))
+                .child(Label::new(description).muted().size(Size::Compact)),
+        )
+        .child(div().flex_none().child(control))
+}
+
+/// An on/off switch: a track that fills when on, and a knob that slides to the end.
+///
+/// A switch rather than the `☑`/`☐` row it replaces. The row was one element and read the
+/// same way, which was true — but it meant a setting's *name* and its *state* were the same
+/// piece of text, so nothing could say what the setting did without making the line longer.
+/// Split into [`setting_row`] plus this, the description finally has somewhere to live.
+///
+/// Built from two flex boxes rather than absolute positioning: `justify_end` is what moves the
+/// knob, so there is no arithmetic to get wrong at a size nobody re-measures.
+#[derive(IntoElement)]
+pub struct Toggle {
+    id: ElementId,
+    on: bool,
+    on_click: Option<OnClick>,
+}
+
+impl Toggle {
+    pub fn new(id: impl Into<ElementId>, on: bool) -> Self {
+        Self {
+            id: id.into(),
+            on,
+            on_click: None,
+        }
+    }
+
+    pub fn on_click(
+        mut self,
+        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_click = Some(Box::new(handler));
+        self
+    }
+}
+
+impl RenderOnce for Toggle {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let track = div()
+            .id(self.id)
+            .flex()
+            .flex_row()
+            .items_center()
+            .flex_none()
+            .w(gpui::px(34.))
+            .h(gpui::px(18.))
+            .px(gpui::px(2.))
+            .rounded_full()
+            .border_1()
+            .border_color(rgb(if self.on {
+                theme::accent()
+            } else {
+                theme::border_strong()
+            }))
+            .bg(rgb(if self.on {
+                theme::accent_soft()
+            } else {
+                theme::surface()
+            }))
+            .hover(|style| style.cursor_pointer())
+            .when(self.on, |track| track.justify_end())
+            .child(div().size(gpui::px(12.)).rounded_full().bg(rgb(if self.on {
+                theme::accent()
+            } else {
+                theme::text_faint()
+            })));
+        match self.on_click {
+            Some(handler) => track.on_click(move |event, window, cx| handler(event, window, cx)),
+            None => track,
+        }
+    }
 }
 
 #[cfg(test)]
