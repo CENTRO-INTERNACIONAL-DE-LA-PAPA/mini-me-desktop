@@ -1052,9 +1052,9 @@ impl BackendSupervisor {
 
     /// Ensure *something* healthy is listening: attach if it is already up,
     /// otherwise spawn and wait. Returns a status string for the UI.
-    pub async fn ensure_running(&mut self, client: &LangGraphClient) -> Result<String> {
+    pub async fn ensure_running(&mut self, client: &LangGraphClient) -> Result<Started> {
         if client.is_healthy().await {
-            return Ok("attached to a running backend".into());
+            return Ok(Started::Attached);
         }
         if self.config.attach_only {
             // Name the variable: this mode is opt-in via the environment, and a
@@ -1072,7 +1072,7 @@ impl BackendSupervisor {
         // `langgraph dev` imports the graph on boot, so first health can take a
         // while on a cold venv.
         self.wait_until_healthy(client, 120).await?;
-        Ok("sidecar started".into())
+        Ok(Started::Spawned)
     }
 
     /// Poll `GET /ok` until it responds or the budget runs out.
@@ -1098,6 +1098,30 @@ impl BackendSupervisor {
             "backend did not become healthy within {} attempts",
             attempts
         )
+    }
+}
+
+/// Whether this app started the backend it is talking to.
+///
+/// A typed answer rather than a sentence, because it is load-bearing: the Python overlay lives
+/// in the backend *process*, so an attached one may be running an older copy than this app
+/// ships — and every symptom of that is identical to a broken feature (docs §80). Matching on
+/// prose to find that out is how the two get confused.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Started {
+    /// Already healthy, so it was left running by an earlier session — possibly an earlier
+    /// *version*.
+    Attached,
+    /// Spawned by this app, so it is running the overlay this app shipped.
+    Spawned,
+}
+
+impl Started {
+    pub fn label(self) -> &'static str {
+        match self {
+            Started::Attached => "attached to a backend that was already running",
+            Started::Spawned => "backend started",
+        }
     }
 }
 

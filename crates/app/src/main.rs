@@ -1122,6 +1122,8 @@ struct Workbench {
     preview: Option<workspace::Output>,
     /// The researcher's past conversations, newest first.
     conversations: Vec<protocol::Conversation>,
+    /// How the app got hold of the backend it is talking to. `None` until it has one.
+    backend_start: Option<backend::Started>,
     /// Whether the list has ever come back. `false` means *loading*, which is not the same as
     /// empty — and saying "conversations you start will appear here" over a list that is merely
     /// still arriving is a claim the researcher has none (docs §79).
@@ -1285,6 +1287,7 @@ impl Workbench {
             preview: None,
             conversations: Vec::new(),
             conversations_loaded: false,
+            backend_start: None,
             pending_title: None,
             renaming: None,
             confirming_delete: None,
@@ -2232,7 +2235,10 @@ impl Workbench {
             let outcome = done.next().await;
             let _ = this.update(cx, |workbench, cx| {
                 match outcome {
-                    Some(Ok(status)) => workbench.say(format!("backend restarted — {status}"), cx),
+                    Some(Ok(status)) => {
+                        workbench.backend_start = Some(status);
+                        workbench.say("backend restarted", cx)
+                    }
                     Some(Err(error)) => workbench.say(format!("restart failed: {error:#}"), cx),
                     None => workbench.say("restart reported nothing back", cx),
                 }
@@ -2562,7 +2568,11 @@ impl Workbench {
             let status = ready.next().await;
             let _ = this.update(cx, |workbench, cx| {
                 if let Some(status) = status {
-                    workbench.status = status;
+                    workbench.status = status.label().into();
+                    // Remembered, not just announced. Whether this app started the backend
+                    // decides whether the backend is running this app's overlay, and the
+                    // status line is gone by the time that matters (docs §80).
+                    workbench.backend_start = Some(status);
                 }
                 workbench.refresh_conversations(cx);
                 workbench.refresh_project(cx);
@@ -4610,6 +4620,29 @@ impl Workbench {
         // row of its own. `ui::Modal` owns all three, which is what stops Re-check ending up
         // inside the scrolling part again (§40, §41, §52).
         let mut pane = div().flex().flex_col().w_full().min_w_0().gap_3();
+
+        // Said out loud, because it is invisible and load-bearing. The Python overlay lives in
+        // the backend *process*, so a server left running by an earlier session may be running
+        // an older copy than this app ships — and the only symptom is a feature that silently
+        // does nothing, which is exactly how §78 and §79 both presented (docs §80).
+        if self.backend_start == Some(backend::Started::Attached) {
+            pane = pane.child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .p_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(theme::warning()))
+                    .text_color(rgb(theme::warning()))
+                    .text_xs()
+                    .child(
+                        "This backend was already running when the app started, so it may be \
+                         running an older version of the app's Python overlay. If something \
+                         new does nothing, restart it below.",
+                    ),
+            );
+        }
 
         match &self.report {
             None => {

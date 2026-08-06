@@ -4842,3 +4842,44 @@ client can stop doing is looking finished while it happens.
 one level out — **"is a backend reachable" and "is it the backend this app shipped with" are
 different questions, and only the first was ever asked.** Every symptom of the second one is
 identical to a feature being broken.
+
+## 80. Where the conversations actually live, and why the wait is what it is (2026-08-06)
+
+Asked directly: why is loading conversations slow, and where are they stored? Both answers come
+out of `langgraph_runtime_inmem`, which is what `langgraph dev` runs on.
+
+**They are stored on this machine and nowhere else.**
+`langgraph_runtime_inmem/checkpoint.py:59` sets
+`filename = os.path.join(".langgraph_api", ".langgraph_checkpoint.")`, relative to the server's
+working directory — so for this app that is
+`~/.local/share/mini-me-desktop/backend/.langgraph_api/.langgraph_checkpoint.N.pckl`, inside the
+distro. Python pickles. Nothing is on anybody's server, and nothing leaves the machine.
+
+**Nothing about listing them is slow.** The runtime is *in-memory*: `d.load()` unpickles the whole
+store into RAM at startup, and every later read is a dictionary lookup. `GET /threads/search`
+answers instantly once the server is up.
+
+**So the wait is the server booting, and it has two parts.** `langgraph dev` imports the graph —
+which imports deepagents, LangChain, the MCP tool wiring and ten subagent definitions — and it
+unpickles the whole accumulated store. The first is fixed. The second **grows with history**, and
+that includes every background worker's thread (§51 found dozens of those in the sidebar for the
+same reason). A researcher who has used this for months boots slower than one who installed it
+yesterday, and no amount of client work changes either number. `rm -rf .langgraph_api` in the
+checkout resets it, at the price of every past conversation.
+
+What the client *can* stop doing is looking finished while it happens, which §79 fixed: the list
+now says "loading" rather than claiming there are none.
+
+### The state that should have been visible from the start
+
+§78 and §79 were two different bugs presenting one symptom — a feature that silently did nothing —
+and in both cases the invisible fact was the same: **the backend the app is talking to is not
+necessarily the backend the app shipped with.** `ensure_running` answers "is one reachable"; it
+never answered "is it mine".
+
+It does now. `Started::{Attached, Spawned}` is a typed answer rather than a sentence — matching on
+prose to discover this is how the two get confused in the first place — and when the app attaches
+to a server it did not start, the Setup page says so and points at the Restart button beside it.
+
+That is the sixth appearance of one shape in this project, and the clearest: a question that was
+never asked because a nearby question had already been answered.

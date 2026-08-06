@@ -15,7 +15,7 @@ use anyhow::{Context as _, Result};
 use futures::channel::mpsc;
 use tokio::sync::Mutex;
 
-use crate::backend::{BackendConfig, BackendSupervisor};
+use crate::backend::{BackendConfig, BackendSupervisor, Started};
 use crate::protocol::{
     AgentRef, AsyncTask, Conversation, Decision, Job, LangGraphClient, ModelChoice, Project,
     TurnEvent, TurnOutcome,
@@ -369,7 +369,7 @@ impl Sidecar {
     /// opened looking as though it had no history — and the 20-40 second build then
     /// happened while they waited on an answer instead of while they read the window
     /// (docs §50).
-    pub fn warm_up(&self) -> mpsc::UnboundedReceiver<String> {
+    pub fn warm_up(&self) -> mpsc::UnboundedReceiver<Started> {
         let (tx, rx) = mpsc::unbounded();
         let supervisor = self.supervisor.clone();
         let base_url = self.base_url.clone();
@@ -395,7 +395,7 @@ impl Sidecar {
     /// replacing it — right for speed, and it means the Python overlay a running server holds in
     /// memory survives an app update. Reloading it needed the process gone, and nothing in the
     /// app could ask for that (docs §79).
-    pub fn restart_backend(&self) -> mpsc::UnboundedReceiver<Result<String>> {
+    pub fn restart_backend(&self) -> mpsc::UnboundedReceiver<Result<Started>> {
         let (tx, rx) = mpsc::unbounded();
         let supervisor = self.supervisor.clone();
         let base_url = self.base_url.clone();
@@ -690,7 +690,7 @@ impl Sidecar {
             {
                 let mut supervisor = supervisor.lock().await;
                 let status = supervisor.ensure_running(&client).await?;
-                println!("health   : ok ({status})");
+                println!("health   : ok ({})", status.label());
             }
 
             // The spine panel depends on this custom route, so cover it here too —
@@ -836,7 +836,7 @@ async fn run_turn(
     {
         let mut supervisor = supervisor.lock().await;
         let status = supervisor.ensure_running(client).await?;
-        emit(TurnEvent::Status(status));
+        emit(TurnEvent::Status(status.label().to_string()));
     }
 
     // Reuse the conversation's thread; only create one when there isn't one yet.
