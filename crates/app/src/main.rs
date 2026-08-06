@@ -18,6 +18,7 @@ mod preflight;
 mod protocol;
 mod selection;
 mod settings;
+mod subagent;
 mod sidecar;
 mod theme;
 mod ui;
@@ -451,7 +452,7 @@ impl Command {
 /// of hidden — a hit at the start of a word counts for much more than one mid-word,
 /// and a hit adjacent to the previous one counts for more again. The list stays
 /// sorted, so "nt" puts "New thread" under the cursor while still showing the rest.
-fn match_score(query: &str, label: &str) -> Option<i32> {
+pub(crate) fn match_score(query: &str, label: &str) -> Option<i32> {
     let label: Vec<char> = label.to_lowercase().chars().collect();
     let query = query.to_lowercase();
 
@@ -2135,6 +2136,16 @@ impl Workbench {
         if self.streaming || prompt.trim().is_empty() {
             return;
         }
+        // `/name …` names a specialist. Resolved *before* anything is sent, because the failure
+        // this guards against is silent: sent as prose, `/eda-subagent do the thing` is a
+        // ten-minute wait for a turn that was never delegated (§55, §76).
+        let prompt = match subagent::parse(&prompt) {
+            None => prompt,
+            Some(command) => match self.resolve_subagent(&command, cx) {
+                Some(turn) => turn,
+                None => return,
+            },
+        };
         self.streaming = true;
         self.error = None;
         self.status = "starting…".into();
@@ -2203,6 +2214,45 @@ impl Workbench {
              be finishing it"
         };
         self.say(outcome, cx);
+    }
+
+    /// Turn a `/name …` into the turn to send, or refuse and say why.
+    ///
+    /// Every rejection leaves the prompt where it was, so nothing typed is lost to a typo.
+    fn resolve_subagent(
+        &mut self,
+        command: &subagent::Command,
+        cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let agents = workspace::subagents();
+        if agents.is_empty() {
+            // The registry is written when the backend assembles a coordinator, so before the
+            // first turn there is genuinely nothing to check against. Saying that is better than
+            // rejecting a name that may well be correct.
+            self.say(
+                "no specialist list yet — ask one ordinary question first, then /name works",
+                cx,
+            );
+            return None;
+        }
+        if !subagent::known(&command.name, &agents) {
+            // Name the nearest thing rather than only the mistake: the names the request
+            // imagined are not the ones the backend uses, so "did you mean" is the useful half.
+            let nearest = subagent::ranked(&command.name, &agents)
+                .first()
+                .map(|agent| format!(" — did you mean /{}?", agent.name))
+                .unwrap_or_default();
+            self.say(
+                format!("no specialist called \"{}\"{nearest}", command.name),
+                cx,
+            );
+            return None;
+        }
+        if command.prompt.trim().is_empty() {
+            self.say(format!("say what {} should do", command.name), cx);
+            return None;
+        }
+        Some(subagent::turn(&command.name, &command.prompt))
     }
 
     fn apply(&mut self, event: TurnEvent, cx: &mut Context<Self>) {

@@ -1,0 +1,45 @@
+{
+  "format": 1,
+  "subagents": [
+    {
+      "name": "academic_researcher",
+      "description": "Conducts research using Asta tools (via MCP tools)."
+    },
+    {
+      "name": "dataverse_explorer",
+      "description": "Searches and recommends datasets from CIP Dataverse."
+    },
+    {
+      "name": "data_cleaning",
+      "description": "Handles validation strategies and data cleaning with pointblank, agrovoc, crop ontology MCP's."
+    },
+    {
+      "name": "exploratory_data_analysis",
+      "description": "Performs exploratory data analysis (EDA) to answer 'What happened?' by profiling, summarizing, and visualizing the data."
+    },
+    {
+      "name": "diagnostic_analytics",
+      "description": "Answer the question 'Why it happened?' can apply inference techniques."
+    },
+    {
+      "name": "predictive_analytics",
+      "description": "Answer the question 'What will happen?' with machine learning and AI models."
+    },
+    {
+      "name": "report_writer",
+      "description": "Write a polished report from the findings and recommendations."
+    },
+    {
+      "name": "hypothesis_generator",
+      "description": "Generate literature-grounded scientific theories and hypotheses for a research question using the Asta Theorizer pipeline. Finds relevant papers, extracts evidence, and synthesizes candidate mechanisms or causal theories."
+    },
+    {
+      "name": "pdf_librarian",
+      "description": "Build and query a local searchable library of the user's own PDFs and documents: OCR/extract text, index papers into a persistent local library, and run semantic search over them so other subagents can use the user's grey literature and institutional reports as grounded context."
+    },
+    {
+      "name": "data_voyager",
+      "description": "Run the Asta DataVoyager pipeline (`asta analyze-data`) to generate and test hypotheses against a local tabular dataset: it writes and executes code in a sandboxed notebook to answer a specific analytical question and returns findings, charts, and the hypotheses it evaluated. Use it to test theories or questions against the user's own data."
+    }
+  ]
+}
