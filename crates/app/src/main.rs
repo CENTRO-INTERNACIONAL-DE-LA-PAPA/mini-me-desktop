@@ -393,13 +393,14 @@ enum Command {
     CopySelected,
     SelectWhole,
     SpecialistInBackground,
+    RestartBackend,
     OpenSettings,
     OpenSetup,
     Quit,
 }
 
 impl Command {
-    const ALL: [Command; 12] = [
+    const ALL: [Command; 13] = [
         Command::RunTurn,
         Command::NewThread,
         Command::RefreshSpine,
@@ -409,6 +410,7 @@ impl Command {
         Command::CopySelected,
         Command::SelectWhole,
         Command::SpecialistInBackground,
+        Command::RestartBackend,
         Command::OpenSettings,
         Command::OpenSetup,
         Command::Quit,
@@ -425,6 +427,7 @@ impl Command {
             Command::CopySelected => "Copy selected text",
             Command::SelectWhole => "Select the whole conversation",
             Command::SpecialistInBackground => "Run the named specialist in the background",
+            Command::RestartBackend => "Restart the backend",
             Command::OpenSettings => "Settings",
             Command::OpenSetup => "Setup & diagnostics",
             Command::Quit => "Quit",
@@ -442,6 +445,7 @@ impl Command {
             Command::CopySelected => "what you dragged over in the transcript (ctrl-c)",
             Command::SelectWhole => "every message, ready to copy (ctrl-shift-a)",
             Command::SpecialistInBackground => "sends the /name in the composer, without waiting",
+            Command::RestartBackend => "after updating the app — reloads its Python overlay",
             Command::OpenSettings => "model, keys, execution (ctrl-,)",
             Command::OpenSetup => "check what the backend still needs",
             Command::Quit => "close the window and the sidecar",
@@ -1118,6 +1122,10 @@ struct Workbench {
     preview: Option<workspace::Output>,
     /// The researcher's past conversations, newest first.
     conversations: Vec<protocol::Conversation>,
+    /// Whether the list has ever come back. `false` means *loading*, which is not the same as
+    /// empty — and saying "conversations you start will appear here" over a list that is merely
+    /// still arriving is a claim the researcher has none (docs §79).
+    conversations_loaded: bool,
     /// A name to give the current conversation once its thread exists.
     pending_title: Option<String>,
     /// The thread whose name is being edited, if any.
@@ -1276,6 +1284,7 @@ impl Workbench {
             conversation_query,
             preview: None,
             conversations: Vec::new(),
+            conversations_loaded: false,
             pending_title: None,
             renaming: None,
             confirming_delete: None,
@@ -2206,6 +2215,39 @@ impl Workbench {
         cx.notify();
     }
 
+    /// Stop the backend and start it again.
+    ///
+    /// The app *attaches* to a healthy backend rather than replacing it, which is right for
+    /// speed and wrong after an update: the Python overlay lives in that process's memory, so a
+    /// newly-pulled app kept talking to a server holding the previous one — with no symptom
+    /// except a feature that did nothing (docs §79).
+    fn restart_backend(&mut self, cx: &mut Context<Self>) {
+        if self.streaming {
+            self.say("can't restart the backend mid-turn", cx);
+            return;
+        }
+        self.status = "restarting the backend…".into();
+        let mut done = self.sidecar.restart_backend();
+        cx.spawn(async move |this, cx| {
+            let outcome = done.next().await;
+            let _ = this.update(cx, |workbench, cx| {
+                match outcome {
+                    Some(Ok(status)) => workbench.say(format!("backend restarted — {status}"), cx),
+                    Some(Err(error)) => workbench.say(format!("restart failed: {error:#}"), cx),
+                    None => workbench.say("restart reported nothing back", cx),
+                }
+                // Everything read from the backend is now a fresh process's answer, including
+                // the specialist list the overlay writes as it assembles a coordinator.
+                workbench.conversations_loaded = false;
+                workbench.refresh_conversations(cx);
+                workbench.run_preflight(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     /// Stop the turn in flight.
     ///
     /// Closes the turn here *and* asks the backend to abandon the run. Only aborting our own
@@ -2310,7 +2352,11 @@ impl Workbench {
                     .p_2()
                     .text_color(rgb(theme::text_muted()))
                     .text_sm()
-                    .child("No specialist list yet — ask one ordinary question first."),
+                    .child(
+                        "No specialist list yet. It is written when the backend builds a \
+                         coordinator, so ask one ordinary question first — and if you just \
+                         updated the app, restart the backend (ctrl-p → Restart).",
+                    ),
             );
         } else if matched.is_empty() {
             list = list.child(
@@ -2535,6 +2581,10 @@ impl Workbench {
             if let Some(conversations) = updates.next().await {
                 let _ = this.update(cx, |workbench, cx| {
                     workbench.conversations = conversations;
+                    // Only on a real answer. A failed fetch sends nothing, so the list keeps
+                    // saying "loading" rather than claiming the researcher has none — a
+                    // backend that is still booting will answer the next refresh.
+                    workbench.conversations_loaded = true;
                     cx.notify();
                 });
             }
@@ -2768,7 +2818,11 @@ impl Workbench {
                     .p_2()
                     .text_color(rgb(theme::text_faint()))
                     .text_xs()
-                    .child(if self.conversations.is_empty() {
+                    .child(if !self.conversations_loaded {
+                        // The backend takes seconds to boot from cold, and this list is
+                        // the first thing anyone looks at.
+                        "Loading your conversations…"
+                    } else if self.conversations.is_empty() {
                         "Conversations you start will appear here."
                     } else {
                         "Nothing matches that."
@@ -4359,6 +4413,13 @@ impl Workbench {
                     cx.listener(|workbench, _event, _window, cx| workbench.run_preflight(cx)),
                 ),
             )
+            // Beside Re-check because this is where someone comes when something is wrong,
+            // and "restart it" is the second thing anyone tries after "check again".
+            .child(
+                ui::Button::new("restart-backend", "Restart backend").on_click(cx.listener(
+                    |workbench, _event, _window, cx| workbench.restart_backend(cx),
+                )),
+            )
             .child(ui::Button::new("close-setup", "Close").on_click(cx.listener(
                 |workbench, _event, _window, cx| {
                     workbench.settings_open = false;
@@ -4928,6 +4989,7 @@ impl Workbench {
             // Whether work blocks is a property of the work, not something to encode in
             // punctuation — so background dispatch is a command rather than a `/name!` syntax
             // nobody would discover (docs §77).
+            Command::RestartBackend => self.restart_backend(cx),
             Command::SpecialistInBackground => {
                 let typed = self.composer.read(cx).text().trim().to_string();
                 if subagent::parse(&typed).is_none() {

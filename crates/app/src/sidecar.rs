@@ -389,6 +389,33 @@ impl Sidecar {
         rx
     }
 
+    /// Stop the backend and start it again, reporting what happened.
+    ///
+    /// The verb that was missing. `ensure_running` attaches to a healthy backend rather than
+    /// replacing it — right for speed, and it means the Python overlay a running server holds in
+    /// memory survives an app update. Reloading it needed the process gone, and nothing in the
+    /// app could ask for that (docs §79).
+    pub fn restart_backend(&self) -> mpsc::UnboundedReceiver<Result<String>> {
+        let (tx, rx) = mpsc::unbounded();
+        let supervisor = self.supervisor.clone();
+        let base_url = self.base_url.clone();
+        self.runtime.spawn(async move {
+            let client = LangGraphClient::new(base_url);
+            let mut supervisor = supervisor.lock().await;
+            supervisor.stop();
+            // The port has to come free before the replacement can bind it. `stop` has already
+            // asked the distro to reap, so this is waiting on the OS rather than on the server.
+            for _ in 0..40 {
+                if !client.is_healthy().await {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+            let _ = tx.unbounded_send(supervisor.ensure_running(&client).await);
+        });
+        rx
+    }
+
     /// The researcher's past conversations, newest first.
     pub fn list_conversations(&self) -> mpsc::UnboundedReceiver<Vec<Conversation>> {
         let (tx, rx) = mpsc::unbounded();

@@ -1101,8 +1101,15 @@ impl BackendSupervisor {
     }
 }
 
-impl Drop for BackendSupervisor {
-    fn drop(&mut self) {
+impl BackendSupervisor {
+    /// Stop the backend this app started, and any `langgraph dev` left in the distro.
+    ///
+    /// Factored out of `Drop` so **restarting** is possible at all. Until now the only way to
+    /// reload the Python overlay was to quit the app *and* make sure nothing had survived it:
+    /// `ensure_running` attaches to a healthy backend rather than replacing it, so an app that
+    /// had just been updated kept talking to a process holding the previous overlay in memory —
+    /// with no symptom except a feature that did nothing (docs §79).
+    pub fn stop(&mut self) {
         if let Some(mut child) = self.child.take() {
             tracing::info!("terminating backend sidecar");
             terminate(&mut child);
@@ -1121,7 +1128,28 @@ impl Drop for BackendSupervisor {
                     .stderr(Stdio::null())
                     .status();
             }
+            return;
         }
+        // Nothing of ours to reap, but the researcher may still be attached to one someone
+        // else's session left behind — which is the case that needs this most.
+        if let Some(wsl) = &self.config.wsl {
+            let mut command = Command::new("wsl.exe");
+            if let Some(distro) = &wsl.distro {
+                command.args(["-d", distro]);
+            }
+            let _ = command
+                .args(["--", "pkill", "-f", "langgraph dev"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+}
+
+impl Drop for BackendSupervisor {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 

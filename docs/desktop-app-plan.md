@@ -4784,3 +4784,61 @@ detour that the message already explains.
 
 **Restart the app** to pick this up. The overlay is Python, loaded when the sidecar starts, so a
 `git pull` alone changes nothing about a running backend.
+
+## 79. The backend the app attaches to is not the backend it shipped with (2026-08-06)
+
+`/report_writer` still said "no specialist list yet" after §78's fix, a pull and a restart of the
+app. The fix was correct. It was not running.
+
+```rust
+pub async fn ensure_running(&mut self, client: &LangGraphClient) -> Result<String> {
+    if client.is_healthy().await {
+        return Ok("attached to a running backend".into());
+    }
+```
+
+**The app attaches to a healthy backend rather than replacing it.** That is right for speed — a
+warm server answers instantly, which is why `warm_up` exists at all (§50). It is wrong after an
+update, because the Python overlay lives *in that process's memory*. The launch command already
+re-copies the overlay into the distro on every start (`sync_overlay_command`, added for exactly
+this reason), and it makes no difference to a server that is not restarting.
+
+So restarting the app reloads nothing, and the only way to reload the overlay was to quit and make
+sure nothing survived — which nothing in the app could ask for, and no message suggested. The
+symptom is a feature that silently does nothing, which is how §78 presented too. **Two different
+causes, one indistinguishable symptom**, and I diagnosed the first one correctly and then watched
+the same screen say the same thing.
+
+`Drop` already knew how to tear the backend down properly, including `pkill -f 'langgraph dev'`
+because killing `wsl.exe` does not reap what it fronted. That was the whole implementation, sitting
+in a destructor where nothing could call it. It is now `BackendSupervisor::stop`, and
+`Sidecar::restart_backend` stops, waits for the port to come free, and starts again — reachable
+from the palette and from a **Restart backend** button on the Setup page, beside Re-check, because
+that is where someone goes when something is wrong and "restart it" is the second thing anyone
+tries.
+
+The picker's dead end now names the cause and the action rather than just its own state.
+
+### "The app seems ready when the backend is not"
+
+Half of this was already true and invisible. `warm_up` starts the backend at launch (§50), so the
+delay is concurrent with reading the window rather than added to the first question — but nothing
+said so, and the window looks finished.
+
+The other half was a **message that lied**. The conversation list said *"Conversations you start
+will appear here"* whenever it was empty, and it is empty for the seconds a cold `langgraph dev`
+takes to boot — so a researcher with four conversations was told they had none, and then watched
+them appear. That is the whole of "conversations take too long to load": they did not take longer
+than the backend, they were misdescribed while waiting for it. Loading and empty are now different
+states, and a failed fetch stays "loading" because the next refresh will answer.
+
+Not fixed, and named so it is not mistaken for fixed: the backend genuinely takes seconds to boot
+because `langgraph dev` imports the graph, and nothing the client does changes that. What the
+client can stop doing is looking finished while it happens.
+
+### The pattern, for the sixth time
+
+§78 called it: two facts that should be independent sharing one condition. This is the same shape
+one level out — **"is a backend reachable" and "is it the backend this app shipped with" are
+different questions, and only the first was ever asked.** Every symptom of the second one is
+identical to a feature being broken.
