@@ -125,18 +125,25 @@ pub fn parse(source: &str) -> Vec<Block> {
 
         // A fence swallows lines verbatim until it closes, so nothing inside a code block
         // is mistaken for a heading or a list.
-        if let Some(language) = start.strip_prefix("```") {
+        let ticks = fence(start);
+        if ticks > 0 {
             flush(&mut paragraph, &mut blocks);
             list_indents.clear();
             let mut body = Vec::new();
-            while let Some(next) = lines.next() {
-                if next.trim_start().starts_with("```") {
+            for next in lines.by_ref() {
+                // Closes only on a fence **at least as long** as the one that opened it.
+                // That is what lets an answer show a fenced block *inside* a fenced block,
+                // which is exactly what one did: four backticks around three. Matching any
+                // ``` turned the outer fence into an empty box, the example into a
+                // paragraph, and the inner fence into a second empty box — the three things
+                // on screen (docs §71).
+                if fence(next.trim_start()) >= ticks {
                     break;
                 }
                 body.push(next);
             }
             blocks.push(Block::Code {
-                language: language.trim().to_string(),
+                language: start[ticks..].trim().to_string(),
                 text: body.join("\n"),
             });
             continue;
@@ -242,6 +249,19 @@ pub fn parse(source: &str) -> Vec<Block> {
     }
     flush(&mut paragraph, &mut blocks);
     blocks
+}
+
+/// The length of a code fence at the start of a line, or zero if there is not one.
+///
+/// CommonMark allows any run of three or more backticks, and the length matters: a longer
+/// fence is how a block containing backticks is written.
+fn fence(line: &str) -> usize {
+    let ticks = line.chars().take_while(|c| *c == '`').count();
+    if ticks >= 3 {
+        ticks
+    } else {
+        0
+    }
 }
 
 /// How far a line is indented, counting a tab as four columns.
@@ -768,6 +788,46 @@ mod tables {
                 other => panic!("{source}: expected a paragraph, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn a_longer_fence_can_contain_a_shorter_one() {
+        // What an answer showing a fenced block looks like. Closing on any ``` produced an
+        // empty box, a paragraph and a second empty box — all three visible on screen before
+        // this (docs §71).
+        let blocks = parse("````markdown\n```python\nprint(\"hi\")\n```\n````");
+        assert_eq!(
+            blocks,
+            vec![Block::Code {
+                language: "markdown".into(),
+                text: "```python\nprint(\"hi\")\n```".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn an_ordinary_three_backtick_fence_still_closes_on_three() {
+        assert_eq!(
+            parse("```python\nprint(\"hi\")\n```\nAfter."),
+            vec![
+                Block::Code {
+                    language: "python".into(),
+                    text: "print(\"hi\")".into(),
+                },
+                Block::Paragraph(Inlines::plain("After.")),
+            ]
+        );
+    }
+
+    #[test]
+    fn two_backticks_are_inline_code_not_a_fence() {
+        // `` is how a literal backtick is written inline; treating it as a fence would eat
+        // the rest of the answer.
+        let blocks = parse("a ``b`` c");
+        assert!(
+            matches!(blocks.as_slice(), [Block::Paragraph(_)]),
+            "{blocks:?}"
+        );
     }
 
     #[test]

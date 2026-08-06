@@ -29,8 +29,13 @@
 //! [`Spot`] — which span, which byte. A drag from one span to another therefore selects
 //! everything between them, because the registry is ordered.
 //!
-//! The registry is rebuilt every frame: layouts move when the window resizes or the
-//! transcript scrolls, and a stale rectangle is a selection drawn in the wrong place.
+//! The registry is rebuilt every frame, because layouts move when the window resizes or the
+//! transcript scrolls and a stale rectangle is a selection drawn in the wrong place. It is
+//! **double-buffered**: prepaint fills the next frame's map while everything else reads the
+//! last completed one. `render` asks whether there is text to copy *before* prepaint has
+//! registered anything, so a single map that was emptied at the top of the frame answered
+//! "nothing" every time — and the right-click menu greyed out Copy over text the reader could
+//! plainly see was highlighted (docs §71).
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -134,12 +139,6 @@ struct Entry {
 }
 
 impl Spans {
-    /// Forget the previous frame. Called as the transcript is rebuilt — bounds from the last
-    /// frame would put the highlight where the text no longer is.
-    pub fn clear(&mut self) {
-        self.entries.clear();
-    }
-
     fn insert(&mut self, span: usize, text: SharedString, layout: TextLayout) {
         self.entries.insert(span, Entry { text, layout });
     }
@@ -234,7 +233,16 @@ pub struct Transcript(Rc<RefCell<State>>);
 #[derive(Default)]
 struct State {
     selection: Selection,
+    /// The spans of the **last completed frame** — the only ones with real bounds.
     spans: Spans,
+    /// The frame being built. Promoted to `spans` when the next one starts.
+    ///
+    /// Two maps, because `render` asks questions about the selection *before* prepaint has
+    /// registered anything: whether there is text to copy decides whether the right-click
+    /// menu greys its Copy row. With one map, clearing it at the top of `render` meant that
+    /// question was always answered "nothing selected" — the menu greyed Copy over text the
+    /// user could see was highlighted (docs §71).
+    building: Spans,
     /// Handed out as the transcript is built, so document order and span index agree.
     next_span: usize,
 }
@@ -244,7 +252,9 @@ impl Transcript {
     /// again. The selection itself survives, because it belongs to the user.
     pub fn begin_frame(&self) {
         let mut state = self.0.borrow_mut();
-        state.spans.clear();
+        // Last frame's spans become the ones everything reads, and the next frame starts
+        // building into an empty map. Nothing is ever read while half-populated.
+        state.spans = std::mem::take(&mut state.building);
         state.next_span = 0;
     }
 
@@ -353,11 +363,11 @@ impl Element for Selectable {
         self.styled
             .prepaint(id, inspector, bounds, &mut (), window, cx);
         let layout = self.styled.layout().clone();
-        self.transcript
-            .0
-            .borrow_mut()
-            .spans
-            .insert(self.span, self.text.clone(), layout.clone());
+        self.transcript.0.borrow_mut().building.insert(
+            self.span,
+            self.text.clone(),
+            layout.clone(),
+        );
 
         let selection = self.transcript.selection();
         let Some(range) = selection.range_in(self.span, self.text.len()) else {

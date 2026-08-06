@@ -4286,3 +4286,52 @@ on the list, honestly described, for when a conversation is long enough to need 
 hand-authored SVG files committed, to replace glyphs that render correctly today, for no
 functional gain — and I cannot look at the result. It is the one item on this list where the
 work is all risk and the payoff is all taste, so it waits for someone who can see it.
+
+## 71. Four bugs from one pass of using it (2026-08-05)
+
+§70 shipped five things at once. A single session with the app found four defects, and three of
+them were invisible to every test in the suite because each lived in an *interaction* between
+two pieces that are individually correct.
+
+**Copy was greyed out over text that was visibly highlighted.** The span registry is rebuilt
+each frame, and it was cleared at the top of `render`. But `render` is also where the
+right-click menu decides whether to grey its Copy row — and it asks *before* prepaint has
+registered anything. So the question "is there text to copy?" was answered against an empty map
+every single time. `ctrl-c` kept working, because a key handler runs between frames when the map
+is full, which is exactly the kind of half-working that hides a bug.
+
+The registry is double-buffered now: prepaint fills the next frame's map while everything else
+reads the last completed one. Nothing is ever read while half-populated.
+
+**Escape stopped closing the preferences window.** Opening it focused `fields.first()` — the
+Model page's first field. On Appearance or Setup that element is not rendered at all, and focus
+on an unrendered element means key bindings stop arriving. Hence the shape of the report:
+Escape did nothing *until you clicked Model*, which put that field back on screen. Focus now
+goes to the first field of the page being shown, and pages that have no fields focus the window
+itself — which is also why `Modal` gained a focus handle. Changing page moves focus for the same
+reason. It is very likely the same fault behind "the focus ring doesn't work": the ring was
+drawn correctly on an element nothing was focusing.
+
+**A fenced code block rendered as an empty box, a stray paragraph and a second empty box.** All
+three at once, which is the tell. An answer showing what a fenced block looks like wraps it in a
+*longer* fence — four backticks around three — and the parser closed on any ` ``` `. So the outer
+fence closed on the inner opener (empty block), the example became a paragraph, and the inner
+closer opened a second fence. Fences are now measured, and close only on one at least as long,
+which is what CommonMark says and what the failure was already telling me.
+
+Worth noting how close I came to fixing the wrong thing: the only recent change to that code path
+was the monospace font, and "empty box" reads exactly like a font that failed to resolve. Testing
+`parse` before touching anything is what stopped a font revert from being shipped as a fix for a
+parser bug. The font *did* get one change, but a defensive one: the primary family is now chosen
+per platform from ones that are always installed, because `fallbacks` covers missing glyphs and
+is not a promise about a missing family.
+
+**Two identical filter boxes in the theme popup.** `theme_list` brings its own, and the popup
+added another. Plainly visible in a screenshot, invisible to a test suite that never assembles
+two components together.
+
+The pattern across all four: every one is a *seam*. Render order against prepaint order, focus
+against what is rendered, a parser against its own output, one component against another. The
+unit tests were right about each piece and had nothing to say about any of the joins — which is
+the second time in three days that a real screenshot found in seconds what the suite could not
+reach (§66 was the first).

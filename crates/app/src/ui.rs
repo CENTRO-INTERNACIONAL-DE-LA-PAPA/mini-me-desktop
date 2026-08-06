@@ -306,6 +306,11 @@ pub struct Modal {
     title: SharedString,
     width: f32,
     nav: Option<gpui::AnyElement>,
+    /// Somewhere for the keyboard to live on a page with no field of its own.
+    ///
+    /// Without it, focus stays on whatever was focused before — often an element the page it
+    /// belonged to no longer renders — and key bindings simply stop arriving (docs §71).
+    focus: Option<gpui::FocusHandle>,
     body: Option<gpui::AnyElement>,
     actions: Option<gpui::AnyElement>,
     footer: Option<gpui::AnyElement>,
@@ -323,6 +328,12 @@ impl Modal {
 
     pub fn width(mut self, width: f32) -> Self {
         self.width = width;
+        self
+    }
+
+    /// The handle the window itself takes focus with.
+    pub fn focus(mut self, handle: &gpui::FocusHandle) -> Self {
+        self.focus = Some(handle.clone());
         self
     }
 
@@ -368,6 +379,7 @@ impl RenderOnce for Modal {
             .children(self.body);
 
         let mut card = div()
+            .when_some(self.focus, |card, handle| card.track_focus(&handle))
             .flex()
             .flex_col()
             .w(gpui::px(self.width))
@@ -611,15 +623,23 @@ impl RenderOnce for Toggle {
 /// `HighlightStyle` carries no font family, so this reaches fenced blocks only. *Inline* code
 /// stays marked by colour, which is what it already was.
 pub fn code_font() -> gpui::Font {
+    // The *primary* is chosen per platform and is one that is always installed there, because
+    // `fallbacks` covers missing glyphs and is not a promise about a missing family. Naming a
+    // font that might not exist risks a block that renders as nothing, and nothing is exactly
+    // what a missing code block looks like.
+    let (family, rest) = if cfg!(target_os = "windows") {
+        ("Consolas", vec!["Cascadia Mono", "Courier New"])
+    } else if cfg!(target_os = "macos") {
+        ("Menlo", vec!["Monaco", "Courier New"])
+    } else {
+        ("DejaVu Sans Mono", vec!["Liberation Mono", "monospace"])
+    };
     gpui::Font {
-        family: "Cascadia Mono".into(),
+        family: family.into(),
         features: gpui::FontFeatures::default(),
-        fallbacks: Some(gpui::FontFallbacks::from_fonts(vec![
-            "Consolas".into(),
-            "Courier New".into(),
-            "DejaVu Sans Mono".into(),
-            "monospace".into(),
-        ])),
+        fallbacks: Some(gpui::FontFallbacks::from_fonts(
+            rest.into_iter().map(str::to_string).collect(),
+        )),
         weight: gpui::FontWeight::NORMAL,
         style: gpui::FontStyle::Normal,
     }

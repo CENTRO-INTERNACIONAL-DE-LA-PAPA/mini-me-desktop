@@ -1086,6 +1086,8 @@ struct Workbench {
     sidebar_width: f32,
     panel_width: f32,
     dragging: Option<Divider>,
+    /// The preferences window's own focus, for pages that have no field to put it in.
+    settings_focus: gpui::FocusHandle,
     /// Recent outcomes, newest last, each fading on its own timer.
     ///
     /// The status bar holds exactly one line, so an outcome worth reading — "copied 12 lines",
@@ -1247,6 +1249,7 @@ impl Workbench {
             text_selection: selection::Transcript::default(),
             context_menu: None,
             open_picker: None,
+            settings_focus: cx.focus_handle(),
             sidebar_width: 240.,
             panel_width: 320.,
             dragging: None,
@@ -1712,13 +1715,9 @@ impl Workbench {
     fn picker_popup(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let (picker, at) = self.open_picker?;
         let panel = match picker {
-            Picker::Theme => div()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(self.filter_field(self.theme_filter.clone(), cx))
-                .child(self.theme_list(cx))
-                .into_any_element(),
+            // `theme_list` brings its own filter field; adding a second one here put two
+            // identical boxes in the popup.
+            Picker::Theme => self.theme_list(cx).into_any_element(),
             Picker::Model => div()
                 .flex()
                 .flex_col()
@@ -3961,10 +3960,7 @@ impl Workbench {
         }
         self.settings_open = true;
         if let Some(window) = window {
-            if let Some((_, first)) = self.fields.first() {
-                let focus = first.focus_handle(cx);
-                window.focus(&focus);
-            }
+            self.focus_settings_page(window, cx);
         }
         cx.notify();
     }
@@ -4073,8 +4069,11 @@ impl Workbench {
         for section in Section::ALL {
             rail = rail.child(
                 ui::NavEntry::new(section.id(), section.label(), section == current).on_click(
-                    cx.listener(move |workbench, _event, _window, cx| {
+                    cx.listener(move |workbench, _event, window, cx| {
                         workbench.settings_section = section;
+                        // The field that had focus may not exist on the new page, and focus on
+                        // an unrendered element stops key bindings arriving (docs §71).
+                        workbench.focus_settings_page(window, cx);
                         // Landing on Setup should show what is true *now*: a stale report is
                         // the one thing worse than none (the reason `open_setup` re-checks).
                         if section == Section::Setup {
@@ -4122,6 +4121,7 @@ impl Workbench {
         );
 
         ui::Modal::new("settings", "SETTINGS")
+            .focus(&self.settings_focus)
             // Wider than the 520px column it replaces: the rail takes 150 of it, and the
             // Setup page has a check, a reason and two buttons to fit on a line.
             .width(760.)
@@ -4130,6 +4130,25 @@ impl Workbench {
             .actions(actions)
             .footer(footer)
             .into_any_element()
+    }
+
+    /// Put the keyboard somewhere that exists on the page being shown.
+    ///
+    /// It used to focus `fields.first()` unconditionally — which is the Model page's first
+    /// field. On Appearance or Setup that element is not rendered at all, and focus sitting on
+    /// something that is not on screen means **key bindings stop arriving**: Escape did nothing
+    /// until you clicked a page that happened to contain that field (docs §71).
+    ///
+    /// Pages with no fields focus the window itself, so Escape always has somewhere to come
+    /// from.
+    fn focus_settings_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let section = self.settings_section;
+        let field = self
+            .fields
+            .iter()
+            .find(|(field, _)| field.section() == section)
+            .map(|(_, composer)| composer.focus_handle(cx));
+        window.focus(&field.unwrap_or_else(|| self.settings_focus.clone()));
     }
 
     /// The buttons for the Setup page. Re-check is its Save.
