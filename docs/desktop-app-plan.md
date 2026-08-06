@@ -45,16 +45,16 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
 - ⬜ **Click-to-update.** The app detects a stale checkout but cannot update itself (§27).
 
 **UI debt — the same call-site mistake, six times now**
-- 🟡 **`Button` and `Label`** — built and migrated (§67): 19 button sites, 6 label sites, and
-  **twelve square buttons rounded** in the process, including `Install Ubuntu` and `Copy ⧉` in
-  the Setup pane. `rounded_md` and `flex_none` are no longer reachable to omit, `disabled` is
-  one flag rather than a colour plus a guard, and `Label::ellipsis()` cannot produce §59's
-  collapse. Three controls stay hand-written, each with a comment saying why. **Awaiting eyes.**
-- 🟡 **`Modal`** — built (§68), and Setup moved into it: one preferences window with a nav rail
-  (Appearance, Model, Research, Backend, Setup) instead of a modal plus a right-hand column
-  that hid the research panel. `body` and `actions` are separate slots, so "actions inside the
-  scroll area" has nowhere left to happen. Toggles are now Zed-style rows with a description
-  and a real switch. **Awaiting eyes.**
+- ✅ **`Button`, `Label`, `Modal`, `Toggle`** (§67, §68) — confirmed on a real window across all
+  five pages. 19 button sites, 6 label sites; **twelve square buttons rounded** on the way,
+  including `Install Ubuntu` and `Copy ⧉`. `rounded_md` and `flex_none` are no longer reachable
+  to omit, `disabled` is one flag rather than a colour beside a guard, `Label::ellipsis()`
+  cannot produce §59's collapse, and `body`/`actions` being separate slots leaves "actions
+  inside the scroll area" nowhere to happen. Setup is a page of the preferences window instead
+  of a column that evicted the research panel. Two controls stay hand-written, each saying why.
+- ✅ **The palette runs the row it highlights** (§69) — the selection was computed three ways and
+  only the Enter path did not clamp, so past the end of a filtered list it silently did nothing.
+  One function now, and the empty case says so out loud.
 - ⬜ **The theme picker as a dropdown**, the way Zed does it: a button that opens a *searchable
   popup*, not an always-open inline list. `anchored` + `deferred` from §64 is the machinery.
 - ⬜ **Bundle a font** — fenced code still renders in the UI font.
