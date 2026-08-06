@@ -367,7 +367,7 @@ fn workbench_key_bindings() -> Vec<KeyBinding> {
 /// Deliberately a closed enum rather than a registry of closures: the whole point of
 /// the palette is that every action is also reachable another way, so there is no
 /// dynamic set to register.
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Command {
     RunTurn,
     NewThread,
@@ -3600,23 +3600,39 @@ impl Workbench {
         cx.notify();
     }
 
+    /// Which row is chosen, and what it would run.
+    ///
+    /// **One function for all three callers.** The row that was drawn as chosen, the row the
+    /// arrow keys move from, and the command Enter runs each used to clamp `palette_selected`
+    /// their own way — and the activation path did not clamp at all. So whenever the index
+    /// outran a filtered list, the palette highlighted the last row and Enter ran either the
+    /// wrong command or, past the end, nothing whatsoever (docs §69).
+    fn palette_choice(&self, commands: &[Command]) -> Option<(usize, Command)> {
+        let index = self.palette_selected.min(commands.len().checked_sub(1)?);
+        Some((index, commands[index]))
+    }
+
     fn move_palette_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let count = self.palette_commands(cx).len();
-        if count == 0 {
+        let commands = self.palette_commands(cx);
+        let Some((current, _)) = self.palette_choice(&commands) else {
             return;
-        }
+        };
         // Wrap, so `up` from the first row lands on the last.
-        let current = self.palette_selected.min(count - 1) as isize;
-        self.palette_selected = (current + delta).rem_euclid(count as isize) as usize;
+        self.palette_selected =
+            (current as isize + delta).rem_euclid(commands.len() as isize) as usize;
         cx.notify();
     }
 
     fn activate_palette(&mut self, cx: &mut Context<Self>) {
-        let Some(command) = self
-            .palette_commands(cx)
-            .get(self.palette_selected)
-            .copied()
-        else {
+        let commands = self.palette_commands(cx);
+        let Some((_, command)) = self.palette_choice(&commands) else {
+            // Said out loud. This branch used to return in silence, which is
+            // indistinguishable from a command that ran and did nothing — and that is
+            // exactly how it was reported (docs §69).
+            self.status = "no command matches what you typed".into();
+            self.palette_open = false;
+            self.restore_focus = true;
+            cx.notify();
             return;
         };
         self.palette_open = false;
@@ -4442,7 +4458,8 @@ impl Workbench {
     /// `absolute`, so it takes no part in the three-pane flex layout.
     fn palette(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let commands = self.palette_commands(cx);
-        let selected = self.palette_selected.min(commands.len().saturating_sub(1));
+        // The same choice the Enter key will make, so what is highlighted is what runs.
+        let selected = self.palette_choice(&commands).map(|(index, _)| index);
 
         let mut list = div().flex().flex_col().w_full().min_w_0();
         if commands.is_empty() {
@@ -4455,7 +4472,7 @@ impl Workbench {
             );
         }
         for (index, command) in commands.iter().enumerate() {
-            let is_selected = index == selected;
+            let is_selected = Some(index) == selected;
             let command = *command;
             list = list.child(
                 div()
@@ -5637,6 +5654,24 @@ mod tests {
             statuses.iter().any(|status| status == "Creating sandbox…"),
             "{statuses:?}"
         );
+    }
+
+    /// A stale index must never make the highlighted row and the Enter key disagree.
+    ///
+    /// Three call sites used to clamp `palette_selected` three ways, and the activation path
+    /// did not clamp at all — so past the end of a filtered list the palette drew the last row
+    /// as chosen and Enter did nothing at all (docs §69).
+    #[test]
+    fn the_row_drawn_as_chosen_is_the_one_enter_runs() {
+        let commands = vec![Command::OpenSettings];
+        for stale in [0usize, 1, 8, 999] {
+            let clamped = stale.min(commands.len() - 1);
+            assert_eq!(clamped, 0, "index {stale} should clamp into a one-item list");
+            assert_eq!(commands[clamped], Command::OpenSettings);
+        }
+        // And an empty list chooses nothing rather than panicking on `commands[0]`.
+        let empty: Vec<Command> = Vec::new();
+        assert_eq!(empty.len().checked_sub(1), None);
     }
 
     #[test]

@@ -4183,3 +4183,37 @@ wanted all along.
 *button* that opens a searchable popup, and ours is still an always-open inline list. The
 machinery for it exists — `anchored` + `deferred`, from the right-click menu in §64 — and it is
 the next thing on this pane. The scrollbar, checked in the same pass, is fine.
+
+## 69. Three ways to say which row is chosen (2026-08-05)
+
+Reported: `ctrl-p`, Enter on **Settings**, nothing happens.
+
+The palette computed its selection in three places and no two of them agreed.
+
+```rust
+// what got drawn as chosen
+let selected = self.palette_selected.min(commands.len().saturating_sub(1));
+// what the arrow keys moved from
+let current = self.palette_selected.min(count - 1) as isize;
+// what Enter ran
+self.palette_commands(cx).get(self.palette_selected)   // <- no clamp at all
+```
+
+The render clamped, the navigation clamped, the activation did not. So the moment
+`palette_selected` outran a filtered list, the palette drew the last row as chosen and Enter ran
+either the *wrong* command or — past the end — nothing whatsoever. All three now go through one
+`palette_choice`, so the row that is highlighted is by construction the row that runs.
+
+**And the branch returned in silence**, which is why the report could only be "nothing happens":
+a command that never ran and a command that ran and did nothing look identical from outside. It
+now says so in the status bar.
+
+Honest about the limit: typing notifies the query entity, whose observer resets the index to
+zero, so a *freshly filtered* list self-corrects and I could not reproduce the exact sequence
+from the description. What is certain is that one path on the reported route could silently do
+nothing, and it cannot any more. If it recurs, the status line now distinguishes "no command
+matched" from "the command ran".
+
+Third time this shape has appeared: two call sites deriving the same fact separately and drifting
+(§67's `disabled` colour beside its own guard, §60's fix verdict read from output instead of the
+re-check). The fix is always the same — one function, both callers.
