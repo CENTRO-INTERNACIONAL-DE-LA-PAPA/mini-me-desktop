@@ -4335,3 +4335,19 @@ against what is rendered, a parser against its own output, one component against
 unit tests were right about each piece and had nothing to say about any of the joins — which is
 the second time in three days that a real screenshot found in seconds what the suite could not
 reach (§66 was the first).
+
+## 72. Two boxes that read identically and were not (2026-08-05)
+
+The theme popup's gallery search rendered a quarter of the width of the filter box above it,
+with its placeholder spilling out the right-hand side.
+
+Both were `div().px_2().py_1().rounded_md().bg(…).border_1()` around a composer, and neither
+said `w_full`. Both were relying on flex stretch to fill their column, and only one got it. I
+did not chase down which nesting difference decided that, because the answer would have been a
+fact about taffy rather than about this app: the fix is that a text field states its own width
+instead of inheriting an argument.
+
+So the gallery box is now the same `filter_field` as the theme box — one function, both callers
+— and it gained the focus ring the hand-written copy never had. That is the fourth time this
+week the fix has been "these two places compute the same thing separately" (§60, §67, §69), and
+the third where making it one function removed a bug nobody had reported yet.

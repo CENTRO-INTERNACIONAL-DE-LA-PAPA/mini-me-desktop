@@ -1584,6 +1584,12 @@ impl Workbench {
     fn filter_field(&self, field: Entity<Composer>, cx: &App) -> impl IntoElement {
         div()
             .track_focus(&field.focus_handle(cx))
+            // Stated, not inherited. The gallery's box was built by hand and looked identical
+            // in the source, and it came out a quarter the width with its placeholder spilling
+            // out the side — it was relying on flex stretch, and the two boxes did not agree
+            // about whether they got it (docs §72).
+            .w_full()
+            .min_w_0()
             .px_2()
             .py_1()
             .rounded_md()
@@ -3130,16 +3136,7 @@ impl Workbench {
             .gap_1()
             .pt_2()
             .child(section_label("GET MORE"))
-            .child(
-                div()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .bg(rgb(theme::background()))
-                    .border_1()
-                    .border_color(rgb(theme::border()))
-                    .child(self.gallery_query.clone()),
-            );
+            .child(self.filter_field(self.gallery_query.clone(), cx));
 
         if !self.gallery_note.is_empty() {
             gallery = gallery.child(
