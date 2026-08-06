@@ -91,6 +91,12 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   transition between two.
 
 **Proposed — P7**
+- ⬜ **The provenance graph** (§73) — a modal showing which subagents a conversation used and
+  where it doubled back: *paper search → theories → get data → clean data → analyze → theories*.
+  Cycles are the point, not a defect. The live data exists; **what does not is any of it after a
+  reload**, so this is a persistence problem first — the record has to be written to the thread's
+  directory as it streams. And adjacency is arrival order, not causation: ask the backend for the
+  real parent edge before inferring one. Sequenced after `/subagent`.
 - ⬜ **`/subagent` slash commands** (`/eda-subagent`, `/research-paper`, `/report-write`),
   designed in §55: a registry read from the backend, the existing fuzzy picker as the
   trigger, foreground *or* background dispatch, and the approval gate still applying.
@@ -4351,3 +4357,93 @@ So the gallery box is now the same `filter_field` as the theme box — one funct
 — and it gained the focus ring the hand-written copy never had. That is the fourth time this
 week the fix has been "these two places compute the same thing separately" (§60, §67, §69), and
 the third where making it one function removed a bug nobody had reported yet.
+
+## 73. Proposed — the provenance graph (2026-08-05)
+
+Requested: a modal showing which subagents a conversation used and how it moved between them.
+The example given is the point of it:
+
+> paper search → theories → get data → clean data → analyze data → theories → paper search
+
+"This shows how in reality science works, so each scientist can track his work by conversation."
+
+That sentence is the specification. Not a picture of the machinery — a **record of the enquiry**:
+what was consulted, what it led to, and where the work doubled back. The doubling back is the
+part worth building for. A run that goes out to the literature, forms a theory, gets data,
+analyses it, and *returns to theories with what it found* is not a pipeline that malfunctioned;
+it is the loop the whole method is made of, and it is invisible today.
+
+### It is not a DAG, and the request already says so
+
+"DAG-like (I think there can be cicles)" is exactly right, and it settles the data structure. The
+acyclic assumption is what would have to be forced on this, and forcing it would delete the one
+edge a scientist most wants to see — the return to a step already taken. So: a **directed
+multigraph over subagent kinds**, cycles allowed and expected.
+
+- **Node** = a kind of subagent (`paper search`, `theories`), *not* an invocation. `theories`
+  appearing twice in the example is one node visited twice, which is what makes the loop visible
+  at all. Visit count belongs on the node.
+- **Edge** = an observed transition, with a count. `theories → paper search` traversed three
+  times is one edge that says three, not three edges.
+- **Order** = across the whole conversation, not one turn. The loop in the example spans turns.
+
+### What exists, and the one thing that does not
+
+The live data is already there. `Message.agents` is `Vec<AgentTrace>`, one entry per invocation,
+carrying `ns` (unique per invocation, from the pregel checkpoint namespace) and `name` (the
+display name the backend sends as `lc_agent_name`, §15b). Entries are appended in first-seen
+order, so a turn's sequence is recoverable, and `Message` order gives the conversation's.
+
+**What does not exist is any of it after a reload.** `conversation_messages` returns role and
+text only, and says why: *"the activity trace is not replayable — it was assembled from a stream
+that is over, and pretending otherwise would show an empty trace next to a real answer."* That
+was the right call for the transcript. It is fatal here: a graph that empties when you reopen the
+conversation is not a record of your work, and "track his work by conversation" is precisely the
+thing it would fail at.
+
+**So this feature is a persistence problem before it is a drawing problem**, and that ordering
+should survive contact with the fun part. The graph is appended to as a turn streams and written
+to the thread's own directory — `Documents\Mini-Me\<thread>\provenance.json`, beside the outputs
+that turn produced (§42's directory, already ours, already the place a researcher is pointed at).
+Written by the client because the client is the only thing that sees the stream.
+
+### The honest limit, named before it is discovered
+
+Adjacency in that list is **arrival order, not causation.** Subagents run concurrently — the `ns`
+namespace exists precisely so two concurrent runs of the same kind stay in separate groups — and
+nothing carries a timestamp or a parent. So `A` appearing before `B` may mean A led to B, or may
+mean both were dispatched together and A's first token arrived first.
+
+Three options, in order of preference:
+
+1. **Ask the backend for the edge.** A delegation is a `task` tool call made *by* something; the
+   coordinator knows which. If the stream can carry the parent, the graph stops being inferred.
+   This is the only version that is true rather than plausible, and it is a small upstream
+   question — worth asking before building the inference.
+2. **Draw concurrency as concurrency.** Group invocations that overlap into a band rather than a
+   chain, so the picture says "these two ran together" instead of inventing an order.
+3. **Label the inference.** If the edges stay heuristic, the modal says so in one line. A
+   provenance record that quietly guesses is worse than no provenance record, because it will be
+   believed.
+
+### Drawing it
+
+GPUI has no graph layout and there is no crate to add. Both pieces needed do exist: `canvas()`
+for arbitrary drawing (`elements/canvas.rs`) and `window.paint_path` for the edges. Two stages:
+
+- **First, the chain.** Chips with arrows between them, wrapping — literally the notation the
+  request was written in, which is a strong hint that it reads. Revisits repeat the chip; a
+  repeated chip *is* the cycle, legible with no layout algorithm at all. This is a day's work on
+  data that already exists and answers the question as asked.
+- **Then the graph**, if the chain proves it wants one: nodes placed by first appearance, edges
+  as curves, thickness by traversal count. Layered layout by hand — a real algorithm, and only
+  worth it once the chain has shown which conversations are complex enough to need it.
+
+Modal rather than a panel, and reached from the command palette and the conversation's row: it is
+something you open, read and close, which is the same argument §68 used to move Setup. `ui::Modal`
+already has the shape.
+
+**Sequenced after `/subagent`**, deliberately. `/subagent` gives a researcher a way to *invoke*
+work deliberately rather than hoping the coordinator delegates; this shows what was invoked.
+Building the record first would mean building it twice — once for the delegations that happen
+now, and again for the ones a researcher asks for by name.
