@@ -72,6 +72,33 @@ def describe(subagents: Any) -> list[dict[str, str]]:
     return described
 
 
+def install(deepagents_module) -> None:
+    """Record the registry on every coordinator build, whatever else is switched on.
+
+    **Its own wrapper on purpose.** This started out folded into the background-work wrapper in
+    `async_agents.install`, which returns early unless `MINIME_ASYNC_SUBAGENTS` is set — the
+    "Let work run in the background" setting, off by default. So the list was never written, and
+    the `/name` picker said "no specialist list yet" after any number of ordinary questions
+    (docs §78). Naming what can be delegated to has nothing to do with whether work may run in
+    the background, and it must not inherit that switch.
+
+    Wrapped on the `deepagents` package for the same reason the other two are: LangGraph loads
+    the graph module by file path, so `backend/agent.py` never passes through the import hook,
+    but its `from deepagents import create_deep_agent` does read the attribute set here
+    (docs §18). Chains cleanly — every wrapper calls whatever was current when it installed.
+    """
+    original = getattr(deepagents_module, "create_deep_agent", None)
+    if original is None:
+        logger.warning("minime_local: no create_deep_agent to wrap for the subagent registry")
+        return
+
+    def create_deep_agent_recording_subagents(*args, **kwargs):
+        record(kwargs.get("subagents"))
+        return original(*args, **kwargs)
+
+    deepagents_module.create_deep_agent = create_deep_agent_recording_subagents
+
+
 def record(subagents: Any) -> None:
     """Write the registry, or say why not and carry on.
 

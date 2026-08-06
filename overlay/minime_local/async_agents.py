@@ -37,8 +37,6 @@ from __future__ import annotations
 import contextvars
 import logging
 
-from minime_local import registry
-
 logger = logging.getLogger(__name__)
 
 # The graph id our generated config registers for background work. Must match the id the
@@ -144,11 +142,6 @@ def install(deepagents_module) -> None:
         return
 
     def create_deep_agent_with_background(*args, **kwargs):
-        # Recorded here because this is the one place the *assembled* subagent list passes
-        # through — `backend/agent.py` calls the factory with `subagents=runtime_subagents`,
-        # built per request. See `minime_local/registry.py` for why it is a file and not a
-        # route.
-        registry.record(kwargs.get("subagents"))
         extra = middleware_for(deepagents_module)
         if extra is not None:
             kwargs["middleware"] = [*kwargs.get("middleware", []), extra]

@@ -46,12 +46,16 @@ def local_execution_requested() -> bool:
 def _patch(module) -> None:
     """Apply whichever patch this module needs."""
     if module.__name__ == _AGENT_MODULE:
-        from minime_local import approval, async_agents
+        from minime_local import approval, async_agents, registry
 
         approval.install(module)
         # After approval, so the background worker inherits the same gate: its wrapper
         # calls whatever `create_deep_agent` is current, which is the gated one.
         async_agents.install(module)
+        # Last, so it is outermost and sees the arguments as `backend/agent.py` passed them.
+        # Unconditional: it only *reads* the subagent list, and folding it into the wrapper
+        # above meant it inherited that one's off-by-default switch (docs §78).
+        registry.install(module)
         return
     _patch_sandbox(module)
 

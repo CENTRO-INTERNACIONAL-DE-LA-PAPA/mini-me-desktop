@@ -4731,3 +4731,56 @@ Two things a person still has to check, both invisible from here: whether the li
 above the composer, and — the real one — whether the coordinator actually honours *"delegate this
 to `report_writer`"*. The instruction is a request to a model, not an API call, and no test in
 this repo can tell me it is obeyed. That is the next thing to find out, and it wants one real turn.
+
+## 78. The registry inherited a switch it had nothing to do with (2026-08-06)
+
+Reported: two ordinary questions asked and answered, then `/report_writer` — and the picker said
+*"No specialist list yet — ask one ordinary question first."*
+
+The message was right about its own state and wrong about the cause. `registry.record` was folded
+into the wrapper in `async_agents.install`, which begins:
+
+```python
+if not enabled():
+    return
+```
+
+`enabled()` reads `MINIME_ASYNC_SUBAGENTS` — the **"Let work run in the background"** setting,
+which is off by default and for good reason (§14: a coordinator holding tools that point at a
+graph the server does not serve would fail mid-task rather than at startup). So with background
+work off, the wrapper was never installed, `record` never ran, and the file was never written. No
+number of questions would have helped.
+
+Naming what can be delegated to has nothing to do with whether work may run in the background.
+The registry now installs its own wrapper, unconditionally, and last — so it is outermost and
+sees the arguments as `backend/agent.py` passed them. It only ever *reads* `subagents`.
+
+This is the fifth time this project has produced a bug by attaching a new thing to an existing
+thing that happened to be nearby (§67's `disabled` beside its own guard, §69's three selection
+clamps, §72's two filter boxes, §60's verdict read from the wrong source). The tell is the same
+each time: two facts that should be independent sharing one condition. **Sharing a wrapper is
+sharing a condition** — that is the part I did not see, because the wrapper was where the data
+happened to pass through.
+
+Nothing in the Rust suite could have caught it: 159 tests pass, the cross-language fixture test
+passes, and both were right. The defect was in *which Python function* the call sat inside, which
+no fixture describes.
+
+### Confirmed while fixing it
+
+`start_async_task` is the real tool name — `deepagents/middleware/async_subagents.py:361` sets
+`name="start_async_task"` — so §77's background instruction names it correctly. That file's own
+prompt also says "Report the task ID to the user and stop", which is the same thing §77's
+instruction asks for in different words, so the two are not fighting.
+
+### Still true, and worth keeping
+
+The list is written when the backend **assembles a coordinator**, which happens per request. So
+one ordinary question is genuinely required before `/` has anything to show, and the picker says
+so. Seeding it at server start by importing `backend.subagents` directly was considered and
+rejected: it would add a second source of truth and an import of upstream's module into the graph
+load path, risking a circular import during startup — a real hazard traded for a ten-second
+detour that the message already explains.
+
+**Restart the app** to pick this up. The overlay is Python, loaded when the sidecar starts, so a
+`git pull` alone changes nothing about a running backend.
