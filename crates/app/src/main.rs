@@ -215,6 +215,20 @@ actions!(
 /// the panel says "stored" or "not set" beside them. A field left blank on save keeps
 /// whatever is already in the keychain; that is what lets someone change their model
 /// without re-pasting a key.
+/// Which edge is being dragged.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Divider {
+    Sidebar,
+    Panel,
+}
+
+/// Which choice a popup is currently open for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Picker {
+    Theme,
+    Model,
+}
+
 /// A page of the preferences window.
 ///
 /// Setup is one of these rather than a pane of its own. It used to live in the right-hand
@@ -622,7 +636,10 @@ fn markdown_block(
                 .border_1()
                 .border_color(rgb(theme::border()))
                 .text_color(rgb(theme::text()))
-                .text_sm();
+                .text_sm()
+                // Nothing bundled — a stack ending at a face Windows always has. See
+                // `ui::code_font`.
+                .font(ui::code_font());
             // Selectable like any other run, and arguably the one that matters most: a
             // snippet is written to be copied.
             match selectable {
@@ -848,6 +865,16 @@ struct Message {
     /// agent panel converged on the same shape, and the pattern has a name — expand live,
     /// collapse on completion (docs §47).
     steps_expanded: bool,
+    /// `body` parsed into blocks, kept beside it rather than recomputed.
+    ///
+    /// It used to be parsed **in `render`**, which meant every message in the conversation was
+    /// re-parsed on every frame — sixty times a second, for text that had not changed since it
+    /// arrived. Now a message parses when its body changes: once for a finished one, and once
+    /// per token for the single message still streaming.
+    ///
+    /// Empty for `you` messages, which are shown as typed — reinterpreting someone's asterisks
+    /// would be presumptuous, and §14 settled that.
+    blocks: Vec<markdown::Block>,
     /// Whether the reader stopped this turn before it finished.
     ///
     /// Shown, because a cut-off answer and a complete one are otherwise the same thing on
@@ -864,15 +891,34 @@ struct Message {
 
 impl Message {
     fn new(role: &'static str, body: String) -> Self {
+        let blocks = Self::parse(role, &body);
         Self {
             role,
             body,
+            blocks,
             steps: Vec::new(),
             agents: Vec::new(),
             steps_expanded: true,
             stopped: false,
             plots: Vec::new(),
         }
+    }
+
+    fn parse(role: &'static str, body: &str) -> Vec<markdown::Block> {
+        if role == "you" || body.is_empty() {
+            Vec::new()
+        } else {
+            markdown::parse(body)
+        }
+    }
+
+    /// Append streamed text, keeping the parsed blocks in step.
+    ///
+    /// The only way the body grows, so the cache cannot be left stale by a caller that forgot
+    /// to refresh it.
+    fn push_body(&mut self, text: &str) {
+        self.body.push_str(text);
+        self.blocks = Self::parse(self.role, &self.body);
     }
 
     /// Nothing happened here worth keeping. A turn that produced only tool calls
@@ -1031,6 +1077,23 @@ struct Workbench {
     text_selection: selection::Transcript,
     /// An open right-click menu, if any.
     context_menu: Option<menu::ContextMenu>,
+    /// An open choice popup: which choice, and where its trigger was clicked.
+    open_picker: Option<(Picker, gpui::Point<gpui::Pixels>)>,
+    /// Pane widths, in pixels, and which edge is being dragged.
+    ///
+    /// Both were fixed numbers. 240px of conversation list is generous on a laptop and mean on
+    /// a 4K monitor, and the person who knows which is the one looking at it.
+    sidebar_width: f32,
+    panel_width: f32,
+    dragging: Option<Divider>,
+    /// Recent outcomes, newest last, each fading on its own timer.
+    ///
+    /// The status bar holds exactly one line, so an outcome worth reading — "copied 12 lines",
+    /// "settings saved" — was routinely overwritten by the next thing that happened before
+    /// anyone looked at it. These stack instead. Deliberately **only** for things a person
+    /// did: streaming progress still goes to the status bar, because a toast per token would
+    /// be a wall of them.
+    toasts: Vec<SharedString>,
     panel_scroll: gpui::ScrollHandle,
     /// The palette on screen right now, which is not always the saved one: the picker
     /// applies as you point at it so a theme can be judged by looking at it.
@@ -1183,6 +1246,11 @@ impl Workbench {
             transcript_scroll: gpui::ScrollHandle::new(),
             text_selection: selection::Transcript::default(),
             context_menu: None,
+            open_picker: None,
+            sidebar_width: 240.,
+            panel_width: 320.,
+            dragging: None,
+            toasts: Vec::new(),
             panel_scroll: gpui::ScrollHandle::new(),
             applied_theme: settings::Settings::load().theme,
             sidebar_open: true,
@@ -1505,6 +1573,173 @@ impl Workbench {
         self.run_preflight(cx);
     }
 
+    /// The bordered box a filter composer sits in.
+    ///
+    /// One helper because the theme popup and the gallery both want it, and because it is the
+    /// only place a *focus ring* has anywhere to attach: the composer is a child entity, so
+    /// the wrapper has to track its handle and light up with `in_focus`.
+    fn filter_field(&self, field: Entity<Composer>, cx: &App) -> impl IntoElement {
+        div()
+            .track_focus(&field.focus_handle(cx))
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .bg(rgb(theme::background()))
+            .border_1()
+            .border_color(rgb(theme::border()))
+            .in_focus(|style| style.border_color(rgb(theme::accent())))
+            .child(field)
+    }
+
+    /// The draggable edge between two panes.
+    ///
+    /// Four pixels wide with a resize cursor, and it does not move anything itself: it records
+    /// *which* edge is being dragged, and the root's mouse-move does the arithmetic. Tracking
+    /// the drag on the root rather than on this strip is what keeps it working when the pointer
+    /// outruns four pixels, which it does immediately.
+    fn divider(&self, edge: Divider, cx: &mut Context<Self>) -> impl IntoElement {
+        let id = match edge {
+            Divider::Sidebar => "divider-sidebar",
+            Divider::Panel => "divider-panel",
+        };
+        div()
+            .id(id)
+            .flex_none()
+            .w(px(4.))
+            .h_full()
+            .when(self.dragging == Some(edge), |bar| {
+                bar.bg(rgb(theme::accent()))
+            })
+            .hover(|style| {
+                style
+                    .bg(rgb(theme::border_strong()))
+                    .cursor(gpui::CursorStyle::ResizeLeftRight)
+            })
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(move |workbench, _event: &gpui::MouseDownEvent, _window, cx| {
+                    workbench.dragging = Some(edge);
+                    cx.notify();
+                }),
+            )
+    }
+
+    /// Report the outcome of something the user did.
+    ///
+    /// Goes to the status bar *and* to a toast that lingers past the next status change. Use
+    /// it for results — copied, saved, stopped, deleted — never for progress.
+    fn say(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        let text = text.into();
+        self.status = text.to_string();
+        self.toasts.push(text);
+        // Bounded, so a burst cannot fill the window with its own history.
+        if self.toasts.len() > 3 {
+            self.toasts.remove(0);
+        }
+        // Each toast retires on its own timer rather than all of them on a shared one, so a
+        // second message does not cut the first one's time short.
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(4))
+                .await;
+            let _ = this.update(cx, |workbench, cx| {
+                if !workbench.toasts.is_empty() {
+                    workbench.toasts.remove(0);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// The stack of recent outcomes, above the status bar.
+    fn toasts(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut stack = div()
+            .absolute()
+            .right_4()
+            .bottom_10()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .items_end();
+        for (index, toast) in self.toasts.iter().enumerate() {
+            stack = stack.child(
+                div()
+                    .id(SharedString::from(format!("toast-{index}")))
+                    .max_w(px(360.))
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .bg(rgb(theme::elevated()))
+                    .border_1()
+                    .border_color(rgb(theme::border_strong()))
+                    .text_color(rgb(theme::text()))
+                    .text_sm()
+                    .hover(|style| style.cursor_pointer())
+                    // Clicking one dismisses it: four seconds is right for a glance and wrong
+                    // for a message you have already read.
+                    .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                        if index < workbench.toasts.len() {
+                            workbench.toasts.remove(index);
+                        }
+                        cx.notify();
+                    }))
+                    .child(toast.clone()),
+            );
+        }
+        stack
+    }
+
+    /// Open or close a choice popup, remembering where its trigger was.
+    ///
+    /// The position comes from the click rather than from the trigger's bounds: the same thing
+    /// the right-click menu does (§64), and it needs no element to measure.
+    fn toggle_picker(
+        &mut self,
+        picker: Picker,
+        at: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_picker = match self.open_picker {
+            Some((open, _)) if open == picker => None,
+            _ => Some((picker, at)),
+        };
+        cx.notify();
+    }
+
+    /// The floating list a [`Picker`] shows: its filter field, then its rows.
+    fn picker_popup(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let (picker, at) = self.open_picker?;
+        let panel = match picker {
+            Picker::Theme => div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(self.filter_field(self.theme_filter.clone(), cx))
+                .child(self.theme_list(cx))
+                .into_any_element(),
+            Picker::Model => div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(self.model_list(cx))
+                .into_any_element(),
+        };
+        Some(
+            ui::picker_popup(
+                at,
+                div().child(panel).on_mouse_down_out(cx.listener(
+                    |workbench, _event: &gpui::MouseDownEvent, _window, cx| {
+                        workbench.open_picker = None;
+                        cx.notify();
+                    },
+                )),
+            )
+            .into_any_element(),
+        )
+    }
+
     /// Open the right-click menu at a point, over whatever was clicked.
     fn open_context_menu(
         &mut self,
@@ -1681,11 +1916,13 @@ impl Workbench {
         };
         let lines = text.lines().count();
         cx.write_to_clipboard(ClipboardItem::new_string(text));
-        self.status = format!(
-            "copied {lines} line{} from the transcript",
-            if lines == 1 { "" } else { "s" }
+        self.say(
+            format!(
+                "copied {lines} line{} from the transcript",
+                if lines == 1 { "" } else { "s" }
+            ),
+            cx,
         );
-        cx.notify();
     }
 
     /// Select the whole transcript.
@@ -1954,14 +2191,13 @@ impl Workbench {
         }
         // Said differently in the two cases because they are different: one stopped the run,
         // the other only stopped us watching it.
-        self.status = if told_backend {
-            "turn stopped".into()
+        let outcome = if told_backend {
+            "turn stopped"
         } else {
             "stopped watching — the run had not reported an id yet, so the backend may still \
              be finishing it"
-                .into()
         };
-        cx.notify();
+        self.say(outcome, cx);
     }
 
     fn apply(&mut self, event: TurnEvent, cx: &mut Context<Self>) {
@@ -1972,7 +2208,7 @@ impl Workbench {
             TurnEvent::Started { .. } => {}
             TurnEvent::Token(text) => {
                 if let Some(last) = self.transcript.last_mut() {
-                    last.body.push_str(&text);
+                    last.push_body(&text);
                 }
             }
             // Activity attaches to the in-flight assistant message, so it sits with
@@ -2164,7 +2400,7 @@ impl Workbench {
             self.jobs.clear();
         }
         self.sidecar.delete_conversation(thread_id);
-        self.status = "conversation deleted".into();
+        self.say("conversation deleted", cx);
         cx.notify();
     }
 
@@ -2490,7 +2726,7 @@ impl Workbench {
         div()
             .flex()
             .flex_col()
-            .w(px(240.))
+            .w(px(self.sidebar_width))
             .h_full()
             .flex_none()
             // A rounded card on the window background, the way Zed's panels sit, rather
@@ -2978,16 +3214,7 @@ impl Workbench {
             .flex_col()
             .w_full()
             .gap_1()
-            .child(
-                div()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .bg(rgb(theme::background()))
-                    .border_1()
-                    .border_color(rgb(theme::border()))
-                    .child(self.theme_filter.clone()),
-            )
+            .child(self.filter_field(self.theme_filter.clone(), cx))
             // The scrollbar lives outside the scrolling list, in a relative wrapper.
             .child(
                 div()
@@ -3271,11 +3498,10 @@ impl Workbench {
             let has_activity = !message.steps.is_empty() || !message.agents.is_empty();
             // An empty assistant body means we're still waiting on the first token —
             // unless a trace is already showing what's going on, which says more.
-            let body = if message.body.is_empty() && self.streaming && !has_activity {
-                "…".to_string()
-            } else {
-                message.body.clone()
-            };
+            // A placeholder while the first token is still coming, and *only* then — it is
+            // not part of the body, so it is not parsed and never reaches the cache.
+            let waiting = message.body.is_empty() && self.streaming && !has_activity;
+            let body = message.body.clone();
             let mut block = div()
                 .flex()
                 .flex_col()
@@ -3292,6 +3518,13 @@ impl Workbench {
             // happened in and because the answer should be the last thing read.
             if has_activity {
                 block = block.child(self.activity_block(index, message, cx));
+            }
+            if waiting {
+                block = block.child(
+                    div()
+                        .text_color(rgb(theme::text_muted()))
+                        .child("…"),
+                );
             }
             if !body.is_empty() {
                 // The user's own text is shown as typed — they wrote it, and reinterpreting
@@ -3310,8 +3543,10 @@ impl Workbench {
                     );
                 } else {
                     let mut rendered = div().flex().flex_col().w_full().min_w_0().gap_2();
-                    for parsed in markdown::parse(&body) {
-                        rendered = rendered.child(markdown_block(&parsed, Some(&self.text_selection)));
+                    // Parsed when the text arrived, not now. See `Message::blocks`.
+                    for parsed in &message.blocks {
+                        rendered =
+                            rendered.child(markdown_block(parsed, Some(&self.text_selection)));
                     }
                     block = block.child(rendered);
                 }
@@ -3655,6 +3890,10 @@ impl Workbench {
             cx.notify();
             return;
         }
+        if self.open_picker.take().is_some() {
+            cx.notify();
+            return;
+        }
         if self.preview.take().is_some() {
             cx.notify();
             return;
@@ -3804,6 +4043,16 @@ impl Workbench {
         }
         note.push_str(" Model applies to the next turn; port and execution need a restart.");
         self.settings_note = note;
+        // A toast as well as the note: the note lives inside a window the user is about to
+        // close, and "did that save?" is the question this whole pane exists to answer.
+        self.say(
+            if stored.is_empty() {
+                "settings saved".to_string()
+            } else {
+                format!("settings saved — stored {}", stored.join(", "))
+            },
+            cx,
+        );
         cx.notify();
     }
 
@@ -3921,20 +4170,40 @@ impl Workbench {
 
         let mut pane = div().flex().flex_col().w_full().min_w_0().gap_3();
         if section == Section::Appearance {
-            // A list, not a cycle button. Cycling meant the only way to find a palette was
-            // to click through every one, and there was no way to see what was available —
-            // Zed shows all of them and previews on *hover*, which is the whole point: a
-            // palette is judged by looking at it, not by reading its name (docs §50).
-            pane = pane.child(self.theme_list(cx));
+            // The list has not changed — it moved into a popup and gained a trigger. Zed puts
+            // every choice behind one, and the reason shows the moment there is more than a
+            // handful: a hundred installed palettes is a hundred rows in a window with four
+            // other settings in it. Hovering a row still previews it (§50); you just have to
+            // open the list first.
+            pane = pane.child(ui::setting_row(
+                "Theme",
+                "The palette the whole window uses. Hovering a row previews it.",
+                ui::Dropdown::new("pick-theme", self.applied_theme.clone())
+                    .open(matches!(self.open_picker, Some((Picker::Theme, _))))
+                    .on_click(cx.listener(|workbench, event: &gpui::ClickEvent, _window, cx| {
+                        workbench.toggle_picker(Picker::Theme, event.position(), cx);
+                    })),
+            ));
         }
         if section == Section::Model {
-            pane = pane.child(self.provider_row(cx)).child(self.model_list(cx));
+            let current = self.field_text_or(Field::ModelId, &self.draft.model_id, cx);
+            pane = pane.child(self.provider_row(cx)).child(ui::setting_row(
+                "Model",
+                "Which model answers. Any id can be typed in the field below.",
+                ui::Dropdown::new("pick-model", current)
+                    .open(matches!(self.open_picker, Some((Picker::Model, _))))
+                    .on_click(cx.listener(|workbench, event: &gpui::ClickEvent, _window, cx| {
+                        workbench.toggle_picker(Picker::Model, event.position(), cx);
+                    })),
+            ));
         }
 
-        for (field, composer) in &self.fields {
-            if field.section() != section {
-                continue;
-            }
+        for (tab, (field, composer)) in self
+            .fields
+            .iter()
+            .filter(|(field, _)| field.section() == section)
+            .enumerate()
+        {
             if *field == Field::BaseUrl && !needs_base_url {
                 continue;
             }
@@ -3967,8 +4236,15 @@ impl Workbench {
                             .w_full()
                             .min_w_0()
                             .p_2()
+                            .rounded_md()
                             .border_1()
                             .border_color(rgb(theme::border()))
+                            .track_focus(&composer.focus_handle(cx))
+                            // Tab walks the fields of the page in the order they are read.
+                            // `track_focus` is what makes landing on this box mean landing in
+                            // the field inside it, rather than on a div that swallows typing.
+                            .tab_index(tab as isize)
+                            .in_focus(|style| style.border_color(rgb(theme::accent())))
                             .child(composer.clone()),
                     ),
             );
@@ -4193,7 +4469,7 @@ impl Workbench {
                                                     cx.write_to_clipboard(
                                                         ClipboardItem::new_string(command.clone()),
                                                     );
-                                                    workbench.status = "command copied".into();
+                                                    workbench.say("command copied", cx);
                                                     cx.notify();
                                                 }
                                             })),
@@ -4315,7 +4591,7 @@ impl Workbench {
                                         cx.write_to_clipboard(ClipboardItem::new_string(
                                             link.clone(),
                                         ));
-                                        workbench.status = "sign-in link copied".into();
+                                        workbench.say("sign-in link copied", cx);
                                         cx.notify();
                                     }
                                 })),
@@ -4427,7 +4703,7 @@ impl Workbench {
                 match answer {
                     Some(answer) => {
                         cx.write_to_clipboard(ClipboardItem::new_string(answer));
-                        self.status = "last answer copied".into();
+                        self.say("last answer copied", cx);
                     }
                     None => self.status = "no answer to copy yet".into(),
                 }
@@ -4705,6 +4981,11 @@ impl Workbench {
             .bg(rgb(theme::surface()))
             .border_1()
             .border_color(rgb(theme::border_strong()))
+            // Which field has the keyboard is otherwise invisible — there is a caret, and it
+            // is two pixels wide. `in_focus` rather than `focus` because the thing with the
+            // focus is a child entity, not this box.
+            .track_focus(&self.composer.focus_handle(cx))
+            .in_focus(|style| style.border_color(rgb(theme::accent())))
             .on_mouse_down(
                 gpui::MouseButton::Right,
                 cx.listener(|workbench, event: &gpui::MouseDownEvent, _window, cx| {
@@ -4897,7 +5178,7 @@ impl Workbench {
             .relative()
             .flex()
             .flex_col()
-            .w(px(320.))
+            .w(px(self.panel_width))
             .flex_none()
             .h_full()
             .m_1()
@@ -5406,13 +5687,17 @@ impl Render for Workbench {
             // separate bugs (§40, §48, §51).
             .min_h_0()
             .w_full()
-            .when(self.sidebar_open, |body| body.child(self.rail(cx)))
+            .when(self.sidebar_open, |body| {
+                body.child(self.rail(cx))
+                    .child(self.divider(Divider::Sidebar, cx))
+            })
             .child(self.chat_pane(cx));
 
         // The right-hand slot belongs to the research panel alone. Setup used to take it,
         // which meant diagnosing a problem hid the outputs you were diagnosing it about.
         body = if self.panel_open {
-            body.child(self.artifacts_panel(cx))
+            body.child(self.divider(Divider::Panel, cx))
+                .child(self.artifacts_panel(cx))
         } else {
             body
         };
@@ -5430,6 +5715,35 @@ impl Render for Workbench {
             .on_action(cx.listener(Self::toggle_palette))
             .on_action(cx.listener(Self::toggle_settings))
             .on_action(cx.listener(Self::dismiss))
+            .on_mouse_move(cx.listener(
+                |workbench, event: &gpui::MouseMoveEvent, window, cx| {
+                    let Some(edge) = workbench.dragging else {
+                        return;
+                    };
+                    // Clamped so a pane can be made narrow but never vanish: a panel dragged
+                    // to nothing is one the user has no handle left to drag back.
+                    let width = match edge {
+                        Divider::Sidebar => f32::from(event.position.x),
+                        Divider::Panel => {
+                            f32::from(window.viewport_size().width - event.position.x)
+                        }
+                    };
+                    let width = width.clamp(160., 640.);
+                    match edge {
+                        Divider::Sidebar => workbench.sidebar_width = width,
+                        Divider::Panel => workbench.panel_width = width,
+                    }
+                    cx.notify();
+                },
+            ))
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(|workbench, _event: &gpui::MouseUpEvent, _window, cx| {
+                    if workbench.dragging.take().is_some() {
+                        cx.notify();
+                    }
+                }),
+            )
             .on_action(cx.listener(Self::copy_selection))
             .on_action(cx.listener(Self::select_all_transcript))
             // Anywhere on the window, not a designated strip: someone dragging a file has
@@ -5440,7 +5754,8 @@ impl Render for Workbench {
                 },
             ))
             .child(body)
-            .child(self.status_bar(cx));
+            .child(self.status_bar(cx))
+            .child(self.toasts(cx));
 
         // Settings floats rather than displacing a panel, so opening it no longer costs
         // the chat 420px for as long as it is open.
@@ -5462,6 +5777,8 @@ impl Render for Workbench {
         } else {
             root
         };
+
+        let root = root.children(self.picker_popup(cx));
 
         // Last, and `deferred` inside, so it paints over every pane it might open across
         // instead of being clipped by the one it opened in.
@@ -5489,7 +5806,7 @@ fn decode_capture(raw: &[u8], mut on_status: impl FnMut(&str)) -> (Message, Vec<
                 // A replay rebuilds the transcript, and the transcript has no use for the
                 // run's id — only a live turn does, to be able to stop it.
                 TurnEvent::Started { .. } => {}
-                TurnEvent::Token(text) => message.body.push_str(&text),
+                TurnEvent::Token(text) => message.push_body(&text),
                 TurnEvent::Step { agent, label } => match agent {
                     None => message.steps.push(label),
                     Some(agent) => trace_for(&mut message, &agent).steps.push(label),

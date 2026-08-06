@@ -600,6 +600,130 @@ impl RenderOnce for Toggle {
     }
 }
 
+/// The face fenced code should be set in.
+///
+/// **Nothing is bundled.** A monospace font is a multi-megabyte binary, a licence to carry and
+/// a rendering result nobody here can look at — and it buys nothing on the platform that
+/// matters, because `Consolas` has shipped with every Windows since Vista and `Cascadia Mono`
+/// with every Windows 11. So this is a stack, not a file: the nice one first, the one that is
+/// certainly present next, and a Linux name for the development machine.
+///
+/// `HighlightStyle` carries no font family, so this reaches fenced blocks only. *Inline* code
+/// stays marked by colour, which is what it already was.
+pub fn code_font() -> gpui::Font {
+    gpui::Font {
+        family: "Cascadia Mono".into(),
+        features: gpui::FontFeatures::default(),
+        fallbacks: Some(gpui::FontFallbacks::from_fonts(vec![
+            "Consolas".into(),
+            "Courier New".into(),
+            "DejaVu Sans Mono".into(),
+            "monospace".into(),
+        ])),
+        weight: gpui::FontWeight::NORMAL,
+        style: gpui::FontStyle::Normal,
+    }
+}
+
+/// The button that opens a picker: what is chosen now, and a chevron.
+///
+/// Zed's settings put every choice behind one of these rather than an always-open list, and
+/// the reason shows up as soon as there is more than one: an inline list of a hundred themes
+/// is a hundred rows of a window that has four other settings in it. The list itself does not
+/// change — it moves into a popup and gains a trigger.
+#[derive(IntoElement)]
+pub struct Dropdown {
+    id: ElementId,
+    value: SharedString,
+    open: bool,
+    on_click: Option<OnClick>,
+}
+
+impl Dropdown {
+    pub fn new(id: impl Into<ElementId>, value: impl Into<SharedString>) -> Self {
+        Self {
+            id: id.into(),
+            value: value.into(),
+            open: false,
+            on_click: None,
+        }
+    }
+
+    /// Marks the trigger while its popup is showing, so it is obvious which one is open.
+    pub fn open(mut self, open: bool) -> Self {
+        self.open = open;
+        self
+    }
+
+    pub fn on_click(
+        mut self,
+        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_click = Some(Box::new(handler));
+        self
+    }
+}
+
+impl RenderOnce for Dropdown {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let trigger = div()
+            .id(self.id)
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .flex_none()
+            .min_w(gpui::px(150.))
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(if self.open {
+                theme::accent()
+            } else {
+                theme::border_strong()
+            }))
+            .text_color(rgb(theme::text()))
+            .text_sm()
+            .hover(|style| style.cursor_pointer())
+            .child(Label::new(self.value).ellipsis())
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(rgb(theme::text_faint()))
+                    .child("⌄"),
+            );
+        match self.on_click {
+            Some(handler) => trigger.on_click(move |event, window, cx| handler(event, window, cx)),
+            None => trigger,
+        }
+    }
+}
+
+/// The floating panel a [`Dropdown`] opens.
+///
+/// Anchored at the click and painted after everything else, the same two elements the
+/// right-click menu is built from (§64) — `anchored` keeps it inside the window, `deferred`
+/// keeps the pane it opened over from clipping it.
+pub fn picker_popup(at: gpui::Point<gpui::Pixels>, panel: impl IntoElement) -> impl IntoElement {
+    gpui::deferred(
+        gpui::anchored().position(at).snap_to_window().child(
+            div()
+                .flex()
+                .flex_col()
+                .w(gpui::px(320.))
+                .gap_2()
+                .p_2()
+                .rounded_md()
+                .bg(rgb(theme::elevated()))
+                .border_1()
+                .border_color(rgb(theme::border_strong()))
+                .child(panel),
+        ),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

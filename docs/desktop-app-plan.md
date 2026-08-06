@@ -55,13 +55,18 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
 - ✅ **The palette runs the row it highlights** (§69) — the selection was computed three ways and
   only the Enter path did not clamp, so past the end of a filtered list it silently did nothing.
   One function now, and the empty case says so out loud.
-- ⬜ **The theme picker as a dropdown**, the way Zed does it: a button that opens a *searchable
-  popup*, not an always-open inline list. `anchored` + `deferred` from §64 is the machinery.
-- ⬜ **Bundle a font** — fenced code still renders in the UI font.
-- ⬜ **SVG icons** instead of the text glyphs `◎ ▤ ▥ ⏎`.
-- ⬜ **`uniform_list` for the transcript** — every message is laid out every frame.
-- ⬜ **Focus rings and a tab order**; **resizable panels**; **toasts** instead of one
-  overwriting status line.
+- 🟡 **UI polish** — all built (§70), **awaiting eyes**: theme and model as searchable dropdown
+  popups; fenced code in a monospace stack (nothing bundled — `Consolas` ships with Windows);
+  focus rings plus a tab order through each page's fields; toasts that stack and fade instead of
+  one overwriting status line; panes resizable by dragging their edge.
+- ✅ **Transcript re-parse** (§70) — markdown was being parsed *in `render`*, so every message
+  was re-parsed sixty times a second. Cached beside the body now. The list's own entry said
+  `uniform_list`, which was **wrong**: it lays every element out at the height of the first, and
+  these are a one-line question next to a two-page report.
+- ⬜ **Virtualize the transcript** with `list` + `ListState` — the honest version of the above,
+  wanted only once a conversation is long enough to feel it.
+- ⬜ **SVG icons** instead of `◎ ▤ ▥ ⏎` — deferred (§70): needs an `AssetSource` and
+  hand-authored assets, to replace glyphs that render correctly, for no functional gain.
 
 **Felt friction**
 - ✅ **Multi-line composer** — Shift-Enter inserts a break, Enter still sends (§55).
@@ -4217,3 +4222,67 @@ matched" from "the command ran".
 Third time this shape has appeared: two call sites deriving the same fact separately and drifting
 (§67's `disabled` colour beside its own guard, §60's fix verdict read from output instead of the
 re-check). The fix is always the same — one function, both callers.
+
+## 70. The UI polish list, and the item on it that was wrong (2026-08-05)
+
+Six entries had been sitting under "UI debt" since §58. Five are done; one turned out to name
+the wrong fix, and one is deferred with a reason rather than quietly dropped.
+
+**The theme and model pickers are dropdowns.** A trigger showing what is chosen, opening a
+searchable popup — Zed's shape, and the reason shows the moment there is more than a handful:
+a hundred installed palettes is a hundred rows in a window that has four other settings in it.
+The list itself did not change; it moved into a popup and gained a trigger, so hovering a row
+still previews the palette (§50). Built from the same `anchored` + `deferred` pair as the
+right-click menu (§64).
+
+**Fenced code has a monospace face, and nothing was bundled.** A font is a multi-megabyte
+binary, a licence to carry, and a rendering result nobody here can look at — and it buys nothing
+on the platform that matters, because `Consolas` has shipped with every Windows since Vista.
+`gpui::Font` takes `fallbacks`, so this is a stack: `Cascadia Mono`, then `Consolas`, then
+`DejaVu Sans Mono` for the development machine. Zero bytes added. `HighlightStyle` carries no
+font family, so this reaches fenced blocks only — *inline* code stays marked by colour, which is
+what it already was.
+
+**Focus rings.** Which field has the keyboard was invisible: there is a caret, and it is two
+pixels wide. The composer and every settings field now light their border. `in_focus` rather
+than `focus`, because the thing holding focus is a child entity and the border belongs to the
+box around it — and `track_focus` is what ties the two together. That same handle is what makes
+`tab_index` work: Tab walks the fields of a page in reading order and lands *in* the field
+rather than on a div that swallows typing.
+
+**Toasts.** The status bar holds one line, so "copied 12 lines" was routinely overwritten before
+anyone looked at it. Outcomes now stack in the corner and fade on individual timers — a second
+message must not cut the first one's time short — capped at three, and clickable to dismiss.
+Deliberately only for things a *person did*: streaming progress still goes to the status bar,
+because a toast per token is a wall of them.
+
+**Resizable panels.** Both widths were fixed numbers. 240px of conversation list is generous on
+a laptop and mean on a 4K monitor, and the person who knows which is the one looking at it. The
+drag is tracked on the *root*, not on the four-pixel strip, because the pointer outruns four
+pixels immediately. Clamped to 160–640: a pane dragged to nothing is one with no handle left to
+drag back.
+
+### The item that was wrong
+
+The list said **"`uniform_list` for the transcript — every message is laid out every frame."**
+The cost is real. The remedy was not: `uniform_list` "measures the first element and lays out
+all remaining elements based on that measurement" and "only works for elements with uniform
+height". Transcript messages are a one-line question and a two-page report. It would have
+rendered every message at the height of the first.
+
+The variable-height element is `list` + `ListState`, and it wants `splice` on every height
+change — which for a message growing a token at a time is a splice per token, to virtualize a
+list that is rarely more than a few dozen items.
+
+So the actual cost got fixed instead: **the markdown was being parsed in `render`**, so every
+message in the conversation was re-parsed sixty times a second for text that had not changed
+since it arrived. Blocks are now cached beside the body and rebuilt only when it changes — once
+for a finished message, once per token for the single one still streaming. Virtualization stays
+on the list, honestly described, for when a conversation is long enough to need it.
+
+### Deferred, and why
+
+**SVG icons** instead of `◎ ▤ ▥ ⏎`. It needs an `AssetSource` registered on the app and a set of
+hand-authored SVG files committed, to replace glyphs that render correctly today, for no
+functional gain — and I cannot look at the result. It is the one item on this list where the
+work is all risk and the payoff is all taste, so it waits for someone who can see it.
