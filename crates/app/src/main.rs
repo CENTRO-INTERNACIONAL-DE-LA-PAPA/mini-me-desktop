@@ -392,13 +392,14 @@ enum Command {
     CopyLastAnswer,
     CopySelected,
     SelectWhole,
+    SpecialistInBackground,
     OpenSettings,
     OpenSetup,
     Quit,
 }
 
 impl Command {
-    const ALL: [Command; 11] = [
+    const ALL: [Command; 12] = [
         Command::RunTurn,
         Command::NewThread,
         Command::RefreshSpine,
@@ -407,6 +408,7 @@ impl Command {
         Command::CopyLastAnswer,
         Command::CopySelected,
         Command::SelectWhole,
+        Command::SpecialistInBackground,
         Command::OpenSettings,
         Command::OpenSetup,
         Command::Quit,
@@ -422,6 +424,7 @@ impl Command {
             Command::CopyLastAnswer => "Copy last answer",
             Command::CopySelected => "Copy selected text",
             Command::SelectWhole => "Select the whole conversation",
+            Command::SpecialistInBackground => "Run the named specialist in the background",
             Command::OpenSettings => "Settings",
             Command::OpenSetup => "Setup & diagnostics",
             Command::Quit => "Quit",
@@ -438,6 +441,7 @@ impl Command {
             Command::CopyLastAnswer => "to the clipboard",
             Command::CopySelected => "what you dragged over in the transcript (ctrl-c)",
             Command::SelectWhole => "every message, ready to copy (ctrl-shift-a)",
+            Command::SpecialistInBackground => "sends the /name in the composer, without waiting",
             Command::OpenSettings => "model, keys, execution (ctrl-,)",
             Command::OpenSetup => "check what the backend still needs",
             Command::Quit => "close the window and the sidecar",
@@ -1078,6 +1082,8 @@ struct Workbench {
     text_selection: selection::Transcript,
     /// An open right-click menu, if any.
     context_menu: Option<menu::ContextMenu>,
+    /// Which row of the `/name` picker is chosen. Reset on every keystroke.
+    subagent_selected: usize,
     /// An open choice popup: which choice, and where its trigger was clicked.
     open_picker: Option<(Picker, gpui::Point<gpui::Pixels>)>,
     /// Pane widths, in pixels, and which edge is being dragged.
@@ -1148,7 +1154,14 @@ impl Workbench {
         // The composer only reports *that* text was submitted; deciding it means
         // "run a coordinator turn" stays here.
         cx.subscribe(&composer, |workbench, _composer, event, cx| match event {
-            ComposerEvent::Submit(text) => workbench.start_turn(text.clone(), cx),
+            ComposerEvent::Submit(text) => workbench.submitted(text.clone(), cx),
+        })
+        .detach();
+        // Observed as well as subscribed: the `/name` picker filters on every keystroke, and
+        // without this the list would only refresh on the next unrelated render.
+        cx.observe(&composer, |workbench, _composer, cx| {
+            workbench.subagent_selected = 0;
+            cx.notify();
         })
         .detach();
 
@@ -1249,6 +1262,7 @@ impl Workbench {
             transcript_scroll: gpui::ScrollHandle::new(),
             text_selection: selection::Transcript::default(),
             context_menu: None,
+            subagent_selected: 0,
             open_picker: None,
             settings_focus: cx.focus_handle(),
             sidebar_width: 240.,
@@ -2133,6 +2147,16 @@ impl Workbench {
 
     /// Kick off one coordinator turn and pump its events into the transcript.
     fn start_turn(&mut self, prompt: String, cx: &mut Context<Self>) {
+        self.start_turn_as(prompt, subagent::Dispatch::default(), cx);
+    }
+
+    /// Start a turn, choosing how a `/name` command should reach its specialist.
+    fn start_turn_as(
+        &mut self,
+        prompt: String,
+        dispatch: subagent::Dispatch,
+        cx: &mut Context<Self>,
+    ) {
         if self.streaming || prompt.trim().is_empty() {
             return;
         }
@@ -2141,7 +2165,7 @@ impl Workbench {
         // ten-minute wait for a turn that was never delegated (§55, §76).
         let prompt = match subagent::parse(&prompt) {
             None => prompt,
-            Some(command) => match self.resolve_subagent(&command, cx) {
+            Some(command) => match self.resolve_subagent(&command, dispatch, cx) {
                 Some(turn) => turn,
                 None => return,
             },
@@ -2216,12 +2240,135 @@ impl Workbench {
         self.say(outcome, cx);
     }
 
+    /// Enter, in the composer.
+    ///
+    /// While a name is still being typed, Enter **completes** rather than sends — the way
+    /// completion works in a shell, and the reason two Enters is the natural rhythm here: one to
+    /// settle the specialist, one to send the request. It cannot send by accident, because a
+    /// half-typed name is never a real one.
+    fn submitted(&mut self, text: String, cx: &mut Context<Self>) {
+        if subagent::completing(&text) {
+            let agents = workspace::subagents();
+            let query = subagent::parse(&text).map(|c| c.name).unwrap_or_default();
+            let matched = subagent::ranked(&query, &agents);
+            if let Some(chosen) = matched.get(self.subagent_selected.min(matched.len().saturating_sub(1))) {
+                self.choose_subagent(&chosen.name, cx);
+                return;
+            }
+            // Nothing matched. Fall through, so `start_turn` refuses by name and suggests —
+            // silence here would look like a key that does nothing.
+        }
+        self.start_turn(text, cx);
+    }
+
+    /// Put a chosen name in the composer, ready for the request.
+    ///
+    /// The trailing space is the point: it closes the picker and puts the caret where the
+    /// sentence continues.
+    fn choose_subagent(&mut self, name: &str, cx: &mut Context<Self>) {
+        let filled = format!("/{name} ");
+        self.composer
+            .update(cx, |composer, cx| composer.set_text(filled, cx));
+        self.subagent_selected = 0;
+        cx.notify();
+    }
+
+    /// The `/name` picker, shown above the composer.
+    ///
+    /// Above it for the same reason the approval card is (§40): that is where attention already
+    /// is, and it cannot be scrolled away from. A plain flex child rather than a floating popup —
+    /// no position to measure, and it behaves like part of the composer, which is what it is.
+    fn subagent_picker(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let text = self.composer.read(cx).text().to_string();
+        if !subagent::completing(&text) {
+            return None;
+        }
+        let agents = workspace::subagents();
+        let query = subagent::parse(&text).map(|c| c.name).unwrap_or_default();
+        let matched = subagent::ranked(&query, &agents);
+
+        let mut list = div()
+            .id("subagent-picker")
+            .flex()
+            .flex_col()
+            .flex_none()
+            .w_full()
+            .min_w_0()
+            .mx_2()
+            .max_h(px(220.))
+            .overflow_y_scroll()
+            .rounded_lg()
+            .bg(rgb(theme::elevated()))
+            .border_1()
+            .border_color(rgb(theme::border_strong()));
+
+        if agents.is_empty() {
+            // The registry is written when the backend assembles a coordinator, so before the
+            // first turn there is nothing to offer. Say which, rather than showing an empty box.
+            list = list.child(
+                div()
+                    .p_2()
+                    .text_color(rgb(theme::text_muted()))
+                    .text_sm()
+                    .child("No specialist list yet — ask one ordinary question first."),
+            );
+        } else if matched.is_empty() {
+            list = list.child(
+                div()
+                    .p_2()
+                    .text_color(rgb(theme::text_muted()))
+                    .text_sm()
+                    .child(format!("No specialist matches \"{query}\".")),
+            );
+        }
+
+        let selected = self.subagent_selected.min(matched.len().saturating_sub(1));
+        for (index, agent) in matched.iter().enumerate() {
+            let chosen = agent.name.clone();
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("subagent-{}", agent.name)))
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .min_w_0()
+                    .px_3()
+                    .py_1()
+                    .gap_px()
+                    .when(index == selected, |row| row.bg(rgb(theme::accent_soft())))
+                    .hover(|style| style.bg(rgb(theme::overlay())).cursor_pointer())
+                    .child(
+                        ui::Label::new(format!("/{}", agent.name))
+                            .colour(if index == selected {
+                                theme::text()
+                            } else {
+                                theme::text_muted()
+                            })
+                            .ellipsis(),
+                    )
+                    // The description is not decoration: none of these names says what it does,
+                    // and the request's own guesses show that nobody can be expected to know.
+                    .child(
+                        ui::Label::new(agent.description.clone())
+                            .colour(theme::text_faint())
+                            .size(ui::Size::Compact)
+                            .ellipsis(),
+                    )
+                    .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                        workbench.choose_subagent(&chosen, cx);
+                    })),
+            );
+        }
+        Some(list.into_any_element())
+    }
+
     /// Turn a `/name …` into the turn to send, or refuse and say why.
     ///
     /// Every rejection leaves the prompt where it was, so nothing typed is lost to a typo.
     fn resolve_subagent(
         &mut self,
         command: &subagent::Command,
+        dispatch: subagent::Dispatch,
         cx: &mut Context<Self>,
     ) -> Option<String> {
         let agents = workspace::subagents();
@@ -2252,7 +2399,7 @@ impl Workbench {
             self.say(format!("say what {} should do", command.name), cx);
             return None;
         }
-        Some(subagent::turn(&command.name, &command.prompt))
+        Some(subagent::turn(&command.name, &command.prompt, dispatch))
     }
 
     fn apply(&mut self, event: TurnEvent, cx: &mut Context<Self>) {
@@ -3679,7 +3826,8 @@ impl Workbench {
         if let Some(request) = &self.pending_approval {
             pane = pane.child(self.approval_card(request, cx));
         }
-        pane.child(self.composer_row(cx))
+        pane.children(self.subagent_picker(cx))
+            .child(self.composer_row(cx))
     }
 
     /// Answer the pending approval and pump the continuation into the same turn.
@@ -4777,6 +4925,19 @@ impl Workbench {
             // Both reachable by keyboard already; here so they can be *found*, which for a
             // reader who has never met this app is the difference between a feature that
             // exists and one that does not.
+            // Whether work blocks is a property of the work, not something to encode in
+            // punctuation — so background dispatch is a command rather than a `/name!` syntax
+            // nobody would discover (docs §77).
+            Command::SpecialistInBackground => {
+                let typed = self.composer.read(cx).text().trim().to_string();
+                if subagent::parse(&typed).is_none() {
+                    self.say("type /name and what it should do first", cx);
+                    return;
+                }
+                self.composer
+                    .update(cx, |composer, cx| composer.set_text("", cx));
+                self.start_turn_as(typed, subagent::Dispatch::Background, cx);
+            }
             Command::CopySelected => self.copy_selected_text(cx),
             Command::SelectWhole => self.select_whole_transcript(cx),
             Command::OpenSettings => self.open_settings(None, cx),

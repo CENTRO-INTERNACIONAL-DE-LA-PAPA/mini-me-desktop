@@ -62,6 +62,14 @@ pub fn parse(input: &str) -> Option<Command> {
     })
 }
 
+/// Whether the picker should be showing for this input.
+///
+/// Only while the *name* is being typed. The first space settles it, and a picker that stayed
+/// open over the prompt would cover the transcript for the rest of the sentence.
+pub fn completing(text: &str) -> bool {
+    text.starts_with('/') && !text.contains(char::is_whitespace)
+}
+
 /// The specialists worth showing for a partly-typed name, best first.
 ///
 /// An empty query lists everything in the order the backend assembled them, which is the order
@@ -111,11 +119,32 @@ pub fn known(name: &str, agents: &[Subagent]) -> bool {
 /// It is not here because it has no trigger yet: the picker is where a reader would choose
 /// "run this in the background", and a `Dispatch` enum with one reachable variant is API invented
 /// ahead of its caller. It arrives with the picker.
-pub fn turn(name: &str, prompt: &str) -> String {
-    format!(
-        "Delegate this to the `{name}` subagent and report what it finds: {}",
-        prompt.trim()
-    )
+pub fn turn(name: &str, prompt: &str, dispatch: Dispatch) -> String {
+    let prompt = prompt.trim();
+    match dispatch {
+        Dispatch::Foreground => {
+            format!("Delegate this to the `{name}` subagent and report what it finds: {prompt}")
+        }
+        Dispatch::Background => format!(
+            "Start background work with start_async_task, subagent_type `{name}`, and this \
+             description: {prompt}. Tell me it has started and carry on — do not wait for it."
+        ),
+    }
+}
+
+/// How the specialist should be reached.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Dispatch {
+    /// Runs in this turn. Right for a literature lookup — you are waiting for the answer.
+    #[default]
+    Foreground,
+    /// Handed to a background Mini-Me, reporting into the Jobs panel (§31, §42). Right for an
+    /// EDA or a report, and the only way to have three of them running at once.
+    ///
+    /// Reached from the command palette rather than from a syntax: whether work blocks is a
+    /// property of the work, not something a researcher should have to encode in punctuation,
+    /// and `/name!` would be a thing to memorise for no gain.
+    Background,
 }
 
 #[cfg(test)]
@@ -141,6 +170,22 @@ mod tests {
         assert_eq!(parse("no slash here"), None);
         // A slash that is not at the start is a path, a date or a fraction.
         assert_eq!(parse("see data/raw.csv"), None);
+    }
+
+    #[test]
+    fn the_picker_opens_on_a_slash_and_closes_on_the_first_space() {
+        assert!(
+            completing("/"),
+            "a bare slash is where completion is most needed"
+        );
+        assert!(completing("/eda"));
+        // The space settles the name. Staying open would cover the transcript for the rest of
+        // the sentence, and there is nothing left to complete.
+        assert!(!completing("/eda "));
+        assert!(!completing("/eda make a chart"));
+        assert!(!completing("hello"));
+        assert!(!completing(""));
+        assert!(!completing("see data/raw.csv"));
     }
 
     #[test]
@@ -196,17 +241,33 @@ mod tests {
     #[test]
     fn the_turn_names_the_subagent_in_the_registrys_own_spelling() {
         // No gap between what was validated and what was asked for.
-        let sent = turn("exploratory_data_analysis", "  do it  ");
+        let sent = turn(
+            "exploratory_data_analysis",
+            "  do it  ",
+            Dispatch::Foreground,
+        );
         assert!(sent.contains("`exploratory_data_analysis`"), "{sent}");
         assert!(sent.ends_with("do it"), "{sent}");
         // Every registry name survives being put in a turn — including the underscored ones,
         // which is the whole set.
         for agent in registry() {
-            assert!(
-                turn(&agent.name, "x").contains(&agent.name),
-                "{}",
-                agent.name
-            );
+            let asked = turn(&agent.name, "x", Dispatch::Foreground);
+            assert!(asked.contains(&agent.name), "{}", agent.name);
         }
+    }
+
+    #[test]
+    fn background_asks_for_background_work_and_says_not_to_wait() {
+        // Its whole value is that the conversation stays live, so the instruction has to say so:
+        // a coordinator that starts the task and then blocks on it has given up the point.
+        let sent = turn("report_writer", "write it up", Dispatch::Background);
+        assert!(sent.contains("start_async_task"), "{sent}");
+        assert!(sent.contains("`report_writer`"), "{sent}");
+        assert!(sent.contains("do not wait"), "{sent}");
+        assert_ne!(
+            turn("report_writer", "write it up", Dispatch::Foreground),
+            sent,
+            "the two modes must ask for different things"
+        );
     }
 }

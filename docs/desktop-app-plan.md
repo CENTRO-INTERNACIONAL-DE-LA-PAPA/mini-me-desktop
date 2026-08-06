@@ -4683,3 +4683,51 @@ reads it.
   deliberately: it has no trigger until the picker exists, and a `Dispatch` enum with one
   reachable variant is API invented ahead of its caller. Same rule that kept `scrolling()` and a
   `Danger` tone out of §67.
+
+## 77. `/subagent`, part two: the picker, and where "background" belongs (2026-08-06)
+
+The names are unguessable — §76 established that none of the three the request imagined is real —
+so completion is not a convenience here, it is the feature. Typing `/` now opens the list.
+
+**Above the composer, as a plain flex child.** Not a floating popup: there is no position to
+measure, nothing to clip it, and it behaves like part of the field, which is what it is. Same
+placement as the approval card and the same reason (§40) — that is where attention already is.
+Each row shows the name *and its description*, because none of these names says what it does and
+the request's own guesses are the proof.
+
+**Enter completes while the name is being typed, and sends once it is settled.** The picker is
+open exactly while the input starts with `/` and contains no space, so the first space closes it —
+and a half-typed name can never be sent by accident, because it is never a real one. Two Enters is
+the rhythm: one to settle the specialist, one to send the request. That needed no new key binding
+at all; the composer's existing `Submit` is intercepted, and if nothing matches it falls through
+to §76's refusal so the key is never silently inert.
+
+The composer is now **observed** as well as subscribed. It was only subscribed, so nothing
+re-rendered as the name was typed and the list would have filtered on the next unrelated frame.
+
+### Background dispatch is a command, not a syntax
+
+`/name!`, `//name`, a trailing `&` — all of them are punctuation to memorise for no gain, and
+whether work blocks is a property of the *work*, not something a researcher should have to encode.
+So it is a palette entry: **"Run the named specialist in the background"**, acting on whatever
+`/name …` is in the composer. Discoverable by looking, keyboard-reachable, and no new grammar.
+
+The instruction it sends says *"tell me it has started and carry on — do not wait for it"*, and a
+test asserts that phrase. Its whole value is that the conversation stays live; a coordinator that
+starts the task and then blocks on it has given up the point, and nothing else in the wording
+would catch that.
+
+`Dispatch` therefore returns — §76 removed it deliberately for having one reachable variant, and
+it comes back at the moment it has two callers. The same rule that kept `scrolling()` and a
+`Danger` tone out of §67, applied in the other direction.
+
+### Where this stands
+
+Working end to end: type `/`, pick a specialist, say what it should do, send. Sixteen tests over
+the parsing, the ranking, the five name mappings, both instructions, and the exact moment the
+picker opens and closes.
+
+Two things a person still has to check, both invisible from here: whether the list reads well
+above the composer, and — the real one — whether the coordinator actually honours *"delegate this
+to `report_writer`"*. The instruction is a request to a model, not an API call, and no test in
+this repo can tell me it is obeyed. That is the next thing to find out, and it wants one real turn.
