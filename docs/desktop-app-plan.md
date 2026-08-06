@@ -95,8 +95,9 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   where it doubled back: *paper search → theories → get data → clean data → analyze → theories*.
   Cycles are the point, not a defect. The live data exists; **what does not is any of it after a
   reload**, so this is a persistence problem first — the record has to be written to the thread's
-  directory as it streams. And adjacency is arrival order, not causation: ask the backend for the
-  real parent edge before inferring one. Sequenced after `/subagent`.
+  directory as it streams. Built as a **timeline of intervals** with the graph as its projection
+  (§74): the client stamps each event on arrival, overlapping intervals prove concurrency and a
+  gap justifies an edge, so no ordering is invented. Sequenced after `/subagent`.
 - ⬜ **`/subagent` slash commands** (`/eda-subagent`, `/research-paper`, `/report-write`),
   designed in §55: a registry read from the backend, the existing fuzzy picker as the
   trigger, foreground *or* background dispatch, and the approval gate still applying.
@@ -4447,3 +4448,68 @@ already has the shape.
 work deliberately rather than hoping the coordinator delegates; this shows what was invoked.
 Building the record first would mean building it twice — once for the delegations that happen
 now, and again for the ones a researcher asks for by name.
+
+## 74. Intervals, not arrows — how the provenance graph should be built (2026-08-06)
+
+§73 said "nothing carries a timestamp or a parent" and used that to justify inferring edges from
+list order. The reply was that timestamps exist. Checking sharpened it in a way that changes the
+design:
+
+- The **client parses no per-event time.** True, and the part that matters.
+- The **captured fixture has none either** — zero hits for `created_at`, `timestamp`,
+  `start_time`, `end_time`. But that capture is explicitly *reduced* ("chunk/metadata narrowed to
+  the fields any client reads"), so it is evidence about our decoder, **not** about the wire.
+  §73's flat claim was therefore over-stated: the wire is an open question, to be answered by a
+  fresh `MINIME_CAPTURE_SSE` with nothing dropped.
+- And the decisive point: **the client can stamp arrival itself.** Every event already passes
+  through one decoder. First and last token of an invocation give it an interval, for nothing,
+  with no backend change and no permission to ask for.
+
+### What an interval buys that an arrow does not
+
+With a start and an end per invocation, the two cases separate on a *fact* rather than a guess:
+
+- **Intervals overlap** → they ran together. Draw them as a band. No edge, because there is no
+  "then".
+- **A ends before B begins** → "B started after A finished". That is a true sentence, and it is
+  the edge.
+
+So the edge stops being invented. §73's worry — that adjacency in a list would manufacture an
+order between two subagents dispatched at once — disappears, because overlap is now visible
+instead of flattened.
+
+Stated precisely, since this is a record scientists will trust: an arrival interval is *narrower*
+than the execution it stands for. The first token lands after the agent started, the last before
+it stopped. So **overlap proves concurrency**; a gap only *suggests* sequence — A may still have
+been working silently while B streamed. Worth one line in the UI, not worth pretending away.
+
+Causation remains out of reach either way, and that is fine: "B started after A finished" is what
+a lab notebook records too.
+
+### So: a timeline, with the graph as its projection
+
+The better thing to build is **both, from one structure** — and the timeline first, because it is
+made only of facts:
+
+- **The timeline is the record.** Each turn is a row, headed by the question that started it;
+  each invocation is a bar. Parallel work looks parallel. Duration is visible, which answers a
+  question nobody has been able to ask yet — *which step is slow* — and needs no graph at all.
+- **The graph is the shape.** Nodes are kinds, edges are the ordered pairs the intervals justify,
+  thickness is traversal count. This is what shows the loop that prompted the request, and it is
+  a *projection* of the timeline rather than a second source of truth.
+
+One modal, two views, one dataset. The timeline earns its keep on the first conversation; the
+graph earns its keep on the tenth, when the loop is the thing worth seeing.
+
+### What to record
+
+Per turn: the prompt, and when it was sent. Per invocation: kind, `ns`, first-token time,
+last-token time. Wall-clock (`SystemTime`) rather than `Instant`, because it has to survive being
+written to disk — §73's `provenance.json` in the thread's own directory, still the load-bearing
+part, since none of this replays from the backend.
+
+Two questions still worth putting upstream, both cheap and both turning a good proxy into the
+real thing: does the stream already carry per-event times, and does it carry the **parent** of a
+delegation? A `task` tool call is made *by* something and the coordinator knows what. If that
+came down the wire, the edges would be causal instead of chronological, and this section would be
+an implementation detail rather than a compromise.
