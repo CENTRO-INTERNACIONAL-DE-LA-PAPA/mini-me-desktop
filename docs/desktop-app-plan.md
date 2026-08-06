@@ -95,9 +95,11 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   where it doubled back: *paper search → theories → get data → clean data → analyze → theories*.
   Cycles are the point, not a defect. The live data exists; **what does not is any of it after a
   reload**, so this is a persistence problem first — the record has to be written to the thread's
-  directory as it streams. Built as a **timeline of intervals** with the graph as its projection
-  (§74): the client stamps each event on arrival, overlapping intervals prove concurrency and a
-  gap justifies an edge, so no ordering is invented. Sequenced after `/subagent`.
+  directory as it streams. Edges come from **namespace nesting** (§75) — `langgraph_checkpoint_ns`
+  is a `|`-joined path, so the parent is a prefix and the edge is *causal*, not chronological.
+  Already on the wire; the client stores it and uses it only for grouping. Arrival stamps are
+  still worth adding, but for **duration** — the wire carries no time at all. Cycles across
+  turns, a tree within one. Sequenced after `/subagent`.
 - ⬜ **`/subagent` slash commands** (`/eda-subagent`, `/research-paper`, `/report-write`),
   designed in §55: a registry read from the backend, the existing fuzzy picker as the
   trigger, foreground *or* background dispatch, and the approval gate still applying.
@@ -4513,3 +4515,85 @@ real thing: does the stream already carry per-event times, and does it carry the
 delegation? A `task` tool call is made *by* something and the coordinator knows what. If that
 came down the wire, the edges would be causal instead of chronological, and this section would be
 an implementation detail rather than a compromise.
+
+## 75. The parent edge was already on the wire (2026-08-06)
+
+Two questions were put to a capture. Both are answered from source and from the capture already
+in the repo, and the second one overturns §74.
+
+### There are no timestamps, and this time that is certain
+
+`langgraph_api/stream.py:262` yields the metadata chunk as exactly:
+
+```python
+yield "metadata", {"run_id": run_id, "attempt": attempt}
+```
+
+which is byte-identical to the first frame of `delegated-turn.sse` — so on this point the capture
+was **not** reduced, and §74's hedge ("evidence about our decoder, not about the wire") can be
+retired. Stream events are `(name, data)` pairs with no envelope. `created_at` exists in
+`langgraph_api/schema.py`, but on runs and threads — REST resources — never on a stream event.
+
+So durations can only ever be measured *here*, by stamping arrival. That remains worth doing, and
+it is the only reason left to do it.
+
+### The parentage is already arriving, and it is causal
+
+LangGraph attaches this to every task (`langgraph/pregel/_algo.py:654`):
+
+```python
+metadata = {
+    "langgraph_step": step,
+    "langgraph_node": name,
+    "langgraph_triggers": triggers,
+    "langgraph_path": task_path[:3],
+    "langgraph_checkpoint_ns": task_checkpoint_ns,
+}
+```
+
+and `NS_SEP = "|"`, `NS_END = ":"` (`langgraph/_internal/_constants.py:87`). The namespace is
+therefore a **path**, and the capture contains a two-segment one:
+
+```
+"langgraph_checkpoint_ns": "tools:d6c187d3-…|model:61d75bb5-…"
+```
+
+The parent of any node is its namespace minus the last segment. That is a *causal* edge — who
+delegated to whom — not a chronological guess about who spoke first. §73 called getting this "a
+small upstream question worth asking"; it turns out there is nothing to ask. It has been arriving
+since the beginning, and the client already keeps the whole namespace (`AgentRef.ns`) and uses it
+only as a grouping key.
+
+### So the design changes
+
+§74's "intervals, not arrows" was the right answer to the wrong question. Intervals were a proxy
+for an ordering the engine states outright, and a proxy should not outlive the thing it stood in
+for:
+
+- **Edges come from namespace nesting.** Parent → child, true by construction. No inference, no
+  disclaimer, nothing to label as heuristic.
+- **Concurrency comes from sharing a parent**, not from overlapping arrival. Siblings are
+  siblings whether or not their tokens interleave — which also fixes the case arrival intervals
+  would still have got wrong: two subagents dispatched together where one stays silent.
+- **Arrival stamps survive, demoted to what they are actually evidence of: duration.** How long a
+  step took is genuinely useful and genuinely unavailable anywhere else. It is not ordering.
+
+The loop the request was about — `theories → … → theories` — is then read off the *sequence of
+turns*, which is where it actually lives: each turn is a root, its delegations hang beneath it,
+and a kind reappearing in a later turn is the return. Cycles across turns, a tree within one.
+That is a truer picture than a single flat graph, and it falls out of the data rather than being
+imposed on it.
+
+### The one thing still unconfirmed
+
+`langgraph_step` is in the engine's task metadata; whether it reaches the *streamed chunk*
+metadata is not visible in the capture, which was reduced in exactly that region ("chunk/metadata
+narrowed to the fields any client reads"). Absence there proves nothing — the trap §74 already
+fell into once. It would order siblings within a parent, which nesting alone does not.
+
+That is now the only reason to run a live capture, and it is a small one: one turn with
+`MINIME_CAPTURE_SSE` set and nothing filtered. Worth doing when a turn is being run anyway,
+not worth spending a turn on by itself.
+
+**Answering the question as asked: yes, we have what is necessary** — more than was assumed for
+structure, less than was assumed for time, and the structure is the half that mattered.
