@@ -20,6 +20,7 @@ mod selection;
 mod settings;
 mod sidecar;
 mod theme;
+mod ui;
 mod workspace;
 
 use std::sync::Arc;
@@ -2316,13 +2317,10 @@ impl Workbench {
                         .border_1()
                         .border_color(rgb(theme::error()))
                         .child(
-                            div()
-                                .flex_grow()
-                                .min_w_0()
-                                .truncate()
-                                .text_color(rgb(theme::text_muted()))
-                                .text_xs()
-                                .child("Delete this conversation?"),
+                            ui::Label::new("Delete this conversation?")
+                                .muted()
+                                .size(ui::Size::Compact)
+                                .ellipsis(),
                         )
                         .child(
                             div()
@@ -2378,13 +2376,10 @@ impl Workbench {
                     // the cursor does not read as a list of *buttons*.
                     .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
                     .child(
-                        div()
-                            .flex_grow()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(rgb(if selected { theme::text() } else { theme::text_muted() }))
-                            .text_xs()
-                            .child(conversation.title.clone()),
+                        ui::Label::new(conversation.title.clone())
+                            .colour(if selected { theme::text() } else { theme::text_muted() })
+                            .size(ui::Size::Compact)
+                            .ellipsis(),
                     )
                     .child(
                         // Hidden until the row is hovered, so the list stays a list of
@@ -2470,9 +2465,12 @@ impl Workbench {
                             })),
                     )
                     .child(
+                        // Not a `ui::Button`: it brightens its border *and* its text on
+                        // hover, which no other button does, and it uses `border_strong`.
+                        // One call site is not worth a flag on the shared type.
                         div()
                             .id("new-conversation")
-                        .rounded_md()
+                            .rounded_md()
                             .px_2()
                             .py_1()
                             .border_1()
@@ -2566,6 +2564,9 @@ impl Workbench {
         for spec in &settings::PROVIDERS {
             let selected = spec.id == self.draft.provider;
             row = row.child(
+                // A selectable pill, not a button: it has a *chosen* state with its own
+                // background, and "which one of these is picked" is a different control from
+                // "press this to do a thing".
                 div()
                     .id(SharedString::from(format!("provider-{}", spec.id)))
                     .flex_none()
@@ -2643,17 +2644,14 @@ impl Workbench {
                         // The label truncates, not the row. `truncate` on the flex item
                         // itself gave it zero intrinsic width, so every model rendered as
                         // a bare "…" (docs §59).
-                        div()
-                            .flex_grow()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(rgb(if selected {
+                        ui::Label::new(model.to_string())
+                            .colour(if selected {
                                 theme::accent()
                             } else {
                                 theme::text_muted()
-                            }))
-                            .text_xs()
-                            .child(model.to_string()),
+                            })
+                            .size(ui::Size::Compact)
+                            .ellipsis(),
                     )
                     .when(selected, |row| {
                         row.child(
@@ -2808,17 +2806,13 @@ impl Workbench {
                         }
                     }))
                     .child(
-                        div()
-                            .flex_grow()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(rgb(if selected {
+                        ui::Label::new(name.clone())
+                            .colour(if selected {
                                 theme::text()
                             } else {
                                 theme::text_muted()
-                            }))
-                            .text_sm()
-                            .child(name.clone()),
+                            })
+                            .ellipsis(),
                     )
                     .child(swatch)
                     .on_click(cx.listener(move |workbench, _event, _window, cx| {
@@ -3462,33 +3456,14 @@ impl Workbench {
                 .flex_row()
                 .gap_3()
                 .child(
-                    div()
-                        .id("approve")
-                        .rounded_md()
-                        .px_3()
-                        .py_1()
-                        .border_1()
-                        .border_color(rgb(theme::accent()))
-                        .text_color(rgb(theme::accent()))
-                        .text_sm()
-                        .hover(|style| style.cursor_pointer())
-                        .child("Approve")
+                    ui::Button::new("approve", "Approve")
+                        .tone(ui::Tone::Accent)
                         .on_click(cx.listener(|workbench, _event, _window, cx| {
                             workbench.decide(true, cx)
                         })),
                 )
                 .child(
-                    div()
-                        .id("reject")
-                        .rounded_md()
-                        .px_3()
-                        .py_1()
-                        .border_1()
-                        .border_color(rgb(theme::border()))
-                        .text_color(rgb(theme::text_muted()))
-                        .text_sm()
-                        .hover(|style| style.cursor_pointer())
-                        .child("Reject")
+                    ui::Button::new("reject", "Reject")
                         .on_click(cx.listener(|workbench, _event, _window, cx| {
                             workbench.decide(false, cx)
                         })),
@@ -3500,17 +3475,7 @@ impl Workbench {
                 // Approving the rest of one task is a decision someone can actually
                 // hold in their head, and it expires on its own.
                 .child(
-                    div()
-                        .id("approve-turn")
-                        .rounded_md()
-                        .px_3()
-                        .py_1()
-                        .border_1()
-                        .border_color(rgb(theme::border()))
-                        .text_color(rgb(theme::text_muted()))
-                        .text_sm()
-                        .hover(|style| style.cursor_pointer())
-                        .child("Approve the rest of this turn")
+                    ui::Button::new("approve-turn", "Approve the rest of this turn")
                         .on_click(cx.listener(|workbench, _event, _window, cx| {
                             workbench.approve_rest_of_turn = true;
                             workbench.decide(true, cx);
@@ -3523,17 +3488,7 @@ impl Workbench {
                 // closing the app ends it, nothing is written to disk, and the status bar
                 // says so for as long as it holds (docs §41).
                 .child(
-                    div()
-                        .id("approve-conversation")
-                        .rounded_md()
-                        .px_3()
-                        .py_1()
-                        .border_1()
-                        .border_color(rgb(theme::border()))
-                        .text_color(rgb(theme::text_muted()))
-                        .text_sm()
-                        .hover(|style| style.cursor_pointer())
-                        .child("Approve everything in this conversation")
+                    ui::Button::new("approve-conversation", "Approve everything in this conversation")
                         .on_click(cx.listener(|workbench, _event, _window, cx| {
                             workbench.approve_conversation = true;
                             workbench.decide(true, cx);
@@ -3867,6 +3822,8 @@ impl Workbench {
             ),
         ] {
             pane = pane.child(
+                // A checkbox row, not a button: full width by design, where every
+                // `ui::Button` is `flex_none`. Making it one would break the Settings layout.
                 div()
                     .id(SharedString::from(format!("toggle-{toggle}")))
                     .w_full()
@@ -3931,33 +3888,14 @@ impl Workbench {
                 .border_t_1()
                 .border_color(rgb(theme::border()))
                 .child(
-                    div()
-                        .id("save-settings")
-                        .rounded_md()
-                        .px_3()
-                        .py_1()
-                        .border_1()
-                        .border_color(rgb(theme::accent()))
-                        .text_color(rgb(theme::accent()))
-                        .text_sm()
-                        .hover(|style| style.cursor_pointer())
-                        .child("Save")
+                    ui::Button::new("save-settings", "Save")
+                        .tone(ui::Tone::Accent)
                         .on_click(cx.listener(|workbench, _event, _window, cx| {
                             workbench.save_settings(cx)
                         })),
                 )
                 .child(
-                    div()
-                        .id("close-settings")
-                        .rounded_md()
-                        .px_3()
-                        .py_1()
-                        .border_1()
-                        .border_color(rgb(theme::border()))
-                        .text_color(rgb(theme::text_muted()))
-                        .text_sm()
-                        .hover(|style| style.cursor_pointer())
-                        .child("Close")
+                    ui::Button::new("close-settings", "Close")
                         .on_click(cx.listener(|workbench, _event, _window, cx| {
                             // Closing without saving puts the saved palette back — the
                             // preview was a look, not a change.
@@ -4139,87 +4077,64 @@ impl Workbench {
                                 // waits and a user who thinks it broke.
                                 .child(div().text_color(rgb(theme::text_muted())).text_xs().child(*note))
                                 .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
+                                    ui::actions()
                                         .gap_2()
                                         .child(
-                                            div()
-                                                .id(SharedString::from(format!(
-                                                    "run-{}",
-                                                    check.id
-                                                )))
-                                                .px_3()
-                                                .py_1()
-                                                .border_1()
-                                                .border_color(rgb(if busy { theme::border() } else { theme::accent() }))
-                                                .text_color(rgb(if busy { theme::text_muted() } else { theme::accent() }))
-                                                .text_sm()
-                                                .hover(|style| style.cursor_pointer())
-                                                .child(*label)
-                                                .on_click(cx.listener({
-                                                    let argv = argv.clone();
-                                                    let label = label.to_string();
-                                                    let check_id = check.id;
-                                                    move |workbench, _event, _window, cx| {
-                                                        workbench.start_fix(
-                                                            label.clone(),
-                                                            argv.clone(),
-                                                            check_id,
-                                                            cx,
-                                                        );
-                                                    }
-                                                })),
+                                            ui::Button::new(
+                                                SharedString::from(format!("run-{}", check.id)),
+                                                *label,
+                                            )
+                                            .tone(ui::Tone::Accent)
+                                            .disabled(busy)
+                                            .on_click(cx.listener({
+                                                let argv = argv.clone();
+                                                let label = label.to_string();
+                                                let check_id = check.id;
+                                                move |workbench, _event, _window, cx| {
+                                                    workbench.start_fix(
+                                                        label.clone(),
+                                                        argv.clone(),
+                                                        check_id,
+                                                        cx,
+                                                    );
+                                                }
+                                            })),
                                         )
                                         // Kept alongside the button: someone who would
                                         // rather run it themselves — or send it to whoever
                                         // administers the machine — should not have to
                                         // retype it.
                                         .child(
-                                            div()
-                                                .id(SharedString::from(format!("copy-{}", check.id)))
-                                                .px_3()
-                                                .py_1()
-                                                .border_1()
-                                                .border_color(rgb(theme::border()))
-                                                .text_color(rgb(theme::text_muted()))
-                                                .text_sm()
-                                                .hover(|style| style.cursor_pointer())
-                                                .child("Copy ⧉")
-                                                .on_click(cx.listener({
-                                                    let command = command.clone();
-                                                    move |workbench, _event, _window, cx| {
-                                                        cx.write_to_clipboard(
-                                                            ClipboardItem::new_string(
-                                                                command.clone(),
-                                                            ),
-                                                        );
-                                                        workbench.status =
-                                                            "command copied".into();
-                                                        cx.notify();
-                                                    }
-                                                })),
+                                            ui::Button::new(
+                                                SharedString::from(format!("copy-{}", check.id)),
+                                                "Copy ⧉",
+                                            )
+                                            .on_click(cx.listener({
+                                                let command = command.clone();
+                                                move |workbench, _event, _window, cx| {
+                                                    cx.write_to_clipboard(
+                                                        ClipboardItem::new_string(command.clone()),
+                                                    );
+                                                    workbench.status = "command copied".into();
+                                                    cx.notify();
+                                                }
+                                            })),
                                         ),
                                 );
                         }
                         preflight::Fix::Adopt { label, dir } => {
                             row = row.child(
-                                div()
-                                    .id(SharedString::from(format!("adopt-{}", check.id)))
-                                    .px_3()
-                                    .py_1()
-                                    .border_1()
-                                    .border_color(rgb(theme::accent()))
-                                    .text_color(rgb(theme::accent()))
-                                    .text_sm()
-                                    .hover(|style| style.cursor_pointer())
-                                    .child(*label)
-                                    .on_click(cx.listener({
-                                        let dir = dir.clone();
-                                        move |workbench, _event, _window, cx| {
-                                            workbench.adopt_checkout(dir.clone(), cx);
-                                        }
-                                    })),
+                                ui::Button::new(
+                                    SharedString::from(format!("adopt-{}", check.id)),
+                                    *label,
+                                )
+                                .tone(ui::Tone::Accent)
+                                .on_click(cx.listener({
+                                    let dir = dir.clone();
+                                    move |workbench, _event, _window, cx| {
+                                        workbench.adopt_checkout(dir.clone(), cx);
+                                    }
+                                })),
                             );
                         }
                         preflight::Fix::Manual(instruction) => {
@@ -4295,16 +4210,8 @@ impl Workbench {
                         .flex_row()
                         .gap_2()
                         .child(
-                            div()
-                                .id("open-signin")
-                                .px_3()
-                                .py_1()
-                                .border_1()
-                                .border_color(rgb(theme::accent()))
-                                .text_color(rgb(theme::accent()))
-                                .text_sm()
-                                .hover(|style| style.cursor_pointer())
-                                .child("Open the sign-in page")
+                            ui::Button::new("open-signin", "Open the sign-in page")
+                                .tone(ui::Tone::Accent)
                                 .on_click(cx.listener({
                                     let link = link.clone();
                                     move |workbench, _event, _window, cx| {
@@ -4323,16 +4230,7 @@ impl Workbench {
                         // the code in that URL is short-lived, so retyping it is not an
                         // option.
                         .child(
-                            div()
-                                .id("copy-signin")
-                                .px_3()
-                                .py_1()
-                                .border_1()
-                                .border_color(rgb(theme::border()))
-                                .text_color(rgb(theme::text_muted()))
-                                .text_sm()
-                                .hover(|style| style.cursor_pointer())
-                                .child("Copy ⧉")
+                            ui::Button::new("copy-signin", "Copy ⧉")
                                 .on_click(cx.listener({
                                     let link = link.clone();
                                     move |workbench, _event, _window, cx| {
@@ -4403,49 +4301,21 @@ impl Workbench {
                 .flex_row()
                 .gap_3()
                 .child(
-                    div()
-                        .id("recheck")
-                        .rounded_md()
-                        .px_3()
-                        .py_1()
-                        .border_1()
-                        .border_color(rgb(theme::accent()))
-                        .text_color(rgb(theme::accent()))
-                        .text_sm()
-                        .hover(|style| style.cursor_pointer())
-                        .child(if self.checking { "Checking…" } else { "Re-check" })
+                    ui::Button::new("recheck", if self.checking { "Checking…" } else { "Re-check" })
+                        .tone(ui::Tone::Accent)
                         .on_click(cx.listener(|workbench, _event, _window, cx| {
                             workbench.run_preflight(cx)
                         })),
                 )
                 .child(
-                    div()
-                        .id("setup-to-settings")
-                        .px_3()
-                        .py_1()
-                        .border_1()
-                        .border_color(rgb(theme::border()))
-                        .text_color(rgb(theme::text_muted()))
-                        .text_sm()
-                        .hover(|style| style.cursor_pointer())
-                        .child("Settings")
+                    ui::Button::new("setup-to-settings", "Settings")
                         .on_click(cx.listener(|workbench, _event, _window, cx| {
                             workbench.setup_open = false;
                             workbench.open_settings(None, cx);
                         })),
                 )
                 .child(
-                    div()
-                        .id("close-setup")
-                        .rounded_md()
-                        .px_3()
-                        .py_1()
-                        .border_1()
-                        .border_color(rgb(theme::border()))
-                        .text_color(rgb(theme::text_muted()))
-                        .text_sm()
-                        .hover(|style| style.cursor_pointer())
-                        .child("Close")
+                    ui::Button::new("close-setup", "Close")
                         .on_click(cx.listener(|workbench, _event, _window, cx| {
                             workbench.setup_open = false;
                             workbench.restore_focus = true;
@@ -4881,29 +4751,16 @@ impl Workbench {
             .border_color(rgb(theme::border()))
             .bg(rgb(theme::surface()))
             .child(
-                div()
-                    .flex_grow()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(rgb(status_color))
-                    .text_sm()
-                    .child(status_text),
+                ui::Label::new(status_text).colour(status_color).ellipsis(),
             )
             // A blanket grant that is in force must never be invisible — and must be
             // revocable without starting a new conversation, or "just this once" becomes
             // permanent by inconvenience. Click to hand the gate back.
             .when(self.approve_conversation, |bar| {
                 bar.child(
-                    div()
-                        .id("revoke-approval")
-                        .flex_none()
-                        .px_2()
-                        .border_1()
-                        .border_color(rgb(theme::accent()))
-                        .text_color(rgb(theme::accent()))
-                        .text_xs()
-                        .hover(|style| style.cursor_pointer())
-                        .child("approving everything — click to stop")
+                    ui::Button::new("revoke-approval", "approving everything — click to stop")
+                        .tone(ui::Tone::Accent)
+                        .size(ui::Size::Chip)
                         .on_click(cx.listener(|workbench, _event, _window, cx| {
                             workbench.approve_conversation = false;
                             workbench.approve_tasks.clear();
@@ -5237,16 +5094,11 @@ impl Workbench {
                         .flex_row()
                         .gap_2()
                         .child(
-                            div()
-                                .id(SharedString::from(format!("bg-approve-{task_id}")))
-                                .px_3()
-                                .py_1()
-                                .border_1()
-                                .border_color(rgb(theme::accent()))
-                                .text_color(rgb(theme::accent()))
-                                .text_sm()
-                                .hover(|style| style.cursor_pointer())
-                                .child("Approve")
+                            ui::Button::new(
+                                SharedString::from(format!("bg-approve-{task_id}")),
+                                "Approve",
+                            )
+                                .tone(ui::Tone::Accent)
                                 .on_click(cx.listener({
                                     let task_id = task_id.clone();
                                     move |workbench, _event, _window, cx| {
@@ -5255,16 +5107,10 @@ impl Workbench {
                                 })),
                         )
                         .child(
-                            div()
-                                .id(SharedString::from(format!("bg-reject-{task_id}")))
-                                .px_3()
-                                .py_1()
-                                .border_1()
-                                .border_color(rgb(theme::border()))
-                                .text_color(rgb(theme::text_muted()))
-                                .text_sm()
-                                .hover(|style| style.cursor_pointer())
-                                .child("Reject")
+                            ui::Button::new(
+                                SharedString::from(format!("bg-reject-{task_id}")),
+                                "Reject",
+                            )
                                 .on_click(cx.listener({
                                     let task_id = task_id.clone();
                                     move |workbench, _event, _window, cx| {
@@ -5287,16 +5133,13 @@ impl Workbench {
                     ("conv", "Approve everything in this conversation", true),
                 ] {
                     row = row.child(
-                        div()
-                            .id(SharedString::from(format!("bg-approve-{suffix}-{task_id}")))
-                            .px_3()
-                            .py_1()
-                            .border_1()
-                            .border_color(rgb(theme::border()))
-                            .text_color(rgb(theme::text_muted()))
-                            .text_xs()
-                            .hover(|style| style.cursor_pointer())
-                            .child(label)
+                        ui::Button::new(
+                            SharedString::from(format!("bg-approve-{suffix}-{task_id}")),
+                            label,
+                        )
+                            // `text_xs` in the original: these sit under the pair above and
+                            // are the wider-scope variants of it, not peers.
+                            .size(ui::Size::Compact)
                             .on_click(cx.listener({
                                 let task_id = task_id.clone();
                                 move |workbench, _event, _window, cx| {
@@ -5380,17 +5223,9 @@ impl Workbench {
         // ever for a way to get at them.
         if let Some(dir) = self.thread_workspace() {
             section = section.child(
-                div()
-                    .id("open-workspace")
-                        .rounded_md()
-                    .px_2()
-                    .py_1()
-                    .border_1()
-                    .border_color(rgb(theme::accent()))
-                    .text_color(rgb(theme::accent()))
-                    .text_xs()
-                    .hover(|style| style.cursor_pointer())
-                    .child("Open this conversation's files")
+                ui::Button::new("open-workspace", "Open this conversation's files")
+                    .tone(ui::Tone::Accent)
+                    .size(ui::Size::Compact)
                     .on_click(move |_event, _window, _cx| {
                         if let Err(error) = workspace::open(&dir) {
                             tracing::warn!(%error, "could not open the workspace folder");
@@ -5429,13 +5264,9 @@ impl Workbench {
                         .px_1()
                         .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
                         .child(
-                            div()
-                                .flex_grow()
-                                .min_w_0()
-                                .truncate()
-                                .text_color(rgb(theme::text()))
-                                .text_xs()
-                                .child(output.name.clone()),
+                            ui::Label::new(output.name.clone())
+                                .size(ui::Size::Compact)
+                                .ellipsis(),
                         )
                         .child(
                             div()

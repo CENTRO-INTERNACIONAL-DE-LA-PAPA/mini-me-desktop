@@ -45,13 +45,14 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
 - ⬜ **Click-to-update.** The app detects a stale checkout but cannot update itself (§27).
 
 **UI debt — the same call-site mistake, six times now**
-- ⬜ **A `Button` / `Label` / `Modal` / `Panel` component set.** `flex_none` / `min_h_0` has
-  caused four layout bugs (§40, §48, §51, §53), "actions inside the scroll area" three
-  (§40, §41, §52), and §58/§59 added a list without a cap, twelve square buttons and a
-  `truncate()` on the wrong element. **Twice the correct pattern was already in the same
-  file** — so this is a repetition problem, not a knowledge one, and writing the lesson
-  down has now demonstrably failed three times. A wrapped primitive is the only mechanism
-  left. **Worth more than any new feature.**
+- 🟡 **`Button` and `Label`** — built and migrated (§67): 19 button sites, 6 label sites, and
+  **twelve square buttons rounded** in the process, including `Install Ubuntu` and `Copy ⧉` in
+  the Setup pane. `rounded_md` and `flex_none` are no longer reachable to omit, `disabled` is
+  one flag rather than a colour plus a guard, and `Label::ellipsis()` cannot produce §59's
+  collapse. Three controls stay hand-written, each with a comment saying why. **Awaiting eyes.**
+- ⬜ **`Modal` and `Panel`** — the other half, and the other bug class: "actions inside the
+  scroll area", three times (§40, §41, §52). Needs thirteen scrolling panes migrated, whose
+  only proof is visual — so it wants a window open.
 - ⬜ **Bundle a font** — fenced code still renders in the UI font.
 - ⬜ **SVG icons** instead of the text glyphs `◎ ▤ ▥ ⏎`.
 - ⬜ **`uniform_list` for the transcript** — every message is laid out every frame.
@@ -73,10 +74,12 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
 - ✅ **Right-click menu** (§64) — confirmed: copy/select-all in the transcript, cut/copy/paste
   in the composer, rows greyed when they would do nothing, each showing its own binding.
 - ⬜ **Cancel a running setup fix** (§28).
-- 🟡 **Markdown gaps** — built (§65): blockquotes with depth, nested lists whose depth comes
-  from the indents actually seen (so 2- and 4-space sources agree), and images that no longer
-  render their own punctuation. Eleven tests. Inline images are *named, not loaded* — the path
-  lives in the distro and §42 already shows real figures from the host. **Awaiting eyes.**
+- ✅ **Markdown gaps** (§65, §66) — verified on a real answer: blockquotes, nested lists whose
+  depth comes from the indents actually seen (two- and four-space sources rendered identically,
+  which was the point), images no longer showing their own punctuation. The one defect the
+  eleven unit tests missed — a `>>` after a `>` folding into the outer quote — was found by
+  that answer in seconds, because every test covered a construct alone and the bug lived in the
+  transition between two.
 
 **Proposed — P7**
 - ⬜ **`/subagent` slash commands** (`/eda-subagent`, `/research-paper`, `/report-write`),
@@ -4058,3 +4061,75 @@ with no display — right after the app first worked end to end on someone else'
 call-site mistakes it would prevent were each caught within a day. Blocking a release-adjacent
 week on a blind refactor to prevent a bug class that is currently being caught cheaply is the
 wrong order. It goes next to a window someone can look at.
+
+## 66. The nested quote that had already vanished (2026-08-05)
+
+§65 shipped blockquotes an hour before a real answer was asked to render one. The answer
+contained `> First quoted line` followed by `>> Nested second-level quote`, and both lines came
+out **run together on a single depth-1 rule**. The nesting was gone.
+
+The fold collected every consecutive quoted line but kept only the *first* line's depth. So a
+`>>` after a `>` was appended to the outer quote's text and its own depth thrown away — while
+`Block::Quote` carried a `depth` field, and a test asserted `>>` alone produced depth 2. The
+field worked; the fold never gave it the chance.
+
+Now only lines at the *same* depth keep folding, with a test for both halves: a quote inside a
+quote is its own block, and an ordinary two-line quote is still one block rather than two rules
+stacked on each other.
+
+Worth being precise about what the eleven tests in §65 did and did not buy. They caught nothing
+here, because every one of them tested a single construct in isolation — `>>` on its own line
+passed, `>` twice passed. The defect lived in the *transition* between two constructs, which is
+exactly the shape unit tests miss and one real answer found immediately. Everything else in that
+answer rendered correctly, including the thing the section was built for: two-space and
+four-space nesting produced identical depth.
+
+## 67. A button you cannot build wrong (2026-08-05)
+
+The component set, finally, and starting with the half that could be verified from a headless
+machine.
+
+**What the survey said, rather than what I would have guessed.** Before writing anything, the
+44 clickables in `main.rs` were counted by what they actually do: borders cluster into exactly
+three — 36 `border()`, 12 `accent()`, 1 `error()`. Sizes into two — `px_3 py_1 text_sm` and a
+compact `text_xs`. So `Tone` has two variants and `Size` has three, and every colour, padding
+and radius in `ui.rs` was read out of the call sites it replaces. Migrating a button is meant to
+change nothing on screen.
+
+**Except that it changed twelve of them, which was the point.** §58 rounded the corners of the
+app and missed **eleven bordered buttons**; a tighter scan while migrating found a twelfth,
+`setup-to-settings` — the *Settings* button sitting immediately beside the already-rounded
+*Re-check* in the pane every new user meets. `Install Ubuntu` and `Copy ⧉`, in every Setup
+screenshot in this document, were square for two months. They are not any more, and not because
+anyone remembered: `rounded_md` is not reachable to omit.
+
+`Button` also makes `disabled` one flag instead of a colour plus a guard. Those were kept in
+step by hand at each site, and the click listener is now attached *only* when the button is
+live — so "disabled" cannot be true in the styling and false in the behaviour.
+
+`Label::ellipsis()` is the §59 lesson as a type. `.truncate()` on a flex item with `min_w_0`
+leaves zero intrinsic width and renders as nothing but an ellipsis; `ellipsis()` always pairs it
+with `flex_grow`, and there is no way to ask for the broken combination. Six call sites, all of
+which already had it right — the value is that the seventh cannot get it wrong.
+
+### Three controls deliberately left hand-written
+
+Each now carries a comment saying why, so the next person does not copy one as the template:
+
+- **the provider pill** — has a *chosen* state with its own background; "which of these is
+  picked" is a different control from "press this to do a thing";
+- **the settings toggle** — a full-width checkbox row, where every `Button` is `flex_none`;
+- **New** in the sidebar — brightens border *and* text on hover, which nothing else does. One
+  call site is not worth a flag on a shared type.
+
+### What is not here, and why
+
+No `Modal`, no `Panel`. Both are about where actions sit relative to a scroll area — the other
+repeated bug, three of them — and that means migrating thirteen scrolling panes whose only proof
+is visual. `scrolling()` was written, found to have no honest caller in this pass, and deleted
+rather than shipped unused. Same for a `Danger` tone: the one destructive control in the app is
+a borderless chip inside an already-red confirmation row, so it is one of the twenty-three rows
+this type deliberately does not cover, and a tone with no caller is a design vocabulary invented
+ahead of the design.
+
+That is the next increment, and it wants a window open.
