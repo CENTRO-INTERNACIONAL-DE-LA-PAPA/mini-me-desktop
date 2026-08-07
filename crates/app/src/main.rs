@@ -1537,6 +1537,12 @@ impl Workbench {
         // the thing actually standing in their way.
         workbench.run_preflight(cx);
 
+        // Pick up where the last session left off. Without this a cold start begins in "No
+        // project" however long the researcher has been working in one, and the first new
+        // conversation of the day lands outside it (docs §107).
+        workbench.sidecar.set_project(
+            Some(workbench.draft.project.clone()).filter(|name| !name.trim().is_empty()),
+        );
         // Populate the spine if a backend is already listening. This does not
         // start one — see `Sidecar::fetch_project`.
         workbench.refresh_project(cx);
@@ -2886,6 +2892,9 @@ impl Workbench {
             .iter()
             .find(|conversation| conversation.thread_id == thread_id)
             .and_then(|conversation| conversation.project.clone());
+        // Remembered as well as adopted: "the project you are working in" is the one you last
+        // looked at, not only the one you last filed something into.
+        self.remember_project(filed.clone());
         self.sidecar.set_project(filed);
         let mut messages = self.sidecar.open_conversation(thread_id);
         cx.spawn(async move |this, cx| {
@@ -3288,29 +3297,71 @@ impl Workbench {
             if show_headings {
                 let heading = project.clone().unwrap_or_else(|| "No project".to_string());
                 let opening = project.clone();
+                let starting = project.clone();
                 list = list.child(
                     div()
-                        .id(SharedString::from(format!("project-{heading}")))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
                         .w_full()
                         .min_w_0()
                         .pt_2()
                         .pb_1()
-                        .hover(|style| style.cursor_pointer())
-                        // Clicking the heading opens the folder — the whole reason a project is
-                        // a directory rather than a label (docs §105).
-                        .on_click(move |_event, _window, _cx| {
-                            let dir = match &opening {
-                                Some(name) => workspace::project_folder(name)
-                                    .map(|folder| workspace::root().join(folder)),
-                                None => Some(workspace::root()),
-                            };
-                            if let Some(dir) = dir {
-                                if let Err(error) = workspace::open(&dir) {
-                                    tracing::warn!(%error, "could not open a project folder");
-                                }
-                            }
-                        })
-                        .child(section_label_owned(heading.to_uppercase())),
+                        .group(SharedString::from(format!("head-{heading}")))
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("project-{heading}")))
+                                .flex_grow()
+                                .min_w_0()
+                                .hover(|style| style.cursor_pointer())
+                                // Clicking the name opens the folder — the whole reason a
+                                // project is a directory rather than a label (docs §105).
+                                .on_click(move |_event, _window, _cx| {
+                                    let dir = match &opening {
+                                        Some(name) => workspace::project_folder(name)
+                                            .map(|folder| workspace::root().join(folder)),
+                                        None => Some(workspace::root()),
+                                    };
+                                    if let Some(dir) = dir {
+                                        if let Err(error) = workspace::open(&dir) {
+                                            tracing::warn!(%error, "could not open a project");
+                                        }
+                                    }
+                                })
+                                .child(section_label_owned(heading.to_uppercase())),
+                        )
+                        // Asked for directly: starting work in a project should not mean
+                        // starting it somewhere else and then filing it (docs §107). Revealed
+                        // on hover, like the rename and delete controls on the rows below.
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("new-in-{heading}")))
+                                .flex_none()
+                                .px_1()
+                                .rounded_md()
+                                .text_color(rgb(theme::text_faint()))
+                                .text_xs()
+                                .invisible()
+                                .group_hover(
+                                    SharedString::from(format!("head-{heading}")),
+                                    |style| style.visible(),
+                                )
+                                .hover(|style| {
+                                    style.text_color(rgb(theme::accent())).cursor_pointer()
+                                })
+                                .child("+")
+                                .tooltip(move |_window, cx| {
+                                    cx.new(|_| Hint {
+                                        text: "new conversation here".into(),
+                                    })
+                                    .into()
+                                })
+                                .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                                    workbench.new_thread_in(starting.clone(), cx);
+                                })),
+                        ),
                 );
             }
             for conversation in conversations {
@@ -4112,14 +4163,7 @@ impl Workbench {
             return;
         }
         self.sidecar.set_project(project.clone());
-        // Remembered, so the next conversation starts where this one is — chosen once, not per
-        // question (docs §106).
-        self.draft.project = project.clone().unwrap_or_default();
-        let mut saved = settings::Settings::load();
-        saved.project = self.draft.project.clone();
-        if let Err(error) = saved.save() {
-            tracing::warn!(%error, "could not remember the current project");
-        }
+        self.remember_project(project.clone());
         self.say(
             match &project {
                 Some(name) => format!("filed under {name}"),
@@ -4129,6 +4173,40 @@ impl Workbench {
         );
         self.sidecar.set_thread_project(thread_id, project);
         self.refresh_conversations(cx);
+    }
+
+    /// Start a fresh conversation in a named project.
+    ///
+    /// The `+` beside a project heading. Same as `New thread` but without the step of starting
+    /// somewhere else and filing afterwards — which is a folder move for something that had not
+    /// needed to be anywhere yet.
+    fn new_thread_in(&mut self, project: Option<String>, cx: &mut Context<Self>) {
+        if self.streaming {
+            self.say("can't start a new thread mid-turn", cx);
+            return;
+        }
+        self.sidecar.set_project(project.clone());
+        self.remember_project(project);
+        self.run_command(Command::NewThread, cx);
+    }
+
+    /// Remember which project the researcher is working in, across restarts.
+    ///
+    /// Written to the settings file rather than held in memory, so the first new conversation of
+    /// a morning lands where yesterday's work is. Updated by *looking* at a conversation as well
+    /// as by filing one — §107's bug was that only filing counted, so opening something already
+    /// in a project and pressing New put you back outside it.
+    fn remember_project(&mut self, project: Option<String>) {
+        let name = project.unwrap_or_default();
+        if self.draft.project == name {
+            return;
+        }
+        self.draft.project = name.clone();
+        let mut saved = settings::Settings::load();
+        saved.project = name;
+        if let Err(error) = saved.save() {
+            tracing::warn!(%error, "could not remember the current project");
+        }
     }
 
     /// A model per specialist, under the coordinator's.
@@ -4343,7 +4421,7 @@ impl Workbench {
         // the reassuring thing regardless is the defect this repo has already reported upstream
         // in `guardrails.py`, and it would be worse to repeat it here, in the document that
         // explains the product.
-        let execution = if self.sidecar.execution() == "local" {
+        let execution = if self.sidecar.runs_locally() {
             (
                 "Runs on this machine",
                 "Python and shell code the agent writes execute here, with your permissions, in \
@@ -6391,11 +6469,12 @@ impl Workbench {
                     return;
                 }
                 self.sidecar.reset_thread();
-                // Started where the last one was: a researcher works through one line of enquiry
-                // over days, and choosing a project once is the shape of that (docs §106).
-                self.sidecar.set_project(
-                    Some(self.draft.project.clone()).filter(|name| !name.trim().is_empty()),
-                );
+                // **The project is deliberately left alone.** A new conversation continues in
+                // whichever project the last one was in, and `sidecar.project()` already holds
+                // it — set by opening a conversation, by filing one, or at startup from the
+                // remembered value. Consulting the *setting* here was wrong: it is only written
+                // when something is filed, so opening a conversation already in a project and
+                // pressing New put the researcher back in "No project" (docs §107).
                 self.transcript.clear();
                 // A new conversation is a new enquiry. The one just left keeps its own record on
                 // disk, where reopening it will find it.

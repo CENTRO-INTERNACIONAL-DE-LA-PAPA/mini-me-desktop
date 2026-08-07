@@ -6210,3 +6210,58 @@ both sanitisers produce the same path segment.
 
 Untested on a real window: all of it. The next screenshot is the one that matters, and on this
 project's record it will find something — §85 and §99 were both settled by one.
+
+## 107. "It says run in a sandbox" (2026-08-07)
+
+Three findings from the first real window on §106. Two were mine; the third was a good idea.
+
+### The About box told every researcher the wrong thing
+
+It read *"Runs in an isolated sandbox"* on a machine running host execution. The check was:
+
+```rust
+if self.sidecar.execution() == "local"
+```
+
+and the label is `"host (local)"` (`backend.rs:810`). The comparison never matched, so the false
+branch was the only one anyone ever saw.
+
+**This is the defect this repo reported upstream against `guardrails.py` the same morning** — a
+component telling the researcher their code is sandboxed when it is running on their own
+filesystem — reintroduced eight hours later, in the section written to avoid it, by comparing
+against a string I assumed instead of read.
+
+§79 had already settled the rule and I did not apply it: *"matching on prose to discover this is
+how the two get confused in the first place."* The fix is `runs_locally()`, answered from the
+`Execution` enum. There is no string to be wrong about.
+
+Worth stating plainly, because the pattern is now specific rather than general: **every time this
+project has compared against a human-readable label, the label has been the thing that changed.**
+§79 was `Started::{Attached, Spawned}`. This is the same fix, and the same lesson had a section
+number already.
+
+### New thread left the project
+
+Filed under `TEST2`, pressed New, landed in `No project`. `NewThread` consulted
+`settings.project`, which is only written when something is *filed* — so opening a conversation
+already in a project, then starting a new one, went outside it.
+
+Three changes, and the shape is that "the project you are in" has more than one source:
+
+- **New thread leaves the project alone.** `sidecar.project()` already holds it; overwriting from
+  a setting was the bug.
+- **Opening a conversation remembers its project**, not just adopting it. Looking at work counts
+  as being in it.
+- **Startup restores it**, so the first conversation of a morning lands where yesterday's work is.
+
+### A `+` on each heading
+
+Asked for, and right: starting work in a project should not mean starting it somewhere else and
+then filing it — which is a folder move for something that had never needed to be anywhere. It
+appears on hover, the same way the rename and delete controls on the rows below do.
+
+### The other two held
+
+Per-specialist models worked on a real turn, and the Asta citation copies. The provider tag on
+each row — *"Anthropic — no key stored"* — did the job it was added for: it says what is missing
+at the moment of choosing, rather than several minutes into a turn that fails inside a subagent.

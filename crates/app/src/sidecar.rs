@@ -141,6 +141,22 @@ impl Sidecar {
         self.execution
     }
 
+    /// Whether the agent's code runs on this machine.
+    ///
+    /// **A typed answer, not a string comparison.** The About box asked
+    /// `execution() == "local"`, and the label is `"host (local)"` — so it never matched and the
+    /// window told every researcher their code ran in an isolated sandbox when it was running on
+    /// their own filesystem. That is the exact defect this repo reported upstream against
+    /// `guardrails.py` the same morning, reintroduced by comparing against a string I assumed
+    /// instead of read (docs §107). §79 had already settled the rule — matching on prose to
+    /// discover a fact is how the two get confused.
+    pub fn runs_locally(&self) -> bool {
+        matches!(
+            self.config.execution,
+            crate::backend::Execution::Local { .. }
+        )
+    }
+
     /// Where the sidecar's own logs land — the first place to look when a turn
     /// fails for reasons the HTTP layer can't explain.
     pub fn log_path(&self) -> &str {
