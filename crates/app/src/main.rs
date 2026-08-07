@@ -75,6 +75,14 @@ fn step_line(label: &str) -> impl IntoElement {
 /// Positioned absolutely, so the caller's container must be `relative()`. `bounds()` is
 /// only meaningful after the first paint, hence the zero check: on frame one there is
 /// simply no bar, and from frame two there is.
+/// Room to leave on the right of anything [`scrollbar`] is drawn over.
+///
+/// The bar is `right: 2px` and `6px` wide, so it owns the last 8; the extra 4 keep a row's
+/// border and the thumb from touching. Stated once and used by both sides, because the
+/// alternative is a number in the scrollbar and a different number in each thing it overlaps —
+/// which is how the theme rows ended up with a thumb sitting on their swatches (docs §100).
+pub const SCROLL_GUTTER: f32 = 12.;
+
 fn scrollbar(handle: &gpui::ScrollHandle) -> Option<impl IntoElement> {
     let overflow = handle.max_offset().height;
     let viewport = handle.bounds().size.height;
@@ -3479,6 +3487,8 @@ impl Workbench {
             .flex_col()
             .w_full()
             .min_w_0()
+            // Same gutter as every other list a scrollbar is drawn over (docs §100).
+            .pr(px(SCROLL_GUTTER))
             .gap_px()
             // Capped, because `custom` could list anything and a long list would push the
             // API-key field out of the modal.
@@ -3597,6 +3607,9 @@ impl Workbench {
             .flex_col()
             .w_full()
             .min_w_0()
+            // Room for the thumb, which is painted over this by the wrapper below. Without it
+            // the bar sits on the rows' right border and the last colour swatch (docs §100).
+            .pr(px(SCROLL_GUTTER))
             .gap_1()
             .max_h(px(260.))
             .overflow_y_scroll()

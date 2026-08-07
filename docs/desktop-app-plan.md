@@ -5875,3 +5875,35 @@ argument, and it is nearly always skipped.**
 
 Still to confirm on a real window: that the two fields now measure like their siblings. The
 logging stays in — it costs nothing, and it is the only reason this section exists.
+
+## 100. The filter field, confirmed — and the thumb on the swatches (2026-08-07)
+
+§99's fix is confirmed on a real window: *"the search bar its fixed."* Both fields in the theme
+picker now lay out like their siblings, and the `WARN` is gone. Four numbers ended a bug that had
+survived §72, §88, an investigation, and a refutation of that investigation.
+
+The logging stays. It costs nothing when there is nothing to say, and it is the only reason there
+is a §99 rather than a fourth guess.
+
+### The scrollbar was sitting on the rows
+
+Visible in the same screenshot. `scrollbar` paints at `right: 2px`, `6px` wide, so it owns the last
+eight pixels of whatever it is drawn over — and the theme rows ran the full width beneath it, which
+put the thumb on their right border and their last colour swatch.
+
+Two numbers that had to agree and never had to be written down together. `SCROLL_GUTTER` states it
+once and both sides use it: the bar's geometry on one side, `pr(SCROLL_GUTTER)` on the lists it
+covers on the other.
+
+Only the two picker lists needed it. The transcript and the artifacts panel already carry `p_4`,
+which is wider than the gutter — so this was never a general defect, just the two places where
+content was allowed to reach the edge.
+
+### The smallest version of a pattern this document keeps recording
+
+A constant in one file and a layout decision in another, agreeing by coincidence until one of them
+moved. §72's box "stated" a width that was a percentage; §88's `flex_grow` needed a row that was a
+block; §98's import needed a `sys.path` the launch never sets. Each time, two things had to hold
+together and only one of them said so.
+
+The fix is always the same shape: **write the number once, where both sides can read it.**
