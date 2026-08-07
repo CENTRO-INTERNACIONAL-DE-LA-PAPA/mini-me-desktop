@@ -341,7 +341,14 @@ class LocalWorkspaceBackend(LocalShellBackend):
         # This is the fifth time in a week that the thing needed to end an argument was a value
         # the program already had: §99's laid-out width, §91's count of adoptable threads, §110's
         # overlay path, §114's config keys.
-        logger.warning(
+        #
+        # `warning` for a real run, `debug` for a read-only graph load. `GET /threads/{id}/state`
+        # builds a backend too — the client polls it while watching a task — and those have no run
+        # config, so they resolve to the run's own thread at the root and touch nothing. At
+        # warning level they outnumbered the lines that matter six to one, which is how a log
+        # stops being read (docs §116).
+        speak = logger.warning if _configurable() else logger.debug
+        speak(
             "minime_local: workspace %s (own thread %s, pinned to %s, project %r)",
             self._work_dir,
             thread_id,

@@ -6688,3 +6688,47 @@ Four of the five were one line of logging. The pattern is specific enough now to
 **when a component computes something from several inputs and then behaves surprisingly, print the
 thing it computed, not the inputs.** Every one of these was a derived value, and in every case the
 inputs looked fine.
+
+## 116. The pin works (2026-08-07)
+
+§115's line, from the background worker's own run:
+
+```
+minime_local: workspace /mnt/c/Users/LENOVO/Documents/Mini-Me/test2/019fdd9e-e0cd-…
+  (own thread 019fde06-e33c-…, pinned to 019fdd9e-e0cd-…, project 'test2')
+  graph_id=background
+```
+
+Its own thread is `019fde06-…`; it resolved to the **conversation's** `019fdd9e-…`, inside
+`test2`. Both §43's thread pin and §111's project key travelled onto a background run, and the
+coordinator's own turns name the same directory.
+
+So of §115's two explanations, it is the second: **the worker looked in the right place and the
+file was not there.** Which points the enquiry at the foreground turn that was supposed to write
+it — a completely different question from the one that was being asked, and one nobody could have
+reached from the transcript.
+
+Three sections of instrumentation to establish that nothing was wrong. That is a fair price:
+§114's guard bug and §111's missing config key were both found on the way, and neither would have
+surfaced without it.
+
+### And the log now knows what is worth saying
+
+The same run produced a dozen of these:
+
+```
+workspace .../Mini-Me/019fde06-… (own thread 019fde06-…, pinned to 019fde06-…, project '<none>')
+  method=GET path=/threads/{thread_id}/state
+```
+
+Read-only graph loads. `GET /threads/{id}/state` builds a backend too — the client polls it every
+few seconds while watching a task — and those have no run config, so they resolve to the run's own
+thread at the root and touch nothing. At warning level they outnumbered the lines that mattered six
+to one.
+
+`warning` when there is a live run, `debug` otherwise. **A log that reports everything is a log
+nobody reads**, and this project has now made that mistake twice in one day — §112's wrapper
+message was the other.
+
+The rule that falls out, and it is the counterpart to §115's: *print the derived value, at the
+moment something derives it for a reason.* Not on every construction, and not only when it fails.
