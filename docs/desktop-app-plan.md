@@ -6381,3 +6381,55 @@ The targets are now split: host-execution patches stay conditional, the spine on
 `self.project = None` before each refresh. A stale mission sitting above a new project's empty
 list reads as that project having inherited the old one's work — the same reason §79's sidebar had
 to say "loading" rather than show nothing.
+
+## 110. The log said which copy (2026-08-07)
+
+Everything §109 asked for showed up in the backend log — the spine per project, both route handlers
+wrapped, and the SQLite checkpointer live with its database on ext4 inside the distro, where §95
+required it. But two lines further down:
+
+```
+Configuring custom checkpointer at
+  /mnt/c/Users/LENOVO/Documents/GitHub/mini-me-desktop/overlay/minime_local/checkpointer.py
+Importing graph  graph_id=background
+  path=/mnt/c/.../overlay/minime_local/async_agents.py
+```
+
+**`/mnt/c`.** The background graph and the checkpointer are being imported across WSL's 9p mount
+on every launch — the exact dependence §25 removed by provisioning a copy inside the distro, and
+§33 later found to have gone stale in the other direction.
+
+### Why, and why it was invisible
+
+`make_config.py` writes **absolute** paths into the generated config, derived from its own
+`__file__`. So whichever copy runs it decides where the server imports from for the life of the
+process. The launch resolved the overlay two different ways in the same command line:
+
+- `PYTHONPATH` used `overlay_expression`, which probes for the in-distro copy and falls back to
+  Windows — correct;
+- the generator was handed the raw host path — so it ran from `/mnt/c` and wrote `/mnt/c` into the
+  config.
+
+Nothing fails. The imports work, just from the wrong side, and the only evidence is a path inside a
+log line. That is the third finding in three days whose whole existence was a value nobody had
+looked at: §99's `bounds.size.width`, §91's count of adoptable threads, and now this.
+
+Fixed by handing the generator the same expression, double-quoted rather than `shell_quote`d —
+quoting a command substitution as a literal would defeat it, while double quotes keep it running
+and still suppress word splitting on a path with a space in it.
+
+### The test is a count
+
+`the_config_generator_runs_from_the_in_distro_overlay` asserts the launch probes for
+`sitecustomize.py` **twice** — once for the generator, once for `PYTHONPATH`. Before the fix there
+was exactly one. That is a more honest assertion than matching a path, because the thing that was
+wrong was not the path's shape; it was that only one of two places asked the question.
+
+### Also from the same log
+
+- `could not adopt older conversations` fired at `warn` on every launch: the adoption pass runs
+  before the first conversation list, which happens while the backend is still starting. A warning
+  that appears every time is one nobody reads on the day it means something — `debug` now, which
+  is what `list_conversations` beside it had already concluded for itself.
+- `thread_dir` was left behind when projects gave a conversation's folder a project component.
+  Removed.

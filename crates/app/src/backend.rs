@@ -405,7 +405,10 @@ fn launch_command_for(
             prepare.push_str("; ");
         }
         let config_flag = if async_subagents {
-            prepare.push_str(&generate_config_command(&overlay, ".venv/bin/python"));
+            prepare.push_str(&generate_config_command(
+                &overlay_expression(&wsl.dir, &overlay),
+                ".venv/bin/python",
+            ));
             prepare.push_str(" && ");
             format!(" --config {GENERATED_CONFIG}")
         } else {
@@ -557,13 +560,24 @@ fn sync_overlay_command(source: &str, backend_dir: &str) -> String {
     )
 }
 
+/// Run the config generator **from the copy the server will actually import**.
+///
+/// `overlay` is the same shell expression the runtime `PYTHONPATH` gets — it resolves to the
+/// in-distro copy when there is one and the Windows path only as a fallback. That matters more
+/// than it looks, because `make_config.py` writes *absolute* paths into the generated config,
+/// derived from its own `__file__`. Run it from `/mnt/c` and the config names `/mnt/c` — so the
+/// background graph and the SQLite checkpointer are imported across WSL's 9p mount every launch,
+/// which is slow, breaks when the Windows drive is not reachable, and re-opens the very
+/// dependence §25 removed. Measured in a real log: `Configuring custom checkpointer at
+/// /mnt/c/Users/.../overlay/minime_local/checkpointer.py` (docs §110).
+///
+/// Double-quoted rather than `shell_quote`d: the value is a command substitution, and quoting it
+/// as a literal would defeat it. Inside double quotes the substitution still runs and word
+/// splitting is suppressed, so a path with a space in it survives.
 fn generate_config_command(overlay: &str, python: &str) -> String {
     format!(
-        "{python} {} .",
-        shell_quote(&format!(
-            "{}/minime_local/make_config.py",
-            overlay.trim_end_matches('/')
-        ))
+        "{python} \"{}/minime_local/make_config.py\" .",
+        overlay.trim_end_matches('/')
     )
 }
 
@@ -1415,6 +1429,56 @@ pub(crate) mod env_lock {
 
 #[cfg(test)]
 mod tests {
+
+    /// The generated config must be written by the copy the server imports, not the other one.
+    ///
+    /// `make_config.py` writes **absolute** paths into that config, taken from its own
+    /// `__file__`. So whichever copy runs it decides where the background graph and the SQLite
+    /// checkpointer are loaded from for the life of the process. Running it from `/mnt/c` puts
+    /// both across WSL's 9p mount — slow, and broken the moment the Windows drive is not
+    /// reachable, which is the dependence §25 existed to remove.
+    ///
+    /// It went unnoticed because nothing fails: the imports work, just from the wrong side, and
+    /// the only evidence is a path in a log line nobody reads (docs §110).
+    #[test]
+    fn the_config_generator_runs_from_the_in_distro_overlay() {
+        let argv = launch_command_for(
+            Path::new("/tmp/mini-me"),
+            2024,
+            Some(&WslTarget {
+                distro: None,
+                dir: "~/Mini-Me".into(),
+            }),
+            &Execution::Local {
+                overlay_dir: PathBuf::from(r"C:\repo\overlay"),
+            },
+            true,
+            // Async subagents on, which is what asks for a generated config at all.
+            true,
+            true,
+        );
+        let command = argv.last().expect("the bash -lc payload");
+
+        // The generator is invoked through the same expression the runtime PYTHONPATH uses, so
+        // it prefers the provisioned copy and falls back to the Windows path only if that copy is
+        // missing. Counting the probe is what distinguishes the fix: before it there was exactly
+        // one — PYTHONPATH's — and the generator ran from a hardcoded Windows path.
+        assert_eq!(
+            command.matches("sitecustomize.py").count(),
+            2,
+            "the generator and PYTHONPATH must resolve the overlay the same way: {command}"
+        );
+        assert!(
+            command.contains("/minime_local/make_config.py\" ."),
+            "{command}"
+        );
+        // Not a quoted literal: `shell_quote` would have emitted a single-quoted /mnt/c path
+        // with no command substitution around it, which is exactly what shipped.
+        assert!(
+            !command.contains("'/mnt/c/repo/overlay/minime_local/make_config.py'"),
+            "the generator must not be pinned to the Windows copy: {command}"
+        );
+    }
 
     /// The install is offered on a checkout the app provisioned, and never on someone else's.
     ///
