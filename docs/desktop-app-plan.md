@@ -90,15 +90,26 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   that answer in seconds, because every test covered a construct alone and the bug lived in the
   transition between two.
 
+**Next**
+- ⬜ **Measure the filter field** (§92) — three fixes shipped against it, none reproduced. One run
+  with the box's real width logged discriminates between every remaining hypothesis; each guess
+  has cost a release.
+- ⬜ **Six upstream reports** (§94), two of them data-loss paths in `langgraph_runtime_inmem`.
+- ⬜ **Publish `v0.1.0`** — tagged and built; the draft needs a decision about who may have it.
+- ⬜ **A custom store** (§93) — deliberately after the checkpointer, and only with numbers:
+  alpha API, and replacing it means owning semantic search and TTL.
+- ⬜ **A native Windows backend?** (§95) — the case is the WSL install, not storage. Its own
+  experiment: run a real turn without the distro and see what actually breaks.
+
 **Proposed — P7**
-- 🟡 **The provenance record** — built (§73–§75 designed it, §83 built it): a `Record` written to
-  `provenance.json` in the thread's own directory as each turn finishes, and a modal with two
-  views over it — a **timeline** of bars per turn, and the **path** as chips and arrows. Edges are
-  causal where the namespace path says so (`delegated to`) and observed where only arrival does
-  (`then`), and the modal says which is which. Cycles across turns, a tree within one.
-  **Not yet built**: the canvas-and-`paint_path` graph §73 sketched as the second stage — the
-  chain is legible with no layout algorithm, and it should earn the graph before one is written.
-  **Awaiting a real conversation** to say whether it does.
+- ✅ **The provenance record** — done (§73–§75 designed it, §83 built it, §85–§86 fixed it on
+  real data): a `Record` written to `provenance.json` in the thread's own directory as each turn
+  finishes, and a modal with two views — a **timeline** of bars on one shared scale, and the
+  **graph**, drawn with `canvas` and `PathBuilder`. Edges are causal where the namespace path
+  says so (`delegated to`) and observed where only arrival does (`then`), and the modal says
+  which is which. Cycles across turns, a tree within one. The chain-of-chips §73 proposed as the
+  first stage was built, shown, and rejected in one screenshot — *"the other image its not a
+  graph"* — which is what the staging was for.
 - ✅ **`/subagent` slash commands** — done (§76–§81): a registry captured from the coordinator
   as it is assembled, a `/` picker over the real ten specialists, name validation that suggests
   the nearest match, and background dispatch from the palette. The one thing no test in this
@@ -108,8 +119,9 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   rather than a coordinator answer.
 
 **Deliberate deferrals**
-- ⬜ **Old workspaces are not migrated** (§42), and **threads from before §51's tag do not
-  appear** in the sidebar.
+- ⬜ **Old workspaces are not migrated** (§42). Threads from before §51's tag **do** appear
+  again: §90 found them filtered rather than lost, and §91 fixed the repair after measuring that
+  the first attempt recovered 1 of 26.
 - ⬜ **Async subagents stay opt-in**, on a preview deepagents API.
 
 **A correction, since it changes what is possible.** This document said text selection was
