@@ -700,6 +700,13 @@ impl Element for ComposerElement {
             + 1;
         let mut style = Style::default();
         style.size.width = relative(1.).into();
+        // **And grow, which is the half that was missing.** `width: 100%` only means anything
+        // when the parent's width is definite; inside the theme picker's popup it resolved to
+        // nothing, so the field's border collapsed to a sliver while its placeholder painted
+        // straight out the side. §72 fixed one box that way and the same bug came back on both
+        // of them (docs §88). `flex_grow` needs no definite parent — it takes whatever free
+        // space the row has — so the two together hold in either kind of container.
+        style.flex_grow = 1.0;
         style.size.height = (window.line_height() * lines.min(MAX_VISIBLE_LINES) as f32).into();
         (window.request_layout(style, [], cx), ())
     }

@@ -1727,6 +1727,13 @@ impl Workbench {
             // in the source, and it came out a quarter the width with its placeholder spilling
             // out the side — it was relying on flex stretch, and the two boxes did not agree
             // about whether they got it (docs §72).
+            //
+            // A **flex row**, because `w_full` alone was not enough and §72 came back: a `div` is
+            // `Display::Block` by default in gpui, so the field inside had no row to fill and its
+            // own `width: 100%` had nothing definite to resolve against (docs §88).
+            .flex()
+            .flex_row()
+            .items_center()
             .w_full()
             .min_w_0()
             .px_2()
@@ -3556,6 +3563,10 @@ impl Workbench {
                         workbench.applied_theme = chosen.clone();
                         // Immediately, so the choice is judged by the window it changes.
                         settings::apply_theme(&workbench.draft);
+                        // And the picker closes: choosing is the thing it was opened to do, and
+                        // a list that stays up over the window it just repainted hides the very
+                        // change being judged (docs §88).
+                        workbench.open_picker = None;
                         cx.notify();
                     })),
             );
@@ -4934,6 +4945,12 @@ impl Workbench {
             },
             cx,
         );
+        // Saving is finishing. Leaving the window up after it put a note inside a pane the user
+        // had already decided to leave, so the only visible answer to "did that work?" was a
+        // sentence they had to go back and look for — which is exactly what the toast above
+        // exists to avoid (docs §88).
+        self.settings_open = false;
+        self.restore_focus = true;
         cx.notify();
     }
 

@@ -5269,3 +5269,51 @@ nothing in this client shapes it. Two things are worth recording rather than fix
 If the searches are genuinely redundant — two relevance searches and two title searches for one
 request — that is a prompt or tool-description question in Mini-Me, and belongs upstream with the
 other three. Worth a look with the timeline open, which is now possible for the first time.
+
+## 88. §72 came back, and this time the mechanism got fixed (2026-08-06)
+
+Three faults in one screenshot, and the first is a repeat.
+
+### The filter box collapsed to a sliver, again
+
+`Filter themes` and `Search Zed's theme gallery` both rendered as a ~10px rounded rectangle with
+their placeholder painting straight out the right-hand side. §72 saw exactly this on one of those
+two boxes, diagnosed it as "relying on flex stretch", and fixed it by adding `w_full`. It came
+back on both.
+
+Because `w_full` was never the mechanism. Two facts, and neither alone is enough:
+
+- **`div()` in gpui is `Display::Block`** (`style.rs:734`), not flex. `filter_field` never called
+  `.flex()`, so its child had no row to fill.
+- **`ComposerElement` asks for `width: relative(1.)`** — 100% of its parent. A percentage needs a
+  *definite* parent width to resolve against, and inside `anchored()` — which lays its child out
+  as an absolutely positioned, shrink-to-fit flex container (`anchored.rs:111`) — there was none.
+  The percentage resolved to nothing, the border drew around nothing, and the text painted anyway.
+
+So the field is now a flex row, and `ComposerElement` sets **`flex_grow = 1.0` as well as** the
+percentage. `flex_grow` needs no definite parent — it takes whatever free space the row has — so
+the pair holds in either kind of container. That is the difference between fixing the box and
+fixing the reason: §72 fixed a box.
+
+The popup's own width, from §86, was fine. It reads as ~400px in the screenshots because Windows
+is at 125% scale: 320 × 1.27 ≈ 406.
+
+### Choosing a theme left the list covering the window it had just repainted
+
+The row applied the theme and did nothing else. Choosing is the thing the picker was opened to do,
+and a list that stays up over the window it just changed hides the very change being judged. It
+closes now.
+
+### Save did not close Settings
+
+`save_settings` wrote everything, set a note, raised a toast — and left the window open. So the
+only visible confirmation was a sentence inside a pane the user had already decided to leave,
+which is precisely what the toast was added to avoid. Saving is finishing; it closes.
+
+### What links them
+
+All three are the same omission in different clothes: **an action that completes without saying
+so, or a size that is stated without being enforced.** The plan has now recorded the second shape
+twice (§72, here) and the first four times (§60, §69, §80, here). The lesson that keeps being
+re-learnt is that a UI's claim — a declared width, a footer promising "esc close", a Save button —
+is a claim the code has to actually make true, and no test catches the ones made in CSS.
