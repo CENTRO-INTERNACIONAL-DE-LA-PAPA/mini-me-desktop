@@ -476,7 +476,11 @@ impl Sidecar {
             match client.adopt_untagged_conversations().await {
                 Ok(0) => {}
                 Ok(adopted) => tracing::info!(adopted, "adopted conversations from before the tag"),
-                Err(error) => tracing::warn!(%error, "could not adopt older conversations"),
+                // `debug`, not `warn`. The first refresh fires while the backend is still
+                // starting, so this fails once on every launch — and a warning that appears every
+                // time is one nobody reads the day it means something. `list_conversations`
+                // beside it already reasoned exactly this way.
+                Err(error) => tracing::debug!(%error, "could not adopt older conversations yet"),
             }
             // 200 is far past what the sidebar can usefully show and still one request.
             match client.list_conversations(200).await {

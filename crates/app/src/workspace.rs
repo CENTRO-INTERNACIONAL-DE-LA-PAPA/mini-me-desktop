@@ -182,11 +182,6 @@ pub fn move_thread(from: Option<&str>, to: Option<&str>, thread_id: &str) -> Res
     Ok(())
 }
 
-/// Where one conversation's files live.
-pub fn thread_dir(thread_id: &str) -> PathBuf {
-    root().join(thread_id)
-}
-
 /// Turn a report's title into a filename a person would recognise in a folder listing.
 ///
 /// Runs of anything that is not a letter or digit become one underscore, and the case is kept —
@@ -756,7 +751,7 @@ mod tests {
         unsafe { std::env::set_var(WORKSPACE_ENV, "/tmp/somewhere-else") };
         assert_eq!(root(), PathBuf::from("/tmp/somewhere-else"));
         assert_eq!(
-            thread_dir("abc-123"),
+            thread_dir_in(None, "abc-123"),
             PathBuf::from("/tmp/somewhere-else").join("abc-123")
         );
         match previous {
