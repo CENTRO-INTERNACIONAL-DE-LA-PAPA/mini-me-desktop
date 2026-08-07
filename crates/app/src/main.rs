@@ -50,6 +50,14 @@ use sidecar::Sidecar;
 /// already typed, to be deleted before the real one could be asked (docs §87).
 const CHECK_PROMPT: &str = "In one short paragraph, what is your role as the Mini-Me coordinator?";
 
+/// The reference the Allen Institute asks for when work uses Asta.
+///
+/// Held as a constant so the About box and anything else that needs it cannot disagree, and
+/// written out in full rather than linked: a researcher pasting this into a manuscript should not
+/// have to open a browser to finish the job.
+const ASTA_CITATION: &str = "AstaBench: Rigorous Benchmarking of AI Agents with a Scientific \
+     Research Suite. arXiv:2510.21652 — https://arxiv.org/abs/2510.21652";
+
 /// A small caps-ish section heading for the side panel.
 fn section_label(text: &'static str) -> impl IntoElement {
     div().text_color(rgb(theme::accent())).text_xs().child(text)
@@ -441,6 +449,7 @@ enum Command {
     SpecialistInBackground,
     RestartBackend,
     RenderReport,
+    OpenAbout,
     OpenProvenance,
     OpenSettings,
     OpenSetup,
@@ -448,7 +457,7 @@ enum Command {
 }
 
 impl Command {
-    const ALL: [Command; 15] = [
+    const ALL: [Command; 16] = [
         Command::RunTurn,
         Command::NewThread,
         Command::RefreshSpine,
@@ -460,6 +469,7 @@ impl Command {
         Command::SpecialistInBackground,
         Command::RestartBackend,
         Command::RenderReport,
+        Command::OpenAbout,
         Command::OpenProvenance,
         Command::OpenSettings,
         Command::OpenSetup,
@@ -479,6 +489,7 @@ impl Command {
             Command::SpecialistInBackground => "Run the named specialist in the background",
             Command::RestartBackend => "Restart the backend",
             Command::RenderReport => "Save the latest report as a PDF",
+            Command::OpenAbout => "About Mini-Me",
             Command::OpenProvenance => "Show this conversation's provenance",
             Command::OpenSettings => "Settings",
             Command::OpenSetup => "Setup & diagnostics",
@@ -499,6 +510,9 @@ impl Command {
             Command::SpecialistInBackground => "sends the /name in the composer, without waiting",
             Command::RestartBackend => "after updating the app — reloads its Python overlay",
             Command::RenderReport => "typeset with citations, into this conversation's folder",
+            Command::OpenAbout => {
+                "what the specialists do, where the data comes from, how to cite it"
+            }
             Command::OpenProvenance => "which specialists were consulted, and in what order",
             Command::OpenSettings => "model, keys, execution (ctrl-,)",
             Command::OpenSetup => "check what the backend still needs",
@@ -1125,6 +1139,8 @@ struct Workbench {
     reports: Vec<protocol::Report>,
     /// Whole citations, for a rendered report's bibliography. Not the panel's truncated ones.
     sources: Vec<String>,
+    /// Whether the About window is showing.
+    about_open: bool,
     /// Whether the provenance window is showing, and which of its two views.
     provenance_open: bool,
     provenance_view: ProvenanceView,
@@ -1218,6 +1234,8 @@ struct Workbench {
     /// needs one anyway: focus left on an element the open pane no longer renders means key
     /// bindings — Escape among them — simply stop arriving.
     provenance_focus: gpui::FocusHandle,
+    /// The About window's own focus, for the same reason (docs §71).
+    about_focus: gpui::FocusHandle,
     /// Recent outcomes, newest last, each fading on its own timer.
     ///
     /// The status bar holds exactly one line, so an outcome worth reading — "copied 12 lines",
@@ -1370,6 +1388,7 @@ impl Workbench {
             saved_reports: std::collections::HashSet::new(),
             reports: Vec::new(),
             sources: Vec::new(),
+            about_open: false,
             provenance_open: false,
             provenance_view: ProvenanceView::Timeline,
             provenance: provenance::Record::default(),
@@ -1406,6 +1425,7 @@ impl Workbench {
             open_picker: None,
             settings_focus: cx.focus_handle(),
             provenance_focus: cx.focus_handle(),
+            about_focus: cx.focus_handle(),
             sidebar_width: 240.,
             panel_width: 320.,
             dragging: None,
@@ -3844,6 +3864,188 @@ impl Workbench {
     /// they use for all fifty-odd of their modals. It suits this exactly — opening a
     /// figure or a report is something you do, look at, and dismiss, not somewhere you
     /// navigate to and have to find your way back from (docs §49).
+    /// What this thing is, what the specialists do, and who to credit.
+    ///
+    /// Asked for after a look at the web app, which has one and this did not. Three jobs, and the
+    /// third is not optional:
+    ///
+    /// 1. **Say what the specialists are.** Ten of them delegate to each other and a researcher
+    ///    meets them one at a time, in a trace, mid-answer. A list is the cheapest orientation
+    ///    there is.
+    /// 2. **Say where the data comes from.** Asta, CIP Dataverse, AGROVOC and Crop Ontology are
+    ///    other people's catalogues, and which one an answer leaned on changes how it should be
+    ///    read.
+    /// 3. **Credit Asta.** The Allen Institute asks that work using it cite AstaBench, and a tool
+    ///    that makes their search easy to use while making the citation hard to find is taking
+    ///    something without saying so. The reference is here, selectable, next to a note about
+    ///    when it applies (docs §103).
+    ///
+    /// **The team list is read from the live registry**, not written here. §76 built that list
+    /// precisely so a copy in the client could not drift the first time upstream renamed a
+    /// specialist, and an About box that names agents the backend no longer has would be the
+    /// same defect wearing a friendlier face.
+    fn about_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let specialists = workspace::subagents();
+
+        let mut team = div().flex().flex_col().w_full().min_w_0().gap_2();
+        if specialists.is_empty() {
+            // Said rather than left blank: an empty list looks like "there are none", and the
+            // real reason is that the backend has not assembled a coordinator yet (docs §78).
+            team = team.child(
+                ui::Label::new(
+                    "The specialist list appears once the backend has answered its first question.",
+                )
+                .muted()
+                .size(ui::Size::Compact),
+            );
+        }
+        for specialist in &specialists {
+            team = team.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .min_w_0()
+                    .child(ui::Label::new(specialist.name.clone()).colour(theme::accent()))
+                    .child(
+                        ui::Label::new(specialist.description.clone())
+                            .muted()
+                            .size(ui::Size::Compact),
+                    ),
+            );
+        }
+
+        let mut sources = div().flex().flex_col().w_full().min_w_0().gap_2();
+        for (name, what) in [
+            (
+                "Asta",
+                "Allen Institute for AI — federated academic literature search and citation \
+                 tracing.",
+            ),
+            (
+                "CIP Dataverse",
+                "The International Potato Center's dataset catalogue, with persistent DOIs and \
+                 full metadata.",
+            ),
+            (
+                "AGROVOC",
+                "FAO's multilingual agricultural vocabulary, used to normalise crop, soil and \
+                 pest terminology.",
+            ),
+            (
+                "Crop Ontology",
+                "Standardised crop traits, genotypes and phenotypes, for comparability across \
+                 studies.",
+            ),
+        ] {
+            sources = sources.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .min_w_0()
+                    .child(ui::Label::new(name).colour(theme::accent()))
+                    .child(ui::Label::new(what).muted().size(ui::Size::Compact)),
+            );
+        }
+
+        // **Where code runs, as this install is actually configured.** The web app's About says
+        // every conversation runs in an isolated LangSmith sandbox. On this app that is usually
+        // false: host execution is the default, because a local-first workbench shipping the
+        // researcher's own files to a rented VM to be read was the wrong shape (docs §11). Saying
+        // the reassuring thing regardless is the defect this repo has already reported upstream
+        // in `guardrails.py`, and it would be worse to repeat it here, in the document that
+        // explains the product.
+        let execution = if self.sidecar.execution() == "local" {
+            (
+                "Runs on this machine",
+                "Python and shell code the agent writes execute here, with your permissions, in \
+                 this conversation's folder under Documents\\Mini-Me. Commands that touch your \
+                 system stop for your approval first.",
+            )
+        } else {
+            (
+                "Runs in an isolated sandbox",
+                "Python and shell code the agent writes execute in a LangSmith sandbox rather \
+                 than on this machine. Files it produces are copied back into this \
+                 conversation's folder.",
+            )
+        };
+
+        let body = div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w_0()
+            .gap_4()
+            .child(ui::Label::new(
+                "A research workbench. A coordinator delegates to specialists that search the \
+                 literature, find datasets, clean and analyse tabular data, build models, and \
+                 write the findings up.",
+            ))
+            .child(section_label("THE SPECIALISTS"))
+            .child(team)
+            .child(section_label("WHERE THE DATA COMES FROM"))
+            .child(sources)
+            .child(section_label("WHERE CODE RUNS"))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .min_w_0()
+                    .child(ui::Label::new(execution.0).colour(theme::accent()))
+                    .child(ui::Label::new(execution.1).muted().size(ui::Size::Compact)),
+            )
+            .child(section_label("CITING THIS WORK"))
+            .child(ui::Label::new(
+                "Literature search is powered by Asta, from the Allen Institute for AI. If your \
+                 work uses output produced with it, please cite AstaBench:",
+            ))
+            // Selectable, because a citation you cannot copy is a citation you will retype
+            // wrongly. `ctrl-c` takes it once dragged over, like the transcript (docs §62).
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .px_3()
+                    .py_2()
+                    .rounded_md()
+                    .border_l_2()
+                    .border_color(rgb(theme::accent()))
+                    .bg(rgb(theme::surface()))
+                    .text_color(rgb(theme::text()))
+                    .text_sm()
+                    .child(selection::Selectable::new(
+                        &self.text_selection,
+                        ASTA_CITATION.to_string(),
+                        StyledText::new(ASTA_CITATION),
+                    )),
+            )
+            .child(
+                ui::Label::new(
+                    "Generative AI produced the analysis and prose in this app. Say so in \
+                     anything you publish from it, and have a subject-matter expert check it.",
+                )
+                .muted()
+                .size(ui::Size::Compact),
+            );
+
+        ui::Modal::new("about", "About Mini-Me")
+            .width(640.)
+            .focus(&self.about_focus)
+            .body(body)
+            .actions(ui::actions().child(div().flex_grow()).child(
+                ui::Button::new("about-close", "Close").on_click(cx.listener(
+                    |workbench, _event, _window, cx| {
+                        workbench.about_open = false;
+                        workbench.restore_focus = true;
+                        cx.notify();
+                    },
+                )),
+            ))
+    }
+
     /// The record of this enquiry: what was consulted, in what order, and where it doubled back.
     ///
     /// Requested (docs §73) with one sentence as the specification — *"each scientist can track
@@ -4942,6 +5144,12 @@ impl Workbench {
             cx.notify();
             return;
         }
+        if self.about_open {
+            self.about_open = false;
+            self.restore_focus = true;
+            cx.notify();
+            return;
+        }
         if self.provenance_open {
             self.provenance_open = false;
             self.restore_focus = true;
@@ -5854,6 +6062,10 @@ impl Workbench {
             Command::CopySelected => self.copy_selected_text(cx),
             Command::SelectWhole => self.select_whole_transcript(cx),
             Command::RenderReport => self.render_report(cx),
+            Command::OpenAbout => {
+                self.about_open = true;
+                cx.notify();
+            }
             Command::OpenProvenance => {
                 self.provenance_open = true;
                 cx.notify();
@@ -6924,6 +7136,12 @@ impl Render for Workbench {
         // the chat 420px for as long as it is open.
         let root = if self.settings_open {
             root.child(self.settings_pane(cx))
+        } else {
+            root
+        };
+
+        let root = if self.about_open {
+            root.child(self.about_modal(cx))
         } else {
             root
         };

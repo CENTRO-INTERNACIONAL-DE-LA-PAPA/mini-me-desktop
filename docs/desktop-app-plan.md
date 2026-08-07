@@ -5995,3 +5995,53 @@ visible at the call site**, which is why all three survived so long: nothing was
 was logged, and the missing capability looked like an absent feature rather than a discarded one.
 
 Worth asking of the next decoder: *what else was in that response, and who will need it?*
+
+## 103. About, and crediting Asta (2026-08-07)
+
+Four gaps named against the web app; this is the first two, which are one modal.
+
+**An About window.** Ten specialists delegate to each other, and a researcher meets them one at a
+time, in a trace, mid-answer. A list is the cheapest orientation there is — plus where the data
+comes from, since Asta, CIP Dataverse, AGROVOC and Crop Ontology are other people's catalogues and
+which one an answer leaned on changes how it should be read.
+
+**The team list is read from the live registry** (§76), never written into the modal. That list
+exists precisely so a copy in the client cannot drift the first time upstream renames a specialist,
+and an About box naming agents the backend no longer has would be that defect wearing a friendlier
+face. When the registry is empty it says why — the backend has not assembled a coordinator yet
+(§78) — rather than showing a blank space that reads as "there are none".
+
+### The attribution is an obligation, not a nicety
+
+The Allen Institute asks that work using Asta cite AstaBench. A tool that makes their search easy
+to use while making the citation hard to find is taking something without saying so. So the
+reference is in the modal, in full, and **selectable** — a citation you cannot copy is a citation
+someone will retype wrongly.
+
+Beside it, the disclosure this organisation requires of its own people: that generative AI produced
+the analysis, and that a subject-matter expert should check it. Both belong in the same place,
+because they answer the same question — *what do I owe when I publish this?*
+
+### Where code runs — and not repeating the bug we just reported
+
+The web app's About says every conversation runs in an isolated LangSmith sandbox. **On this app
+that is usually false.** Host execution is the default (§11): a local-first workbench shipping the
+researcher's own files to a rented VM to be read was the wrong shape.
+
+So the modal reads `sidecar.execution()` and says which one this install is actually in, naming the
+folder in the local case. Saying the reassuring thing regardless is exactly the defect this repo
+reported upstream against `guardrails.py` a few hours ago
+(`docs/upstream/mini-me/guardrails-claims-isolation.md`), and repeating it in the document that
+explains the product would be worse than leaving it there.
+
+That is the third component in two days caught **stating something it does not know** — the
+theorizer's guessed cause, the guardrail's conditional promise, and now nearly this. The tell is
+the same each time: a sentence written once, about a system that later grew a second mode.
+
+### Still to come from the same list
+
+- **Per-subagent model selection.** The backend already accepts it —
+  `configurable.model_config.subagents` is a `{name: "provider::model"}` map
+  (`backend/models.py:104-122`), and the client sends only `default` today. Client-side work only.
+- **Projects in the conversation list.** Conversations are flat; there is no grouping, so a
+  researcher with three lines of work has one undifferentiated column.
