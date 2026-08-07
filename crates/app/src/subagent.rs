@@ -114,11 +114,8 @@ pub fn known(name: &str, agents: &[Subagent]) -> bool {
 /// it is — see the module docs. Names the subagent in the same spelling the registry uses, so
 /// there is no gap between what was validated and what was asked for.
 ///
-/// **Foreground only, for now.** §55 wanted a background mode too, straight into
-/// `start_async_task` so three specialists can run at once — and that is the more valuable half.
-/// It is not here because it has no trigger yet: the picker is where a reader would choose
-/// "run this in the background", and a `Dispatch` enum with one reachable variant is API invented
-/// ahead of its caller. It arrives with the picker.
+/// Both modes are instructions, differing only in what they ask for — there is no second code
+/// path, because there is no endpoint either of them could call instead.
 pub fn turn(name: &str, prompt: &str, dispatch: Dispatch) -> String {
     let prompt = prompt.trim();
     match dispatch {

@@ -100,10 +100,11 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   Already on the wire; the client stores it and uses it only for grouping. Arrival stamps are
   still worth adding, but for **duration** — the wire carries no time at all. Cycles across
   turns, a tree within one. Sequenced after `/subagent`.
-- ⬜ **`/subagent` slash commands** (`/eda-subagent`, `/research-paper`, `/report-write`),
-  designed in §55: a registry read from the backend, the existing fuzzy picker as the
-  trigger, foreground *or* background dispatch, and the approval gate still applying.
-  Sequenced after the release and the component set.
+- 🟡 **`/subagent` slash commands** — built (§76–§81): a registry captured from the coordinator
+  as it is assembled, a `/` picker over the real ten specialists, name validation that suggests
+  the nearest match, and background dispatch from the palette. **Awaiting one confirmation** —
+  that the coordinator honours "delegate this to `X`", which is a request to a model and cannot
+  be tested from this repo.
 
 **Deliberate deferrals**
 - ⬜ **Old workspaces are not migrated** (§42), and **threads from before §51's tag do not
