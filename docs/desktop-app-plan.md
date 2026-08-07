@@ -94,7 +94,10 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
 - ⬜ **Measure the filter field** (§92) — three fixes shipped against it, none reproduced. One run
   with the box's real width logged discriminates between every remaining hypothesis; each guess
   has cost a release.
-- ⬜ **Six upstream reports** (§94), two of them data-loss paths in `langgraph_runtime_inmem`.
+- 🟡 **Six upstream reports** — written (§101), in `docs/upstream/`, each with evidence and a
+  suggested fix. **Not filed**: that is an outward-facing act on someone else's repository and
+  the decision is not this repo's. The two `langgraph_runtime_inmem` ones are silent data loss
+  and affect anyone running `langgraph dev`.
 - ⬜ **Publish `v0.1.0`** — tagged and built; the draft needs a decision about who may have it.
 - ⬜ **A custom store** (§93) — deliberately after the checkpointer, and only with numbers:
   alpha API, and replacing it means owning semantic search and TTL.
@@ -5907,3 +5910,48 @@ block; §98's import needed a `sys.path` the launch never sets. Each time, two t
 together and only one of them said so.
 
 The fix is always the same shape: **write the number once, where both sides can read it.**
+
+## 101. The six reports, written (2026-08-07)
+
+Written up as filable documents in `docs/upstream/`, one per defect, each carrying evidence with
+`file:line`, what it costs, and a suggested fix. Not filed: filing is an outward-facing act on
+somebody else's repository, and who does it and when is not this repo's call.
+
+Two audiences, and they are not the same kind of ask.
+
+**Mini-Me** gets four, and three of them are about *what a component says*, not what it computes:
+
+- The **theorizer** reports an inferred cause where the command's real output belongs. The CLI it
+  wraps fails with exit 0 and empty output, so the two together defeat both "read the error" and
+  "log the failures" — six real defects were found and fixed while chasing a seventh that was
+  neither. The fix is to print the exit code, stdout, stderr and the *source* of the token; naming
+  the source alone would have ended it in one round.
+- **`guardrails.py`** tells the researcher a command is sandboxed at the moment they are deciding
+  whether to allow it. Under local execution it is not. That is the one sentence standing between
+  a person and a command on their own filesystem.
+- **`agent.py`'s docstring** says the dev store loses memories on restart; it does not, and this
+  app has a Restart button it tells people to press.
+- **`deepagents`' `start_async_task`** creates the run with no `config`, so background work
+  inherits no model, no key and no recursion limit — fine on LangGraph Platform, broken on every
+  self-hosted deployment, and silent because the run is created successfully and fails later
+  inside a graph nobody is watching.
+
+**langgraph** gets two, both silent data loss, both reachable by anyone running `langgraph dev`.
+They share a single sentence as their fix: **a persistence layer that cannot read its file must
+refuse to write it.** One registers an empty dict with a flush loop that overwrites the real file
+ten seconds later; the other deletes the thread index on any exception, including one caused by an
+unset environment variable.
+
+### What writing them up changed
+
+Two things sharpened in the writing that had been fuzzy in the plan.
+
+The `os.remove` in the checkpoint recovery path is **dead code** — it targets the filename prefix
+without the `N.pckl` suffix, so it always raises and is always swallowed. That looks like a
+harmless bug and is the opposite: because the delete fails, the file survives to be overwritten
+with valid empty data, instead of being left corrupt where a human might notice.
+
+And three of the four Mini-Me reports are the same defect in different clothes: **a component
+stating something it does not know.** A guessed cause, a safety claim that is conditionally false,
+a docstring describing a behaviour the runtime stopped having. None is a crash. All three cost
+somebody hours, because the wrong thing to say is more expensive than saying nothing.
