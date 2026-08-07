@@ -5821,3 +5821,57 @@ looking. This one looked, wrote a test, and *arranged the conditions under which
 be reassuring*. The closest relative is §92 — a taffy simulation that reproduced a bug the real
 tree cannot produce. Both times the model of the system was built to be runnable rather than to be
 faithful, and the difference only showed on the real machine.
+
+## 99. 0.0px, 38.4px, 204px, 533px (2026-08-07)
+
+The measurement §97 added, from one real window:
+
+```
+INFO  text field width  width=204.0    field=Search conversations
+INFO  text field width  width=533.6    field=Ask Mini-Me…
+WARN  too narrow        width=0.0      field=Filter themes
+WARN  too narrow        width=38.4     field=Search Zed's theme gallery
+```
+
+Four numbers, and they settle in one reading what three fixes and two investigations could not.
+
+- **The field is not the problem.** The same `filter_field` helper, the same `ComposerElement`,
+  measures 204px in the sidebar and 533px in the composer. Nothing about the widget is broken.
+- **The popup is.** Both fields inside the theme picker collapse, and only those.
+- **One of them is exactly `0.0`** — not small, not rounded: zero. That is a percentage resolving
+  against an indefinite parent and falling back to `unwrap_or(0.0)`, which is precisely the
+  mechanism §92's investigation described.
+
+So the investigation was right about the mechanism, and **the refutation was wrong that it cannot
+fire here.** It argued the popup's declared 320px is definite and propagates by flexbox stretch,
+citing taffy's `unwrap_or(AlignItems::Stretch)`. The reasoning was sound, every citation checked
+out, and the window disagrees. Something between the popup and the fields is not carrying the
+number down — and 0.0 is proof, not inference.
+
+The chain had exactly one link that states nothing: the popup's content was wrapped in a bare
+`div().child(panel).on_mouse_down_out(…)`, which in gpui is `Display::Block` with `width: auto`.
+Every `w_full` beneath it was a percentage of that. It is now a flex column with `w_full` — a
+stated width, in the one place between the 320 and the fields that had none.
+
+### And a floor, because derived widths keep evaluating to nothing
+
+`ComposerElement` had two widths and both were *derived*: `relative(1.)` is a fraction of the
+parent, `flex_grow` is a share of the parent's spare room. Every fix in this saga added another
+derived width to a chain whose problem was that it was entirely derived — §72 added a percentage,
+§88 added a flex-grow, and the measured result of both was 0.0.
+
+`min_size.width = px(120.)` asks nothing of any ancestor. It does not fix the popup; it means the
+worst case is a small control rather than an invisible one, wherever this field is used next.
+
+### What actually ended it
+
+Not insight. `prepaint` has received `bounds` since the element was written, and printing it took
+one line. Three releases, three reports from the person using the app, one detailed investigation
+and one detailed refutation were spent on a question the program could answer about itself.
+
+§81 was one log line on success. §91 was counting how many threads a rule would adopt. This is one
+`f32` from a function that already had it. **The instrument is nearly always cheaper than the
+argument, and it is nearly always skipped.**
+
+Still to confirm on a real window: that the two fields now measure like their siblings. The
+logging stays in — it costs nothing, and it is the only reason this section exists.

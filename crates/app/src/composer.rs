@@ -707,6 +707,13 @@ impl Element for ComposerElement {
         // of them (docs §88). `flex_grow` needs no definite parent — it takes whatever free
         // space the row has — so the two together hold in either kind of container.
         style.flex_grow = 1.0;
+        // **A floor, because a text field is never legitimately narrower than this.** The two
+        // above are both *derived* — a percentage of the parent, and a share of the parent's
+        // spare room — so both evaluate to nothing when an ancestor is content-sized, which is
+        // what a real window measured: 0.0px for one field and 38.4px for another (docs §99).
+        // This is the only width here that does not ask anything of an ancestor, and it turns
+        // the worst case from an invisible control into a small one.
+        style.min_size.width = px(120.).into();
         style.size.height = (window.line_height() * lines.min(MAX_VISIBLE_LINES) as f32).into();
         (window.request_layout(style, [], cx), ())
     }

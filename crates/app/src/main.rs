@@ -1896,12 +1896,24 @@ impl Workbench {
         Some(
             ui::picker_popup(
                 at,
-                div().child(panel).on_mouse_down_out(cx.listener(
-                    |workbench, _event: &gpui::MouseDownEvent, _window, cx| {
-                        workbench.open_picker = None;
-                        cx.notify();
-                    },
-                )),
+                // **A flex column with a stated width, not a bare div.** Measured on a real
+                // window: the two fields inside this popup came out at 0.0px and 38.4px while
+                // the sidebar's and the composer's were 204 and 533. A `div()` is
+                // `Display::Block` with `width: auto` in gpui, so it did not carry the popup's
+                // declared 320px down, and every `w_full` beneath it was a percentage of
+                // nothing (docs §99).
+                div()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .min_w_0()
+                    .child(panel)
+                    .on_mouse_down_out(cx.listener(
+                        |workbench, _event: &gpui::MouseDownEvent, _window, cx| {
+                            workbench.open_picker = None;
+                            cx.notify();
+                        },
+                    )),
             )
             .into_any_element(),
         )
