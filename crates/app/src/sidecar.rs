@@ -428,6 +428,15 @@ impl Sidecar {
         let base_url = self.base_url.clone();
         self.runtime.spawn(async move {
             let client = LangGraphClient::new(base_url);
+            // Before the first listing, adopt anything that predates the tag. Cheap and
+            // self-cancelling — it returns at once as soon as one tagged thread exists — and
+            // it is the difference between a researcher's history being there and appearing
+            // to have been deleted by an update (docs §90).
+            match client.adopt_untagged_conversations().await {
+                Ok(0) => {}
+                Ok(adopted) => tracing::info!(adopted, "adopted conversations from before the tag"),
+                Err(error) => tracing::warn!(%error, "could not adopt older conversations"),
+            }
             // 200 is far past what the sidebar can usefully show and still one request.
             match client.list_conversations(200).await {
                 Ok(conversations) => {

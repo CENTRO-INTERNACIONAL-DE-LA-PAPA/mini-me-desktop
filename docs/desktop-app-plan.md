@@ -5368,3 +5368,67 @@ missing because it is not in the folder. Same root as §42, which found figures 
 reported, and the same fix: **the client is the only thing that sees both sides, so the client
 reconciles them.** What made this one harder to spot is that nothing was broken — the panel listed
 it, the agent described it, and every layer was telling the truth about a file that did not exist.
+
+## 90. The conversations were never erased (2026-08-07)
+
+*"when I run git pull; cargo run the conversations doesnt load like this was erased, is this
+normal? what if we have an update and the user click on the button update. The conversation will
+dissapear?"*
+
+Two questions, and I answered the second one first and got the first one wrong. Worth recording in
+that order, because the mistake is the more useful half.
+
+### What actually happened
+
+`dfea94a` — "Keep background workers out of the conversation list" — made the sidebar filter
+`POST /threads/search` on `metadata: { minime_conversation: true }` (`protocol.rs:832`). The tag is
+written by `create_thread` (`protocol.rs:804`), so it is carried only by threads created *from that
+commit onward*. Every earlier conversation stopped matching, the search returned `[]`, and the
+sidebar said "Conversations you start will appear here" — which from the outside is
+indistinguishable from deletion. `git pull` is what delivered that commit.
+
+Measured on a real checkout: **0 of 30 stored threads carried the tag, and 26 of them had genuine
+message history.** The commit message had anticipated the consequence — *"threads created before
+this change no longer appear"* — and judged the casualties to be "almost all junk rows". That
+judgement was mine and it was wrong.
+
+`adopt_untagged_conversations` repairs it: before the first listing, if the tagged search comes
+back empty, every untagged thread **with a title** is adopted. A title is written by
+`rename_conversation` from the first question asked and by nothing else — the async-subagent
+middleware names none of the threads it creates — so it is exactly the discriminator the tag was
+introduced to provide, applied retroactively. It self-cancels the moment one tagged thread exists,
+so the cost after the first launch is one request.
+
+### The data-loss paths are real, and neither of them fired
+
+Traced from source while looking for something that turned out not to be there. Both are live and
+both belong upstream:
+
+- `checkpoint.py:71-75` registers the `PersistentDict` with the flush loop **before** calling
+  `d.load()`. When the load throws, lines 91-97 swallow it and leave an empty dict that is already
+  registered; `_persistence.py` calls `sync()` every ten seconds; `PersistentDict.sync()` pickles
+  the empty dict and `shutil.move`s it over the real file, under a comment reading
+  `# atomic commit`. Ten seconds after a failed load, the history is gone.
+- `database.py:167-184` deletes the conversation index outright on any load exception. Unpickling
+  it *imports* `langgraph_api.config`, which reads `REDIS_URI`/`DATABASE_URI` at import time — so a
+  missing environment variable alone is enough to raise inside `pickle.load` and take the index
+  with it.
+
+The `ModuleNotFoundError` branch names the trigger itself: *"Pulled updates that modified class
+definitions in a way that's incompatible with the cache."* So the worry behind the question was
+sound even though the diagnosis of the symptom was not.
+
+### The mistake, named
+
+I told the researcher their conversations had probably already been destroyed, and offered a chain
+of source citations proving it *could* happen. Every link was real. None of it was what happened.
+Having proved a mechanism exists, I stopped looking for the simpler explanation — and the simpler
+explanation was a filter this project had added five days earlier and documented as safe.
+
+That is a new shape for this document, and worth naming precisely: **a correct proof of a possible
+cause is not evidence of the actual cause.** §81's lesson was that silence is ambiguous. This one
+is sharper — a confident, well-evidenced answer to the wrong question reads exactly like an answer
+to the right one, and it cost a researcher an afternoon of believing their work was gone.
+
+What broke the tie was measuring: counting how many stored threads actually carried the tag. One
+count, against the real data, decided between two mechanisms that both "explained" the symptom.
