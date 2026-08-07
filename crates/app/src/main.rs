@@ -401,13 +401,13 @@ fn workbench_key_bindings() -> Vec<KeyBinding> {
 /// Which face of the provenance record is showing.
 ///
 /// One modal, two views, one dataset (docs §74). They are not alternatives so much as two
-/// distances: the timeline is what happened, in order, with durations; the path is the shape that
+/// distances: the timeline is what happened, in order, with durations; the graph is the shape that
 /// falls out of it once invocations collapse into kinds. The timeline earns its keep on the first
-/// conversation, the path on the tenth — when the loop is the thing worth seeing.
+/// conversation, the graph on the tenth — when the loop is the thing worth seeing.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ProvenanceView {
     Timeline,
-    Path,
+    Graph,
 }
 
 /// One command-palette entry.
@@ -1062,30 +1062,6 @@ fn one_line(prompt: &str) -> String {
         Some((at, _)) => format!("{}…", &flattened[..at]),
         None => flattened,
     }
-}
-
-/// `1 time`, `2 times` — agreement, because "visited 1 times" reads as a bug in the tool.
-fn plural(count: usize, noun: &str) -> String {
-    if count == 1 {
-        format!("1 {noun}")
-    } else {
-        format!("{count} {noun}s")
-    }
-}
-
-/// One specialist in the path view.
-fn chip(name: &str) -> impl IntoElement {
-    div()
-        .flex_none()
-        .px_2()
-        .py(px(2.))
-        .rounded_md()
-        .border_1()
-        .border_color(rgb(theme::border_strong()))
-        .bg(rgb(theme::surface()))
-        .text_color(rgb(theme::accent()))
-        .text_xs()
-        .child(name.to_string())
 }
 
 /// Root view: the three-pane research workbench.
@@ -3711,9 +3687,9 @@ impl Workbench {
                 })),
             )
             .child(
-                ui::NavEntry::new("prov-path", "Path", view == ProvenanceView::Path).on_click(
+                ui::NavEntry::new("prov-graph", "Graph", view == ProvenanceView::Graph).on_click(
                     cx.listener(|workbench, _event, _window, cx| {
-                        workbench.provenance_view = ProvenanceView::Path;
+                        workbench.provenance_view = ProvenanceView::Graph;
                         cx.notify();
                     }),
                 ),
@@ -3730,7 +3706,7 @@ impl Workbench {
         } else {
             match view {
                 ProvenanceView::Timeline => self.provenance_timeline(),
-                ProvenanceView::Path => self.provenance_path(),
+                ProvenanceView::Graph => self.provenance_graph(),
             }
         };
 
@@ -3758,37 +3734,41 @@ impl Workbench {
             )
     }
 
-    /// One row per turn, one bar per invocation, laid out against that turn's own clock.
+    /// One row per turn, one bar per invocation, on a scale shared by the whole conversation.
     ///
-    /// Per turn rather than against a single conversation-wide axis: turns are separated by
-    /// however long the researcher took to read the answer and type the next question, which
-    /// would squash every bar to a sliver. What is being compared is the work inside a turn.
+    /// **The scale is the point, and getting it wrong made the view worse than useless.** It
+    /// first normalised each turn against its own span, which meant a turn with a single
+    /// invocation always drew a full-width bar — so an 8-second lookup and a 32-second one came
+    /// out pixel-identical and *looked* comparable. A chart whose bars carry no information is
+    /// worse than no chart, because it will be read anyway.
+    ///
+    /// So the divisor is the longest **turn span** in the conversation. Spans rather than
+    /// individual durations because a turn's bars are laid out inside it, and a scale smaller
+    /// than the span would push later bars off the end. Gaps *between* turns stay out of it —
+    /// those are however long the researcher took to read and type, and including them would
+    /// squash every bar to a sliver.
     fn provenance_timeline(&self) -> gpui::Div {
         let mut body = div().flex().flex_col().w_full().min_w_0().gap_4();
+        // Shared by every row — see `Record::scale` for why, and for what it replaced.
+        let scale = self.provenance.scale() as f32;
         for (index, turn) in self.provenance.turns.iter().enumerate() {
             if turn.invocations.is_empty() {
                 continue;
             }
-            // The turn's own span: first token of the earliest to last token of the latest.
+            // Where this turn's clock starts. Offsets are measured from here and widths against
+            // the conversation-wide `scale`, so bars compare between rows as well as within one.
             let start = turn
                 .invocations
                 .iter()
                 .map(|invocation| invocation.first_seen)
                 .min()
                 .unwrap_or(turn.sent_at);
-            let end = turn
-                .invocations
-                .iter()
-                .map(|invocation| invocation.last_seen)
-                .max()
-                .unwrap_or(start);
-            let span = end.saturating_sub(start).max(1) as f32;
 
             let mut rows = div().flex().flex_col().w_full().min_w_0().gap_1();
             for invocation in &turn.invocations {
-                let offset = invocation.first_seen.saturating_sub(start) as f32 / span;
+                let offset = invocation.first_seen.saturating_sub(start) as f32 / scale;
                 let width =
-                    invocation.last_seen.saturating_sub(invocation.first_seen) as f32 / span;
+                    invocation.last_seen.saturating_sub(invocation.first_seen) as f32 / scale;
                 rows = rows.child(
                     div()
                         .flex()
@@ -3867,60 +3847,137 @@ impl Workbench {
             );
         }
         body.child(
-            ui::Label::new(
-                "Bars are when tokens arrived, which is narrower than the work itself — so bars \
-                 that overlap certainly ran together, while a gap only suggests one followed the \
-                 other.",
-            )
+            ui::Label::new(format!(
+                "Every row is drawn to the same scale, where full width is {}. Bars are when \
+                 tokens arrived, which is narrower than the work itself — so bars that overlap \
+                 certainly ran together, while a gap only suggests one followed the other.",
+                duration_label(scale as u64)
+            ))
             .muted()
             .size(ui::Size::Compact),
         )
     }
 
-    /// The chain, in the notation the request was written in.
+    /// The graph: nodes are kinds, edges are the transitions between them, drawn.
     ///
-    /// `a → b → c`, wrapping, with a revisit simply repeating its chip — which makes the cycle
-    /// legible with no layout algorithm at all (docs §73). Concurrent work is joined by `+`
-    /// rather than an arrow, because there is no "then" between two things that ran together.
-    fn provenance_path(&self) -> gpui::Div {
-        let mut chain = div()
-            .flex()
-            .flex_row()
-            .flex_wrap()
-            .w_full()
-            .min_w_0()
-            .gap_1()
-            .items_center();
-        let mut first = true;
-        for turn in &self.provenance.turns {
-            let mut ordered: Vec<&provenance::Invocation> = turn.invocations.iter().collect();
-            ordered.sort_by_key(|invocation| (invocation.first_seen, invocation.last_seen));
-            let mut reach = 0u64;
-            for invocation in ordered {
-                let concurrent = !first && invocation.first_seen < reach;
-                if !first {
-                    chain = chain.child(
-                        ui::Label::new(if concurrent { "+" } else { "→" })
-                            .muted()
-                            .size(ui::Size::Compact),
-                    );
-                }
-                reach = reach.max(invocation.last_seen);
-                chain = chain.child(chip(&invocation.name));
-                first = false;
-            }
-        }
-
+    /// §73 sketched this as a second stage after a chain of chips, and the chain was built first.
+    /// Shown, the verdict was immediate: *"the other image its not a graph."* Fair — a row of
+    /// chips is a sentence about the work, and what was asked for is its shape.
+    ///
+    /// **Laid out vertically**, which is not the obvious choice and is the right one here. The
+    /// specialists are named `exploratory_data_analysis` and `academic_researcher`; ten of those
+    /// across a 570px modal is 57px each, so a horizontal row would either clip every label or
+    /// need text painted into the canvas. A column gives each name the full width, grows to any
+    /// number of specialists, and leaves the whole right-hand gutter for the edges.
+    ///
+    /// **Edges bow further right the further they travel**, so a transition that skips three
+    /// nodes cannot be mistaken for one between neighbours and nested arcs stay separable. The
+    /// arrowhead carries direction, which is what makes the return edge — the one this feature
+    /// exists for — visible as an arc running back *up* the column.
+    fn provenance_graph(&self) -> gpui::Div {
         let graph = self.provenance.graph();
-        let mut visits = div().flex().flex_col().w_full().min_w_0().gap_1();
+
+        // Two sides of one geometry. `canvas` cannot lay out text and a `div` cannot draw a
+        // curve, so the nodes are real elements and the edges are painted beside them — which
+        // means both have to agree on where a node is. One constant each, used by both.
+        const ROW: f32 = 44.;
+        const GUTTER: f32 = 170.;
+
+        let height = ROW * graph.nodes.len() as f32;
+        let arcs: Vec<(f32, f32, f32, f32, u32)> = graph
+            .edges
+            .iter()
+            .map(|edge| {
+                let from = (edge.from as f32 + 0.5) * ROW;
+                let to = (edge.to as f32 + 0.5) * ROW;
+                let span = (edge.to as f32 - edge.from as f32).abs();
+                // Heavier with each traversal, but bounded: a loop walked ten times should read
+                // as heavier than one walked twice without becoming a blob.
+                let weight = (1.5 + (edge.count.saturating_sub(1) as f32) * 1.2).min(6.);
+                let colour = match edge.kind {
+                    provenance::Edge::Delegated => theme::accent(),
+                    provenance::Edge::Then => theme::text_muted(),
+                };
+                (from, to, span, weight, colour)
+            })
+            .collect();
+
+        let edges = gpui::canvas(
+            |_bounds, _window, _cx| {},
+            move |bounds, _prepaint, window, _cx| {
+                for (from, to, span, weight, colour) in arcs {
+                    let x = bounds.origin.x;
+                    let start = gpui::point(x, bounds.origin.y + px(from));
+                    let finish = gpui::point(x, bounds.origin.y + px(to));
+                    // A quadratic reaches half-way to its control point, so the control sits at
+                    // twice the bow the arc should actually show.
+                    let bow = (24. + 22. * (span - 1.).max(0.)).min(GUTTER - 24.) * 2.;
+                    let control = gpui::point(x + px(bow), (start.y + finish.y) / 2.);
+
+                    let mut line = gpui::PathBuilder::stroke(px(weight));
+                    line.move_to(start);
+                    line.curve_to(finish, control);
+                    if let Ok(path) = line.build() {
+                        window.paint_path(path, gpui::rgb(colour));
+                    }
+
+                    // The arrowhead, pointing the way the curve travels as it lands: for a
+                    // quadratic that tangent is `finish - control`. Without it the graph shows
+                    // that two specialists are related but not which way the work went, which is
+                    // the entire question.
+                    let (dx, dy) = (
+                        f32::from(finish.x - control.x),
+                        f32::from(finish.y - control.y),
+                    );
+                    let length = (dx * dx + dy * dy).sqrt().max(1.);
+                    let (ux, uy) = (dx / length, dy / length);
+                    let size = 7. + weight;
+                    let back = gpui::point(finish.x - px(ux * size), finish.y - px(uy * size));
+                    let (wx, wy) = (uy * size * 0.45, ux * size * 0.45);
+                    let mut head = gpui::PathBuilder::fill();
+                    head.add_polygon(
+                        &[
+                            finish,
+                            gpui::point(back.x - px(wx), back.y + px(wy)),
+                            gpui::point(back.x + px(wx), back.y - px(wy)),
+                        ],
+                        true,
+                    );
+                    if let Ok(path) = head.build() {
+                        window.paint_path(path, gpui::rgb(colour));
+                    }
+                }
+            },
+        );
+
+        let mut column = div().flex().flex_col().flex_none().min_w_0();
         for node in &graph.nodes {
-            visits = visits.child(
-                ui::Label::new(format!(
-                    "{} — visited {}",
-                    node.name,
-                    plural(node.visits, "time")
-                ))
-                .size(ui::Size::Compact),
+            column = column.child(
+                div()
+                    .h(px(ROW))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .flex_none()
+                            .px_2()
+                            .py(px(3.))
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(theme::border_strong()))
+                            .bg(rgb(theme::surface()))
+                            .text_color(rgb(theme::accent()))
+                            .text_xs()
+                            .child(match node.visits {
+                                // The count belongs on the node, because a revisit *is* the node
+                                // visited again — §73's `theories` twice is one node, and putting
+                                // the number anywhere else invites reading it as two.
+                                1 => node.name.clone(),
+                                visits => format!("{}  ×{visits}", node.name),
+                            }),
+                    ),
             );
         }
 
@@ -3940,7 +3997,7 @@ impl Workbench {
                 ))
                 .size(ui::Size::Compact)
                 .colour(match edge.kind {
-                    provenance::Edge::Delegated => theme::text(),
+                    provenance::Edge::Delegated => theme::accent(),
                     provenance::Edge::Then => theme::text_muted(),
                 }),
             );
@@ -3952,13 +4009,19 @@ impl Workbench {
             .w_full()
             .min_w_0()
             .gap_4()
-            .child(chain)
             .child(
-                ui::Label::new("Specialists")
-                    .muted()
-                    .size(ui::Size::Compact),
+                div()
+                    .flex()
+                    .flex_row()
+                    .w_full()
+                    .min_w_0()
+                    .flex_none()
+                    .h(px(height))
+                    .child(column.flex_grow())
+                    // The gutter the arcs live in. Fixed, because the bow distances are measured
+                    // against it.
+                    .child(div().flex_none().w(px(GUTTER)).h(px(height)).child(edges)),
             )
-            .child(visits)
             .child(
                 ui::Label::new("Transitions")
                     .muted()
@@ -3967,9 +4030,10 @@ impl Workbench {
             .child(transitions)
             .child(
                 ui::Label::new(
-                    "\u{201c}delegated to\u{201d} is certain — it comes from the run\u{2019}s own \
-                     structure. \u{201c}then\u{201d} is the order things were observed in, which \
-                     is not the same as one causing the other.",
+                    "Orange is \u{201c}delegated to\u{201d} — certain, because it comes from the \
+                     run\u{2019}s own structure. Grey is \u{201c}then\u{201d}: the order things \
+                     were observed in, which is not the same as one causing the other. A thicker \
+                     line was travelled more often.",
                 )
                 .muted()
                 .size(ui::Size::Compact),

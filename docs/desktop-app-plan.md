@@ -5115,3 +5115,65 @@ wrong claim was written by me, in a comment, and then believed on re-reading**.
 
 The tell was available the whole time: the footer promised "esc close" and nobody had tested it.
 A UI that documents a key is making a claim, and this project now has a test for that one.
+
+## 85. Two rows that lied, and a picture that was not one (2026-08-06)
+
+The provenance modal opened on a real conversation, and both views were wrong in the same way:
+each showed something true and drew it so that it read as something false.
+
+### The timeline compared things it had no scale to compare
+
+Turn 2 ran `academic_researcher` for 8.2s. Turn 3 ran `dataverse_explorer` for 32.4s. Both bars
+were full width, one above the other, identical to the pixel. Reported exactly right: *"this
+doesn't make sense because I asked these in two different prompts."*
+
+The cause was a decision made deliberately and argued for in §83: normalise each turn against its
+**own** span, so the gaps between turns — however long a person took to read and type — could not
+squash every bar to a sliver. That reasoning is sound. What it missed is that a turn with one
+invocation has a span *equal to* that invocation, so its bar is always 100%. The overwhelmingly
+common case renders as a constant.
+
+And a constant is not neutral. Two bars of equal length, stacked, with different numbers beside
+them, make a claim — that these are commensurable — and the view had no basis for it. **A chart
+whose bars carry no information is worse than no chart, because it will be read anyway.**
+
+Fixed by scaling every row against the longest **turn span** in the conversation (`Record::scale`,
+tested). Spans rather than individual durations because a turn lays its own siblings out inside
+its row, and a smaller divisor would push a later sibling off the end. The gaps between turns stay
+excluded, so §83's original concern is still handled — it was the *denominator* that was wrong,
+not the exclusion.
+
+### "The other image its not a graph"
+
+Also correct. §73 proposed a chain of chips first and a drawn graph second, on the reasoning that
+a repeated chip *is* the cycle and needs no layout algorithm. That was a fair bet and it lost on
+contact: a row of chips is a sentence about the work, and what was asked for was its shape.
+
+So the graph is drawn — `gpui::canvas` with `PathBuilder`, which §73 had already established were
+the two pieces available.
+
+**Vertically**, which is the non-obvious part and the reason it fits. The specialists are named
+`exploratory_data_analysis` and `academic_researcher`; ten of those across the modal's usable
+570px is 57px each, so a horizontal row would clip every label or need text painted into the
+canvas. A column gives each name the full width, grows to any number of nodes, and leaves the
+right-hand gutter for the edges.
+
+Edges bow further right the further they travel, so a transition skipping three nodes cannot be
+confused with one between neighbours. Thickness is traversal count. The arrowhead is not
+decoration: without it the picture says two specialists are related but not which way the work
+went, and "which way" is the entire question. The return edge — the one this feature exists for —
+reads as an arc running back *up* the column.
+
+`canvas` cannot lay out text and a `div` cannot draw a curve, so nodes are real elements and edges
+are painted beside them. Both derive from the same two constants, `ROW` and `GUTTER`, because two
+independent copies of that geometry would drift the first time either changed.
+
+### What both had in common
+
+Neither was a coding error. Both were a **defensible choice whose failure mode only appears on
+real data** — per-turn normalisation is right until a turn has one bar; a chain of chips is
+legible until you wanted a shape. Every unit test passed throughout.
+
+That is the argument for putting a build in front of the person who asked for it early, rather
+than polishing against imagined data. The plan had already written down that the graph should
+wait until "the chain proves it wants one". It took one screenshot.

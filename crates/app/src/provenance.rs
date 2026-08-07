@@ -187,6 +187,30 @@ impl Record {
         self.turns.iter().all(|turn| turn.invocations.is_empty())
     }
 
+    /// The span a timeline should draw full-width: the longest turn in the conversation.
+    ///
+    /// **Shared across every row, which is the whole correction.** The timeline first normalised
+    /// each turn against its own span, so a turn holding one invocation always drew a full-width
+    /// bar — an 8-second lookup and a 32-second one came out pixel-identical, side by side, and
+    /// the view invited exactly the comparison it could not support. A chart whose bars carry no
+    /// information is worse than no chart, because it will be read anyway.
+    ///
+    /// Turn *spans* rather than individual durations, because a turn's bars are laid out inside
+    /// it: a scale smaller than the span would push a later sibling past the end of its row.
+    /// Never zero, so the caller can divide by it.
+    pub fn scale(&self) -> u64 {
+        self.turns
+            .iter()
+            .filter_map(|turn| {
+                let start = turn.invocations.iter().map(|i| i.first_seen).min()?;
+                let end = turn.invocations.iter().map(|i| i.last_seen).max()?;
+                Some(end.saturating_sub(start))
+            })
+            .max()
+            .unwrap_or(0)
+            .max(1)
+    }
+
     /// Collapse invocations into kinds, and derive the edges between them.
     pub fn graph(&self) -> Graph {
         let mut nodes: Vec<Node> = Vec::new();
@@ -667,6 +691,61 @@ mod tests {
         let forward = parse(r#"{"format": 1, "turns": [{"prompt": "q", "invented": 1}]}"#);
         assert_eq!(forward.turns.len(), 1);
         assert_eq!(forward.turns[0].prompt, "q");
+    }
+
+    #[test]
+    fn one_scale_serves_every_row_so_a_long_turn_looks_long() {
+        // The bug this replaced: each turn normalised against its own span, so a turn holding a
+        // single invocation always drew a full-width bar. Reported as "this doesn't make sense
+        // because I asked these in two different prompts" — an 8s lookup and a 32s one, drawn
+        // identically, one above the other (docs §85).
+        let mut record = Record::default();
+        record.begin_turn("search the deseq2 paper", 0);
+        record.observe("tools:a", "academic_researcher", 1_000);
+        record.observe("tools:a", "academic_researcher", 9_200); // 8.2s
+        record.begin_turn("search 1 dataset", 20_000);
+        record.observe("tools:b", "dataverse_explorer", 21_000);
+        record.observe("tools:b", "dataverse_explorer", 53_400); // 32.4s
+
+        let scale = record.scale();
+        assert_eq!(scale, 32_400, "the longest turn sets the full width");
+        let width = |turn: &Turn| {
+            let invocation = &turn.invocations[0];
+            invocation.last_seen.saturating_sub(invocation.first_seen) as f64 / scale as f64
+        };
+        // The shorter one must be visibly shorter. Under the old per-turn scale both were 1.0.
+        assert!(
+            (width(&record.turns[0]) - 0.253).abs() < 0.01,
+            "{}",
+            width(&record.turns[0])
+        );
+        assert!((width(&record.turns[1]) - 1.0).abs() < 0.001);
+        // The idle minutes between one answer and the next question stay out of the scale, or
+        // every bar would be a sliver.
+        assert!(
+            scale < 53_400,
+            "the gap between turns is not part of any span"
+        );
+    }
+
+    #[test]
+    fn a_turn_lays_its_own_siblings_out_within_the_shared_scale() {
+        // The reason the divisor is a turn *span* and not the longest single invocation: a later
+        // sibling is offset by where it started, and a smaller scale would push it off the row.
+        let mut record = Record::default();
+        record.begin_turn("do both", 0);
+        record.observe("tools:a", "academic_researcher", 0);
+        record.observe("tools:a", "academic_researcher", 30_000);
+        record.observe("tools:b", "theorizer", 30_000);
+        record.observe("tools:b", "theorizer", 60_000);
+        let scale = record.scale() as f64;
+        let second = &record.turns[0].invocations[1];
+        let offset = second.first_seen as f64 / scale;
+        let width = (second.last_seen - second.first_seen) as f64 / scale;
+        assert!(
+            offset + width <= 1.0001,
+            "{offset} + {width} must fit the row"
+        );
     }
 
     #[test]
