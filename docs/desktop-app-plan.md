@@ -6581,3 +6581,60 @@ other direction, where the config named `/mnt/c` while `PYTHONPATH` named the di
 
 The overlay exists precisely because upstream is not ours to hold still. Code in it should assume
 **less** about upstream than code anywhere else in this repo, and this assumed more.
+
+## 114. A worker spawning workers (2026-08-07)
+
+The line that answers the question, from a real launch:
+
+```
+launching background_worker with config keys
+  ['__is_for_execution__', '__llm_keys', '__workspace_project__',
+   '__workspace_thread__', 'model_config'], recursion_limit=10000
+  graph_id=agent      ← the coordinator, as intended
+
+launching background_worker with config keys [ …the same… ]
+  graph_id=background ← a background worker, launching another one
+```
+
+**Every key is there.** The model, the key, the project, the workspace pin, a ten-thousand
+superstep budget. So the empty results were never a missing model — which was the obvious suspect
+and the one I had said to check first.
+
+The second line is the finding. `graph_id=background` means a background worker executed
+`start_async_task` and started a worker of its own. §39 recorded that
+`_BUILDING_BACKGROUND` *"still stops a worker spawning workers"*, and on this deployment it does
+not. That explains the symptom exactly: a worker asked to do the analysis delegates it onward and
+returns `success` with nothing in it, because it did nothing — it handed the work to someone else
+and stopped watching.
+
+### Why it could not be seen
+
+`middleware_for` returns `None` when the guard fires, and said nothing either way. So "the guard
+worked" and "the guard was bypassed" produced identical evidence: a coordinator that starts.
+§81's lesson, for the fifth time in this document, and the first where the silent component was one
+I had already written a comment claiming worked.
+
+It now says so, at the moment it declines.
+
+### The second guard
+
+The ContextVar is set around the factory call and read during the build. Whether it survives
+depends on the context propagating across every `await` inside `backend.agent.agent` — MCP tool
+loading, model resolution, middleware assembly — and on the pinned checkout, evidently, it does
+not.
+
+So there is now a second signal that cannot be lost that way: `__is_background__`, set on the
+**run's own config** by the launching tool and read back by `building_background()`. Config is the
+same channel the model, the key and the workspace already travel on — if it were not reaching the
+worker, nothing would work at all.
+
+Two independent sources, either sufficient. That is deliberate: the ContextVar covers builds that
+happen inside the factory, the config key covers the run itself, and the failure mode of one is
+not the failure mode of the other.
+
+### What this does not yet prove
+
+That the empty results are *only* this. It is a sufficient explanation and it matches the evidence,
+but a worker that delegates onward and a worker that runs and returns nothing look the same from
+outside — which is the whole reason this took a log line to find. The next run with these two
+changes in place will say plainly whether a worker was built with the tool or without it.

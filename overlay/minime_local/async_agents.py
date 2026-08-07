@@ -53,9 +53,32 @@ _BUILDING_BACKGROUND: contextvars.ContextVar[bool] = contextvars.ContextVar(
 )
 
 
+#: Marks a run as *being* a background worker, carried in its own config.
+#:
+#: The `ContextVar` above is set around the factory call and is the primary guard. This is a
+#: second, independent one, and it exists because the first is silent when it works: a worker that
+#: was handed `start_async_task` anyway looks exactly like one that was not, right up until it
+#: spawns another worker (docs §114). This signal travels *in the run's config*, which is the same
+#: place the model and the workspace come from, so it cannot be lost to a context that did not
+#: propagate across an `await`.
+BACKGROUND_RUN_KEY = "__is_background__"
+
+
 def building_background() -> bool:
-    """Whether the agent currently being built is the background worker."""
-    return _BUILDING_BACKGROUND.get()
+    """Whether the agent being built is a background worker.
+
+    Two sources, either sufficient. The ContextVar covers the build the factory drives; the config
+    key covers the run itself, including any build that happens outside that context.
+    """
+    if _BUILDING_BACKGROUND.get():
+        return True
+    try:
+        from langgraph.config import get_config
+
+        configurable = (get_config() or {}).get("configurable") or {}
+        return bool(configurable.get(BACKGROUND_RUN_KEY))
+    except Exception:  # noqa: BLE001 — no live run, which is the coordinator's own build
+        return False
 
 
 def async_subagent_specs() -> list[dict]:
@@ -171,6 +194,13 @@ def middleware_for(deepagents_module):
     deepagents that lacks them should still give the researcher a working coordinator.
     """
     if building_background():
+        # **Said out loud.** One level of delegation is the feature; a worker that can spawn
+        # workers is a runaway on the researcher's own model key, and the difference between the
+        # guard working and the guard being bypassed was previously invisible — both produce a
+        # coordinator that starts, and only one of them produces a tree (docs §114).
+        logger.warning(
+            "minime_local: background worker built WITHOUT start_async_task, as intended"
+        )
         return None
     factory = getattr(deepagents_module, "AsyncSubAgentMiddleware", None)
     if factory is None:
@@ -305,6 +335,9 @@ def _forwarding_config(middleware, specs: list[dict]):
         # Read here, at the launch, not when the tool was built — a graph is constructed per
         # request, including read-only ones with no model in them.
         forwarded = _forwarded_config()
+        # Mark the run as a background worker, so the graph it builds knows what it is without
+        # depending on a ContextVar surviving the trip (docs §114).
+        forwarded.setdefault("configurable", {})[BACKGROUND_RUN_KEY] = True
         configurable = forwarded.get("configurable") or {}
         # **Named on the way out.** A background run that starts without a model reports
         # `success` with an empty result, which is indistinguishable from one that ran and found
