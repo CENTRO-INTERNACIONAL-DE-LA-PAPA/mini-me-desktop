@@ -330,6 +330,24 @@ class LocalWorkspaceBackend(LocalShellBackend):
         project = workspace_project()
         root = workspace_root()
         self._work_dir = (root / project / self._thread_id) if project else (root / self._thread_id)
+        # **The value everything else depends on, printed once.**
+        #
+        # A background worker that cannot find a file the conversation just wrote has exactly two
+        # explanations — it is looking in the wrong directory, or the file is not where the
+        # conversation thinks it is — and from the outside they are the same sentence: *"could not
+        # find ./potato_yield.csv"*. The directory is computed right here from three inputs and was
+        # never reported, so neither could be ruled out (docs §115).
+        #
+        # This is the fifth time in a week that the thing needed to end an argument was a value
+        # the program already had: §99's laid-out width, §91's count of adoptable threads, §110's
+        # overlay path, §114's config keys.
+        logger.warning(
+            "minime_local: workspace %s (own thread %s, pinned to %s, project %r)",
+            self._work_dir,
+            thread_id,
+            self._thread_id,
+            project or "<none>",
+        )
         self._announced = False
         super().__init__(
             root_dir=self._work_dir,

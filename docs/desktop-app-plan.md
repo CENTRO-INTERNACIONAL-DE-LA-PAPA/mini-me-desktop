@@ -6638,3 +6638,53 @@ That the empty results are *only* this. It is a sufficient explanation and it ma
 but a worker that delegates onward and a worker that runs and returns nothing look the same from
 outside — which is the whole reason this took a log line to find. The next run with these two
 changes in place will say plainly whether a worker was built with the tool or without it.
+
+## 115. Where did it look? (2026-08-07)
+
+§114's guards held on the next run — one `launching` from `graph_id=agent`, and
+`background worker built WITHOUT start_async_task, as intended` from `graph_id=background`. **That
+is background work functioning end to end for the first time**, three months after §39 recorded
+that it "had never run once."
+
+The next thing it did was fail to find a file the conversation had just written:
+
+> it could not find `/potato_yield.csv` and asked for the exact sandbox-relative path
+
+Two explanations, and from outside they are the same sentence:
+
+1. the worker is looking in the wrong directory — the pin, or the project, did not travel;
+2. the file is not where the conversation thinks it is — the *coordinator* wrote it somewhere else.
+
+Both would produce exactly that message. Neither can be ruled out from the transcript.
+
+### The value that decides it was never printed
+
+`LocalWorkspaceBackend.__init__` computes the work directory from three inputs — the run's own
+thread, the pin that may override it, and the project — and reported none of them. So it now logs
+once per construction:
+
+```
+minime_local: workspace /mnt/c/Users/.../Mini-Me/TEST/019fddfc-…
+  (own thread 019fde02-…, pinned to 019fddfc-…, project 'TEST')
+```
+
+Which settles it in one reading: if the coordinator's line and the worker's line name the same
+directory, the pin works and the file is genuinely absent; if they differ, the difference *is* the
+bug and the line says which of the three inputs disagreed.
+
+### The fifth time this week
+
+Every argument this week has ended with a value the program already held and did not print:
+
+| | the value | what it settled |
+|---|---|---|
+| §91 | how many threads a rule would adopt | 1, not 26 — the fix was wrong |
+| §99 | `bounds.size.width` | 0.0px — three fixes had missed the mechanism |
+| §110 | the overlay path in a log line | `/mnt/c` — imports crossing the 9p mount |
+| §114 | the forwarded config keys | all present — the model was never the problem |
+| §115 | the resolved work directory | pending |
+
+Four of the five were one line of logging. The pattern is specific enough now to act on in advance:
+**when a component computes something from several inputs and then behaves surprisingly, print the
+thing it computed, not the inputs.** Every one of these was a derived value, and in every case the
+inputs looked fine.
