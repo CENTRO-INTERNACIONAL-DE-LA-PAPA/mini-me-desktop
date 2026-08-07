@@ -100,11 +100,13 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   Already on the wire; the client stores it and uses it only for grouping. Arrival stamps are
   still worth adding, but for **duration** — the wire carries no time at all. Cycles across
   turns, a tree within one. Sequenced after `/subagent`.
-- 🟡 **`/subagent` slash commands** — built (§76–§81): a registry captured from the coordinator
+- ✅ **`/subagent` slash commands** — done (§76–§81): a registry captured from the coordinator
   as it is assembled, a `/` picker over the real ten specialists, name validation that suggests
-  the nearest match, and background dispatch from the palette. **Awaiting one confirmation** —
-  that the coordinator honours "delegate this to `X`", which is a request to a model and cannot
-  be tested from this repo.
+  the nearest match, and background dispatch from the palette. The one thing no test in this
+  repo could settle — whether the coordinator *honours* "delegate this to `X`" — is
+  **confirmed** on a real turn: `/academic_researcher search deseq2 paper` delegated, and the
+  transcript carries the specialist's own trace (`academic_researcher · 4 steps · 1879 chars`)
+  rather than a coordinator answer.
 
 **Deliberate deferrals**
 - ⬜ **Old workspaces are not migrated** (§42), and **threads from before §51's tag do not
@@ -125,6 +127,9 @@ three).
   rounds, the most expensive defect of this project.
 - ⬜ `deepagents`' `start_async_task` passes no config, so no self-hosted deployment can
   give a background run its model, key or recursion limit (§38/§39).
+- ⬜ `agent.py`'s `make_backend` docstring says the `langgraph dev` store "loses content on
+  process restart" (§82). It does not — the dev runtime's store is disk-backed. A docstring,
+  but a load-bearing one: this app tells researchers to restart the backend.
 
 **Health of the bet.** The two risks that could have killed this are both down:
 **R1** (GPUI as an unstable `git` dep) — GPUI is a *published* crate, pinned at
@@ -4926,3 +4931,61 @@ The pull-based redesign floated in §80 — the app asking Python for the list d
 **not** needed. It was proposed because push had failed three times for three different reasons,
 which looked like evidence against the design. It was evidence against the *instrumentation*. The
 mechanism was sound each time.
+
+## 82. What the store is, what the checkpointer is, and why not Postgres (2026-08-06)
+
+Asked directly, after §80 answered *where* conversations live but not *what holds what*. Two
+different things sit in `.langgraph_api/`, and confusing them is how a "let's use Postgres"
+decision gets made for the wrong reason.
+
+**The checkpointer is one conversation.** Every message, tool call, interrupt and resume in a
+thread, pickled to `.langgraph_api/.langgraph_checkpoint.N.pckl` — sharded, written by the
+runtime with no involvement from this app or the overlay
+(`langgraph_runtime_inmem/checkpoint.py:59,69`). It is what the sidebar reads through
+`GET /threads/search`, and it is the thing that grows with history, which makes it the whole of
+§80's boot cost.
+
+**The store is everything that outlives a conversation.** `DiskBackedInMemStore(InMemoryStore)`
+— so the answer to "are we using an `InMemoryStore`?" is *yes, a disk-backed subclass*. It swaps
+`_data` and `_vectors` for `PersistentDict`s over `store.pckl` and `store.vectors.pckl`
+(`store.py:83-84`), flushed by a daemon thread every ten seconds (`_persistence.py`). Three
+namespaces live in it, and `backend/agent.py:64` routes the first two there with a
+`CompositeBackend` while everything else goes to the sandbox:
+
+- `/memories/` → `(assistant_id, user_id)` — per-researcher scratch memory
+- `/skills/` → `("skills", assistant_id)` — shared across users of one assistant
+- the project spine → `(user_id, "project")` — deliberately *not* keyed by assistant, so it
+  spans every thread and the `/project` route can rebuild the namespace from
+  `request.user.identity` without resolving an assistant_id it never sees
+
+`StoreBackend(store=None)` holds no store; it calls `get_store()` at request time and takes what
+the server runtime provides. Which is why none of this needed wiring from the desktop app.
+
+The line between them, in one sentence: **checkpointer is within a conversation, store is across
+conversations.** `rm -rf .langgraph_api` takes both — every past thread *and* every memory.
+
+### Postgres: no, and the reason matters
+
+The question was whether a real store would be faster. It would make things **slower**, and the
+temptation comes from mistaking §80's boot cost for a store problem.
+
+1. It needs `langgraph up --postgres-uri`, which needs Docker. On machines where WSL2 alone took
+   §57–§60 to install, a second required install is a second way to fail.
+2. Every read today is a dict lookup in RAM. Postgres makes each one a network round-trip — the
+   runtime cost goes up, permanently, on every turn.
+3. It helps exactly one thing: not having to unpickle at boot. That gain is real and it is the
+   only one, against those two costs.
+
+The actual fix for slow boot is **pruning** `.langgraph_api/`, most of which is background
+worker threads (§51 found dozens in the sidebar for the same reason). Measure before deleting.
+
+### A docstring that is load-bearing and wrong
+
+`make_backend`'s docstring says that under `langgraph dev` the store "loses content on process
+restart", and advises a durable store so memories survive. It has not been true for as long as
+the runtime has shipped `DiskBackedInMemStore`: persistence is on unless
+`LANGGRAPH_DISABLE_FILE_PERSISTENCE=true`, which nothing here sets.
+
+Ordinarily a stale docstring is worth a shrug. This one is not, because §79 added a **Restart
+backend** button and the Setup page tells people to press it. Believing the docstring means
+believing that button discards a researcher's memories. Owed upstream.
