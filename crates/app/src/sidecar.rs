@@ -18,7 +18,7 @@ use tokio::sync::Mutex;
 use crate::backend::{BackendConfig, BackendSupervisor, Started};
 use crate::protocol::{
     AgentRef, AsyncTask, Conversation, Decision, Job, LangGraphClient, ModelChoice, Project,
-    Snapshot, TurnEvent, TurnOutcome,
+    TurnEvent, TurnOutcome,
 };
 
 /// Find (or start) the tally row for one subagent invocation, keyed by namespace so
@@ -75,6 +75,12 @@ pub struct Sidecar {
     /// Behind a lock so Settings can change it without a restart: `submit` clones it per
     /// turn, so the next turn simply uses the new one.
     model: SyncMutex<Option<ModelChoice>>,
+    /// The project folder the current conversation's outputs belong in.
+    ///
+    /// Beside the model because it has the same lifetime and the same problem: it is chosen in
+    /// the UI and needed on a background task, and both are read afresh per request so a change
+    /// applies to the next turn without restarting anything.
+    project: SyncMutex<Option<String>>,
     /// Where the agent's code runs, for the status bar. The user should be able to
     /// see at a glance that commands are landing on their own machine.
     execution: &'static str,
@@ -113,6 +119,7 @@ impl Sidecar {
             supervisor: Arc::new(Mutex::new(BackendSupervisor::new(config))),
             thread: Arc::new(SyncMutex::new(None)),
             model: SyncMutex::new(model),
+            project: SyncMutex::new(None),
             base_url,
             log_path,
             execution,
@@ -148,11 +155,14 @@ impl Sidecar {
         let thread = self.thread.clone();
         let base_url = self.base_url.clone();
         let model = self.model.lock().expect("model mutex").clone();
+        let project = self.project();
 
         let running = self.running.clone();
         let record = running.clone();
         let task = self.runtime.spawn(async move {
-            let client = LangGraphClient::new(base_url).with_model(model);
+            let client = LangGraphClient::new(base_url)
+                .with_model(model)
+                .with_project(project);
             // Send failures just mean the UI dropped the receiver (window closed).
             let mut emit = |event: TurnEvent| {
                 // Noted on the way past rather than asked for separately: this is the only
@@ -244,6 +254,16 @@ impl Sidecar {
         *self.model.lock().expect("model mutex") = model;
     }
 
+    /// Name the project this conversation's outputs belong in, or clear it.
+    pub fn set_project(&self, project: Option<String>) {
+        *self.project.lock().expect("project mutex") = project;
+    }
+
+    /// What the current conversation is filed under.
+    pub fn project(&self) -> Option<String> {
+        self.project.lock().expect("project mutex").clone()
+    }
+
     /// Answer a paused run's approval request and stream what follows.
     ///
     /// Runs on the conversation's existing thread, so the continuation lands in the
@@ -253,6 +273,7 @@ impl Sidecar {
         let thread = self.thread.clone();
         let base_url = self.base_url.clone();
         let model = self.model.lock().expect("model mutex").clone();
+        let project = self.project();
 
         // A resumed continuation is as cancellable as the turn that started it: an approved
         // command can be the slowest part of a run, and that is exactly when someone reaches
@@ -260,7 +281,9 @@ impl Sidecar {
         let running = self.running.clone();
         let record = running.clone();
         let task = self.runtime.spawn(async move {
-            let client = LangGraphClient::new(base_url).with_model(model);
+            let client = LangGraphClient::new(base_url)
+                .with_model(model)
+                .with_project(project);
             let mut emit = |event: TurnEvent| {
                 if let TurnEvent::Started { run_id } = &event {
                     if let Ok(mut slot) = record.lock() {
@@ -531,6 +554,21 @@ impl Sidecar {
         rx
     }
 
+    /// Record a conversation's project on the thread itself.
+    ///
+    /// Fire-and-forget: the folder has already moved and the app already shows the new grouping,
+    /// so a failure here means the label and the disk disagree until the next successful write —
+    /// worth logging, not worth blocking the researcher on.
+    pub fn set_thread_project(&self, thread_id: String, project: Option<String>) {
+        let base_url = self.base_url.clone();
+        self.runtime.spawn(async move {
+            let client = LangGraphClient::new(base_url);
+            if let Err(error) = client.set_project(&thread_id, project.as_deref()).await {
+                tracing::warn!(%error, "could not record the conversation's project");
+            }
+        });
+    }
+
     /// Watch one long job until it stops moving, reporting every status change.
     ///
     /// **Outlives the turn that started it.** That is the whole point: the theorizer and
@@ -639,8 +677,11 @@ impl Sidecar {
     pub fn decide_task(&self, thread_id: String, decisions: Vec<Decision>) {
         let base_url = self.base_url.clone();
         let model = self.model.lock().expect("model mutex").clone();
+        let project = self.project();
         self.runtime.spawn(async move {
-            let client = LangGraphClient::new(base_url).with_model(model);
+            let client = LangGraphClient::new(base_url)
+                .with_model(model)
+                .with_project(project);
             if let Err(error) = client.resume_background(&thread_id, &decisions).await {
                 tracing::error!(%thread_id, %error, "could not answer a background task");
             }
@@ -734,10 +775,13 @@ impl Sidecar {
         let thread = self.thread.clone();
         let base_url = self.base_url.clone();
         let model = self.model.lock().expect("model mutex").clone();
+        let project = self.project();
         println!("url      : {base_url}");
         println!("log      : {}", self.log_path);
         self.runtime.block_on(async move {
-            let client = LangGraphClient::new(base_url).with_model(model);
+            let client = LangGraphClient::new(base_url)
+                .with_model(model)
+                .with_project(project);
             // Scoped: `run_turn` locks the supervisor itself, so holding it here
             // would deadlock the first turn.
             {

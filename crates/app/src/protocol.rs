@@ -291,6 +291,13 @@ impl AsyncTask {
 /// that keeps being wrong.
 const CONVERSATION_TAG: &str = "minime_conversation";
 
+/// Metadata key naming the project a conversation belongs to.
+///
+/// Paired with the folder the backend writes into (`__workspace_project__`, see
+/// `overlay/minime_local/workspace.py`). The folder is where the files are; this is how the app
+/// knows which folder to look in — see docs §105 for why it is both and not either.
+const PROJECT_KEY: &str = "minime_project";
+
 /// A stored thread that is not yet tagged, by id.
 ///
 /// Only the cheap half of the decision. Whether it is a *conversation* is settled by asking
@@ -327,6 +334,12 @@ pub type StoredConversation = (Vec<(String, String)>, Option<Snapshot>);
 #[derive(Clone, Debug, PartialEq)]
 pub struct Conversation {
     pub thread_id: String,
+    /// Which project it belongs to, or `None` for ungrouped.
+    ///
+    /// On the thread rather than inferred from the folder: renaming a directory in Explorer is
+    /// something a scientist will do, and an app that read the project only from the path would
+    /// then be silently wrong about where a conversation lives (docs §106).
+    pub project: Option<String>,
     /// What to call it in the list. Never empty — see [`decode_conversation`].
     pub title: String,
     /// ISO-8601, as the server reports it. Used for grouping, not for display.
@@ -352,6 +365,12 @@ fn decode_conversation(thread: &Value) -> Option<Conversation> {
         .unwrap_or_else(|| "New conversation".to_string());
     Some(Conversation {
         thread_id: thread_id.to_string(),
+        project: metadata
+            .and_then(|metadata| metadata.get(PROJECT_KEY))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|project| !project.is_empty())
+            .map(str::to_string),
         title,
         updated_at: thread
             .get("updated_at")
@@ -653,6 +672,8 @@ pub struct LangGraphClient {
     http: reqwest::Client,
     base_url: String,
     model: Option<ModelChoice>,
+    /// The project whose folder this thread's outputs belong in, if any.
+    project: Option<String>,
 }
 
 impl LangGraphClient {
@@ -661,7 +682,14 @@ impl LangGraphClient {
             http: reqwest::Client::new(),
             base_url: base_url.into(),
             model: None,
+            project: None,
         }
+    }
+
+    /// Name the project folder the backend should write this thread's outputs into.
+    pub fn with_project(mut self, project: Option<String>) -> Self {
+        self.project = project;
+        self
     }
 
     /// Attach the user's model choice and key. Without one the backend falls back to
@@ -821,7 +849,7 @@ impl LangGraphClient {
     pub async fn resume_background(&self, thread_id: &str, decisions: &[Decision]) -> Result<()> {
         // The same body a foreground resume sends — one definition, so a change to the
         // decision shape cannot fix one path and leave the other broken.
-        let payload = resume_request_body(decisions, self.model.as_ref());
+        let payload = resume_request_body(decisions, self.model.as_ref(), self.project.as_deref());
         self.http
             .post(format!(
                 "{}/threads/{}/runs",
@@ -964,6 +992,28 @@ impl LangGraphClient {
             }
         }
         Ok(adopted)
+    }
+
+    /// File a conversation under a project, or take it out of one.
+    ///
+    /// Metadata only — the caller moves the folder, because that has to happen while no turn is
+    /// running and this does not know.
+    pub async fn set_project(&self, thread_id: &str, project: Option<&str>) -> Result<()> {
+        self.http
+            .patch(format!(
+                "{}/threads/{}",
+                self.base_url,
+                urlencode(thread_id)
+            ))
+            // `null` clears it: LangGraph merges metadata, so omitting the key would leave the
+            // old project in place and the conversation would file itself back on next read.
+            .json(&json!({ "metadata": { PROJECT_KEY: project } }))
+            .send()
+            .await
+            .context("filing the conversation failed")?
+            .error_for_status()
+            .context("the thread-update route returned an error status")?;
+        Ok(())
     }
 
     /// Mark an existing thread as one of ours, leaving its other metadata alone.
@@ -1135,7 +1185,7 @@ impl LangGraphClient {
     ) -> Result<TurnOutcome> {
         self.stream(
             thread_id,
-            run_request_body(prompt, self.model.as_ref()),
+            run_request_body(prompt, self.model.as_ref(), self.project.as_deref()),
             on_event,
         )
         .await
@@ -1150,7 +1200,7 @@ impl LangGraphClient {
     ) -> Result<TurnOutcome> {
         self.stream(
             thread_id,
-            resume_request_body(decisions, self.model.as_ref()),
+            resume_request_body(decisions, self.model.as_ref(), self.project.as_deref()),
             on_event,
         )
         .await
@@ -1245,8 +1295,8 @@ impl LangGraphClient {
 /// Asking for `messages` instead selects the v1 path, which emits
 /// `messages/partial` + `messages/complete` with a different payload shape — and
 /// yields no tokens through this decoder.
-fn run_request_body(prompt: &str, model: Option<&ModelChoice>) -> Value {
-    let mut body = stream_request_body(model);
+fn run_request_body(prompt: &str, model: Option<&ModelChoice>, project: Option<&str>) -> Value {
+    let mut body = stream_request_body(model, project);
     body["input"] = json!({ "messages": [ { "type": "human", "content": prompt } ] });
     body
 }
@@ -1256,7 +1306,11 @@ fn run_request_body(prompt: &str, model: Option<&ModelChoice>) -> Value {
 /// Shape from the HITL middleware (`human_in_the_loop.py`:
 /// `decisions = interrupt(hitl_request)["decisions"]`): exactly one decision per
 /// held action, in the order they were presented.
-fn resume_request_body(decisions: &[Decision], model: Option<&ModelChoice>) -> Value {
+fn resume_request_body(
+    decisions: &[Decision],
+    model: Option<&ModelChoice>,
+    project: Option<&str>,
+) -> Value {
     let decisions: Vec<Value> = decisions
         .iter()
         .map(|decision| match decision {
@@ -1264,7 +1318,7 @@ fn resume_request_body(decisions: &[Decision], model: Option<&ModelChoice>) -> V
             Decision::Reject { message } => json!({ "type": "reject", "message": message }),
         })
         .collect();
-    let mut body = stream_request_body(model);
+    let mut body = stream_request_body(model, project);
     body["command"] = json!({ "resume": { "decisions": decisions } });
     body
 }
@@ -1284,7 +1338,7 @@ pub enum TurnOutcome {
 }
 
 /// The parts of the request body shared by a fresh run and a resume.
-fn stream_request_body(model: Option<&ModelChoice>) -> Value {
+fn stream_request_body(model: Option<&ModelChoice>, project: Option<&str>) -> Value {
     json!({
         "assistant_id": "agent",
         "stream_mode": ["messages-tuple", "values", "custom"],
@@ -1293,17 +1347,24 @@ fn stream_request_body(model: Option<&ModelChoice>) -> Value {
         // the silent gap the activity trace exists to close. On a measured turn this
         // flag is the difference between 176 and 495 message events.
         "stream_subgraphs": true,
-        "config": config_for(model),
+        "config": config_for(model, project),
     })
 }
 
 /// The `config` object: recursion limit, model routing, and the key.
-fn config_for(model: Option<&ModelChoice>) -> Value {
+fn config_for(model: Option<&ModelChoice>, project: Option<&str>) -> Value {
     let mut configurable = json!({
         // Marks this as a real run rather than a read-only graph load, which is what the
         // backend's key check keys off.
         "__is_for_execution__": true,
     });
+
+    // Which folder under the workspace root this turn's outputs belong in. The overlay reads
+    // this key and sanitises it again on its own side — a project name is a path segment and a
+    // thing a person types (docs §105).
+    if let Some(project) = project.map(str::trim).filter(|name| !name.is_empty()) {
+        configurable["__workspace_project__"] = json!(project);
+    }
 
     if let Some(model) = model {
         let mut model_config = json!({
@@ -2118,7 +2179,7 @@ mod tests {
         // tokens, because the server then emits `messages/partial` frames.
         // `values` rides alongside for the artifacts/spine snapshot — verified on a
         // live backend that asking for both still produces `event: messages`.
-        let body = run_request_body("hi", None);
+        let body = run_request_body("hi", None, None);
         assert_eq!(
             body["stream_mode"],
             json!(["messages-tuple", "values", "custom"])
@@ -2143,7 +2204,7 @@ mod tests {
             base_url: Some("https://openrouter.ai/api/v1".into()),
             ..Default::default()
         };
-        let body = run_request_body("hi", Some(&model));
+        let body = run_request_body("hi", Some(&model), None);
         let configurable = &body["config"]["configurable"];
         assert_eq!(
             configurable["model_config"]["default"],
@@ -2162,7 +2223,7 @@ mod tests {
 
         // A resume carries the same routing: the continuation must not silently switch
         // model or lose the key mid-turn.
-        let resumed = resume_request_body(&[Decision::Approve], Some(&model));
+        let resumed = resume_request_body(&[Decision::Approve], Some(&model), None);
         assert_eq!(
             resumed["config"]["configurable"]["__llm_keys"],
             configurable["__llm_keys"]
@@ -2201,7 +2262,7 @@ mod tests {
                 .into_iter()
                 .collect(),
         };
-        let body = run_request_body("hi", Some(&model));
+        let body = run_request_body("hi", Some(&model), None);
         let configurable = &body["config"]["configurable"];
 
         assert_eq!(
@@ -2228,7 +2289,8 @@ mod tests {
                 .into_iter()
                 .collect(),
         };
-        let keys = &run_request_body("hi", Some(&model))["config"]["configurable"]["__llm_keys"];
+        let keys =
+            &run_request_body("hi", Some(&model), None)["config"]["configurable"]["__llm_keys"];
         assert_eq!(keys["custom"]["api_key"], "sk-custom");
         assert_eq!(keys["custom"]["base_url"], "https://openrouter.ai/api/v1");
     }
@@ -2243,7 +2305,7 @@ mod tests {
             api_key: Some("sk".into()),
             ..Default::default()
         };
-        let configurable = &run_request_body("hi", Some(&model))["config"]["configurable"];
+        let configurable = &run_request_body("hi", Some(&model), None)["config"]["configurable"];
         assert!(
             configurable["model_config"].get("subagents").is_none(),
             "{}",
@@ -2262,7 +2324,7 @@ mod tests {
             base_url: None,
             ..Default::default()
         };
-        let body = run_request_body("hi", Some(&model));
+        let body = run_request_body("hi", Some(&model), None);
         let configurable = &body["config"]["configurable"];
         assert_eq!(configurable["model_config"]["default"], "openai::gpt-5.4");
         assert!(configurable["model_config"]["storage_mode"].is_null());
@@ -2433,6 +2495,53 @@ mod tests {
         // Nothing to PATCH.
         assert_eq!(untagged(&json!({"metadata": {"title": "No id"}})), None);
         assert_eq!(untagged(&json!({"thread_id": "   "})), None);
+    }
+
+    #[test]
+    fn a_conversations_project_is_read_from_the_thread_not_the_folder() {
+        // The label is what survives contact with a scientist. Rename a project folder in
+        // Explorer, or move one to a shared drive, and an app that inferred the project only
+        // from the path is silently wrong about where a conversation lives (docs §105).
+        let filed = json!({
+            "thread_id": "t-1",
+            "metadata": {"title": "Late blight resistance", "minime_project": "Late blight"}
+        });
+        let conversation = decode_conversation(&filed).expect("decodes");
+        assert_eq!(conversation.project.as_deref(), Some("Late blight"));
+
+        // Ungrouped is the absence of the key, and stays that way — every conversation from
+        // before projects existed reads as ungrouped rather than as an error.
+        let old = json!({"thread_id": "t-2", "metadata": {"title": "Older work"}});
+        assert_eq!(decode_conversation(&old).expect("decodes").project, None);
+        // Blank is not a project name.
+        let blank = json!({"thread_id": "t-3", "metadata": {"minime_project": "   "}});
+        assert_eq!(decode_conversation(&blank).expect("decodes").project, None);
+    }
+
+    #[test]
+    fn a_run_names_the_project_folder_its_outputs_belong_in() {
+        // The other half of §105's pair: the label tells the app where to look, this tells the
+        // backend where to write. They are computed from the same string by two sanitisers that
+        // `workspace.rs` has a test to keep byte-identical.
+        let body = run_request_body("hi", None, Some("Late blight"));
+        assert_eq!(
+            body["config"]["configurable"]["__workspace_project__"],
+            "Late blight"
+        );
+        // No project, no key — an ungrouped conversation keeps the path it always had.
+        let plain = run_request_body("hi", None, None);
+        assert!(
+            plain["config"]["configurable"]
+                .get("__workspace_project__")
+                .is_none(),
+            "{}",
+            plain["config"]["configurable"]
+        );
+        assert!(
+            run_request_body("hi", None, Some("   "))["config"]["configurable"]
+                .get("__workspace_project__")
+                .is_none()
+        );
     }
 
     #[test]

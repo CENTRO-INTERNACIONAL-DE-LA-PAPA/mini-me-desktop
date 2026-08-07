@@ -58,6 +58,11 @@ const CHECK_PROMPT: &str = "In one short paragraph, what is your role as the Min
 const ASTA_CITATION: &str = "AstaBench: Rigorous Benchmarking of AI Agents with a Scientific \
      Research Suite. arXiv:2510.21652 — https://arxiv.org/abs/2510.21652";
 
+/// [`section_label`] for a heading only known at runtime.
+fn section_label_owned(text: String) -> impl IntoElement {
+    div().text_color(rgb(theme::accent())).text_xs().child(text)
+}
+
 /// One row of a picker: a label, a tick when it is the current choice, and an optional note.
 ///
 /// Shared so every picker in this window looks the same and states the same thing the same way —
@@ -293,6 +298,8 @@ enum Divider {
 enum Picker {
     Theme,
     Model,
+    /// Which project the open conversation is filed under.
+    Project,
     /// A model for one specialist, by its index in the registry.
     ///
     /// The index rather than the name because a `Picker` is `Copy` and lives in a field that is
@@ -496,6 +503,7 @@ enum Command {
     SpecialistInBackground,
     RestartBackend,
     RenderReport,
+    FileInProject,
     OpenAbout,
     OpenProvenance,
     OpenSettings,
@@ -504,7 +512,7 @@ enum Command {
 }
 
 impl Command {
-    const ALL: [Command; 16] = [
+    const ALL: [Command; 17] = [
         Command::RunTurn,
         Command::NewThread,
         Command::RefreshSpine,
@@ -516,6 +524,7 @@ impl Command {
         Command::SpecialistInBackground,
         Command::RestartBackend,
         Command::RenderReport,
+        Command::FileInProject,
         Command::OpenAbout,
         Command::OpenProvenance,
         Command::OpenSettings,
@@ -536,6 +545,7 @@ impl Command {
             Command::SpecialistInBackground => "Run the named specialist in the background",
             Command::RestartBackend => "Restart the backend",
             Command::RenderReport => "Save the latest report as a PDF",
+            Command::FileInProject => "Put this conversation in a project",
             Command::OpenAbout => "About Mini-Me",
             Command::OpenProvenance => "Show this conversation's provenance",
             Command::OpenSettings => "Settings",
@@ -557,6 +567,7 @@ impl Command {
             Command::SpecialistInBackground => "sends the /name in the composer, without waiting",
             Command::RestartBackend => "after updating the app — reloads its Python overlay",
             Command::RenderReport => "typeset with citations, into this conversation's folder",
+            Command::FileInProject => "its folder moves there too, so Explorer matches",
             Command::OpenAbout => {
                 "what the specialists do, where the data comes from, how to cite it"
             }
@@ -1250,6 +1261,8 @@ struct Workbench {
     /// Filters the *installed* theme list. With a hundred palettes installed, a list you
     /// can only scroll is a list you cannot use.
     theme_filter: Entity<Composer>,
+    /// Filter for the project picker, which doubles as the field a new project is named in.
+    project_query: Entity<Composer>,
     theme_scroll: gpui::ScrollHandle,
     model_scroll: gpui::ScrollHandle,
     /// What the gallery search box holds, and what it found.
@@ -1364,6 +1377,9 @@ impl Workbench {
         // Filtering installed themes, as you type — this one is local, so every keystroke
         // is free.
         let theme_filter = cx.new(|cx| Composer::new(cx, "Filter themes"));
+        let project_query = cx.new(|cx| Composer::new(cx, "Find or name a project"));
+        cx.observe(&project_query, |_workbench, _field, cx| cx.notify())
+            .detach();
         cx.observe(&theme_filter, |_workbench, _field, cx| cx.notify())
             .detach();
 
@@ -1460,6 +1476,7 @@ impl Workbench {
             approve_rest_of_turn: false,
             approve_conversation: false,
             theme_filter,
+            project_query,
             theme_scroll: gpui::ScrollHandle::new(),
             model_scroll: gpui::ScrollHandle::new(),
             gallery_query,
@@ -1968,6 +1985,7 @@ impl Workbench {
                 .child(self.model_list(cx))
                 .into_any_element(),
             Picker::Subagent(index) => self.subagent_model_list(index, cx).into_any_element(),
+            Picker::Project => self.project_list(cx).into_any_element(),
         };
         Some(
             ui::picker_popup(
@@ -2860,6 +2878,15 @@ impl Workbench {
         self.approve_tasks.clear();
         self.status = "opening…".into();
 
+        // Adopt the project it is filed under *before* the fetch, so `thread_workspace` — which
+        // the figures and the provenance record are read from — is looking in the right folder
+        // by the time they land.
+        let filed = self
+            .conversations
+            .iter()
+            .find(|conversation| conversation.thread_id == thread_id)
+            .and_then(|conversation| conversation.project.clone());
+        self.sidecar.set_project(filed);
         let mut messages = self.sidecar.open_conversation(thread_id);
         cx.spawn(async move |this, cx| {
             if let Some((messages, snapshot)) = messages.next().await {
@@ -3087,9 +3114,10 @@ impl Workbench {
 
     /// The thread's own output directory, or `None` before the first turn creates one.
     fn thread_workspace(&self) -> Option<std::path::PathBuf> {
+        let project = self.sidecar.project();
         self.sidecar
             .thread_id()
-            .map(|thread_id| workspace::thread_dir(&thread_id))
+            .map(|thread_id| workspace::thread_dir_in(project.as_deref(), &thread_id))
     }
 
     /// Every figure currently in this thread's workspace.
@@ -3230,157 +3258,223 @@ impl Workbench {
             );
         }
 
-        for conversation in matched {
-            let thread_id = conversation.thread_id.clone();
-            let selected = current.as_deref() == Some(thread_id.as_str());
-            let renaming = self.renaming.as_deref() == Some(thread_id.as_str());
+        // Grouped by project, ungrouped last.
+        //
+        // A heading per project rather than an indent or a colour: the sidebar is scanned, and a
+        // name is the only marker that survives being glanced at. The order is alphabetical with
+        // "No project" pinned to the bottom, so the list does not reshuffle as work moves between
+        // projects — a sidebar that reorders itself is one nobody builds a memory of (docs §106).
+        let mut grouped: std::collections::BTreeMap<Option<String>, Vec<&protocol::Conversation>> =
+            std::collections::BTreeMap::new();
+        for conversation in &matched {
+            grouped
+                .entry(conversation.project.clone())
+                .or_default()
+                .push(conversation);
+        }
+        let mut ordered: Vec<(Option<String>, Vec<&protocol::Conversation>)> =
+            grouped.into_iter().collect();
+        ordered.sort_by(|a, b| match (&a.0, &b.0) {
+            (None, None) => std::cmp::Ordering::Equal,
+            (None, _) => std::cmp::Ordering::Greater,
+            (_, None) => std::cmp::Ordering::Less,
+            (Some(a), Some(b)) => a.cmp(b),
+        });
+        // One project is not a grouping — the heading would be noise above every row a
+        // researcher owns. Headings appear once there is something to tell apart.
+        let show_headings = ordered.len() > 1;
 
-            // Renaming happens in place, in the row itself — the pattern every chat app
-            // uses, and the one that keeps the name next to the thing being named.
-            if renaming {
+        for (project, conversations) in ordered {
+            if show_headings {
+                let heading = project.clone().unwrap_or_else(|| "No project".to_string());
+                let opening = project.clone();
                 list = list.child(
                     div()
+                        .id(SharedString::from(format!("project-{heading}")))
                         .w_full()
                         .min_w_0()
-                        .px_2()
-                        .py_1()
-                        .border_1()
-                        .border_color(rgb(theme::accent()))
-                        .child(self.rename_editor.clone()),
+                        .pt_2()
+                        .pb_1()
+                        .hover(|style| style.cursor_pointer())
+                        // Clicking the heading opens the folder — the whole reason a project is
+                        // a directory rather than a label (docs §105).
+                        .on_click(move |_event, _window, _cx| {
+                            let dir = match &opening {
+                                Some(name) => workspace::project_folder(name)
+                                    .map(|folder| workspace::root().join(folder)),
+                                None => Some(workspace::root()),
+                            };
+                            if let Some(dir) = dir {
+                                if let Err(error) = workspace::open(&dir) {
+                                    tracing::warn!(%error, "could not open a project folder");
+                                }
+                            }
+                        })
+                        .child(section_label_owned(heading.to_uppercase())),
                 );
-                continue;
             }
+            for conversation in conversations {
+                let thread_id = conversation.thread_id.clone();
+                let selected = current.as_deref() == Some(thread_id.as_str());
+                let renaming = self.renaming.as_deref() == Some(thread_id.as_str());
 
-            // Asked once, then confirmed in place. Nothing about a row of names should be
-            // able to destroy work on one click.
-            if self.confirming_delete.as_deref() == Some(thread_id.as_str()) {
-                let confirmed = thread_id.clone();
+                // Renaming happens in place, in the row itself — the pattern every chat app
+                // uses, and the one that keeps the name next to the thing being named.
+                if renaming {
+                    list = list.child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .px_2()
+                            .py_1()
+                            .border_1()
+                            .border_color(rgb(theme::accent()))
+                            .child(self.rename_editor.clone()),
+                    );
+                    continue;
+                }
+
+                // Asked once, then confirmed in place. Nothing about a row of names should be
+                // able to destroy work on one click.
+                if self.confirming_delete.as_deref() == Some(thread_id.as_str()) {
+                    let confirmed = thread_id.clone();
+                    list = list.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .w_full()
+                            .min_w_0()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(theme::error()))
+                            .child(
+                                ui::Label::new("Delete this conversation?")
+                                    .muted()
+                                    .size(ui::Size::Compact)
+                                    .ellipsis(),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("del-yes-{thread_id}")))
+                                    .flex_none()
+                                    .px_2()
+                                    .rounded_md()
+                                    .text_color(rgb(theme::error()))
+                                    .text_xs()
+                                    .hover(|style| {
+                                        style.bg(rgb(theme::elevated())).cursor_pointer()
+                                    })
+                                    .child("delete")
+                                    .on_click(cx.listener(
+                                        move |workbench, _event, _window, cx| {
+                                            workbench.delete_conversation(confirmed.clone(), cx);
+                                        },
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("del-no-{thread_id}")))
+                                    .flex_none()
+                                    .px_2()
+                                    .rounded_md()
+                                    .text_color(rgb(theme::text_muted()))
+                                    .text_xs()
+                                    .hover(|style| {
+                                        style.bg(rgb(theme::elevated())).cursor_pointer()
+                                    })
+                                    .child("keep")
+                                    .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                        workbench.confirming_delete = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    );
+                    continue;
+                }
+
+                let open = thread_id.clone();
+                let rename = thread_id.clone();
+                let remove = thread_id.clone();
                 list = list.child(
                     div()
+                        .id(SharedString::from(format!("conv-{thread_id}")))
+                        .group(SharedString::from(format!("conv-group-{thread_id}")))
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap_2()
+                        .gap_1()
                         .w_full()
                         .min_w_0()
                         .px_2()
                         .py_1()
                         .rounded_md()
-                        .border_1()
-                        .border_color(rgb(theme::error()))
+                        .when(selected, |row| row.bg(rgb(theme::accent_soft())))
+                        // Every row reacts to the pointer. A list that does not respond to
+                        // the cursor does not read as a list of *buttons*.
+                        .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
                         .child(
-                            ui::Label::new("Delete this conversation?")
-                                .muted()
+                            ui::Label::new(conversation.title.clone())
+                                .colour(if selected {
+                                    theme::text()
+                                } else {
+                                    theme::text_muted()
+                                })
                                 .size(ui::Size::Compact)
                                 .ellipsis(),
                         )
                         .child(
+                            // Hidden until the row is hovered, so the list stays a list of
+                            // names rather than a wall of controls.
                             div()
-                                .id(SharedString::from(format!("del-yes-{thread_id}")))
+                                .id(SharedString::from(format!("rename-{thread_id}")))
                                 .flex_none()
-                                .px_2()
-                                .rounded_md()
-                                .text_color(rgb(theme::error()))
+                                .invisible()
+                                .group_hover(
+                                    SharedString::from(format!("conv-group-{thread_id}")),
+                                    |style| style.visible(),
+                                )
+                                .px_1()
+                                .text_color(rgb(theme::text_faint()))
                                 .text_xs()
-                                .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
-                                .child("delete")
-                                .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                                    workbench.delete_conversation(confirmed.clone(), cx);
+                                .hover(|style| {
+                                    style.text_color(rgb(theme::accent())).cursor_pointer()
+                                })
+                                .child("rename")
+                                .on_click(cx.listener(move |workbench, _event, window, cx| {
+                                    workbench.start_rename(rename.clone(), window, cx);
                                 })),
                         )
                         .child(
                             div()
-                                .id(SharedString::from(format!("del-no-{thread_id}")))
+                                .id(SharedString::from(format!("delete-{thread_id}")))
                                 .flex_none()
-                                .px_2()
+                                .invisible()
+                                .group_hover(
+                                    SharedString::from(format!("conv-group-{thread_id}")),
+                                    |style| style.visible(),
+                                )
+                                .px_1()
                                 .rounded_md()
-                                .text_color(rgb(theme::text_muted()))
+                                .text_color(rgb(theme::text_faint()))
                                 .text_xs()
-                                .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
-                                .child("keep")
-                                .on_click(cx.listener(|workbench, _event, _window, cx| {
-                                    workbench.confirming_delete = None;
+                                .hover(|style| {
+                                    style.text_color(rgb(theme::error())).cursor_pointer()
+                                })
+                                .child("✕")
+                                .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                                    workbench.confirming_delete = Some(remove.clone());
                                     cx.notify();
                                 })),
-                        ),
+                        )
+                        .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                            workbench.open_conversation(open.clone(), cx);
+                        })),
                 );
-                continue;
             }
-
-            let open = thread_id.clone();
-            let rename = thread_id.clone();
-            let remove = thread_id.clone();
-            list = list.child(
-                div()
-                    .id(SharedString::from(format!("conv-{thread_id}")))
-                    .group(SharedString::from(format!("conv-group-{thread_id}")))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_1()
-                    .w_full()
-                    .min_w_0()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .when(selected, |row| row.bg(rgb(theme::accent_soft())))
-                    // Every row reacts to the pointer. A list that does not respond to
-                    // the cursor does not read as a list of *buttons*.
-                    .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
-                    .child(
-                        ui::Label::new(conversation.title.clone())
-                            .colour(if selected {
-                                theme::text()
-                            } else {
-                                theme::text_muted()
-                            })
-                            .size(ui::Size::Compact)
-                            .ellipsis(),
-                    )
-                    .child(
-                        // Hidden until the row is hovered, so the list stays a list of
-                        // names rather than a wall of controls.
-                        div()
-                            .id(SharedString::from(format!("rename-{thread_id}")))
-                            .flex_none()
-                            .invisible()
-                            .group_hover(
-                                SharedString::from(format!("conv-group-{thread_id}")),
-                                |style| style.visible(),
-                            )
-                            .px_1()
-                            .text_color(rgb(theme::text_faint()))
-                            .text_xs()
-                            .hover(|style| style.text_color(rgb(theme::accent())).cursor_pointer())
-                            .child("rename")
-                            .on_click(cx.listener(move |workbench, _event, window, cx| {
-                                workbench.start_rename(rename.clone(), window, cx);
-                            })),
-                    )
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("delete-{thread_id}")))
-                            .flex_none()
-                            .invisible()
-                            .group_hover(
-                                SharedString::from(format!("conv-group-{thread_id}")),
-                                |style| style.visible(),
-                            )
-                            .px_1()
-                            .rounded_md()
-                            .text_color(rgb(theme::text_faint()))
-                            .text_xs()
-                            .hover(|style| style.text_color(rgb(theme::error())).cursor_pointer())
-                            .child("✕")
-                            .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                                workbench.confirming_delete = Some(remove.clone());
-                                cx.notify();
-                            })),
-                    )
-                    .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                        workbench.open_conversation(open.clone(), cx);
-                    })),
-            );
         }
 
         div()
@@ -3912,6 +4006,131 @@ impl Workbench {
     /// they use for all fifty-odd of their modals. It suits this exactly — opening a
     /// figure or a report is something you do, look at, and dismiss, not somewhere you
     /// navigate to and have to find your way back from (docs §49).
+    /// Every project that exists, plus the way out of one.
+    ///
+    /// The list is derived from the conversations themselves rather than kept anywhere: a project
+    /// is exactly "a name some conversation is filed under", so there is no separate registry to
+    /// fall out of step with the sidebar (docs §106). Creating one is typing a name into the
+    /// filter field and pressing the row that offers it — the same gesture as choosing an
+    /// existing one, so there is no second mode to learn.
+    fn project_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let typed = self.project_query.read(cx).text().trim().to_string();
+        let current = self.sidecar.project();
+        let mut names: Vec<String> = self
+            .conversations
+            .iter()
+            .filter_map(|conversation| conversation.project.clone())
+            .collect();
+        names.sort();
+        names.dedup();
+
+        let mut list = div()
+            .id("project-rows")
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w_0()
+            .pr(px(SCROLL_GUTTER))
+            .gap_px()
+            .max_h(px(240.))
+            .overflow_y_scroll();
+
+        // Offered first, because naming a new one is the reason this list is usually open.
+        if !typed.is_empty() && !names.iter().any(|name| name == &typed) {
+            let created = typed.clone();
+            list = list.child(
+                picker_row(
+                    format!("New project “{typed}”"),
+                    false,
+                    Some("creates the folder".into()),
+                )
+                .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                    workbench.file_in_project(Some(created.clone()), cx);
+                })),
+            );
+        }
+
+        list = list.child(picker_row("No project", current.is_none(), None).on_click(
+            cx.listener(|workbench, _event, _window, cx| workbench.file_in_project(None, cx)),
+        ));
+
+        for name in names {
+            if !typed.is_empty() && crate::match_score(&typed, &name).is_none() {
+                continue;
+            }
+            let chosen = name.clone();
+            list = list.child(
+                picker_row(
+                    name.clone(),
+                    current.as_deref() == Some(name.as_str()),
+                    None,
+                )
+                .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                    workbench.file_in_project(Some(chosen.clone()), cx);
+                })),
+            );
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w_0()
+            .gap_1()
+            .child(self.filter_field(self.project_query.clone(), cx))
+            .child(list)
+    }
+
+    /// File the open conversation under a project, moving its folder to match.
+    ///
+    /// **The folder moves first, and a failure stops there.** If the metadata were written first
+    /// and the move then failed, the app would believe the conversation lives somewhere its files
+    /// are not — which is the §89 shape again, and worse here because it would look like the
+    /// files had been deleted.
+    fn file_in_project(&mut self, project: Option<String>, cx: &mut Context<Self>) {
+        self.open_picker = None;
+        self.project_query
+            .update(cx, |query, cx| query.set_text("", cx));
+        let Some(thread_id) = self.sidecar.thread_id() else {
+            return;
+        };
+        if self.streaming {
+            self.say(
+                "can't move a conversation mid-turn — its folder is in use",
+                cx,
+            );
+            return;
+        }
+        let from = self.sidecar.project();
+        if from == project {
+            return;
+        }
+        if let Err(error) = workspace::move_thread(from.as_deref(), project.as_deref(), &thread_id)
+        {
+            self.error = Some(format!("{error:#}"));
+            cx.notify();
+            return;
+        }
+        self.sidecar.set_project(project.clone());
+        // Remembered, so the next conversation starts where this one is — chosen once, not per
+        // question (docs §106).
+        self.draft.project = project.clone().unwrap_or_default();
+        let mut saved = settings::Settings::load();
+        saved.project = self.draft.project.clone();
+        if let Err(error) = saved.save() {
+            tracing::warn!(%error, "could not remember the current project");
+        }
+        self.say(
+            match &project {
+                Some(name) => format!("filed under {name}"),
+                None => "taken out of its project".to_string(),
+            },
+            cx,
+        );
+        self.sidecar.set_thread_project(thread_id, project);
+        self.refresh_conversations(cx);
+    }
+
     /// A model per specialist, under the coordinator's.
     ///
     /// **The specialists do genuinely different work**, and one model for all ten is either an
@@ -6172,6 +6391,11 @@ impl Workbench {
                     return;
                 }
                 self.sidecar.reset_thread();
+                // Started where the last one was: a researcher works through one line of enquiry
+                // over days, and choosing a project once is the shape of that (docs §106).
+                self.sidecar.set_project(
+                    Some(self.draft.project.clone()).filter(|name| !name.trim().is_empty()),
+                );
                 self.transcript.clear();
                 // A new conversation is a new enquiry. The one just left keeps its own record on
                 // disk, where reopening it will find it.
@@ -6231,6 +6455,18 @@ impl Workbench {
             Command::CopySelected => self.copy_selected_text(cx),
             Command::SelectWhole => self.select_whole_transcript(cx),
             Command::RenderReport => self.render_report(cx),
+            Command::FileInProject => {
+                if self.sidecar.thread_id().is_none() {
+                    self.say(
+                        "ask something first — there is no conversation to file yet",
+                        cx,
+                    );
+                    return;
+                }
+                // Anchored under the sidebar, where the projects it is about are listed.
+                self.open_picker = Some((Picker::Project, gpui::point(px(24.), px(120.))));
+                cx.notify();
+            }
             Command::OpenAbout => {
                 self.about_open = true;
                 cx.notify();

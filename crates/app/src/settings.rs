@@ -147,6 +147,13 @@ pub struct Settings {
     /// every save is one nobody can diff.
     #[serde(default)]
     pub subagents: std::collections::BTreeMap<String, String>,
+    /// The project new conversations start in. Empty means none.
+    ///
+    /// Remembered rather than asked, because a researcher works through one line of enquiry over
+    /// days: choosing once and continuing is the shape of the work, and a dialog before every
+    /// question is not (docs §106).
+    #[serde(default)]
+    pub project: String,
     /// Whether the app created that directory.
     ///
     /// **Load-bearing.** Updating means `git fetch && git checkout <pin> && uv sync`, and
@@ -169,6 +176,7 @@ impl Default for Settings {
             async_subagents: false,
             theme: "Mini-Me Dark".to_string(),
             subagents: std::collections::BTreeMap::new(),
+            project: String::new(),
             backend_dir_owned: true,
         }
     }
@@ -491,6 +499,7 @@ mod tests {
             backend_dir: "~/Mini-Me".into(),
             async_subagents: true,
             theme: "Slate".into(),
+            project: "Late blight".into(),
             subagents: [("report_writer".to_string(), "openai::gpt-5.4".to_string())]
                 .into_iter()
                 .collect(),

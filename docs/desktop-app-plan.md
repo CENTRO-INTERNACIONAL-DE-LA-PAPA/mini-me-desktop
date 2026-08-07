@@ -6159,3 +6159,54 @@ person types and `../..` must not write outside the workspace root.
 Built: the folder layout, both sanitisers, the move, and the cross-language test. Still to come:
 the sidebar grouping, the "move to project" action, and creating a project — which is now
 straightforward, because the part that could quietly lose someone's data is settled.
+
+## 106. Projects, visible (2026-08-07)
+
+§105 laid the ground — the folder layout, both sanitisers, the move, and the test keeping the two
+languages byte-identical. This is the half a researcher touches.
+
+**A project is exactly "a name some conversation is filed under".** There is no registry of
+projects, because a registry is a second place for the truth to live and the first thing to fall
+out of step with the sidebar. The picker derives its list from the conversations themselves, so a
+project exists while something is in it and stops existing when nothing is — which is also what a
+folder does.
+
+**Creating one is typing its name.** The picker's filter field doubles as the field a new project
+is named in: type something no project matches and the top row offers to create it. Choosing an
+existing project and creating a new one are the same gesture, so there is no second mode to learn
+and no "New project" dialog to find.
+
+### The order the work happens in
+
+`file_in_project` moves the folder **first**, and a failure stops there. Writing the metadata first
+and then failing to move would leave the app believing a conversation lives somewhere its files are
+not — §89's shape again, and worse here, because from the researcher's side it would look like the
+files had been deleted.
+
+It refuses mid-turn, and says why: the backend holds that path open for the length of a turn.
+
+### Three small decisions that are mostly about not being annoying
+
+- **Headings appear only once there is more than one group.** One project is not a grouping; the
+  heading would be noise above every row a researcher owns.
+- **The order is alphabetical, with "No project" pinned last.** A sidebar that reorders itself as
+  work moves is one nobody builds a memory of.
+- **Clicking a heading opens the folder.** That is the entire reason a project is a directory
+  rather than a label, and it should be one click from the thing that names it.
+
+### What the two halves each do, again
+
+The pairing is easy to lose, so: the **folder** is where the files are; the **label on the thread**
+is how the app knows which folder. Two tests hold the ends together —
+`a_conversations_project_is_read_from_the_thread_not_the_folder` and
+`a_run_names_the_project_folder_its_outputs_belong_in` — on top of §105's cross-language check that
+both sanitisers produce the same path segment.
+
+### The four gaps, closed
+
+- ✅ A model per specialist (§104).
+- ✅ An About window with the Asta attribution (§103).
+- ✅ Projects, as folders (§105, §106).
+
+Untested on a real window: all of it. The next screenshot is the one that matters, and on this
+project's record it will find something — §85 and §99 were both settled by one.
