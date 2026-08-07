@@ -2794,7 +2794,7 @@ impl Workbench {
 
         let mut messages = self.sidecar.open_conversation(thread_id);
         cx.spawn(async move |this, cx| {
-            if let Some(messages) = messages.next().await {
+            if let Some((messages, snapshot)) = messages.next().await {
                 let _ = this.update(cx, |workbench, cx| {
                     for (role, body) in messages {
                         // Roles come back as the two the transcript renders; anything
@@ -2809,6 +2809,26 @@ impl Workbench {
                     // on disk because the stream it came from is over (docs §73).
                     if let Some(dir) = workbench.thread_workspace() {
                         workbench.provenance = provenance::load(&dir);
+                    }
+                    // **And pick up any long run still going.** A theorizer or DataVoyager task
+                    // lives on Asta's own service, keyed by a task id the thread's artifacts
+                    // carry — so closing the window never stopped the work, only our watching of
+                    // it. The state we just fetched for the messages already holds those ids,
+                    // and `track_job` re-arms the poll that persists the result (docs §102).
+                    if let Some(snapshot) = snapshot {
+                        if !snapshot.buckets.is_empty() {
+                            workbench.buckets = snapshot.buckets;
+                        }
+                        if let Some(project) = snapshot.project {
+                            workbench.project =
+                                Some(merge_spine(workbench.project.as_ref(), project));
+                        }
+                        for job in snapshot.jobs {
+                            workbench.track_job(job, cx);
+                        }
+                        for task in snapshot.tasks {
+                            workbench.track_task(task, cx);
+                        }
                     }
                     workbench.status = "done".into();
                     workbench.refresh_project(cx);

@@ -14,7 +14,7 @@
 //!
 //! - `messages-tuple` → `event: messages` frames, `[chunk, metadata]` — the tokens
 //! - `values`         → full state snapshots carrying `artifacts` (and the spine
-//!                      nested at `artifacts.project`)
+//!   nested at `artifacts.project`)
 //! - `custom`         → `sandbox_status` provisioning progress
 //! - `messages|tools:<uuid>` → the same, but produced *inside* a subagent
 //!
@@ -318,6 +318,10 @@ fn untagged(thread: &Value) -> Option<&str> {
         .map(str::trim)
         .filter(|id| !id.is_empty())
 }
+
+/// What reopening a conversation yields: its transcript, and whatever else the thread still
+/// holds — outputs, the spine, and the task ids of work that is still running somewhere else.
+pub type StoredConversation = (Vec<(String, String)>, Option<Snapshot>);
 
 /// One past conversation, for the sidebar.
 #[derive(Clone, Debug, PartialEq)]
@@ -1065,7 +1069,7 @@ impl LangGraphClient {
     /// Only role and text: the activity trace is not replayable — it was assembled from a
     /// stream that is over — and pretending otherwise would show an empty trace next to a
     /// real answer, which reads as a bug rather than as history.
-    pub async fn conversation_messages(&self, thread_id: &str) -> Result<Vec<(String, String)>> {
+    pub async fn conversation_state(&self, thread_id: &str) -> Result<StoredConversation> {
         let resp = self
             .http
             .get(format!(
@@ -1082,14 +1086,28 @@ impl LangGraphClient {
             .json()
             .await
             .context("could not decode the conversation")?;
-        let Some(messages) = state
-            .get("values")
-            .and_then(|values| values.get("messages"))
-            .and_then(Value::as_array)
-        else {
-            return Ok(Vec::new());
+        let Some(values) = state.get("values") else {
+            return Ok((Vec::new(), None));
         };
-        Ok(messages.iter().filter_map(decode_stored_message).collect())
+        let messages = values
+            .get("messages")
+            .and_then(Value::as_array)
+            .map(|messages| {
+                messages
+                    .iter()
+                    .filter_map(decode_stored_message)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        // The same response already carries `artifacts` — the outputs, the spine, and the
+        // **task ids of background jobs**. Decoding it here costs nothing and is what lets a
+        // reopened conversation pick a long run back up (docs §102).
+        Ok((messages, decode_values(&values.to_string())))
+    }
+
+    /// Just the messages, for callers that do not care what else the thread holds.
+    pub async fn conversation_messages(&self, thread_id: &str) -> Result<Vec<(String, String)>> {
+        Ok(self.conversation_state(thread_id).await?.0)
     }
 
     /// Stream one coordinator turn, invoking `on_event` for each decoded event.
@@ -2305,6 +2323,64 @@ mod tests {
         // Nothing to PATCH.
         assert_eq!(untagged(&json!({"metadata": {"title": "No id"}})), None);
         assert_eq!(untagged(&json!({"thread_id": "   "})), None);
+    }
+
+    #[test]
+    fn a_stored_thread_still_carries_the_task_ids_of_running_work() {
+        // The observation this rests on: a theorizer or DataVoyager run lives on Asta's own
+        // hosted service, keyed by a task id. Closing the window never stopped the work — it
+        // stopped our watching of it, and the poll is also what persists the result. So the ids
+        // have to survive a reopen, and they do: `GET /threads/{id}/state` returns `values`
+        // holding both the messages *and* the artifacts, and the client used to read only the
+        // messages out of it (docs §102).
+        //
+        // This is the `values` half of a real stored state, in the shape `conversation_state`
+        // hands to `decode_values`.
+        let snapshot = decode_values(
+            &json!({
+                "messages": [{"type": "human", "content": "generate theories about X"}],
+                "artifacts": {
+                    "hypotheses": [
+                        {"question": "how do lightning strikes form?",
+                         "task_id": "task-still-going", "status": "running"},
+                        {"question": "an older one", "task_id": "task-done",
+                         "status": "completed"},
+                    ],
+                    "analyses": [
+                        {"question": "yield vs rainfall", "task_id": "voyager-1",
+                         "status": "running", "context_id": "ctx-9"},
+                    ],
+                }
+            })
+            .to_string(),
+        )
+        .expect("a stored state with artifacts decodes");
+
+        let ids: Vec<&str> = snapshot
+            .jobs
+            .iter()
+            .map(|job| job.task_id.as_str())
+            .collect();
+        assert_eq!(ids, ["task-still-going", "task-done", "voyager-1"]);
+
+        // Finished ones come back too — the Jobs panel should show what a conversation did, not
+        // only what it is still doing. `track_job` is what declines to poll them.
+        let running: Vec<&str> = snapshot
+            .jobs
+            .iter()
+            .filter(|job| !job.is_finished())
+            .map(|job| job.task_id.as_str())
+            .collect();
+        assert_eq!(running, ["task-still-going", "voyager-1"]);
+
+        // The question rides along, because the theorizer's poll route needs it in the query
+        // string to persist the outcome under the right heading.
+        let theorizer = &snapshot.jobs[0];
+        assert!(
+            theorizer.route("t-1").contains("how%20do%20lightning"),
+            "{}",
+            theorizer.route("t-1")
+        );
     }
 
     #[test]

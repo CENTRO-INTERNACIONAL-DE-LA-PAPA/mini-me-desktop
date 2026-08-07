@@ -18,7 +18,7 @@ use tokio::sync::Mutex;
 use crate::backend::{BackendConfig, BackendSupervisor, Started};
 use crate::protocol::{
     AgentRef, AsyncTask, Conversation, Decision, Job, LangGraphClient, ModelChoice, Project,
-    TurnEvent, TurnOutcome,
+    Snapshot, TurnEvent, TurnOutcome,
 };
 
 /// Find (or start) the tally row for one subagent invocation, keyed by namespace so
@@ -454,7 +454,7 @@ impl Sidecar {
     pub fn open_conversation(
         &self,
         thread_id: String,
-    ) -> mpsc::UnboundedReceiver<Vec<(String, String)>> {
+    ) -> mpsc::UnboundedReceiver<crate::protocol::StoredConversation> {
         let (tx, rx) = mpsc::unbounded();
         let base_url = self.base_url.clone();
         // Switch first, so a turn sent before the history arrives still lands on the right
@@ -462,9 +462,9 @@ impl Sidecar {
         *self.thread.lock().expect("thread id mutex") = Some(thread_id.clone());
         self.runtime.spawn(async move {
             let client = LangGraphClient::new(base_url);
-            match client.conversation_messages(&thread_id).await {
-                Ok(messages) => {
-                    let _ = tx.unbounded_send(messages);
+            match client.conversation_state(&thread_id).await {
+                Ok(state) => {
+                    let _ = tx.unbounded_send(state);
                 }
                 Err(error) => tracing::warn!(%error, "could not read a conversation"),
             }

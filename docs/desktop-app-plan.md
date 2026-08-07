@@ -5955,3 +5955,43 @@ And three of the four Mini-Me reports are the same defect in different clothes: 
 stating something it does not know.** A guessed cause, a safety claim that is conditionally false,
 a docstring describing a behaviour the runtime stopped having. None is a crash. All three cost
 somebody hours, because the wrong thing to say is more expensive than saying nothing.
+
+## 102. The work was never lost, only unwatched (2026-08-07)
+
+I had just flagged a limit on the theorizer: the poll that observes a terminal state is also the
+thing that persists the result, so closing the window during a 5–15 minute run means nothing local
+ever writes it. The reply reframed it:
+
+> *"but asta cli let you call theorizer so you can get metadata from their remote process"*
+
+Which is the whole answer. **The run lives on Asta's hosted service, keyed by a task id.** Closing
+the window never stopped the work — it stopped our watching of it. Nothing was lost; something
+merely stopped being observed, and those are only the same thing if the id is gone too.
+
+It is not gone. It is in the thread's artifacts, and — this is the part that makes the fix small —
+**in a response the client was already making.** `GET /threads/{id}/state` returns `values`
+carrying the messages *and* the artifacts, and `conversation_messages` read `values.messages` and
+threw the rest away.
+
+So reopening a conversation now decodes that same payload: outputs, spine, and every job's task id
+and status. `track_job` re-arms the poll for anything still running, and already declines to poll a
+finished one (a guard that existed for a different reason and turned out to be exactly right here).
+A theorizer left running yesterday is picked back up on open, and the poll that persists its
+theories happens after all.
+
+### The shape, which is becoming familiar
+
+The third time in three days that a response already on the wire was decoded down to the one field
+someone had needed at the time:
+
+- §89 — a report's `{title, markdown}` reduced to a title for a side panel, so the only copy of the
+  body was discarded and the researcher's folder held no report.
+- §99 — a width that `prepaint` had received all along, never read.
+- Here — artifacts fetched on every conversation open, parsed for messages only.
+
+None was a bug in the sense of code doing the wrong thing. Each was a decoder written to answer one
+question, then reused for a second question it silently could not answer. **The cost is never
+visible at the call site**, which is why all three survived so long: nothing was thrown, nothing
+was logged, and the missing capability looked like an absent feature rather than a discarded one.
+
+Worth asking of the next decoder: *what else was in that response, and who will need it?*
