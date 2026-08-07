@@ -526,6 +526,12 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
     //
     // A `Warn`, not a `Fail`. Nothing is broken without it, and a red row for something
     // optional is how a Setup pane stops being read.
+    //
+    // **And it is not how most people get it.** On a checkout the app owns — every ordinary
+    // install — provisioning installs it and the launch command re-checks, so this row is a
+    // report, not a chore. It only asks anything of a developer pointed at their own clone,
+    // whose virtualenv is not ours to change (docs §96). A researcher who cannot code should
+    // never have had to notice a warning to avoid losing their history.
     if checkout_ok {
         let module = if in_wsl || !cfg!(windows) {
             ".venv/lib/python3.12/site-packages/langgraph/checkpoint/sqlite"

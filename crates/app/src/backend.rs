@@ -262,6 +262,7 @@ impl BackendConfig {
             &execution,
             settings.approve_execute,
             settings.async_subagents,
+            config.owned,
         );
         config.execution = execution;
         config.approve_execute = settings.approve_execute;
@@ -311,6 +312,7 @@ impl BackendConfig {
                 &execution,
                 true,
                 false,
+                owned,
             ),
             project_dir,
             wsl,
@@ -344,6 +346,7 @@ fn launch_command_for(
     execution: &Execution,
     approve_execute: bool,
     async_subagents: bool,
+    owned: bool,
 ) -> Vec<String> {
     if let Some(wsl) = wsl {
         let mut argv = vec!["wsl.exe".to_string()];
@@ -392,6 +395,13 @@ fn launch_command_for(
         let mut prepare = String::new();
         if !overlay.is_empty() {
             prepare.push_str(&sync_overlay_command(&overlay, &wsl.dir));
+            prepare.push_str("; ");
+        }
+        // Durable conversation storage, for installs that were provisioned before it existed.
+        // New ones get it from `setup-wsl.sh`; this is how the researchers already using the
+        // app stop paying for a pickle store without having to be told about one (docs §96).
+        if owned {
+            prepare.push_str(&ensure_checkpointer_command());
             prepare.push_str("; ");
         }
         let config_flag = if async_subagents {
@@ -448,6 +458,28 @@ fn launch_command_for(
         argv.push(GENERATED_CONFIG.into());
     }
     argv
+}
+
+/// Install the SQLite checkpointer if it is not already there.
+///
+/// **Only ever on a checkout the app provisioned and owns.** Installing a package into someone
+/// else's virtualenv is a change to an environment they are responsible for, and the rule that
+/// keeps this app welcome on a developer's own clone is that it never runs anything destructive
+/// or surprising there (see `resolve_project_dir`). For those, Setup offers the same command and
+/// a person decides.
+///
+/// **Why at launch and not only at provisioning.** Everyone already using the app provisioned
+/// before this existed, and the alternative was a warning row in Setup that a researcher has to
+/// notice, understand and act on. They would have to know the pickle store's failure modes to go
+/// looking for the switch — which is the opposite of who this app is for (docs §96).
+///
+/// The import check makes the common case one fast subprocess: after the first launch the
+/// install never runs again. `|| true` throughout, because a backend that starts with the old
+/// store is strictly better than one that does not start.
+fn ensure_checkpointer_command() -> String {
+    "{ .venv/bin/python -c 'import langgraph.checkpoint.sqlite' 2>/dev/null \
+     || uv pip install langgraph-checkpoint-sqlite ; } >/dev/null 2>&1 || true"
+        .to_string()
 }
 
 /// The overlay copy that provisioning installs next to the checkout.
@@ -1384,6 +1416,51 @@ pub(crate) mod env_lock {
 #[cfg(test)]
 mod tests {
 
+    /// The install is offered on a checkout the app provisioned, and never on someone else's.
+    ///
+    /// The rule that keeps this app welcome on a developer's own clone: it may run destructive
+    /// or environment-changing commands only where it owns the environment (`resolve_project_dir`).
+    /// Installing a package is exactly that kind of change, so it is gated on `owned` — and this
+    /// pins the gate, because the cost of getting it wrong is silent and lands on somebody else's
+    /// virtualenv (docs §96).
+    #[test]
+    fn the_checkpointer_install_is_gated_on_owning_the_checkout() {
+        let launch = |owned: bool| {
+            launch_command_for(
+                Path::new("/tmp/mini-me"),
+                2024,
+                Some(&WslTarget {
+                    distro: None,
+                    dir: "~/Mini-Me".into(),
+                }),
+                &Execution::Sandbox,
+                true,
+                false,
+                owned,
+            )
+            .last()
+            .expect("the bash -lc payload")
+            .clone()
+        };
+
+        let ours = launch(true);
+        assert!(ours.contains("langgraph-checkpoint-sqlite"), "{ours}");
+        // Guarded by an import check, so the common case is one fast subprocess and the install
+        // runs exactly once in the life of an installation.
+        assert!(
+            ours.contains("import langgraph.checkpoint.sqlite"),
+            "{ours}"
+        );
+        // And it can never stop the backend starting: a server on the old store beats no server.
+        assert!(ours.contains("|| true"), "{ours}");
+
+        let theirs = launch(false);
+        assert!(
+            !theirs.contains("langgraph-checkpoint-sqlite"),
+            "a checkout we do not own must be left alone: {theirs}"
+        );
+    }
+
     /// The generated config must extend upstream's, not replace it — and must name the SQLite
     /// checkpointer only when the backend can actually load it.
     ///
@@ -1513,11 +1590,21 @@ print(make_config.build({checkout:?}, {overlay:?}))
             &Execution::Sandbox,
             true,
             false,
+            true,
         );
         let command = argv.last().expect("the bash -lc payload");
         assert!(!command.contains("MINIME_EXECUTION_BACKEND"), "{command}");
+        // No overlay copy and no generated config: both are host-execution machinery, and the
+        // sandbox path must not acquire either.
+        assert!(!command.contains("cp -r"), "{command}");
+        assert!(!command.contains("--config"), "{command}");
+        // Storage, however, is not an execution concern. Where conversations are kept is the
+        // same question whichever side runs the agent's code, so the checkpointer install
+        // belongs on this path too (docs §96).
+        assert!(command.contains("langgraph-checkpoint-sqlite"), "{command}");
+        assert!(command.contains("cd ~/'Mini-Me' && "), "{command}");
         assert!(
-            command.contains("cd ~/'Mini-Me' && exec .venv/bin/langgraph dev"),
+            command.contains("exec .venv/bin/langgraph dev"),
             "{command}"
         );
     }
@@ -1776,6 +1863,7 @@ print(make_config.build({checkout:?}, {overlay:?}))
             &execution,
             true,
             true,
+            true,
         );
         let command = argv.last().expect("the bash -lc payload");
         // Assignments must land *before* `exec`, or the server never sees them.
@@ -1859,6 +1947,7 @@ print(make_config.build({checkout:?}, {overlay:?}))
             },
             true,
             false,
+            true,
         );
         let command = argv.last().expect("the bash -lc payload");
         let sync = command.find("cp -r").expect("the overlay sync");
@@ -1885,6 +1974,7 @@ print(make_config.build({checkout:?}, {overlay:?}))
             &Execution::Sandbox,
             true,
             false,
+            true,
         );
         assert!(!sandbox.last().unwrap().contains("cp -r"), "{sandbox:?}");
     }
@@ -1904,6 +1994,7 @@ print(make_config.build({checkout:?}, {overlay:?}))
             2024,
             Some(&wsl),
             &execution,
+            true,
             true,
             true,
         );
@@ -1939,6 +2030,7 @@ print(make_config.build({checkout:?}, {overlay:?}))
             &execution,
             true,
             false,
+            true,
         );
         let plain = plain.last().expect("payload");
         assert!(!plain.contains("make_config"), "{plain}");

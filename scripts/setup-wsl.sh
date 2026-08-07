@@ -162,6 +162,21 @@ fi
 say "Installing Python packages (a few minutes the first time)"
 echo "    This pulls the scientific stack — PyMC, scikit-learn and friends."
 uv sync --extra dev
+
+# Durable conversation storage, installed by default and not left to a checkbox.
+#
+# Without it the backend keeps `langgraph dev`'s pickle checkpointer, which loads every
+# conversation in the installation before answering anything, and which — on a load that
+# fails after a dependency change — flushes an empty dict over the real file ten seconds
+# later (docs §90/§94). Neither cost is one a researcher can be expected to opt out of;
+# they would have to know the failure exists to go looking for the switch.
+#
+# `|| true` because this is an improvement, not a requirement: a machine that cannot reach
+# the index still gets a working backend, and Setup will offer the install again.
+say "Installing durable conversation storage"
+uv pip install langgraph-checkpoint-sqlite || \
+  bad "could not install langgraph-checkpoint-sqlite - Setup will offer it again"
+
 if [ -x .venv/bin/langgraph ]; then
   ok "the backend can be started"
 else

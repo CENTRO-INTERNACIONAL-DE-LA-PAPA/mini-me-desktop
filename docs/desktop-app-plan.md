@@ -5665,3 +5665,53 @@ correct about a file neither had produced together.
 The module logs on **success**, naming the database path. §81 paid for that lesson three times: a
 checkpointer that silently failed to take effect would look exactly like one that worked, until
 someone noticed their conversations were still slow.
+
+## 96. On by default, because the default is the whole decision (2026-08-07)
+
+§95 shipped the SQLite checkpointer as an opt-in: a `Warn` row in Setup with a one-click install.
+The response was one sentence and it was right —
+
+> *"so we did sqlite as default right? remember to think in users rather then in me the
+> developer"*
+
+It was not the default, and that made it nearly worthless. **~98% of the people this is for cannot
+code.** To take an opt-in they would have to open Setup, read a yellow row about a pickle
+checkpointer, understand that a boot which grows with history and a flush that can overwrite good
+data are things worth avoiding, and click. Every one of those steps is a filter, and what gets
+filtered out is exactly the researcher least able to recover from a lost conversation.
+
+An optional safety feature is a feature for the people who already knew about the hazard.
+
+### What changed
+
+- **`setup-wsl.sh` installs it during provisioning**, right after `uv sync --extra dev`. Every
+  new install has durable storage before it ever starts a conversation.
+- **The launch command re-checks, on a checkout the app owns.** Everyone already using the app
+  provisioned before this existed; a fix that only reaches new installs leaves the current users
+  on the store with the failure modes. Guarded by an import check, so after the first launch it is
+  one fast subprocess and the install never runs again. `|| true` throughout — a backend that
+  starts on the old store is strictly better than one that does not start.
+- **Only where the app owns the environment.** `resolve_project_dir` already distinguishes the
+  checkout this app provisioned from one a developer pointed it at, and the rule that keeps it
+  welcome on someone's own clone is that it runs nothing destructive or surprising there.
+  Installing a package is precisely that kind of change, so it is gated on `owned` and pinned by a
+  test — the cost of getting that wrong is silent and lands in somebody else's virtualenv.
+- **Setup's row stops being a chore and becomes a report.** It still offers the install, because
+  the unowned case is real, but nobody on an ordinary install has to act on it.
+
+One test changed meaning rather than breaking: `the_sandbox_path_is_left_exactly_as_it_was` pinned
+that sandbox execution adds no launch preamble. The overlay copy and the generated config are
+host-execution machinery and still must not appear there — but **storage is not an execution
+concern**. Where conversations are kept is the same question whichever side runs the agent's code,
+so the install belongs on that path too, and the test now says what it actually meant.
+
+### The shape
+
+This document has recorded plenty of bugs where the code did the wrong thing. This one did exactly
+what it was written to do, correctly, with a test — and was still the wrong answer, because the
+question was never "can the researcher turn this on?" but "what happens to the researcher who
+never opens Setup?"
+
+**A default is not a convenience; it is the decision, taken on behalf of everyone who will never
+revisit it.** The right test for any option in this app is not whether it can be found — it is what
+happens to someone who never looks.
