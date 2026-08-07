@@ -6538,3 +6538,46 @@ properly and found nothing. That ambiguity is §81's, exactly, and it cost four 
 The grep for the two ids from the transcript matched nothing. Not evidence of anything: the sidecar
 log is per launch and the backend had been restarted several times since. Worth stating because a
 missing line reads like a finding, and here it only meant the file was younger than the question.
+
+## 113. A wrapper that restated a signature it did not own (2026-08-07)
+
+`install_runtime.<locals>._project_namespace_scoped() takes 1 positional argument but 2 were
+given` — and the backend could not start. §109's patch, one launch old.
+
+I wrote the wrapper as `def _project_namespace_scoped(user_id: str)`, matching what
+`backend/runtime.py:141` says on **this developer's reference clone**. The checkout a researcher
+actually runs is a *pinned* provision of Mini-Me, and there it takes two. So every call into the
+research spine raised `TypeError`, on a code path every request touches.
+
+The fix is what the wrapper should always have been:
+
+```python
+@functools.wraps(original)
+def _project_namespace_scoped(*args, **kwargs):
+    base = original(*args, **kwargs)
+    project = current_project()
+    return (*base, project) if project else base
+```
+
+**A wrapper over someone else's function has no business knowing how it is called.** It needs to
+pass along whatever it was given and adjust what comes back — nothing more. The same applies to the
+route handlers, so they take `*args, **kwargs` too.
+
+Exercised against three arities — one argument, two, and keyword-only — because the whole failure
+was an assumption about exactly that, and "it works on the clone I read" is not a test.
+
+### The shape, and it is not a new one
+
+This repo has a rule for it, written down twice and not applied here:
+
+- §79: *"matching on prose to discover this is how the two get confused"* — answer from the type.
+- §107: the About box compared `execution()` to a string it had guessed rather than read.
+- Here: a signature copied from a file that is **not the one that runs**.
+
+Every one is the same act — treating a local reading of upstream as a fact about the deployed
+upstream. The reference checkout at `~/Documents/Mini-Me` is a *developer's* clone with its own
+branches; the backend a researcher runs is pinned and provisioned. §110 was the same gap in the
+other direction, where the config named `/mnt/c` while `PYTHONPATH` named the distro.
+
+The overlay exists precisely because upstream is not ours to hold still. Code in it should assume
+**less** about upstream than code anywhere else in this repo, and this assumed more.

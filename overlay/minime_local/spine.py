@@ -31,6 +31,7 @@ the checkout stays byte-for-byte upstream and a `git pull` there can never confl
 from __future__ import annotations
 
 import contextvars
+import functools
 import logging
 
 logger = logging.getLogger(__name__)
@@ -95,8 +96,15 @@ def install_runtime(module) -> None:
         logger.warning("minime_local: no _project_namespace to make project-aware")
         return
 
-    def _project_namespace_scoped(user_id: str):
-        base = original(user_id)
+    # **`*args, **kwargs`, and never a restated signature.** The first version declared
+    # `(user_id: str)`, matching the reference checkout on the developer's machine — and the
+    # pinned checkout a researcher actually runs calls it with two, so every request died with
+    # *"takes 1 positional argument but 2 were given"* and the backend could not start (docs
+    # §113). A wrapper over someone else's function has no business knowing how it is called; it
+    # only needs to pass along whatever it was given and adjust what comes back.
+    @functools.wraps(original)
+    def _project_namespace_scoped(*args, **kwargs):
+        base = original(*args, **kwargs)
         project = current_project()
         return (*base, project) if project else base
 
@@ -122,10 +130,11 @@ def install_routes(module) -> None:
         # functions: a sync wrapper would set the variable, build the coroutine, reset, and
         # return it unawaited — so the value would be gone by the time the handler actually ran,
         # and every request would read the ungrouped spine while looking like it worked.
-        async def scoped(request, _handler=handler):
+        @functools.wraps(handler)
+        async def scoped(request, *args, _handler=handler, **kwargs):
             token = _http_project.set(request.query_params.get(QUERY_PARAM, "") or "")
             try:
-                return await _handler(request)
+                return await _handler(request, *args, **kwargs)
             finally:
                 _http_project.reset(token)
 
