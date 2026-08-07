@@ -5595,3 +5595,73 @@ firing but both live for anyone running `langgraph dev`:
 
 Both would be fixed by the same principle: **a persistence layer that cannot read its file must
 refuse to write it**, not carry on with an empty copy and flush.
+
+## 95. The SQLite checkpointer, built (2026-08-07)
+
+§93 planned it; this is the build. Three pieces, and the shape of them is the interesting part:
+**none of it patches Python and none of it touches the checkout.**
+
+### It is configuration, not a patch
+
+Everything else in `overlay/minime_local` works by import hook, because `langgraph.json` loads
+`http.app` by file path and so bypasses `sys.meta_path` (§18). The checkpointer needs none of that.
+`langgraph.json` takes a `checkpointer` key naming an async context manager, and the app has
+generated its own copy of that config since §30 — `make_config.py` reads upstream's, adds the
+background graph, and writes `.mini-me-desktop.langgraph.json` beside it. One more key in the same
+generator, and the checkout is as untouched as it ever was.
+
+That retires the obstacle §93 named as the only real one. It also means the change is legible: a
+researcher can open the generated file and see where their conversations go.
+
+### Optional by construction
+
+`make_config.py` adds the key **only if `langgraph.checkpoint.sqlite` imports**. Without the
+package the config is byte-identical to what it was, and the backend keeps the pickle checkpointer
+and behaves exactly as before. Naming a checkpointer the server cannot load would convert a missing
+optional dependency into a server that does not boot — a strictly worse failure than the one being
+fixed.
+
+The Setup pane carries it as a **`Warn`, not a `Fail`**, with a one-click
+`uv pip install langgraph-checkpoint-sqlite`: nothing is broken without it, and a red row for
+something optional is how a diagnostics pane stops being read.
+
+### What it actually buys
+
+- **Boot stops growing with history.** `PersistentDict` loads every conversation in the
+  installation before the server answers anything (§80). SQLite reads rows when asked.
+- **A failed load stops being fatal.** §90/§94's chain — registered with the flush loop *before*
+  `load()`, exception swallowed, empty dict flushed over the real file ten seconds later under a
+  comment reading `# atomic commit` — has nothing to act on. Writes are transactional and
+  per-checkpoint, so a version change that breaks one row cannot take the other thirty
+  conversations with it.
+
+Deliberately **not** Rust, despite the request being framed that way. The cost is unpickling
+megabytes and writing them back — serialisation and I/O, not computation — so there is no work for
+a faster language to do, and PyO3 plus a per-platform wheel is a new way for the install to fail on
+machines that spent §57–§60 fighting WSL2 alone.
+
+The database sits at `.langgraph_api/checkpoints.sqlite`, **inside the distro**. That placement is
+now load-bearing rather than incidental: SQLite's file locking over WSL's 9p mount is not reliable,
+so a Windows-visible path is the one location that could corrupt it. Asked directly whether SQLite
+was an argument for running the backend natively on Windows, the answer is no — it is an argument
+for keeping the database exactly where it already is. The case for a native backend is the WSL
+install itself, which is a separate question with a separate experiment.
+
+### Migration, stated plainly
+
+There is none. Conversations already in the pickle stay there; SQLite starts empty and takes
+everything from the moment it is switched on. Writing a converter would mean unpickling the old
+store — the operation whose unreliability is the reason for the change. The Setup row says so.
+
+### What is pinned
+
+`the_generated_config_extends_upstream_and_gates_the_checkpointer` runs the real `make_config.py`
+and asserts both branches: upstream's `http`, `env` and `graphs` survive, the background graph is
+added, and the `checkpointer` key appears **only** when the package is available. It is a contract
+between two languages — Rust chooses the filename and passes `--config`, Python decides the
+contents — and §76 established this pattern after three rounds of each side being individually
+correct about a file neither had produced together.
+
+The module logs on **success**, naming the database path. §81 paid for that lesson three times: a
+checkpointer that silently failed to take effect would look exactly like one that worked, until
+someone noticed their conversations were still slow.

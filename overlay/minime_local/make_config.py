@@ -25,6 +25,8 @@ import json
 import os
 import sys
 
+from minime_local import checkpointer as sqlite_checkpointer
+
 #: Must match `BACKGROUND_GRAPH_ID` in async_agents.py and `BACKGROUND_GRAPH_ID` in
 #: crates/app/src/backend.rs. A mismatch fails when the coordinator first delegates —
 #: mid-task, in front of the user — rather than at startup.
@@ -54,6 +56,23 @@ def build(checkout: str, overlay: str) -> str:
         os.path.join(overlay, "minime_local", "async_agents.py") + ":background_graph"
     )
 
+    # Conversations in SQLite rather than one pickle of everything: constant boot instead of a
+    # boot that grows with history, and per-row writes instead of a format where one unreadable
+    # byte takes every conversation with it (docs §93, §95).
+    #
+    # **Only when the package is importable.** Naming a checkpointer the backend cannot load
+    # would turn a missing optional dependency into a server that does not start; leaving the
+    # key out gives exactly today's behaviour. The Setup pane checks for it and offers to
+    # install it, so this is a choice a researcher can see and make, not a silent downgrade.
+    if sqlite_checkpointer.available():
+        config["checkpointer"] = {
+            "path": os.path.join(overlay, "minime_local", "checkpointer.py")
+            + ":checkpointer"
+        }
+    elif "checkpointer" in config:
+        # Upstream declared one and we cannot honour ours: leave theirs alone.
+        pass
+
     destination = os.path.join(checkout, OUTPUT_NAME)
     with open(destination, "w", encoding="utf-8") as handle:
         json.dump(config, handle, indent=2)
@@ -67,7 +86,10 @@ def main(argv: list[str]) -> int:
     # stays correct when provisioning copies the overlay into the distro.
     overlay = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     written = build(checkout, overlay)
-    print(f"minime_local: wrote {written}", file=sys.stderr)
+    storage = (
+        "sqlite" if sqlite_checkpointer.available() else "the built-in pickle (see Setup)"
+    )
+    print(f"minime_local: wrote {written}; conversations in {storage}", file=sys.stderr)
     return 0
 
 

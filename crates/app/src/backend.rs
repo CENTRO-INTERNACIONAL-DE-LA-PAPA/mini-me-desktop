@@ -1383,6 +1383,97 @@ pub(crate) mod env_lock {
 
 #[cfg(test)]
 mod tests {
+
+    /// The generated config must extend upstream's, not replace it — and must name the SQLite
+    /// checkpointer only when the backend can actually load it.
+    ///
+    /// Runs the real `make_config.py`, because the thing worth pinning is a **contract between
+    /// two languages**: Rust decides the filename and passes `--config`, Python decides what
+    /// goes in it. §76 established this pattern for the subagent registry after three rounds of
+    /// each side being individually correct about a file neither had produced together.
+    ///
+    /// Skipped rather than failed when `python3` is absent, so a machine without it still runs
+    /// the suite. Announced, because a test that quietly does nothing is one nobody notices has
+    /// stopped covering anything (docs §81).
+    #[test]
+    fn the_generated_config_extends_upstream_and_gates_the_checkpointer() {
+        let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: python3 is not on PATH");
+            return;
+        }
+
+        let scratch = std::env::temp_dir().join(format!("mini-me-config-{}", std::process::id()));
+        std::fs::create_dir_all(&scratch).expect("scratch");
+        std::fs::write(
+            scratch.join("langgraph.json"),
+            r#"{"graphs":{"agent":"./backend/agent.py:agent"},
+                "http":{"app":"./backend/routes/__init__.py:app"},
+                "env":".env","dependencies":["."]}"#,
+        )
+        .expect("upstream config");
+
+        // `available` is forced both ways, so the test covers the machine it runs on *and* the
+        // machine it does not — the package is optional and most checkouts will not have it.
+        let run = |available: bool| -> serde_json::Value {
+            let script = format!(
+                r#"
+import json, sys
+sys.path.insert(0, {overlay:?})
+from minime_local import make_config, checkpointer
+checkpointer.available = lambda: {available}
+print(make_config.build({checkout:?}, {overlay:?}))
+"#,
+                overlay = overlay.to_string_lossy(),
+                checkout = scratch.to_string_lossy(),
+                available = if available { "True" } else { "False" },
+            );
+            let out = std::process::Command::new("python3")
+                .arg("-c")
+                .arg(script)
+                .output()
+                .expect("running make_config");
+            assert!(
+                out.status.success(),
+                "make_config failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let written = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            serde_json::from_str(&std::fs::read_to_string(&written).expect("generated config"))
+                .expect("valid JSON")
+        };
+
+        let without = run(false);
+        // Everything upstream carries survives. `http` is the load-bearing one: it mounts the
+        // routes the project spine and the report renderer depend on, and rebuilding the file
+        // by hand instead of extending it is how that gets dropped.
+        assert_eq!(without["http"]["app"], "./backend/routes/__init__.py:app");
+        assert_eq!(without["env"], ".env");
+        assert!(without["graphs"]["agent"].is_string());
+        // The background graph the async subagents need (docs §30).
+        assert!(without["graphs"]["background"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("async_agents.py:background_graph")));
+        // No package, no key: a config naming a checkpointer the backend cannot import would
+        // turn a missing optional dependency into a server that does not start.
+        assert!(
+            without.get("checkpointer").is_none(),
+            "{:?}",
+            without.get("checkpointer")
+        );
+
+        let with = run(true);
+        assert_eq!(with["http"]["app"], "./backend/routes/__init__.py:app");
+        assert!(with["checkpointer"]["path"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("checkpointer.py:checkpointer")));
+
+        std::fs::remove_dir_all(&scratch).ok();
+    }
     use super::*;
 
     #[test]

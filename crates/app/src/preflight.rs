@@ -515,6 +515,55 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
         ));
     }
 
+    // ------------------------------------------- 3b. durable conversation storage
+    //
+    // Optional, and deliberately a *check* rather than a hard dependency. Without it the
+    // backend keeps `langgraph dev`'s pickle checkpointer and works exactly as it always
+    // has — slow to boot and able to lose everything, but working. With it, conversations
+    // move to SQLite: constant boot instead of one that grows with history (docs §80), and
+    // per-row writes instead of a format where one unreadable byte takes every conversation
+    // with it (docs §90/§94).
+    //
+    // A `Warn`, not a `Fail`. Nothing is broken without it, and a red row for something
+    // optional is how a Setup pane stops being read.
+    if checkout_ok {
+        let module = if in_wsl || !cfg!(windows) {
+            ".venv/lib/python3.12/site-packages/langgraph/checkpoint/sqlite"
+        } else {
+            ".venv/Lib/site-packages/langgraph/checkpoint/sqlite"
+        };
+        if exists(config, module) {
+            checks.push(Check::pass(
+                "checkpointer",
+                "Conversation storage",
+                "SQLite — conversations load without unpickling the whole history",
+            ));
+        } else {
+            checks.push(Check::failing(
+                "checkpointer",
+                "Conversation storage",
+                State::Warn,
+                "the pickle store — boot slows as history grows, and a failed load can \
+                 overwrite it"
+                    .to_string(),
+                vec![Fix::Run {
+                    label: "Move conversations to SQLite",
+                    argv: config.shell_argv(&format!(
+                        "cd {} && uv pip install langgraph-checkpoint-sqlite",
+                        quote_path(&config.backend_dir())
+                    )),
+                    note: "existing conversations stay in the old store until they are opened",
+                }],
+            ));
+        }
+    } else {
+        checks.push(Check::skip(
+            "checkpointer",
+            "Conversation storage",
+            "the checkout above has to be there",
+        ));
+    }
+
     // ---------------------------------------------------------------- 4. the overlay
     //
     // The check that exists because this failure is *silent*. Host execution works by
