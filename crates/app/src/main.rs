@@ -358,8 +358,14 @@ fn workbench_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("up", PalettePrev, palette),
         // Escape everywhere else. Bound with **no** key context, because the composer
         // almost always has focus and a binding scoped to the workbench would never be
-        // reached from there — the reason Escape did nothing to a modal (docs §58). The
-        // palette's own binding above is more specific, so it still wins while it is open.
+        // reached from there — the reason Escape did nothing to a modal (docs §58).
+        //
+        // It also **outranks** the palette binding above, which is the opposite of what this
+        // comment used to claim. `Keymap::binding_enabled` scores a context-less binding at
+        // `contexts.len()` — deeper than any predicate can match — and actions stop propagation
+        // during the bubble phase, so `PaletteDismiss` is never reached (docs §84). The palette
+        // is therefore closed by `dismiss` like every other overlay, and the binding above is
+        // kept only for the arrow keys it sits beside.
         KeyBinding::new("escape", Dismiss, None),
     ];
     for modifier in ["cmd", "ctrl"] {
@@ -4619,7 +4625,7 @@ impl Workbench {
     ///
     /// One at a time and inside-out, which is what the key means everywhere else: from a
     /// file preview it returns to Settings if that was open behind it, not to nothing.
-    fn dismiss(&mut self, _: &Dismiss, _window: &mut Window, cx: &mut Context<Self>) {
+    fn dismiss(&mut self, _: &Dismiss, window: &mut Window, cx: &mut Context<Self>) {
         // Innermost first, the rule §58 settled: a menu open over a modal closes the menu.
         if self.context_menu.take().is_some() {
             cx.notify();
@@ -4627,6 +4633,13 @@ impl Workbench {
         }
         if self.open_picker.take().is_some() {
             cx.notify();
+            return;
+        }
+        // Above the preview because it paints above it, and here at all because the scoped
+        // `PaletteDismiss` binding cannot fire — see `workbench_key_bindings`. The footer has
+        // promised "esc close" the whole time (docs §84).
+        if self.palette_open {
+            self.close_palette(window, cx);
             return;
         }
         if self.preview.take().is_some() {
@@ -6890,6 +6903,34 @@ mod tests {
         assert!(
             graph.edges.is_empty(),
             "one specialist has nothing to point at"
+        );
+    }
+
+    #[test]
+    fn a_context_less_binding_outranks_a_scoped_one() {
+        // Why Escape never closed the palette, proven against gpui rather than reasoned about.
+        //
+        // `escape` is bound twice: to `PaletteDismiss` in the `Palette` context, and to `Dismiss`
+        // with no context at all. The comment beside them used to say the scoped one wins because
+        // it is "more specific". It does not: `Keymap::binding_enabled` scores a context-less
+        // binding at `contexts.len()`, which is deeper than any predicate can match, and matched
+        // bindings are sorted deepest-first. `Dismiss` is dispatched, actions stop propagation
+        // during the bubble phase (`window.rs`: "Actions stop propagation by default"), and
+        // `PaletteDismiss` is never reached.
+        //
+        // Pinned here so a gpui bump that changes the rule is caught by a failing test rather
+        // than by a key that quietly stops working.
+        let keymap = gpui::Keymap::new(workbench_key_bindings());
+        let stack = [
+            gpui::KeyContext::try_from("Palette").expect("a valid context"),
+            gpui::KeyContext::try_from("Composer").expect("a valid context"),
+        ];
+        let (matched, _pending) =
+            keymap.bindings_for_input(&[gpui::Keystroke::parse("escape").unwrap()], &stack);
+        let first = matched.first().expect("escape matches something");
+        assert!(
+            first.action().partial_eq(&Dismiss),
+            "the unscoped Dismiss is dispatched first, so the palette must close from `dismiss`"
         );
     }
 

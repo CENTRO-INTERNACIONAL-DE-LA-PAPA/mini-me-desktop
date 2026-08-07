@@ -5056,3 +5056,62 @@ identical whether nothing was recorded, nothing was written, or nothing was read
 recording path is pinned to measured wire data, `save_provenance` reports a write failure in the
 status line instead of swallowing it, and an empty record is drawn as the *sentence* "no
 specialist has been consulted in this conversation yet" rather than as an empty canvas.
+
+## 84. "esc close", which it never did (2026-08-06)
+
+Reported alongside a screenshot of the palette missing its new entry: *"when ctrl + p and I press
+esc I cannot exit that menu."* Two findings, and only one of them was a bug.
+
+**The missing command was a stale binary.** `Command::ALL` carries `OpenProvenance`, and the
+palette's only render path is built from `Command::ALL`. The screenshot shows thirteen entries;
+the source has fourteen. Nothing to fix — but worth writing down that the first check was *"is the
+code actually wrong"* rather than a fix aimed at a symptom, because §78–§81 lost three rounds to
+exactly that reflex.
+
+**Escape was a real bug, and an old one.** `escape` is bound twice:
+
+```rust
+KeyBinding::new("escape", PaletteDismiss, Some("Palette")),
+…
+KeyBinding::new("escape", Dismiss, None),
+```
+
+with a comment claiming *"the palette's own binding above is more specific, so it still wins while
+it is open."* It does not, and gpui says so plainly:
+
+```rust
+fn binding_enabled(&self, binding: &KeyBinding, contexts: &[KeyContext]) -> Option<usize> {
+    if let Some(predicate) = &binding.context_predicate {
+        predicate.depth_of(contexts)
+    } else {
+        Some(contexts.len())          // ← no context = deeper than anything
+    }
+}
+```
+
+Matched bindings sort deepest-first, so the context-*less* `Dismiss` outranks the scoped
+`PaletteDismiss`. And an action that is handled ends the matter — `window.rs`, in the bubble
+phase: `cx.propagate_event = false; // Actions stop propagation by default`. So `Dismiss` ran,
+`dismiss()` had no palette branch, and `PaletteDismiss` was never reached. The palette's footer
+has read "esc close" since it was written.
+
+The fix does not touch precedence at all: the palette is now closed by `dismiss()`, in its place
+in the same inside-out chain every other overlay uses. Depending on which of two bindings wins was
+the fragile part; there is now one handler that receives the key however that resolves.
+
+### Proven, not reasoned
+
+`a_context_less_binding_outranks_a_scoped_one` builds the app's real bindings into a
+`gpui::Keymap`, asks it what `escape` resolves to under `[Palette, Composer]`, and asserts it is
+`Dismiss`. It was checked by inverting the assertion and watching it fail. A gpui bump that
+changes the rule now breaks a test instead of a key.
+
+### The pattern, for the seventh time
+
+A comment asserting the opposite of the behaviour is worse than no comment, because it stops the
+next reader from checking. This is the sixth confident claim in this project to dissolve on one
+reading of the source (§52 has three, §61 and §71 have the others) — and the second where **the
+wrong claim was written by me, in a comment, and then believed on re-reading**.
+
+The tell was available the whole time: the footer promised "esc close" and nobody had tested it.
+A UI that documents a key is making a claim, and this project now has a test for that one.
