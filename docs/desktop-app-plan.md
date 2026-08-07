@@ -5231,3 +5231,41 @@ column. What was wrong was the seam between a laid-out element and a painted one
 crate crosses — it would have produced the same detached arc. A real layout algorithm becomes
 worth its dependency when the graph is dense enough that hand placement stops reading, and that
 is a question the drawing can now answer for itself.
+
+## 87. The composer opens empty (2026-08-06)
+
+Every launch since P6.0 has opened with *"In one short paragraph, what is your role as the Mini-Me
+coordinator?"* already typed into the composer. Reported plainly: *"when the app opens this
+appear. we should avoid this behaviour of the prefilled text."*
+
+It was a scaffold with a real job. In P6.0 the app could not be trusted to reach the backend at
+all, and Enter-with-no-typing was the fastest possible proof that the whole round trip worked. It
+outlived that the moment the round trip stopped being in doubt, and what was left was litter: a
+stranger's question to delete before your own could be asked, on every single launch.
+
+The constant survives as `CHECK_PROMPT`, which is what it actually is now — what `--stream` asks
+when no `--prompt` is given, so a headless check exercises a full turn without depending on the
+researcher's data. The composer opens empty and the placeholder says what to do, which is all a
+first launch needs.
+
+### On the six searches
+
+Reported in the same breath: *"its weird that it takes too long to search papers."* The trace
+showed `academic_researcher · 6 steps · 0 chars` — `search_papers_by_relevance ×2`,
+`search_paper_by_title ×2`, `get_paper ×2` — and the turn was stopped before it answered. The next
+turn, asking for one known paper, took 2 steps and 942 characters.
+
+That difference is the subagent's own choice of tool calls against the Asta MCP server, and
+nothing in this client shapes it. Two things are worth recording rather than fixing here:
+
+- `get_paper` returns a great deal — the last one landed as a 223 KB `.txt` in the thread
+  directory. Six round trips of that order is minutes, and the client is waiting on the network,
+  not on itself.
+- **From the user's side it looked frozen**, because six tool calls produced zero streamed
+  characters. That is the part this app can answer, and §83's timeline now does: each of those
+  steps is measured, so "which step is slow" stops being a guess. §86 pinned the elapsed time to
+  the bottom of the transcript for the same reason.
+
+If the searches are genuinely redundant — two relevance searches and two title searches for one
+request — that is a prompt or tool-description question in Mini-Me, and belongs upstream with the
+other three. Worth a look with the timeline open, which is now possible for the first time.

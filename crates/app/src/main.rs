@@ -41,9 +41,14 @@ use sidecar::Sidecar;
 
 // ---- Palette (placeholder; align with the web app's tokens in P6.3) --------
 
-/// Prefilled into the composer on first launch so Enter alone proves the round
-/// trip; the user can clear or replace it.
-const SEED_PROMPT: &str = "In one short paragraph, what is your role as the Mini-Me coordinator?";
+/// What `--stream` asks when no `--prompt` is given: a question every backend can answer, so a
+/// headless check exercises the whole round trip without depending on the researcher's data.
+///
+/// It used to be **prefilled into the composer** as well, from P6.0, when the app could not yet be
+/// trusted to reach the backend at all and Enter-with-no-typing was the fastest proof it did. That
+/// stopped being a scaffold and became litter: every launch opened with a stranger's question
+/// already typed, to be deleted before the real one could be asked (docs §87).
+const CHECK_PROMPT: &str = "In one short paragraph, what is your role as the Mini-Me coordinator?";
 
 /// A small caps-ish section heading for the side panel.
 fn section_label(text: &'static str) -> impl IntoElement {
@@ -1251,13 +1256,12 @@ struct Workbench {
 
 impl Workbench {
     fn new(sidecar: Arc<Sidecar>, cx: &mut Context<Self>) -> Self {
+        // Opens empty. The placeholder says what to do, which is all a first launch needs.
         let composer = cx.new(|cx| {
-            let mut composer = Composer::new(
+            Composer::new(
                 cx,
                 "Ask Mini-Me…  (Enter to send, Shift-Enter for a new line)",
-            );
-            composer.set_text(SEED_PROMPT, cx);
-            composer
+            )
         });
         // The composer only reports *that* text was submitted; deciding it means
         // "run a coordinator turn" stays here.
@@ -7491,7 +7495,7 @@ fn main() {
             }
         }
         if prompts.is_empty() && args.iter().any(|a| a == "--stream") {
-            prompts.push(SEED_PROMPT);
+            prompts.push(CHECK_PROMPT);
         }
         let outcome = sidecar.check(&prompts);
         let failed = match &outcome {
