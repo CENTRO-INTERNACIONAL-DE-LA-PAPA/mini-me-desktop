@@ -733,6 +733,12 @@ pub fn picker_popup(at: gpui::Point<gpui::Pixels>, panel: impl IntoElement) -> i
                 .flex()
                 .flex_col()
                 .w(gpui::px(320.))
+                // A declared width is not a promise on its own: a flex child's `min-width: auto`
+                // lets its intrinsic content override it, and one long unbreakable path inside
+                // the theme picker widened this panel to nearly 400px (docs §86). These two make
+                // the number mean what it says, whatever a future caller puts inside.
+                .min_w_0()
+                .overflow_hidden()
                 .gap_2()
                 .p_2()
                 .rounded_md()

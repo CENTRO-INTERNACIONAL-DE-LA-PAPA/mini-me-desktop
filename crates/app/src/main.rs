@@ -3465,6 +3465,7 @@ impl Workbench {
             .flex()
             .flex_col()
             .w_full()
+            .min_w_0()
             .gap_1()
             .max_h(px(260.))
             .overflow_y_scroll()
@@ -3563,6 +3564,7 @@ impl Workbench {
             .flex()
             .flex_col()
             .w_full()
+            .min_w_0()
             .gap_1()
             .pt_2()
             .child(section_label("GET MORE"))
@@ -3636,6 +3638,7 @@ impl Workbench {
             .flex()
             .flex_col()
             .w_full()
+            .min_w_0()
             .gap_1()
             .child(self.filter_field(self.theme_filter.clone(), cx))
             // The scrollbar lives outside the scrolling list, in a relative wrapper.
@@ -3652,6 +3655,12 @@ impl Workbench {
             .child(gallery)
             .child(
                 div()
+                    // `w_full` + `min_w_0` so the path *wraps*. Without them this line's
+                    // intrinsic width — an unbreakable Windows path — became the popup's
+                    // minimum, and a panel declared at 320px rendered at nearly 400, pushing
+                    // the filter field and every swatch off the right-hand edge (docs §86).
+                    .w_full()
+                    .min_w_0()
                     .text_color(rgb(theme::text_faint()))
                     .text_xs()
                     .child(format!(
@@ -3950,7 +3959,7 @@ impl Workbench {
             },
         );
 
-        let mut column = div().flex().flex_col().flex_none().min_w_0();
+        let mut column = div().flex().flex_col().flex_grow().min_w_0();
         for node in &graph.nodes {
             column = column.child(
                 div()
@@ -3958,10 +3967,18 @@ impl Workbench {
                     .flex()
                     .flex_row()
                     .items_center()
+                    .w_full()
                     .min_w_0()
                     .child(
                         div()
-                            .flex_none()
+                            // **Full width, so every node ends at the same x.** The edges are
+                            // painted in a gutter that begins where this column stops, and the
+                            // canvas has no way to ask how wide a chip came out. With chips at
+                            // their natural width the arcs anchored to the gutter's edge and the
+                            // nodes stopped wherever their names did — an arc floating in space,
+                            // attached to nothing (docs §86). One shared right edge is what makes
+                            // the two halves of this drawing agree.
+                            .w_full()
                             .px_2()
                             .py(px(3.))
                             .rounded_md()
@@ -4017,7 +4034,7 @@ impl Workbench {
                     .min_w_0()
                     .flex_none()
                     .h(px(height))
-                    .child(column.flex_grow())
+                    .child(column)
                     // The gutter the arcs live in. Fixed, because the bow distances are measured
                     // against it.
                     .child(div().flex_none().w(px(GUTTER)).h(px(height)).child(edges)),
@@ -4296,11 +4313,7 @@ impl Workbench {
             );
         }
         for (index, message) in self.transcript.iter().enumerate() {
-            let label_color = if message.role == "you" {
-                theme::text_muted()
-            } else {
-                theme::accent()
-            };
+            let asked = message.role == "you";
             let has_activity = !message.steps.is_empty() || !message.agents.is_empty();
             // An empty assistant body means we're still waiting on the first token —
             // unless a trace is already showing what's going on, which says more.
@@ -4308,12 +4321,17 @@ impl Workbench {
             // not part of the body, so it is not parsed and never reaches the cache.
             let waiting = message.body.is_empty() && self.streaming && !has_activity;
             let body = message.body.clone();
-            let mut block = div().flex().flex_col().w_full().min_w_0().gap_1().child(
-                div()
-                    .text_color(rgb(label_color))
-                    .text_sm()
-                    .child(message.role),
-            );
+            // **Side carries the role, so no label does.** Asked for by name after a side-by-side
+            // with a chat client: questions ride right in a bubble, answers run full width on the
+            // left as plain prose. The shape is doing the work a `you` / `mini-me` caption used to
+            // do, and two signals for one fact is one more than the eye needs (docs §86).
+            let mut block = div()
+                .flex()
+                .flex_col()
+                .w_full()
+                .min_w_0()
+                .gap_1()
+                .when(asked, |block| block.items_end());
             // The trace goes *above* the answer, because that is the order it
             // happened in and because the answer should be the last thing read.
             if has_activity {
@@ -4325,12 +4343,23 @@ impl Workbench {
             if !body.is_empty() {
                 // The user's own text is shown as typed — they wrote it, and reinterpreting
                 // their asterisks would be presumptuous. Assistant text is Markdown.
-                if message.role == "you" {
+                if asked {
                     block = block.child(
                         div()
-                            .w_full()
+                            // Capped rather than full width: a bubble that reaches both edges is
+                            // not a bubble, and the ragged left edge is what makes a glance down
+                            // the transcript separate questions from answers.
+                            .max_w(relative(0.78))
                             .min_w_0()
+                            .px_3()
+                            .py_2()
+                            .rounded_lg()
+                            .bg(rgb(theme::surface()))
+                            .border_1()
+                            .border_color(rgb(theme::border()))
                             .text_color(rgb(theme::text()))
+                            // Shown as typed — they wrote it, and reinterpreting their asterisks
+                            // would be presumptuous (docs §14).
                             .child(selection::Selectable::new(
                                 &self.text_selection,
                                 body.clone(),
@@ -4399,6 +4428,36 @@ impl Workbench {
                 );
             }
             col = col.child(block);
+        }
+
+        // What the turn is doing, kept at the bottom of the transcript while it runs.
+        //
+        // The trace still sits above the answer it produced — that is the order it happened in and
+        // it stays with its own message. But during a two-minute delegation the trace scrolls up
+        // out of view behind the streaming answer, and the one question a person has while waiting
+        // is "is this still going". So the live line is pinned under the last message instead of
+        // being hunted for inside it.
+        if self.streaming {
+            let elapsed = self
+                .provenance
+                .turns
+                .last()
+                .map(|turn| provenance::now_ms().saturating_sub(turn.sent_at))
+                .filter(|elapsed| *elapsed >= 1_000)
+                .map(|elapsed| format!(" · {}", duration_label(elapsed)))
+                .unwrap_or_default();
+            col = col.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .w_full()
+                    .min_w_0()
+                    .gap_2()
+                    .text_color(rgb(theme::text_muted()))
+                    .text_xs()
+                    .child(format!("{}{elapsed}", self.status)),
+            );
         }
 
         let mut pane = div()

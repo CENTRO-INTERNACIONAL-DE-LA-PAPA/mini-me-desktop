@@ -5177,3 +5177,57 @@ legible until you wanted a shape. Every unit test passed throughout.
 That is the argument for putting a build in front of the person who asked for it early, rather
 than polishing against imagined data. The plan had already written down that the graph should
 wait until "the chain proves it wants one". It took one screenshot.
+
+## 86. Three things one screenshot showed (2026-08-06)
+
+### The theme picker was 400px wide and declared 320
+
+`ui::picker_popup` sets `.w(px(320.))`. The panel rendered at nearly 400, pushing the filter field
+and every colour swatch off the right-hand edge — which is why the search box "had a bug in the
+width": it was `w_full` of a parent that had silently grown, so most of it was off-screen.
+
+The cause was one line with no width constraint at the bottom of the theme list:
+
+```rust
+.child(format!("Or drop a Zed theme .json in {}.", settings::themes_dir().display()))
+```
+
+`C:\Users\LENOVO\AppData\Roaming\mini-me-desktop\themes` has no break opportunity, so its
+intrinsic width became the panel's minimum. **A declared width is not a promise on its own** — a
+flex child's `min-width: auto` lets content override it. `w_full` + `min_w_0` on that line makes
+it wrap; `min_w_0` + `overflow_hidden` on the popup itself makes the 320 mean 320 whatever a
+future caller puts inside.
+
+Same shape as §72, which was the *other* box in this same picker coming out a quarter-width. Both
+times: a size that looked stated in the source and was actually negotiated at layout.
+
+### Side now carries the role
+
+Questions ride right in a bubble, answers run full width on the left as plain prose — the shape
+of every chat client, asked for after a side-by-side. The `you` / `mini-me` captions are gone with
+it: the alignment already says which is which, and two signals for one fact is one more than the
+eye needs. The bubble is capped at 78% so it stays a bubble, and the ragged left edge is what lets
+a glance down the transcript separate questions from answers.
+
+The live status line moved to the **bottom of the transcript** while a turn runs. The trace still
+sits above the answer it produced — that is the order it happened in and it belongs with its
+message — but during a two-minute delegation it scrolls out of view behind the streaming answer,
+and the only question a waiting person has is whether anything is still happening.
+
+### The arc was attached to nothing
+
+The graph painted a correct curve, in the wrong place — floating in the right-hand third of the
+panel, connected to neither node.
+
+Nothing to do with layout algorithms. `canvas` cannot measure a `div`, so the nodes and the edges
+have to agree on where a node *ends* by construction. The column was `flex_grow`, so it took all
+the space and the gutter — where arcs anchor — began 170px from the right edge, while the chips
+stopped wherever their names happened to. Fixed by making every chip full width inside the column,
+so all of them end exactly where the gutter begins.
+
+**Worth naming, since a graph crate was offered:** this was not a case for one. `layout-rs` and
+friends compute node *positions*; the positions here were never in doubt for ten nodes in a
+column. What was wrong was the seam between a laid-out element and a painted one, which no layout
+crate crosses — it would have produced the same detached arc. A real layout algorithm becomes
+worth its dependency when the graph is dense enough that hand placement stops reading, and that
+is a question the drawing can now answer for itself.
