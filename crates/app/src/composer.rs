@@ -726,6 +726,33 @@ impl Element for ComposerElement {
         let cursor = composer.cursor_offset();
         let style = window.text_style();
 
+        // What the box actually measures, which nobody has ever read.
+        //
+        // Three fixes have shipped against a field that renders ~10px wide with its placeholder
+        // spilling out the side (§72, §88, and a third diagnosis §92 refuted), and not one of
+        // them started from this number. A taffy replay says the collapse needs a content-sized
+        // ancestor this tree does not appear to contain; the only way to tell whether real gpui
+        // agrees is to look. `prepaint` already receives `bounds` — the measurement was one line
+        // away the whole time (docs §97).
+        //
+        // Both branches speak, because §81 paid three times for the lesson that a component
+        // which only reports failure is indistinguishable from one that was never reached. The
+        // narrow case warns; setting `MINIME_LAYOUT_DEBUG` reports every field, so "no warning"
+        // can be confirmed as "measured and fine" rather than assumed.
+        {
+            let width = f32::from(bounds.size.width);
+            let field = composer.placeholder.clone();
+            if width < 40. {
+                tracing::warn!(
+                    width,
+                    field = %field,
+                    "a text field was laid out too narrow to use — docs §92"
+                );
+            } else if std::env::var_os("MINIME_LAYOUT_DEBUG").is_some() {
+                tracing::info!(width, field = %field, "text field width");
+            }
+        }
+
         let (display_text, text_color) = if content.is_empty() {
             (
                 composer.placeholder.clone(),
@@ -875,10 +902,20 @@ impl Element for ComposerElement {
             window.paint_quad(selection);
         }
         let line_height = window.line_height();
-        for (row, (_, line)) in prepaint.lines.iter().enumerate() {
-            let origin = point(bounds.origin.x, bounds.origin.y + line_height * row as f32);
-            line.paint(origin, line_height, window, cx).unwrap();
-        }
+        // Clipped to the box it belongs to.
+        //
+        // A separate defect from the width, and conflated with it three times: the text is
+        // shaped with no wrap width and painted at `bounds.origin`, so a field that measures
+        // wrong does not truncate — it draws its content straight across whatever is beside it.
+        // That is why a 10px box appeared to contain a full-length placeholder. With the mask, a
+        // future layout mistake becomes "text visibly cut off", which is a bug report someone
+        // can act on, instead of "text floating over unrelated UI" (docs §97).
+        window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
+            for (row, (_, line)) in prepaint.lines.iter().enumerate() {
+                let origin = point(bounds.origin.x, bounds.origin.y + line_height * row as f32);
+                line.paint(origin, line_height, window, cx).unwrap();
+            }
+        });
 
         // Caret only when focused. (Nested `if`s, not a let-chain: those need
         // edition 2024 and this crate is on 2021.)

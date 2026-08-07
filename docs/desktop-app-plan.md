@@ -5727,3 +5727,50 @@ never opens Setup?"
 **A default is not a convenience; it is the decision, taken on behalf of everyone who will never
 revisit it.** The right test for any option in this app is not whether it can be found — it is what
 happens to someone who never looks.
+
+## 97. Measuring the box, finally (2026-08-07)
+
+Three fixes have shipped against a filter field that renders about ten pixels wide with its
+placeholder painting out the side — §72, §88, and a third diagnosis that §92's refutation
+dismantled. **Not one of them began by reading what the box actually measures.**
+
+`prepaint` has received `bounds` the entire time. The measurement was one line away through all
+three attempts, and each attempt instead reasoned from CSS intuition about a layout engine whose
+behaviour was checkable.
+
+So: `ComposerElement::prepaint` now reports its own width. Under 40px it **warns**, naming the
+field by its placeholder. Otherwise, with `MINIME_LAYOUT_DEBUG` set, it reports at info. Both
+branches speak, because §81 paid three times for the lesson that a component which only reports
+failure cannot be told from one that was never reached — "no warning" has to be confirmable as
+*measured and fine*, not assumed.
+
+The number discriminates between every hypothesis left:
+
+- **≈302** (÷ the display scale) — the field is laid out correctly and the bug is elsewhere:
+  paint, DPI, or something about how the window is composited. Layout is exonerated and §92's
+  simulation was right that the collapse cannot happen in this tree.
+- **≈18** — real gpui disagrees with a taffy 0.9.0 replay of its own styles, which is a finding in
+  itself, and the next step is dumping the styles taffy actually receives rather than the ones the
+  source appears to set.
+
+### The companion defect, which is not the width
+
+The text is shaped with **no wrap width** (`composer.rs:784-789`) and painted at `bounds.origin`
+with no clip, and `filter_field` sets no overflow. So a field that measures wrong does not
+truncate — it draws straight across whatever is beside it. That is why a ten-pixel box appeared to
+*contain* a full-length placeholder, and it is why three sections treated one symptom as one bug.
+
+`window.with_content_mask` now bounds the painting. It fixes no width. What it does is convert any
+future layout mistake from "text floating over unrelated UI" into "text visibly cut off" — a
+symptom that points at its own cause.
+
+### The rule this is really about
+
+**A measurement that is one line away is not an optimisation to reach for after the guesses run
+out; it is the first thing to write.** Three releases and three reports from the person using the
+app were spent avoiding it. The same shape as §91, where counting how many threads a rule would
+actually adopt turned an argument into the number 1 — and as §81, where one log line on success
+ended four rounds of misdiagnosis.
+
+Every one of those was cheap, available from the start, and skipped in favour of reasoning about
+code that could simply have been asked.
