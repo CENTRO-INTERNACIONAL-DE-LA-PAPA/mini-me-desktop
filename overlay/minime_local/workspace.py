@@ -62,6 +62,18 @@ _DEFAULT_TIMEOUT = 300
 #: path, for everyone who goes looking.
 WORKSPACE_THREAD_KEY = "__workspace_thread__"
 
+#: Config key naming the project folder this run's workspace sits inside.
+#:
+#: **Why a project is a real directory and not only a label.** Docs §42 moved outputs out of the
+#: distro into ``Documents\Mini-Me`` on one argument: files a researcher cannot find are files
+#: that do not exist. A project is the unit a scientist actually works in, so the same argument
+#: applies again one level up — a grouping that exists only inside the app is not a grouping they
+#: can zip, back up, or drop on a shared drive (docs §105).
+#:
+#: Empty or absent means the conversation is not in a project, and its directory sits directly
+#: under the root exactly as before. Every conversation that predates this stays where it is.
+WORKSPACE_PROJECT_KEY = "__workspace_project__"
+
 
 def workspace_root() -> Path:
     """The directory that holds one subdirectory per thread."""
@@ -69,6 +81,40 @@ def workspace_root() -> Path:
     if configured:
         return Path(configured).expanduser()
     return Path.home() / ".mini-me" / "workspaces"
+
+
+def _configurable() -> dict:
+    """The live run's ``configurable``, or an empty dict outside a run.
+
+    Read from the running config rather than passed in, because upstream constructs the backend
+    as ``LazyLangsmithSandbox(thread_id)`` at two call sites this overlay deliberately does not
+    touch.
+    """
+    try:
+        from langgraph.config import get_config
+
+        return (get_config() or {}).get("configurable") or {}
+    except Exception:  # noqa: BLE001  # no runnable context: a read-only graph load
+        return {}
+
+
+def workspace_project() -> str:
+    """The project folder for this run, or ``""`` for none.
+
+    Sanitised here as well as in the client, because this is the value that becomes a path. A
+    project named ``Q1/Q2`` must not write outside the workspace root, and a name is a thing a
+    person types.
+    """
+    raw = _configurable().get(WORKSPACE_PROJECT_KEY)
+    name = str(raw).strip() if raw else ""
+    if not name:
+        return ""
+    # One path segment, no traversal, and nothing Windows refuses.
+    cleaned = "".join(
+        character if (character.isalnum() or character in " -_") else "_"
+        for character in name
+    ).strip(" ._")
+    return cleaned[:96]
 
 
 def workspace_thread(default: str) -> str:
@@ -79,13 +125,7 @@ def workspace_thread(default: str) -> str:
     because upstream constructs the backend as ``LazyLangsmithSandbox(thread_id)`` at two
     call sites this overlay deliberately does not touch.
     """
-    try:
-        from langgraph.config import get_config
-
-        configurable = (get_config() or {}).get("configurable") or {}
-    except Exception:  # noqa: BLE001  # no runnable context: a read-only graph load
-        return default
-    pinned = configurable.get(WORKSPACE_THREAD_KEY)
+    pinned = _configurable().get(WORKSPACE_THREAD_KEY)
     pinned = str(pinned).strip() if pinned else ""
     return pinned or default
 
@@ -287,7 +327,9 @@ class LocalWorkspaceBackend(LocalShellBackend):
         # Not necessarily this run's own thread: a background worker shares the
         # conversation's workspace, or its output would land where nobody looks.
         self._thread_id = workspace_thread(thread_id)
-        self._work_dir = workspace_root() / self._thread_id
+        project = workspace_project()
+        root = workspace_root()
+        self._work_dir = (root / project / self._thread_id) if project else (root / self._thread_id)
         self._announced = False
         super().__init__(
             root_dir=self._work_dir,

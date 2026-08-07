@@ -6098,3 +6098,64 @@ the same row: a label, a tick, a hover. `picker_row` is now one function, which 
   Code groups by working directory, which is real but does not map — a researcher's three lines of
   work all sit under `Documents\Mini-Me`. A name in thread metadata, grouped in the sidebar, is
   the shape that fits what is already there.
+
+## 105. Projects are folders (2026-08-07)
+
+The last of the four gaps, and the only one that was a data question rather than a screen. Asked
+whether a project should be a label on the thread or a real directory, the answer was folders —
+*"I think working in folders makes more sense in science"* — and that is right for a reason this
+document had already written down once.
+
+§42 moved outputs out of the distro into `Documents\Mini-Me` on a single argument: **files a
+researcher cannot find are files that do not exist.** A project is the unit a scientist actually
+works in, so the same argument applies one level up. A grouping that lives only inside the app is
+not a grouping they can zip, back up, or drop on a shared drive.
+
+### Both, doing different jobs
+
+Folders and metadata were framed as alternatives. They are not:
+
+- **The folder** is where the files live: `Documents\Mini-Me\<project>\<conversation>\`.
+- **The label on the thread** is how the app knows which folder a conversation belongs to.
+
+The label is what survives contact with a scientist. Rename a folder in Explorer, or move one to a
+shared drive, and an app that inferred the project *only* from the path is now silently wrong. With
+the label it can notice and say so.
+
+### Three decisions, taken by the person who uses it
+
+- **Moving a conversation moves its folder.** What the app shows and what Explorer shows stay the
+  same story. Only possible while no turn is running, because the backend holds that path open.
+- **Existing conversations stay where they are.** They appear ungrouped; nothing on disk moves on
+  first launch. The answer to "what happens to my work" is *nothing*.
+- **New conversations inherit the last project used.** You pick once and keep working, rather than
+  answering a dialog before every question.
+
+### The mechanism was already there
+
+`overlay/minime_local/workspace.py` already chose a thread's directory from a config key — that is
+how a background worker gets pinned to the conversation's folder rather than its own (§43). A
+project is the same mechanism with a second key, `__workspace_project__`, so this needed no new
+seam, no upstream change, and no route.
+
+### The one genuinely dangerous part, and the test for it
+
+The project name becomes a **path segment**, computed twice: by Python when the backend writes a
+turn's outputs, and by Rust when the app goes looking for them. One character of disagreement and a
+researcher's figures land somewhere the app will never show them — §89's failure with a longer fuse
+and no error anywhere.
+
+It cannot be written once, since it lives in two languages. So it is checked instead:
+`the_rust_and_python_project_names_agree` runs both implementations over thirteen names — traversal
+attempts, Windows-illegal characters, accents, empty strings, a 200-character name — and asserts
+byte equality. That is the same defect shape as §100's scrollbar width in one file and layout in
+another, caught before it shipped rather than after.
+
+Sanitising happens on **both** sides rather than trusting the client, because a name is a thing a
+person types and `../..` must not write outside the workspace root.
+
+### Where this stands
+
+Built: the folder layout, both sanitisers, the move, and the cross-language test. Still to come:
+the sidebar grouping, the "move to project" action, and creating a project — which is now
+straightforward, because the part that could quietly lose someone's data is settled.

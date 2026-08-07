@@ -109,6 +109,79 @@ pub(crate) fn parse_registry(text: &str) -> Vec<Subagent> {
         .unwrap_or_default()
 }
 
+/// One path segment for a project name, or `None` for "no project".
+///
+/// **This must agree exactly with `workspace_project` in `overlay/minime_local/workspace.py`.**
+/// The backend writes a turn's outputs into the folder *it* computes; the app looks in the folder
+/// *this* computes. Disagree by one character and the researcher's figures are written somewhere
+/// the app will never show them — the §89 failure with a longer fuse. There is a test that runs
+/// both and compares them, because two implementations of one rule in two languages is exactly
+/// the shape this project keeps getting wrong (docs §105).
+pub fn project_folder(name: &str) -> Option<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let cleaned: String = name
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() || matches!(character, ' ' | '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim_matches(|c| matches!(c, ' ' | '.' | '_'));
+    let clipped: String = trimmed.chars().take(96).collect();
+    (!clipped.is_empty()).then_some(clipped)
+}
+
+/// Where one conversation's files live, inside its project if it has one.
+pub fn thread_dir_in(project: Option<&str>, thread_id: &str) -> PathBuf {
+    match project.and_then(project_folder) {
+        Some(folder) => root().join(folder).join(thread_id),
+        None => root().join(thread_id),
+    }
+}
+
+/// Move a conversation's folder into a different project, or out of one.
+///
+/// **Moves rather than copies**, which is what a person expects of "move to project" and what
+/// keeps the app and Explorer telling the same story. Only safe while no turn is running — the
+/// backend holds this path open for the length of a turn — so the caller checks that first.
+///
+/// Absent source is not an error: a conversation that has produced nothing yet has no directory,
+/// and filing it should still work.
+pub fn move_thread(from: Option<&str>, to: Option<&str>, thread_id: &str) -> Result<()> {
+    let source = thread_dir_in(from, thread_id);
+    let destination = thread_dir_in(to, thread_id);
+    if source == destination || !source.is_dir() {
+        return Ok(());
+    }
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    // Refuse rather than merge: two directories for one conversation means the app has already
+    // lost track of where its files are, and silently folding them together would hide that.
+    if destination.exists() {
+        anyhow::bail!(
+            "{} already exists — move or remove it first",
+            destination.display()
+        );
+    }
+    std::fs::rename(&source, &destination)
+        .with_context(|| format!("moving {} to {}", source.display(), destination.display()))?;
+    // An empty project folder left behind reads as a project that still exists.
+    if let Some(parent) = source.parent() {
+        if parent != root() {
+            let _ = std::fs::remove_dir(parent);
+        }
+    }
+    Ok(())
+}
+
 /// Where one conversation's files live.
 pub fn thread_dir(thread_id: &str) -> PathBuf {
     root().join(thread_id)
@@ -374,6 +447,112 @@ pub fn open(path: &Path) -> Result<()> {
         .spawn()
         .with_context(|| format!("could not open {}", path.display()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod project_tests {
+    use super::*;
+
+    /// The Rust and Python sanitisers must produce byte-identical names.
+    ///
+    /// **This is the test that matters most in this file.** The backend writes a turn's outputs
+    /// into the folder it computes from `configurable.__workspace_project__`; the app looks in the
+    /// folder *it* computes from the same string. One character of disagreement and a
+    /// researcher's figures land somewhere the app will never look — §89's failure, with a longer
+    /// fuse and no error anywhere.
+    ///
+    /// Two implementations of one rule in two languages is a shape this project has got wrong
+    /// before (§100: a scrollbar width in one file and a layout in another). It cannot be written
+    /// once here, so it is checked instead.
+    #[test]
+    fn the_rust_and_python_project_names_agree() {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: python3 is not on PATH");
+            return;
+        }
+        let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
+
+        let names = [
+            "Late blight",
+            "Late blight/2026",
+            "  ../../etc  ",
+            "",
+            "   ",
+            r#"Q1:"yield"<x>|v2"#,
+            "café ñandú",
+            "___",
+            "...",
+            "a.b.c",
+            &"A".repeat(200),
+            "trailing_",
+            "-leading",
+        ];
+
+        // The sanitiser lifted out of the module, so importing it does not pull in deepagents.
+        let source = std::fs::read_to_string(overlay.join("minime_local/workspace.py"))
+            .expect("the overlay is beside the crate");
+        let start = source
+            .find("def workspace_project()")
+            .expect("the function");
+        let end = source
+            .find("def workspace_thread(")
+            .expect("the next function");
+        let script = format!(
+            "import json,sys\nWORKSPACE_PROJECT_KEY='__workspace_project__'\n\
+             def _configurable(): return {{'__workspace_project__': sys.argv[1]}}\n{}\n\
+             print(json.dumps(workspace_project()))",
+            &source[start..end]
+        );
+
+        for name in names {
+            let out = std::process::Command::new("python3")
+                .arg("-c")
+                .arg(&script)
+                .arg(name)
+                .output()
+                .expect("running the python sanitiser");
+            assert!(
+                out.status.success(),
+                "python failed for {name:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let python: String = serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim())
+                .expect("json string");
+            let rust = project_folder(name).unwrap_or_default();
+            assert_eq!(rust, python, "disagreed on {name:?}");
+        }
+    }
+
+    #[test]
+    fn a_project_name_can_never_escape_the_workspace() {
+        // It becomes a path segment, and it is a thing a person types.
+        for hostile in ["../..", "/etc/passwd", r"..\..\Windows", "a/b"] {
+            let folder = project_folder(hostile).unwrap_or_default();
+            assert!(!folder.contains('/'), "{hostile:?} -> {folder:?}");
+            assert!(!folder.contains('\\'), "{hostile:?} -> {folder:?}");
+            assert!(!folder.starts_with('.'), "{hostile:?} -> {folder:?}");
+        }
+        // Nothing usable is nothing, not a folder called "_".
+        assert_eq!(project_folder("   "), None);
+        assert_eq!(project_folder("..."), None);
+        assert_eq!(project_folder(""), None);
+    }
+
+    #[test]
+    fn an_ungrouped_conversation_keeps_the_path_it_always_had() {
+        // Every conversation that predates projects stays exactly where it is — the answer to
+        // "what happens to my existing work" is "nothing" (docs §105).
+        assert_eq!(thread_dir_in(None, "t-1"), root().join("t-1"));
+        assert_eq!(thread_dir_in(Some("   "), "t-1"), root().join("t-1"));
+        assert_eq!(
+            thread_dir_in(Some("Late blight"), "t-1"),
+            root().join("Late blight").join("t-1")
+        );
+    }
 }
 
 #[cfg(test)]
