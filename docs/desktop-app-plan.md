@@ -91,9 +91,12 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   transition between two.
 
 **Next**
-- ⬜ **Measure the filter field** (§92) — three fixes shipped against it, none reproduced. One run
-  with the box's real width logged discriminates between every remaining hypothesis; each guess
-  has cost a release.
+- ⬜ **Outputs a turn wrote into a folder** (§117) — `outputs` and `images` read one level, so an
+  agent that organises its work into `./eda_outputs/` disappears from the panel entirely. Sixteen
+  files invisible on the first working background analysis.
+- ✅ **The filter field** (§92, §97, §99) — measured rather than guessed: 0.0px in the popup
+  against 204 and 533 elsewhere. One link in the chain stated no width; confirmed fixed on a real
+  window.
 - 🟡 **Six upstream reports** — written (§101), in `docs/upstream/`, each with evidence and a
   suggested fix. **Not filed**: that is an outward-facing act on someone else's repository and
   the decision is not this repo's. The two `langgraph_runtime_inmem` ones are silent data loss
@@ -6732,3 +6735,59 @@ message was the other.
 
 The rule that falls out, and it is the counterpart to §115's: *print the derived value, at the
 moment something derives it for a reason.* Not on every construction, and not only when it fails.
+
+## 117. Proposed — outputs a turn wrote into a folder (2026-08-07)
+
+**Background work is done.** The worker found `potato_yield.csv` in the conversation's own
+directory, profiled it, and produced eight tables and eight plots. §39 recorded that background
+work "had never run once"; it now runs, on the researcher's model, in the right folder, without
+spawning workers of its own.
+
+And the moment it worked, it exposed the next thing:
+
+> Files created: `./hola_eda_outputs/dataset_summary.csv`,
+> `./hola_eda_outputs/yield_by_clone_boxplot.png`, … *(sixteen of them)*
+
+The Outputs panel showed two files. `provenance.json` and `potato_yield.csv` — the ones at the top
+level. **Every artefact of the analysis was invisible.**
+
+### The cause is one level deep, and it is not about background work
+
+`workspace::outputs` and `workspace::images` both call `read_dir` and then `is_file()`, so a
+directory is not descended into — it is dropped. Any turn that organises its output into a folder
+disappears from the app, and organising output into a folder is what analysis tooling does. A
+*foreground* EDA has exactly the same problem; the background worker only made it obvious, because
+naming an output directory is the first thing that specialist does.
+
+This is §42's argument for the third time. Outputs were moved to `Documents\Mini-Me` because
+*files a researcher cannot find are files that do not exist*; projects became folders for the same
+reason (§105); and now the app cannot see one level down from its own workspace.
+
+### What a fix has to decide
+
+Not difficult, but not a one-line recursion either — four judgement calls:
+
+- **How deep, and how many.** A turn can write a virtualenv, a cache, or a dataset tree of ten
+  thousand files. A bounded walk (a few levels, a capped count) with the cap *stated* when it
+  bites, rather than a silent truncation — §51's rule.
+- **What to skip.** `__pycache__`, `.ipynb_checkpoints`, anything dotted. The existing top-level
+  reader already drops dotfiles as "the agent's business, not the researcher's"; the same judgement
+  extends downward.
+- **How to group.** `hola_eda_outputs/` is a *meaningful* name the agent chose — the panel should
+  probably show the folder as the grouping rather than flattening sixteen files into one list. The
+  Kind buckets (Data, Figures, Reports) may want to become secondary to it.
+- **What `collect_plots` does with it.** §42 attaches new figures to the newest answer by diffing
+  the workspace. Recursing changes what that diff sees, and a turn that writes forty plots into a
+  folder would flood the transcript. Probably: the panel recurses, the transcript keeps a
+  conservative cap and says how many it did not show.
+
+### Why it is worth doing properly rather than quickly
+
+The panel is where a researcher goes to find what a turn produced, and it currently says *"Papers,
+datasets, theories and reports show up here as a turn produces them."* That sentence is a claim the
+code stopped making true the moment an agent organised its own work — and this document's most
+expensive defects have all been claims that quietly stopped being true (§107's sandbox line,
+§82's docstring, §72's stated width).
+
+Sequenced after the release, not before: it changes what the panel shows, and that is worth
+watching on a real conversation rather than shipping blind.
