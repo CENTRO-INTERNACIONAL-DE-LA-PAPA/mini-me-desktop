@@ -131,6 +131,22 @@ pub struct Settings {
     /// taste *and* everyone's room — the same charcoal that reads well at a desk is
     /// unusable on a projector (docs §49).
     pub theme: String,
+    /// A model per specialist, by name — `{"academic_researcher": "openai::gpt-4.1"}`.
+    ///
+    /// Absent means "use the coordinator's". The backend has accepted this since before the
+    /// desktop app existed: `configurable.model_config.subagents` is read at
+    /// `backend/models.py:114` and merged into the provider set the request needs keys for. Only
+    /// the client had never sent it (docs §104).
+    ///
+    /// **Why anyone wants it.** The specialists do genuinely different work. Literature search
+    /// wants a long context window and cheap tokens across many calls; a report wants the best
+    /// prose available; data cleaning wants neither and is run dozens of times. One model for all
+    /// ten is either an expensive way to grep or a cheap way to write a paper.
+    ///
+    /// A `BTreeMap` so the file has a stable order — a settings file that reshuffles itself on
+    /// every save is one nobody can diff.
+    #[serde(default)]
+    pub subagents: std::collections::BTreeMap<String, String>,
     /// Whether the app created that directory.
     ///
     /// **Load-bearing.** Updating means `git fetch && git checkout <pin> && uv sync`, and
@@ -152,6 +168,7 @@ impl Default for Settings {
             backend_dir: String::new(),
             async_subagents: false,
             theme: "Mini-Me Dark".to_string(),
+            subagents: std::collections::BTreeMap::new(),
             backend_dir_owned: true,
         }
     }
@@ -474,6 +491,9 @@ mod tests {
             backend_dir: "~/Mini-Me".into(),
             async_subagents: true,
             theme: "Slate".into(),
+            subagents: [("report_writer".to_string(), "openai::gpt-5.4".to_string())]
+                .into_iter()
+                .collect(),
             backend_dir_owned: false,
         };
         let text = toml::to_string_pretty(&settings).expect("serialise");

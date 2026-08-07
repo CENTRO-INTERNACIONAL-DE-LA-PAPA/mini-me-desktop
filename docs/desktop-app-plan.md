@@ -6045,3 +6045,56 @@ the same each time: a sentence written once, about a system that later grew a se
   (`backend/models.py:104-122`), and the client sends only `default` today. Client-side work only.
 - **Projects in the conversation list.** Conversations are flat; there is no grouping, so a
   researcher with three lines of work has one undifferentiated column.
+
+## 104. A model per specialist (2026-08-07)
+
+The second of the four gaps against the web app, and the one with the most behind it.
+
+**The backend has accepted this the whole time.** `configurable.model_config.subagents` is a
+`{name: "provider::model"}` map, read at `backend/models.py:114` and folded into the provider set
+the request needs keys for at `:117-122`. The client sent `default` and nothing else. So this is
+client-side work only — no overlay, no upstream change, no new route.
+
+### Why it is worth having
+
+The specialists do genuinely different work, and one model for all ten is either an expensive way
+to grep or a cheap way to write a paper. Literature search wants a long context window and cheap
+tokens across many calls. A report wants the best prose available, once. Data cleaning wants
+neither and runs dozens of times a session.
+
+### The part that would have failed silently
+
+The backend derives the providers it needs keys for from the coordinator's spec **and every
+override**. Point one specialist at a second provider and that provider's key becomes part of the
+request — so sending the overrides without the key produces a turn that dies *inside a subagent*,
+several minutes in, reading exactly like the specialist being broken.
+
+So `model_choice` collects a key for every other provider an override reaches, and the picker
+**names a provider with no key stored, on the row, before it is chosen**. A researcher finds out
+at the moment of choosing rather than at the end of a long turn. It is muted rather than red: a
+missing key is a thing to do next, not a thing done wrong.
+
+Two details settled while writing it:
+
+- **"Use default" is not the same as choosing the coordinator's current model.** One follows
+  whatever the coordinator becomes; the other is a choice that happens to match today and will not
+  move with it. The picker offers both, and `model_choice` drops an override equal to the default
+  rather than sending a shape with no effect.
+- **The list is the live registry** (§76), so it cannot offer a specialist the backend does not
+  have — the same argument that put the registry there, and the same one behind §103's About list.
+
+### And a small consolidation
+
+The theme list, the model list and the new per-specialist list had drifted into three shapes for
+the same row: a label, a tick, a hover. `picker_row` is now one function, which is also where the
+"no key stored" note lives, so a future picker cannot forget to say it.
+
+### Where this leaves the four
+
+- ✅ Per-specialist models.
+- ✅ An About window, with the Asta attribution (§103).
+- ⬜ **Projects in the conversation list.** The remaining one, and the only one that is a data
+  question rather than a screen: is a project a folder on disk, or a name on the thread? Claude
+  Code groups by working directory, which is real but does not map — a researcher's three lines of
+  work all sit under `Documents\Mini-Me`. A name in thread metadata, grouped in the sidebar, is
+  the shape that fits what is already there.

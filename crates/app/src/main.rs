@@ -58,6 +58,47 @@ const CHECK_PROMPT: &str = "In one short paragraph, what is your role as the Min
 const ASTA_CITATION: &str = "AstaBench: Rigorous Benchmarking of AI Agents with a Scientific \
      Research Suite. arXiv:2510.21652 — https://arxiv.org/abs/2510.21652";
 
+/// One row of a picker: a label, a tick when it is the current choice, and an optional note.
+///
+/// Shared so every picker in this window looks the same and states the same thing the same way —
+/// the theme list, the model list and the per-specialist list had drifted into three shapes.
+fn picker_row(
+    label: impl Into<SharedString>,
+    selected: bool,
+    note: Option<String>,
+) -> gpui::Stateful<gpui::Div> {
+    let label: SharedString = label.into();
+    div()
+        .id(SharedString::from(format!("row-{label}")))
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .w_full()
+        .min_w_0()
+        .px_2()
+        .py_1()
+        .rounded_md()
+        .when(selected, |row| row.bg(rgb(theme::accent_soft())))
+        .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
+        .child(
+            ui::Label::new(label)
+                .colour(if selected {
+                    theme::text()
+                } else {
+                    theme::text_muted()
+                })
+                .ellipsis(),
+        )
+        .children(note.map(|note| {
+            // Muted, not red: a missing key is a thing to do next, not a thing done wrong.
+            ui::Label::new(note)
+                .colour(theme::warning())
+                .size(ui::Size::Compact)
+        }))
+}
+
 /// A small caps-ish section heading for the side panel.
 fn section_label(text: &'static str) -> impl IntoElement {
     div().text_color(rgb(theme::accent())).text_xs().child(text)
@@ -252,6 +293,12 @@ enum Divider {
 enum Picker {
     Theme,
     Model,
+    /// A model for one specialist, by its index in the registry.
+    ///
+    /// The index rather than the name because a `Picker` is `Copy` and lives in a field that is
+    /// compared on every frame; the name is one lookup away and the registry does not reorder
+    /// within a session.
+    Subagent(usize),
 }
 
 /// A page of the preferences window.
@@ -1920,6 +1967,7 @@ impl Workbench {
                 .gap_2()
                 .child(self.model_list(cx))
                 .into_any_element(),
+            Picker::Subagent(index) => self.subagent_model_list(index, cx).into_any_element(),
         };
         Some(
             ui::picker_popup(
@@ -3864,6 +3912,126 @@ impl Workbench {
     /// they use for all fifty-odd of their modals. It suits this exactly — opening a
     /// figure or a report is something you do, look at, and dismiss, not somewhere you
     /// navigate to and have to find your way back from (docs §49).
+    /// A model per specialist, under the coordinator's.
+    ///
+    /// **The specialists do genuinely different work**, and one model for all ten is either an
+    /// expensive way to grep or a cheap way to write a paper. Literature search wants a long
+    /// context and cheap tokens across many calls; a report wants the best prose available; data
+    /// cleaning wants neither and runs dozens of times.
+    ///
+    /// The list is the live registry (§76), so it cannot name a specialist the backend does not
+    /// have — and when the registry is empty it says why rather than showing nothing.
+    fn subagent_models(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let specialists = workspace::subagents();
+        let mut rows = div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w_0()
+            .gap_3()
+            .child(section_label("PER SPECIALIST"));
+
+        if specialists.is_empty() {
+            return rows.child(
+                ui::Label::new(
+                    "The specialists appear here once the backend has answered its first \
+                     question. Until then they all use the model above.",
+                )
+                .muted()
+                .size(ui::Size::Compact),
+            );
+        }
+
+        for (index, specialist) in specialists.iter().enumerate() {
+            // "Use default" rather than a repeat of the coordinator's model: the two are
+            // different states. One follows whatever the coordinator becomes; the other is a
+            // choice that happens to match today and would not move with it.
+            let chosen = self
+                .draft
+                .subagents
+                .get(&specialist.name)
+                .map(|spec| spec.rsplit("::").next().unwrap_or(spec).to_string())
+                .unwrap_or_else(|| "Use default".to_string());
+            rows = rows.child(ui::setting_row(
+                specialist.name.clone(),
+                specialist.description.clone(),
+                ui::Dropdown::new(
+                    SharedString::from(format!("pick-subagent-{index}")),
+                    chosen,
+                )
+                .open(matches!(self.open_picker, Some((Picker::Subagent(open), _)) if open == index))
+                .on_click(cx.listener(move |workbench, event: &gpui::ClickEvent, _window, cx| {
+                    workbench.toggle_picker(Picker::Subagent(index), event.position(), cx);
+                })),
+            ));
+        }
+        rows
+    }
+
+    /// The models one specialist can be pointed at, plus the way back to the default.
+    ///
+    /// Every provider's models, not just the current one's: pointing literature search at a
+    /// cheap long-context model from another provider is the main reason to want this at all.
+    /// The key for that provider has to be stored, so the row says when it is not — a turn that
+    /// fails inside a subagent several minutes in is the worst place to discover it (§104).
+    fn subagent_model_list(&self, index: usize, cx: &mut Context<Self>) -> impl IntoElement {
+        let specialists = workspace::subagents();
+        let Some(specialist) = specialists.get(index) else {
+            return div().into_any_element();
+        };
+        let name = specialist.name.clone();
+        let chosen = self.draft.subagents.get(&name).cloned();
+
+        let mut list = div()
+            .id(SharedString::from(format!("subagent-models-{index}")))
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w_0()
+            .pr(px(SCROLL_GUTTER))
+            .gap_px()
+            .max_h(px(260.))
+            .overflow_y_scroll();
+
+        let clearing = name.clone();
+        list = list.child(
+            picker_row("Use default", chosen.is_none(), None).on_click(cx.listener(
+                move |workbench, _event, _window, cx| {
+                    workbench.draft.subagents.remove(&clearing);
+                    workbench.open_picker = None;
+                    cx.notify();
+                },
+            )),
+        );
+
+        for provider in settings::PROVIDERS {
+            for model in provider.models {
+                let spec = format!("{}::{}", provider.id, model);
+                let selected = chosen.as_deref() == Some(spec.as_str());
+                // Named only when it would be a *second* provider to key, since that is the
+                // thing a researcher has to act on before the choice can work.
+                let missing = provider.id != self.draft.provider
+                    && settings::secret(&format!("llm:{}", provider.id)).is_none();
+                let note = missing.then(|| format!("{} — no key stored", provider.label));
+                let picked = name.clone();
+                let value = spec.clone();
+                list = list.child(
+                    picker_row(*model, selected, note)
+                        .id(SharedString::from(format!("sa-{index}-{spec}")))
+                        .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                            workbench
+                                .draft
+                                .subagents
+                                .insert(picked.clone(), value.clone());
+                            workbench.open_picker = None;
+                            cx.notify();
+                        })),
+                );
+            }
+        }
+        list.into_any_element()
+    }
+
     /// What this thing is, what the specialists do, and who to credit.
     ///
     /// Asked for after a look at the web app, which has one and this did not. Three jobs, and the
@@ -5495,6 +5663,7 @@ impl Workbench {
                         }),
                     ),
             ));
+            pane = pane.child(self.subagent_models(cx));
         }
 
         for (tab, (field, composer)) in self
@@ -7721,6 +7890,29 @@ mod tests {
 /// Assemble the model routing the backend expects from settings plus the keychain.
 fn model_choice(user_settings: &settings::Settings) -> Option<protocol::ModelChoice> {
     let provider = settings::provider(&user_settings.provider)?;
+    // Only the specialists actually pointed somewhere else. An entry equal to the coordinator's
+    // spec is not an override, and sending it would make the settings file's shape visible in
+    // every request for no effect.
+    let subagents: std::collections::BTreeMap<String, String> = user_settings
+        .subagents
+        .iter()
+        .filter(|(_, spec)| !spec.trim().is_empty() && **spec != user_settings.model_spec())
+        .map(|(name, spec)| (name.clone(), spec.trim().to_string()))
+        .collect();
+    // A key for every *other* provider those overrides reach. Read here, on the main thread,
+    // for the same reason the coordinator's is: the keychain is not async-safe (see `secret_env`).
+    let mut extra_keys = std::collections::BTreeMap::new();
+    for spec in subagents.values() {
+        let Some((provider_id, _)) = spec.split_once("::") else {
+            continue;
+        };
+        if provider_id == user_settings.provider || extra_keys.contains_key(provider_id) {
+            continue;
+        }
+        if let Some(key) = settings::secret(&format!("llm:{provider_id}")) {
+            extra_keys.insert(provider_id.to_string(), key);
+        }
+    }
     Some(protocol::ModelChoice {
         spec: user_settings.model_spec(),
         provider: user_settings.provider.clone(),
@@ -7730,6 +7922,8 @@ fn model_choice(user_settings: &settings::Settings) -> Option<protocol::ModelCho
         } else {
             None
         },
+        subagents,
+        extra_keys,
     })
 }
 

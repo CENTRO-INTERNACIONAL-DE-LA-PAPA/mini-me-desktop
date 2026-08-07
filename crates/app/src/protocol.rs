@@ -634,6 +634,18 @@ pub struct ModelChoice {
     pub api_key: Option<String>,
     /// Mandatory for the `custom` provider, ignored otherwise.
     pub base_url: Option<String>,
+    /// A model per specialist, by name. Empty means every one follows the coordinator.
+    ///
+    /// Sent as `model_config.subagents`, which `backend/models.py:114` reads and folds into the
+    /// set of providers the request needs keys for.
+    pub subagents: std::collections::BTreeMap<String, String>,
+    /// A key per *other* provider a specialist uses, by provider id.
+    ///
+    /// **Necessary, and easy to miss.** The backend gathers providers from the coordinator's spec
+    /// *and every override* (`models.py:117-122`), so pointing one specialist at a second
+    /// provider makes that provider's key part of the request. Without it the turn fails inside a
+    /// subagent, several minutes in, for a reason that reads like the specialist being broken.
+    pub extra_keys: std::collections::BTreeMap<String, String>,
 }
 
 /// Thin HTTP client bound to a backend base URL.
@@ -1308,15 +1320,33 @@ fn config_for(model: Option<&ModelChoice>) -> Value {
                 .expect("object")
                 .remove("storage_mode");
         }
+        if !model.subagents.is_empty() {
+            model_config
+                .as_object_mut()
+                .expect("object")
+                .insert("subagents".into(), json!(model.subagents));
+        }
         configurable["model_config"] = model_config;
 
+        // One entry per provider the request will actually touch — the coordinator's, plus any a
+        // specialist was pointed at. The backend derives that same set from the specs
+        // (`models.py:117-122`); sending fewer keys than providers is the failure that surfaces
+        // minutes later, inside a subagent, looking like the subagent's fault.
+        let mut keys = serde_json::Map::new();
         if let Some(api_key) = &model.api_key {
-            configurable["__llm_keys"] = json!({
-                model.provider.clone(): {
-                    "api_key": api_key,
-                    "base_url": model.base_url,
-                }
-            });
+            keys.insert(
+                model.provider.clone(),
+                json!({ "api_key": api_key, "base_url": model.base_url }),
+            );
+        }
+        for (provider, api_key) in &model.extra_keys {
+            // The coordinator's own entry carries its base_url and must not be flattened by a
+            // specialist that happens to share its provider.
+            keys.entry(provider.clone())
+                .or_insert_with(|| json!({ "api_key": api_key, "base_url": null }));
+        }
+        if !keys.is_empty() {
+            configurable["__llm_keys"] = Value::Object(keys);
         }
     }
 
@@ -2111,6 +2141,7 @@ mod tests {
             provider: "custom".into(),
             api_key: Some("sk-test".into()),
             base_url: Some("https://openrouter.ai/api/v1".into()),
+            ..Default::default()
         };
         let body = run_request_body("hi", Some(&model));
         let configurable = &body["config"]["configurable"];
@@ -2143,6 +2174,84 @@ mod tests {
     }
 
     #[test]
+    fn a_specialist_on_a_second_provider_takes_its_key_with_it() {
+        // The failure this prevents is expensive and misleading: the backend collects providers
+        // from the coordinator's spec *and every override* (`backend/models.py:117-122`), so
+        // pointing one specialist at a second provider makes that provider's key part of the
+        // request. Send the overrides without the key and the turn dies inside a subagent,
+        // minutes in, reading like the specialist is broken (docs §104).
+        let model = ModelChoice {
+            spec: "anthropic::claude-sonnet-4-5".into(),
+            provider: "anthropic".into(),
+            api_key: Some("sk-ant".into()),
+            base_url: None,
+            subagents: [
+                (
+                    "academic_researcher".to_string(),
+                    "openai::gpt-4.1".to_string(),
+                ),
+                (
+                    "report_writer".to_string(),
+                    "anthropic::claude-opus-4-1".to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            extra_keys: [("openai".to_string(), "sk-openai".to_string())]
+                .into_iter()
+                .collect(),
+        };
+        let body = run_request_body("hi", Some(&model));
+        let configurable = &body["config"]["configurable"];
+
+        assert_eq!(
+            configurable["model_config"]["subagents"]["academic_researcher"],
+            "openai::gpt-4.1"
+        );
+        // A key per provider the request will actually touch — both of them.
+        assert_eq!(configurable["__llm_keys"]["anthropic"]["api_key"], "sk-ant");
+        assert_eq!(configurable["__llm_keys"]["openai"]["api_key"], "sk-openai");
+        // The coordinator's own entry keeps its base_url; a specialist sharing its provider
+        // must not flatten it.
+        let model = ModelChoice {
+            spec: "custom::openai/gpt-4o-mini".into(),
+            provider: "custom".into(),
+            api_key: Some("sk-custom".into()),
+            base_url: Some("https://openrouter.ai/api/v1".into()),
+            subagents: [(
+                "data_cleaning".to_string(),
+                "custom::openai/gpt-4o".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+            extra_keys: [("custom".to_string(), "sk-should-not-win".to_string())]
+                .into_iter()
+                .collect(),
+        };
+        let keys = &run_request_body("hi", Some(&model))["config"]["configurable"]["__llm_keys"];
+        assert_eq!(keys["custom"]["api_key"], "sk-custom");
+        assert_eq!(keys["custom"]["base_url"], "https://openrouter.ai/api/v1");
+    }
+
+    #[test]
+    fn no_overrides_means_no_subagents_key_at_all() {
+        // Every specialist follows the coordinator by default, and an empty map in the request
+        // would be a shape the backend has to interpret for no reason.
+        let model = ModelChoice {
+            spec: "openai::gpt-5.4".into(),
+            provider: "openai".into(),
+            api_key: Some("sk".into()),
+            ..Default::default()
+        };
+        let configurable = &run_request_body("hi", Some(&model))["config"]["configurable"];
+        assert!(
+            configurable["model_config"].get("subagents").is_none(),
+            "{}",
+            configurable["model_config"]
+        );
+    }
+
+    #[test]
     fn omits_client_key_storage_when_there_is_no_key() {
         // Claiming client-only storage with nothing to supply would tell the backend to
         // skip its own lookup and then find no key at all.
@@ -2151,6 +2260,7 @@ mod tests {
             provider: "openai".into(),
             api_key: None,
             base_url: None,
+            ..Default::default()
         };
         let body = run_request_body("hi", Some(&model));
         let configurable = &body["config"]["configurable"];
