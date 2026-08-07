@@ -15,6 +15,7 @@ somebody else's repository, and the decision of when and by whom is the maintain
 | [guardrails-claims-isolation.md](mini-me/guardrails-claims-isolation.md) | **high** | The approval prompt tells the researcher a command is sandboxed when it may be running on their machine |
 | [dev-store-docstring.md](mini-me/dev-store-docstring.md) | low | `make_backend` says the dev store loses content on restart. It does not, and the app tells people to restart |
 | [start-async-task-config.md](mini-me/start-async-task-config.md) | **high** | `deepagents` launches background runs with no config, so they inherit no model, key or recursion limit |
+| [project-spine-is-not-per-project.md](mini-me/project-spine-is-not-per-project.md) | medium | The research spine is keyed per *user*, so it mixes every study a person has run and never forgets a deleted conversation |
 
 ## langgraph (`langgraph_runtime_inmem`, LangChain)
 

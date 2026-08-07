@@ -358,9 +358,11 @@ impl Sidecar {
     pub fn fetch_project(&self) -> mpsc::UnboundedReceiver<Result<Project, String>> {
         let (tx, rx) = mpsc::unbounded();
         let base_url = self.base_url.clone();
+        // The spine belongs to the project, not to the person (docs §109).
+        let project = self.project();
 
         self.runtime.spawn(async move {
-            let client = LangGraphClient::new(base_url);
+            let client = LangGraphClient::new(base_url).with_project(project);
             let outcome = client
                 .fetch_project()
                 .await

@@ -716,7 +716,25 @@ impl LangGraphClient {
     pub async fn fetch_project(&self) -> Result<Project> {
         let resp = self
             .http
-            .get(format!("{}/project", self.base_url))
+            // The project this spine belongs to. Upstream keys it `(user_id, "project")` — one
+            // per person, accumulating forever — which mixes every line of work a researcher has
+            // ever had and never forgets a deleted conversation. The overlay reads this
+            // parameter and scopes the namespace to match what a turn writes; without it the two
+            // sides would disagree and the panel would go blank rather than become correct
+            // (`overlay/minime_local/spine.py`, docs §109).
+            .get(format!(
+                "{}/project{}",
+                self.base_url,
+                match self
+                    .project
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty())
+                {
+                    Some(project) => format!("?project={}", urlencode(project)),
+                    None => String::new(),
+                }
+            ))
             .send()
             .await
             .context("GET /project failed (is the sidecar running?)")?

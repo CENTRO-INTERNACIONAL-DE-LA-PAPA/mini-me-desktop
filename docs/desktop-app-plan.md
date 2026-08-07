@@ -6334,3 +6334,50 @@ Three options, none of them free:
 Not decided here. It is the researcher's call which of "correct but needs upstream", "works now
 but starts empty", or "honest about what it is" fits how they work — and this document has a bad
 record of choosing a default on someone's behalf and finding out later (§96).
+
+## 109. A spine per project (2026-08-07)
+
+§108 laid out three options for a research panel that mixed every project and never forgot a
+deleted conversation. The answer was the first: *"do 1, so we can change it properly."*
+
+Properly, here, means two things at once — because Mini-Me is a pinned, unmodified reference
+checkout and the locked decision is *bundled upstream, not forked*:
+
+1. **`overlay/minime_local/spine.py`**, so it works now, with the checkout byte-for-byte upstream.
+2. **`docs/upstream/mini-me/project-spine-is-not-per-project.md`**, so it can land at the source,
+   where the route can simply take a parameter instead of an overlay smuggling one through a
+   `ContextVar`.
+
+That is exactly the shape §18 chose for host execution, and the sentence it used still applies:
+*this is the bridge, not a rejection of the PR.*
+
+### Why both halves had to be patched
+
+`_project_namespace` has two callers that must agree: one inside a turn, which can see the run's
+`configurable`, and two HTTP handlers, which cannot. Scoping only the runtime side would leave
+`GET /project` reading a namespace turns no longer write to — the panel would go **blank** rather
+than become correct, which is a worse outcome than the bug.
+
+So the overlay patches the namespace function (covering both callers at once, since both import
+it) and wraps the two handlers to read `?project=` into a `ContextVar` the patched function
+consults. The client sends it. Backwards compatible by construction: with no project the namespace
+is unchanged, so every spine that exists today is what an ungrouped conversation reads.
+
+### Two things that would have failed quietly
+
+**The wrapper had to be `async`.** The handlers are coroutine functions, so a sync wrapper would
+set the variable, build the coroutine, reset the token, and return it *unawaited* — the value gone
+before the handler ran. Every request would have read the ungrouped spine while the code looked
+right. Caught while writing it, which is luck; the shape is §98's exactly, where a test passed
+because it exercised a different invocation than production.
+
+**The patch is armed unconditionally.** `install()` returns early unless host execution is on, and
+folding the spine patch into that would have tied "which project's spine am I seeing" to "where
+does the agent's code run" — two unrelated facts sharing one switch, which is §78 word for word.
+The targets are now split: host-execution patches stay conditional, the spine ones always run.
+
+### And the panel is cleared when the project changes
+
+`self.project = None` before each refresh. A stale mission sitting above a new project's empty
+list reads as that project having inherited the old one's work — the same reason §79's sidebar had
+to say "loading" rather than show nothing.

@@ -27,8 +27,21 @@ _TARGET_NAME = "LazyLangsmithSandbox"
 #: attribute first is what actually takes effect.
 _AGENT_MODULE = "deepagents"
 
+#: Where the research spine's namespace is computed, and where it is asked for over HTTP.
+_RUNTIME_MODULE = "backend.runtime"
+_PROJECT_ROUTE_MODULE = "backend.routes.project"
+
+#: Patched only when host execution is on — they *are* host execution.
+_LOCAL_TARGETS = (_SANDBOX_MODULE, _AGENT_MODULE)
+
+#: Patched always. Scoping the research spine to a project has nothing to do with where the
+#: agent's code runs, and tying it to that switch is exactly the mistake §78 made with the
+#: subagent registry: a feature that silently did nothing because it inherited an unrelated
+#: setting's default.
+_ALWAYS_TARGETS = (_RUNTIME_MODULE, _PROJECT_ROUTE_MODULE)
+
 #: Every module we patch, and what patching it means.
-_TARGETS = (_SANDBOX_MODULE, _AGENT_MODULE)
+_TARGETS = _LOCAL_TARGETS + _ALWAYS_TARGETS
 
 log = logging.getLogger("minime_local")
 
@@ -45,6 +58,18 @@ def local_execution_requested() -> bool:
 
 def _patch(module) -> None:
     """Apply whichever patch this module needs."""
+    if module.__name__ == _RUNTIME_MODULE:
+        from minime_local import spine
+
+        spine.install_runtime(module)
+        return
+    if module.__name__ == _PROJECT_ROUTE_MODULE:
+        from minime_local import spine
+
+        spine.install_routes(module)
+        return
+    if not local_execution_requested():
+        return
     if module.__name__ == _AGENT_MODULE:
         from minime_local import approval, async_agents, registry
 
@@ -132,14 +157,16 @@ def install() -> bool:
 
     Safe to call more than once.
     """
-    if not local_execution_requested():
-        return False
+    local = local_execution_requested()
+    # The spine patches are armed either way; `_patch` declines the host-execution ones itself
+    # when they are not wanted, so there is one list of targets and one place that decides.
+    targets = _TARGETS if local else _ALWAYS_TARGETS
 
-    for name in _TARGETS:
+    for name in targets:
         already = sys.modules.get(name)
         if already is not None:
             _patch(already)
 
     if not any(isinstance(finder, _PatchOnImport) for finder in sys.meta_path):
         sys.meta_path.insert(0, _PatchOnImport())
-    return True
+    return local

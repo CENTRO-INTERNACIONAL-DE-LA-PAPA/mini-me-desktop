@@ -2896,6 +2896,7 @@ impl Workbench {
         // looked at, not only the one you last filed something into.
         self.remember_project(filed.clone());
         self.sidecar.set_project(filed);
+        self.project = None;
         let mut messages = self.sidecar.open_conversation(thread_id);
         cx.spawn(async move |this, cx| {
             if let Some((messages, snapshot)) = messages.next().await {
@@ -4172,6 +4173,11 @@ impl Workbench {
             cx,
         );
         self.sidecar.set_thread_project(thread_id, project);
+        // The spine belongs to the project now, so moving between them changes which one the
+        // panel shows. Cleared first: a stale mission above a new project's empty list reads as
+        // that project having inherited the old one's work (docs §109).
+        self.project = None;
+        self.refresh_project(cx);
         self.refresh_conversations(cx);
     }
 
@@ -4187,6 +4193,8 @@ impl Workbench {
         }
         self.sidecar.set_project(project.clone());
         self.remember_project(project);
+        self.project = None;
+        self.refresh_project(cx);
         self.run_command(Command::NewThread, cx);
     }
 
