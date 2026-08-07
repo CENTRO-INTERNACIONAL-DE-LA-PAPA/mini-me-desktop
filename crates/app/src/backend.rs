@@ -1461,20 +1461,27 @@ mod tests {
         );
     }
 
-    /// The generated config must extend upstream's, not replace it — and must name the SQLite
-    /// checkpointer only when the backend can actually load it.
+    /// The generated config must extend upstream's, not replace it — and the generator must run
+    /// **the way the launch command runs it**: as a script, with nothing arranged on `sys.path`.
     ///
-    /// Runs the real `make_config.py`, because the thing worth pinning is a **contract between
-    /// two languages**: Rust decides the filename and passes `--config`, Python decides what
-    /// goes in it. §76 established this pattern for the subagent registry after three rounds of
-    /// each side being individually correct about a file neither had produced together.
+    /// That last clause is the whole point. The first version of this test imported
+    /// `make_config` as a module with the overlay root on `sys.path`, which passed while
+    /// production was failing: the launch invokes
+    /// `.venv/bin/python <overlay>/minime_local/make_config.py .`, and Python then puts the
+    /// *script's* directory on the path — `minime_local/`, not the overlay above it. A
+    /// `from minime_local import ...` at the top of the file therefore raised
+    /// `ModuleNotFoundError`, the generator exited non-zero, and the `&&` in the launch
+    /// expression stopped the backend from starting at all (docs §98).
     ///
-    /// Skipped rather than failed when `python3` is absent, so a machine without it still runs
-    /// the suite. Announced, because a test that quietly does nothing is one nobody notices has
-    /// stopped covering anything (docs §81).
+    /// So this shells out to the file by path, exactly as `generate_config_command` does. A test
+    /// that exercises a different invocation than production is not testing production.
+    ///
+    /// Skipped rather than failed when `python3` is absent, and it says so — a test that quietly
+    /// covers nothing is one nobody notices has stopped (docs §81).
     #[test]
-    fn the_generated_config_extends_upstream_and_gates_the_checkpointer() {
+    fn the_generated_config_survives_being_run_as_a_script() {
         let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
+        let script = overlay.join("minime_local/make_config.py");
         if std::process::Command::new("python3")
             .arg("--version")
             .output()
@@ -1494,60 +1501,54 @@ mod tests {
         )
         .expect("upstream config");
 
-        // `available` is forced both ways, so the test covers the machine it runs on *and* the
-        // machine it does not — the package is optional and most checkouts will not have it.
-        let run = |available: bool| -> serde_json::Value {
-            let script = format!(
-                r#"
-import json, sys
-sys.path.insert(0, {overlay:?})
-from minime_local import make_config, checkpointer
-checkpointer.available = lambda: {available}
-print(make_config.build({checkout:?}, {overlay:?}))
-"#,
-                overlay = overlay.to_string_lossy(),
-                checkout = scratch.to_string_lossy(),
-                available = if available { "True" } else { "False" },
-            );
-            let out = std::process::Command::new("python3")
-                .arg("-c")
-                .arg(script)
-                .output()
-                .expect("running make_config");
-            assert!(
-                out.status.success(),
-                "make_config failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-            let written = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            serde_json::from_str(&std::fs::read_to_string(&written).expect("generated config"))
-                .expect("valid JSON")
-        };
+        // No PYTHONPATH, no cwd trickery, no `-c` wrapper: the launch sets none of those for
+        // this step, and every one of them would hide the failure it shipped with.
+        let out = std::process::Command::new("python3")
+            .arg(&script)
+            .arg(&scratch)
+            .env_remove("PYTHONPATH")
+            .output()
+            .expect("running make_config");
+        assert!(
+            out.status.success(),
+            "the generator must not fail — the launch joins it with `&&`:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
 
-        let without = run(false);
+        let written = scratch.join(".mini-me-desktop.langgraph.json");
+        let config: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&written).expect("generated config"))
+                .expect("valid JSON");
+
         // Everything upstream carries survives. `http` is the load-bearing one: it mounts the
         // routes the project spine and the report renderer depend on, and rebuilding the file
         // by hand instead of extending it is how that gets dropped.
-        assert_eq!(without["http"]["app"], "./backend/routes/__init__.py:app");
-        assert_eq!(without["env"], ".env");
-        assert!(without["graphs"]["agent"].is_string());
+        assert_eq!(config["http"]["app"], "./backend/routes/__init__.py:app");
+        assert_eq!(config["env"], ".env");
+        assert!(config["graphs"]["agent"].is_string());
         // The background graph the async subagents need (docs §30).
-        assert!(without["graphs"]["background"]
+        assert!(config["graphs"]["background"]
             .as_str()
             .is_some_and(|path| path.ends_with("async_agents.py:background_graph")));
-        // No package, no key: a config naming a checkpointer the backend cannot import would
-        // turn a missing optional dependency into a server that does not start.
-        assert!(
-            without.get("checkpointer").is_none(),
-            "{:?}",
-            without.get("checkpointer")
+        // The checkpointer key tracks whether the package is importable *in this interpreter*,
+        // so assert the relationship rather than a fixed answer — the test has to pass on a
+        // machine with the package and on one without.
+        let available = std::process::Command::new("python3")
+            .arg("-c")
+            .arg("import langgraph.checkpoint.sqlite.aio")
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false);
+        assert_eq!(
+            config.get("checkpointer").is_some(),
+            available,
+            "the key must appear exactly when the backend could load it"
         );
-
-        let with = run(true);
-        assert_eq!(with["http"]["app"], "./backend/routes/__init__.py:app");
-        assert!(with["checkpointer"]["path"]
-            .as_str()
-            .is_some_and(|path| path.ends_with("checkpointer.py:checkpointer")));
+        if available {
+            assert!(config["checkpointer"]["path"]
+                .as_str()
+                .is_some_and(|path| path.ends_with("checkpointer.py:checkpointer")));
+        }
 
         std::fs::remove_dir_all(&scratch).ok();
     }

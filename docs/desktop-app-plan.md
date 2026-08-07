@@ -5774,3 +5774,50 @@ ended four rounds of misdiagnosis.
 
 Every one of those was cheap, available from the start, and skipped in favour of reasoning about
 code that could simply have been asked.
+
+## 98. The generator that could not import itself (2026-08-07)
+
+*"I noticed that when I moved the data to sqlite I see this message and I cannot start any
+conversation"* — `backend exited during startup with exit code: 1`.
+
+Mine, and squarely. §95 added one line to the top of `make_config.py`:
+
+```python
+from minime_local import checkpointer as sqlite_checkpointer
+```
+
+The launch command runs that file **as a script**:
+`.venv/bin/python <overlay>/minime_local/make_config.py .`. Python then puts the *script's own
+directory* on `sys.path` — `minime_local/`, not the overlay root above it — so the package
+`minime_local` is not importable from inside itself. `ModuleNotFoundError`, exit 1, and because the
+generator is joined to the server with `&&` (deliberately, §30: a config that failed to generate
+must stop the launch rather than start a coordinator holding tools pointing at a graph nobody
+serves), the backend never started at all.
+
+Fixed by inlining the three-line availability check. `checkpointer.py` keeps its own copy for the
+server, which loads it by file path and needs no package either. Duplication measured against a
+backend that cannot start is not a close call.
+
+### The test passed while production was broken
+
+This is the part worth keeping. §95 shipped with a test —
+`the_generated_config_extends_upstream_and_gates_the_checkpointer` — that ran the real
+`make_config.py` and asserted the real output. It passed. It kept passing while the app would not
+boot.
+
+Because it invoked the generator **differently from production**: `python3 -c` with
+`sys.path.insert(0, overlay)`, which is precisely the arrangement that makes the broken import
+work. The test constructed the one environment in which the bug is invisible, and did so in the
+course of being careful — the `sys.path` line was written to make the import succeed, which is
+exactly what production could not do.
+
+**A test that exercises a different invocation than production is not testing production.** The
+replacement, `the_generated_config_survives_being_run_as_a_script`, shells out to the file by path
+with `PYTHONPATH` removed — the same call `generate_config_command` builds. It fails against the
+shipped code and passes against the fix.
+
+That is a different failure from §81's and §91's, and worth distinguishing: those were about not
+looking. This one looked, wrote a test, and *arranged the conditions under which the answer would
+be reassuring*. The closest relative is §92 — a taffy simulation that reproduced a bug the real
+tree cannot produce. Both times the model of the system was built to be runnable rather than to be
+faithful, and the difference only showed on the real machine.
