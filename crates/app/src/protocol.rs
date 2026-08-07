@@ -291,28 +291,27 @@ impl AsyncTask {
 /// that keeps being wrong.
 const CONVERSATION_TAG: &str = "minime_conversation";
 
-/// Whether a stored thread is a conversation worth adopting, and its id if so.
+/// A stored thread that is not yet tagged, by id.
 ///
-/// Separated from the request loop so the judgement can be tested against real thread shapes
-/// without a server — it decides what appears in someone's sidebar, and getting it wrong in
-/// either direction is costly: too strict and their work stays hidden, too loose and §51's
-/// wall of background-worker rows comes back.
-fn adoptable(thread: &Value) -> Option<&str> {
-    let metadata = thread.get("metadata");
-    // Already ours.
-    if metadata
+/// Only the cheap half of the decision. Whether it is a *conversation* is settled by asking
+/// whether it holds any messages, which needs a request per thread — see
+/// [`LangGraphClient::adopt_untagged_conversations`].
+///
+/// **A title is not the test, though it was.** The first version of this filtered on
+/// `metadata.title`, on the reasoning that `rename_conversation` writes it and nothing else does.
+/// That is true and it is useless here: `rename_conversation` shipped in `4911094`, the *same day*
+/// as the filter it was meant to work around. No thread old enough to be hidden is new enough to
+/// have a title. Measured against a real store, it adopted **1 of 30** and left 25 threads with
+/// genuine history exactly as invisible as before — the identical mistake as the original bug,
+/// one level down, and caught only because the numbers were checked (docs §91).
+fn untagged(thread: &Value) -> Option<&str> {
+    if thread
+        .get("metadata")
         .and_then(|metadata| metadata.get(CONVERSATION_TAG))
         .is_some()
     {
         return None;
     }
-    // A title is written by `rename_conversation` from the first question asked, and by
-    // nothing else — the async-subagent middleware names none of the threads it creates.
-    metadata
-        .and_then(|metadata| metadata.get("title"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|title| !title.is_empty())?;
     thread
         .get("thread_id")
         .and_then(Value::as_str)
@@ -887,12 +886,12 @@ impl LangGraphClient {
     /// as *"the conversations doesn't load, like this was erased"* — which is exactly what a
     /// filtered-out history looks like from the outside (docs §90).
     ///
-    /// **Why a title is the test.** The app titles a conversation from its first question
-    /// ([`title_from_prompt`]) and writes it with [`Self::rename_conversation`]; nothing else
-    /// does. A background worker's thread is created by the async-subagent middleware, which
-    /// never names anything. So "has a non-empty title" identifies precisely the threads a person
-    /// started and would expect to find — a narrower test than the tag, deliberately: adopting a
-    /// worker thread would put the junk back, and this runs unattended.
+    /// **Why messages are the test.** The obvious discriminator — a title — does not exist on the
+    /// data that needs adopting: `rename_conversation` shipped the same day as the filter, so no
+    /// thread old enough to be hidden carries one. What every hidden conversation does have, and
+    /// no background worker does, is **human messages**. So each untagged thread is read once and
+    /// adopted if anyone wrote in it. That costs a request per thread on a list bounded at 200,
+    /// paid on the single launch that repairs the history and never again.
     ///
     /// **Runs once, and only when there is nothing to lose.** It returns immediately unless the
     /// tagged search comes back empty, so a researcher who has since started a conversation is
@@ -926,8 +925,21 @@ impl LangGraphClient {
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(adoptable)
+            .filter_map(untagged)
         {
+            // The test that actually holds on old data: does anyone's writing live in here?
+            // A background worker's thread carries the machinery of a delegation and no human
+            // messages, so this excludes them without depending on a marker that postdates them.
+            // One request per thread, once, on a list bounded at 200 — the only time this app
+            // pays it is the single launch that repairs a hidden history.
+            match self.conversation_messages(id).await {
+                Ok(messages) if messages.is_empty() => continue,
+                Err(error) => {
+                    tracing::warn!(%error, thread = id, "could not read a thread while adopting");
+                    continue;
+                }
+                Ok(_) => {}
+            }
             // One thread failing to adopt must not abandon the rest: the next one may be the
             // conversation the researcher is actually looking for.
             match self.tag_conversation(id).await {
@@ -2266,36 +2278,33 @@ mod tests {
     }
 
     #[test]
-    fn a_titled_thread_from_before_the_tag_is_adopted_and_machinery_is_not() {
-        // The regression this repairs: `dfea94a` filtered the sidebar on the tag, and every
-        // conversation predating it vanished — reported, fairly, as if an update had erased
-        // them (docs §90). Adoption has to be exactly wide enough to bring those back and no
-        // wider, or §51's wall of background-worker rows returns with them.
+    fn adoption_screens_on_the_tag_and_nothing_a_hidden_thread_could_not_have() {
+        // The first version of this filtered on `metadata.title`, which sounded exact and was
+        // measured at 1 adoption out of 30 — because `rename_conversation` shipped the same day
+        // as the filter it was working around, so no thread old enough to be hidden has a title
+        // (docs §91). The cheap screen is now *only* "not already ours"; whether it is a
+        // conversation is decided by reading its messages, which is the one property every
+        // hidden conversation has and no background worker does.
 
-        // A real conversation from before the tag: titled, untagged.
-        let old = json!({"thread_id": "t-1", "metadata": {"title": "Late blight resistance"}});
-        assert_eq!(adoptable(&old), Some("t-1"));
-
-        // A background worker's thread. The async-subagent middleware names nothing, so there
-        // is no title — which is the whole discriminator.
-        let worker = json!({"thread_id": "t-2", "metadata": {"assistant_id": "agent"}});
-        assert_eq!(adoptable(&worker), None);
-        assert_eq!(adoptable(&json!({"thread_id": "t-3"})), None);
+        // A thread from before any of this: no tag, no title, no metadata to speak of.
+        let ancient = json!({"thread_id": "t-1", "metadata": {"assistant_id": "agent"}});
         assert_eq!(
-            adoptable(&json!({"thread_id": "t-4", "metadata": {"title": "   "}})),
-            None,
-            "a blank title is not a name"
+            untagged(&ancient),
+            Some("t-1"),
+            "a thread with no title must still be considered — that was the whole bug"
         );
+        assert_eq!(untagged(&json!({"thread_id": "t-2"})), Some("t-2"));
 
-        // Already ours: adopting again would be a wasted PATCH per launch.
+        // Already ours: adopting again would be a wasted request on every launch.
         let tagged = json!({
-            "thread_id": "t-5",
+            "thread_id": "t-3",
             "metadata": {"title": "Yield trials", CONVERSATION_TAG: true}
         });
-        assert_eq!(adoptable(&tagged), None);
+        assert_eq!(untagged(&tagged), None);
 
         // Nothing to PATCH.
-        assert_eq!(adoptable(&json!({"metadata": {"title": "No id"}})), None);
+        assert_eq!(untagged(&json!({"metadata": {"title": "No id"}})), None);
+        assert_eq!(untagged(&json!({"thread_id": "   "})), None);
     }
 
     #[test]

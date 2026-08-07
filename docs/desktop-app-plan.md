@@ -5432,3 +5432,166 @@ to the right one, and it cost a researcher an afternoon of believing their work 
 
 What broke the tie was measuring: counting how many stored threads actually carried the tag. One
 count, against the real data, decided between two mechanisms that both "explained" the symptom.
+
+## 91. The adoption fix repeated the bug it was fixing (2026-08-07)
+
+§90 shipped `adopt_untagged_conversations` and claimed it restored the hidden history. An
+adversarial pass measured it instead of reading it, and it did not.
+
+`adoptable` accepted a thread if `metadata.title` was non-empty, reasoning that
+`rename_conversation` is the only writer of that key and background workers name nothing. Both
+halves are true. The conclusion is still wrong, for a reason that was one `git log` away:
+
+> `rename_conversation` shipped in **`4911094`, 2026-08-02** — the *same day* as `dfea94a`, the
+> filter it was written to work around.
+
+**No thread old enough to be hidden is new enough to have a title.** Measured against a real store:
+1 adoption out of 30, leaving 25 of the 26 threads with genuine history exactly as invisible as
+before. The severity argument in §90 — *26 conversations lost* — was answered by a fix that
+recovered one.
+
+That is the same shape as the bug, one level down: **discriminating on a marker that postdates the
+data it has to identify.** Written twice, five days apart, by the same reasoning each time —
+"nothing else writes this key, so it is exact" — with the question *"has it always existed?"*
+unasked both times.
+
+The test now is **messages**. Every hidden conversation has human writing in it; a background
+worker's thread carries a delegation's machinery and none. It costs one `GET /threads/{id}/state`
+per untagged thread on a list bounded at 200, paid on the single launch that repairs the history
+and never again. It cannot fail the same way, because it screens on a property of the
+conversation rather than on a marker some release happened to add.
+
+### What caught it
+
+Not a re-reading. **Counting.** Loading the real `.langgraph_ops.pckl` and asking how many threads
+each rule would actually adopt turned an argument into a number, and the number was 1. Every
+confident claim in §90 was individually true; the arithmetic between them was never done.
+
+## 92. The filter field: three fixes, no reproduction (2026-08-07)
+
+Reported a third time — *"This bug persist! the search bar its to thin! Please be careful and check
+why that happens!"* — after §72 and §88 had each declared it fixed. So it went to an investigation
+with an adversarial pass instead of a fourth guess. **Both the diagnosis and its refutation are
+worth keeping, because the refutation won.**
+
+### The proposed mechanism
+
+`ComposerElement` is a taffy **leaf with zero intrinsic width**: `composer.rs:701-711` calls
+`window.request_layout(style, [], cx)` with no children and no measure function, which becomes
+`taffy.new_leaf` (`gpui/taffy.rs:62-68`), and gpui's measure callback returns `Size::default()` for
+a context-less node (`taffy.rs:196-199`). Its only width is `relative(1.)` — a percentage. Taffy
+resolves a percentage against the parent's known size; when that is `None`, `maybe_resolve` returns
+`None` and `compute_leaf_layout` falls back to `unwrap_or(0.0)`.
+
+So the field's width floor is literally zero, and every width above it is *derived* rather than
+*stated*: `anchored()` is shrink-to-fit (`anchored.rs:107-111`), `ui.rs:735` states 320px, and then
+four more links re-derive it — a bare `Display::Block` div, two `w_full` percentages, and the
+Composer's own auto-width root. A taffy 0.9.0 replay of the exact style set, with one ancestor
+content-sized, produced **`FIELD_BOX = 18px`** — 0 content + `px_2` + `border_1`, which is the
+"~10px rounded rectangle" exactly.
+
+It also explained the second half, which three sections had conflated with the first: the
+placeholder escapes because `composer.rs:784-789` shapes with no wrap width and
+`composer.rs:878-881` paints at `bounds.origin` with **no `with_content_mask`**, and `filter_field`
+sets no overflow. A zero-width box does not clip its own text. That is a separate defect and it is
+real regardless.
+
+### Why the refutation stands
+
+Every citation checked out verbatim. The mechanism still **cannot fire in this element tree**:
+
+- The 320px panel width is not a lucky survivor — `git log -S"px(320.)"` finds it in `43dd19e`,
+  older than §72. It has been stated for the entire life of the bug.
+- `anchored()`'s shrink-to-fit is defused by its own child: taffy hands absolute children
+  `AvailableSpace::Definite(container_width)` (`flexbox.rs:2144-2153`), so the anchored node's
+  content size is exactly the 320 its child states.
+- The bare `Display::Block` div at `main.rs:1899` is stretched **unconditionally**, not
+  incidentally: `align_items: None` and taffy's `unwrap_or(AlignItems::Stretch)` (`flexbox.rs:437`).
+
+So the chain resolves, and the collapse the simulation produced needs a content-sized ancestor this
+tree does not contain.
+
+### What that leaves
+
+**§88's stated mechanism is wrong regardless of the outcome** — the percentage does not fail to
+resolve inside `anchored()`, and that section says it does. Retracted here.
+
+And the correct next step is **not a fourth style change**. It is one measurement: log
+`bounds.size.width` from `ComposerElement::prepaint` (which already receives it) or put
+`.debug_below()` on the field, open the picker on the Windows machine at 125% scaling, and read the
+number. If it is ~302 the bug is elsewhere entirely — a paint or DPI issue, not layout. If it is 18,
+real gpui disagrees with the taffy replay and the next step is dumping the actual taffy styles.
+
+Three fixes have now been shipped against this without one reading of what the box actually
+measures. **The measurement costs one run and discriminates between every remaining hypothesis;
+each guess has cost a release and a report from the person using it.**
+
+## 93. Planned — the SQLite checkpointer
+
+Proposed by the researcher: *"Maybe its worth the effort to construct our custom store and custom
+checkpointer … so we can use the best of rust and accelerate the conversation loading and also
+avoid conversations lost."* Right on the problem, and the docs settle a constraint this document
+had assumed wrongly.
+
+**`langgraph.json` takes `checkpointer` and `store` keys**, each a path to an async context manager
+yielding a `BaseCheckpointSaver` / `BaseStore`, and it works under `langgraph dev`. This is
+configuration, not a reimplementation of the server — which is what the §80 Postgres analysis had
+implicitly assumed when it concluded the only alternative was `langgraph up` and Docker. That
+conclusion stands for *Postgres*; it was too broad about custom persistence generally.
+
+**Adopt a SQLite checkpointer.** It closes both open hazards and the boot cost with one change:
+
+- No pickle, so the §90 failure mode — a load that throws, then a flush that writes an empty dict
+  over good data ten seconds later — has nothing to act on.
+- Lazy reads, so §80's boot cost stops growing with history. That is the actual answer to "why is
+  it slow", and no client-side work could ever have provided it.
+- `langgraph-checkpoint-sqlite` already ships `AsyncSqliteSaver`, so this is roughly ten lines of
+  glue rather than an implementation of five async methods.
+
+**Not Rust, despite the framing of the request.** The bottleneck is unpickling megabytes at boot
+and writing them back every ten seconds — I/O and serialisation, not computation, so there is no
+work for a faster language to do. Reaching Rust from Python means PyO3 and a compiled wheel per
+platform, which is a new way for the install to fail on machines that already spent §57–§60
+fighting WSL2. Rust earns its keep in this project where it already is: the client.
+
+**Store: wait.** Custom stores are documented **alpha** ("may experience breaking changes in minor
+version updates"), and replacing the built-in one means owning semantic search and TTL. The store
+holds `/memories/` and `/skills/`, it is small, and it is not what makes boot slow. Do the
+checkpointer, measure, then decide with numbers.
+
+**The one real obstacle** is that `langgraph.json` lives in the checkout, and §18's whole overlay
+design exists because a checkout the app does not own must not be edited. This lands cleanly on the
+app-provisioned backend and needs a deliberate decision for anyone pointed at their own clone.
+
+## 94. Owed upstream, consolidated
+
+Four now, all found here, none of them this app's to fix.
+
+- ⬜ `guardrails.py` claims sandbox isolation that host execution does not provide (§18).
+- ⬜ The theorizer reports a *guess* instead of the command's real output (§35) — seven rounds, the
+  most expensive defect of this project.
+- ⬜ `deepagents`' `start_async_task` passes no config, so no self-hosted deployment can give a
+  background run its model, key or recursion limit (§38/§39).
+- ⬜ `agent.py`'s `make_backend` docstring says the `langgraph dev` store "loses content on process
+  restart" (§82). It does not — the dev runtime's store is disk-backed. Load-bearing, because this
+  app tells researchers to restart the backend.
+
+And two new ones against `langgraph_runtime_inmem`, both data-loss paths, neither yet observed
+firing but both live for anyone running `langgraph dev`:
+
+- ⬜ **A failed checkpoint load silently overwrites good data.** `checkpoint.py:71-75` registers the
+  `PersistentDict` with the flush loop *before* `d.load()`. When the load throws, lines 91-97
+  swallow it and leave an empty dict that is already registered; `_persistence.py` calls `sync()`
+  every ten seconds; `PersistentDict.sync()` pickles the empty dict and `shutil.move`s it over the
+  real file under a comment reading `# atomic commit`. Ten seconds after a failed load, the history
+  is gone. The `ModuleNotFoundError` branch names the trigger in its own message: *"Pulled updates
+  that modified class definitions in a way that's incompatible with the cache."*
+  There is also a latent bug in the recovery attempt itself: `os.remove(self.filename)` at lines 88
+  and 94 is given the *prefix* `.langgraph_api/.langgraph_checkpoint.` with no `N.pckl` suffix, so
+  it always raises and is always swallowed — dead code that hides how bad the outcome is.
+- ⬜ **The conversation index is deleted outright on any load exception.**
+  `database.py:167-184` has a bare `except Exception` whose remedy is `os.remove(OPS_FILENAME)`,
+  with no existence check and no backup.
+
+Both would be fixed by the same principle: **a persistence layer that cannot read its file must
+refuse to write it**, not carry on with an empty copy and flush.
