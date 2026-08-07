@@ -6484,3 +6484,57 @@ Worth noting the overlay already does the thing that would otherwise be the obvi
 forwards `model_config`, `__llm_keys` and a recursion limit onto the background run, because
 upstream's `start_async_task` sends none (`docs/upstream/mini-me/start-async-task-config.md`). So
 the model and key should be there. The empty result is something after that.
+
+## 112. A log line that was wiring, not an event (2026-08-07)
+
+The §110 fix is confirmed in the same log that raised the question:
+
+```
+Importing graph  graph_id=background
+  path=/home/piero_linux/.local/share/mini-me-desktop/backend/.desktop-overlay/minime_local/async_agents.py
+```
+
+In the distro, not `/mnt/c`.
+
+### Why the background log said nothing useful
+
+Three copies of this, and nothing else about background work:
+
+```
+minime_local: background work will run on the conversation's own model
+  method=GET path=/threads/{thread_id}/state
+```
+
+On a **state read**. That looked like the smoking gun — config being captured during a read-only
+graph load, where there is no model to capture. It is not: `_forwarded_config()` is called inside
+the tool, at the moment a task is launched, and the config is read from the run that is live then.
+Checked in the source rather than inferred from the log, which is the only reason this section is
+not a fourth wrong diagnosis.
+
+The line was logged where the tool is **wrapped** — which happens on every graph build, including
+the read-only ones behind the `GET /threads/{id}/state` the client polls while watching a task. So
+it was a wiring step wearing the grammar of an event, at warning level, three times a minute.
+
+### What it says now
+
+Demoted to `info` and reworded to what it is. The line that matters moved into the tool, where a
+launch actually happens:
+
+```
+minime_local: launching data_voyager with config keys
+  ['__is_for_execution__', '__llm_keys', '__workspace_project__', 'model_config'],
+  recursion_limit=10000
+```
+
+and, when there is nothing to forward, `NONE — the worker will have no model`.
+
+Keys only, never values — one of those is an API key. And it is the **first** thing that would
+distinguish the two explanations for the reported symptom: a background run that starts without a
+model reports `success` with an empty result, which is indistinguishable from one that ran
+properly and found nothing. That ambiguity is §81's, exactly, and it cost four rounds there.
+
+### The task ids were not in the log at all
+
+The grep for the two ids from the transcript matched nothing. Not evidence of anything: the sidecar
+log is per launch and the backend had been restarted several times since. Worth stating because a
+missing line reads like a finding, and here it only meant the file was younger than the question.

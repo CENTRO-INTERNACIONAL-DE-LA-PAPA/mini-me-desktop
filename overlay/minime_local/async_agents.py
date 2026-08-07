@@ -302,6 +302,21 @@ def _forwarding_config(middleware, specs: list[dict]):
             allowed = ", ".join(f"`{name}`" for name in by_name)
             return f"Unknown async subagent type `{subagent_type}`. Available types: {allowed}"
 
+        # Read here, at the launch, not when the tool was built — a graph is constructed per
+        # request, including read-only ones with no model in them.
+        forwarded = _forwarded_config()
+        configurable = forwarded.get("configurable") or {}
+        # **Named on the way out.** A background run that starts without a model reports
+        # `success` with an empty result, which is indistinguishable from one that ran and found
+        # nothing — and that ambiguity is exactly what cost §81 four rounds. Keys only; a value
+        # here would be an API key in a log file.
+        logger.warning(
+            "minime_local: launching %s with config keys %s, recursion_limit=%s",
+            subagent_type,
+            sorted(configurable) or "NONE — the worker will have no model",
+            forwarded.get("recursion_limit"),
+        )
+
         try:
             client = get_client(url=spec.get("url"))
             thread = await client.threads.create()
@@ -309,7 +324,7 @@ def _forwarding_config(middleware, specs: list[dict]):
                 thread_id=thread["thread_id"],
                 assistant_id=spec["graph_id"],
                 input={"messages": [{"role": "user", "content": description}]},
-                config=_forwarded_config(),
+                config=forwarded,
             )
         except Exception as exc:  # noqa: BLE001  # the LangGraph SDK raises untyped errors
             logger.warning("minime_local: failed to launch background work: %s", exc)
@@ -362,5 +377,10 @@ def _forwarding_config(middleware, specs: list[dict]):
         return middleware
 
     middleware.tools = tools
-    logger.warning("minime_local: background work will run on the conversation's own model")
+    # `info`, and worded as what it is. This runs on **every graph build** — including the
+    # read-only ones behind `GET /threads/{id}/state`, which the client polls while watching a
+    # task — so at warning level it filled the log with a sentence that reads like an event and
+    # was only ever a wiring step. The line that matters is in the tool itself, where a launch
+    # actually happens (docs §112).
+    logger.info("minime_local: start_async_task will forward the conversation's config")
     return middleware
