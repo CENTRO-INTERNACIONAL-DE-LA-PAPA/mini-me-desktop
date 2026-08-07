@@ -4883,3 +4883,45 @@ to a server it did not start, the Setup page says so and points at the Restart b
 
 That is the sixth appearance of one shape in this project, and the clearest: a question that was
 never asked because a nearby question had already been answered.
+
+## 81. "Blocking call to os.mkdir" (2026-08-06)
+
+The log line that ended it:
+
+```
+minime_local: could not record the subagent registry: Blocking call to os.mkdir
+```
+
+`create_deep_agent` is called from inside `async def agent(config)`, so `record` ran **on the
+event loop**, and the LangGraph dev server activates `blockbuster` — a guard that raises on
+synchronous I/O there. `os.makedirs` and `open` are exactly that. My own `except` caught it and
+logged it, and the turn carried on: the tolerance was doing its job, and the file was never
+written.
+
+The guard is right, and the point is not pedantic: a synchronous write on the loop stalls health
+checks and every other run in the process. `langgraph dev --allow-blocking` would have silenced
+it, and taking that would have been fixing the smoke alarm. So the write now goes to a worker
+thread when there is a loop, and stays inline when there is not — which is what a plain
+`python -c` import does, and what the earlier manual checks were unknowingly testing.
+
+**Verified against the real guard**, not against the reasoning: `blockbuster 1.5.26` is in the
+backend's own venv, so the fix is exercised with `BlockBuster().activate()` in the loop. It no
+longer trips, and the file lands.
+
+### What actually found it
+
+Four attempts at this feature failed, and the fourth was diagnosed in one reading. The difference
+was not insight — it was that §80 added **a log line on success**. Until then `registry.install`
+logged only on error, so "the code is absent", "the wrapper never ran" and "it ran and failed
+silently" produced identical evidence: nothing. With the install line present, the log said the
+wrapper was armed and named its target file, which left exactly one thing that could still be
+wrong, and the next line said what it was.
+
+That is the same lesson as §60 (a fix that reported "done" over a red row) and §69 (a palette key
+that returned in silence), now paid for three times. **A component that only speaks when it fails
+cannot be distinguished from one that was never reached.**
+
+The pull-based redesign floated in §80 — the app asking Python for the list during preflight — is
+**not** needed. It was proposed because push had failed three times for three different reasons,
+which looked like evidence against the design. It was evidence against the *instrumentation*. The
+mechanism was sound each time.

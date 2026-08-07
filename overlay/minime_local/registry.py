@@ -25,6 +25,7 @@ shares with this process (`MINIME_LOCAL_WORKSPACE`) — the same directory figur
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -107,11 +108,29 @@ def install(deepagents_module) -> None:
     )
 
 
+def _write(path: str, payload: dict) -> None:
+    """The blocking part, kept together so it can be handed to a thread."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    # Written whole and replaced, so a client never reads a half-written list.
+    temporary = f"{path}.tmp"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+    os.replace(temporary, path)
+    logger.warning("minime_local: recorded %d subagents in %s", len(payload["subagents"]), path)
+
+
 def record(subagents: Any) -> None:
     """Write the registry, or say why not and carry on.
 
-    Never raises. This is called on the path that answers a researcher's question, and a picker
-    that cannot be populated is worth strictly less than the turn it would have broken.
+    **Never on the event loop.** `create_deep_agent` is called from inside
+    `async def agent(config)`, and the LangGraph dev server installs a guard that raises on
+    blocking I/O there — *"Blocking call to os.mkdir"*, which is precisely what this did on its
+    first real turn (docs §81). The guard is right: a synchronous write on the loop stalls health
+    checks and every other run in the process. So the file is written in a worker thread when
+    there is a loop, and inline when there is not, which is what a plain `python -c` import does.
+
+    Never raises. This is on the path that answers a researcher's question, and a picker that
+    cannot be populated is worth strictly less than the turn it would have broken.
     """
     try:
         described = describe(subagents)
@@ -123,16 +142,25 @@ def record(subagents: Any) -> None:
             # Only set when the desktop app launched this server. A plain `langgraph dev` in
             # the checkout should write nothing at all.
             return
-        os.makedirs(root, exist_ok=True)
         path = os.path.join(root, FILENAME)
         payload = {"format": FORMAT, "subagents": described}
-        # Written whole and replaced, so a client never reads a half-written list.
-        temporary = f"{path}.tmp"
-        with open(temporary, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2)
-        os.replace(temporary, path)
-        logger.warning(
-            "minime_local: recorded %d nameable subagents in %s", len(described), path
-        )
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is None:
+            _write(path, payload)
+            return
+        # Fire and forget: the turn must not wait on a picker's registry, and a failure inside
+        # the thread logs from `_write`'s own caller below.
+        future = loop.run_in_executor(None, _write, path, payload)
+        future.add_done_callback(_report)
     except Exception as error:  # noqa: BLE001 — see the docstring
+        logger.warning("minime_local: could not record the subagent registry: %s", error)
+
+
+def _report(future) -> None:
+    """Surface a failure that happened in the worker thread rather than dropping it."""
+    error = future.exception()
+    if error is not None:
         logger.warning("minime_local: could not record the subagent registry: %s", error)
