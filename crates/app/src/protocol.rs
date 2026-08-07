@@ -866,6 +866,16 @@ impl LangGraphClient {
     }
 
     /// `POST /threads` → a fresh thread id.
+    /// The body `POST /threads` is sent, separated so it can be asserted without a server.
+    fn new_thread_body(&self) -> Value {
+        json!({
+            "metadata": {
+                CONVERSATION_TAG: true,
+                PROJECT_KEY: self.project.as_deref().map(str::trim).filter(|p| !p.is_empty()),
+            }
+        })
+    }
+
     pub async fn create_thread(&self) -> Result<String> {
         let resp = self
             .http
@@ -873,7 +883,14 @@ impl LangGraphClient {
             // Marked as *ours*. Every background worker creates a thread of its own
             // (§43), and without this the sidebar filled with dozens of "New
             // conversation" rows that were machinery, not conversations (docs §51).
-            .json(&json!({ "metadata": { CONVERSATION_TAG: true } }))
+            //
+            // **And filed, at birth.** The project drives two different things and they were
+            // wired separately: `self.project` tells the backend which folder to write into,
+            // and this key tells the sidebar which heading to show it under. Setting only the
+            // first meant a conversation started with the `+` on a project heading had its
+            // files in the right folder and its row under "No project" — right by one measure
+            // and wrong by the other, which is the worst of both (docs §108).
+            .json(&self.new_thread_body())
             .send()
             .await
             .context("POST /threads failed (is the sidecar running?)")?
@@ -2495,6 +2512,25 @@ mod tests {
         // Nothing to PATCH.
         assert_eq!(untagged(&json!({"metadata": {"title": "No id"}})), None);
         assert_eq!(untagged(&json!({"thread_id": "   "})), None);
+    }
+
+    #[test]
+    fn a_new_thread_is_filed_at_birth() {
+        // The project drives two things that were wired separately: which folder the backend
+        // writes into, and which heading the sidebar shows the row under. Setting only the first
+        // put a conversation started from a project's `+` into the right folder and under
+        // "No project" — right by one measure, wrong by the other (docs §108).
+        let filed = LangGraphClient::new("http://x").with_project(Some("Late blight".into()));
+        let body = filed.new_thread_body();
+        assert_eq!(body["metadata"][CONVERSATION_TAG], true);
+        assert_eq!(body["metadata"][PROJECT_KEY], "Late blight");
+
+        // Ungrouped stays ungrouped, and sends `null` rather than an empty string — the sidebar
+        // treats blank as no project, but only one of the two is honest about it.
+        let plain = LangGraphClient::new("http://x");
+        assert!(plain.new_thread_body()["metadata"][PROJECT_KEY].is_null());
+        let blank = LangGraphClient::new("http://x").with_project(Some("   ".into()));
+        assert!(blank.new_thread_body()["metadata"][PROJECT_KEY].is_null());
     }
 
     #[test]

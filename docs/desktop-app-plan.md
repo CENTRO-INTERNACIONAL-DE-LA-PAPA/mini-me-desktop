@@ -6265,3 +6265,72 @@ appears on hover, the same way the rename and delete controls on the rows below 
 Per-specialist models worked on a real turn, and the Asta citation copies. The provider tag on
 each row — *"Anthropic — no key stored"* — did the job it was added for: it says what is missing
 at the moment of choosing, rather than several minutes into a turn that fails inside a subagent.
+
+## 108. Filed at birth, and a spine that belongs to nobody (2026-08-07)
+
+### The `+` put files in the right folder and the row in the wrong place
+
+Pressing `+` on a project heading gave a conversation under **No project**. The project drives two
+different things, and §106 wired only one of them:
+
+- `sidecar.project()` → `configurable.__workspace_project__` → **which folder the backend writes
+  into**;
+- the thread's `minime_project` metadata → **which heading the sidebar shows the row under**.
+
+`file_in_project` sets both. Creating a thread set only the first, because `create_thread` was
+written before projects existed and nobody went back to it. So a conversation started from a
+project's own `+` had its files in the right place and its row outside — right by one measure and
+wrong by the other, which is worse than being wrong by both, because half of it looks like it
+worked.
+
+Fixed at the source: `POST /threads` carries the project alongside the conversation tag, so a
+conversation is filed at birth rather than needing a move it should never have needed.
+
+**The tell was there in §105 and I wrote it myself**: *"the folder is where the files live; the
+label is how the app knows"*. Two facts, deliberately kept separate — and then set in one place
+and not the other. Every appearance of this project's oldest shape has been two things that must
+agree, and this is the first where I had already written down that they were two.
+
+### The research spine is not per project, and never was
+
+Also reported: the right-hand panel shows completed work from conversations since deleted, and
+from other projects. That is not a bug in this app — it is Mini-Me's design, stated in
+`backend/runtime.py:141-154`:
+
+```python
+def _project_namespace(user_id: str) -> tuple[str, ...]:
+    """Namespace for the persistent research-project spine.
+
+    User-scoped as ``(user_id, "project")`` — deliberately **not** keyed by
+    assistant_id (unlike memories) …
+    * The research project is the user's, spanning every assistant/thread.
+```
+
+One spine per person, accumulating forever. That was right when a researcher had one line of work.
+With projects it is wrong twice over: it mixes them, and it never forgets.
+
+**Making it per project is not a small change**, because the namespace is computed in two places
+that must agree:
+
+- `_project_namespace_for_runtime` (`runtime.py:157`) runs inside a turn and *can* see
+  `__workspace_project__` through `get_config()`;
+- `routes/project.py:76,100` computes the same namespace in an **HTTP handler**, which has no run
+  config — and the docstring says that symmetry is the reason it is keyed the way it is.
+
+So patching the runtime side alone would leave `GET /project` reading a namespace the turns no
+longer write to: the panel would go blank rather than become correct.
+
+Three options, none of them free:
+
+1. **Namespace the spine by project, and give the route the project too** — a query parameter the
+   client already knows. Correct, and it needs the route to change, which means an upstream
+   change rather than an overlay patch.
+2. **Stop calling `GET /project` when a project is active** and rely on the spine that arrives in
+   each `values` snapshot, which is per-run and would carry the right namespace once the runtime
+   side is patched. No upstream change; the panel is empty until the first turn in that project.
+3. **Leave it user-wide and say so** — one line in the panel, so it reads as a career summary
+   rather than as this project's state.
+
+Not decided here. It is the researcher's call which of "correct but needs upstream", "works now
+but starts empty", or "honest about what it is" fits how they work — and this document has a bad
+record of choosing a default on someone's behalf and finding out later (§96).
