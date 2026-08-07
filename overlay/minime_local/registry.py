@@ -97,6 +97,14 @@ def install(deepagents_module) -> None:
         return original(*args, **kwargs)
 
     deepagents_module.create_deep_agent = create_deep_agent_recording_subagents
+    # Logged on *success*, like every other installer in this overlay. Without it a wrapper
+    # that installed and one that never ran look identical in the log — which is precisely
+    # what happened: three `minime_local` lines, none of them this one, and no way to tell
+    # whether the code was absent, skipped, or working and writing somewhere else (docs §81).
+    logger.warning(
+        "minime_local: the subagent registry will be written to %s",
+        os.path.join(os.getenv("MINIME_LOCAL_WORKSPACE", "<unset>"), FILENAME),
+    )
 
 
 def record(subagents: Any) -> None:
