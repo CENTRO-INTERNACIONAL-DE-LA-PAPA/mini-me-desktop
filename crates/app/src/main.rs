@@ -432,6 +432,7 @@ enum Command {
     SelectWhole,
     SpecialistInBackground,
     RestartBackend,
+    RenderReport,
     OpenProvenance,
     OpenSettings,
     OpenSetup,
@@ -439,7 +440,7 @@ enum Command {
 }
 
 impl Command {
-    const ALL: [Command; 14] = [
+    const ALL: [Command; 15] = [
         Command::RunTurn,
         Command::NewThread,
         Command::RefreshSpine,
@@ -450,6 +451,7 @@ impl Command {
         Command::SelectWhole,
         Command::SpecialistInBackground,
         Command::RestartBackend,
+        Command::RenderReport,
         Command::OpenProvenance,
         Command::OpenSettings,
         Command::OpenSetup,
@@ -468,6 +470,7 @@ impl Command {
             Command::SelectWhole => "Select the whole conversation",
             Command::SpecialistInBackground => "Run the named specialist in the background",
             Command::RestartBackend => "Restart the backend",
+            Command::RenderReport => "Save the latest report as a PDF",
             Command::OpenProvenance => "Show this conversation's provenance",
             Command::OpenSettings => "Settings",
             Command::OpenSetup => "Setup & diagnostics",
@@ -487,6 +490,7 @@ impl Command {
             Command::SelectWhole => "every message, ready to copy (ctrl-shift-a)",
             Command::SpecialistInBackground => "sends the /name in the composer, without waiting",
             Command::RestartBackend => "after updating the app — reloads its Python overlay",
+            Command::RenderReport => "typeset with citations, into this conversation's folder",
             Command::OpenProvenance => "which specialists were consulted, and in what order",
             Command::OpenSettings => "model, keys, execution (ctrl-,)",
             Command::OpenSetup => "check what the backend still needs",
@@ -1106,6 +1110,13 @@ struct Workbench {
     /// Work handed to a background Mini-Me, and whether it is stopped at the gate.
     tasks: Vec<protocol::AsyncTask>,
     transcript: Vec<Message>,
+    /// Reports already written to disk this session, so each is announced once rather than on
+    /// every `values` frame of the turn that produced it.
+    saved_reports: std::collections::HashSet<std::path::PathBuf>,
+    /// The reports this conversation has produced, bodies included, newest last.
+    reports: Vec<protocol::Report>,
+    /// Whole citations, for a rendered report's bibliography. Not the panel's truncated ones.
+    sources: Vec<String>,
     /// Whether the provenance window is showing, and which of its two views.
     provenance_open: bool,
     provenance_view: ProvenanceView,
@@ -1348,6 +1359,9 @@ impl Workbench {
             jobs: Vec::new(),
             tasks: Vec::new(),
             transcript: Vec::new(),
+            saved_reports: std::collections::HashSet::new(),
+            reports: Vec::new(),
+            sources: Vec::new(),
             provenance_open: false,
             provenance_view: ProvenanceView::Timeline,
             provenance: provenance::Record::default(),
@@ -2633,6 +2647,13 @@ impl Workbench {
             // merge. The spine rides along in the same payload, which keeps the
             // mission current without another HTTP round trip.
             TurnEvent::Snapshot(snapshot) => {
+                self.save_reports(&snapshot.reports, cx);
+                if !snapshot.reports.is_empty() {
+                    self.reports = snapshot.reports.clone();
+                }
+                if !snapshot.sources.is_empty() {
+                    self.sources = snapshot.sources.clone();
+                }
                 if let Some(project) = snapshot.project {
                     self.project = Some(merge_spine(self.project.as_ref(), project));
                 }
@@ -2846,6 +2867,93 @@ impl Workbench {
     fn note_provenance(&mut self, agent: &AgentRef) {
         self.provenance
             .observe(&agent.ns, &agent.name, provenance::now_ms());
+    }
+
+    /// Put every report this turn has produced on disk, beside the figures and the data.
+    ///
+    /// **Because otherwise there is no report.** A report artifact is `{title, markdown}` living
+    /// in the run's state — unlike a figure, which a plotting script writes to the workspace, or a
+    /// dataset, which is a file by nature. So the agent would say "the report is in the Outputs
+    /// panel", which was true, and the researcher would open the thread's folder and find seven
+    /// files, none of them the report (docs §89).
+    ///
+    /// Called on every `values` snapshot, which is often; [`workspace::save_report`] skips a write
+    /// whose content is already there, so the cost is a read per report per frame and the file's
+    /// timestamp stays honest.
+    fn save_reports(&mut self, reports: &[protocol::Report], cx: &mut Context<Self>) {
+        if reports.is_empty() {
+            return;
+        }
+        let Some(dir) = self.thread_workspace() else {
+            return;
+        };
+        for report in reports {
+            match workspace::save_report(&dir, &report.title, &report.markdown) {
+                Ok(path) => {
+                    if self.saved_reports.insert(path.clone()) {
+                        // Said once per report, because a file appearing silently in a folder is
+                        // not something anyone notices — and not finding it was the whole
+                        // complaint.
+                        let name = path
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        self.say(format!("saved {name}"), cx);
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "could not save a report"),
+            }
+        }
+    }
+
+    /// Typeset the newest report into this conversation's folder.
+    ///
+    /// The markdown is already on disk beside it — that is what `save_reports` fixed — so this is
+    /// the second half of the same answer: *"how do we render it as a PDF?"* Through the backend,
+    /// which has done it since before this app existed (`backend/routes/rendering.py`) and does it
+    /// with the figures resolved and the citations laid out.
+    fn render_report(&mut self, cx: &mut Context<Self>) {
+        let Some(report) = self.reports.last().cloned() else {
+            self.say("no report in this conversation yet", cx);
+            return;
+        };
+        let Some(dir) = self.thread_workspace() else {
+            self.say("no conversation folder yet", cx);
+            return;
+        };
+        let into = dir.join(workspace::report_filename(&report.title));
+        self.say(format!("rendering {}…", report.title), cx);
+        let mut rendered = self.sidecar.render_report(
+            report.title.clone(),
+            report.markdown.clone(),
+            self.sources.clone(),
+            into,
+        );
+        cx.spawn(async move |this, cx| {
+            if let Some(result) = rendered.next().await {
+                let _ = this.update(cx, |workbench, cx| {
+                    match result {
+                        Ok(path) => {
+                            let name = path
+                                .file_name()
+                                .map(|name| name.to_string_lossy().into_owned())
+                                .unwrap_or_default();
+                            workbench.say(format!("saved {name}"), cx);
+                            // Opened, because a PDF is made to be looked at and the folder is
+                            // one more step between the researcher and the thing they asked for.
+                            if let Err(error) = workspace::open(&path) {
+                                tracing::warn!(%error, "could not open the rendered report");
+                            }
+                        }
+                        // Surfaced whole: a Typst compile fails for reasons that are in the
+                        // message, and "could not render" alone would waste the only useful part.
+                        Err(error) => workbench.error = Some(format!("{error:#}")),
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     /// Persist this conversation's record, if there is a conversation to persist it under.
@@ -5700,6 +5808,7 @@ impl Workbench {
             }
             Command::CopySelected => self.copy_selected_text(cx),
             Command::SelectWhole => self.select_whole_transcript(cx),
+            Command::RenderReport => self.render_report(cx),
             Command::OpenProvenance => {
                 self.provenance_open = true;
                 cx.notify();

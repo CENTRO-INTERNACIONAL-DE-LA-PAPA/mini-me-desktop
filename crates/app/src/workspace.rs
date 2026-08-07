@@ -114,6 +114,57 @@ pub fn thread_dir(thread_id: &str) -> PathBuf {
     root().join(thread_id)
 }
 
+/// Turn a report's title into a filename a person would recognise in a folder listing.
+///
+/// Runs of anything that is not a letter or digit become one underscore, and the case is kept —
+/// so *"EDA Report: Simulated Potato Field Trials"* becomes
+/// `EDA_Report_Simulated_Potato_Field_Trials.md`, which is what the agent itself proposed when
+/// asked where the file was. Matching that spelling matters: the answer in the transcript and the
+/// file on disk should be the same name.
+///
+/// Windows is the target, so this also has to survive `\ / : * ? " < > |` — a title with a colon
+/// in it is the common case, not the exotic one.
+pub fn report_filename(title: &str) -> String {
+    let mut name = String::new();
+    let mut pending = false;
+    for character in title.chars() {
+        if character.is_alphanumeric() {
+            if pending && !name.is_empty() {
+                name.push('_');
+            }
+            pending = false;
+            name.push(character);
+        } else {
+            pending = true;
+        }
+    }
+    if name.is_empty() {
+        name.push_str("Report");
+    }
+    // Long titles happen, and Windows' path limit is not generous.
+    let clipped: String = name.chars().take(96).collect();
+    format!("{}.md", clipped.trim_end_matches('_'))
+}
+
+/// Write a report beside the conversation's other outputs, and say where it went.
+///
+/// Skips the write when the file already holds exactly this text. A `values` snapshot arrives
+/// many times during a turn and carries every report each time, so without this the same file
+/// would be rewritten on every frame — and its modification time, which [`images`] sorts by and
+/// a researcher reads, would keep jumping to now.
+pub fn save_report(dir: &Path, title: &str, markdown: &str) -> Result<PathBuf> {
+    let path = dir.join(report_filename(title));
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        if existing == markdown {
+            return Ok(path);
+        }
+    }
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("creating {} for a report", dir.display()))?;
+    std::fs::write(&path, markdown).with_context(|| format!("writing {}", path.display()))?;
+    Ok(path)
+}
+
 /// Every image in `dir`, oldest first.
 ///
 /// Sorted by modification time so a turn's figures appear in the order they were drawn,
@@ -323,6 +374,60 @@ pub fn open(path: &Path) -> Result<()> {
         .spawn()
         .with_context(|| format!("could not open {}", path.display()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod report_tests {
+    use super::*;
+
+    #[test]
+    fn a_title_becomes_the_filename_the_agent_itself_proposed() {
+        // The transcript said the report could be saved as
+        // `EDA_Report_Simulated_Potato_Field_Trials.md`. The file on disk should carry that same
+        // name, or the answer and the folder disagree about what happened (docs §89).
+        assert_eq!(
+            report_filename("EDA Report: Simulated Potato Field Trials"),
+            "EDA_Report_Simulated_Potato_Field_Trials.md"
+        );
+    }
+
+    #[test]
+    fn characters_windows_refuses_never_reach_the_path() {
+        // Windows is the target, and a colon in a report title is the common case. Every one of
+        // `\ / : * ? " < > |` has to be gone, not escaped.
+        let name = report_filename(r#"Q1/Q2: "yield" <draft> | v2*?"#);
+        assert!(
+            !name.contains(['\\', '/', ':', '*', '?', '"', '<', '>', '|']),
+            "{name}"
+        );
+        assert_eq!(name, "Q1_Q2_yield_draft_v2.md");
+    }
+
+    #[test]
+    fn a_title_of_nothing_usable_still_produces_a_file() {
+        assert_eq!(report_filename("***"), "Report.md");
+        assert_eq!(report_filename(""), "Report.md");
+    }
+
+    #[test]
+    fn rewriting_the_same_report_leaves_the_file_alone() {
+        // A `values` snapshot arrives many times per turn and carries every report each time.
+        // Rewriting on each one would keep resetting a timestamp a researcher reads — and that
+        // `images` sorts by.
+        let dir = std::env::temp_dir().join(format!("mini-me-report-{}", std::process::id()));
+        let first = save_report(&dir, "Trial Report", "# Yield\n").expect("first write");
+        let stamp = std::fs::metadata(&first).unwrap().modified().unwrap();
+        let again = save_report(&dir, "Trial Report", "# Yield\n").expect("second write");
+        assert_eq!(first, again);
+        assert_eq!(
+            std::fs::metadata(&again).unwrap().modified().unwrap(),
+            stamp
+        );
+        // Changed content does land.
+        save_report(&dir, "Trial Report", "# Yield\n\nRevised.\n").expect("third write");
+        assert!(std::fs::read_to_string(&first).unwrap().contains("Revised"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
 
 #[cfg(test)]

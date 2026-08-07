@@ -5317,3 +5317,54 @@ so, or a size that is stated without being enforced.** The plan has now recorded
 twice (§72, here) and the first four times (§60, §69, §80, here). The lesson that keeps being
 re-learnt is that a UI's claim — a declared width, a footer promising "esc close", a Save button —
 is a claim the code has to actually make true, and no test catches the ones made in CSS.
+
+## 89. The report that was never a file (2026-08-06)
+
+*"I cannot find the report!"* — and the folder listing proved it: a heatmap, three boxplots, a
+scatter, a CSV, a 151 KB search dump, `provenance.json`. Seven files, no report. Meanwhile the
+answer in the transcript said *"the report is in the Outputs panel"*, and it was.
+
+Both were true, which is the whole diagnosis. **A report is the one output that never reaches
+disk.** Figures are written by a plotting script inside `execute` and found by diffing the
+workspace (§42); datasets and downloaded papers are files by nature. A report is neither —
+`ReportArtifactPayload` is `{title, markdown}` (`backend/schemas.py:321`), it lives in the run's
+state, and the only copy that ever leaves the backend is the one in the `values` snapshot.
+
+Which the client received on every frame of the turn, reduced to a 96-character label for the side
+panel, and threw the body away.
+
+So: the markdown is decoded whole and written beside the other outputs the moment it arrives,
+under the name the agent itself proposed —
+`EDA_Report_Simulated_Potato_Field_Trials.md`. A snapshot arrives many times per turn and carries
+every report each time, so the write is skipped when the file already holds exactly that text;
+otherwise the modification time — which `images` sorts by and a researcher reads — would keep
+resetting to now. Each new report is announced once, because a file appearing silently in a folder
+is not something anyone notices, and not noticing was the complaint.
+
+### The PDF was already built, and had never been called
+
+Asked in the same message: *"how we can render it as pdf? Maybe using typst? I think we did it in
+the mini me repo."* Right on all three counts. `POST /render-report/{thread_id}`
+(`backend/routes/rendering.py:328`) takes `{markdown, title, sources, used_asta}`, converts through
+`pypandoc` to Typst, wraps it in a template with a title page and a citation list, resolves image
+references against the thread's working directory so the figures land *in* the document, and
+compiles with `typst` — host-side, in-process, no LaTeX. The desktop app had never called it.
+
+It does now, from the palette: **Save the latest report as a PDF**. Rendering in Rust instead was
+never worth considering — a faithful markdown-to-PDF pipeline is a large dependency and a long
+tail of edge cases, and this one is already installed in the backend's venv and already what the
+web client uses, so a report rendered from the desktop app is byte-comparable with one rendered
+anywhere else.
+
+One detail that would have been a quiet defect: the citation list is built from a **separate**
+decode of `sources`, not from the side panel's bucket. Panel items are truncated to 96 characters
+to stay scannable, and a bibliography ending in `…` is not a bibliography. Pinned by a test that
+asserts the rendered citation outlives the panel's truncation.
+
+### The shape, again
+
+An artifact the backend considers delivered because it is in the state, and a researcher considers
+missing because it is not in the folder. Same root as §42, which found figures the agent never
+reported, and the same fix: **the client is the only thing that sees both sides, so the client
+reconciles them.** What made this one harder to spot is that nothing was broken — the panel listed
+it, the agent described it, and every layer was telling the truth about a file that did not exist.

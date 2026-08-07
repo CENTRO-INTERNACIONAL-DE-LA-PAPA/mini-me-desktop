@@ -485,6 +485,43 @@ impl Sidecar {
         });
     }
 
+    /// Render a report to PDF and write it beside the conversation's other outputs.
+    ///
+    /// Reports the path it wrote, or why it could not. Off the UI thread because a Typst compile
+    /// with figures in it takes seconds, and this is a button press, not a frame.
+    pub fn render_report(
+        &self,
+        title: String,
+        markdown: String,
+        sources: Vec<String>,
+        into: std::path::PathBuf,
+    ) -> mpsc::UnboundedReceiver<Result<std::path::PathBuf>> {
+        let (tx, rx) = mpsc::unbounded();
+        let base_url = self.base_url.clone();
+        let Some(thread_id) = self.thread_id() else {
+            // Nothing to render against: the route resolves image references relative to the
+            // thread's own working directory, so there is no sensible thread-less version.
+            let _ = tx.unbounded_send(Err(anyhow::anyhow!(
+                "there is no conversation to render a report from yet"
+            )));
+            return rx;
+        };
+        self.runtime.spawn(async move {
+            let client = LangGraphClient::new(base_url);
+            let result = client
+                .render_report(&thread_id, &title, &markdown, &sources)
+                .await
+                .and_then(|pdf| {
+                    let path = into.with_extension("pdf");
+                    std::fs::write(&path, pdf)
+                        .with_context(|| format!("writing {}", path.display()))?;
+                    Ok(path)
+                });
+            let _ = tx.unbounded_send(result);
+        });
+        rx
+    }
+
     /// Watch one long job until it stops moving, reporting every status change.
     ///
     /// **Outlives the turn that started it.** That is the whole point: the theorizer and

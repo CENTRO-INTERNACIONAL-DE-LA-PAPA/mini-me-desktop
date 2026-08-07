@@ -122,6 +122,31 @@ pub struct Snapshot {
     pub jobs: Vec<Job>,
     /// Work handed to a background worker. See [`AsyncTask`].
     pub tasks: Vec<AsyncTask>,
+    /// Reports, with their bodies. See [`Report`].
+    pub reports: Vec<Report>,
+    /// Citations gathered so far, **whole**.
+    ///
+    /// Separate from the `sources` bucket, whose items are truncated to 96 characters for a
+    /// side panel that has to stay scannable. A rendered report's citation list must not be —
+    /// a bibliography ending in `…` is not a bibliography.
+    pub sources: Vec<String>,
+}
+
+/// A written report, whole.
+///
+/// **The one output that never reaches disk.** Figures are written by a plotting script inside
+/// `execute` and found by diffing the workspace (§42); datasets and downloaded papers are files
+/// by nature. A report is neither — `ReportArtifactPayload` is `{title, markdown}`
+/// (`backend/schemas.py:321`), it lives in the run's state, and the only copy that ever leaves
+/// the backend is the one in this snapshot.
+///
+/// So the client used to reduce it to a title for the Outputs panel and drop the body, which is
+/// how the agent could say "the report is in the Outputs panel" and be right, while the
+/// researcher opened the thread's folder and found no report at all (docs §89).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Report {
+    pub title: String,
+    pub markdown: String,
 }
 
 /// A long-running Asta job that outlived the turn that started it.
@@ -841,6 +866,58 @@ impl LangGraphClient {
         Ok(())
     }
 
+    /// Render a report to PDF, on the backend, and hand back the bytes.
+    ///
+    /// **The rendering already existed and had never been called.** `POST /render-report/{thread}`
+    /// converts markdown through `pypandoc` to Typst, wraps it in a template that lays out a title
+    /// page and a citation list, and compiles it with `typst` — all of it host-side, in-process,
+    /// no LaTeX (`backend/routes/rendering.py:253`). It also resolves image references against the
+    /// thread's working directory, so the figures a turn drew end up *in* the PDF rather than as
+    /// broken links.
+    ///
+    /// Doing it here rather than in Rust is not a shortcut. A faithful markdown-to-PDF pipeline is
+    /// a large dependency and a long tail of edge cases, and this one is already written, already
+    /// installed in the backend's venv, and already the thing the web client uses — so a report
+    /// rendered from the desktop app comes out identical to one rendered anywhere else.
+    pub async fn render_report(
+        &self,
+        thread_id: &str,
+        title: &str,
+        markdown: &str,
+        sources: &[String],
+    ) -> Result<Vec<u8>> {
+        let response = self
+            .http
+            .post(format!(
+                "{}/render-report/{}",
+                self.base_url,
+                urlencode(thread_id)
+            ))
+            .json(&json!({
+                "markdown": markdown,
+                "title": title,
+                "sources": sources,
+                // The Asta attribution goes in the footer when the work used it, which having
+                // gathered sources is the backend's own test for.
+                "used_asta": !sources.is_empty(),
+            }))
+            .send()
+            .await
+            .context("asking the backend to render the report failed")?;
+        let status = response.status();
+        let bytes = response
+            .bytes()
+            .await
+            .context("reading the rendered report failed")?;
+        if !status.is_success() {
+            // The route answers a failed Typst compile with JSON, so the reason is in the body
+            // and saying "502" alone would throw away the only useful part.
+            let detail = String::from_utf8_lossy(&bytes);
+            anyhow::bail!("the backend could not render the report ({status}): {detail}");
+        }
+        Ok(bytes.to_vec())
+    }
+
     /// Delete a conversation and everything the backend stored for it.
     ///
     /// **Irreversible, and the caller must have asked first.** This is why the sidebar
@@ -1252,8 +1329,15 @@ fn decode_values(data: &str) -> Option<Snapshot> {
 
     let jobs = decode_jobs(artifacts);
     let tasks = decode_async_tasks(artifacts, &value);
+    let reports = decode_reports(artifacts);
+    let sources = decode_sources(artifacts);
 
-    if buckets.is_empty() && project.is_none() && jobs.is_empty() && tasks.is_empty() {
+    if buckets.is_empty()
+        && project.is_none()
+        && jobs.is_empty()
+        && tasks.is_empty()
+        && reports.is_empty()
+    {
         return None;
     }
     Some(Snapshot {
@@ -1261,7 +1345,53 @@ fn decode_values(data: &str) -> Option<Snapshot> {
         project,
         jobs,
         tasks,
+        reports,
+        sources,
     })
+}
+
+/// Full citations, for the bibliography of a rendered report.
+fn decode_sources(artifacts: &Value) -> Vec<String> {
+    let Some(entries) = artifacts.get("sources").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let citation = entry.get("citation").and_then(Value::as_str)?.trim();
+            (!citation.is_empty()).then(|| citation.to_string())
+        })
+        .collect()
+}
+
+/// Pull whole reports, bodies and all, out of a `values` payload.
+///
+/// Tolerant of a missing title and strict about a missing body: a report with no markdown is
+/// nothing to write to disk, and writing an empty file would be worse than writing none — it
+/// would look like the report had been saved.
+fn decode_reports(artifacts: &Value) -> Vec<Report> {
+    let Some(entries) = artifacts.get("reports").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let markdown = entry.get("markdown").and_then(Value::as_str)?.trim();
+            if markdown.is_empty() {
+                return None;
+            }
+            let title = entry
+                .get("title")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+                .unwrap_or("Report");
+            Some(Report {
+                title: title.to_string(),
+                markdown: markdown.to_string(),
+            })
+        })
+        .collect()
 }
 
 /// Pull the still-running long jobs out of a `values` payload.
@@ -2024,6 +2154,62 @@ mod tests {
         // Nothing has run yet, and a state with no messages at all.
         assert_eq!(last_activity(&json!({"values": {"messages": []}})), None);
         assert_eq!(last_activity(&json!({})), None);
+    }
+
+    #[test]
+    fn a_report_arrives_whole_and_a_bodyless_one_is_not_a_file() {
+        // The shape is `ReportArtifactPayload = {title, markdown}` (`backend/schemas.py:321`) —
+        // a cross-repo contract, so it is pinned here rather than assumed. The body was being
+        // decoded to a label and thrown away, which is how the agent could truthfully say the
+        // report was in the Outputs panel while the folder held no report at all (docs §89).
+        let snapshot = decode_values(
+            &json!({
+                "artifacts": {
+                    "reports": [
+                        {"title": "EDA Report: Simulated Potato Field Trials",
+                         "markdown": "# Yield\n\nClone A led on every site.\n"},
+                        // No body: nothing to write, and an empty file would look like a saved
+                        // report rather than a missing one.
+                        {"title": "Draft", "markdown": "   "},
+                        {"title": "Untitled but real", "markdown": "# Something"},
+                    ],
+                    "sources": [
+                        {"citation": "Love, M. I., Huber, W., & Anders, S. (2014). Moderated estimation of fold change and dispersion for RNA-seq data with DESeq2. Genome Biology, 15, 550."}
+                    ],
+                }
+            })
+            .to_string(),
+        )
+        .expect("a payload with reports decodes");
+
+        let titles: Vec<&str> = snapshot
+            .reports
+            .iter()
+            .map(|report| report.title.as_str())
+            .collect();
+        assert_eq!(
+            titles,
+            [
+                "EDA Report: Simulated Potato Field Trials",
+                "Untitled but real"
+            ]
+        );
+        assert!(snapshot.reports[0].markdown.contains("Clone A led"));
+
+        // The bibliography gets the citation *whole*. The `sources` bucket beside it is
+        // truncated for the side panel, and a reference list ending in `…` is not one.
+        assert_eq!(snapshot.sources.len(), 1);
+        assert!(snapshot.sources[0].ends_with("Genome Biology, 15, 550."));
+        let panel = snapshot
+            .buckets
+            .iter()
+            .find(|bucket| bucket.name == "sources")
+            .expect("the panel still lists sources");
+        assert!(panel.items[0].ends_with('…'), "{}", panel.items[0]);
+        assert!(
+            snapshot.sources[0].len() > panel.items[0].len(),
+            "the rendered citation must outlive the panel's truncation"
+        );
     }
 
     #[test]
