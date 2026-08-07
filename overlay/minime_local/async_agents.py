@@ -193,7 +193,18 @@ def middleware_for(deepagents_module):
 # An **allowlist**, not a copy. `configurable` also holds `thread_id`, `checkpoint_ns` and
 # `run_id`; forwarding those would point the background run at the conversation's own
 # thread and corrupt it.
-FORWARDED_CONFIG_KEYS = ("model_config", "__llm_keys", "__is_for_execution__")
+#
+# `__workspace_project__` is here for the same reason the thread pin below is: it decides which
+# directory the worker writes into. Left out — as it was when projects shipped (docs §105) — a
+# background worker pinned to the conversation's thread still wrote to the *root*, so its report
+# landed outside the project whose conversation asked for it, and the app looked for it inside
+# (docs §111).
+FORWARDED_CONFIG_KEYS = (
+    "model_config",
+    "__llm_keys",
+    "__is_for_execution__",
+    "__workspace_project__",
+)
 
 # What the recursion limit falls back to when the parent run has none.
 #

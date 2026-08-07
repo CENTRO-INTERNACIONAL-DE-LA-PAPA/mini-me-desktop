@@ -179,6 +179,32 @@ impl Record {
         });
     }
 
+    /// Note that a **background** worker produced something, now.
+    ///
+    /// Separate from [`Self::observe`] for one reason: background work outlives the turn that
+    /// started it. A theorizer launched in turn three is still running during turns four and
+    /// five, and `observe` — which looks only at the turn in progress — would file it three
+    /// times, as three different pieces of work. So this searches every turn, and extends the
+    /// entry wherever it already lives.
+    ///
+    /// It is why the provenance record showed nothing for async subagents at all: they run on
+    /// their **own LangGraph thread**, so not one of their events reaches the conversation's
+    /// stream (§43). The only trace on this side is the `async_tasks` map in each snapshot —
+    /// which the client already decoded, for the Jobs panel, and never told the record about
+    /// (docs §111).
+    pub fn observe_background(&mut self, ns: &str, name: &str, at: u64) {
+        for turn in self.turns.iter_mut() {
+            if let Some(existing) = turn.invocations.iter_mut().find(|i| i.ns == ns) {
+                existing.last_seen = at.max(existing.last_seen);
+                if existing.name == FALLBACK_NAME && name != FALLBACK_NAME {
+                    existing.name = name.to_string();
+                }
+                return;
+            }
+        }
+        self.observe(ns, name, at);
+    }
+
     /// Whether there is anything worth showing.
     ///
     /// A conversation of undelegated turns has a record, and it is empty of work — the modal
@@ -745,6 +771,52 @@ mod tests {
         assert!(
             offset + width <= 1.0001,
             "{offset} + {width} must fit the row"
+        );
+    }
+
+    #[test]
+    fn background_work_is_one_invocation_however_many_turns_it_outlives() {
+        // A background worker runs on its own thread, so the only trace on this side is the
+        // `async_tasks` map, repeated in every snapshot for as long as the task lives — across
+        // the turn that started it and every turn after. Filing it per turn would show one
+        // theorizer run as three separate pieces of work (docs §111).
+        let mut record = Record::default();
+        record.begin_turn("analyse this", 0);
+        record.observe_background("async:t-1", "data_voyager", 100);
+        record.observe_background("async:t-1", "data_voyager", 400);
+        record.begin_turn("anything running?", 1_000);
+        record.observe_background("async:t-1", "data_voyager", 1_100);
+        record.begin_turn("still?", 2_000);
+        record.observe_background("async:t-1", "data_voyager", 2_500);
+
+        // One entry, in the turn that started it, spanning the whole time it was alive.
+        assert_eq!(record.turns[0].invocations.len(), 1);
+        assert!(record.turns[1].invocations.is_empty());
+        assert!(record.turns[2].invocations.is_empty());
+        let task = &record.turns[0].invocations[0];
+        assert_eq!(task.name, "data_voyager");
+        assert_eq!((task.first_seen, task.last_seen), (100, 2_500));
+
+        // And it is one node, visited once — not three.
+        let graph = record.graph();
+        assert_eq!(graph.nodes.len(), 1);
+        assert_eq!(graph.nodes[0].visits, 1);
+    }
+
+    #[test]
+    fn a_second_background_task_is_its_own_invocation() {
+        let mut record = Record::default();
+        record.begin_turn("do two things", 0);
+        record.observe_background("async:t-1", "data_voyager", 100);
+        record.observe_background("async:t-2", "report_writer", 150);
+        record.observe_background("async:t-1", "data_voyager", 900);
+        record.observe_background("async:t-2", "report_writer", 950);
+        assert_eq!(record.turns[0].invocations.len(), 2);
+        // Overlapping, so no order is claimed between them — they were handed off together.
+        assert!(
+            record.graph().edges.is_empty(),
+            "{:?}",
+            record.graph().edges
         );
     }
 

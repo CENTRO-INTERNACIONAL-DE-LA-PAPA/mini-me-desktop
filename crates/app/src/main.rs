@@ -2776,6 +2776,17 @@ impl Workbench {
                     self.track_job(job, cx);
                 }
                 for task in snapshot.tasks {
+                    // Into the provenance record as well as the Jobs panel. A background worker
+                    // runs on its own LangGraph thread, so none of its events reach this
+                    // conversation's stream — the `async_tasks` map is the only trace on this
+                    // side, and the record had never been told about it. Which is why the graph
+                    // showed nothing for work a researcher had explicitly handed off
+                    // (docs §111).
+                    self.provenance.observe_background(
+                        &format!("async:{}", task.task_id),
+                        &task.agent_name,
+                        provenance::now_ms(),
+                    );
                     self.track_task(task, cx);
                 }
             }

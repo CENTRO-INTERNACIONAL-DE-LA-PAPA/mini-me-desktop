@@ -6433,3 +6433,54 @@ wrong was not the path's shape; it was that only one of two places asked the que
   is what `list_conversations` beside it had already concluded for itself.
 - `thread_dir` was left behind when projects gave a conversation's folder a project component.
   Removed.
+
+## 111. Background work was invisible twice over (2026-08-07)
+
+Two findings from one screenshot, and they share a cause: **a background worker runs on its own
+LangGraph thread**, so nothing it does reaches the conversation's stream. Everything this app
+knows about it comes from the `async_tasks` map in each snapshot.
+
+### The provenance record never heard of it
+
+*"the provenance plots dont capture async agent in the background."* Correct, and it had nothing to
+work with: the record is built from stream events, and a background worker emits none here. The
+`async_tasks` map was decoded — for the Jobs panel — and never passed on.
+
+It is now, through `observe_background`, which differs from `observe` in one way that matters:
+**it searches every turn, not just the one in progress.** Background work outlives its turn. A
+theorizer launched in turn three is still in the snapshot during turns four and five, and the
+per-turn lookup would file it three times, as three different pieces of work by the same
+specialist. The graph would show a node visited three times for one run.
+
+So the deliberate handoffs a researcher makes — the thing `/subagent`'s background mode exists for
+— now appear in the record beside the delegations the coordinator makes itself.
+
+### And it was writing to the wrong folder
+
+Found while reading the forwarding code rather than reported. `FORWARDED_CONFIG_KEYS` is an
+allowlist of what travels from a conversation's run onto a background run, and projects (§105)
+added `__workspace_project__` without adding it there. So a worker pinned to the conversation's
+thread — which §43 arranged specifically so its files land where the researcher looks — wrote to
+the workspace **root** instead of the project folder. Its report landed outside the project whose
+conversation asked for it, while the app looked inside.
+
+The comment sitting directly above that list explains the rule it needed: the thread pin is there
+for exactly this reason, and the project is the same kind of key. **A new config value that decides
+a path has to be added in two places, and only one of them is where you added it.**
+
+That is this project's oldest shape again — §100's scrollbar width, §108's project-at-birth,
+§110's overlay path — and the fourth time in three days. The others were caught by a screenshot, a
+log line and a warning. This one was caught by reading a list while looking for something else,
+which is the least reliable of the four.
+
+### The empty background results are a separate matter
+
+*"not sure why the background tasks are not working."* Both tasks reported `success` with nothing
+useful in the result. That is not diagnosable from this side: the worker's own thread has its own
+log, and this app only ever sees the status. What would settle it is the backend log around those
+two task ids — whether the worker built a model at all, and what its final state held.
+
+Worth noting the overlay already does the thing that would otherwise be the obvious suspect: it
+forwards `model_config`, `__llm_keys` and a recursion limit onto the background run, because
+upstream's `start_async_task` sends none (`docs/upstream/mini-me/start-async-task-config.md`). So
+the model and key should be there. The empty result is something after that.
