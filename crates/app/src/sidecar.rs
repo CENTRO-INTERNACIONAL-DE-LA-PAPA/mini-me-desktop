@@ -336,7 +336,10 @@ impl Sidecar {
     ///
     /// On the sidecar's runtime because that is where this app's HTTP lives; it has
     /// nothing to do with the backend, which may not even be running.
-    pub fn search_themes(&self, query: String) -> mpsc::UnboundedReceiver<Result<Vec<crate::gallery::Listing>, String>> {
+    pub fn search_themes(
+        &self,
+        query: String,
+    ) -> mpsc::UnboundedReceiver<Result<Vec<crate::gallery::Listing>, String>> {
         let (tx, rx) = mpsc::unbounded();
         self.runtime.spawn(async move {
             let client = reqwest::Client::new();
@@ -349,7 +352,10 @@ impl Sidecar {
     }
 
     /// Install one theme extension into the researcher's `themes/` directory.
-    pub fn install_theme(&self, id: String) -> mpsc::UnboundedReceiver<Result<Vec<String>, String>> {
+    pub fn install_theme(
+        &self,
+        id: String,
+    ) -> mpsc::UnboundedReceiver<Result<Vec<String>, String>> {
         let (tx, rx) = mpsc::unbounded();
         let dir = crate::settings::themes_dir();
         self.runtime.spawn(async move {
@@ -610,9 +616,10 @@ impl Sidecar {
         let (tx, rx) = mpsc::unbounded();
         let config = self.config.clone();
         self.runtime.spawn(async move {
-            let report =
-                tokio::task::spawn_blocking(move || crate::preflight::inspect(&config, has_model_key))
-                    .await;
+            let report = tokio::task::spawn_blocking(move || {
+                crate::preflight::inspect(&config, has_model_key)
+            })
+            .await;
             match report {
                 Ok(report) => {
                     let _ = tx.unbounded_send(report);
@@ -796,7 +803,9 @@ impl Sidecar {
                         .expect("thread id mutex")
                         .clone()
                         .context("the run paused but no thread was recorded")?;
-                    outcome = client.resume_turn(&thread_id, &decisions, &mut handle).await?;
+                    outcome = client
+                        .resume_turn(&thread_id, &decisions, &mut handle)
+                        .await?;
                 }
 
                 println!("stream   : {chunks} chunk(s), {} chars", text.len());

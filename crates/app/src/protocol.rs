@@ -905,8 +905,12 @@ impl LangGraphClient {
         prompt: &str,
         on_event: impl FnMut(TurnEvent),
     ) -> Result<TurnOutcome> {
-        self.stream(thread_id, run_request_body(prompt, self.model.as_ref()), on_event)
-            .await
+        self.stream(
+            thread_id,
+            run_request_body(prompt, self.model.as_ref()),
+            on_event,
+        )
+        .await
     }
 
     /// Resume a run that stopped at the approval gate, streaming the continuation.
@@ -955,7 +959,6 @@ impl LangGraphClient {
         body: Value,
         mut on_event: impl FnMut(TurnEvent),
     ) -> Result<TurnOutcome> {
-
         let resp = self
             .http
             .post(format!(
@@ -1353,14 +1356,7 @@ const MAX_LABEL_CHARS: usize = 96;
 /// would misrepresent work that actually happened.
 fn artifact_label(item: &Value) -> String {
     const LABEL_KEYS: [&str; 8] = [
-        "title",
-        "citation",
-        "name",
-        "question",
-        "summary",
-        "filename",
-        "label",
-        "id",
+        "title", "citation", "name", "question", "summary", "filename", "label", "id",
     ];
 
     let text = LABEL_KEYS
@@ -1734,10 +1730,13 @@ mod tests {
             name: "metadata".into(),
             data: r#"{"run_id":"019fb670-c72a-7330-98be-0f52520fb23b","attempt":1}"#.into(),
         });
-        assert!(events.iter().any(|event| matches!(
-            event,
-            TurnEvent::Started { run_id } if run_id == "019fb670-c72a-7330-98be-0f52520fb23b"
-        )), "{events:?}");
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                TurnEvent::Started { run_id } if run_id == "019fb670-c72a-7330-98be-0f52520fb23b"
+            )),
+            "{events:?}"
+        );
         // Still says the run started, because that is what the status line shows.
         assert!(events
             .iter()
@@ -1846,7 +1845,10 @@ mod tests {
         };
         let body = run_request_body("hi", Some(&model));
         let configurable = &body["config"]["configurable"];
-        assert_eq!(configurable["model_config"]["default"], "custom::openai/gpt-4o-mini");
+        assert_eq!(
+            configurable["model_config"]["default"],
+            "custom::openai/gpt-4o-mini"
+        );
         assert_eq!(configurable["model_config"]["storage_mode"], "client");
         assert_eq!(configurable["__llm_keys"]["custom"]["api_key"], "sk-test");
         assert_eq!(
@@ -1865,7 +1867,10 @@ mod tests {
             resumed["config"]["configurable"]["__llm_keys"],
             configurable["__llm_keys"]
         );
-        assert_eq!(resumed["command"]["resume"]["decisions"][0]["type"], "approve");
+        assert_eq!(
+            resumed["command"]["resume"]["decisions"][0]["type"],
+            "approve"
+        );
     }
 
     #[test]
@@ -1924,7 +1929,10 @@ mod tests {
     #[test]
     fn a_conversation_is_named_by_its_first_question() {
         // Short enough to stand as the title unchanged.
-        assert_eq!(title_from_prompt("What drives yield?"), "What drives yield?");
+        assert_eq!(
+            title_from_prompt("What drives yield?"),
+            "What drives yield?"
+        );
         // Whitespace from a pasted prompt would otherwise reach the sidebar verbatim.
         assert_eq!(title_from_prompt("  many\n\n spaces  "), "many spaces");
 
@@ -1934,7 +1942,10 @@ mod tests {
         let title = title_from_prompt(long);
         assert!(title.ends_with('…'), "{title}");
         assert!(title.chars().count() <= 49, "{title}");
-        assert!(long.starts_with(title.trim_end_matches('…').trim()), "{title}");
+        assert!(
+            long.starts_with(title.trim_end_matches('…').trim()),
+            "{title}"
+        );
 
         // One unbroken word longer than the limit still has to produce something.
         let wall = "x".repeat(200);
@@ -1972,8 +1983,14 @@ mod tests {
             ),
             Some(("mini-me".to_string(), "hi there".to_string()))
         );
-        assert_eq!(decode_stored_message(&json!({"type": "tool", "content": "{}"})), None);
-        assert_eq!(decode_stored_message(&json!({"type": "ai", "content": "  "})), None);
+        assert_eq!(
+            decode_stored_message(&json!({"type": "tool", "content": "{}"})),
+            None
+        );
+        assert_eq!(
+            decode_stored_message(&json!({"type": "ai", "content": "  "})),
+            None
+        );
     }
 
     #[test]
@@ -2026,7 +2043,8 @@ mod tests {
 
         // An object-shaped error must not render as JSON at the user.
         assert_eq!(
-            error_text(&json!({"message": "no API key configured", "type": "ValueError"})).as_deref(),
+            error_text(&json!({"message": "no API key configured", "type": "ValueError"}))
+                .as_deref(),
             Some("no API key configured")
         );
         // A task that simply has not failed contributes nothing.
@@ -2099,13 +2117,23 @@ mod tests {
         // The question rides in the query string, and the theorizer route uses it when
         // persisting results — so accented Spanish has to survive encoding intact.
         let route = theorizer.route("thread-1");
-        assert!(route.starts_with("/theorizer/thread-1/1f0a2b3c-"), "{route}");
+        assert!(
+            route.starts_with("/theorizer/thread-1/1f0a2b3c-"),
+            "{route}"
+        );
         assert!(route.contains("q=%C2%BFqu%C3%A9%20papa"), "{route}");
-        assert!(!route.contains(' '), "a raw space would break the request: {route}");
+        assert!(
+            !route.contains(' '),
+            "a raw space would break the request: {route}"
+        );
 
         let analysis = &snapshot.jobs[1];
         assert_eq!(analysis.kind, JobKind::Analysis);
-        assert!(analysis.route("t").contains("ctx=ctx-42"), "{}", analysis.route("t"));
+        assert!(
+            analysis.route("t").contains("ctx=ctx-42"),
+            "{}",
+            analysis.route("t")
+        );
     }
 
     #[test]
@@ -2133,13 +2161,7 @@ mod tests {
     fn every_terminal_state_the_backend_can_report_stops_the_poll() {
         // `unavailable` is the subtle one: the thread's sandbox is gone, so no further
         // poll can ever tell us anything and looping would burn requests forever.
-        for status in [
-            "completed",
-            "failed",
-            "canceled",
-            "unavailable",
-            "error",
-        ] {
+        for status in ["completed", "failed", "canceled", "unavailable", "error"] {
             let job = Job {
                 kind: JobKind::Theorizer,
                 task_id: "x".into(),
@@ -2211,10 +2233,7 @@ mod tests {
             data: json!({"sandbox_status": {"state": "preparing", "message": "Creating sandbox…"}})
                 .to_string(),
         });
-        assert_eq!(
-            decoded,
-            vec![TurnEvent::Status("Creating sandbox…".into())]
-        );
+        assert_eq!(decoded, vec![TurnEvent::Status("Creating sandbox…".into())]);
 
         // Falls back to the state when no message is given.
         let decoded = decode(&SseEvent {
@@ -2237,7 +2256,10 @@ mod tests {
         // `title`, and rendered as "(untitled)" until this list covered it.
         let cases = [
             (json!({"title": "A dataset"}), "A dataset"),
-            (json!({"citation": "Love MI et al. 2014."}), "Love MI et al. 2014."),
+            (
+                json!({"citation": "Love MI et al. 2014."}),
+                "Love MI et al. 2014.",
+            ),
             (json!({"name": "eda.png"}), "eda.png"),
             (json!({"question": "Does X affect Y?"}), "Does X affect Y?"),
             (json!({"summary": "Indexed 12 papers"}), "Indexed 12 papers"),
@@ -2302,14 +2324,8 @@ mod tests {
             name: "messages".into(),
             data: r#"[{"type":"AIMessageChunk","id":"m1","content":[{"type":"text","text":"blocks"},{"type":"other","text":"skip"}]},{}]"#.into(),
         };
-        assert_eq!(
-            decode(&string_form),
-            vec![TurnEvent::Token("plain".into())]
-        );
-        assert_eq!(
-            decode(&block_form),
-            vec![TurnEvent::Token("blocks".into())]
-        );
+        assert_eq!(decode(&string_form), vec![TurnEvent::Token("plain".into())]);
+        assert_eq!(decode(&block_form), vec![TurnEvent::Token("blocks".into())]);
     }
 
     #[test]
@@ -2383,7 +2399,10 @@ mod tests {
         // The JS SDK keys on the *first* `tools:` segment, which would file an inner
         // agent's work under its parent's group while labelling it with the inner
         // agent's name. We key on the whole namespace instead.
-        let outer = agent_ref("tools:aaa", Some(&json!({"lc_agent_name": "coordinator_two"})));
+        let outer = agent_ref(
+            "tools:aaa",
+            Some(&json!({"lc_agent_name": "coordinator_two"})),
+        );
         let inner = agent_ref(
             "tools:aaa|tools:bbb",
             Some(&json!({"lc_agent_name": "report_writer"})),
@@ -2417,7 +2436,8 @@ mod tests {
             events,
             vec![TurnEvent::Step {
                 agent: None,
-                label: "delegating to academic_researcher — Find the canonical DESeq2 paper.".into(),
+                label: "delegating to academic_researcher — Find the canonical DESeq2 paper."
+                    .into(),
             }]
         );
         // Replaying the closing fragment must not announce a second time.
@@ -2485,7 +2505,10 @@ mod tests {
         // Prose is untouched, and so is a partial object still streaming in — which
         // is what makes the trace look alive rather than empty.
         assert_eq!(summarize_agent_result("  plain prose  "), "plain prose");
-        assert_eq!(summarize_agent_result(r#"{"summary":"half"#), r#"{"summary":"half"#);
+        assert_eq!(
+            summarize_agent_result(r#"{"summary":"half"#),
+            r#"{"summary":"half"#
+        );
     }
 
     #[test]
@@ -2494,10 +2517,7 @@ mod tests {
             name: "error".into(),
             data: r#"{"message":"boom"}"#.into(),
         };
-        assert_eq!(
-            decode(&err),
-            vec![TurnEvent::Error("boom".into())]
-        );
+        assert_eq!(decode(&err), vec![TurnEvent::Error("boom".into())]);
     }
 
     #[test]
@@ -2507,9 +2527,6 @@ mod tests {
             b"event: messages\r\ndata: [{\"type\":\"AIMessageChunk\",\"content\":\"crlf\"},{}]\r\n\r\n",
         );
         assert_eq!(events.len(), 1);
-        assert_eq!(
-            decode(&events[0]),
-            vec![TurnEvent::Token("crlf".into())]
-        );
+        assert_eq!(decode(&events[0]), vec![TurnEvent::Token("crlf".into())]);
     }
 }

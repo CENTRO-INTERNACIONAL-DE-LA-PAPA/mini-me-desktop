@@ -54,7 +54,10 @@ impl Inlines {
 /// One rendered block.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Block {
-    Heading { level: u8, inlines: Inlines },
+    Heading {
+        level: u8,
+        inlines: Inlines,
+    },
     Paragraph(Inlines),
     /// A list item. `marker` is what to draw in the gutter — a bullet, or `3.`.
     ///
@@ -71,7 +74,10 @@ pub enum Block {
     /// Consecutive quoted lines fold into a single block, the same way paragraph lines do —
     /// a quote containing several paragraphs collapses to one, which is a limit worth having
     /// over a nested block tree nothing in this app produces.
-    Quote { depth: usize, inlines: Inlines },
+    Quote {
+        depth: usize,
+        inlines: Inlines,
+    },
     /// An image reference, alone on its line.
     ///
     /// The **path is not loaded**. It would have to be translated out of the distro's
@@ -79,9 +85,15 @@ pub enum Block {
     /// (§46 records the three spellings). Figures the agent actually produced already appear
     /// beneath the answer, found by diffing the thread's output directory on the host (§42) —
     /// so this block exists to stop `![](…)` rendering as punctuation, not to duplicate them.
-    Image { alt: String, url: String },
+    Image {
+        alt: String,
+        url: String,
+    },
     /// A fenced code block, kept verbatim: no inline parsing inside code.
-    Code { language: String, text: String },
+    Code {
+        language: String,
+        text: String,
+    },
     /// A pipe table. `header` may be empty when the source had no header row.
     ///
     /// Rows are ragged on purpose — a malformed table should render as the cells it does
@@ -594,7 +606,10 @@ mod tables {
     use super::*;
 
     fn table(source: &str) -> (Vec<Inlines>, Vec<Vec<Inlines>>) {
-        match parse(source).into_iter().find(|b| matches!(b, Block::Table { .. })) {
+        match parse(source)
+            .into_iter()
+            .find(|b| matches!(b, Block::Table { .. }))
+        {
             Some(Block::Table { header, rows }) => (header, rows),
             other => panic!("expected a table, got {other:?}"),
         }
@@ -766,7 +781,11 @@ mod tables {
         match &blocks[0] {
             Block::Paragraph(inlines) => {
                 assert!(!inlines.text.contains('!'), "{:?}", inlines.text);
-                assert!(inlines.text.starts_with("See the plot"), "{:?}", inlines.text);
+                assert!(
+                    inlines.text.starts_with("See the plot"),
+                    "{:?}",
+                    inlines.text
+                );
                 assert!(inlines.text.ends_with("for detail."), "{:?}", inlines.text);
                 assert!(inlines.text.contains("p.png"), "the path is kept");
             }
@@ -860,13 +879,14 @@ mod tables {
             "| this line has pipes but no rule under it |",
         ] {
             assert!(
-                !parse(source).iter().any(|b| matches!(b, Block::Table { .. })),
+                !parse(source)
+                    .iter()
+                    .any(|b| matches!(b, Block::Table { .. })),
                 "{source:?} must stay prose"
             );
-            assert!(parse(source).iter().any(|b| matches!(
-                b,
-                Block::Paragraph(_) | Block::ListItem { .. }
-            )));
+            assert!(parse(source)
+                .iter()
+                .any(|b| matches!(b, Block::Paragraph(_) | Block::ListItem { .. })));
         }
     }
 
@@ -1040,7 +1060,10 @@ mod tests {
     fn plain_text_survives_untouched() {
         // The common case: an answer with no markup at all must not be reshaped.
         let blocks = parse("Just a sentence.");
-        assert_eq!(blocks, vec![Block::Paragraph(Inlines::plain("Just a sentence."))]);
+        assert_eq!(
+            blocks,
+            vec![Block::Paragraph(Inlines::plain("Just a sentence."))]
+        );
         assert!(parse("").is_empty());
     }
 

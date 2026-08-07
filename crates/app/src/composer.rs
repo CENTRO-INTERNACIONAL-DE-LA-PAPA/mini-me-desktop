@@ -418,9 +418,12 @@ impl Composer {
                 return Some((row, line.x_for_index(offset.saturating_sub(*start))));
             }
         }
-        self.last_layout
-            .last()
-            .map(|(start, line)| (self.last_layout.len() - 1, line.x_for_index(offset.saturating_sub(*start))))
+        self.last_layout.last().map(|(start, line)| {
+            (
+                self.last_layout.len() - 1,
+                line.x_for_index(offset.saturating_sub(*start)),
+            )
+        })
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -542,7 +545,8 @@ impl EntityInputHandler for Composer {
             .unwrap_or(self.selected_range.clone());
 
         self.content =
-            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..]).into();
+            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
+                .into();
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         self.marked_range.take();
         cx.notify();
@@ -566,7 +570,8 @@ impl EntityInputHandler for Composer {
             .unwrap_or(self.selected_range.clone());
 
         self.content =
-            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..]).into();
+            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
+                .into();
         self.marked_range = if new_text.is_empty() {
             None
         } else {
@@ -715,7 +720,10 @@ impl Element for ComposerElement {
         let style = window.text_style();
 
         let (display_text, text_color) = if content.is_empty() {
-            (composer.placeholder.clone(), rgb(theme::text_muted()).into())
+            (
+                composer.placeholder.clone(),
+                rgb(theme::text_muted()).into(),
+            )
         } else {
             (content, style.color)
         };
@@ -909,14 +917,9 @@ impl Render for Composer {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .child(
-                div()
-                    .flex_grow()
-                    .min_w_0()
-                    .child(ComposerElement {
-                        composer: cx.entity(),
-                    }),
-            )
+            .child(div().flex_grow().min_w_0().child(ComposerElement {
+                composer: cx.entity(),
+            }))
     }
 }
 
@@ -956,12 +959,18 @@ mod tests {
 
         // First line is bytes 0..2: one whole run, one byte of the marked one.
         assert_eq!(
-            runs_for(&runs, 0, 2).iter().map(|r| r.len).collect::<Vec<_>>(),
+            runs_for(&runs, 0, 2)
+                .iter()
+                .map(|r| r.len)
+                .collect::<Vec<_>>(),
             vec![1, 1]
         );
         // Second line is bytes 3..5: the tail of the marked run, then the last run.
         assert_eq!(
-            runs_for(&runs, 3, 5).iter().map(|r| r.len).collect::<Vec<_>>(),
+            runs_for(&runs, 3, 5)
+                .iter()
+                .map(|r| r.len)
+                .collect::<Vec<_>>(),
             vec![1, 1]
         );
         // A range past the end contributes nothing — never a zero-length run, which

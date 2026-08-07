@@ -181,7 +181,10 @@ impl Kind {
             .to_ascii_lowercase();
         if IMAGE_EXTENSIONS.contains(&extension.as_str()) || extension == "svg" {
             Kind::Figure
-        } else if matches!(extension.as_str(), "csv" | "tsv" | "xlsx" | "json" | "parquet") {
+        } else if matches!(
+            extension.as_str(),
+            "csv" | "tsv" | "xlsx" | "json" | "parquet"
+        ) {
             Kind::Data
         } else if matches!(extension.as_str(), "md" | "txt" | "pdf" | "docx" | "html") {
             Kind::Document
@@ -262,8 +265,8 @@ pub fn human_size(bytes: u64) -> String {
 pub fn head(path: &Path, lines: usize) -> Result<String> {
     use std::io::{BufRead, BufReader};
 
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("could not open {}", path.display()))?;
+    let file =
+        std::fs::File::open(path).with_context(|| format!("could not open {}", path.display()))?;
     let mut reader = BufReader::new(file);
     let mut text = String::new();
     let mut buffer = String::new();
@@ -275,7 +278,8 @@ pub fn head(path: &Path, lines: usize) -> Result<String> {
             Ok(_) => text.push_str(&buffer),
             Err(error) => {
                 if taken == 0 {
-                    return Err(error).with_context(|| format!("could not read {}", path.display()));
+                    return Err(error)
+                        .with_context(|| format!("could not read {}", path.display()));
                 }
                 break;
             }
@@ -327,7 +331,8 @@ mod tests {
 
     #[test]
     fn only_images_are_collected_and_in_the_order_they_were_written() {
-        let dir = std::env::temp_dir().join(format!("minime-workspace-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("minime-workspace-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a temp dir");
 
@@ -441,7 +446,13 @@ mod tests {
     fn junk_and_absence_both_give_nothing_rather_than_panicking() {
         // This file is written by another process while this one reads it. Every bad shape has
         // to be survivable, because the alternative is the window dying on a truncated write.
-        for text in ["", "not json", "{}", r#"{"format":1}"#, r#"{"format":1,"subagents":[]}"#] {
+        for text in [
+            "",
+            "not json",
+            "{}",
+            r#"{"format":1}"#,
+            r#"{"format":1,"subagents":[]}"#,
+        ] {
             assert!(parse_registry(text).is_empty(), "{text:?}");
         }
         // A nameless entry is not nameable, and a missing description is merely unhelpful.

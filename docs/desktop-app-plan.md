@@ -91,15 +91,14 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   transition between two.
 
 **Proposed — P7**
-- ⬜ **The provenance graph** (§73) — a modal showing which subagents a conversation used and
-  where it doubled back: *paper search → theories → get data → clean data → analyze → theories*.
-  Cycles are the point, not a defect. The live data exists; **what does not is any of it after a
-  reload**, so this is a persistence problem first — the record has to be written to the thread's
-  directory as it streams. Edges come from **namespace nesting** (§75) — `langgraph_checkpoint_ns`
-  is a `|`-joined path, so the parent is a prefix and the edge is *causal*, not chronological.
-  Already on the wire; the client stores it and uses it only for grouping. Arrival stamps are
-  still worth adding, but for **duration** — the wire carries no time at all. Cycles across
-  turns, a tree within one. Sequenced after `/subagent`.
+- 🟡 **The provenance record** — built (§73–§75 designed it, §83 built it): a `Record` written to
+  `provenance.json` in the thread's own directory as each turn finishes, and a modal with two
+  views over it — a **timeline** of bars per turn, and the **path** as chips and arrows. Edges are
+  causal where the namespace path says so (`delegated to`) and observed where only arrival does
+  (`then`), and the modal says which is which. Cycles across turns, a tree within one.
+  **Not yet built**: the canvas-and-`paint_path` graph §73 sketched as the second stage — the
+  chain is legible with no layout algorithm, and it should earn the graph before one is written.
+  **Awaiting a real conversation** to say whether it does.
 - ✅ **`/subagent` slash commands** — done (§76–§81): a registry captured from the coordinator
   as it is assembled, a `/` picker over the real ten specialists, name validation that suggests
   the nearest match, and background dispatch from the palette. The one thing no test in this
@@ -4989,3 +4988,71 @@ the runtime has shipped `DiskBackedInMemStore`: persistence is on unless
 Ordinarily a stale docstring is worth a shrug. This one is not, because §79 added a **Restart
 backend** button and the Setup page tells people to press it. Believing the docstring means
 believing that button discards a researcher's memories. Owed upstream.
+
+## 83. The provenance record, built (2026-08-06)
+
+§73 asked for it, §74 and §75 argued out how the edges should be derived, and this section is the
+build. Sequenced after `/subagent` deliberately, and that sequencing paid: the delegations a
+researcher now asks for *by name* are recorded by the same code as the ones the coordinator makes
+on its own, because there was never a second path.
+
+### The record is the feature; the drawing is a view of it
+
+§73's ordering held. `crates/app/src/provenance.rs` is data — `Record` → `Turn` → `Invocation` —
+with no pixels in it, written to `provenance.json` in the thread's own directory as each turn
+finishes. That is the load-bearing part: `conversation_messages` returns role and text only,
+because the activity trace was assembled from a stream that is over (§46), so *nothing* about what
+was consulted survives a reload unless the client writes it down. It is the only thing that ever
+sees the stream.
+
+Written at `finish_turn` and only there, for the same reason the auto-title is: the thread id does
+not exist until the turn has run, so before that point there is no directory to write into.
+
+### Sibling order — the gap §75 named, filled without inventing anything
+
+§75 retired arrival-based ordering in favour of namespace nesting, which is causal and true by
+construction. It also flagged what nesting does *not* do: **it cannot order two siblings.** Both
+children of the coordinator are children of the coordinator whether one ran after the other or
+both ran at once, and `langgraph_step` — which would settle it — is not visible in the capture.
+
+That gap matters more than it sounds, because in practice almost every delegation is top-level:
+one segment, `tools:<uuid>`. A graph built from nesting alone would have drawn §73's example as
+five disconnected chips.
+
+So arrival comes back, in exactly the role §74 established for it and no wider:
+
+- Siblings are partitioned into **bands** by interval overlap. Everything in one band was running
+  while something else in that band was; everything in band *n* had finished before anything in
+  band *n + 1* began.
+- Between bands there is a `Then` edge. Within a band there is none — two subagents dispatched
+  together are joined by `+`, not by an arrow.
+
+Two edge kinds, and the modal says which is which: `delegated to` is certain, `then` is the order
+things were observed in. §73's third option asked for that line, and it is there because a
+provenance record that quietly guesses is worse than none — it will be believed.
+
+### What it looks like
+
+One modal, two views, one dataset (§74). **Timeline** is a row per turn headed by the question,
+with a bar per invocation laid out against *that turn's* clock — per turn, because the gaps
+between turns are however long the researcher took to read and type, and a shared axis would
+squash every bar to a sliver. Duration is on the right, which answers a question nobody could ask
+before: which step is slow. **Path** is §73's chain, in the notation the request was written in —
+chips and arrows, wrapping, a revisit simply repeating its chip. A repeated chip *is* the cycle,
+legible with no layout algorithm at all, which is why the canvas-and-`paint_path` graph §73
+sketched has not been built yet. It is worth building when the chain proves it wants one.
+
+### The test that will catch this breaking
+
+`the_same_real_turn_lands_in_the_provenance_record` replays the captured `delegated-turn.sse`
+through the **real** decoder into a real `Record`. Not hand-written events: if `AgentRef.ns` or
+`lc_agent_name` changes shape, it fails there rather than as an empty modal noticed weeks later.
+
+That test exists because of §81. Four attempts at the subagent registry failed, three of them
+diagnosed wrongly, and every one of those failures had the same signature — a component that only
+speaks when it fails, so "absent", "never reached" and "ran and failed" were indistinguishable.
+The provenance record has the same hazard in a worse form: a modal that shows nothing looks
+identical whether nothing was recorded, nothing was written, or nothing was read back. So the
+recording path is pinned to measured wire data, `save_provenance` reports a write failure in the
+status line instead of swallowing it, and an empty record is drawn as the *sentence* "no
+specialist has been consulted in this conversation yet" rather than as an empty canvas.

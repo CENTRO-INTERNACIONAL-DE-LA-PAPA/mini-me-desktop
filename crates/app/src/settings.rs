@@ -74,7 +74,11 @@ pub const PROVIDERS: [Provider; 5] = [
         label: "Mistral",
         needs_base_url: false,
         suggested_model: "mistral-large-latest",
-        models: &["mistral-large-latest", "mistral-small-latest", "codestral-latest"],
+        models: &[
+            "mistral-large-latest",
+            "mistral-small-latest",
+            "codestral-latest",
+        ],
     },
     Provider {
         id: "custom",
@@ -430,7 +434,11 @@ mod tests {
         )
         .expect("write");
         let themes = available_themes();
-        assert_eq!(themes.len(), crate::theme::THEMES.len(), "replaced, not appended");
+        assert_eq!(
+            themes.len(),
+            crate::theme::THEMES.len(),
+            "replaced, not appended"
+        );
         let replaced = themes
             .iter()
             .find(|(name, _)| name == "Mini-Me Dark")

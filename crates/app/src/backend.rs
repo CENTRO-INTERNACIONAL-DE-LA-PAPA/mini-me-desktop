@@ -128,7 +128,11 @@ fn resource(env_var: &str, name: &str) -> PathBuf {
         return beside;
     }
     // `CARGO_MANIFEST_DIR` is `crates/app`; these sit at the repo root.
-    normalized(Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(name))
+    normalized(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(name),
+    )
 }
 
 /// Resolve `..` segments lexically, so a path built by joining reads like a path.
@@ -242,26 +246,23 @@ impl BackendConfig {
         if std::env::var_os("MINIME_BACKEND_PORT").is_none() {
             config.port = settings.backend_port;
         }
-        let execution = resolve_execution(
-            override_local.or_else(|| {
-                if std::env::var_os("MINIME_EXECUTION_BACKEND").is_some() {
-                    None
-                } else {
-                    Some(settings.local_execution)
-                }
-            }),
-        );
+        let execution = resolve_execution(override_local.or_else(|| {
+            if std::env::var_os("MINIME_EXECUTION_BACKEND").is_some() {
+                None
+            } else {
+                Some(settings.local_execution)
+            }
+        }));
         // The launch command embeds both the port and the execution environment, so it is
         // rebuilt rather than patched.
-        config.launch_command =
-            launch_command_for(
-                &config.project_dir,
-                config.port,
-                config.wsl.as_ref(),
-                &execution,
-                settings.approve_execute,
-                settings.async_subagents,
-            );
+        config.launch_command = launch_command_for(
+            &config.project_dir,
+            config.port,
+            config.wsl.as_ref(),
+            &execution,
+            settings.approve_execute,
+            settings.async_subagents,
+        );
         config.execution = execution;
         config.approve_execute = settings.approve_execute;
         config.async_subagents = settings.async_subagents;
@@ -303,7 +304,14 @@ impl BackendConfig {
         let execution = resolve_execution(None);
         Self {
             port,
-            launch_command: launch_command_for(&project_dir, port, wsl.as_ref(), &execution, true, false),
+            launch_command: launch_command_for(
+                &project_dir,
+                port,
+                wsl.as_ref(),
+                &execution,
+                true,
+                false,
+            ),
             project_dir,
             wsl,
             attach_only: std::env::var_os("MINIME_BACKEND_ATTACH_ONLY").is_some(),
@@ -520,7 +528,10 @@ fn sync_overlay_command(source: &str, backend_dir: &str) -> String {
 fn generate_config_command(overlay: &str, python: &str) -> String {
     format!(
         "{python} {} .",
-        shell_quote(&format!("{}/minime_local/make_config.py", overlay.trim_end_matches('/')))
+        shell_quote(&format!(
+            "{}/minime_local/make_config.py",
+            overlay.trim_end_matches('/')
+        ))
     )
 }
 
@@ -977,9 +988,10 @@ impl BackendSupervisor {
         // child. (In WSL mode they are already inside the `bash -lc` string, because
         // `wsl.exe`'s own environment does not cross into the distro.)
         if self.config.wsl.is_none() {
-            for (name, value) in execution_env(&self.config.execution, false, self.config.approve_execute)
-                .into_iter()
-                .chain(feature_env(self.config.async_subagents))
+            for (name, value) in
+                execution_env(&self.config.execution, false, self.config.approve_execute)
+                    .into_iter()
+                    .chain(feature_env(self.config.async_subagents))
             {
                 if name == "PYTHONPATH" {
                     // Prepend rather than replace: whatever the user had still works.
@@ -1381,9 +1393,15 @@ mod tests {
             wsl_path(Path::new(r"C:\Users\piero\mini-me-desktop\overlay")),
             "/mnt/c/Users/piero/mini-me-desktop/overlay"
         );
-        assert_eq!(wsl_path(Path::new(r"D:\repos\overlay")), "/mnt/d/repos/overlay");
+        assert_eq!(
+            wsl_path(Path::new(r"D:\repos\overlay")),
+            "/mnt/d/repos/overlay"
+        );
         // A POSIX path is already what WSL wants.
-        assert_eq!(wsl_path(Path::new("/home/piero/overlay")), "/home/piero/overlay");
+        assert_eq!(
+            wsl_path(Path::new("/home/piero/overlay")),
+            "/home/piero/overlay"
+        );
     }
 
     #[test]
@@ -1407,7 +1425,10 @@ mod tests {
         );
         let command = argv.last().expect("the bash -lc payload");
         assert!(!command.contains("MINIME_EXECUTION_BACKEND"), "{command}");
-        assert!(command.contains("cd ~/'Mini-Me' && exec .venv/bin/langgraph dev"), "{command}");
+        assert!(
+            command.contains("cd ~/'Mini-Me' && exec .venv/bin/langgraph dev"),
+            "{command}"
+        );
     }
 
     #[test]
@@ -1690,12 +1711,17 @@ mod tests {
             command.contains("~/'Mini-Me/.desktop-overlay'/sitecustomize.py"),
             "{command}"
         );
-        assert!(command.contains("printf %s '/mnt/c/repo/overlay'"), "{command}");
+        assert!(
+            command.contains("printf %s '/mnt/c/repo/overlay'"),
+            "{command}"
+        );
         // And it still ends up as one assignment in front of exec.
         // The assignments end and `exec` begins — checked without pinning the exact
         // neighbour, so adding a variable does not fail a test about the overlay path.
         let exports_end = command.find("fi)\"").expect("the PYTHONPATH expression");
-        let exec_at = command.find("exec .venv/bin/langgraph dev").expect("the server");
+        let exec_at = command
+            .find("exec .venv/bin/langgraph dev")
+            .expect("the server");
         assert!(exports_end < exec_at, "{command}");
     }
 
@@ -1709,7 +1735,10 @@ mod tests {
         // Reading the sources rather than importing them keeps this a plain unit test; the
         // Python is not ours to run from here.
         let overlay = normalized(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay"));
-        for file in ["minime_local/make_config.py", "minime_local/async_agents.py"] {
+        for file in [
+            "minime_local/make_config.py",
+            "minime_local/async_agents.py",
+        ] {
             let path = overlay.join(file);
             let source = std::fs::read_to_string(&path)
                 .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
@@ -1742,9 +1771,14 @@ mod tests {
         );
         let command = argv.last().expect("the bash -lc payload");
         let sync = command.find("cp -r").expect("the overlay sync");
-        let serve = command.find("exec .venv/bin/langgraph").expect("the server");
+        let serve = command
+            .find("exec .venv/bin/langgraph")
+            .expect("the server");
         assert!(sync < serve, "{command}");
-        assert!(command.contains("~/'Mini-Me/.desktop-overlay'"), "{command}");
+        assert!(
+            command.contains("~/'Mini-Me/.desktop-overlay'"),
+            "{command}"
+        );
         // Never fatal: a stale overlay beats a backend that will not start, and the repo's
         // copy may be genuinely unreachable — the case the in-distro copy exists for.
         assert!(command.contains("|| true"), "{command}");
@@ -1788,10 +1822,18 @@ mod tests {
         // launch must stop, not start a coordinator holding tools that point at a graph
         // nobody serves.
         let generate = command.find("make_config.py").expect("the generator");
-        let serve = command.find("exec .venv/bin/langgraph").expect("the server");
+        let serve = command
+            .find("exec .venv/bin/langgraph")
+            .expect("the server");
         assert!(generate < serve, "{command}");
-        assert!(command.contains("&& exec") || command.contains("&& MINIME"), "{command}");
-        assert!(command.contains("--config .mini-me-desktop.langgraph.json"), "{command}");
+        assert!(
+            command.contains("&& exec") || command.contains("&& MINIME"),
+            "{command}"
+        );
+        assert!(
+            command.contains("--config .mini-me-desktop.langgraph.json"),
+            "{command}"
+        );
         // Registering the graph is only half of it: without this variable the overlay
         // never installs the middleware, so the coordinator has no `start_async_task`
         // and quietly delegates to a normal subagent instead — which blocks the chat,
@@ -1851,7 +1893,10 @@ mod tests {
         std::env::set_var("MINIME_EXECUTION_BACKEND", "local");
         assert!(matches!(resolve_execution(Some(false)), Execution::Sandbox));
         std::env::set_var("MINIME_EXECUTION_BACKEND", "sandbox");
-        assert!(matches!(resolve_execution(Some(true)), Execution::Local { .. }));
+        assert!(matches!(
+            resolve_execution(Some(true)),
+            Execution::Local { .. }
+        ));
         std::env::remove_var("MINIME_EXECUTION_BACKEND");
     }
 }

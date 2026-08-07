@@ -16,10 +16,11 @@ mod markdown;
 mod menu;
 mod preflight;
 mod protocol;
+mod provenance;
 mod selection;
 mod settings;
-mod subagent;
 mod sidecar;
+mod subagent;
 mod theme;
 mod ui;
 mod workspace;
@@ -29,9 +30,9 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use futures::StreamExt;
 use gpui::{
-    actions, div, img, AnimationExt as _, prelude::*, px, rgb, size, App, Application, Bounds, ClipboardItem, Context,
-    Entity, Focusable, FontStyle, FontWeight, HighlightStyle, KeyBinding, SharedString, StyledText,
-    Window, WindowBounds, WindowOptions,
+    actions, div, img, prelude::*, px, relative, rgb, size, AnimationExt as _, App, Application,
+    Bounds, ClipboardItem, Context, Entity, Focusable, FontStyle, FontWeight, HighlightStyle,
+    KeyBinding, SharedString, StyledText, Window, WindowBounds, WindowOptions,
 };
 
 use composer::{Composer, ComposerEvent};
@@ -169,11 +170,7 @@ fn fold_steps(steps: &[String]) -> Vec<String> {
 
 /// A labelled, bulleted list of spine entries.
 fn spine_list(label: &'static str, items: &[String], bullet: &'static str) -> impl IntoElement {
-    let mut list = div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .child(section_label(label));
+    let mut list = div().flex().flex_col().gap_1().child(section_label(label));
     for item in items {
         list = list.child(
             div()
@@ -182,7 +179,13 @@ fn spine_list(label: &'static str, items: &[String], bullet: &'static str) -> im
                 .w_full()
                 .min_w_0()
                 .gap_2()
-                .child(div().flex_none().text_color(rgb(theme::text_muted())).text_sm().child(bullet))
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(rgb(theme::text_muted()))
+                        .text_sm()
+                        .child(bullet),
+                )
                 .child(
                     div()
                         .flex_grow()
@@ -360,14 +363,26 @@ fn workbench_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("escape", Dismiss, None),
     ];
     for modifier in ["cmd", "ctrl"] {
-        bindings.push(KeyBinding::new(&format!("{modifier}-p"), TogglePalette, None));
-        bindings.push(KeyBinding::new(&format!("{modifier}-,"), ToggleSettings, None));
+        bindings.push(KeyBinding::new(
+            &format!("{modifier}-p"),
+            TogglePalette,
+            None,
+        ));
+        bindings.push(KeyBinding::new(
+            &format!("{modifier}-,"),
+            ToggleSettings,
+            None,
+        ));
         // Also unscoped, and for the same reason Escape is: focus lives in the composer,
         // so a workbench-scoped binding would never be reached. The composer's own
         // `ctrl-c` is more specific and still wins — it just declines the action when it
         // has nothing selected, which is what lets a transcript selection be copied
         // without first clicking somewhere to move focus (docs §62).
-        bindings.push(KeyBinding::new(&format!("{modifier}-c"), CopySelection, None));
+        bindings.push(KeyBinding::new(
+            &format!("{modifier}-c"),
+            CopySelection,
+            None,
+        ));
         bindings.push(KeyBinding::new(
             &format!("{modifier}-shift-a"),
             SelectAllTranscript,
@@ -375,6 +390,18 @@ fn workbench_key_bindings() -> Vec<KeyBinding> {
         ));
     }
     bindings
+}
+
+/// Which face of the provenance record is showing.
+///
+/// One modal, two views, one dataset (docs §74). They are not alternatives so much as two
+/// distances: the timeline is what happened, in order, with durations; the path is the shape that
+/// falls out of it once invocations collapse into kinds. The timeline earns its keep on the first
+/// conversation, the path on the tenth — when the loop is the thing worth seeing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ProvenanceView {
+    Timeline,
+    Path,
 }
 
 /// One command-palette entry.
@@ -394,13 +421,14 @@ enum Command {
     SelectWhole,
     SpecialistInBackground,
     RestartBackend,
+    OpenProvenance,
     OpenSettings,
     OpenSetup,
     Quit,
 }
 
 impl Command {
-    const ALL: [Command; 13] = [
+    const ALL: [Command; 14] = [
         Command::RunTurn,
         Command::NewThread,
         Command::RefreshSpine,
@@ -411,6 +439,7 @@ impl Command {
         Command::SelectWhole,
         Command::SpecialistInBackground,
         Command::RestartBackend,
+        Command::OpenProvenance,
         Command::OpenSettings,
         Command::OpenSetup,
         Command::Quit,
@@ -428,6 +457,7 @@ impl Command {
             Command::SelectWhole => "Select the whole conversation",
             Command::SpecialistInBackground => "Run the named specialist in the background",
             Command::RestartBackend => "Restart the backend",
+            Command::OpenProvenance => "Show this conversation's provenance",
             Command::OpenSettings => "Settings",
             Command::OpenSetup => "Setup & diagnostics",
             Command::Quit => "Quit",
@@ -446,6 +476,7 @@ impl Command {
             Command::SelectWhole => "every message, ready to copy (ctrl-shift-a)",
             Command::SpecialistInBackground => "sends the /name in the composer, without waiting",
             Command::RestartBackend => "after updating the app — reloads its Python overlay",
+            Command::OpenProvenance => "which specialists were consulted, and in what order",
             Command::OpenSettings => "model, keys, execution (ctrl-,)",
             Command::OpenSetup => "check what the backend still needs",
             Command::Quit => "close the window and the sidecar",
@@ -674,7 +705,14 @@ fn markdown_block(
                     .min_w_0()
                     .px_2()
                     .py_1()
-                    .child(styled(inlines, if bold { theme::text() } else { theme::text_muted() }))
+                    .child(styled(
+                        inlines,
+                        if bold {
+                            theme::text()
+                        } else {
+                            theme::text_muted()
+                        },
+                    ))
                     .when(bold, |row| row.font_weight(FontWeight::BOLD))
             };
             // Pad short rows so columns stay aligned when the source is ragged.
@@ -818,7 +856,10 @@ fn open_in_browser(url: &str) -> std::io::Result<()> {
     }
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open").arg(url).spawn().map(|_| ())
+        std::process::Command::new("open")
+            .arg(url)
+            .spawn()
+            .map(|_| ())
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
@@ -984,6 +1025,63 @@ fn trace_for<'a>(message: &'a mut Message, agent: &AgentRef) -> &'a mut AgentTra
     message.agents.last_mut().expect("just pushed")
 }
 
+/// How deeply nested a delegation is: 0 for one the coordinator made itself.
+///
+/// The namespace is a `|`-joined path (`NS_SEP`, docs §75), so depth is a segment count.
+fn depth(ns: &str) -> usize {
+    ns.split('|').count().saturating_sub(1)
+}
+
+/// A duration in the units a person reads it in.
+///
+/// Sub-second work is reported in milliseconds because that is what distinguishes a cache hit
+/// from a real call; anything longer is seconds, where a hundred milliseconds is noise.
+fn duration_label(ms: u64) -> String {
+    if ms < 1_000 {
+        format!("{ms}ms")
+    } else if ms < 60_000 {
+        format!("{:.1}s", ms as f64 / 1_000.)
+    } else {
+        format!("{}m {}s", ms / 60_000, (ms % 60_000) / 1_000)
+    }
+}
+
+/// A prompt reduced to a heading: one line, bounded.
+///
+/// A `/subagent` turn is a paragraph of instruction to the coordinator, and a timeline row headed
+/// by all of it would be a wall of near-identical text.
+fn one_line(prompt: &str) -> String {
+    let flattened = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    match flattened.char_indices().nth(90) {
+        Some((at, _)) => format!("{}…", &flattened[..at]),
+        None => flattened,
+    }
+}
+
+/// `1 time`, `2 times` — agreement, because "visited 1 times" reads as a bug in the tool.
+fn plural(count: usize, noun: &str) -> String {
+    if count == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{count} {noun}s")
+    }
+}
+
+/// One specialist in the path view.
+fn chip(name: &str) -> impl IntoElement {
+    div()
+        .flex_none()
+        .px_2()
+        .py(px(2.))
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(theme::border_strong()))
+        .bg(rgb(theme::surface()))
+        .text_color(rgb(theme::accent()))
+        .text_xs()
+        .child(name.to_string())
+}
+
 /// Root view: the three-pane research workbench.
 /// A setup command the app is running for the user, and its output so far.
 struct RunningFix {
@@ -1021,6 +1119,17 @@ struct Workbench {
     /// Work handed to a background Mini-Me, and whether it is stopped at the gate.
     tasks: Vec<protocol::AsyncTask>,
     transcript: Vec<Message>,
+    /// Whether the provenance window is showing, and which of its two views.
+    provenance_open: bool,
+    provenance_view: ProvenanceView,
+    /// What this conversation consulted, and in what order (docs §73–§75).
+    ///
+    /// Held here rather than derived from `transcript` because the transcript deliberately does
+    /// not survive a reload: `conversation_messages` returns role and text only, since the
+    /// activity trace was assembled from a stream that is over. This record is written to the
+    /// thread's directory as turns finish, which makes it the one part of a turn's activity that
+    /// can be reopened — and "track his work by conversation" is the whole request.
+    provenance: provenance::Record,
     sidecar: Arc<Sidecar>,
     /// Status line text (backend/stream progress, not model output).
     status: String,
@@ -1099,6 +1208,10 @@ struct Workbench {
     dragging: Option<Divider>,
     /// The preferences window's own focus, for pages that have no field to put it in.
     settings_focus: gpui::FocusHandle,
+    /// The provenance window's own focus. It has no field at all, and §71 is the reason it
+    /// needs one anyway: focus left on an element the open pane no longer renders means key
+    /// bindings — Escape among them — simply stop arriving.
+    provenance_focus: gpui::FocusHandle,
     /// Recent outcomes, newest last, each fading on its own timer.
     ///
     /// The status bar holds exactly one line, so an outcome worth reading — "copied 12 lines",
@@ -1157,7 +1270,10 @@ struct Workbench {
 impl Workbench {
     fn new(sidecar: Arc<Sidecar>, cx: &mut Context<Self>) -> Self {
         let composer = cx.new(|cx| {
-            let mut composer = Composer::new(cx, "Ask Mini-Me…  (Enter to send, Shift-Enter for a new line)");
+            let mut composer = Composer::new(
+                cx,
+                "Ask Mini-Me…  (Enter to send, Shift-Enter for a new line)",
+            );
             composer.set_text(SEED_PROMPT, cx);
             composer
         });
@@ -1198,9 +1314,12 @@ impl Workbench {
         // Renaming a conversation. Submit commits the new name; the sidebar row is
         // replaced by this field while it is in force.
         let rename_editor = cx.new(|cx| Composer::new(cx, "Name this conversation"));
-        cx.subscribe(&rename_editor, |workbench, _editor, event, cx| match event {
-            ComposerEvent::Submit(text) => workbench.commit_rename(text.clone(), cx),
-        })
+        cx.subscribe(
+            &rename_editor,
+            |workbench, _editor, event, cx| match event {
+                ComposerEvent::Submit(text) => workbench.commit_rename(text.clone(), cx),
+            },
+        )
         .detach();
 
         let palette_query = cx.new(|cx| {
@@ -1243,6 +1362,9 @@ impl Workbench {
             jobs: Vec::new(),
             tasks: Vec::new(),
             transcript: Vec::new(),
+            provenance_open: false,
+            provenance_view: ProvenanceView::Timeline,
+            provenance: provenance::Record::default(),
             sidecar,
             status: "idle — type a prompt and press Enter".to_string(),
             streaming: false,
@@ -1275,6 +1397,7 @@ impl Workbench {
             subagent_selected: 0,
             open_picker: None,
             settings_focus: cx.focus_handle(),
+            provenance_focus: cx.focus_handle(),
             sidebar_width: 240.,
             panel_width: 320.,
             dragging: None,
@@ -1364,8 +1487,10 @@ impl Workbench {
                     let finished = update.is_finished();
                     let label = update.kind.label();
                     let succeeded = update.succeeded();
-                    if let Some(tracked) =
-                        workbench.jobs.iter_mut().find(|k| k.task_id == update.task_id)
+                    if let Some(tracked) = workbench
+                        .jobs
+                        .iter_mut()
+                        .find(|k| k.task_id == update.task_id)
                     {
                         tracked.status = update.status.clone();
                     }
@@ -1415,8 +1540,10 @@ impl Workbench {
                     let waiting = update.needs_approval();
                     let succeeded = update.succeeded();
                     let task_id = update.task_id.clone();
-                    if let Some(tracked) =
-                        workbench.tasks.iter_mut().find(|t| t.task_id == update.task_id)
+                    if let Some(tracked) = workbench
+                        .tasks
+                        .iter_mut()
+                        .find(|t| t.task_id == update.task_id)
                     {
                         *tracked = update;
                     }
@@ -1433,8 +1560,7 @@ impl Workbench {
                         return;
                     }
                     if waiting {
-                        workbench.status =
-                            "a background task is waiting for your approval".into();
+                        workbench.status = "a background task is waiting for your approval".into();
                     } else if finished {
                         workbench.status = if succeeded {
                             "a background task finished".into()
@@ -1653,10 +1779,12 @@ impl Workbench {
             })
             .on_mouse_down(
                 gpui::MouseButton::Left,
-                cx.listener(move |workbench, _event: &gpui::MouseDownEvent, _window, cx| {
-                    workbench.dragging = Some(edge);
-                    cx.notify();
-                }),
+                cx.listener(
+                    move |workbench, _event: &gpui::MouseDownEvent, _window, cx| {
+                        workbench.dragging = Some(edge);
+                        cx.notify();
+                    },
+                ),
             )
     }
 
@@ -1892,12 +2020,10 @@ impl Workbench {
                         theme::text_faint()
                     }))
                     .when(enabled, |row| {
-                        row.hover(|style| {
-                            style.bg(rgb(theme::accent_soft())).cursor_pointer()
-                        })
-                        .on_click(cx.listener(move |workbench, _event, window, cx| {
-                            workbench.run_menu_item(item, target, window, cx);
-                        }))
+                        row.hover(|style| style.bg(rgb(theme::accent_soft())).cursor_pointer())
+                            .on_click(cx.listener(move |workbench, _event, window, cx| {
+                                workbench.run_menu_item(item, target, window, cx);
+                            }))
                     })
                     .child(item.label())
                     .child(
@@ -1910,24 +2036,21 @@ impl Workbench {
         }
 
         // Clicking anywhere else closes it, which is the only way out most people look for.
-        gpui::deferred(
-            gpui::anchored()
-                .position(open.at)
-                .snap_to_window()
-                .child(panel.on_mouse_down_out(cx.listener(
-                    |workbench, event: &gpui::MouseDownEvent, _window, cx| {
-                        // A right-click elsewhere re-opens the menu at the new spot, and
-                        // that handler is the only one that should decide. Closing here as
-                        // well would race it, and which one won would depend on paint
-                        // order — sometimes leaving no menu at all.
-                        if event.button == gpui::MouseButton::Right {
-                            return;
-                        }
-                        workbench.context_menu = None;
-                        cx.notify();
-                    },
-                ))),
-        )
+        gpui::deferred(gpui::anchored().position(open.at).snap_to_window().child(
+            panel.on_mouse_down_out(cx.listener(
+                |workbench, event: &gpui::MouseDownEvent, _window, cx| {
+                    // A right-click elsewhere re-opens the menu at the new spot, and
+                    // that handler is the only one that should decide. Closing here as
+                    // well would race it, and which one won would depend on paint
+                    // order — sometimes leaving no menu at all.
+                    if event.button == gpui::MouseButton::Right {
+                        return;
+                    }
+                    workbench.context_menu = None;
+                    cx.notify();
+                },
+            )),
+        ))
     }
 
     /// Copy the selected transcript text.
@@ -2111,10 +2234,8 @@ impl Workbench {
                                         .into(),
                                 );
                             }
-                            workbench.status = format!(
-                                "{}: {note}",
-                                if ok { "done" } else { "failed" }
-                            );
+                            workbench.status =
+                                format!("{}: {note}", if ok { "done" } else { "failed" });
                             // Re-check on success so the row the user just fixed goes
                             // green by itself — and so that a fix which succeeded without
                             // fixing anything gets found out. See `judge_finished_fix`.
@@ -2191,6 +2312,11 @@ impl Workbench {
         // conversation" is a sidebar of nothing, and every chat app auto-titles for
         // exactly this reason; the researcher can rename it whenever they like.
         let first_turn = self.transcript.is_empty();
+        // Open a row in the provenance record for this question. The prompt sent is what is
+        // recorded, not what was typed — for a `/name` command those differ, and what reached the
+        // coordinator is what the work responded to.
+        self.provenance
+            .begin_turn(prompt.clone(), provenance::now_ms());
         self.transcript.push(Message::new("you", prompt.clone()));
         // The assistant message — text *and* activity — streams into this entry.
         self.transcript.push(Message::new("mini-me", String::new()));
@@ -2299,7 +2425,9 @@ impl Workbench {
             let agents = workspace::subagents();
             let query = subagent::parse(&text).map(|c| c.name).unwrap_or_default();
             let matched = subagent::ranked(&query, &agents);
-            if let Some(chosen) = matched.get(self.subagent_selected.min(matched.len().saturating_sub(1))) {
+            if let Some(chosen) =
+                matched.get(self.subagent_selected.min(matched.len().saturating_sub(1)))
+            {
                 self.choose_subagent(&chosen.name, cx);
                 return;
             }
@@ -2468,6 +2596,9 @@ impl Workbench {
             // Activity attaches to the in-flight assistant message, so it sits with
             // the answer it produced instead of in a panel the user has to correlate.
             TurnEvent::Step { agent, label } => {
+                if let Some(agent) = &agent {
+                    self.note_provenance(agent);
+                }
                 if let Some(message) = self.transcript.last_mut() {
                     match agent {
                         None => message.steps.push(label),
@@ -2500,6 +2631,7 @@ impl Workbench {
                 // paused on a question for the user.
             }
             TurnEvent::SubagentToken { agent, text } => {
+                self.note_provenance(&agent);
                 if let Some(message) = self.transcript.last_mut() {
                     trace_for(message, &agent).push_text(&text);
                 }
@@ -2614,6 +2746,9 @@ impl Workbench {
         // Clear what belongs to the conversation being left. The spine is
         // thread-independent, so it stays — same rule as `New thread`.
         self.transcript.clear();
+        // Read back from the thread being opened, below. Cleared first so a failure to load
+        // shows the new conversation as having no record rather than the previous one's.
+        self.provenance = provenance::Record::default();
         self.text_selection.update(|selection| selection.clear());
         self.buckets.clear();
         self.tasks.clear();
@@ -2636,6 +2771,11 @@ impl Workbench {
                     // Figures this conversation produced are still on disk, so they can
                     // be shown again — history the transcript alone cannot carry.
                     workbench.collect_plots();
+                    // Same argument, for the same reason: the record of what was consulted is
+                    // on disk because the stream it came from is over (docs §73).
+                    if let Some(dir) = workbench.thread_workspace() {
+                        workbench.provenance = provenance::load(&dir);
+                    }
                     workbench.status = "done".into();
                     workbench.refresh_project(cx);
                     cx.notify();
@@ -2656,6 +2796,7 @@ impl Workbench {
         if self.sidecar.thread_id().as_deref() == Some(thread_id.as_str()) {
             self.sidecar.reset_thread();
             self.transcript.clear();
+            self.provenance = provenance::Record::default();
             self.text_selection.update(|selection| selection.clear());
             self.buckets.clear();
             self.tasks.clear();
@@ -2701,6 +2842,38 @@ impl Workbench {
         }
         self.restore_focus = true;
         cx.notify();
+    }
+
+    /// Note that a specialist produced something, now.
+    ///
+    /// Called from every frame that carries an [`AgentRef`], which is what makes the interval an
+    /// *arrival* interval — narrower than the execution it stands for, and honest about it
+    /// (docs §74). Cheap by construction: a scan of one turn's invocations, which is single
+    /// digits even on a heavily delegated question.
+    fn note_provenance(&mut self, agent: &AgentRef) {
+        self.provenance
+            .observe(&agent.ns, &agent.name, provenance::now_ms());
+    }
+
+    /// Persist this conversation's record, if there is a conversation to persist it under.
+    ///
+    /// A failure is reported in the status line rather than swallowed. This is the researcher's
+    /// record of their own enquiry, and a provenance file that silently stopped being written
+    /// would be discovered weeks later, as a gap — which is precisely the failure §81 spent four
+    /// attempts on. It does not interrupt the turn, which has already succeeded.
+    fn save_provenance(&mut self) {
+        let Some(dir) = self.thread_workspace() else {
+            return;
+        };
+        if self.provenance.is_empty() {
+            return;
+        }
+        if let Err(error) = provenance::save(&dir, &self.provenance) {
+            tracing::warn!(%error, "could not write the provenance record");
+            self.error = Some(format!(
+                "could not save this conversation's provenance: {error}"
+            ));
+        }
     }
 
     /// The thread's own output directory, or `None` before the first turn creates one.
@@ -2753,9 +2926,15 @@ impl Workbench {
 
     fn finish_turn(&mut self, cx: &mut Context<Self>) {
         self.collect_plots();
+        // Written here, and only here, for the same reason the title is: the thread id does not
+        // exist until the turn has run, so there is no directory to write into before this point.
+        // A turn stopped or failed still gets recorded — what was consulted before it stopped is
+        // part of the enquiry, and §63 already settled that a cut-off turn is worth keeping.
+        self.save_provenance();
         // The thread id does not exist until the turn has run, which is why the title
         // waits until here rather than being set when the prompt was typed.
-        if let (Some(title), Some(thread_id)) = (self.pending_title.take(), self.sidecar.thread_id())
+        if let (Some(title), Some(thread_id)) =
+            (self.pending_title.take(), self.sidecar.thread_id())
         {
             self.sidecar.rename_conversation(thread_id, title);
         }
@@ -2809,8 +2988,10 @@ impl Workbench {
         if !query.trim().is_empty() {
             ranked.sort_by(|a, b| b.0.cmp(&a.0));
         }
-        let matched: Vec<&protocol::Conversation> =
-            ranked.into_iter().map(|(_, conversation)| conversation).collect();
+        let matched: Vec<&protocol::Conversation> = ranked
+            .into_iter()
+            .map(|(_, conversation)| conversation)
+            .collect();
 
         let mut list = div()
             .id("conversations")
@@ -2939,7 +3120,11 @@ impl Workbench {
                     .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
                     .child(
                         ui::Label::new(conversation.title.clone())
-                            .colour(if selected { theme::text() } else { theme::text_muted() })
+                            .colour(if selected {
+                                theme::text()
+                            } else {
+                                theme::text_muted()
+                            })
                             .size(ui::Size::Compact)
                             .ellipsis(),
                     )
@@ -3019,7 +3204,9 @@ impl Workbench {
                             .id("open-settings")
                             .text_color(rgb(theme::accent()))
                             .hover(|style| {
-                                style.text_color(rgb(theme::accent_hover())).cursor_pointer()
+                                style
+                                    .text_color(rgb(theme::accent_hover()))
+                                    .cursor_pointer()
                             })
                             .child("◎")
                             .on_click(cx.listener(|workbench, _event, _window, cx| {
@@ -3447,10 +3634,7 @@ impl Workbench {
                                     .truncate()
                                     .text_color(rgb(theme::text_faint()))
                                     .text_xs()
-                                    .child(format!(
-                                        "{by} · {} installs",
-                                        listing.download_count
-                                    )),
+                                    .child(format!("{by} · {} installs", listing.download_count)),
                             ),
                     )
                     .child(
@@ -3501,6 +3685,291 @@ impl Workbench {
     /// they use for all fifty-odd of their modals. It suits this exactly — opening a
     /// figure or a report is something you do, look at, and dismiss, not somewhere you
     /// navigate to and have to find your way back from (docs §49).
+    /// The record of this enquiry: what was consulted, in what order, and where it doubled back.
+    ///
+    /// Requested (docs §73) with one sentence as the specification — *"each scientist can track
+    /// his work by conversation"* — and built as a modal for the reason §68 moved Setup into one:
+    /// it is something you open, read and close, not a place you navigate to.
+    fn provenance_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let view = self.provenance_view;
+        let rail = ui::nav_rail()
+            .child(
+                ui::NavEntry::new(
+                    "prov-timeline",
+                    "Timeline",
+                    view == ProvenanceView::Timeline,
+                )
+                .on_click(cx.listener(|workbench, _event, _window, cx| {
+                    workbench.provenance_view = ProvenanceView::Timeline;
+                    cx.notify();
+                })),
+            )
+            .child(
+                ui::NavEntry::new("prov-path", "Path", view == ProvenanceView::Path).on_click(
+                    cx.listener(|workbench, _event, _window, cx| {
+                        workbench.provenance_view = ProvenanceView::Path;
+                        cx.notify();
+                    }),
+                ),
+            );
+
+        let body = if self.provenance.is_empty() {
+            // Distinguished from "nothing happened": a conversation of plain questions has a
+            // record and it is empty of delegations, which is a fact about the work rather than
+            // a failure of the feature.
+            div().flex().flex_col().gap_2().child(
+                ui::Label::new("No specialist has been consulted in this conversation yet.")
+                    .muted(),
+            )
+        } else {
+            match view {
+                ProvenanceView::Timeline => self.provenance_timeline(),
+                ProvenanceView::Path => self.provenance_path(),
+            }
+        };
+
+        ui::Modal::new("provenance", "Provenance")
+            .width(760.)
+            .focus(&self.provenance_focus)
+            .nav(rail)
+            .body(body)
+            .actions(ui::actions().child(div().flex_grow()).child(
+                ui::Button::new("provenance-close", "Close").on_click(cx.listener(
+                    |workbench, _event, _window, cx| {
+                        workbench.provenance_open = false;
+                        workbench.restore_focus = true;
+                        cx.notify();
+                    },
+                )),
+            ))
+            .footer(
+                ui::Label::new(match self.thread_workspace() {
+                    Some(dir) => format!("kept in {}", dir.join(provenance::FILENAME).display()),
+                    None => "kept beside this conversation's files, once it has some".to_string(),
+                })
+                .muted()
+                .size(ui::Size::Compact),
+            )
+    }
+
+    /// One row per turn, one bar per invocation, laid out against that turn's own clock.
+    ///
+    /// Per turn rather than against a single conversation-wide axis: turns are separated by
+    /// however long the researcher took to read the answer and type the next question, which
+    /// would squash every bar to a sliver. What is being compared is the work inside a turn.
+    fn provenance_timeline(&self) -> gpui::Div {
+        let mut body = div().flex().flex_col().w_full().min_w_0().gap_4();
+        for (index, turn) in self.provenance.turns.iter().enumerate() {
+            if turn.invocations.is_empty() {
+                continue;
+            }
+            // The turn's own span: first token of the earliest to last token of the latest.
+            let start = turn
+                .invocations
+                .iter()
+                .map(|invocation| invocation.first_seen)
+                .min()
+                .unwrap_or(turn.sent_at);
+            let end = turn
+                .invocations
+                .iter()
+                .map(|invocation| invocation.last_seen)
+                .max()
+                .unwrap_or(start);
+            let span = end.saturating_sub(start).max(1) as f32;
+
+            let mut rows = div().flex().flex_col().w_full().min_w_0().gap_1();
+            for invocation in &turn.invocations {
+                let offset = invocation.first_seen.saturating_sub(start) as f32 / span;
+                let width =
+                    invocation.last_seen.saturating_sub(invocation.first_seen) as f32 / span;
+                rows = rows.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .w_full()
+                        .min_w_0()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_none()
+                                .w(px(190.))
+                                .min_w_0()
+                                // Depth shows a nested delegation for what it is: a specialist
+                                // that was called by another specialist, not by the coordinator.
+                                .pl(px(12. * depth(&invocation.ns) as f32))
+                                .child(
+                                    ui::Label::new(invocation.name.clone())
+                                        .size(ui::Size::Compact)
+                                        .ellipsis(),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .relative()
+                                .flex_grow()
+                                .min_w_0()
+                                .h(px(12.))
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .inset_0()
+                                        .my(px(5.))
+                                        .rounded_sm()
+                                        .bg(rgb(theme::border())),
+                                )
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .top_0()
+                                        .h_full()
+                                        .left(relative(offset))
+                                        .w(relative(width))
+                                        // A single-chunk invocation has a zero-width interval
+                                        // and would otherwise be drawn as nothing at all.
+                                        .min_w(px(3.))
+                                        .rounded_sm()
+                                        .bg(rgb(theme::accent())),
+                                ),
+                        )
+                        .child(
+                            div().flex_none().w(px(56.)).child(
+                                ui::Label::new(duration_label(
+                                    invocation.last_seen.saturating_sub(invocation.first_seen),
+                                ))
+                                .muted()
+                                .size(ui::Size::Compact),
+                            ),
+                        ),
+                );
+            }
+
+            body = body.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .min_w_0()
+                    .gap_2()
+                    .child(
+                        ui::Label::new(format!("{}. {}", index + 1, one_line(&turn.prompt)))
+                            .size(ui::Size::Compact)
+                            .ellipsis(),
+                    )
+                    .child(rows),
+            );
+        }
+        body.child(
+            ui::Label::new(
+                "Bars are when tokens arrived, which is narrower than the work itself — so bars \
+                 that overlap certainly ran together, while a gap only suggests one followed the \
+                 other.",
+            )
+            .muted()
+            .size(ui::Size::Compact),
+        )
+    }
+
+    /// The chain, in the notation the request was written in.
+    ///
+    /// `a → b → c`, wrapping, with a revisit simply repeating its chip — which makes the cycle
+    /// legible with no layout algorithm at all (docs §73). Concurrent work is joined by `+`
+    /// rather than an arrow, because there is no "then" between two things that ran together.
+    fn provenance_path(&self) -> gpui::Div {
+        let mut chain = div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .w_full()
+            .min_w_0()
+            .gap_1()
+            .items_center();
+        let mut first = true;
+        for turn in &self.provenance.turns {
+            let mut ordered: Vec<&provenance::Invocation> = turn.invocations.iter().collect();
+            ordered.sort_by_key(|invocation| (invocation.first_seen, invocation.last_seen));
+            let mut reach = 0u64;
+            for invocation in ordered {
+                let concurrent = !first && invocation.first_seen < reach;
+                if !first {
+                    chain = chain.child(
+                        ui::Label::new(if concurrent { "+" } else { "→" })
+                            .muted()
+                            .size(ui::Size::Compact),
+                    );
+                }
+                reach = reach.max(invocation.last_seen);
+                chain = chain.child(chip(&invocation.name));
+                first = false;
+            }
+        }
+
+        let graph = self.provenance.graph();
+        let mut visits = div().flex().flex_col().w_full().min_w_0().gap_1();
+        for node in &graph.nodes {
+            visits = visits.child(
+                ui::Label::new(format!(
+                    "{} — visited {}",
+                    node.name,
+                    plural(node.visits, "time")
+                ))
+                .size(ui::Size::Compact),
+            );
+        }
+
+        let mut transitions = div().flex().flex_col().w_full().min_w_0().gap_1();
+        for edge in &graph.edges {
+            transitions = transitions.child(
+                ui::Label::new(format!(
+                    "{} {} {}{}",
+                    graph.nodes[edge.from].name,
+                    edge.kind.label(),
+                    graph.nodes[edge.to].name,
+                    if edge.count > 1 {
+                        format!(" ×{}", edge.count)
+                    } else {
+                        String::new()
+                    },
+                ))
+                .size(ui::Size::Compact)
+                .colour(match edge.kind {
+                    provenance::Edge::Delegated => theme::text(),
+                    provenance::Edge::Then => theme::text_muted(),
+                }),
+            );
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w_0()
+            .gap_4()
+            .child(chain)
+            .child(
+                ui::Label::new("Specialists")
+                    .muted()
+                    .size(ui::Size::Compact),
+            )
+            .child(visits)
+            .child(
+                ui::Label::new("Transitions")
+                    .muted()
+                    .size(ui::Size::Compact),
+            )
+            .child(transitions)
+            .child(
+                ui::Label::new(
+                    "\u{201c}delegated to\u{201d} is certain — it comes from the run\u{2019}s own \
+                     structure. \u{201c}then\u{201d} is the order things were observed in, which \
+                     is not the same as one causing the other.",
+                )
+                .muted()
+                .size(ui::Size::Compact),
+            )
+    }
+
     fn preview_modal(&self, output: workspace::Output, cx: &mut Context<Self>) -> impl IntoElement {
         let mut body = div()
             .id("preview-body")
@@ -3536,7 +4005,11 @@ impl Workbench {
                         // down the rows. Without column *layout* — which GPUI 0.2.2 does
                         // not have — colour is the only thing that makes a wide CSV
                         // readable at all (docs §50).
-                        let delimiter = if output.name.ends_with(".tsv") { '\t' } else { ',' };
+                        let delimiter = if output.name.ends_with(".tsv") {
+                            '\t'
+                        } else {
+                            ','
+                        };
                         for (row, line) in text.lines().enumerate() {
                             let mut cells = div().flex().flex_row().flex_wrap().w_full().gap_2();
                             for (column, cell) in line.split(delimiter).enumerate() {
@@ -3626,7 +4099,7 @@ impl Workbench {
                             .child(
                                 div()
                                     .id("preview-open")
-                        .rounded_md()
+                                    .rounded_md()
                                     .flex_none()
                                     .px_2()
                                     .text_color(rgb(theme::text_muted()))
@@ -3644,7 +4117,7 @@ impl Workbench {
                             .child(
                                 div()
                                     .id("preview-close")
-                        .rounded_md()
+                                    .rounded_md()
                                     .flex_none()
                                     .px_2()
                                     .text_color(rgb(theme::text_muted()))
@@ -3692,7 +4165,9 @@ impl Workbench {
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|workbench, event: &gpui::MouseDownEvent, _window, cx| {
-                    workbench.text_selection.update(|selection| selection.clear());
+                    workbench
+                        .text_selection
+                        .update(|selection| selection.clear());
                     if let Some(spot) = workbench.text_selection.spot_at(event.position) {
                         workbench
                             .text_selection
@@ -3701,8 +4176,8 @@ impl Workbench {
                     cx.notify();
                 }),
             )
-            .on_mouse_move(cx.listener(
-                |workbench, event: &gpui::MouseMoveEvent, _window, cx| {
+            .on_mouse_move(
+                cx.listener(|workbench, event: &gpui::MouseMoveEvent, _window, cx| {
                     if !workbench.text_selection.selection().dragging() {
                         return;
                     }
@@ -3712,8 +4187,8 @@ impl Workbench {
                             .update(|selection| selection.extend(spot));
                         cx.notify();
                     }
-                },
-            ))
+                }),
+            )
             .on_mouse_up(
                 gpui::MouseButton::Left,
                 cx.listener(|workbench, _event: &gpui::MouseUpEvent, _window, cx| {
@@ -3751,7 +4226,11 @@ impl Workbench {
             );
         }
         for (index, message) in self.transcript.iter().enumerate() {
-            let label_color = if message.role == "you" { theme::text_muted() } else { theme::accent() };
+            let label_color = if message.role == "you" {
+                theme::text_muted()
+            } else {
+                theme::accent()
+            };
             let has_activity = !message.steps.is_empty() || !message.agents.is_empty();
             // An empty assistant body means we're still waiting on the first token —
             // unless a trace is already showing what's going on, which says more.
@@ -3759,29 +4238,19 @@ impl Workbench {
             // not part of the body, so it is not parsed and never reaches the cache.
             let waiting = message.body.is_empty() && self.streaming && !has_activity;
             let body = message.body.clone();
-            let mut block = div()
-                .flex()
-                .flex_col()
-                .w_full()
-                .min_w_0()
-                .gap_1()
-                .child(
-                    div()
-                        .text_color(rgb(label_color))
-                        .text_sm()
-                        .child(message.role),
-                );
+            let mut block = div().flex().flex_col().w_full().min_w_0().gap_1().child(
+                div()
+                    .text_color(rgb(label_color))
+                    .text_sm()
+                    .child(message.role),
+            );
             // The trace goes *above* the answer, because that is the order it
             // happened in and because the answer should be the last thing read.
             if has_activity {
                 block = block.child(self.activity_block(index, message, cx));
             }
             if waiting {
-                block = block.child(
-                    div()
-                        .text_color(rgb(theme::text_muted()))
-                        .child("…"),
-                );
+                block = block.child(div().text_color(rgb(theme::text_muted())).child("…"));
             }
             if !body.is_empty() {
                 // The user's own text is shown as typed — they wrote it, and reinterpreting
@@ -3914,7 +4383,12 @@ impl Workbench {
                 }
             })
             .collect();
-        self.status = if approve { "approved — running…" } else { "rejected" }.into();
+        self.status = if approve {
+            "approved — running…"
+        } else {
+            "rejected"
+        }
+        .into();
 
         let mut events = self.sidecar.resume(decisions);
         cx.spawn(async move |this, cx| {
@@ -4011,16 +4485,15 @@ impl Workbench {
                 .child(
                     ui::Button::new("approve", "Approve")
                         .tone(ui::Tone::Accent)
-                        .on_click(cx.listener(|workbench, _event, _window, cx| {
-                            workbench.decide(true, cx)
-                        })),
+                        .on_click(
+                            cx.listener(|workbench, _event, _window, cx| {
+                                workbench.decide(true, cx)
+                            }),
+                        ),
                 )
-                .child(
-                    ui::Button::new("reject", "Reject")
-                        .on_click(cx.listener(|workbench, _event, _window, cx| {
-                            workbench.decide(false, cx)
-                        })),
-                )
+                .child(ui::Button::new("reject", "Reject").on_click(
+                    cx.listener(|workbench, _event, _window, cx| workbench.decide(false, cx)),
+                ))
                 // Bounded to *this turn*, and nothing is persisted. A permanent
                 // "always allow" is how a security gate becomes a habit: the tenth
                 // identical dialog in one analysis is not read, it is dismissed, and
@@ -4028,11 +4501,12 @@ impl Workbench {
                 // Approving the rest of one task is a decision someone can actually
                 // hold in their head, and it expires on its own.
                 .child(
-                    ui::Button::new("approve-turn", "Approve the rest of this turn")
-                        .on_click(cx.listener(|workbench, _event, _window, cx| {
+                    ui::Button::new("approve-turn", "Approve the rest of this turn").on_click(
+                        cx.listener(|workbench, _event, _window, cx| {
                             workbench.approve_rest_of_turn = true;
                             workbench.decide(true, cx);
-                        })),
+                        }),
+                    ),
                 )
                 // The wider grant, asked for because one analysis is a dozen commands
                 // across several turns and nobody reads the twelfth dialog. It covers
@@ -4041,11 +4515,14 @@ impl Workbench {
                 // closing the app ends it, nothing is written to disk, and the status bar
                 // says so for as long as it holds (docs §41).
                 .child(
-                    ui::Button::new("approve-conversation", "Approve everything in this conversation")
-                        .on_click(cx.listener(|workbench, _event, _window, cx| {
-                            workbench.approve_conversation = true;
-                            workbench.decide(true, cx);
-                        })),
+                    ui::Button::new(
+                        "approve-conversation",
+                        "Approve everything in this conversation",
+                    )
+                    .on_click(cx.listener(|workbench, _event, _window, cx| {
+                        workbench.approve_conversation = true;
+                        workbench.decide(true, cx);
+                    })),
                 ),
         )
     }
@@ -4161,6 +4638,12 @@ impl Workbench {
             cx.notify();
             return;
         }
+        if self.provenance_open {
+            self.provenance_open = false;
+            self.restore_focus = true;
+            cx.notify();
+            return;
+        }
         if self.settings_open {
             // Same as Close: an unsaved palette was a look, not a change.
             let saved = settings::Settings::load();
@@ -4258,7 +4741,10 @@ impl Workbench {
                 if value.is_empty() {
                     return None;
                 }
-                let name = field.secret_name().map(str::to_string).unwrap_or_else(|| key_name.clone());
+                let name = field
+                    .secret_name()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| key_name.clone());
                 Some((name, value))
             })
             .collect();
@@ -4416,7 +4902,11 @@ impl Workbench {
             .child(
                 ui::Button::new(
                     "recheck",
-                    if self.checking { "Checking…" } else { "Re-check" },
+                    if self.checking {
+                        "Checking…"
+                    } else {
+                        "Re-check"
+                    },
                 )
                 .tone(ui::Tone::Accent)
                 .on_click(
@@ -4426,17 +4916,19 @@ impl Workbench {
             // Beside Re-check because this is where someone comes when something is wrong,
             // and "restart it" is the second thing anyone tries after "check again".
             .child(
-                ui::Button::new("restart-backend", "Restart backend").on_click(cx.listener(
-                    |workbench, _event, _window, cx| workbench.restart_backend(cx),
+                ui::Button::new("restart-backend", "Restart backend").on_click(
+                    cx.listener(|workbench, _event, _window, cx| workbench.restart_backend(cx)),
+                ),
+            )
+            .child(
+                ui::Button::new("close-setup", "Close").on_click(cx.listener(
+                    |workbench, _event, _window, cx| {
+                        workbench.settings_open = false;
+                        workbench.restore_focus = true;
+                        cx.notify();
+                    },
                 )),
             )
-            .child(ui::Button::new("close-setup", "Close").on_click(cx.listener(
-                |workbench, _event, _window, cx| {
-                    workbench.settings_open = false;
-                    workbench.restore_focus = true;
-                    cx.notify();
-                },
-            )))
     }
 
     fn settings_pane(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -4465,9 +4957,11 @@ impl Workbench {
                 "The palette the whole window uses. Hovering a row previews it.",
                 ui::Dropdown::new("pick-theme", self.applied_theme.clone())
                     .open(matches!(self.open_picker, Some((Picker::Theme, _))))
-                    .on_click(cx.listener(|workbench, event: &gpui::ClickEvent, _window, cx| {
-                        workbench.toggle_picker(Picker::Theme, event.position(), cx);
-                    })),
+                    .on_click(
+                        cx.listener(|workbench, event: &gpui::ClickEvent, _window, cx| {
+                            workbench.toggle_picker(Picker::Theme, event.position(), cx);
+                        }),
+                    ),
             ));
         }
         if section == Section::Model {
@@ -4477,9 +4971,11 @@ impl Workbench {
                 "Which model answers. Any id can be typed in the field below.",
                 ui::Dropdown::new("pick-model", current)
                     .open(matches!(self.open_picker, Some((Picker::Model, _))))
-                    .on_click(cx.listener(|workbench, event: &gpui::ClickEvent, _window, cx| {
-                        workbench.toggle_picker(Picker::Model, event.position(), cx);
-                    })),
+                    .on_click(
+                        cx.listener(|workbench, event: &gpui::ClickEvent, _window, cx| {
+                            workbench.toggle_picker(Picker::Model, event.position(), cx);
+                        }),
+                    ),
             ));
         }
 
@@ -4493,7 +4989,10 @@ impl Workbench {
                 continue;
             }
             let status = if field.is_secret() {
-                let name = field.secret_name().map(str::to_string).unwrap_or_else(|| key_name.clone());
+                let name = field
+                    .secret_name()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| key_name.clone());
                 // Presence only — the value itself is never read back into the UI.
                 if settings::secret(&name).is_some() {
                     " · stored"
@@ -4570,15 +5069,9 @@ impl Workbench {
                 ui::Toggle::new(SharedString::from(format!("toggle-{toggle}")), value).on_click(
                     cx.listener(move |workbench, _event, _window, cx| {
                         match toggle {
-                            0 => {
-                                workbench.draft.local_execution = !workbench.draft.local_execution
-                            }
-                            1 => {
-                                workbench.draft.approve_execute = !workbench.draft.approve_execute
-                            }
-                            _ => {
-                                workbench.draft.async_subagents = !workbench.draft.async_subagents
-                            }
+                            0 => workbench.draft.local_execution = !workbench.draft.local_execution,
+                            1 => workbench.draft.approve_execute = !workbench.draft.approve_execute,
+                            _ => workbench.draft.async_subagents = !workbench.draft.async_subagents,
                         }
                         cx.notify();
                     }),
@@ -4594,18 +5087,20 @@ impl Workbench {
                         cx.listener(|workbench, _event, _window, cx| workbench.save_settings(cx)),
                     ),
             )
-            .child(ui::Button::new("close-settings", "Close").on_click(cx.listener(
-                |workbench, _event, _window, cx| {
-                    // Closing without saving puts the saved palette back — the preview was a
-                    // look, not a change.
-                    let saved = settings::Settings::load();
-                    workbench.applied_theme = saved.theme.clone();
-                    settings::apply_theme(&saved);
-                    workbench.settings_open = false;
-                    workbench.restore_focus = true;
-                    cx.notify();
-                },
-            )));
+            .child(
+                ui::Button::new("close-settings", "Close").on_click(cx.listener(
+                    |workbench, _event, _window, cx| {
+                        // Closing without saving puts the saved palette back — the preview was a
+                        // look, not a change.
+                        let saved = settings::Settings::load();
+                        workbench.applied_theme = saved.theme.clone();
+                        settings::apply_theme(&saved);
+                        workbench.settings_open = false;
+                        workbench.restore_focus = true;
+                        cx.notify();
+                    },
+                )),
+            );
 
         self.preferences_window(pane, actions, cx)
     }
@@ -4663,7 +5158,11 @@ impl Workbench {
                         .gap_1()
                         .child(
                             div()
-                                .text_color(rgb(if report.ready() { theme::text_muted() } else { theme::error() }))
+                                .text_color(rgb(if report.ready() {
+                                    theme::text_muted()
+                                } else {
+                                    theme::error()
+                                }))
                                 .text_sm()
                                 .child(if self.checking {
                                     "Re-checking…".to_string()
@@ -4684,13 +5183,13 @@ impl Workbench {
                         // Whether the app may maintain that directory. Said out loud
                         // because it decides what the app is allowed to do to the user's
                         // own files, and that must never be a surprise.
-                        .child(
-                            div().text_color(rgb(theme::text_muted())).text_xs().child(if report.owned {
+                        .child(div().text_color(rgb(theme::text_muted())).text_xs().child(
+                            if report.owned {
                                 "Installed and maintained by this app."
                             } else {
                                 "Your own checkout — the app runs it but never modifies it."
-                            }),
-                        ),
+                            },
+                        )),
                 );
 
                 for check in &report.checks {
@@ -4729,87 +5228,97 @@ impl Workbench {
                         );
 
                     for fix in &check.fixes {
-                    match fix {
-                        preflight::Fix::Run { label, argv, note } => {
-                            let command = preflight::display_argv(argv);
-                            let busy = self.running_fix.as_ref().is_some_and(|fix| !fix.done);
-                            row = row
-                                // The note is not decoration: "asks for admin rights, then
-                                // needs a restart" is the difference between a user who
-                                // waits and a user who thinks it broke.
-                                .child(div().text_color(rgb(theme::text_muted())).text_xs().child(*note))
-                                .child(
-                                    ui::actions()
-                                        .gap_2()
-                                        .child(
-                                            ui::Button::new(
-                                                SharedString::from(format!("run-{}", check.id)),
-                                                *label,
+                        match fix {
+                            preflight::Fix::Run { label, argv, note } => {
+                                let command = preflight::display_argv(argv);
+                                let busy = self.running_fix.as_ref().is_some_and(|fix| !fix.done);
+                                row = row
+                                    // The note is not decoration: "asks for admin rights, then
+                                    // needs a restart" is the difference between a user who
+                                    // waits and a user who thinks it broke.
+                                    .child(
+                                        div()
+                                            .text_color(rgb(theme::text_muted()))
+                                            .text_xs()
+                                            .child(*note),
+                                    )
+                                    .child(
+                                        ui::actions()
+                                            .gap_2()
+                                            .child(
+                                                ui::Button::new(
+                                                    SharedString::from(format!("run-{}", check.id)),
+                                                    *label,
+                                                )
+                                                .tone(ui::Tone::Accent)
+                                                .disabled(busy)
+                                                .on_click(cx.listener({
+                                                    let argv = argv.clone();
+                                                    let label = label.to_string();
+                                                    let check_id = check.id;
+                                                    move |workbench, _event, _window, cx| {
+                                                        workbench.start_fix(
+                                                            label.clone(),
+                                                            argv.clone(),
+                                                            check_id,
+                                                            cx,
+                                                        );
+                                                    }
+                                                })),
                                             )
-                                            .tone(ui::Tone::Accent)
-                                            .disabled(busy)
-                                            .on_click(cx.listener({
-                                                let argv = argv.clone();
-                                                let label = label.to_string();
-                                                let check_id = check.id;
-                                                move |workbench, _event, _window, cx| {
-                                                    workbench.start_fix(
-                                                        label.clone(),
-                                                        argv.clone(),
-                                                        check_id,
-                                                        cx,
-                                                    );
-                                                }
-                                            })),
-                                        )
-                                        // Kept alongside the button: someone who would
-                                        // rather run it themselves — or send it to whoever
-                                        // administers the machine — should not have to
-                                        // retype it.
-                                        .child(
-                                            ui::Button::new(
-                                                SharedString::from(format!("copy-{}", check.id)),
-                                                "Copy ⧉",
-                                            )
-                                            .on_click(cx.listener({
-                                                let command = command.clone();
-                                                move |workbench, _event, _window, cx| {
-                                                    cx.write_to_clipboard(
-                                                        ClipboardItem::new_string(command.clone()),
-                                                    );
-                                                    workbench.say("command copied", cx);
-                                                    cx.notify();
-                                                }
-                                            })),
-                                        ),
+                                            // Kept alongside the button: someone who would
+                                            // rather run it themselves — or send it to whoever
+                                            // administers the machine — should not have to
+                                            // retype it.
+                                            .child(
+                                                ui::Button::new(
+                                                    SharedString::from(format!(
+                                                        "copy-{}",
+                                                        check.id
+                                                    )),
+                                                    "Copy ⧉",
+                                                )
+                                                .on_click(cx.listener({
+                                                    let command = command.clone();
+                                                    move |workbench, _event, _window, cx| {
+                                                        cx.write_to_clipboard(
+                                                            ClipboardItem::new_string(
+                                                                command.clone(),
+                                                            ),
+                                                        );
+                                                        workbench.say("command copied", cx);
+                                                        cx.notify();
+                                                    }
+                                                })),
+                                            ),
+                                    );
+                            }
+                            preflight::Fix::Adopt { label, dir } => {
+                                row = row.child(
+                                    ui::Button::new(
+                                        SharedString::from(format!("adopt-{}", check.id)),
+                                        *label,
+                                    )
+                                    .tone(ui::Tone::Accent)
+                                    .on_click(cx.listener({
+                                        let dir = dir.clone();
+                                        move |workbench, _event, _window, cx| {
+                                            workbench.adopt_checkout(dir.clone(), cx);
+                                        }
+                                    })),
                                 );
+                            }
+                            preflight::Fix::Manual(instruction) => {
+                                row = row.child(
+                                    div()
+                                        .w_full()
+                                        .min_w_0()
+                                        .text_color(rgb(theme::text_muted()))
+                                        .text_xs()
+                                        .child(instruction.clone()),
+                                );
+                            }
                         }
-                        preflight::Fix::Adopt { label, dir } => {
-                            row = row.child(
-                                ui::Button::new(
-                                    SharedString::from(format!("adopt-{}", check.id)),
-                                    *label,
-                                )
-                                .tone(ui::Tone::Accent)
-                                .on_click(cx.listener({
-                                    let dir = dir.clone();
-                                    move |workbench, _event, _window, cx| {
-                                        workbench.adopt_checkout(dir.clone(), cx);
-                                    }
-                                })),
-                            );
-                        }
-                        preflight::Fix::Manual(instruction) => {
-                            row = row.child(
-                                div()
-                                    .w_full()
-                                    .min_w_0()
-                                    .text_color(rgb(theme::text_muted()))
-                                    .text_xs()
-                                    .child(instruction.clone()),
-                            );
-                        }
-                    }
                     }
                     pane = pane.child(row);
                 }
@@ -4892,17 +5401,14 @@ impl Workbench {
                         // the code in that URL is short-lived, so retyping it is not an
                         // option.
                         .child(
-                            ui::Button::new("copy-signin", "Copy ⧉")
-                                .on_click(cx.listener({
-                                    let link = link.clone();
-                                    move |workbench, _event, _window, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            link.clone(),
-                                        ));
-                                        workbench.say("sign-in link copied", cx);
-                                        cx.notify();
-                                    }
-                                })),
+                            ui::Button::new("copy-signin", "Copy ⧉").on_click(cx.listener({
+                                let link = link.clone();
+                                move |workbench, _event, _window, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(link.clone()));
+                                    workbench.say("sign-in link copied", cx);
+                                    cx.notify();
+                                }
+                            })),
                         ),
                 );
             }
@@ -4957,8 +5463,7 @@ impl Workbench {
             pane = pane.child(log);
         }
 
-        pane
-        .child(
+        pane.child(
             div()
                 .w_full()
                 .min_w_0()
@@ -4981,6 +5486,9 @@ impl Workbench {
                 }
                 self.sidecar.reset_thread();
                 self.transcript.clear();
+                // A new conversation is a new enquiry. The one just left keeps its own record on
+                // disk, where reopening it will find it.
+                self.provenance = provenance::Record::default();
                 self.text_selection.update(|selection| selection.clear());
                 self.buckets.clear();
                 self.error = None;
@@ -5035,6 +5543,10 @@ impl Workbench {
             }
             Command::CopySelected => self.copy_selected_text(cx),
             Command::SelectWhole => self.select_whole_transcript(cx),
+            Command::OpenProvenance => {
+                self.provenance_open = true;
+                cx.notify();
+            }
             Command::OpenSettings => self.open_settings(None, cx),
             Command::OpenSetup => self.open_setup(cx),
             Command::Quit => cx.quit(),
@@ -5090,7 +5602,11 @@ impl Workbench {
                         div()
                             .flex_grow()
                             .min_w_0()
-                            .text_color(rgb(if is_selected { theme::text() } else { theme::text_muted() }))
+                            .text_color(rgb(if is_selected {
+                                theme::text()
+                            } else {
+                                theme::text_muted()
+                            }))
                             .child(command.label()),
                     )
                     .child(
@@ -5286,7 +5802,12 @@ impl Workbench {
         } else if has_text {
             ("↑", theme::accent(), theme::background(), "send")
         } else {
-            ("↑", theme::elevated(), theme::text_faint(), "type a question first")
+            (
+                "↑",
+                theme::elevated(),
+                theme::text_faint(),
+                "type a question first",
+            )
         };
 
         div()
@@ -5383,8 +5904,7 @@ impl Workbench {
                         .text_sm()
                         .with_animation(
                             "working",
-                            gpui::Animation::new(std::time::Duration::from_millis(1200))
-                                .repeat(),
+                            gpui::Animation::new(std::time::Duration::from_millis(1200)).repeat(),
                             |label, delta| {
                                 // Four frames of a braille spinner: no font dependency,
                                 // no SVG to ship, and it reads as motion at any size.
@@ -5405,9 +5925,7 @@ impl Workbench {
             .border_t_1()
             .border_color(rgb(theme::border()))
             .bg(rgb(theme::surface()))
-            .child(
-                ui::Label::new(status_text).colour(status_color).ellipsis(),
-            )
+            .child(ui::Label::new(status_text).colour(status_color).ellipsis())
             // A blanket grant that is in force must never be invisible — and must be
             // revocable without starting a new conversation, or "just this once" becomes
             // permanent by inconvenience. Click to hand the gate back.
@@ -5436,7 +5954,11 @@ impl Workbench {
                         theme::text_faint()
                     }))
                     .text_xs()
-                    .hover(|style| style.text_color(rgb(theme::accent_hover())).cursor_pointer())
+                    .hover(|style| {
+                        style
+                            .text_color(rgb(theme::accent_hover()))
+                            .cursor_pointer()
+                    })
                     .child("▤ conversations")
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
                         workbench.sidebar_open = !workbench.sidebar_open;
@@ -5453,7 +5975,11 @@ impl Workbench {
                         theme::text_faint()
                     }))
                     .text_xs()
-                    .hover(|style| style.text_color(rgb(theme::accent_hover())).cursor_pointer())
+                    .hover(|style| {
+                        style
+                            .text_color(rgb(theme::accent_hover()))
+                            .cursor_pointer()
+                    })
                     .child("▥ research")
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
                         workbench.panel_open = !workbench.panel_open;
@@ -5630,7 +6156,9 @@ impl Workbench {
             );
         }
 
-        panel.child(self.jobs_section(cx)).child(self.outputs_section(cx))
+        panel
+            .child(self.jobs_section(cx))
+            .child(self.outputs_section(cx))
     }
 
     /// Long jobs still running, and the ones that finished this session.
@@ -5753,25 +6281,25 @@ impl Workbench {
                                 SharedString::from(format!("bg-approve-{task_id}")),
                                 "Approve",
                             )
-                                .tone(ui::Tone::Accent)
-                                .on_click(cx.listener({
-                                    let task_id = task_id.clone();
-                                    move |workbench, _event, _window, cx| {
-                                        workbench.decide_task(task_id.clone(), true, cx);
-                                    }
-                                })),
+                            .tone(ui::Tone::Accent)
+                            .on_click(cx.listener({
+                                let task_id = task_id.clone();
+                                move |workbench, _event, _window, cx| {
+                                    workbench.decide_task(task_id.clone(), true, cx);
+                                }
+                            })),
                         )
                         .child(
                             ui::Button::new(
                                 SharedString::from(format!("bg-reject-{task_id}")),
                                 "Reject",
                             )
-                                .on_click(cx.listener({
-                                    let task_id = task_id.clone();
-                                    move |workbench, _event, _window, cx| {
-                                        workbench.decide_task(task_id.clone(), false, cx);
-                                    }
-                                })),
+                            .on_click(cx.listener({
+                                let task_id = task_id.clone();
+                                move |workbench, _event, _window, cx| {
+                                    workbench.decide_task(task_id.clone(), false, cx);
+                                }
+                            })),
                         ),
                 );
                 // A background worker asks once per command over several minutes. Without
@@ -5792,20 +6320,20 @@ impl Workbench {
                             SharedString::from(format!("bg-approve-{suffix}-{task_id}")),
                             label,
                         )
-                            // `text_xs` in the original: these sit under the pair above and
-                            // are the wider-scope variants of it, not peers.
-                            .size(ui::Size::Compact)
-                            .on_click(cx.listener({
-                                let task_id = task_id.clone();
-                                move |workbench, _event, _window, cx| {
-                                    if conversation_wide {
-                                        workbench.approve_conversation = true;
-                                    } else {
-                                        workbench.approve_tasks.insert(task_id.clone());
-                                    }
-                                    workbench.decide_task(task_id.clone(), true, cx);
+                        // `text_xs` in the original: these sit under the pair above and
+                        // are the wider-scope variants of it, not peers.
+                        .size(ui::Size::Compact)
+                        .on_click(cx.listener({
+                            let task_id = task_id.clone();
+                            move |workbench, _event, _window, cx| {
+                                if conversation_wide {
+                                    workbench.approve_conversation = true;
+                                } else {
+                                    workbench.approve_tasks.insert(task_id.clone());
                                 }
-                            })),
+                                workbench.decide_task(task_id.clone(), true, cx);
+                            }
+                        })),
                     );
                 }
             }
@@ -5842,7 +6370,12 @@ impl Workbench {
                             .text_sm()
                             .child(format!("{mark} {}", job.kind.label())),
                     )
-                    .child(div().text_color(rgb(theme::text_muted())).text_xs().child(detail))
+                    .child(
+                        div()
+                            .text_color(rgb(theme::text_muted()))
+                            .text_xs()
+                            .child(detail),
+                    )
                     .when(!job.question.is_empty(), |row| {
                         row.child(
                             div()
@@ -5941,12 +6474,9 @@ impl Workbench {
         }
 
         if self.buckets.is_empty() && files.is_empty() {
-            return section.child(
-                div()
-                    .text_color(rgb(theme::text_muted()))
-                    .text_xs()
-                    .child("Papers, datasets, theories and reports show up here as a turn produces them."),
-            );
+            return section.child(div().text_color(rgb(theme::text_muted())).text_xs().child(
+                "Papers, datasets, theories and reports show up here as a turn produces them.",
+            ));
         }
 
         for bucket in &self.buckets {
@@ -6037,8 +6567,8 @@ impl Render for Workbench {
             .on_action(cx.listener(Self::toggle_palette))
             .on_action(cx.listener(Self::toggle_settings))
             .on_action(cx.listener(Self::dismiss))
-            .on_mouse_move(cx.listener(
-                |workbench, event: &gpui::MouseMoveEvent, window, cx| {
+            .on_mouse_move(
+                cx.listener(|workbench, event: &gpui::MouseMoveEvent, window, cx| {
                     let Some(edge) = workbench.dragging else {
                         return;
                     };
@@ -6056,8 +6586,8 @@ impl Render for Workbench {
                         Divider::Panel => workbench.panel_width = width,
                     }
                     cx.notify();
-                },
-            ))
+                }),
+            )
             .on_mouse_up(
                 gpui::MouseButton::Left,
                 cx.listener(|workbench, _event: &gpui::MouseUpEvent, _window, cx| {
@@ -6070,11 +6600,11 @@ impl Render for Workbench {
             .on_action(cx.listener(Self::select_all_transcript))
             // Anywhere on the window, not a designated strip: someone dragging a file has
             // their eyes on the file, not on a target.
-            .on_drop(cx.listener(
-                |workbench, paths: &gpui::ExternalPaths, _window, cx| {
+            .on_drop(
+                cx.listener(|workbench, paths: &gpui::ExternalPaths, _window, cx| {
                     workbench.files_dropped(paths.paths(), cx);
-                },
-            ))
+                }),
+            )
             .child(body)
             .child(self.status_bar(cx))
             .child(self.toasts(cx));
@@ -6083,6 +6613,12 @@ impl Render for Workbench {
         // the chat 420px for as long as it is open.
         let root = if self.settings_open {
             root.child(self.settings_pane(cx))
+        } else {
+            root
+        };
+
+        let root = if self.provenance_open {
+            root.child(self.provenance_modal(cx))
         } else {
             root
         };
@@ -6143,7 +6679,9 @@ fn decode_capture(raw: &[u8], mut on_status: impl FnMut(&str)) -> (Message, Vec<
                 }
                 TurnEvent::Approval(request) => {
                     for action in &request.actions {
-                        message.steps.push(format!("awaiting approval: {}", action.tool));
+                        message
+                            .steps
+                            .push(format!("awaiting approval: {}", action.tool));
                     }
                 }
                 TurnEvent::Status(status) => on_status(&status),
@@ -6253,9 +6791,8 @@ mod tests {
     #[test]
     fn a_real_delegated_turn_produces_one_named_trace_with_its_steps() {
         let mut statuses = Vec::new();
-        let (message, outputs) = decode_capture(DELEGATED_TURN, |status| {
-            statuses.push(status.to_string())
-        });
+        let (message, outputs) =
+            decode_capture(DELEGATED_TURN, |status| statuses.push(status.to_string()));
 
         // The coordinator's own line: one delegation, announced once, labelled from
         // arguments that arrived across 60 fragments.
@@ -6268,7 +6805,10 @@ mod tests {
 
         // One group, named by the backend, with the subagent's real tool call in it.
         let [trace] = message.agents.as_slice() else {
-            panic!("expected exactly one subagent group, got {}", message.agents.len());
+            panic!(
+                "expected exactly one subagent group, got {}",
+                message.agents.len()
+            );
         };
         assert_eq!(trace.name, "academic_researcher");
         assert!(trace.ns.starts_with("tools:"), "{}", trace.ns);
@@ -6276,14 +6816,20 @@ mod tests {
 
         // Its answer was a JSON object, so the trace shows the readable part.
         let preview = protocol::summarize_agent_result(&trace.text);
-        assert!(preview.starts_with("The canonical DESeq2 paper"), "{preview}");
+        assert!(
+            preview.starts_with("The canonical DESeq2 paper"),
+            "{preview}"
+        );
         assert!(preview.ends_with("· 1 sources"), "{preview}");
 
         // The coordinator's answer still arrives, and the outputs panel still fills:
         // subagent frames must not be mistaken for either.
         assert!(message.body.contains("Genome Biology"), "{}", message.body);
         assert_eq!(
-            outputs.iter().map(|b| (b.name, b.items.len())).collect::<Vec<_>>(),
+            outputs
+                .iter()
+                .map(|b| (b.name, b.items.len()))
+                .collect::<Vec<_>>(),
             vec![("sources", 1)]
         );
 
@@ -6292,6 +6838,58 @@ mod tests {
         assert!(
             statuses.iter().any(|status| status == "Creating sandbox…"),
             "{statuses:?}"
+        );
+    }
+
+    #[test]
+    fn the_same_real_turn_lands_in_the_provenance_record() {
+        // The cross-layer proof: the record is fed by the *real* decoder on *measured* wire data,
+        // not by hand-written events. If `AgentRef.ns` or `lc_agent_name` ever changes shape, this
+        // fails here rather than as an empty modal weeks later — which is exactly how the subagent
+        // registry went wrong three times (docs §78–§81).
+        let mut frames = protocol::SseDecoder::default();
+        let mut turn = protocol::TurnDecoder::default();
+        let mut record = provenance::Record::default();
+        record.begin_turn("Find the canonical DESeq2 paper", 0);
+        // A counter, not the clock: arrival order is what the capture fixes, and a test that
+        // depended on wall-clock timing would be a test that fails on a slow machine.
+        let mut tick = 0u64;
+        for frame in frames.push(DELEGATED_TURN) {
+            for event in turn.push(&frame) {
+                tick += 1;
+                match event {
+                    TurnEvent::Step {
+                        agent: Some(agent), ..
+                    }
+                    | TurnEvent::SubagentToken { agent, .. } => {
+                        record.observe(&agent.ns, &agent.name, tick);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let [invocation] = record.turns[0].invocations.as_slice() else {
+            panic!(
+                "expected one invocation, got {:?}",
+                record.turns[0].invocations
+            );
+        };
+        assert_eq!(invocation.name, "academic_researcher");
+        assert!(invocation.ns.starts_with("tools:"), "{}", invocation.ns);
+        // A real interval, not a point: the invocation streamed across many frames.
+        assert!(
+            invocation.last_seen > invocation.first_seen,
+            "{invocation:?}"
+        );
+        // One kind, visited once, and nothing invented around it.
+        let graph = record.graph();
+        assert_eq!(graph.nodes.len(), 1);
+        assert_eq!(graph.nodes[0].name, "academic_researcher");
+        assert_eq!(graph.nodes[0].visits, 1);
+        assert!(
+            graph.edges.is_empty(),
+            "one specialist has nothing to point at"
         );
     }
 
@@ -6305,7 +6903,10 @@ mod tests {
         let commands = vec![Command::OpenSettings];
         for stale in [0usize, 1, 8, 999] {
             let clamped = stale.min(commands.len() - 1);
-            assert_eq!(clamped, 0, "index {stale} should clamp into a one-item list");
+            assert_eq!(
+                clamped, 0,
+                "index {stale} should clamp into a one-item list"
+            );
             assert_eq!(commands[clamped], Command::OpenSettings);
         }
         // And an empty list chooses nothing rather than panicking on `commands[0]`.
@@ -6326,7 +6927,9 @@ mod tests {
                 })
                 .collect();
             hits.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-            hits.into_iter().map(|(_, _, label)| label).collect::<Vec<_>>()
+            hits.into_iter()
+                .map(|(_, _, label)| label)
+                .collect::<Vec<_>>()
         };
         // "nt" is ambiguous — "ruN Turn" matches too — so the test is about *rank*,
         // which is what Enter acts on.
@@ -6415,7 +7018,8 @@ mod tests {
     fn the_sign_in_link_is_picked_out_of_the_cli_output() {
         // The real line, verbatim: `asta auth login` prints the device-activation URL and
         // then fails to open it, because there is no browser inside the distro.
-        let real = "gio: https://auth0.allenai.org/activate?user_code=DPMW-BJCG: Operation not supported";
+        let real =
+            "gio: https://auth0.allenai.org/activate?user_code=DPMW-BJCG: Operation not supported";
         assert_eq!(
             first_url(real).as_deref(),
             Some("https://auth0.allenai.org/activate?user_code=DPMW-BJCG"),
@@ -6483,7 +7087,10 @@ mod tests {
             &["/mnt/c/a.csv".into(), "/mnt/c/b.csv".into()],
             &[false, false],
         );
-        assert!(many.contains("/mnt/c/a.csv") && many.contains("/mnt/c/b.csv"), "{many}");
+        assert!(
+            many.contains("/mnt/c/a.csv") && many.contains("/mnt/c/b.csv"),
+            "{many}"
+        );
         assert_eq!(many.matches("- ").count(), 2, "{many}");
 
         assert!(prompt_for_dropped(&[], &[]).is_empty());
@@ -6607,8 +7214,7 @@ fn set_secret_from_args(args: &[String]) -> Option<i32> {
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 

@@ -274,7 +274,12 @@ mod tests {
     #[test]
     fn every_theme_has_a_ladder_and_a_visible_hover() {
         for (name, theme) in THEMES {
-            let ladder = [theme.background, theme.surface, theme.elevated, theme.overlay];
+            let ladder = [
+                theme.background,
+                theme.surface,
+                theme.elevated,
+                theme.overlay,
+            ];
             for pair in ladder.windows(2) {
                 // One rule for every palette: elevation raises luminance. The light theme
                 // gets there with a grey canvas and white cards rather than by inverting,
@@ -325,7 +330,10 @@ mod tests {
 
         let (name, dark) = &themes[0];
         assert_eq!(name, "Example Dark");
-        assert_eq!(dark.background, 0x101014, "alpha is dropped, not parsed as colour");
+        assert_eq!(
+            dark.background, 0x101014,
+            "alpha is dropped, not parsed as colour"
+        );
         assert_eq!(dark.surface, 0x16161b);
         assert_eq!(dark.accent, 0x7aa2f7);
         // A key Zed does not define falls back rather than landing on black.
@@ -397,7 +405,10 @@ pub fn from_zed_family(json: &serde_json::Value) -> Vec<(String, Theme)> {
                     elevated: pick("elevated_surface.background", base.elevated),
                     // Zed has no separate overlay role; its elevated surface is what
                     // modals sit on, nudged so our ladder still ascends.
-                    overlay: nudge(pick("elevated_surface.background", base.overlay), background),
+                    overlay: nudge(
+                        pick("elevated_surface.background", base.overlay),
+                        background,
+                    ),
                     accent_soft: pick("element.selected", base.accent_soft),
                     text: pick("text", base.text),
                     text_muted: pick("text.muted", base.text_muted),

@@ -113,9 +113,15 @@ pub async fn install(
     let mut tar = tar::Archive::new(decoder);
     let mut installed = Vec::new();
 
-    for entry in tar.entries().context("the download is not a readable archive")? {
+    for entry in tar
+        .entries()
+        .context("the download is not a readable archive")?
+    {
         let mut entry = entry.context("could not read an entry from the archive")?;
-        let path = entry.path().context("an archive entry has no path")?.into_owned();
+        let path = entry
+            .path()
+            .context("an archive entry has no path")?
+            .into_owned();
 
         // `themes/<something>.json`, and nothing else. Checking the *file name* rather
         // than the whole path also means a crafted archive cannot write outside the
