@@ -10,6 +10,7 @@ import importlib.abc
 import logging
 import os
 import sys
+from pathlib import Path
 
 LOCAL_EXECUTION_ENV = "MINIME_EXECUTION_BACKEND"
 
@@ -190,12 +191,64 @@ class _PatchOnImport(importlib.abc.MetaPathFinder):
         return None
 
 
+def _checkout_version(start: "os.PathLike[str] | str | None" = None) -> str:
+    """The commit this backend is running, read from the checkout's own git files.
+
+    **Because every diagnosis this week was made without knowing what code was running.** The app
+    syncs the checkout to a pin before spawning, and when that fails — a private remote WSL has no
+    credentials for, most recently — it says so in the *app's* log, while the backend log the
+    researcher actually reads carries no version at all. So a fix that was merged, pulled and never
+    delivered produces a log identical to one that was delivered and did not work, and the second
+    reading is the one that costs a night.
+
+    No subprocess: this runs during interpreter start-up on a path where a stalled `git` would
+    delay the window, and the two files involved are plain text.
+    """
+    root = Path(start or Path.cwd())
+    for base in (root, *root.parents):
+        marker = base / ".git"
+        if marker.is_file():  # a worktree or submodule: `gitdir: <path>`
+            pointer = marker.read_text(errors="replace").partition("gitdir:")[2].strip()
+            marker = Path(pointer) if pointer else marker
+        if not marker.is_dir():
+            continue
+        try:
+            head = (marker / "HEAD").read_text(errors="replace").strip()
+        except OSError:
+            return "unknown"
+        if not head.startswith("ref:"):
+            return f"{head[:7]} (detached)"
+        ref = head.partition("ref:")[2].strip()
+        # A linked worktree keeps its own HEAD but shares every ref with the repository it was
+        # made from, named by `commondir`. Without this the branch resolves nowhere and the stamp
+        # reads "unresolved" — a diagnostic that cannot read its own repository is worse than
+        # none, because it invites exactly the shrug this whole line exists to prevent.
+        common = marker / "commondir"
+        if common.is_file():
+            marker = (marker / common.read_text(errors="replace").strip()).resolve()
+        loose = marker / ref
+        if loose.is_file():
+            return f"{loose.read_text(errors='replace').strip()[:7]} ({ref.split('/')[-1]})"
+        # Packed refs — what a fresh clone that has never been updated looks like.
+        packed = marker / "packed-refs"
+        if packed.is_file():
+            for line in packed.read_text(errors="replace").splitlines():
+                sha, _, name = line.partition(" ")
+                if name.strip() == ref:
+                    return f"{sha[:7]} ({ref.split('/')[-1]})"
+        return f"unresolved {ref}"
+    return "not a git checkout"
+
+
 def install() -> bool:
     """Arm the overlay. Returns True when host execution is enabled.
 
     Safe to call more than once.
     """
     local = local_execution_requested()
+    # First line of the backend log, on purpose: it is the one fact every other line is read
+    # against, and it has never been there.
+    log.warning("minime_local: backend checkout %s", _checkout_version())
     # The spine patches are armed either way; `_patch` declines the host-execution ones itself
     # when they are not wanted, so there is one list of targets and one place that decides.
     targets = _TARGETS if local else _ALWAYS_TARGETS

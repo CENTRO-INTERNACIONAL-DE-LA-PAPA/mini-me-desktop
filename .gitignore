@@ -14,10 +14,13 @@ Cargo.lock.orig
 # Claude Code session + linked worktrees (never commit — holds build output)
 .claude/
 
-# The bundled Mini-Me checkout (scripts/bundle-backend.sh). It ships *with a build* so a
-# user with no GitHub credentials can still install — but it must never enter this repo's
-# history: the locked decision is "bundled, never forked" (docs §5), and a vendored copy in
-# git is a fork with extra steps.
+# A Mini-Me copy assembled by scripts/bundle-backend.sh for a packaged build. Still not
+# tracked — it is build output, not source.
+#
+# The source itself now lives at `mini-me/` **and is tracked**. That reverses §5's "bundled,
+# never forked", on the researcher's instruction: *"from now I want a mono repo in mini me
+# desktop. I dont want to depende on a secod repo anymmore."* See docs §135 for what the old
+# rule was protecting and why it stopped being worth its cost.
 /vendor/
 
 # Python bytecode from the overlay, which the *backend* regenerates every run. Tracking

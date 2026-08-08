@@ -7846,3 +7846,69 @@ the repository rather than the overlay: the constraint that put four of these pa
 verification, a citation builder, a CLI search — was built on the assumption that the subagent was
 searching badly. It was not searching at all, and nothing we added on that assumption could have
 found that out.*
+
+## 134. A fix that was merged, pulled, and never delivered (2026-08-08)
+
+§133's fix was merged at 23:22:57. The run at 23:24 behaved exactly as before, and the honest
+reading of that was *"the fix does not work"*. It had not run. The backend was still executing
+`77c8b94` — **three pull requests behind**.
+
+Every layer of the delivery chain reported success or said nothing:
+
+- `sync_to_pin` fetched from Mini-Me's own remote. It is a **private** repository and WSL holds
+  no credentials for it, so the fetch failed — quietly, and into the *app's* log, not the backend
+  log anyone reads.
+- The checkout also carried four hand-delivered files from an earlier attempt, so the dirty-tree
+  guard refused to move it. Correctly. It cannot tell an abandoned manual patch from a
+  colleague's work in progress.
+- And the backend log carried **no version at all**, so every line in it was read against an
+  assumption about which code produced it.
+
+Three independent safeguards, each behaving as designed, combining into a backend frozen a month
+back with nothing on screen to say so.
+
+### The stamp
+
+The overlay now logs the checkout's commit as its first line — read from `.git` directly, no
+subprocess, because this runs during start-up and a stalled `git` would delay the window:
+
+> `minime_local: backend checkout aab5790 (main)`
+
+It reads a linked worktree correctly too, via `commondir`, which it did not on the first attempt.
+A diagnostic that cannot read its own repository is worse than none: it earns the shrug it exists
+to prevent.
+
+## 135. One repository (2026-08-08)
+
+> *"from now I want a mono repo in mini me desktop. copy everything we need I dont want to depende
+> on a secod repo anymmore"*
+
+The backend source is now `mini-me/` in this repository, tracked, at `aab5790` — all 184 files,
+including the web frontend, so nothing is left behind that would keep the second repository alive.
+
+### What §5 was protecting, and why it stopped paying
+
+The locked decision was *"bundled, never forked"*, and its reasoning was sound: a vendored copy in
+git is a fork with extra steps, and a fork drifts. That held while the checkout was **reference
+material somebody else maintained**. It stopped holding at *"I myself mantain it"*, and what
+replaced it was not safety but four delivery bugs in three days, ending in §134 — a merged fix that
+never reached the machine because the update path needed credentials the machine did not have.
+
+The monorepo removes that path entirely. `bundled_backend_dir()` finds `mini-me/` first, and
+provisioning already knew how to copy from a bundled source rather than clone
+(`scripts/setup-wsl.sh`, `MINIME_BUNDLED_SOURCE`). **A `git pull` on this repository is now the
+backend update** — a file copy that needs no network and no token, instead of a `git fetch` against
+a private remote that WSL has never once succeeded at.
+
+### What is deliberately not done yet
+
+`sync_to_pin` still updates an existing checkout with `git fetch origin`. Provisioning a *new* one
+now uses the in-repo source, but a machine that already has `~/Mini-Me` keeps the old path, and the
+old path is the broken one. Replacing it means deciding what a WSL checkout even is once the source
+is here — a git clone with its own history, or a plain directory mirrored from `mini-me/` with a
+version stamp written beside it. The second is simpler and matches the monorepo, and it wants a
+clear head rather than the end of this session.
+
+*Written down rather than done, because the failure being fixed is a delivery mechanism whose
+failure mode is silence — and shipping half of one at midnight is how §127, §129, §130 and §131
+each happened.*

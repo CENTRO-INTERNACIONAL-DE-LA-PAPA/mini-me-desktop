@@ -163,18 +163,32 @@ fn scripts_dir() -> PathBuf {
     resource("MINIME_SCRIPTS_DIR", "scripts")
 }
 
-/// A Mini-Me copy shipped with the app, if there is one.
+/// The Mini-Me source this app runs.
 ///
-/// `vendor/Mini-Me`, populated by `scripts/bundle-backend.sh` and gitignored. Its
-/// presence is what lets provisioning skip GitHub entirely — see [`BackendConfig::setup_script`].
+/// **`mini-me/` in this repository, tracked.** *"from now I want a mono repo in mini me desktop.
+/// I dont want to depende on a secod repo anymmore."*
+///
+/// It is also what makes updates work at all. The backend used to be fetched from its own
+/// repository, which is private: WSL has no credentials for it, so `git fetch` either hung waiting
+/// for a sign-in dialog (§131) or failed fast and left the checkout on last month's commit while
+/// every log line looked healthy (§134). Shipping the source here replaces a network call needing
+/// credentials with a file copy needing nothing — `git pull` on this repo *is* the backend update.
+///
+/// `vendor/Mini-Me` is still honoured behind it, for a packaged build laid out by
+/// `scripts/bundle-backend.sh`, and `MINIME_BUNDLED_BACKEND` overrides both.
 fn bundled_backend_dir() -> Option<PathBuf> {
-    // The variable names the checkout itself, not the directory holding it — the default
-    // is `vendor/Mini-Me`, but someone overriding it is pointing at a specific copy.
-    let dir = match std::env::var_os("MINIME_BUNDLED_BACKEND") {
-        Some(dir) => PathBuf::from(dir),
-        None => resource("MINIME_VENDOR_DIR", "vendor").join("Mini-Me"),
-    };
-    dir.join("langgraph.json").is_file().then_some(dir)
+    // The variable names the checkout itself, not the directory holding it — someone overriding
+    // it is pointing at a specific copy.
+    if let Some(dir) = std::env::var_os("MINIME_BUNDLED_BACKEND") {
+        let dir = PathBuf::from(dir);
+        return dir.join("langgraph.json").is_file().then_some(dir);
+    }
+    [
+        resource("MINIME_SOURCE_DIR", "mini-me"),
+        resource("MINIME_VENDOR_DIR", "vendor").join("Mini-Me"),
+    ]
+    .into_iter()
+    .find(|dir| dir.join("langgraph.json").is_file())
 }
 
 /// Render a path the way WSL sees it: `C:\\Users\\x` becomes `/mnt/c/Users/x`.
@@ -1933,9 +1947,35 @@ mod tests {
             dir: "~/Mini-Me".into(),
         });
         let command = config.setup_script();
-        assert!(command.starts_with("bash '"), "{command}");
+        // The source now ships in this repository (`mini-me/`), so provisioning always has one
+        // to copy from and the script never reaches GitHub for it. This assertion used to be
+        // `starts_with("bash '")` — true only while a developer tree had no bundled copy, which
+        // stopped being the case the moment the backend moved in here.
+        assert!(command.contains("MINIME_BUNDLED_SOURCE="), "{command}");
+        assert!(command.contains("bash '"), "{command}");
         assert!(command.contains("setup-wsl.sh"), "{command}");
         assert!(command.ends_with("~/'Mini-Me'"), "{command}");
+    }
+
+    /// The backend source is found in this repository, without an environment variable.
+    ///
+    /// **The point of the monorepo, as an assertion.** Provisioning and updates both hang off
+    /// `bundled_backend_dir()`; if it stops finding `mini-me/`, the app silently falls back to
+    /// cloning a *private* repository that WSL cannot authenticate to — which is the failure
+    /// that cost §131 and §134, and it presents as a backend that simply never changes.
+    #[test]
+    fn the_backend_source_ships_in_this_repository() {
+        let _env = env_lock::hold();
+        std::env::remove_var("MINIME_BUNDLED_BACKEND");
+        std::env::remove_var("MINIME_SOURCE_DIR");
+        std::env::remove_var("MINIME_VENDOR_DIR");
+        let found = bundled_backend_dir().expect("mini-me/ is part of this repo");
+        assert!(
+            found.ends_with("mini-me"),
+            "expected the in-repo source, found {found:?}"
+        );
+        assert!(found.join("backend/agent.py").is_file(), "{found:?}");
+        assert!(found.join("skills").is_dir(), "{found:?}");
     }
 
     #[test]
@@ -2374,6 +2414,85 @@ mod pin_tests {
     ///
     /// **These are the ones worth a test.** Getting the happy path wrong costs a stale backend;
     /// getting these wrong destroys a colleague's uncommitted work — the failure §231 wrote the
+    /// The version stamp reads a real checkout, including a linked worktree.
+    ///
+    /// **Because the whole point of it is to be trusted at 11pm.** Four diagnoses this week were
+    /// made without knowing which commit was running, and two of them were wrong because of it.
+    /// A stamp that prints `unresolved refs/heads/…` for an ordinary layout would be worse than
+    /// none: it invites the shrug it exists to prevent. The worktree case was broken when first
+    /// written — a linked worktree keeps its own `HEAD` and shares refs with the repository it
+    /// came from, via `commondir`.
+    #[test]
+    fn the_backend_says_which_commit_it_is_running() {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: python3 is not on PATH");
+            return;
+        }
+        let Some((clone, _)) = repo() else {
+            eprintln!("skipping: git is not on PATH");
+            return;
+        };
+        let tree = clone.parent().unwrap_or(&clone).join("linked");
+        let linked = std::process::Command::new("git")
+            .args(["-C", &clone.to_string_lossy(), "worktree", "add", "-q"])
+            .arg(&tree)
+            .arg("HEAD")
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false);
+        let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
+        let read = |dir: &std::path::Path| -> String {
+            let script = format!(
+                "import sys; sys.path.insert(0, {overlay:?})\n\
+                 from minime_local import _checkout_version\n\
+                 print(_checkout_version({dir:?}))",
+                overlay = overlay.to_string_lossy(),
+                dir = dir.to_string_lossy(),
+            );
+            let out = std::process::Command::new("python3")
+                .arg("-c")
+                .arg(&script)
+                .output()
+                .expect("python3 runs");
+            assert!(
+                out.status.success(),
+                "reading the checkout version raised:
+{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+
+        let head = String::from_utf8_lossy(
+            &std::process::Command::new("git")
+                .current_dir(&clone)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .expect("git")
+                .stdout,
+        )
+        .trim()
+        .to_string();
+        let stamp = read(&clone);
+        assert!(
+            !head.is_empty() && stamp.starts_with(&head[..7]),
+            "a plain clone should stamp its own HEAD, said {stamp:?} for {head:?}"
+        );
+        if linked {
+            let stamp = read(&tree);
+            assert!(
+                stamp.starts_with(&head[..7]),
+                "a linked worktree shares its refs through commondir, said {stamp:?}"
+            );
+        }
+        // Somewhere with no repository at all must say so rather than guessing.
+        assert_eq!(read(std::env::temp_dir().as_path()), "not a git checkout");
+    }
+
     /// ownership flag to prevent.
     #[test]
     fn a_checkout_is_only_moved_when_it_is_ours_and_clean() {

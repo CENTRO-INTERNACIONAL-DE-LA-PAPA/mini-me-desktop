@@ -1,0 +1,32 @@
+{
+  "name": "ask-the-data-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@fontsource/inter": "^5.2.8",
+    "@fontsource/jetbrains-mono": "^5.2.8",
+    "@fontsource/outfit": "^5.2.8",
+    "@langchain/core": "^1.1.42",
+    "@langchain/react": "^0.3.4",
+    "@vitejs/plugin-react": "^5.0.4",
+    "@workos-inc/authkit-react": "^0.16.1",
+    "langchain": "^1.0.3",
+    "lucide-react": "^0.468.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "typescript": "^5.9.3",
+    "vite": "^7.1.12"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.16",
+    "@types/react-dom": "^19.1.9"
+  }
+}
