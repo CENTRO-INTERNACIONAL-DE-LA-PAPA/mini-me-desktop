@@ -30,6 +30,12 @@ _AGENT_MODULE = "deepagents"
 #: Where the research spine's namespace is computed, and where it is asked for over HTTP.
 _RUNTIME_MODULE = "backend.runtime"
 _PROJECT_ROUTE_MODULE = "backend.routes.project"
+#: Where an Asta paper search hands its results to the model, and where a subagent's
+#: structured output becomes the `sources` list the desktop app reads. Both are
+#: ordinary imports, so the hook reaches them; `http.app` is the one that cannot be
+#: (docs §18). See `minime_local/sources.py`.
+_MCP_MODULE = "backend.mcp_tools"
+_ARTIFACTS_MODULE = "backend.middleware.artifacts"
 
 #: Patched only when host execution is on — they *are* host execution.
 _LOCAL_TARGETS = (_SANDBOX_MODULE, _AGENT_MODULE)
@@ -38,7 +44,12 @@ _LOCAL_TARGETS = (_SANDBOX_MODULE, _AGENT_MODULE)
 #: agent's code runs, and tying it to that switch is exactly the mistake §78 made with the
 #: subagent registry: a feature that silently did nothing because it inherited an unrelated
 #: setting's default.
-_ALWAYS_TARGETS = (_RUNTIME_MODULE, _PROJECT_ROUTE_MODULE)
+_ALWAYS_TARGETS = (
+    _RUNTIME_MODULE,
+    _PROJECT_ROUTE_MODULE,
+    _MCP_MODULE,
+    _ARTIFACTS_MODULE,
+)
 
 #: Every module we patch, and what patching it means.
 _TARGETS = _LOCAL_TARGETS + _ALWAYS_TARGETS
@@ -67,6 +78,16 @@ def _patch(module) -> None:
         from minime_local import spine
 
         spine.install_routes(module)
+        return
+    if module.__name__ == _MCP_MODULE:
+        from minime_local import sources
+
+        sources.install_mcp(module)
+        return
+    if module.__name__ == _ARTIFACTS_MODULE:
+        from minime_local import sources
+
+        sources.install_artifacts(module)
         return
     if not local_execution_requested():
         return

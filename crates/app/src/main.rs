@@ -6289,7 +6289,16 @@ impl Workbench {
             if !seen.insert(source.citation.clone()) {
                 continue;
             }
-            match link_for(source).as_deref().and_then(references::doi_in) {
+            let link = link_for(source);
+            // A corpus-id link needs no registry call: it was built from the id in the search
+            // result, so there is nothing composed in it to be wrong. Settled here, and settled
+            // as the *strongest* verdict rather than as "nothing to check".
+            if link.as_deref().is_some_and(references::is_corpus_link) {
+                self.checked
+                    .insert(source.citation.clone(), references::Verdict::FromSearch);
+                continue;
+            }
+            match link.as_deref().and_then(references::doi_in) {
                 Some(doi) => wanted.push((source.citation.clone(), doi, source.citation.clone())),
                 // Settled here, with no network call: there is nothing to ask about, and that
                 // absence is itself the finding.
@@ -6302,8 +6311,18 @@ impl Workbench {
             }
         }
         if wanted.is_empty() {
+            let from_search = self
+                .checked
+                .values()
+                .filter(|verdict| **verdict == references::Verdict::FromSearch)
+                .count();
             self.say(
-                "none of these sources carry a DOI — nothing to check against the registry",
+                if from_search > 0 {
+                    format!("{from_search} sources link through the id Asta returned — nothing to verify")
+                } else {
+                    "none of these sources carry a DOI — nothing to check against the registry"
+                        .to_string()
+                },
                 cx,
             );
             cx.notify();
@@ -9362,7 +9381,10 @@ impl Workbench {
                             div()
                                 .text_color(rgb(if verdict.is_problem() {
                                     theme::error()
-                                } else if matches!(verdict, references::Verdict::Confirmed) {
+                                } else if matches!(
+                                    verdict,
+                                    references::Verdict::Confirmed | references::Verdict::FromSearch
+                                ) {
                                     theme::success()
                                 } else {
                                     theme::text_faint()

@@ -57,6 +57,13 @@ pub enum Verdict {
     Mismatch { found: String },
     /// The registry has no such DOI. It was not mistyped from a real one — it is not one.
     Unregistered,
+    /// The link is a Semantic Scholar corpus id, which needs no checking.
+    ///
+    /// **Not a weaker answer than [`Self::Confirmed`] — a stronger one.** A DOI has to be
+    /// verified because the model wrote it. This link was built from the `corpusId` in the search
+    /// result the paper came from (`overlay/minime_local/sources.py`), so it does not name the
+    /// wrong paper for the same reason a file path does not: nothing composed it.
+    FromSearch,
     /// Nothing to check: no DOI in the citation and none in the structured field.
     NoIdentifier,
     /// The check itself failed — offline, rate-limited, or the service is down. **Not** a
@@ -74,12 +81,24 @@ impl Verdict {
     pub fn label(&self) -> String {
         match self {
             Verdict::Confirmed => "DOI checked — resolves to this paper".to_string(),
+            Verdict::FromSearch => "Semantic Scholar — the id Asta returned for this paper".to_string(),
             Verdict::Mismatch { found } => format!("DOI resolves to a different paper: {found}"),
             Verdict::Unregistered => "this DOI is not registered — no such record".to_string(),
             Verdict::NoIdentifier => "no DOI to check".to_string(),
             Verdict::Unreachable { why } => format!("could not check ({why})"),
         }
     }
+}
+
+/// Whether a link is the Semantic Scholar corpus-id form.
+///
+/// That link comes from the search result itself rather than from the model, so it is the one
+/// kind this module has nothing to check — and must not report as unidentified.
+pub fn is_corpus_link(link: &str) -> bool {
+    link.trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .starts_with("api.semanticscholar.org/CorpusID:")
 }
 
 /// The bare DOI inside a link, or `None` if it carries none.
@@ -479,6 +498,122 @@ mod tests {
         assert!(found[0].1.starts_with("The past record and future prospects"));
         assert!(!found[0].1.contains('\n'), "the registry's whitespace is normalised");
         assert!(candidates_of(&serde_json::json!({})).is_empty());
+    }
+
+    /// The Rust and Python title matchers must reach the same verdict.
+    ///
+    /// **The same shape as `workspace::project_tests`, and for the same reason.** This rule is now
+    /// written twice: `overlay/minime_local/sources.py` uses it to decide which corpus id belongs
+    /// to a citation, and this module uses it to decide which registry record does. Both carry the
+    /// same noise words, the same 0.6 threshold and the same 0.15 margin, and if they drift the
+    /// backend and the client will disagree about which paper a citation names — silently, and in
+    /// the one feature built to stop exactly that.
+    ///
+    /// It cannot be written once, so it is checked instead.
+    #[test]
+    fn the_rust_and_python_matchers_agree() {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: python3 is not on PATH");
+            return;
+        }
+        let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
+
+        // (citation, candidate titles) — the real cases from §119 and §120, plus the ties.
+        let cases: [(&str, &[&str]); 5] = [
+            (
+                "Plaisted, R. L., & Hoopes, R. W. (1989). The past record and future prospects \
+                 for the use of wild species for the improvement of potato (Solanum tuberosum) \
+                 varieties. American Potato Journal, 66, 603-627.",
+                &[
+                    "The past record and future prospects for the use of exotic potato germplasm",
+                    "Solanum amayanum: A new wild Peruvian potato species",
+                ],
+            ),
+            (
+                "Hijmans, R.J., & Spooner, D.M. (2001). Geographic distribution of wild potato \
+                 species. American Journal of Botany, 88(11), 2101-2112.",
+                &["Algal switching among lichen symbioses"],
+            ),
+            (
+                "Hijmans, R.J., & Spooner, D.M. (2001). Geographic distribution of wild potato \
+                 species. American Journal of Botany, 88(11), 2101-2112.",
+                &["Geographic distribution of wild potato species"],
+            ),
+            // A tie: both plausible, so both sides must decline.
+            (
+                "Smith (2020). The potato crop handbook.",
+                &["The potato crop handbook", "The potato crop handbook II"],
+            ),
+            ("Nothing recognisable here.", &["Some unrelated title"]),
+        ];
+
+        let source = std::fs::read_to_string(overlay.join("minime_local/sources.py"))
+            .expect("the overlay is beside the crate");
+        // Only the pure functions, so importing does not pull in contextvars-backed state.
+        let start = source.find("_NOISE = {").expect("the noise set");
+        let end = source.find("def _papers()").expect("the next function");
+        let script = format!(
+            "import json,re,sys\n{}\n\
+             cit, titles = sys.argv[1], json.loads(sys.argv[2])\n\
+             have = set(_significant(cit))\n\
+             ranked = []\n\
+             for t in titles:\n\
+             \x20   want = _significant(t)\n\
+             \x20   if want: ranked.append((sum(w in have for w in want)/len(want), t))\n\
+             ranked.sort(reverse=True)\n\
+             ok = bool(ranked) and ranked[0][0] >= 0.6 and (len(ranked) < 2 or ranked[0][0]-ranked[1][0] >= 0.15)\n\
+             print(json.dumps(ranked[0][1] if ok else None))",
+            &source[start..end]
+        );
+
+        for (citation, titles) in cases {
+            let candidates: Vec<(String, String)> = titles
+                .iter()
+                .enumerate()
+                .map(|(at, title)| (format!("10.1/{at}"), title.to_string()))
+                .collect();
+            let ours = best_match(citation, &candidates).map(|repair| repair.title);
+
+            let out = std::process::Command::new("python3")
+                .arg("-c")
+                .arg(&script)
+                .arg(citation)
+                .arg(serde_json::to_string(titles).expect("json"))
+                .output()
+                .expect("python3 runs");
+            assert!(
+                out.status.success(),
+                "python failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let theirs: Option<String> =
+                serde_json::from_slice(&out.stdout).expect("python printed json");
+
+            assert_eq!(ours, theirs, "disagreed on {citation:?} against {titles:?}");
+        }
+    }
+
+    #[test]
+    fn a_corpus_link_is_recognised_and_never_treated_as_a_doi() {
+        // The form `overlay/minime_local/sources.py` writes, and the one `_paper_ref` established
+        // resolves correctly.
+        for link in [
+            "https://api.semanticscholar.org/CorpusID:45447591",
+            "http://api.semanticscholar.org/CorpusID:237412855",
+            " https://api.semanticscholar.org/CorpusID:1 ",
+        ] {
+            assert!(is_corpus_link(link), "{link}");
+            // And it carries no DOI, so it must never be sent to Crossref — which would 404 and
+            // report a correctly identified paper as unregistered.
+            assert_eq!(doi_in(link), None, "{link}");
+        }
+        assert!(!is_corpus_link("https://doi.org/10.1007/BF02853982"));
+        assert!(!is_corpus_link("https://www.semanticscholar.org/paper/abc123"));
+        assert!(!is_corpus_link(""));
     }
 
     #[test]

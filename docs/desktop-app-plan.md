@@ -7156,3 +7156,61 @@ model from over-claiming was itself over-claiming, in its error path, where nobo
 
 *Report what was checked. A tool that says more than it verified is the thing it was built to
 replace.*
+
+## 121. The corpus id, put where it was always available (2026-08-07)
+
+> *"I dont care to have a doi url in the front end. If asta give a corpusId, we can put that ID
+> into an url from semanthic scholar and we can be redirected to semanthic scholar. Thats what I
+> want."*
+
+§120 established why the DOIs are wrong — Asta returns `corpusId`, `title` and `authors`, and
+`AcademicSourceFinding.citation` asks the model for an APA citation, which needs five fields it
+was never given. The report went upstream. This is the part that did not have to wait.
+
+### Where it goes in
+
+`overlay/minime_local/sources.py`, through the §18 import hook, in two places:
+
+- **`backend.mcp_tools`** — patches `_wrap_mcp_tools` and lets the original run *afterwards*, so
+  the recorder ends up **inside** upstream's capping wrapper. That ordering is the whole trick:
+  above it we would see the truncated result, or the 2 KB preview left behind when a large result
+  is written to the sandbox — and `mcp_tools.py:132` puts the `asta` threshold at 32 KB while its
+  own comment says paper searches run to hundreds of KB. The ids are in the part that gets cut.
+- **`backend.middleware.artifacts`** — wraps `ArtifactCaptureMiddleware.after_agent`, which is
+  where a subagent's structured output becomes the `sources` list the client reads, and replaces
+  `link` with `https://api.semanticscholar.org/CorpusID:<n>`.
+
+That URL form and not the website's, because `theory_tools.py:_paper_ref` already settled it: the
+`/paper/CorpusID:<n>` path *"resolves UNRELIABLY (it sent users to the wrong paper)"*. Somebody
+paid for that once and wrote it down.
+
+### Why capture at the tool rather than reconstruct later
+
+Because at the tool the identifier is **known**, and everywhere after it is a guess. The client's
+"Find the right DOI" repair takes the title out of a citation and searches for it, and carries
+every uncertainty a search has: near-matches, ties, an index that does not cover books (§120b).
+Here the corpus id is sitting in the response the model is reading. Nothing needs inferring.
+
+That difference now has a name in the client. `Verdict::FromSearch` is **not** a weaker answer than
+`Confirmed` — it is a stronger one. A DOI has to be verified because the model wrote it; a corpus
+link cannot name the wrong paper for the same reason a file path cannot, because nothing composed
+it. So a source carrying one is settled with no registry call at all.
+
+### One rule, two languages, checked
+
+The matcher — same noise words, same 0.6 threshold, same 0.15 margin — is now written in Python
+(which citation does this corpus id belong to) and in Rust (which registry record does this
+citation name). `the_rust_and_python_matchers_agree` runs both over the real §119/§120 cases and
+compares, the same discipline as `the_rust_and_python_project_names_agree` and for the same reason:
+two implementations of one rule is a shape this project has got wrong before, and here the failure
+would be the backend and the client silently disagreeing about which paper a citation names — in
+the one feature built to stop exactly that.
+
+### What is still not fixed
+
+A citation whose title matches nothing the search returned gets no link, because there is nothing
+to link it to. That is §120a's second class, it is the subagent citing papers it was not given, and
+no amount of identifier plumbing reaches it. It stays in the upstream report as its own
+recommendation.
+
+*The fix was never a lookup. It was carrying a value forty lines further than it had been carried.*
