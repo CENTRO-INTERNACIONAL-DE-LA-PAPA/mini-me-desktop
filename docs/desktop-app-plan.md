@@ -6791,3 +6791,103 @@ expensive defects have all been claims that quietly stopped being true (§107's 
 
 Sequenced after the release, not before: it changes what the panel shows, and that is worth
 watching on a real conversation rather than shipping blind.
+
+## 118. The designer's brief, and the four places it could not be followed (2026-08-07)
+
+A design handoff arrived as a zip: a README written against this codebase — GPUI logical pixels,
+`p_4`/`text_xs` helpers, the exact `theme.rs` field names, and which function in `main.rs` each
+change touches — plus an HTML canvas of frames to look at rather than port. The instruction with it
+was specific: implement the `5a`/`5b` palette and the `2a`–`2d` frames; `0a`–`0h` are the current
+UI recreated as a baseline and `3a`–`4d` are rejected explorations kept for context.
+
+Implemented over seven commits: the **Bench** palette and the accent discipline that goes with it,
+the **road strip**, the **research panel**, the **empty state**, **provenance chips and an export
+row**, the **approval card**, **inline output cards**, and the **provenance graph**.
+
+### The claim that was checked before it was built on
+
+The README said of the two palettes: *"The two existing tests cover them unchanged — every
+ink/surface pair clears 4.5:1 and luminance rises across the ladder."* Running the numbers before
+writing any of it: **six of the pairs do not.** `text_faint` on Bench's background is 4.41:1,
+`running` 4.45:1, both again on `accent_soft`; Bench Night's `error` is 4.44:1 on `overlay` and
+4.13:1 on `accent_soft`. The floor `every_shipped_theme_is_readable` enforces is 4.5.
+
+Hue and saturation were kept; only lightness moved, by two or three points per channel — the
+smallest change that clears AA. Had this been taken on trust the theme would have failed its own
+test on first run, and the obvious repair under time pressure is to relax the test.
+
+**The rule, and it is not new here:** *a number in a handoff is a claim, and the cheapest ones are
+worth checking before they become the foundation.* This is §72 and §99 again, from the other
+direction: there the app stated a width nothing had measured; here a document stated a ratio
+nothing had computed.
+
+### Four things the design drew that the data cannot support
+
+Each of these is a place where following the drawing would have meant showing a researcher
+something the program does not know. They are listed together because they are one decision made
+four times, and it is §73's: *a record that quietly guesses is worse than no record, because it
+will be believed.*
+
+| Drawn | Built | Why |
+|---|---|---|
+| A dashed **"anticipated"** road node | Two states only | Nothing carries a plan. `Snapshot` has buckets, jobs, tasks, reports and sources; the coordinator decides its next delegation while answering. A dashed `analyze data` under a running `get data` is an invented plan shown as a record. |
+| `6 pages · 8 references` on a PDF | Size alone | Page counts need a parser or one of the folklore heuristics (`/Type /Page` double-counts and misses object streams; `/Count` finds the first of several). Reference counts are not in the file in any recoverable form. |
+| The **specialist** that asked for approval | The tool | `ApprovalRequest` carries no subagent. It could be inferred from whichever spoke most recently — very likely right, and an inference stated as fact beside a security decision. |
+| `today 14:22` on a resume card | `2 hours ago` | Local wall-clock needs a timezone database. Relative time is exact in every timezone and needs no table. |
+
+Two more were substitutions rather than omissions. **Save as PNG became Save as SVG**: rasterising
+needs a screenshot API gpui 0.2.2 does not expose, or a hand-written encoder, on a build that has
+to succeed on a colleague's Windows machine with nothing installed — and a vector figure is what a
+journal wants anyway. **Copy BibTeX emits `@misc` with the citation verbatim in `note`**, because a
+source is one line of the agent's prose and a parser for that is right about most citations and
+confidently wrong about the rest; a mis-split reference does not look broken in a manuscript, it
+looks like a citation with the wrong author on it.
+
+And one place the design was **not** followed for a safety reason: §4 shows three actions on the
+approval card, dropping *"Approve the rest of this turn"*. Both grants were kept and moved right at
+`Compact`. Removing the narrower one leaves "approve everything in this conversation" as the only
+way to stop clicking, which is how a gate becomes a formality — §41's argument, unchanged.
+
+### What the brief was right about that the code was not
+
+Three of its observations were about facts the codebase had let drift, and each was a real defect
+rather than a matter of taste:
+
+- **Headings wearing the accent.** `section_label`, `section_label_owned` and the modal title all
+  used `theme::accent()`, against `theme.rs`'s own first documented rule — *"the accent means 'you
+  can act on this', and nothing else"*. The module said it, the tests did not check it, and three
+  functions broke it. One line each.
+- **The default named in three places.** `Settings::default().theme`, `apply_theme`'s fallback and
+  the `live_theme!` seeds each restated the default palette. Changing "the default" therefore meant
+  changing three things that had no way to disagree out loud. `THEMES[0]` now says it and the other
+  three read it — the §91/§114 shape once more.
+- **The §117 placeholder.** *"Papers, datasets, theories and reports show up here as a turn
+  produces them"* is deleted. It was untrue, §117 says why, and an empty section now renders
+  nothing at all.
+
+The panel states this correctly now, but **§117 itself is still open**: `workspace::outputs` reads
+one level, so a turn that organises its work into a folder still has files the app cannot see. What
+changed is that the app no longer promises otherwise.
+
+### The distinction that was in a comment and not in the data
+
+Building the graph (`2d`) turned up the sharpest instance of this document's recurring bug. The
+design asks for four line styles, one of them for an edge crossing a turn boundary. `provenance.rs`
+computed that edge separately and had done since §75 — its comment reads *"the turn boundary needs
+no hedge: the researcher read one answer before typing the next question, so this ordering is a
+fact about a person, not an inference about a scheduler"* — and then filed it as `Edge::Then`,
+alongside the hedged within-turn case.
+
+So the view drew them identically, and the returns §73 asked the whole feature to make visible were
+the one thing it could not point at. `Edge::Returned` is the missing variant; the reasoning was
+already written down, in prose, one type short of being real.
+
+*A distinction that lives only in a comment is a distinction the program does not make.*
+
+### Where this leaves the release
+
+Everything in the brief's implement list is done, 208 tests pass, and clippy is at the seven
+warnings that predate this work. What has not happened is a **real-window pass**: every screen here
+was built against the README's measurements and the existing code, not looked at on Windows at
+125% scaling — which is where §72, §85, §88 and §99 were all caught. That is the next step, and it
+is the researcher's, not the developer's.
