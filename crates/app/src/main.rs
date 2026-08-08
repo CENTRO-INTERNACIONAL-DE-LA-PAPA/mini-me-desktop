@@ -1653,8 +1653,13 @@ struct Workbench {
     /// is worse than none. Not by DOI because the references that most need an answer are the
     /// ones that have no DOI at all — which is the shape a fabricated citation takes.
     checked: HashMap<String, references::Verdict>,
-    /// The work each bad citation actually describes, once the registry has been asked.
-    repaired: HashMap<String, references::Repair>,
+    /// What the registry had for each bad citation, once it has been asked.
+    ///
+    /// `None` records **asked, and there is no such work** — which is not an absence of
+    /// information, it is the most important thing this feature can tell anyone. A reference
+    /// whose DOI is unregistered *and* whose text matches nothing in the registry was not
+    /// mis-transcribed; it does not describe a paper that exists.
+    repaired: HashMap<String, Option<references::Repair>>,
     /// Whether a repair pass is in flight.
     repairing: bool,
     /// Whether a reference check is in flight, and how much of it is done.
@@ -6377,8 +6382,10 @@ impl Workbench {
         cx.spawn(async move |this, cx| {
             let mut found = 0usize;
             while let Some((key, repair)) = results.next().await {
-                let Some(repair) = repair else { continue };
-                found += 1;
+                found += usize::from(repair.is_some());
+                // Recorded either way. A row that stayed blank after being asked looked exactly
+                // like one that was never asked, which is how "it found nothing" and "it did
+                // nothing" became the same thing on screen.
                 if this
                     .update(cx, |workbench, cx| {
                         workbench.repaired.insert(key, repair);
@@ -6395,10 +6402,15 @@ impl Workbench {
                 // matching those citations, which for a fabricated reference is the right answer
                 // and a much stronger statement than silence.
                 workbench.say(
-                    match found {
-                        0 => format!("no registered work matches any of those {total} references"),
-                        1 => "found the work 1 reference describes".to_string(),
-                        many => format!("found the work {many} of {total} references describe"),
+                    match (found, total - found) {
+                        (0, 1) => "no registered work matches that reference".to_string(),
+                        (0, missing) => format!(
+                            "no registered work matches any of those {missing} references"
+                        ),
+                        (found, 0) => format!("found the work all {found} describe"),
+                        (found, missing) => format!(
+                            "found {found}; {missing} match no registered work at all"
+                        ),
                     },
                     cx,
                 );
@@ -9362,7 +9374,25 @@ impl Workbench {
                         // The work the citation actually describes. Clicking copies the real
                         // DOI, because the next thing anyone does with it is paste it into a
                         // manuscript or a reference manager.
-                        .children(repair.map(|repair| {
+                        // Asked, and the registry has no such work. Said plainly, because this
+                        // is the strongest statement the feature can make: a DOI that is not
+                        // registered *and* text that matches nothing is not a mis-transcribed
+                        // reference — no paper by that description exists to link to, by DOI or
+                        // by corpus id or by anything else.
+                        .children(matches!(repair, Some(None)).then(|| {
+                            div()
+                                .p_2()
+                                .rounded_md()
+                                .bg(rgb(theme::accent_soft()))
+                                .text_color(rgb(theme::error()))
+                                .text_size(px(11.))
+                                .line_height(px(15.))
+                                .child(
+                                    "no registered work matches this reference — it does not \
+                                     appear to describe a real paper",
+                                )
+                        }))
+                        .children(repair.flatten().map(|repair| {
                             let copied = format!("https://doi.org/{}", repair.doi);
                             div()
                                 .id(SharedString::from(format!("repair-{at}")))

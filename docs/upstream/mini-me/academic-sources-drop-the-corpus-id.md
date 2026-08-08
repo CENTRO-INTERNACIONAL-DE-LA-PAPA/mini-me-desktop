@@ -76,6 +76,35 @@ The past record and future prospects for the use of exotic potato germplasm | 19
 DOI: 10.1007/BF02853982
 ```
 
+## There is a second failure, and it is worse
+
+The above explains a citation that names a **real paper** and attaches the wrong identifier. A
+later run produced a different kind:
+
+> Sørensen, K. J., Kirk, H. G., & Poulsen, K. (2006). Use of Andean potato landrace populations to
+> identify new sources of resistance to late blight. Euphytica, 152(3), 305–316.
+> `https://doi.org/10.1007/s10681-006-9223-6`
+
+The DOI is unregistered (Crossref 404). Searching for the title returns **nothing**:
+
+```
+$ asta papers search "Use of Andean potato landrace populations to identify new sources of resistance to late blight"
+total: 0
+```
+
+No such paper, in Semantic Scholar or in Crossref, under the title or under those authors. It was
+not mis-transcribed — it was composed. Two of the six references in the earlier run (Douches 1997,
+Ellis 2018) are the same.
+
+So carrying `corpusId` through fixes the first class completely and the second class not at all:
+**there is no paper to link to.** A subagent that emits references the search never returned is a
+separate defect from one that cannot cite the references it did return, and the first is not
+visible until the second is fixed.
+
+Worth checking whether `academic_researcher` is constrained to cite only what the tool returned,
+and what it does when the search returns few or no results — the pressure to produce a
+`sources` list of a plausible length is presumably where the invented ones come from.
+
 ## Suggested change
 
 1. **Carry `corpusId` through the academic-research path.** Add it to `AcademicSourceFinding` as a
@@ -88,6 +117,14 @@ DOI: 10.1007/BF02853982
    fetch them (`corpusId` → `/graph/v1/paper/CorpusID:<n>?fields=externalIds,year,venue,journal`
    is one call and returns the real DOI), or describe the field as what it can honestly be — title
    and authors — and let the client render the rest from structured data.
+
+   The researcher's own framing of this is the right one: *"I don't care to have a DOI, we can
+   have the corpusid url to be redirected to the paper."* A link that reaches the paper is what a
+   citation is for. `api.semanticscholar.org/CorpusID:<n>` is available for every result the
+   search returns, which is more than can be said for the DOI.
+
+4. **Constrain the subagent to what the search returned** — see the second failure above. No
+   amount of identifier plumbing helps a reference to a paper that does not exist.
 
 3. **Reconsider the 32 KB save-to-sandbox threshold for `asta`** (`mcp_tools.py:132`). Above it the
    model receives a pointer plus a 2 KB preview and must use code execution to read the rest. Paper

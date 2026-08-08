@@ -7068,3 +7068,47 @@ have been `Returned` draws fine. A regexed link opens something.
 
 *Nothing about a plausible answer tells you where it came from. Only the record does — which is
 why the provenance work and the citation work turned out to be the same project.*
+
+### §120a — a second failure, hiding behind the first (2026-08-07)
+
+Testing the repair turned up a reference of a different kind:
+
+> Sørensen, K. J., Kirk, H. G., & Poulsen, K. (2006). Use of Andean potato landrace populations to
+> identify new sources of resistance to late blight. Euphytica, 152(3), 305–316.
+
+DOI unregistered. Title search: `total: 0`. No such paper in Semantic Scholar or Crossref, under
+the title or the authors. Douches 1997 and Ellis 2018 from §119 are the same.
+
+So the six references are **two defects**, not one:
+
+| | | corpus id fixes it? |
+|---|---|---|
+| Plaisted, Hijmans, Vargas, Lindqvist-Kreuze | real papers, invented identifiers | yes — §120 |
+| Sørensen, Douches, Ellis | no such paper, invented whole | **no** |
+
+The researcher's instinct — *"I don't care to have a DOI, we can have the corpusid url"* — is
+right for the first class and cannot touch the second. A CorpusID URL redirects to a paper, and
+there is no paper.
+
+**The reason this matters beyond the fix:** the second defect was invisible while the first
+existed. Every reference had a wrong DOI, so "wrong DOI" was the explanation for all six, and it
+was the correct explanation for four. Fixing the identifiers would have made the app produce four
+good citations and two that resolve to nothing — and that would have looked like a regression in
+the fix rather than a defect it uncovered.
+
+*A defect that explains every instance is not thereby the only defect. It is a reason the others
+have not been noticed.*
+
+### What the repair now says
+
+The lookup refusing to answer was correct — nothing matched, and §120's margin rule exists
+precisely so it stays quiet rather than naming the closest paper. But a red flag followed by
+silence is not a usable result, and the researcher's report was *"its not working"*, which is fair.
+
+`repaired` now records `None` as a finding rather than as an absence: **no registered work matches
+this reference — it does not appear to describe a real paper.** That is the strongest statement
+this feature can make, and it is more useful than a corrected DOI, because the answer is not
+"cite it differently" but "do not cite it".
+
+The same distinction that has run through §118–§120: *asked and found nothing* and *never asked*
+must not look the same on screen.
