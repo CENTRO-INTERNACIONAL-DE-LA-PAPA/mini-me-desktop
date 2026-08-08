@@ -51,6 +51,24 @@ pub struct Subagent {
     pub description: String,
 }
 
+impl Subagent {
+    /// Whether this specialist reaches Asta.
+    ///
+    /// **Read off the registry rather than from a list kept here.** Three of the shipped
+    /// specialists say so in their own descriptions — *"Conducts research using Asta tools"*,
+    /// *"using the Asta Theorizer pipeline"*, *"Run the Asta DataVoyager pipeline"* — and that
+    /// text arrives in `subagents.json`, written by the backend from the factory call that
+    /// actually built the coordinator.
+    ///
+    /// A hardcoded `["academic_researcher", "hypothesis_generator", "data_voyager"]` would be
+    /// the exact thing §55 built this file to avoid: a copy in the client that drifts the first
+    /// time upstream renames one, failing silently. Here the failure mode is a specialist whose
+    /// description stops mentioning Asta, which is visible in the file.
+    pub fn uses_asta(&self) -> bool {
+        self.description.to_ascii_lowercase().contains("asta")
+    }
+}
+
 /// The file the backend overlay writes its subagent list into.
 const REGISTRY: &str = "subagents.json";
 
@@ -950,6 +968,48 @@ mod report_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_registry_says_which_specialists_reach_asta() {
+        // The three real descriptions, verbatim from `backend/subagents.py` (2026-08-07). The
+        // list is read rather than copied, so this test is about the *rule* holding against the
+        // text upstream actually writes.
+        let registry = parse_registry(
+            &serde_json::json!({
+                "format": 1,
+                "subagents": [
+                    {"name": "academic_researcher",
+                     "description": "Conducts research using Asta tools (via MCP tools)."},
+                    {"name": "hypothesis_generator",
+                     "description": "Generate literature-grounded scientific theories and hypotheses for a research question using the Asta Theorizer pipeline."},
+                    {"name": "data_voyager",
+                     "description": "Run the Asta DataVoyager pipeline (`asta analyze-data`) to generate and test hypotheses."},
+                    {"name": "report_writer",
+                     "description": "Write a polished report from the findings and recommendations."},
+                    {"name": "dataverse_explorer",
+                     "description": "Searches and recommends datasets from CIP Dataverse."},
+                ]
+            })
+            .to_string(),
+        );
+        let asta: Vec<&str> = registry
+            .iter()
+            .filter(|subagent| subagent.uses_asta())
+            .map(|subagent| subagent.name.as_str())
+            .collect();
+        assert_eq!(
+            asta,
+            ["academic_researcher", "hypothesis_generator", "data_voyager"]
+        );
+        // The report writer produces the document the attribution goes *in*. Crediting Asta
+        // because that ran would restore the bug in a new place.
+        assert!(!registry[3].uses_asta());
+        assert!(!registry[4].uses_asta(), "CIP Dataverse is not Asta");
+
+        // An empty or unreadable registry credits nothing. A missing acknowledgement can be
+        // added; a false one has to be retracted.
+        assert!(parse_registry("{ not json").is_empty());
+    }
 
     #[test]
     fn a_delimiter_inside_quotes_is_not_a_column() {

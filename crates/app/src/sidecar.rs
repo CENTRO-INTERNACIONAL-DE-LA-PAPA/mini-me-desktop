@@ -548,6 +548,10 @@ impl Sidecar {
         title: String,
         markdown: String,
         sources: Vec<String>,
+        // Whether an Asta-backed specialist actually ran — see `Workbench::used_asta`. Passed
+        // through rather than derived here: this layer cannot see the provenance record, and
+        // guessing from `sources` is the mistake being fixed.
+        used_asta: bool,
         into: std::path::PathBuf,
     ) -> mpsc::UnboundedReceiver<Result<std::path::PathBuf>> {
         let (tx, rx) = mpsc::unbounded();
@@ -563,7 +567,7 @@ impl Sidecar {
         self.runtime.spawn(async move {
             let client = LangGraphClient::new(base_url);
             let result = client
-                .render_report(&thread_id, &title, &markdown, &sources)
+                .render_report(&thread_id, &title, &markdown, &sources, used_asta)
                 .await
                 .and_then(|pdf| {
                     let path = into.with_extension("pdf");

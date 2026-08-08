@@ -1211,6 +1211,7 @@ impl LangGraphClient {
         title: &str,
         markdown: &str,
         sources: &[String],
+        used_asta: bool,
     ) -> Result<Vec<u8>> {
         let response = self
             .http
@@ -1223,9 +1224,24 @@ impl LangGraphClient {
                 "markdown": markdown,
                 "title": title,
                 "sources": sources,
-                // The Asta attribution goes in the footer when the work used it, which having
-                // gathered sources is the backend's own test for.
-                "used_asta": !sources.is_empty(),
+                // **Decided by the caller from the provenance record, not from this list.**
+                //
+                // The backend's own default is `len(sources) > 0`
+                // (`backend/routes/rendering.py:343`), and the footer it controls reads
+                // *"Academic literature search performed using Asta tools (Allen Institute for
+                // AI)"*. Those two do not match: `sources` is a list of citation objects the
+                // **model** produced, so a run where nothing was ever searched — where the model
+                // wrote five plausible references from memory — puts that sentence in the report
+                // and credits AI2 for work their tools did not do.
+                //
+                // That is not hypothetical. Five references from a real run were checked against
+                // Crossref: three DOIs resolved to different papers (one to a paper about
+                // lichens) and two did not exist at all. The footer would have claimed Asta for
+                // every one of them (docs §119).
+                //
+                // An attribution is a claim about provenance, so it should come from the
+                // provenance record. See `Workbench::used_asta`.
+                "used_asta": used_asta,
             }))
             .send()
             .await

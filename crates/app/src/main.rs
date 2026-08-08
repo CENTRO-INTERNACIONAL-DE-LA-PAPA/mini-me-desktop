@@ -3566,6 +3566,7 @@ impl Workbench {
                 .iter()
                 .map(|source| source.citation.clone())
                 .collect(),
+            self.used_asta(),
             into,
         );
         cx.spawn(async move |this, cx| {
@@ -6246,6 +6247,37 @@ impl Workbench {
             );
         }
         block.child(moves)
+    }
+
+    /// Whether an Asta-backed specialist actually ran in this conversation.
+    ///
+    /// **What the report footer's attribution should be decided by.** That footer reads
+    /// *"Academic literature search performed using Asta tools (Allen Institute for AI)"*, and
+    /// the backend's default test for it is `len(sources) > 0` — the number of citation objects
+    /// the *model* emitted. Those are different claims. A run in which the model wrote five
+    /// references from memory produces five sources, no Asta call, and a report crediting AI2
+    /// for it (docs §119).
+    ///
+    /// Attribution is a claim about what happened, so it is answered from the record of what
+    /// happened: the specialists the provenance record saw run, crossed with the ones the
+    /// backend's own registry describes as using Asta.
+    ///
+    /// Conservative in the one direction that matters. An unreadable or absent registry means no
+    /// specialist is known to use Asta, so nothing is credited — a missing acknowledgement is a
+    /// thing a researcher can add, and a false one is a thing they have to retract.
+    fn used_asta(&self) -> bool {
+        let asta: std::collections::HashSet<String> = workspace::subagents()
+            .into_iter()
+            .filter(workspace::Subagent::uses_asta)
+            .map(|subagent| subagent.name)
+            .collect();
+        if asta.is_empty() {
+            return false;
+        }
+        self.provenance
+            .road()
+            .iter()
+            .any(|stage| asta.contains(&stage.name))
     }
 
     /// Write the graph beside the conversation's own files, and open it.
