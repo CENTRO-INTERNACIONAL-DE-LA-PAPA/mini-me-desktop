@@ -1151,13 +1151,18 @@ struct Message {
     /// Shown, because a cut-off answer and a complete one are otherwise the same thing on
     /// screen — and the difference decides whether it can be trusted (docs §63).
     stopped: bool,
-    /// Figures this turn drew, shown inline beneath the answer.
+    /// Files this turn produced, shown inline beneath the answer.
     ///
     /// Found by diffing the thread's workspace across the turn rather than reported by the
     /// agent: a plot is usually written by a `matplotlib` script inside `execute`, which
     /// registers no artifact and tells the client nothing. The file appearing on disk is
     /// the only signal there is (docs §42).
-    plots: Vec<std::path::PathBuf>,
+    ///
+    /// **Every output, not only figures.** This held images alone, so a turn that produced a
+    /// cleaned dataset said so in prose and showed nothing — the researcher had to go and find
+    /// it in the side panel to learn whether it had 40 rows or 40,000. The diff never cared what
+    /// kind of file it was; only the renderer did.
+    outputs: Vec<workspace::Output>,
 }
 
 impl Message {
@@ -1171,7 +1176,7 @@ impl Message {
             agents: Vec::new(),
             steps_expanded: true,
             stopped: false,
-            plots: Vec::new(),
+            outputs: Vec::new(),
         }
     }
 
@@ -1452,6 +1457,12 @@ struct Workbench {
     /// from `&mut self` would have to be refreshed by `render` for a panel that may not even be
     /// open. Never borrowed across a call that could re-enter.
     shapes: std::cell::RefCell<HashMap<PathBuf, (std::time::SystemTime, workspace::Shape)>>,
+    /// The first rows of each table, for the cards in the transcript. Same key, same reason as
+    /// [`Self::shapes`]; `None` records "looked, and it is not a table we can split", so a
+    /// Markdown file is not re-opened on every frame to find that out again.
+    #[allow(clippy::type_complexity)]
+    previews:
+        std::cell::RefCell<HashMap<PathBuf, (std::time::SystemTime, Option<Vec<Vec<String>>>)>>,
     /// What the sidebar's search box holds. Empty means "show everything".
     conversation_query: Entity<Composer>,
     /// A file being previewed in the centre, if any.
@@ -1643,6 +1654,7 @@ impl Workbench {
             panel_open: stored.panel_open,
             road_open: stored.road_open,
             shapes: std::cell::RefCell::new(HashMap::new()),
+            previews: std::cell::RefCell::new(HashMap::new()),
             conversation_query,
             preview: None,
             conversations: Vec::new(),
@@ -3286,17 +3298,11 @@ impl Workbench {
             .map(|thread_id| workspace::thread_dir_in(project.as_deref(), &thread_id))
     }
 
-    /// Every figure currently in this thread's workspace.
-    fn workspace_images(&self) -> Vec<std::path::PathBuf> {
-        self.thread_workspace()
-            .map(|dir| workspace::images(&dir))
-            .unwrap_or_default()
-    }
-
-    /// Attach any figure not already on screen to the newest answer.
+    /// Attach any output not already on screen to the newest answer.
     ///
     /// A diff rather than a report, because nothing reports it: a figure is written by a
-    /// plotting script inside `execute`, which registers no artifact (docs §42).
+    /// plotting script inside `execute`, which registers no artifact (docs §42), and so is the
+    /// cleaned CSV beside it.
     ///
     /// Diffed against **what the transcript already shows**, not against a snapshot taken
     /// when the turn began. A background worker finishes on its own schedule — often
@@ -3307,14 +3313,23 @@ impl Workbench {
         let shown: std::collections::HashSet<_> = self
             .transcript
             .iter()
-            .flat_map(|message| message.plots.iter().cloned())
+            .flat_map(|message| message.outputs.iter().map(|output| output.path.clone()))
             .collect();
-        let drawn: Vec<_> = self
-            .workspace_images()
+        let mut produced: Vec<workspace::Output> = self
+            .thread_workspace()
+            .map(|dir| workspace::outputs(&dir))
+            .unwrap_or_default()
             .into_iter()
-            .filter(|path| !shown.contains(path))
+            .flat_map(|(_, items)| items)
+            .filter(|output| !shown.contains(&output.path))
             .collect();
-        if drawn.is_empty() {
+        // Oldest first, so a turn's files read in the order they were written — which for an
+        // analysis script is the order the work went in. Sorted on the stamp rather than by
+        // reversing what `outputs` returned: that is grouped by kind *and then* newest-first, so
+        // reversing it would have put every figure after every stray file rather than putting
+        // anything in chronological order.
+        produced.sort_by_key(|output| output.modified);
+        if produced.is_empty() {
             return;
         }
         if let Some(message) = self
@@ -3323,7 +3338,7 @@ impl Workbench {
             .rev()
             .find(|message| message.role == "mini-me")
         {
-            message.plots.extend(drawn);
+            message.outputs.extend(produced);
         }
     }
 
@@ -5227,6 +5242,221 @@ impl Workbench {
             }))
     }
 
+    /// A file a turn produced, in the transcript, under the answer that produced it.
+    ///
+    /// **Why here and not only in the panel.** A produced file used to appear as a name and a
+    /// size in a 330px column on the far side of the window. So the answer would say "I cleaned
+    /// the dataset and removed 14 duplicate plots", and whether that dataset now had 1,204 rows
+    /// or 40 was a separate trip to a separate place — which is exactly the check a researcher
+    /// should be able to make without leaving the sentence that prompted it.
+    ///
+    /// A table shows its first rows, a figure shows itself, anything else shows its header. All
+    /// three open the existing preview modal on click.
+    fn output_card(
+        &self,
+        key: usize,
+        output: &workspace::Output,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        /// Enough to see the shape of the table without becoming a table.
+        const PREVIEW_ROWS: usize = 4;
+        /// Past this the cells are too narrow to read in a chat pane.
+        const PREVIEW_COLUMNS: usize = 4;
+
+        let (glyph, ink) = file_mark(&output.path);
+        let shape = self.shape_of(output);
+        let opened = output.path.clone();
+        let revealed = output.path.parent().map(std::path::Path::to_path_buf);
+        let previewed = output.clone();
+
+        let header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .w_full()
+            .min_w_0()
+            .px_3()
+            .py_2()
+            .border_b_1()
+            .border_color(rgb(theme::border()))
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(rgb(ink))
+                    .text_size(px(13.))
+                    .child(glyph),
+            )
+            .child(
+                ui::Label::new(output.name.clone())
+                    .size(ui::Size::Compact)
+                    .ellipsis(),
+            )
+            .child(
+                div()
+                    .flex_grow()
+                    .min_w_0()
+                    .text_color(rgb(theme::text_faint()))
+                    .text_size(px(12.))
+                    .child(shape.describe(output.bytes)),
+            )
+            .child(
+                div()
+                    .id(("open-output", key))
+                    .flex_none()
+                    .text_color(rgb(theme::text_muted()))
+                    .text_size(px(12.))
+                    .hover(|style| style.text_color(rgb(theme::accent())).cursor_pointer())
+                    .child("Open ⧉")
+                    .on_click(move |_event, _window, _cx| {
+                        if let Err(error) = workspace::open(&opened) {
+                            tracing::warn!(%error, "could not open an output");
+                        }
+                    }),
+            )
+            .children(revealed.map(|folder| {
+                div()
+                    .id(("reveal-output", key))
+                    .flex_none()
+                    .text_color(rgb(theme::text_muted()))
+                    .text_size(px(12.))
+                    .hover(|style| style.text_color(rgb(theme::accent())).cursor_pointer())
+                    .child("Reveal")
+                    .on_click(move |_event, _window, _cx| {
+                        if let Err(error) = workspace::open(&folder) {
+                            tracing::warn!(%error, "could not open an output's folder");
+                        }
+                    })
+            }));
+
+        let mut card = div()
+            .id(("output-card", key))
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w_0()
+            .rounded_lg()
+            .overflow_hidden()
+            .border_1()
+            .border_color(rgb(theme::border()))
+            // One step off the transcript's own background, whichever way the palette runs.
+            .bg(rgb(if theme::is_light(&theme::current()) {
+                theme::elevated()
+            } else {
+                theme::surface()
+            }))
+            .hover(|style| style.border_color(rgb(theme::border_strong())).cursor_pointer())
+            .child(header);
+
+        match output.kind {
+            workspace::Kind::Figure => {
+                card = card.child(
+                    div().p_2().child(
+                        // Capped, not scaled to the pane: a 2000px figure would otherwise push
+                        // the transcript's width around as it loads.
+                        img(output.path.clone())
+                            .max_w_full()
+                            .max_h(px(420.))
+                            .object_fit(gpui::ObjectFit::Contain),
+                    ),
+                );
+            }
+            _ => {
+                if let Some(rows) = self.preview_of(output, PREVIEW_ROWS) {
+                    let columns = rows
+                        .iter()
+                        .map(Vec::len)
+                        .max()
+                        .unwrap_or(0)
+                        .min(PREVIEW_COLUMNS);
+                    let mut table = div().flex().flex_col().w_full().min_w_0().px_3().py_2();
+                    for (at, record) in rows.iter().enumerate() {
+                        let heading = at == 0;
+                        let mut line = div()
+                            .flex()
+                            .flex_row()
+                            .w_full()
+                            .min_w_0()
+                            .gap_2()
+                            .py_1()
+                            .when(heading, |line| {
+                                line.border_b_1().border_color(rgb(theme::border()))
+                            });
+                        for cell in record.iter().take(columns) {
+                            line = line.child(
+                                div()
+                                    .flex_grow()
+                                    .flex_basis(relative(1. / columns as f32))
+                                    .min_w_0()
+                                    .text_color(rgb(if heading {
+                                        theme::text_faint()
+                                    } else {
+                                        theme::text_muted()
+                                    }))
+                                    .text_size(px(12.))
+                                    .overflow_hidden()
+                                    .child(cell.clone()),
+                            );
+                        }
+                        // Said, not silently dropped: a table shown four columns wide when it
+                        // has eleven is a table someone will read as complete.
+                        if record.len() > columns {
+                            line = line.child(
+                                div()
+                                    .flex_none()
+                                    .text_color(rgb(theme::text_faint()))
+                                    .text_size(px(12.))
+                                    .child(format!("+{}", record.len() - columns)),
+                            );
+                        }
+                        table = table.child(line);
+                    }
+                    card = card.child(table);
+
+                    if let workspace::Shape::Table { rows: total, .. } = shape {
+                        card = card.child(
+                            div()
+                                .w_full()
+                                .min_w_0()
+                                .px_3()
+                                .pb_2()
+                                .text_color(rgb(theme::text_faint()))
+                                .text_size(px(12.))
+                                .child(format!(
+                                    "first {} of {} rows · click to open the whole table",
+                                    rows.len().saturating_sub(1),
+                                    workspace::thousands(total)
+                                )),
+                        );
+                    }
+                }
+            }
+        }
+
+        card.on_click(cx.listener(move |workbench, _event, _window, cx| {
+            workbench.preview = Some(previewed.clone());
+            cx.notify();
+        }))
+    }
+
+    /// The first rows of a table, measured at most once per version of the file.
+    ///
+    /// Cached beside the shape and for the same reason: this renders on every frame of a
+    /// streaming answer, and a preview that re-read the file each time would be doing disk I/O
+    /// sixty times a second on the thread drawing the window.
+    fn preview_of(&self, output: &workspace::Output, rows: usize) -> Option<Vec<Vec<String>>> {
+        if let Some(entry) = self.previews.borrow().get(&output.path) {
+            if entry.0 == output.modified {
+                return entry.1.clone();
+            }
+        }
+        let found = workspace::table_preview(&output.path, rows);
+        self.previews
+            .borrow_mut()
+            .insert(output.path.clone(), (output.modified, found.clone()));
+        found
+    }
+
     /// Who was consulted for this answer, how long it took, how many steps.
     ///
     /// The path reads `academic_researcher → theorizer → data_analysis · 19s · 4 steps`, which is
@@ -6000,44 +6230,9 @@ impl Workbench {
                         .child("— you stopped this turn; the answer above is incomplete"),
                 );
             }
-            // Figures last: the answer explains them, so it should be read first.
-            for (plot, path) in message.plots.iter().enumerate() {
-                let name = path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                let opened = path.clone();
-                block = block.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .w_full()
-                        .min_w_0()
-                        .gap_1()
-                        .child(
-                            // Capped, not scaled to the pane: a 2000px figure would
-                            // otherwise push the transcript's width around as it loads.
-                            img(path.clone())
-                                .max_w_full()
-                                .max_h(px(420.))
-                                .object_fit(gpui::ObjectFit::Contain),
-                        )
-                        .child(
-                            div()
-                                .id(("plot", index * 64 + plot))
-                                .text_color(rgb(theme::text_muted()))
-                                .text_xs()
-                                .hover(|style| style.cursor_pointer())
-                                .child(format!("{name} — click to open"))
-                                .on_click(move |_event, _window, _cx| {
-                                    // The figure at full size, in whatever the researcher
-                                    // normally views images with.
-                                    if let Err(error) = workspace::open(&opened) {
-                                        tracing::warn!(%error, "could not open a figure");
-                                    }
-                                }),
-                        ),
-                );
+            // Files last: the answer explains them, so it should be read first.
+            for (at, output) in message.outputs.iter().enumerate() {
+                block = block.child(self.output_card(index * 64 + at, output, cx));
             }
             // What to do with the answer, under the answer. All three exist already — the first
             // is a palette command, and a command nobody knows the name of is a feature nobody
@@ -8395,18 +8590,15 @@ impl Workbench {
     /// leaves alone is not. A file that has vanished between the directory listing and this call
     /// reports its size only, which is what the row falls back to anyway.
     fn shape_of(&self, output: &workspace::Output) -> workspace::Shape {
-        let Ok(modified) = std::fs::metadata(&output.path).and_then(|meta| meta.modified()) else {
-            return workspace::Shape::Plain;
-        };
         if let Some((seen, shape)) = self.shapes.borrow().get(&output.path) {
-            if *seen == modified {
+            if *seen == output.modified {
                 return *shape;
             }
         }
         let shape = workspace::shape(&output.path, output.bytes);
         self.shapes
             .borrow_mut()
-            .insert(output.path.clone(), (modified, shape));
+            .insert(output.path.clone(), (output.modified, shape));
         shape
     }
 

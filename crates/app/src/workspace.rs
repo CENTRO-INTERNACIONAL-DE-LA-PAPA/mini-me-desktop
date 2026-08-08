@@ -233,31 +233,10 @@ pub fn save_report(dir: &Path, title: &str, markdown: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-/// Every image in `dir`, oldest first.
-///
-/// Sorted by modification time so a turn's figures appear in the order they were drawn,
-/// which for a plotting script is the order the analysis went in. Returns empty for a
-/// directory that does not exist yet — the common case, since the backend creates it on
-/// first write.
-pub fn images(dir: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut found: Vec<(std::time::SystemTime, PathBuf)> = entries
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            let extension = path.extension()?.to_str()?.to_ascii_lowercase();
-            if !IMAGE_EXTENSIONS.contains(&extension.as_str()) {
-                return None;
-            }
-            let modified = entry.metadata().ok()?.modified().ok()?;
-            Some((modified, path))
-        })
-        .collect();
-    found.sort_by(|a, b| a.0.cmp(&b.0));
-    found.into_iter().map(|(_, path)| path).collect()
-}
+// No `images`. It listed the figures in a directory, oldest first, and existed because the
+// transcript showed figures and nothing else. The transcript now shows every output a turn
+// produced, so its one caller reads `outputs` — which finds the same files, carries what it
+// already read about them, and does not need a second directory walk with a second sort rule.
 
 /// One file a conversation produced.
 #[derive(Clone, Debug, PartialEq)]
@@ -267,6 +246,13 @@ pub struct Output {
     /// What it is, in the researcher's terms — the grouping key in the panel.
     pub kind: Kind,
     pub bytes: u64,
+    /// When it was last written.
+    ///
+    /// Carried rather than discarded: [`outputs`] reads it to sort and used to throw it away, so
+    /// every caller that wanted chronological order — or wanted to know whether its cached
+    /// measurement of this file was still current — went back to the filesystem for a number
+    /// that had already been read.
+    pub modified: std::time::SystemTime,
 }
 
 /// The kinds of output worth telling apart.
@@ -318,7 +304,7 @@ pub fn outputs(dir: &Path) -> Vec<(Kind, Vec<Output>)> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
-    let mut found: Vec<(std::time::SystemTime, Output)> = entries
+    let mut found: Vec<Output> = entries
         .flatten()
         .filter_map(|entry| {
             let path = entry.path();
@@ -331,26 +317,24 @@ pub fn outputs(dir: &Path) -> Vec<(Kind, Vec<Output>)> {
             if name.starts_with('.') {
                 return None;
             }
-            Some((
-                metadata.modified().ok()?,
-                Output {
-                    kind: Kind::of(&path),
-                    path,
-                    name,
-                    bytes: metadata.len(),
-                },
-            ))
+            Some(Output {
+                kind: Kind::of(&path),
+                path,
+                name,
+                bytes: metadata.len(),
+                modified: metadata.modified().ok()?,
+            })
         })
         .collect();
     // Newest first: the file someone wants is nearly always the one just written.
-    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.sort_by(|a, b| b.modified.cmp(&a.modified));
 
     let mut groups: Vec<(Kind, Vec<Output>)> = Vec::new();
     for kind in [Kind::Figure, Kind::Data, Kind::Document, Kind::Other] {
         let items: Vec<Output> = found
             .iter()
-            .filter(|(_, output)| output.kind == kind)
-            .map(|(_, output)| output.clone())
+            .filter(|output| output.kind == kind)
+            .cloned()
             .collect();
         if !items.is_empty() {
             groups.push((kind, items));
@@ -514,6 +498,74 @@ fn table(path: &Path, delimiter: u8) -> Shape {
     std::fs::read(path)
         .map(|data| count_records(&data, delimiter))
         .unwrap_or(Shape::Plain)
+}
+
+/// The delimiter a file's extension implies, for the two this app previews.
+fn delimiter_of(path: &Path) -> Option<u8> {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "csv" => Some(b','),
+        "tsv" => Some(b'\t'),
+        _ => None,
+    }
+}
+
+/// One record split into fields, honouring quotes.
+///
+/// The same rules as [`count_records`] — a delimiter inside quotes is a character, `""` is an
+/// escaped quote — because a preview whose columns disagreed with the column count printed above
+/// it would be two views of one file contradicting each other on screen.
+pub(crate) fn split_record(line: &str, delimiter: u8) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut field = String::new();
+    let mut quoted = false;
+    let mut characters = line.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '"' if quoted => {
+                if characters.peek() == Some(&'"') {
+                    characters.next();
+                    field.push('"');
+                } else {
+                    quoted = false;
+                }
+            }
+            '"' => quoted = true,
+            c if !quoted && c as u32 == delimiter as u32 => {
+                fields.push(std::mem::take(&mut field));
+            }
+            '\r' | '\n' if !quoted => {}
+            c => field.push(c),
+        }
+    }
+    fields.push(field);
+    fields
+}
+
+/// The first few rows of a delimited file — header first — for the card in the transcript.
+///
+/// `None` for anything that is not a table we can split. Bounded by `rows`, and the read is
+/// bounded too: [`head`] stops after that many lines rather than pulling a 400 MB export into
+/// memory to show three rows of it.
+///
+/// A quoted field containing a newline will be cut short here, because the read is line-based
+/// while [`count_records`] is byte-based. That costs a preview a cell; it does not affect the
+/// row and column counts, which are the numbers anyone acts on.
+pub fn table_preview(path: &Path, rows: usize) -> Option<Vec<Vec<String>>> {
+    let delimiter = delimiter_of(path)?;
+    let text = head(path, rows).ok()?;
+    let found: Vec<Vec<String>> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| split_record(line, delimiter))
+        .collect();
+    // A header on its own is not a preview of anything.
+    (found.len() > 1).then_some(found)
 }
 
 /// Pixel dimensions, straight out of the header.
@@ -969,6 +1021,52 @@ mod tests {
     }
 
     #[test]
+    fn a_preview_splits_the_same_way_the_count_does() {
+        // The two must agree: a preview showing four columns under a sub-line saying three is
+        // one file contradicting itself on screen.
+        let fields = split_record("\"Cusco, Peru\",21.4,\"he said \"\"yes\"\"\"", b',');
+        assert_eq!(fields, vec!["Cusco, Peru", "21.4", "he said \"yes\""]);
+        assert_eq!(split_record("a\tb\tc", b'\t'), vec!["a", "b", "c"]);
+        // A trailing delimiter is a real empty last field, not an absent one.
+        assert_eq!(split_record("a,b,", b','), vec!["a", "b", ""]);
+
+        let dir = std::env::temp_dir().join(format!("minime-preview-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a temp dir");
+
+        let csv = dir.join("yield.csv");
+        std::fs::write(
+            &csv,
+            "site,yield_t_ha\n\"Cusco, Peru\",21.4\nPuno,18.9\nJunin,20.1\n",
+        )
+        .expect("write");
+        let preview = table_preview(&csv, 3).expect("a table");
+        assert_eq!(preview[0], vec!["site", "yield_t_ha"]);
+        assert_eq!(preview[1], vec!["Cusco, Peru", "21.4"]);
+        assert_eq!(preview.len(), 3, "bounded by the row budget");
+        // The column count the preview shows and the one the sub-line states are the same.
+        assert_eq!(
+            count_records(&std::fs::read(&csv).expect("read"), b','),
+            Shape::Table {
+                rows: 3,
+                columns: 2
+            }
+        );
+
+        // A header with no data under it previews nothing rather than an empty table.
+        let bare = dir.join("empty.csv");
+        std::fs::write(&bare, "a,b,c\n").expect("write");
+        assert!(table_preview(&bare, 4).is_none());
+
+        // Not a delimited file at all.
+        let note = dir.join("informe.md");
+        std::fs::write(&note, "# Hola\n\nunas notas\n").expect("write");
+        assert!(table_preview(&note, 4).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn an_images_dimensions_come_out_of_its_header() {
         // Real headers, byte for byte, rather than files written by an encoder we would then be
         // testing instead of ours.
@@ -1065,31 +1163,41 @@ mod tests {
     }
 
     #[test]
-    fn only_images_are_collected_and_in_the_order_they_were_written() {
+    fn every_output_carries_when_it_was_written() {
+        // What replaced `images`. The transcript shows a turn's files in the order they were
+        // written, across kinds — so the stamp has to survive `outputs`, and sorting on it has
+        // to give write order rather than the kind grouping the panel wants.
         let dir =
             std::env::temp_dir().join(format!("minime-workspace-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a temp dir");
 
-        // A report and a dataset are outputs too, but they are not something the chat can
-        // render — only figures belong inline.
-        for name in ["informe.md", "papas.csv", "notes.txt"] {
-            std::fs::write(dir.join(name), b"x").expect("write");
-        }
-        for name in ["a_first.png", "b_second.JPG", "c_third.webp"] {
+        // Deliberately alternating kinds: a figure, then data, then a figure again. Reversing
+        // what `outputs` returns would put both figures together and lose this order entirely.
+        for name in ["a_first.png", "b_second.csv", "c_third.webp", "d_last.md"] {
             std::fs::write(dir.join(name), b"x").expect("write");
             // Distinct mtimes, or the sort has nothing to order by.
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
 
-        let found: Vec<String> = images(&dir)
-            .iter()
-            .filter_map(|path| path.file_name()?.to_str().map(str::to_string))
+        let mut produced: Vec<Output> = outputs(&dir)
+            .into_iter()
+            .flat_map(|(_, items)| items)
             .collect();
-        assert_eq!(found, vec!["a_first.png", "b_second.JPG", "c_third.webp"]);
+        produced.sort_by_key(|output| output.modified);
+        let names: Vec<&str> = produced.iter().map(|output| output.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["a_first.png", "b_second.csv", "c_third.webp", "d_last.md"]
+        );
+
+        // The panel's own order is the other one: grouped by kind, newest first inside a group.
+        let grouped = outputs(&dir);
+        assert_eq!(grouped[0].0, Kind::Figure);
+        assert_eq!(grouped[0].1[0].name, "c_third.webp", "newest figure first");
 
         // A directory that does not exist is the normal state before the first write.
-        assert!(images(&dir.join("nothing-here")).is_empty());
+        assert!(outputs(&dir.join("nothing-here")).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
