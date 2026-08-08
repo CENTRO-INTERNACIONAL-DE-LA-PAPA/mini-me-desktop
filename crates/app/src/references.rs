@@ -25,6 +25,20 @@
 //! comparison done here against text that never leaves. Org policy is explicit that confidential
 //! and unpublished material must not be sent to third parties; this sends neither.
 //!
+//! # What a negative result does *not* mean
+//!
+//! Crossref registers **journal articles**. Books, monographs, society series and much grey
+//! literature are largely absent from it, and so are older works generally — Sørensen's 1948
+//! similarity index, one of the most cited works in plant ecology, has no DOI at all.
+//!
+//! So "nothing matches" is a fact about the registry, not about the world, and this module says
+//! so in those words. The first version of the message read *"does not appear to describe a real
+//! paper"*, which would have told a researcher that a correctly cited monograph was fabricated —
+//! worse than the fabrications the check exists to catch, because it arrives with the app's
+//! authority rather than the model's.
+//!
+//! The rule, and it cuts both ways: **report what was checked, not what was concluded.**
+//!
 //! # Why Crossref rather than Semantic Scholar
 //!
 //! Crossref is the registrar: a DOI exists because it was registered there, so "this DOI does not

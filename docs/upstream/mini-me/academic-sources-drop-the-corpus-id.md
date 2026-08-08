@@ -76,7 +76,7 @@ The past record and future prospects for the use of exotic potato germplasm | 19
 DOI: 10.1007/BF02853982
 ```
 
-## There is a second failure, and it is worse
+## There is a second failure, and identifiers cannot reach it
 
 The above explains a citation that names a **real paper** and attaches the wrong identifier. A
 later run produced a different kind:
@@ -92,14 +92,30 @@ $ asta papers search "Use of Andean potato landrace populations to identify new 
 total: 0
 ```
 
-No such paper, in Semantic Scholar or in Crossref, under the title or under those authors. It was
-not mis-transcribed — it was composed. Two of the six references in the earlier run (Douches 1997,
-Ellis 2018) are the same.
+Nothing in Semantic Scholar or Crossref matches that title. Two of the six references in the
+earlier run (Douches 1997, Ellis 2018) behave the same way.
 
-So carrying `corpusId` through fixes the first class completely and the second class not at all:
-**there is no paper to link to.** A subagent that emits references the search never returned is a
-separate defect from one that cannot cite the references it did return, and the first is not
-visible until the second is fixed.
+**Stated carefully, because a negative here is weaker than it looks.** Crossref registers journal
+articles; books, monographs and society series largely are not in it, and neither index covers
+older or grey literature well. What can be said is that the *title as written* matches nothing —
+not that no such work exists.
+
+And the authors are real collaborators on this exact topic. Searching for them returns:
+
+```
+Linkage and quantitative trait locus mapping of foliage late blight… (2006)
+K. Sørensen, M. Madsen, H. Kirk, D. K. Madsen
+```
+
+Right people, right year, right subject, different title. So this is not a reference conjured from
+nothing — it is a real research group with a title and an identifier attached to them that are not
+theirs, which is a more insidious failure than pure invention and harder for a reader to catch.
+
+So carrying `corpusId` through fixes the first class completely and the second class not at all.
+Where the search did return the paper, a corpus id reaches it; where the citation's title belongs
+to no returned result, there is nothing to attach an id to. A subagent that emits references the
+search did not return is a separate defect from one that cannot cite the references it did, and
+the first stays invisible while the second exists.
 
 Worth checking whether `academic_researcher` is constrained to cite only what the tool returned,
 and what it does when the search returns few or no results — the pressure to produce a
@@ -123,10 +139,10 @@ and what it does when the search returns few or no results — the pressure to p
    citation is for. `api.semanticscholar.org/CorpusID:<n>` is available for every result the
    search returns, which is more than can be said for the DOI.
 
-4. **Constrain the subagent to what the search returned** — see the second failure above. No
-   amount of identifier plumbing helps a reference to a paper that does not exist.
+3. **Constrain the subagent to what the search returned** — see the second failure above. No
+   amount of identifier plumbing helps a citation whose title belongs to no result.
 
-3. **Reconsider the 32 KB save-to-sandbox threshold for `asta`** (`mcp_tools.py:132`). Above it the
+4. **Reconsider the 32 KB save-to-sandbox threshold for `asta`** (`mcp_tools.py:132`). Above it the
    model receives a pointer plus a 2 KB preview and must use code execution to read the rest. Paper
    searches are "hundreds of KB" by that file's own comment, so this is the normal path, not the
    exceptional one — and a subagent that does not read the file back is composing its answer from

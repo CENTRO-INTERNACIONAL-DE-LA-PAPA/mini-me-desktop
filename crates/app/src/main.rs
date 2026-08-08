@@ -6403,14 +6403,14 @@ impl Workbench {
                 // and a much stronger statement than silence.
                 workbench.say(
                     match (found, total - found) {
-                        (0, 1) => "no registered work matches that reference".to_string(),
-                        (0, missing) => format!(
-                            "no registered work matches any of those {missing} references"
-                        ),
+                        (0, 1) => "nothing in Crossref matches that reference".to_string(),
+                        (0, missing) => {
+                            format!("nothing in Crossref matches any of those {missing}")
+                        }
                         (found, 0) => format!("found the work all {found} describe"),
-                        (found, missing) => format!(
-                            "found {found}; {missing} match no registered work at all"
-                        ),
+                        (found, missing) => {
+                            format!("found {found}; {missing} match nothing in Crossref")
+                        }
                     },
                     cx,
                 );
@@ -9374,22 +9374,30 @@ impl Workbench {
                         // The work the citation actually describes. Clicking copies the real
                         // DOI, because the next thing anyone does with it is paste it into a
                         // manuscript or a reference manager.
-                        // Asked, and the registry has no such work. Said plainly, because this
-                        // is the strongest statement the feature can make: a DOI that is not
-                        // registered *and* text that matches nothing is not a mis-transcribed
-                        // reference — no paper by that description exists to link to, by DOI or
-                        // by corpus id or by anything else.
+                        // Asked, and Crossref has nothing matching.
+                        //
+                        // **Says what was checked, not what exists.** This first read "it does
+                        // not appear to describe a real paper", which is a claim the evidence
+                        // does not support: Crossref registers journal articles, and books,
+                        // monographs and society series largely are not in it. Sørensen's 1948
+                        // similarity index — one of the most cited works in plant ecology — has
+                        // no DOI at all. A tool that told a researcher that reference was
+                        // fabricated would be worse than the fabrications it was built to catch.
+                        //
+                        // Amber, not red, for the same reason. Something is wrong with the
+                        // reference; *which* thing is not established.
                         .children(matches!(repair, Some(None)).then(|| {
                             div()
                                 .p_2()
                                 .rounded_md()
                                 .bg(rgb(theme::accent_soft()))
-                                .text_color(rgb(theme::error()))
+                                .text_color(rgb(theme::warning()))
                                 .text_size(px(11.))
                                 .line_height(px(15.))
                                 .child(
-                                    "no registered work matches this reference — it does not \
-                                     appear to describe a real paper",
+                                    "nothing in Crossref matches this — which covers journal \
+                                     articles, so a book or a monograph may not be there. Check \
+                                     it by hand.",
                                 )
                         }))
                         .children(repair.flatten().map(|repair| {

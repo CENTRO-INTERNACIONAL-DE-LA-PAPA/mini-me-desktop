@@ -7112,3 +7112,47 @@ this feature can make, and it is more useful than a corrected DOI, because the a
 
 The same distinction that has run through §118–§120: *asked and found nothing* and *never asked*
 must not look the same on screen.
+
+### §120b — the negative was over-claimed (2026-08-07)
+
+The researcher, on being told Sørensen 2006 does not exist: *"Sorensen exists as a book not a
+paper. there is a betdiversity index by sorensen btw."*
+
+Both halves land, and the second is the sharper one.
+
+**Sørensen's 1948 similarity index** — the basis of the beta-diversity coefficient, one of the most
+cited works in plant ecology — is a monograph in *Biologiske Skrifter*, and Semantic Scholar has it
+with **no DOI at all**. Crossref registers journal articles; books, monographs, society series and
+grey literature are largely not in it, and older works generally are not.
+
+So `total: 0` is a fact about an index, not about the world — and §120a stated it as though it
+were about the world. The row read:
+
+> no registered work matches this reference — **it does not appear to describe a real paper**
+
+Told to a researcher who had correctly cited a monograph, that is worse than the fabrications the
+feature exists to catch, because it arrives with the app's authority instead of the model's. It now
+reads *"nothing in Crossref matches this — which covers journal articles, so a book or a monograph
+may not be there. Check it by hand."* Amber rather than red: something is wrong with the reference,
+and *which* thing is not established.
+
+**And the authors are real.** Searching them returns *Linkage and quantitative trait locus mapping
+of foliage late blight…* (2006) — **K. Sørensen, M. Madsen, H. Kirk**, D. K. Madsen. Right people,
+right year, right subject, different title. Not a reference conjured from nothing: a real research
+group with someone else's title and identifier attached to them, which is harder to catch than pure
+invention.
+
+### This is the same mistake, three times, from three directions
+
+| | the over-claim | what actually held |
+|---|---|---|
+| §119 | "these DOIs don't exist" — from a Semantic Scholar 404 | Crossref, the registrar, was needed to say it |
+| §120a | "this reference describes no real paper" — from `total: 0` | the index does not cover books |
+| — | the check's own copy | now says what was checked, not what was concluded |
+
+Each time the correction came from the researcher, and each time the pattern was identical:
+**a negative from one source, reported as a fact about the world.** The feature built to stop a
+model from over-claiming was itself over-claiming, in its error path, where nobody looks.
+
+*Report what was checked. A tool that says more than it verified is the thing it was built to
+replace.*
