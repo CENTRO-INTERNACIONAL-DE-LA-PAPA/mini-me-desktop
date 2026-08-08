@@ -329,14 +329,27 @@ def install_mcp(module) -> None:
             if not asyncio.iscoroutinefunction(coroutine):
                 continue
 
-            async def _watched(*args, _inner=coroutine, **kwargs):
+            async def _watched(*args, _inner=coroutine, _tool=name, **kwargs):
                 result = await _inner(*args, **kwargs)
                 # Never let bookkeeping break a tool call: a failure here costs a link, and
                 # raising would cost the search.
                 try:
-                    observe(result)
+                    found = observe(result)
                 except Exception:  # noqa: BLE001
-                    logger.debug("minime_local: could not read papers from a tool result")
+                    logger.warning("minime_local: could not read papers from %s", _tool)
+                    return result
+                # **Logged per call, and this is the diagnostic that was missing.** The only
+                # signal before this was "0 of 6 sources carry the corpus id", which is the
+                # *outcome* and not the cause: it reads identically whether no search ran at
+                # all, or ten papers were recorded and no citation matched one of them. Those
+                # need completely different fixes, so they must not produce the same line
+                # (docs §81).
+                logger.warning(
+                    "minime_local: %s returned %d paper(s) with a corpus id (%d known so far)",
+                    _tool,
+                    found,
+                    len(_papers()),
+                )
                 return result
 
             try:
