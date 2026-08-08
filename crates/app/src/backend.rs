@@ -1262,10 +1262,27 @@ impl BackendSupervisor {
         false
     }
 
+    /// How long any one git command may take before the launch gives up on it.
+    ///
+    /// Generous for a `fetch` over a slow link, short enough that a researcher does not conclude
+    /// the app is broken.
+    const GIT_TIMEOUT_S: u32 = 20;
+
     /// Run one git command in `dir`, or `None` if it could not run or failed.
     fn run_git(&self, dir: &str, args: &[&str]) -> Option<String> {
+        // **Never wait for a human, never wait forever.** This runs on the startup path, before
+        // the backend is spawned, and Mini-Me is a *private* repository — so `git fetch` with a
+        // credential helper configured will sit there waiting for a sign-in that nobody is
+        // watching for, and the app looks hung. `GIT_TERMINAL_PROMPT=0` and an askpass that
+        // answers nothing turn "ask the user" into "fail immediately", and `timeout` bounds the
+        // rest: DNS, a stalled TLS handshake, a repository that has moved.
+        //
+        // A version check is worth a few seconds and is worth nothing at all if it costs the
+        // researcher a window that will not open (docs §131).
         let command = format!(
-            "git -C {} {}",
+            "GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true GCM_INTERACTIVE=never \
+             timeout {} git -C {} {}",
+            Self::GIT_TIMEOUT_S,
             quote_path(dir),
             args.iter()
                 .map(|arg| shell_quote(arg))

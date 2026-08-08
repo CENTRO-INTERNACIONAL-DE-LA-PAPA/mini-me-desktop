@@ -7681,3 +7681,40 @@ different cause.
 *A mechanism whose failure mode is silence needs its diagnostics written before its logic, not
 after each failure.* Every fix in this chain arrived one launch late because the line that would
 have named the cause did not exist yet.
+
+## 131. A version check that waited for a password (2026-08-08)
+
+*"dont know why the backend takes to long to start."*
+
+§130 moved `sync_to_pin` above the health check, which was right, and made it the first thing every
+launch does — which turned two of its properties into defects.
+
+`run_git` shelled out with no timeout and no prompt suppression. Mini-Me is **private**, and once a
+credential helper is configured, `git fetch` against it does not fail — it *waits*, for a sign-in
+dialog nobody is watching for, before the backend is spawned. The app looks hung, and the thing it
+is hung on is a version check.
+
+Now: `GIT_TERMINAL_PROMPT=0`, an askpass that answers nothing, and `timeout 20`. "Ask the user"
+becomes "fail immediately", and the rest — DNS, a stalled handshake, a moved repository — is
+bounded. A version check is worth a few seconds and worth nothing at all if it costs a window that
+will not open.
+
+### Where the rest of the startup goes
+
+Measured from a real launch, spawn to healthy is about **17 seconds**:
+
+| | |
+|---|---|
+| `asta auth print-token --raw --refresh` | **~10s** |
+| `langgraph dev` importing the graph | ~7s |
+
+The token is minted **fresh on every launch** (`backend.rs:1423`) — `--refresh` unconditionally,
+with no check of whether the stored one is still valid. That is the single largest cost in getting
+the window usable, and it is a network round trip through the CLI for a credential that is
+typically still good. Worth a validity check before a refresh; not tonight.
+
+The MCP tool lists are a separate ~7s, paid on the **first turn** rather than at startup — 8 Asta,
+23 Dataverse, 9 AGROVOC, each fetched over HTTP when the agent is assembled.
+
+*The startup path is the one place where every network call is a call the researcher waits on with
+nothing on screen. It deserves an inventory, and it has never had one.*
