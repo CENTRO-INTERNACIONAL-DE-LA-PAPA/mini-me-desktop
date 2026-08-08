@@ -68,15 +68,82 @@ pub struct Theme {
 
 /// The themes that ship with the app.
 ///
-/// Four, chosen to cover real situations rather than to fill a gallery: the default, one
-/// for people who do not want orange, one for a bright room or a projector, and one for
+/// Six, chosen to cover real situations rather than to fill a gallery: the default and its
+/// after-dark twin, the original pair, one for anybody who does not want orange, and one for
 /// anybody who finds the others too low-contrast.
-pub const THEMES: [(&str, Theme); 4] = [
+///
+/// **First is the default**, and that is not a comment — [`DEFAULT`] and [`DEFAULT_NAME`] read
+/// this array rather than restating it, so the palette a fresh install opens on is decided in
+/// exactly one place. It used to be decided in three (the `live_theme!` defaults,
+/// `Settings::default`, and `apply_theme`'s fallback), which is the shape this project keeps
+/// getting wrong: several facts that have to agree, with more than one of them saying so.
+pub const THEMES: [(&str, Theme); 6] = [
+    ("Bench", BENCH),
+    ("Bench Night", BENCH_NIGHT),
     ("Mini-Me Dark", MINI_ME_DARK),
     ("Slate", SLATE),
     ("Paper", PAPER),
     ("High Contrast", HIGH_CONTRAST),
 ];
+
+/// The palette a fresh install opens on.
+pub const DEFAULT: Theme = THEMES[0].1;
+
+/// Its name, as `settings.toml` writes it.
+pub const DEFAULT_NAME: &str = THEMES[0].0;
+
+/// Neutral paper and one deep teal. The default: bright rooms, shared screens.
+///
+/// A light default is a deliberate reversal. The app opened on charcoal because editors do, and
+/// this is not an editor — it is read next to a bench, a greenhouse window and a projector, and
+/// those are the rooms a dark UI actually fails in. The teal is held to the things you can act
+/// on; nothing else in the window is saturated.
+pub const BENCH: Theme = Theme {
+    background: 0xedebe6,
+    surface: 0xf6f5f1,
+    elevated: 0xfcfcfa,
+    overlay: 0xffffff,
+    accent_soft: 0xddede7,
+    text: 0x2f343a,
+    text_muted: 0x5e656b,
+    // Two inks sit a shade darker than the design named them: `text_faint` came as 0x666d73
+    // and `running` as 0x2f6fa8, which measure 4.41:1 and 4.45:1 on the background — under the
+    // 4.5 floor `every_shipped_theme_is_readable` enforces, and under it again on `accent_soft`.
+    // Hue and saturation are the designer's; only lightness moved, by two or three points per
+    // channel, which is the smallest change that clears AA.
+    text_faint: 0x646a70,
+    border: 0xdfddd6,
+    border_strong: 0xc3c1b8,
+    accent: 0x1f6f63,
+    accent_hover: 0x17564d,
+    success: 0x2f6b23,
+    warning: 0x8a5d04,
+    error: 0xa63a34,
+    running: 0x2e6da5,
+};
+
+/// The same bench after dark. Blue-charcoal, off-white ink, teal held back.
+pub const BENCH_NIGHT: Theme = Theme {
+    background: 0x23262a,
+    surface: 0x2a2e33,
+    elevated: 0x333840,
+    overlay: 0x383e46,
+    accent_soft: 0x284840,
+    text: 0xe3e5e2,
+    text_muted: 0xaeb3b0,
+    text_faint: 0xaab0ad,
+    border: 0x383d42,
+    border_strong: 0x495057,
+    accent: 0x6fc3ae,
+    accent_hover: 0x8fd6c4,
+    success: 0x9cc96b,
+    warning: 0xe3b95c,
+    // Lightened from 0x e58f8b for the same reason as BENCH's two: 4.44:1 on `overlay` and
+    // 4.13:1 on `accent_soft`, both below AA. An error message is the last text in the window
+    // that should be hard to read.
+    error: 0xe89a97,
+    running: 0x85b8e8,
+};
 
 /// Warm charcoal and the Mini-Me orange. Neutrals carry a slight warm tint so they sit
 /// with the accent — a pure grey beside a saturated warm colour reads blue by comparison.
@@ -168,9 +235,13 @@ pub fn is_light(theme: &Theme) -> bool {
 }
 
 macro_rules! live_theme {
-    ($($field:ident => $getter:ident, $slot:ident, $default:expr;)*) => {
+    ($($field:ident => $getter:ident, $slot:ident;)*) => {
         $(
-            static $slot: AtomicU32 = AtomicU32::new($default);
+            // Seeded from [`DEFAULT`] rather than from a literal repeated here. The literals
+            // were a second copy of one palette, and a copy of a palette is a palette that can
+            // be half-changed — which is what "a fresh install opens on Bench" would have meant
+            // if only some of these rows were updated.
+            static $slot: AtomicU32 = AtomicU32::new(DEFAULT.$field);
             /// The live value of this role. Cheap enough to call per element per frame.
             pub fn $getter() -> u32 { $slot.load(Ordering::Relaxed) }
         )*
@@ -188,22 +259,22 @@ macro_rules! live_theme {
 }
 
 live_theme! {
-    background   => background,   BACKGROUND_SLOT,    0x16161a;
-    surface      => surface,      SURFACE_SLOT,       0x1c1c21;
-    elevated     => elevated,     ELEVATED_SLOT,      0x232329;
-    overlay      => overlay,      OVERLAY_SLOT,       0x2a2a31;
-    accent_soft  => accent_soft,  ACCENT_SOFT_SLOT,   0x3a2419;
-    text         => text,         TEXT_SLOT,          0xececf0;
-    text_muted   => text_muted,   TEXT_MUTED_SLOT,    0xb0b0ba;
-    text_faint   => text_faint,   TEXT_FAINT_SLOT,    0x9a9aa5;
-    border       => border,       BORDER_SLOT,        0x2f2f37;
-    border_strong=> border_strong,BORDER_STRONG_SLOT, 0x3f3f49;
-    accent       => accent,       ACCENT_SLOT,        0xe8703a;
-    accent_hover => accent_hover, ACCENT_HOVER_SLOT,  0xf58b5c;
-    success      => success,      SUCCESS_SLOT,       0x5bbd7a;
-    warning      => warning,      WARNING_SLOT,       0xd9a441;
-    error        => error,        ERROR_SLOT,         0xf1676b;
-    running      => running,      RUNNING_SLOT,       0x6aa9e0;
+    background   => background,   BACKGROUND_SLOT;
+    surface      => surface,      SURFACE_SLOT;
+    elevated     => elevated,     ELEVATED_SLOT;
+    overlay      => overlay,      OVERLAY_SLOT;
+    accent_soft  => accent_soft,  ACCENT_SOFT_SLOT;
+    text         => text,         TEXT_SLOT;
+    text_muted   => text_muted,   TEXT_MUTED_SLOT;
+    text_faint   => text_faint,   TEXT_FAINT_SLOT;
+    border       => border,       BORDER_SLOT;
+    border_strong=> border_strong,BORDER_STRONG_SLOT;
+    accent       => accent,       ACCENT_SLOT;
+    accent_hover => accent_hover, ACCENT_HOVER_SLOT;
+    success      => success,      SUCCESS_SLOT;
+    warning      => warning,      WARNING_SLOT;
+    error        => error,        ERROR_SLOT;
+    running      => running,      RUNNING_SLOT;
 }
 
 /// One channel, linearised — the sRGB → linear step of the WCAG formula.
@@ -347,6 +418,27 @@ mod tests {
 
         // Anything that is not a theme family yields nothing rather than erroring.
         assert!(from_zed_family(&serde_json::json!({"nope": 1})).is_empty());
+    }
+
+    #[test]
+    fn a_fresh_window_draws_the_default_before_settings_load() {
+        // The window paints its first frame from these atomics, before `apply_theme` has read
+        // `settings.toml` — so if the seeds and `THEMES[0]` disagreed, a fresh install would
+        // flash one palette and settle on another. They cannot disagree now; this checks the
+        // macro actually wires them, which a comment cannot.
+        apply(&MINI_ME_DARK);
+        for (name, theme) in THEMES {
+            apply(&theme);
+            assert_eq!(current(), theme, "{name} did not survive a round trip");
+        }
+        assert_eq!(DEFAULT, BENCH);
+        assert_eq!(DEFAULT_NAME, "Bench");
+        // What a fresh install writes must name a theme that exists, or it silently falls back.
+        assert!(
+            THEMES.iter().any(|(name, _)| *name == DEFAULT_NAME),
+            "the default name is not in THEMES"
+        );
+        apply(&DEFAULT);
     }
 
     #[test]

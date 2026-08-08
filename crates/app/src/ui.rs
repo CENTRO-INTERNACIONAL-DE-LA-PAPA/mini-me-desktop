@@ -395,7 +395,11 @@ impl RenderOnce for Modal {
                     .flex_none()
                     .px_4()
                     .pt_4()
-                    .text_color(rgb(theme::accent()))
+                    // Faint, not accent. `SETTINGS` and `PROVENANCE` are labels for a surface
+                    // you are already looking at — there is nothing to click. The accent is
+                    // reserved for what can be acted on, and a heading wearing it is the
+                    // loudest thing on a modal whose actual buttons are at the bottom.
+                    .text_color(rgb(theme::text_faint()))
                     .text_xs()
                     .child(self.title),
             );

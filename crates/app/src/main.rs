@@ -60,7 +60,10 @@ const ASTA_CITATION: &str = "AstaBench: Rigorous Benchmarking of AI Agents with 
 
 /// [`section_label`] for a heading only known at runtime.
 fn section_label_owned(text: String) -> impl IntoElement {
-    div().text_color(rgb(theme::accent())).text_xs().child(text)
+    div()
+        .text_color(rgb(theme::text_faint()))
+        .text_xs()
+        .child(text)
 }
 
 /// One row of a picker: a label, a tick when it is the current choice, and an optional note.
@@ -105,8 +108,16 @@ fn picker_row(
 }
 
 /// A small caps-ish section heading for the side panel.
+///
+/// **Faint, not accent.** A heading is not something you can click, and the accent is the app's
+/// one signal that you can — `OUTPUTS`, `SUGGESTED NEXT` and `THE SPECIALISTS` shouting in the
+/// brand colour is most of why the window read as busy. Moving these to `text_faint` was the
+/// single largest change in the redesign and it is one line.
 fn section_label(text: &'static str) -> impl IntoElement {
-    div().text_color(rgb(theme::accent())).text_xs().child(text)
+    div()
+        .text_color(rgb(theme::text_faint()))
+        .text_xs()
+        .child(text)
 }
 
 /// One line of the activity trace: a tool call, or a delegation.

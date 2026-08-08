@@ -174,7 +174,7 @@ impl Default for Settings {
             backend_port: 2024,
             backend_dir: String::new(),
             async_subagents: false,
-            theme: "Mini-Me Dark".to_string(),
+            theme: crate::theme::DEFAULT_NAME.to_string(),
             subagents: std::collections::BTreeMap::new(),
             project: String::new(),
             backend_dir_owned: true,
@@ -323,7 +323,7 @@ pub fn apply_theme(settings: &Settings) {
         .into_iter()
         .find(|(name, _)| name.eq_ignore_ascii_case(&settings.theme))
         .map(|(_, theme)| theme)
-        .unwrap_or(crate::theme::MINI_ME_DARK);
+        .unwrap_or(crate::theme::DEFAULT);
     crate::theme::apply(&chosen);
 }
 
@@ -481,7 +481,9 @@ mod tests {
             ..Default::default()
         };
         apply_theme(&settings);
-        assert_eq!(crate::theme::current(), crate::theme::MINI_ME_DARK);
+        // Named as `DEFAULT`, not as whichever palette that currently is: this test is about
+        // *falling back*, and it should not have to be edited every time the default moves.
+        assert_eq!(crate::theme::current(), crate::theme::DEFAULT);
 
         unsafe { std::env::remove_var("MINIME_SETTINGS") };
         let _ = std::fs::remove_dir_all(&dir);
