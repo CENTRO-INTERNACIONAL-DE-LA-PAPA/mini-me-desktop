@@ -44,7 +44,6 @@ records that the other one *"sent users to the wrong paper"*. Somebody has paid 
 from __future__ import annotations
 
 import asyncio
-import contextvars
 import functools
 import json
 import logging
@@ -56,12 +55,29 @@ logger = logging.getLogger(__name__)
 #: The link form that redirects to the canonical paper page. See `_paper_ref`.
 CORPUS_URL = "https://api.semanticscholar.org/CorpusID:{}"
 
-#: Papers seen in Asta results during the current run, as ``{normalised title: corpus id}``.
+#: Papers seen in Asta results, as ``{normalised title: corpus id}``.
 #:
-#: A `ContextVar` so two concurrent turns cannot read each other's papers — a citation matched
-#: against another conversation's search results would be exactly the wrong-paper failure this
-#: file exists to remove.
-_seen: contextvars.ContextVar[dict[str, str]] = contextvars.ContextVar("minime_local_papers")
+#: **Process-global, and it started as a `ContextVar`.** The reasoning for a ContextVar was that
+#: two concurrent turns must not read each other's papers. That reasoning was wrong twice over.
+#:
+#: It does not work. A `ContextVar` set inside a child task is invisible to the parent — copy on
+#: write, one direction only — and LangGraph runs a tool call in a task while the middleware that
+#: reads this runs outside it. Measured, not assumed:
+#:
+#:     await asyncio.create_task(tool_call())   # records one paper
+#:     len(_papers())                           # 0
+#:
+#: So every source would have kept the model's invented link, and nothing would have said why —
+#: the §114 failure exactly: an isolation mechanism that silently isolated the wrong thing.
+#:
+#: And it was not needed. Sharing is safe *because* the match is on the title: a citation only
+#: takes a corpus id when it names that paper, and a paper named in one conversation is the same
+#: paper when it is named in another. Cross-talk here can only produce the right answer sooner.
+_seen: dict[str, str] = {}
+
+#: Bounded, because this outlives a turn now. Old entries cost only memory, but a researcher who
+#: leaves the app open for a week should not accumulate one without limit.
+_MAX_PAPERS = 4_000
 
 #: Words too common to help decide that two titles are the same work.
 _NOISE = {
@@ -77,13 +93,13 @@ def _significant(text: str) -> list[str]:
 
 
 def _papers() -> dict[str, str]:
-    """This run's recorded papers, creating the store on first use."""
-    try:
-        return _seen.get()
-    except LookupError:
-        store: dict[str, str] = {}
-        _seen.set(store)
-        return store
+    """Every paper recorded so far. See `_seen` for why this is not per-run."""
+    if len(_seen) > _MAX_PAPERS:
+        # Oldest first — dicts keep insertion order — so a long session drops what it has not
+        # needed in a while rather than the search that just ran.
+        for key in list(_seen)[: len(_seen) - _MAX_PAPERS // 2]:
+            _seen.pop(key, None)
+    return _seen
 
 
 def remember(payload: Any) -> int:

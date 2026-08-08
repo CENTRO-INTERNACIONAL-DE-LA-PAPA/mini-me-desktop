@@ -7269,3 +7269,51 @@ the conversation, never a file.
 
 That is the trade the button was standing in for, and stating it once in the code is more honest
 than making somebody re-consent every time they want a reference checked.
+
+## 123. The isolation that isolated the wrong thing (2026-08-07)
+
+Asked directly whether the Asta literature problem is solved. Checking before answering found that
+**§121's overlay would have done nothing at all.**
+
+`sources.py` kept its `{title: corpus id}` store in a `ContextVar`, reasoned as *"so two concurrent
+turns cannot read each other's papers"*. Measured:
+
+```python
+await asyncio.create_task(tool_call())   # records one paper
+len(_papers())                           # 0
+```
+
+A `ContextVar` set inside a child task is invisible to the parent — copy on write, one direction —
+and LangGraph runs a tool call in a task while the middleware that reads the store runs outside it.
+So every source would have kept the model's invented link, silently, and the success log would have
+printed `0 of 6 sources carry the corpus id`.
+
+That is **§114 exactly**: an isolation mechanism that isolated the wrong thing, written by me,
+one day after documenting §114. It was never run against a live backend — the unit tests exercised
+`remember` and `link_for` in one context, which is the only arrangement where it works.
+
+The store is now process-global and bounded. The isolation was not merely broken, it was
+unnecessary: the match is on the **title**, so a citation only takes a corpus id when it names that
+paper, and a paper named in one conversation is the same paper when named in another. Sharing can
+only produce the right answer sooner.
+
+*A test that exercises a function in the arrangement the author imagined is not a test of the
+arrangement the program uses.*
+
+### The MCP is not the limit — the tool choice is
+
+Compared, on one query:
+
+```
+MCP  snippet-search   → authors, corpusId, openAccessInfo, title
+CLI  asta papers      → authors, externalIds{DOI}, paperId, publicationDate, title, venue, year
+```
+
+Semantic Scholar holds the year, the venue and the DOI; `snippet_search` does not return them
+because it exists to return *passages*, with just enough paper attached to identify one. It is
+being used as the sole source for a task that needs bibliography.
+
+So `academic_researcher` has no tool that returns a year, a venue or a DOI, and is asked for all
+three. Added to the upstream report: the fix is a paper-lookup tool beside the snippet search, or a
+resolution step from `corpusId` — not more plumbing downstream of a tool that was never meant to
+answer this.

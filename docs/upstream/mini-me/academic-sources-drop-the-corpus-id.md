@@ -49,6 +49,30 @@ sanity-check comes out right.** The journal is right, the year is right, the vol
 the identifier is wrong, and it is the one thing nobody verifies by eye — and in three of six
 cases it resolves, so the link works and opens a real paper on the right subject.
 
+## The same service already returns the missing fields, through a different tool
+
+`asta papers search` — the CLI over the same Semantic Scholar data — returns everything the
+citation needs. Run side by side on one query:
+
+```
+MCP  (snippet-search, what academic_researcher uses)
+  fields: ['authors', 'corpusId', 'openAccessInfo', 'title']
+  DOI   : ABSENT      year: ABSENT      venue: ABSENT
+
+CLI  (asta papers search)
+  fields: ['authors', 'externalIds', 'paperId', 'publicationDate', 'title', 'venue', 'year']
+  DOI   : 10.1186/s40066-021-00330-9    year: 2021    venue: Agriculture & Food Security
+```
+
+So this is not a limit of the data Asta holds. `snippet_search` is built to return **snippets** —
+passages of text with just enough paper attached to identify them — and it is being used as the
+sole source for a task that needs bibliographic metadata. The subagent has no tool that returns a
+year, a venue or a DOI, and is asked for all three.
+
+That reframes the fix: a paper-lookup tool alongside the snippet search, or a resolution step from
+`corpusId`, would remove the guesswork at its source rather than patching the identifier
+downstream.
+
 ## The fix already exists in this repository
 
 `backend/theory_tools.py:56-84`, `_paper_ref`, handles exactly this case for the theorizer path:
