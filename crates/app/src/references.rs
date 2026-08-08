@@ -774,6 +774,77 @@ asyncio.run(main())
         );
     }
 
+    /// `find_papers` is recorded too, and keeps the link the record gave it.
+    ///
+    /// **This one exists because of four days spent reading the wrong half of the system.** The
+    /// only evidence in the backend log was `0 of N sources carry the corpus id`, which was taken
+    /// as "the subagent invented its citations again". It says exactly the same thing when the
+    /// subagent did everything right: `find_papers` is not part of the MCP bundle, so it never
+    /// passed through the wrapper that records papers, and a perfect run recorded nothing and
+    /// printed zero.
+    ///
+    /// Asserts the link is passed through rather than rebuilt: `backend/citations.py` prefers the
+    /// DOI from the publisher's record, and a corpus id reconstructed here would be worse.
+    #[test]
+    fn the_overlay_records_the_cli_search_as_well_as_the_mcp_one() {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: python3 is not on PATH");
+            return;
+        }
+        let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
+        let script = format!(
+            r#"
+import sys, types, asyncio, json
+sys.path.insert(0, {overlay:?})
+from minime_local import sources
+
+mod = types.ModuleType("backend.paper_tools")
+found = json.dumps({{"query": "q", "count": 1, "papers": [{{
+    "citation": "Sorensen, T. (1948). A method of establishing groups of equal amplitude.",
+    "link": "https://api.semanticscholar.org/DOI:10.1234/abcd",
+    "title": "A method of establishing groups of equal amplitude in plant sociology"}}]}})
+
+class Tool:
+    name = "find_papers"
+    def __init__(self):
+        async def coro(query, limit=10):
+            return found
+        self.coroutine = coro
+
+mod.find_papers = Tool()
+sources.install_papers(mod)
+async def main():
+    # In a child task, like every other tool call the backend makes (§123).
+    await asyncio.create_task(mod.find_papers.coroutine("beta diversity"))
+    print(sources.link_for(
+        "Sorensen, T. (1948). A method of establishing groups of equal "
+        "amplitude in plant sociology. Biologiske Skrifter."))
+asyncio.run(main())
+"#,
+            overlay = overlay.to_string_lossy()
+        );
+        let out = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("python3 runs");
+        assert!(
+            out.status.success(),
+            "the overlay's find_papers wrapper raised:
+{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "https://api.semanticscholar.org/DOI:10.1234/abcd",
+            "the recorded link is the one the record supplied, not a rebuilt corpus id"
+        );
+    }
+
     #[test]
     fn a_corpus_link_is_recognised_and_never_treated_as_a_doi() {
         // The form `overlay/minime_local/sources.py` writes, and the one `_paper_ref` established

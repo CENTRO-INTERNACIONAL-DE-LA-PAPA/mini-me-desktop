@@ -37,6 +37,10 @@ _PROJECT_ROUTE_MODULE = "backend.routes.project"
 _SUBAGENTS_MODULE = "backend.subagents"
 _MCP_MODULE = "backend.mcp_tools"
 _ARTIFACTS_MODULE = "backend.middleware.artifacts"
+#: The other tool that finds papers. Watched for the same reason as `_MCP_MODULE` and separately
+#: from it, because `find_papers` is not part of the MCP bundle and never passes through the
+#: function that wraps it.
+_PAPER_MODULE = "backend.paper_tools"
 
 #: Patched only when host execution is on — they *are* host execution.
 _LOCAL_TARGETS = (_SANDBOX_MODULE, _AGENT_MODULE)
@@ -49,6 +53,7 @@ _ALWAYS_TARGETS = (
     _RUNTIME_MODULE,
     _PROJECT_ROUTE_MODULE,
     _MCP_MODULE,
+    _PAPER_MODULE,
     _ARTIFACTS_MODULE,
     _SUBAGENTS_MODULE,
 )
@@ -90,6 +95,11 @@ def _patch(module) -> None:
         from minime_local import sources
 
         sources.install_mcp(module)
+        return
+    if module.__name__ == _PAPER_MODULE:
+        from minime_local import sources
+
+        sources.install_papers(module)
         return
     if module.__name__ == _ARTIFACTS_MODULE:
         from minime_local import sources

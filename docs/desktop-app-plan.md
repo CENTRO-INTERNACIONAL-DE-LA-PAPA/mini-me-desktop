@@ -7718,3 +7718,68 @@ The MCP tool lists are a separate ~7s, paid on the **first turn** rather than at
 
 *The startup path is the one place where every network call is a call the researcher waits on with
 nothing on screen. It deserves an inventory, and it has never had one.*
+
+## 132. The diagnostic that reads the same when it works (2026-08-08)
+
+> `0 of 7 sources carry the corpus id Asta returned`
+
+That line is the whole of the evidence four days of DOI work has been steering by, and tonight —
+with `find_papers` finally on the machine and the skills path fixed — it printed again, unchanged.
+The reading each previous time was *the subagent called no search tool and wrote its citations from
+memory*. That reading is no longer sound, and the line is the reason.
+
+### What it actually measures
+
+`_seen` is filled by `install_mcp`, which hooks `_make_mcp_tools_resilient` — the function that
+wraps the **MCP bundle**. `find_papers` is ours: a plain `@tool` in `backend/paper_tools.py`,
+handed to the subagent alongside the bundle and never through it. It has never passed through that
+wrapper, so nothing it returns is recorded.
+
+So `_papers()` is empty whenever the CLI path is used — *including when it works perfectly* — and
+`link_for` returns nothing for every source, and the count is zero out of seven. The line reads
+identically in the two cases it exists to tell apart:
+
+| what happened | what the line says |
+|---|---|
+| no search ran; citations came from memory | `0 of 7` |
+| `find_papers` ran; every link built from the record | `0 of 7` |
+
+§81's rule, for the fifth time this week, and this time it cost the diagnosis rather than a
+launch: the message was written when there was one way to find a paper, and a second way was added
+without revisiting what the message claims.
+
+### The other half: a level nobody checked
+
+`find_papers` does log its result — `logger.info("find_papers(%r) -> %d paper(s)")`. Every line
+this overlay has ever been *seen* to produce in the backend log arrived at WARNING, and the spawn
+sets no log level. So the absence of that line was read as "the tool did not run" when it may only
+mean "INFO does not reach this file". A diagnostic on an unconfirmed channel is not a diagnostic.
+
+### The fix
+
+`install_papers` wraps `find_papers` the way `install_mcp` wraps the bundle, and says so at the
+level that demonstrably arrives:
+
+> `minime_local: find_papers returned 10 paper(s), 10 newly recorded (10 known so far)`
+
+`_seen` now stores a **finished URL** rather than a corpus id, because there are two shapes of
+answer and only one of them carries an id. `find_papers` arrives with a link already resolved
+against the publisher's record by `backend/citations.py`, which prefers the DOI when there is one —
+strictly better than anything reconstructible here. Storing the id would have meant discarding it
+and rebuilding something worse.
+
+And the artifact line no longer reports a count when there is nothing to count:
+
+> `no search recorded — the 7 source(s) keep the links the subagent supplied, which are their own
+> unless find_papers logged above`
+
+The tool object is **mutated**, not rebound: `backend/agent.py` does `from backend.paper_tools
+import find_papers`, so by patch time the agent already holds the object and replacing the module
+attribute would patch a name nothing reads — the §125 failure exactly, which took two attempts
+there and should not take a third here.
+
+`the_overlay_records_the_cli_search_as_well_as_the_mcp_one` drives it from Rust, through a child
+task, and asserts the DOI link survives rather than being rebuilt as a corpus id.
+
+*The question that mattered tonight — did the subagent call a tool — was answerable all along by a
+line that was never written, and unanswerable from the one that was.*

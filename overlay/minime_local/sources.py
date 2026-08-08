@@ -55,7 +55,14 @@ logger = logging.getLogger(__name__)
 #: The link form that redirects to the canonical paper page. See `_paper_ref`.
 CORPUS_URL = "https://api.semanticscholar.org/CorpusID:{}"
 
-#: Papers seen in Asta results, as ``{normalised title: corpus id}``.
+#: Papers seen in a search result, as ``{normalised title: link}``.
+#:
+#: **The value is a finished URL, not a corpus id, because there are now two ways a paper
+#: arrives.** The MCP snippet search carries a ``corpusId`` and nothing else, so its link has to
+#: be built here. `find_papers` carries a link already built from the publisher's record by
+#: `backend/citations.py`, which prefers the DOI when the record has one — better than anything
+#: this file could reconstruct. Storing the id would mean throwing that away and rebuilding a
+#: worse link from a field the CLI path does not even return.
 #:
 #: **Process-global, and it started as a `ContextVar`.** The reasoning for a ContextVar was that
 #: two concurrent turns must not read each other's papers. That reasoning was wrong twice over.
@@ -102,25 +109,41 @@ def _papers() -> dict[str, str]:
     return _seen
 
 
+def _url_of(node: dict[str, Any]) -> str:
+    """The link for one paper record, from whichever identifier its finder carries.
+
+    Two shapes, because two tools now find papers. ``corpusId`` is what the MCP snippet search
+    returns; ``link`` is what `find_papers` returns, already resolved against the record. Checked
+    in that order so the MCP path behaves exactly as it did before this function existed.
+    """
+    corpus = node.get("corpusId")
+    if corpus is not None and str(corpus).strip():
+        return CORPUS_URL.format(str(corpus).strip())
+    link = node.get("link")
+    if isinstance(link, str) and link.strip().startswith("http"):
+        return link.strip()
+    return ""
+
+
 def remember(payload: Any) -> int:
-    """Record every ``{corpusId, title}`` pair anywhere in an Asta result.
+    """Record every identified paper anywhere in a search result.
 
     Walks the whole structure rather than reaching for a known path. The snippet search returns
-    ``{"data": [{"paper": {...}}]}`` today, and other Asta tools nest differently; a recursive walk
-    keeps working when one of them changes shape, and costs nothing on a payload that has no
-    corpus ids in it at all.
+    ``{"data": [{"paper": {...}}]}`` today, `find_papers` returns ``{"papers": [...]}``, and other
+    Asta tools nest differently again; a recursive walk keeps working when one of them changes
+    shape, and costs nothing on a payload that has no papers in it at all.
     """
     store = _papers()
     before = len(store)
 
     def walk(node: Any) -> None:
         if isinstance(node, dict):
-            corpus = node.get("corpusId")
             title = node.get("title")
-            if corpus is not None and isinstance(title, str) and title.strip():
+            if isinstance(title, str) and title.strip():
+                url = _url_of(node)
                 key = " ".join(_significant(title))
-                if key:
-                    store.setdefault(key, str(corpus))
+                if url and key:
+                    store.setdefault(key, url)
             for value in node.values():
                 walk(value)
         elif isinstance(node, list):
@@ -172,21 +195,21 @@ def link_for(citation: str) -> str | None:
     if not have:
         return None
     ranked: list[tuple[float, str]] = []
-    for key, corpus in _papers().items():
+    for key, url in _papers().items():
         want = key.split()
         if not want:
             continue
-        ranked.append((sum(word in have for word in want) / len(want), corpus))
+        ranked.append((sum(word in have for word in want) / len(want), url))
     if not ranked:
         return None
     ranked.sort(reverse=True)
-    best, corpus = ranked[0]
+    best, url = ranked[0]
     if best < 0.6:
         return None
     # Two plausible papers is not an answer.
     if len(ranked) > 1 and best - ranked[1][0] < 0.15:
         return None
-    return CORPUS_URL.format(corpus)
+    return url
 
 
 #: Appended to `academic_researcher`'s prompt.
@@ -304,7 +327,7 @@ def install_mcp(module) -> None:
     # A rename fixed in one of its two places is a rename not fixed.
     found = next((name for name in candidates if getattr(module, name, None)), None)
     original = getattr(module, found) if found else None
-    if original is None:
+    if found is None or original is None:
         # **Reports what *is* there.** The previous failure said only that the name it wanted was
         # absent, which named the guess and not the fact — so the log identified the symptom and
         # left the answer in the file it had just failed to read.
@@ -385,6 +408,62 @@ def install_mcp(module) -> None:
     )
 
 
+def install_papers(module) -> None:
+    """Record what `find_papers` returns, and say in the log that it ran.
+
+    **This is the tool the wrapper above cannot see.** `install_mcp` hooks the function that wraps
+    the *MCP* bundle, and `find_papers` is ours — a plain `@tool` in `backend/paper_tools.py`. It
+    never passed through that path, so a run that used it recorded nothing and logged nothing, and
+    the only line left in the log was *"0 of 7 sources carry the corpus id"* — which is emitted
+    just as readily when the search worked perfectly as when no search happened at all.
+
+    Two tools that find papers and one that is watched is not a diagnostic; it is a coin toss
+    dressed as evidence. Its own `logger.info` line does not close the gap either: everything this
+    file has ever seen reach the backend log arrived at WARNING, so an INFO line is a message
+    written to a channel nobody has confirmed is open.
+
+    Mutates the tool object rather than rebinding the module attribute, because `backend/agent.py`
+    does ``from backend.paper_tools import find_papers`` — by the time this runs, the agent already
+    holds the object, and replacing the name in the module would patch a reference nothing reads
+    (docs §125).
+    """
+    tool = getattr(module, "find_papers", None)
+    coroutine = getattr(tool, "coroutine", None) if tool is not None else None
+    if tool is None or not asyncio.iscoroutinefunction(coroutine):
+        logger.warning(
+            "minime_local: no async find_papers to record in %s — a run that uses it will look "
+            "identical to a run that searched nothing",
+            module.__name__,
+        )
+        return
+
+    @functools.wraps(coroutine)
+    async def _watched(*args, **kwargs):
+        result = await coroutine(*args, **kwargs)
+        try:
+            payload = json.loads(result) if isinstance(result, str) else result
+            papers = payload.get("papers") or [] if isinstance(payload, dict) else []
+            recorded = remember(payload)
+        except Exception:  # noqa: BLE001
+            # Bookkeeping never costs a search — the same rule the MCP wrapper follows.
+            logger.warning("minime_local: could not read papers from find_papers")
+            return result
+        logger.warning(
+            "minime_local: find_papers returned %d paper(s), %d newly recorded (%d known so far)",
+            len(papers),
+            recorded,
+            len(_papers()),
+        )
+        return result
+
+    try:
+        tool.coroutine = _watched
+    except Exception:  # noqa: BLE001
+        logger.warning("minime_local: could not wrap find_papers for recording")
+        return
+    logger.warning("minime_local: recording the link of every paper find_papers returns")
+
+
 def install_artifacts(module) -> None:
     """Put the recorded link on each source artifact.
 
@@ -423,11 +502,27 @@ def install_artifacts(module) -> None:
             # Logged on success as well as failure. Three attempts at the subagent registry were
             # misdiagnosed because its installer spoke only when it broke, so "absent", "never
             # reached" and "ran and did nothing" produced identical evidence (docs §81).
-            logger.warning(
-                "minime_local: %d of %d sources carry the corpus id Asta returned",
-                replaced,
-                len(sources),
-            )
+            known = len(_papers())
+            if known:
+                logger.warning(
+                    "minime_local: %d of %d sources relinked to a paper the search returned "
+                    "(%d recorded)",
+                    replaced,
+                    len(sources),
+                    known,
+                )
+            else:
+                # **Not a count of failures — a statement that there is nothing to count.** The
+                # old line said "0 of 7 sources carry the corpus id" here, which reads as seven
+                # broken links. It is the same line the good case prints: `find_papers` builds
+                # its link from the record, so a run where every citation is correct also records
+                # no corpus id and also prints zero. A message that cannot distinguish the fix
+                # from the defect sent four days into looking at the wrong half of the system.
+                logger.warning(
+                    "minime_local: no search recorded — the %d source(s) keep the links the "
+                    "subagent supplied, which are its own unless find_papers logged above",
+                    len(sources),
+                )
         return produced
 
     middleware.after_agent = _linked
