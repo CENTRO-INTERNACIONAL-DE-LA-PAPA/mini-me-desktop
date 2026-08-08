@@ -619,7 +619,7 @@ mod tests {
         // model invented in a live run (§119, §120): it wrote BF02853934 for Plaisted, whose real
         // DOI is BF02853982, and 3558457 for Hijmans, whose real DOI is 3558435 — the wrong one
         // belonging to a study of lichen symbioses.
-        let cases: [(&str, &str); 4] = [
+        let cases: [(&str, &str); 5] = [
             (
                 r#"{"authors":[{"name":"R. Plaisted"},{"name":"R. Hoopes"}],"year":1989,
                     "title":"The past record and future prospects for the use of exotic potato germplasm",
@@ -654,6 +654,20 @@ mod tests {
                 // a complete one they cannot check.
                 r#"{"title":"An orphan record"}"#,
                 "(n.d.). An orphan record.",
+            ),
+            (
+                // Semantic Scholar indents its `pages` field across newlines, which reached the
+                // rendered reference as `65,\n          1-8\n        .` until `_clean` collapsed
+                // it. Found by comparing seventeen live records against Crossref, where it was
+                // the only thing that looked like a disagreement and was not one.
+                r#"{"authors":[{"name":"M. Alquraishi"}],"year":2021,
+                    "title":"Machine learning in protein structure prediction",
+                    "journal":{"name":"Current opinion in chemical biology","volume":"65",
+                               "pages":"\n          1-8\n        "},
+                    "externalIds":{"DOI":"10.1016/j.cbpa.2021.04.005"}}"#,
+                "Alquraishi, M. (2021). Machine learning in protein structure prediction. \
+                 Current opinion in chemical biology, 65, 1–8. \
+                 https://doi.org/10.1016/j.cbpa.2021.04.005",
             ),
         ];
 

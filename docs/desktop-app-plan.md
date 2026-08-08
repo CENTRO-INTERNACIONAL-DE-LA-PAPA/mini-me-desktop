@@ -7437,3 +7437,46 @@ The chain is verified against upstream's real function name, its real wrapping o
 task — but not yet against a live backend. The number to look for is
 `minime_local: N of M sources carry the corpus id Asta returned`. Until that reads something other
 than `0 of M`, this remains a patch that has passed a rehearsal.
+
+## 126. Seventeen papers, checked against the registry (2026-08-07)
+
+*"Test at least 15 papers from different themes to verify it works. You test must compare the
+builded doi and visit the doi link to check if its correct what we see in the web."*
+
+The right demand. A citation builder validated against its own inputs proves only that it is
+self-consistent. So: seventeen papers across six unrelated fields — potato late blight, CRISPR crop
+editing, protein-structure prediction, soil carbon, malaria vector control, Andean glacier retreat
+— built with `minime_local.citations`, then every DOI resolved at **Crossref** and every field
+compared with what the registry holds.
+
+| | |
+|---|---|
+| DOI resolves at Crossref | **17 / 17** |
+| title agrees | **17 / 17** |
+| year agrees | **17 / 17** |
+| volume — agrees / omitted / **contradicts** | 9 / 8 / **0** |
+| pages — agrees / omitted / **contradicts** | 8 / 9 / **0** |
+
+**Zero contradictions.** Where Semantic Scholar carries a field, it matches the registry; where it
+does not, the reference renders without it. That is the module's whole discipline holding under
+measurement rather than by assertion: eight references are missing a volume and none of them is
+wrong about one.
+
+Set against the same pipeline three days ago — six references, three DOIs resolving to different
+papers and three to nothing at all — the difference is not that the model got better. It is that
+the model is no longer the one producing the field.
+
+### What the check found that the unit tests could not
+
+Two rows first looked like disagreements and were not: Semantic Scholar indents `pages` across
+newlines, so the raw value is `"\n          1-8\n        "`. `_clean` already collapses it and the
+rendered citation was correct — but only the *live* comparison surfaced that the raw data has that
+shape at all. Now pinned as a case, with the real value in it.
+
+*A formatter tested against data its author invented is tested against their idea of the data.*
+
+### The result that matters is the one on the left
+
+`17/17` DOIs resolving is the headline, and it is worth being clear about *why* it is not
+impressive engineering: the DOI is copied out of the record it came with. It is the number that
+was wrong before because the number was previously being remembered instead of copied.
