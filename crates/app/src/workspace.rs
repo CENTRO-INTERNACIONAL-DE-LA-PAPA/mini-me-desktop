@@ -283,14 +283,10 @@ pub enum Kind {
 }
 
 impl Kind {
-    pub fn label(self) -> &'static str {
-        match self {
-            Kind::Figure => "Figures",
-            Kind::Data => "Data",
-            Kind::Document => "Documents",
-            Kind::Other => "Other files",
-        }
-    }
+    // No `label`. The panel used to head each group with "Figures" / "Data" / "Documents", and
+    // the redesign replaced those headings with a glyph on each row — three words of chrome per
+    // group, in a 330px column, to say what the icon beside the filename already said. The kind
+    // still decides the *order* files appear in, which is the part that was doing work.
 
     fn of(path: &Path) -> Self {
         let extension = path
@@ -376,6 +372,271 @@ pub fn human_size(bytes: u64) -> String {
     }
 }
 
+/// What a file is, past its name and its size.
+///
+/// # Why only two kinds
+///
+/// The design asks each file row to carry "the real shape of the file" and gives three examples:
+/// `1,204 rows · 418 KB`, `1600 × 900 · 92 KB`, and `6 pages · 8 references`. The first two are
+/// derivable here and are; the third is not, and is therefore absent.
+///
+/// A PDF's page count lives in its page tree, and reading that means either a PDF parser — a
+/// dependency on a machine where `cargo build` is already the riskiest step a colleague performs
+/// (see this crate's `Cargo.toml`, which argues the point for `flate2` and `keyring`) — or one of
+/// the folklore heuristics: counting `/Type /Page`, which double-counts `/Pages` nodes and misses
+/// anything in an object stream, or grepping `/Count`, which finds the first of several. Both
+/// produce a plausible number that is sometimes wrong, shown in a panel a researcher is meant to
+/// trust. Reference counts are not in the file at all in any recoverable form.
+///
+/// So a PDF says its size, which is true, and nothing else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shape {
+    /// A delimited table: data rows (the header is not one) and columns.
+    Table { rows: u64, columns: usize },
+    /// Pixel dimensions.
+    Image { width: u32, height: u32 },
+    /// Nothing beyond the size — either the kind carries no shape, or reading it failed.
+    Plain,
+}
+
+impl Shape {
+    /// The sub-line, with the size on the end. `Plain` is the size alone.
+    pub fn describe(self, bytes: u64) -> String {
+        let size = human_size(bytes);
+        match self {
+            Shape::Table { rows, columns } => {
+                format!("{} rows · {columns} cols · {size}", thousands(rows))
+            }
+            Shape::Image { width, height } => format!("{width} × {height} · {size}"),
+            Shape::Plain => size,
+        }
+    }
+}
+
+/// Past this, the shape is not worth the read.
+///
+/// A 400 MB export would be counted line by line on the thread that draws the window. The panel
+/// says the size instead, which is the honest answer to "how big is this" anyway.
+const SHAPE_BUDGET: u64 = 64 * 1024 * 1024;
+
+/// Measure a file, or [`Shape::Plain`] if it has no measurable shape or cannot be read.
+///
+/// Never an error: this decorates a row in a panel. A file mid-write, on a disconnected drive,
+/// or in an encoding we cannot read should cost that row its sub-line, not the panel.
+pub fn shape(path: &Path, bytes: u64) -> Shape {
+    if bytes > SHAPE_BUDGET {
+        return Shape::Plain;
+    }
+    let extension = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "csv" => table(path, b','),
+        "tsv" => table(path, b'\t'),
+        extension if IMAGE_EXTENSIONS.contains(&extension) => {
+            std::fs::read(path).map(|data| image_shape(&data)).unwrap_or(Shape::Plain)
+        }
+        _ => Shape::Plain,
+    }
+}
+
+/// Count the records and fields of a delimited file.
+///
+/// **Quote-aware**, which is not fussiness: a delimiter inside `"Cusco, Peru"` counted as a
+/// column boundary makes the column count wrong for exactly the files a researcher exports from
+/// a spreadsheet, and a newline inside a quoted field makes the row count wrong the same way.
+/// A number in this panel is read as a fact about the data.
+pub(crate) fn count_records(data: &[u8], delimiter: u8) -> Shape {
+    let mut rows: u64 = 0;
+    let mut columns = 0usize;
+    let mut fields = 1usize;
+    let mut quoted = false;
+    let mut started = false;
+    let mut index = 0usize;
+    while index < data.len() {
+        let byte = data[index];
+        if quoted {
+            // `""` inside a quoted field is an escaped quote, not the end of one.
+            if byte == b'"' {
+                if data.get(index + 1) == Some(&b'"') {
+                    index += 2;
+                    continue;
+                }
+                quoted = false;
+            }
+            started = true;
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'"' => {
+                quoted = true;
+                started = true;
+            }
+            b'\r' => {}
+            b'\n' => {
+                if started {
+                    // The first record is the header, so it is a column count, not a row.
+                    if columns == 0 {
+                        columns = fields;
+                    } else {
+                        rows += 1;
+                    }
+                }
+                fields = 1;
+                started = false;
+            }
+            byte if byte == delimiter => {
+                fields += 1;
+                started = true;
+            }
+            _ => started = true,
+        }
+        index += 1;
+    }
+    // A last line with no trailing newline is still a record.
+    if started {
+        if columns == 0 {
+            columns = fields;
+        } else {
+            rows += 1;
+        }
+    }
+    if columns == 0 {
+        return Shape::Plain;
+    }
+    Shape::Table { rows, columns }
+}
+
+fn table(path: &Path, delimiter: u8) -> Shape {
+    std::fs::read(path)
+        .map(|data| count_records(&data, delimiter))
+        .unwrap_or(Shape::Plain)
+}
+
+/// Pixel dimensions, straight out of the header.
+///
+/// Four formats, four headers, no decoder — the bytes that carry width and height sit within the
+/// first few dozen of each file and are documented in each specification. `img()` already decodes
+/// these to draw them; this only needs the numbers, and reaching for an image crate to get two
+/// integers would add a dependency tree to a build that has to succeed on a colleague's Windows
+/// machine with nothing installed.
+pub(crate) fn image_shape(data: &[u8]) -> Shape {
+    let be = |at: usize| -> Option<u32> {
+        let slice: [u8; 4] = data.get(at..at + 4)?.try_into().ok()?;
+        Some(u32::from_be_bytes(slice))
+    };
+    let le16 = |at: usize| -> Option<u32> {
+        let slice: [u8; 2] = data.get(at..at + 2)?.try_into().ok()?;
+        Some(u16::from_le_bytes(slice) as u32)
+    };
+
+    // PNG: an 8-byte signature, then the IHDR chunk whose first two fields are the dimensions.
+    if data.starts_with(b"\x89PNG\r\n\x1a\n") {
+        if let (Some(width), Some(height)) = (be(16), be(20)) {
+            return Shape::Image { width, height };
+        }
+    }
+    // GIF: the logical screen descriptor, little-endian, right after `GIF87a`/`GIF89a`.
+    if data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a") {
+        if let (Some(width), Some(height)) = (le16(6), le16(8)) {
+            return Shape::Image { width, height };
+        }
+    }
+    // WebP: a RIFF container whose VP8 flavour decides where the size lives.
+    if data.starts_with(b"RIFF") && data.get(8..12) == Some(b"WEBP") {
+        match data.get(12..16) {
+            // Lossy: a 3-byte start code, then 14-bit width and height.
+            Some(b"VP8 ") => {
+                if let (Some(width), Some(height)) = (le16(26), le16(28)) {
+                    return Shape::Image {
+                        width: width & 0x3fff,
+                        height: height & 0x3fff,
+                    };
+                }
+            }
+            // Lossless: 14-bit each, packed across four bytes, and stored one less than actual.
+            Some(b"VP8L") => {
+                if let Some(bits) = data.get(21..25) {
+                    let packed = u32::from_le_bytes([bits[0], bits[1], bits[2], bits[3]]);
+                    return Shape::Image {
+                        width: (packed & 0x3fff) + 1,
+                        height: ((packed >> 14) & 0x3fff) + 1,
+                    };
+                }
+            }
+            // Extended: 24-bit each, little-endian, also stored one less than actual.
+            Some(b"VP8X") => {
+                if let Some(bits) = data.get(24..30) {
+                    let width = u32::from_le_bytes([bits[0], bits[1], bits[2], 0]) + 1;
+                    let height = u32::from_le_bytes([bits[3], bits[4], bits[5], 0]) + 1;
+                    return Shape::Image { width, height };
+                }
+            }
+            _ => {}
+        }
+    }
+    // JPEG: no fixed offset. Walk the marker segments to the frame header, whose payload
+    // begins with precision, height, width.
+    if data.starts_with(b"\xff\xd8") {
+        let mut at = 2usize;
+        while at + 3 < data.len() {
+            if data[at] != 0xff {
+                at += 1;
+                continue;
+            }
+            let marker = data[at + 1];
+            // Padding and the standalone markers carry no length field to skip over.
+            if marker == 0xff {
+                at += 1;
+                continue;
+            }
+            if matches!(marker, 0xd8 | 0x01) || (0xd0..=0xd7).contains(&marker) {
+                at += 2;
+                continue;
+            }
+            let length = match data.get(at + 2..at + 4) {
+                Some(bytes) => u16::from_be_bytes([bytes[0], bytes[1]]) as usize,
+                None => break,
+            };
+            // Every SOFn *except* the four that are not frame headers: DHT, JPG, DAC, DNL.
+            let is_frame = (0xc0..=0xcf).contains(&marker)
+                && !matches!(marker, 0xc4 | 0xc8 | 0xcc);
+            if is_frame {
+                if let Some(bytes) = data.get(at + 5..at + 9) {
+                    return Shape::Image {
+                        width: u16::from_be_bytes([bytes[2], bytes[3]]) as u32,
+                        height: u16::from_be_bytes([bytes[0], bytes[1]]) as u32,
+                    };
+                }
+                break;
+            }
+            if length < 2 {
+                break;
+            }
+            at += 2 + length;
+        }
+    }
+    Shape::Plain
+}
+
+/// `1204` → `1,204`.
+///
+/// A four-digit row count is read as a four-digit number either way; a seven-digit one is not.
+pub fn thousands(value: u64) -> String {
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (seen, digit) in digits.chars().enumerate() {
+        if seen > 0 && (digits.len() - seen).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
 /// The first `lines` lines of a text file.
 ///
 /// Bounded on purpose. A dataset can be hundreds of megabytes, and a preview that reads
@@ -441,6 +702,36 @@ pub fn open(path: &Path) -> Result<()> {
     command
         .spawn()
         .with_context(|| format!("could not open {}", path.display()))?;
+    Ok(())
+}
+
+/// Open a URL in the researcher's browser.
+///
+/// **Separate from [`open`], which must not be handed one.** That function conjures a missing
+/// directory before launching the file manager — a deliberate fix from §50 — so calling it with
+/// `https://doi.org/…` would create a folder called `https:` in the working directory and then
+/// point Explorer at it. Same three platform launchers, none of the filesystem behaviour.
+///
+/// Only `http` and `https`. A citation is a line of text the *model* wrote, so it is untrusted
+/// input reaching a process launcher: `file://` would open anything on the disk, and on Windows
+/// `explorer.exe` will act on a UNC path or a shell verb given the chance. Anything else is
+/// refused rather than passed along.
+pub fn browse(url: &str) -> Result<()> {
+    let url = url.trim();
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        anyhow::bail!("{url:?} is not an http(s) URL");
+    }
+    let launcher = if cfg!(windows) {
+        "explorer.exe"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(launcher)
+        .arg(url)
+        .spawn()
+        .with_context(|| format!("could not open {url}"))?;
     Ok(())
 }
 
@@ -609,6 +900,171 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_delimiter_inside_quotes_is_not_a_column() {
+        // The case that makes a naive split wrong on precisely the files a researcher exports
+        // from a spreadsheet: a place name with a comma in it.
+        let csv = b"site,yield_t_ha,notes\n\"Cusco, Peru\",21.4,ok\n\"Puno, Peru\",18.9,ok\n";
+        assert_eq!(
+            count_records(csv, b','),
+            Shape::Table {
+                rows: 2,
+                columns: 3
+            }
+        );
+
+        // A newline inside a quoted field is not a record boundary either.
+        let wrapped = b"a,b\n\"line one\nline two\",2\n";
+        assert_eq!(
+            count_records(wrapped, b','),
+            Shape::Table {
+                rows: 1,
+                columns: 2
+            }
+        );
+
+        // `""` is an escaped quote, so the field does not end there and the rest of the line is
+        // still one field.
+        let escaped = b"a,b\n\"he said \"\"yes\"\", then left\",2\n";
+        assert_eq!(
+            count_records(escaped, b','),
+            Shape::Table {
+                rows: 1,
+                columns: 2
+            }
+        );
+
+        // No trailing newline still counts the last record.
+        assert_eq!(
+            count_records(b"a,b\n1,2", b','),
+            Shape::Table {
+                rows: 1,
+                columns: 2
+            }
+        );
+        // A header and nothing else is a table with no rows, not a table with one.
+        assert_eq!(
+            count_records(b"a,b,c\n", b','),
+            Shape::Table {
+                rows: 0,
+                columns: 3
+            }
+        );
+        // Blank lines between records are not records.
+        assert_eq!(
+            count_records(b"a,b\n1,2\n\n\n3,4\n", b','),
+            Shape::Table {
+                rows: 2,
+                columns: 2
+            }
+        );
+        assert_eq!(count_records(b"", b','), Shape::Plain);
+        // Tabs, for a .tsv, and a comma inside a field is then just a character.
+        assert_eq!(
+            count_records(b"a\tb\nCusco, Peru\t2\n", b'\t'),
+            Shape::Table {
+                rows: 1,
+                columns: 2
+            }
+        );
+    }
+
+    #[test]
+    fn an_images_dimensions_come_out_of_its_header() {
+        // Real headers, byte for byte, rather than files written by an encoder we would then be
+        // testing instead of ours.
+
+        // PNG: signature, chunk length, "IHDR", then 1600 × 900.
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend_from_slice(&13u32.to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&1600u32.to_be_bytes());
+        png.extend_from_slice(&900u32.to_be_bytes());
+        assert_eq!(
+            image_shape(&png),
+            Shape::Image {
+                width: 1600,
+                height: 900
+            }
+        );
+
+        // GIF: little-endian, and the byte order is the thing worth pinning.
+        let mut gif = b"GIF89a".to_vec();
+        gif.extend_from_slice(&640u16.to_le_bytes());
+        gif.extend_from_slice(&480u16.to_le_bytes());
+        assert_eq!(
+            image_shape(&gif),
+            Shape::Image {
+                width: 640,
+                height: 480
+            }
+        );
+
+        // JPEG: a comment segment first, so the walk has to skip a length-carrying marker to
+        // reach the frame header — and the frame stores *height before width*.
+        let mut jpeg = b"\xff\xd8".to_vec();
+        jpeg.extend_from_slice(b"\xff\xfe"); // COM
+        jpeg.extend_from_slice(&6u16.to_be_bytes()); // length, including itself
+        jpeg.extend_from_slice(b"hola");
+        jpeg.extend_from_slice(b"\xff\xc0"); // SOF0
+        jpeg.extend_from_slice(&17u16.to_be_bytes());
+        jpeg.push(8); // precision
+        jpeg.extend_from_slice(&768u16.to_be_bytes()); // height
+        jpeg.extend_from_slice(&1024u16.to_be_bytes()); // width
+        assert_eq!(
+            image_shape(&jpeg),
+            Shape::Image {
+                width: 1024,
+                height: 768
+            }
+        );
+
+        // WebP lossless stores each dimension one less than it is.
+        let mut webp = b"RIFF\0\0\0\0WEBPVP8L".to_vec();
+        webp.extend_from_slice(&[0, 0, 0, 0, 0]); // chunk length + signature byte
+        let packed: u32 = (255) | (99 << 14);
+        webp.extend_from_slice(&packed.to_le_bytes());
+        assert_eq!(
+            image_shape(&webp),
+            Shape::Image {
+                width: 256,
+                height: 100
+            }
+        );
+
+        // Anything else, and anything truncated, says nothing rather than guessing.
+        assert_eq!(image_shape(b"not an image at all"), Shape::Plain);
+        assert_eq!(image_shape(&png[..12]), Shape::Plain);
+        assert_eq!(image_shape(b""), Shape::Plain);
+    }
+
+    #[test]
+    fn a_shape_reads_as_the_sub_line_the_panel_shows() {
+        assert_eq!(
+            Shape::Table {
+                rows: 1204,
+                columns: 11
+            }
+            .describe(428_032),
+            "1,204 rows · 11 cols · 418 KB"
+        );
+        assert_eq!(
+            Shape::Image {
+                width: 1600,
+                height: 900
+            }
+            .describe(94_208),
+            "1600 × 900 · 92 KB"
+        );
+        // A PDF says its size and stops: page and reference counts are not derivable here.
+        assert_eq!(Shape::Plain.describe(1_048_576), "1.0 MB");
+
+        assert_eq!(thousands(0), "0");
+        assert_eq!(thousands(999), "999");
+        assert_eq!(thousands(1_000), "1,000");
+        assert_eq!(thousands(1_234_567), "1,234,567");
+    }
+
+    #[test]
     fn only_images_are_collected_and_in_the_order_they_were_written() {
         let dir =
             std::env::temp_dir().join(format!("minime-workspace-test-{}", std::process::id()));
@@ -653,9 +1109,14 @@ mod tests {
         }
 
         let groups = outputs(&dir);
-        let labels: Vec<&str> = groups.iter().map(|(kind, _)| kind.label()).collect();
-        // Figures first: they are the outputs someone wants to *see*.
-        assert_eq!(labels, vec!["Figures", "Data", "Documents", "Other files"]);
+        let kinds: Vec<Kind> = groups.iter().map(|(kind, _)| *kind).collect();
+        // Figures first: they are the outputs someone wants to *see*. The panel no longer heads
+        // each group with a word, but it still lists them in this order, so the order is still
+        // the thing worth pinning.
+        assert_eq!(
+            kinds,
+            vec![Kind::Figure, Kind::Data, Kind::Document, Kind::Other]
+        );
 
         let names: Vec<&str> = groups
             .iter()

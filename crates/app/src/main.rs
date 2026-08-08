@@ -25,6 +25,8 @@ mod theme;
 mod ui;
 mod workspace;
 
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context as _;
@@ -118,6 +120,28 @@ fn section_label(text: &'static str) -> impl IntoElement {
         .text_color(rgb(theme::text_faint()))
         .text_xs()
         .child(text)
+}
+
+/// The glyph and colour that stand for a file's kind.
+///
+/// Finer than [`workspace::Kind`], which groups by what a researcher *does* with a file and is
+/// the right grouping for the panel's sections. Here a PDF and a Markdown note want telling
+/// apart at a glance even though both are things you read.
+///
+/// Four colours, from the palette's status roles rather than a new set — the same argument as
+/// the provenance chips: a colour per file type is a legend nobody memorises.
+fn file_mark(path: &std::path::Path) -> (&'static str, u32) {
+    let extension = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "csv" | "tsv" | "xlsx" | "parquet" => ("▤", theme::success()),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" => ("▩", theme::running()),
+        "pdf" => ("▦", theme::error()),
+        _ => ("▤", theme::warning()),
+    }
 }
 
 /// One line of the activity trace: a tool call, or a delegation.
@@ -910,12 +934,22 @@ fn prompt_for_dropped(paths: &[String], directories: &[bool]) -> String {
     }
 }
 
-/// The first `https://` URL in a line of command output.
+/// The first URL in a line of text.
 ///
 /// Stops at whitespace and trims the punctuation a sentence tends to leave attached, so
 /// "open https://example.org/x." yields the URL without the full stop.
+///
+/// Two callers with the same problem: a device sign-in URL inside `asta auth login`'s output, and
+/// the link inside a citation the agent wrote — `Smith et al. (2021). Late blight…
+/// https://doi.org/10.1234/x.` Both are one line of someone else's prose with a link somewhere in
+/// it. `http://` as well as `https://` for the second: plenty of older DOIs and institutional
+/// repositories are still published that way, and a source row that silently would not open
+/// because of the scheme is indistinguishable from one with no link at all.
 fn first_url(line: &str) -> Option<String> {
-    let at = line.find("https://")?;
+    let at = match (line.find("https://"), line.find("http://")) {
+        (Some(secure), Some(plain)) => secure.min(plain),
+        (found, None) | (None, found) => found?,
+    };
     let url: String = line[at..]
         .chars()
         .take_while(|c| !c.is_whitespace())
@@ -925,8 +959,15 @@ fn first_url(line: &str) -> Option<String> {
     // from the error. Safe to strip: a colon is meaningful *inside* a URL (a port), never
     // at the end of one.
     let url = url.trim_end_matches(['.', ',', ':', ';', ')', ']', '"', '\'']);
-    // A bare scheme is not a link.
-    (url.len() > "https://".len()).then(|| url.to_string())
+    // A bare scheme is not a link — measured against *the scheme this one has*. A fixed floor
+    // does not work with two schemes: `"http://".len()` lets a bare `https://` through, and
+    // `"https://".len()` rejects the real `http://x.org`.
+    let scheme = if url.starts_with("https://") {
+        "https://"
+    } else {
+        "http://"
+    };
+    (url.len() > scheme.len()).then(|| url.to_string())
 }
 
 /// The device code out of a sign-in URL (`…?user_code=KFDM-BQQG`).
@@ -1326,6 +1367,17 @@ struct Workbench {
     panel_open: bool,
     /// Whether the road strip down the left of the chat is showing.
     road_open: bool,
+    /// What each output file turned out to be, keyed by path and stamped with the modification
+    /// time it was measured at.
+    ///
+    /// The panel redraws on every frame — every streamed token, every scroll — and measuring a
+    /// CSV means reading it. Without this, a turn that produced a 20 MB dataset would re-read
+    /// that dataset sixty times a second on the thread drawing the window.
+    ///
+    /// A `RefCell` because the panel renders from `&self`, and a cache that could only be filled
+    /// from `&mut self` would have to be refreshed by `render` for a panel that may not even be
+    /// open. Never borrowed across a call that could re-enter.
+    shapes: std::cell::RefCell<HashMap<PathBuf, (std::time::SystemTime, workspace::Shape)>>,
     /// What the sidebar's search box holds. Empty means "show everything".
     conversation_query: Entity<Composer>,
     /// A file being previewed in the centre, if any.
@@ -1516,6 +1568,7 @@ impl Workbench {
             sidebar_open: stored.sidebar_open,
             panel_open: stored.panel_open,
             road_open: stored.road_open,
+            shapes: std::cell::RefCell::new(HashMap::new()),
             conversation_query,
             preview: None,
             conversations: Vec::new(),
@@ -7370,7 +7423,10 @@ impl Workbench {
             .track_scroll(&self.panel_scroll)
             .p_4()
             .gap_4()
-            .child(section_label("RESEARCH PROJECT"));
+            // `MISSION`, not `RESEARCH PROJECT`. The panel *is* the research project — saying so
+            // at the top of it spends the widest heading in the column on a word that names the
+            // container rather than its first section.
+            .child(section_label("MISSION"));
 
         let Some(project) = &self.project else {
             // No spine yet, but a run may already be producing outputs — still show
@@ -7383,7 +7439,8 @@ impl Workbench {
                         .child("No project loaded yet. Run a turn — the mission is derived from your first question."),
                 )
                 .child(self.jobs_section(cx))
-                .child(self.outputs_section(cx));
+                .child(self.outputs_section(cx))
+                .child(self.sources_section());
         };
 
         panel = panel.child(if project.mission.is_empty() {
@@ -7478,6 +7535,7 @@ impl Workbench {
         panel
             .child(self.jobs_section(cx))
             .child(self.outputs_section(cx))
+            .child(self.sources_section())
     }
 
     /// Long jobs still running, and the ones that finished this session.
@@ -7714,73 +7772,176 @@ impl Workbench {
     ///
     /// Fed by the `values` stream event, so it fills in as a turn produces papers,
     /// datasets, theories and reports — not only at the end.
+    /// What this conversation has cited, numbered.
+    ///
+    /// `[n]` in the accent because a source is something you can act on — it opens. The number is
+    /// the same one the agent's prose uses, so `[3]` in an answer and `[3]` here are the same
+    /// paper without the researcher having to match titles.
+    ///
+    /// Whole strings, not split into title and venue: `Snapshot::sources` carries a citation as
+    /// one line of the agent's own text, in whatever form it wrote it. Splitting it into
+    /// `Plant Pathology · 2021 · CIP Dataverse` would mean parsing prose into fields and being
+    /// confidently wrong about some of them — a bibliography that quietly mis-attributes is worse
+    /// than one that is merely plain.
+    fn sources_section(&self) -> impl IntoElement {
+        let mut section = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .when(!self.sources.is_empty(), |section| {
+                section
+                    .pt_2()
+                    .border_t_1()
+                    .border_color(rgb(theme::border()))
+                    .child(section_label_owned(format!(
+                        "SOURCES · {}",
+                        self.sources.len()
+                    )))
+            });
+
+        for (at, source) in self.sources.iter().enumerate() {
+            let opened = first_url(source);
+            let mut row = div()
+                .id(SharedString::from(format!("source-{at}")))
+                .flex()
+                .flex_row()
+                .items_start()
+                .gap_2()
+                .w_full()
+                .min_w_0()
+                .p_2()
+                .rounded_lg()
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(rgb(theme::accent()))
+                        .text_size(px(11.))
+                        .child(format!("[{}]", at + 1)),
+                )
+                .child(
+                    div()
+                        .flex_grow()
+                        .min_w_0()
+                        .text_color(rgb(theme::text()))
+                        .text_size(px(13.))
+                        .line_height(px(18.))
+                        .child(source.clone()),
+                );
+            // Only a citation carrying a URL is clickable. A row that looks interactive and does
+            // nothing teaches people that rows here do nothing.
+            if let Some(url) = opened {
+                row = row
+                    .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
+                    .on_click(move |_event, _window, _cx| {
+                        if let Err(error) = workspace::browse(&url) {
+                            tracing::warn!(%error, "could not open a source");
+                        }
+                    });
+            }
+            section = section.child(row);
+        }
+        section
+    }
+
+    /// What a file turned out to be, measured at most once per version of it.
+    ///
+    /// Keyed on modification time, so a dataset the agent rewrites is re-measured and one it
+    /// leaves alone is not. A file that has vanished between the directory listing and this call
+    /// reports its size only, which is what the row falls back to anyway.
+    fn shape_of(&self, output: &workspace::Output) -> workspace::Shape {
+        let Ok(modified) = std::fs::metadata(&output.path).and_then(|meta| meta.modified()) else {
+            return workspace::Shape::Plain;
+        };
+        if let Some((seen, shape)) = self.shapes.borrow().get(&output.path) {
+            if *seen == modified {
+                return *shape;
+            }
+        }
+        let shape = workspace::shape(&output.path, output.bytes);
+        self.shapes
+            .borrow_mut()
+            .insert(output.path.clone(), (modified, shape));
+        shape
+    }
+
     fn outputs_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        // What is actually on disk, rather than the agent's own artifact list: a file written by
+        // a script inside `execute` registers no artifact, and those are most of them.
+        let files = self
+            .thread_workspace()
+            .map(|dir| workspace::outputs(&dir))
+            .unwrap_or_default();
+        let count: usize = files.iter().map(|(_, items)| items.len()).sum();
+
         let mut section = div()
             .flex()
             .flex_col()
             .gap_2()
             .pt_2()
             .border_t_1()
-            .border_color(rgb(theme::border()))
-            .child(section_label("OUTPUTS"));
+            .border_color(rgb(theme::border()));
 
-        // Everything this conversation wrote, in one folder the researcher already owns.
-        // This *is* "download all the documents": the files are in their own Documents
-        // directory (`workspace.rs`), so there is nothing to package — the ask was only
-        // ever for a way to get at them.
-        if let Some(dir) = self.thread_workspace() {
-            section = section.child(
-                ui::Button::new("open-workspace", "Open this conversation's files")
-                    .tone(ui::Tone::Accent)
-                    .size(ui::Size::Compact)
-                    .on_click(move |_event, _window, _cx| {
-                        if let Err(error) = workspace::open(&dir) {
-                            tracing::warn!(%error, "could not open the workspace folder");
-                        }
-                    }),
-            );
+        // **Nothing at all when there is nothing.** This used to say "Papers, datasets, theories
+        // and reports show up here as a turn produces them" — which was untrue: `outputs` reads
+        // one level of the thread's directory, so a turn that wrote into a subfolder produced
+        // files this panel would never show, and the sentence promised otherwise (docs §117).
+        // An empty section says less and is right.
+        if count == 0 && self.buckets.is_empty() {
+            return section;
         }
 
-        // The files themselves, grouped by what a researcher would do with them. The
-        // buckets below are what the *agent* declared it produced; this is what is
-        // actually on disk, which is a superset and the thing they asked to see.
-        let files = self
-            .thread_workspace()
-            .map(|dir| workspace::outputs(&dir))
-            .unwrap_or_default();
-        for (kind, items) in &files {
-            section = section.child(
-                div()
-                    .pt_1()
-                    .text_color(rgb(theme::text_faint()))
-                    .text_xs()
-                    .child(kind.label()),
-            );
+        if count > 0 {
+            section = section.child(section_label_owned(format!("FILES · {count}")));
+        }
+
+        for (_, items) in &files {
             for output in items {
                 let shown = output.clone();
+                let (glyph, ink) = file_mark(&output.path);
                 section = section.child(
                     div()
                         .id(SharedString::from(format!("file-{}", output.name)))
                         .flex()
                         .flex_row()
                         .items_center()
-                        .justify_between()
                         .gap_2()
                         .w_full()
                         .min_w_0()
-                        .px_1()
-                        .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
-                        .child(
-                            ui::Label::new(output.name.clone())
-                                .size(ui::Size::Compact)
-                                .ellipsis(),
-                        )
+                        .p_2()
+                        .rounded_lg()
+                        // A fill instead of a border: thirty bordered rows in a 330px column is
+                        // thirty horizontal lines, and the eye reads those as a table it is
+                        // supposed to compare across.
+                        .bg(rgb(theme::elevated()))
+                        .hover(|style| style.bg(rgb(theme::accent_soft())).cursor_pointer())
                         .child(
                             div()
                                 .flex_none()
-                                .text_color(rgb(theme::text_faint()))
-                                .text_xs()
-                                .child(workspace::human_size(output.bytes)),
+                                .text_color(rgb(ink))
+                                .text_size(px(13.))
+                                .child(glyph),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_grow()
+                                .min_w_0()
+                                .child(
+                                    ui::Label::new(output.name.clone())
+                                        .size(ui::Size::Compact)
+                                        .ellipsis(),
+                                )
+                                // The real shape of the file, not just how much of the disk it
+                                // takes: `1,204 rows · 11 cols` is what decides whether it is the
+                                // file you wanted. See `workspace::Shape` for why a PDF gets a
+                                // size and no page count.
+                                .child(
+                                    div()
+                                        .text_color(rgb(theme::text_faint()))
+                                        .text_size(px(11.))
+                                        .child(self.shape_of(output).describe(output.bytes)),
+                                ),
                         )
                         .on_click(cx.listener(move |workbench, _event, _window, cx| {
                             // In the window first. Leaving the app to look at a 4 KB CSV
@@ -7792,10 +7953,47 @@ impl Workbench {
             }
         }
 
-        if self.buckets.is_empty() && files.is_empty() {
-            return section.child(div().text_color(rgb(theme::text_muted())).text_xs().child(
-                "Papers, datasets, theories and reports show up here as a turn produces them.",
-            ));
+        // Everything this conversation wrote, in one folder the researcher already owns.
+        // This *is* "download all the documents": the files are in their own Documents
+        // directory (`workspace.rs`), so there is nothing to package — the ask was only
+        // ever for a way to get at them.
+        //
+        // Dashed and last, because it is a way *out* of the panel rather than another row in it —
+        // and it is where the files this list cannot reach are (docs §117).
+        if let Some(dir) = self.thread_workspace() {
+            section = section.child(
+                div()
+                    .id("open-workspace")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_center()
+                    .w_full()
+                    .min_w_0()
+                    .p_2()
+                    .rounded_lg()
+                    .border_1()
+                    .border_dashed()
+                    .border_color(rgb(theme::border_strong()))
+                    .text_color(rgb(theme::text_muted()))
+                    .text_xs()
+                    .hover(|style| {
+                        style
+                            .text_color(rgb(theme::accent()))
+                            .border_color(rgb(theme::accent()))
+                            .cursor_pointer()
+                    })
+                    .child(if cfg!(windows) {
+                        "Open the folder in Explorer"
+                    } else {
+                        "Open the folder"
+                    })
+                    .on_click(move |_event, _window, _cx| {
+                        if let Err(error) = workspace::open(&dir) {
+                            tracing::warn!(%error, "could not open the workspace folder");
+                        }
+                    }),
+            );
         }
 
         for bucket in &self.buckets {
@@ -8388,10 +8586,35 @@ mod tests {
             first_url("see (https://example.org/b)").as_deref(),
             Some("https://example.org/b")
         );
+        // A citation, which is the second caller: one line of the agent's prose with a DOI in it.
+        assert_eq!(
+            first_url("Smith et al. (2021). Late blight. https://doi.org/10.1234/x.").as_deref(),
+            Some("https://doi.org/10.1234/x")
+        );
+        // `http://`, because plenty of older DOIs and institutional repositories still publish
+        // that way and a source row that would not open is indistinguishable from one with no
+        // link at all.
+        assert_eq!(
+            first_url("archived at http://hdl.handle.net/10568/1").as_deref(),
+            Some("http://hdl.handle.net/10568/1")
+        );
+        // Whichever comes first in the line, not whichever scheme is checked first.
+        assert_eq!(
+            first_url("http://a.org and https://b.org").as_deref(),
+            Some("http://a.org")
+        );
+        assert_eq!(
+            first_url("https://a.org and http://b.org").as_deref(),
+            Some("https://a.org")
+        );
+
         // Nothing to open.
         assert_eq!(first_url("Waiting for authentication…"), None);
+        // A bare scheme is not a link — and the guard has to be against *its own* scheme. A
+        // fixed floor of `"http://".len()` would let this one through, which is exactly what
+        // adding the second scheme did until this line caught it.
         assert_eq!(first_url("https://"), None, "a bare scheme is not a link");
-        assert_eq!(first_url("http://example.org"), None, "https only");
+        assert_eq!(first_url("http://"), None, "either scheme");
     }
 
     #[test]
