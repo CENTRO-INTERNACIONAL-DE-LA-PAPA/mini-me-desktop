@@ -7317,3 +7317,70 @@ So `academic_researcher` has no tool that returns a year, a venue or a DOI, and 
 three. Added to the upstream report: the fix is a paper-lookup tool beside the snippet search, or a
 resolution step from `corpusId` — not more plumbing downstream of a tool that was never meant to
 answer this.
+
+## 124. Seven tools, and nothing that says so (2026-08-07)
+
+*"Ok and to be clear, what are the capabilities of the subagents that search papers? Only search?"*
+
+No — and answering it properly turned up why the citations are wrong, which is not what §120 said.
+
+### What `academic_researcher` actually holds
+
+Its declaration is `"tools": []` (`backend/subagents.py:50`). Everything arrives at runtime:
+
+* the **entire, unfiltered** Asta MCP bundle — `get_mcp_tools(("asta",))` with no allowlist
+  (`backend/mcp_tools.py:413-414`), against the Dataverse loader which whitelists three by name;
+* the **full deepagents filesystem toolkit** — `ls`, `read_file`, `write_file`, `edit_file`,
+  `glob`, `grep`, `execute` — prepended to *every* subagent (`deepagents/graph.py:547-560`,
+  `middleware/filesystem.py:789-797`).
+
+It cannot delegate: `task` belongs to the main agent alone (`deepagents/graph.py:683-695`). And it
+runs **outside the guardrail stack** — PII redaction and the model/tool-call limits are applied to
+the coordinator only (`backend/agent.py:124-143`) — while holding `execute`. Whether our own
+approval patch catches that combination is not established and is worth checking on its own.
+
+### The reason the DOIs are wrong is not the one §120 gave
+
+§120 concluded the model invents identifiers because `snippet_search` returns none. True, but
+incomplete: **it has six other tools that do**, and has had them all along.
+
+`skills/research/SKILL.md:69-82` names all seven by purpose, including which returns full metadata.
+The subagent almost certainly never reads it. Every subagent declares its skill one directory too
+deep:
+
+```
+on disk        skills/research/SKILL.md            SKILL.md is a file inside research/
+coordinator    skills=["/skills/"]                 scans subdirs → finds twelve ✓
+subagent       "skills": ["/skills/research/"]     scans subdirs of research/ → finds none ✗
+```
+
+The loader wants a path whose *subdirectories* hold a `SKILL.md`
+(`deepagents/middleware/skills.py:749-762`); the prompt then renders *"(No skills available
+yet…)"*. A child cannot inherit the parent's either — `skills_metadata` is stripped from the state
+passed down (`middleware/subagents.py:186-192`). **All ten subagents have the same path shape.**
+
+So the picture is complete: seven tools, no document explaining them, and an instruction to produce
+APA references. It reaches for the one tool whose purpose is guessable from its name and writes the
+rest from memory. Filed as `docs/upstream/mini-me/subagent-skills-point-one-level-too-deep.md`.
+
+### The cheap experiment, before the expensive one
+
+The obvious remedy — a code-side search tool over the `asta` CLI — is a permanent fork: our own
+tool definitions, parsing, and CLI version drift, re-checked on every upstream update. It is also
+premature, because the subagent already *has* the tools it needs.
+
+So the overlay appends to `academic_researcher`'s prompt instead: name the metadata tools, say what
+`snippet_search` does not return, and forbid the three inventions — never write a DOI from memory,
+never fill a year or a volume the tools did not give, **cite only papers a tool returned in this
+conversation.** That last one is the first thing aimed at §120a's fabricated references, which no
+amount of identifier plumbing could reach.
+
+Appended, not replaced: upstream's prompt sets the role and the source limit, and rewriting it here
+would silently drop whatever upstream adds next.
+
+If the identifiers come out right, the code-side tool is unnecessary. If they do not, that is
+evidence rather than a guess — which is the only reason to build the expensive thing.
+
+*Three explanations for one defect, in three days: the client dropped the field (§119), the tool
+does not return it (§120), the document naming the tool that does was never delivered (§124). Each
+was true. Only the last one was the cause.*

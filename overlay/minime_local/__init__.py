@@ -34,6 +34,7 @@ _PROJECT_ROUTE_MODULE = "backend.routes.project"
 #: structured output becomes the `sources` list the desktop app reads. Both are
 #: ordinary imports, so the hook reaches them; `http.app` is the one that cannot be
 #: (docs §18). See `minime_local/sources.py`.
+_SUBAGENTS_MODULE = "backend.subagents"
 _MCP_MODULE = "backend.mcp_tools"
 _ARTIFACTS_MODULE = "backend.middleware.artifacts"
 
@@ -49,6 +50,7 @@ _ALWAYS_TARGETS = (
     _PROJECT_ROUTE_MODULE,
     _MCP_MODULE,
     _ARTIFACTS_MODULE,
+    _SUBAGENTS_MODULE,
 )
 
 #: Every module we patch, and what patching it means.
@@ -78,6 +80,11 @@ def _patch(module) -> None:
         from minime_local import spine
 
         spine.install_routes(module)
+        return
+    if module.__name__ == _SUBAGENTS_MODULE:
+        from minime_local import sources
+
+        sources.install_prompt(module)
         return
     if module.__name__ == _MCP_MODULE:
         from minime_local import sources

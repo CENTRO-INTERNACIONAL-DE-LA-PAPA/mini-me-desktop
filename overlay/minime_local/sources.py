@@ -189,6 +189,98 @@ def link_for(citation: str) -> str | None:
     return CORPUS_URL.format(corpus)
 
 
+#: Appended to `academic_researcher`'s prompt.
+#:
+#: **Why a prompt and not more plumbing.** The subagent already holds every tool it needs. Its
+#: MCP bundle arrives unfiltered (`backend/mcp_tools.py:413`), so `get_papers`,
+#: `search_paper_by_title` and `search_papers_by_relevance` — all of which return a DOI, a year
+#: and a venue as *fields* — are in its hands on every turn. It has simply never been told they
+#: exist: its prompt says only *"use available tools"* and *"cite all claims with APA-format
+#: references"* (`backend/subagents.py:36-47`).
+#:
+#: The document that does name them, `skills/research/SKILL.md:69-82`, is almost certainly never
+#: delivered. Every subagent declares its skill one directory too deep —
+#: `"skills": ["/skills/research/"]` — while the loader scans a path's *subdirectories* for a
+#: `SKILL.md` (`deepagents/middleware/skills.py:749-762`). `research/` contains a file, not a
+#: subdirectory, so nothing resolves. The coordinator's `skills=["/skills/"]` sits one level up
+#: and loads all twelve.
+#:
+#: So the model reaches for the one tool whose purpose it can infer from the name — snippet
+#: search — reads titles and authors, and supplies the year, journal, volume, pages and DOI from
+#: memory, because it was asked for an APA citation and given no other way to produce one.
+#:
+#: This is the cheap experiment before the expensive one: name the tools, forbid the invention,
+#: and see whether the identifiers come out right. If they do, the code-side search tool is
+#: unnecessary. If they do not, that is evidence rather than a guess (docs §124).
+IDENTIFIER_RULES = """
+
+    ## Identifiers (mini-me local)
+
+    Every paper you cite must be resolved before you cite it.
+
+    You have tools that return bibliographic metadata as structured fields, not as prose:
+
+      - `search_papers_by_relevance` - find papers by topic; returns metadata
+      - `search_paper_by_title`      - find one paper by its title; returns metadata
+      - `get_papers`                 - full metadata for a paper you already have an id for
+      - `snippet_search`             - ~500-word passages of text; returns NO metadata
+
+    `snippet_search` is for reading evidence. It does not return a DOI, a year, a venue or page
+    numbers. If you cite a paper you found through it, look that paper up with
+    `search_paper_by_title` or `get_papers` (its `corpusId` works as an id) and take the
+    identifier from the result.
+
+    Rules, in order of importance:
+
+    1. **Never write a DOI from memory.** A DOI is an opaque string; one that looks right is not
+       right. Use only a DOI a tool returned to you in this conversation. If no tool returned
+       one, give no DOI at all - an incomplete citation is correctable, a confident wrong one is
+       not.
+    2. The same applies to the year, the journal, the volume and the page numbers. Report what
+       the tools returned. Omit what they did not.
+    3. **Cite only papers a tool returned in this conversation.** Do not add references from your
+       own knowledge to round out the list, however relevant they seem. Fewer real sources is the
+       correct answer; the source limit is a maximum, not a target.
+    4. If you cannot verify a paper exists through these tools, leave it out and say in your
+       summary that the evidence base was thin.
+
+    Put the identifier in the `link` field of each source: a DOI as `https://doi.org/<doi>`, or,
+    when you only have a corpus id, `https://api.semanticscholar.org/CorpusID:<id>`.
+"""
+
+
+def install_prompt(module) -> None:
+    """Tell `academic_researcher` which tools return identifiers, and forbid inventing them.
+
+    Appends rather than replaces: upstream's prompt sets the subagent's role and its source
+    limit, and rewriting it here would silently drop whatever upstream adds next.
+
+    `_build_runtime_subagents` spreads `**subagent` per request (`backend/subagents.py:492`), so
+    editing the module-level dict at import time reaches every turn without touching the file.
+    """
+    entries = getattr(module, "subagents", None)
+    if not isinstance(entries, (list, tuple)):
+        logger.warning("minime_local: no subagents list to extend")
+        return
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.get("name") != "academic_researcher":
+            continue
+        prompt = entry.get("system_prompt")
+        if not isinstance(prompt, str):
+            logger.warning("minime_local: academic_researcher has no system_prompt to extend")
+            return
+        # Idempotent: `install()` patches an already-imported module as well as hooking future
+        # imports, so this can run twice on one process.
+        if "Identifiers (mini-me local)" in prompt:
+            return
+        entry["system_prompt"] = prompt + IDENTIFIER_RULES
+        logger.warning(
+            "minime_local: academic_researcher told which tools return identifiers"
+        )
+        return
+    logger.warning("minime_local: no academic_researcher subagent found to extend")
+
+
 def install_mcp(module) -> None:
     """Record the papers every Asta tool call returns.
 

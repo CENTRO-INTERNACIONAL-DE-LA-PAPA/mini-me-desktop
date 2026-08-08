@@ -17,6 +17,7 @@ somebody else's repository, and the decision of when and by whom is the maintain
 | [start-async-task-config.md](mini-me/start-async-task-config.md) | **high** | `deepagents` launches background runs with no config, so they inherit no model, key or recursion limit |
 | [project-spine-is-not-per-project.md](mini-me/project-spine-is-not-per-project.md) | medium | The research spine is keyed per *user*, so it mixes every study a person has run and never forgets a deleted conversation |
 | [academic-sources-drop-the-corpus-id.md](mini-me/academic-sources-drop-the-corpus-id.md) | **high** | Asta's paper search returns only a `corpusId`; it is dropped, and the model is asked for an APA citation it has no data for — so it invents the DOI |
+| [subagent-skills-point-one-level-too-deep.md](mini-me/subagent-skills-point-one-level-too-deep.md) | **high** | All ten subagents declare `/skills/<name>/` where the loader wants the parent, so each appears to receive none of the guidance written for it |
 
 ## langgraph (`langgraph_runtime_inmem`, LangChain)
 
