@@ -290,9 +290,36 @@ def install_mcp(module) -> None:
     (`mcp_tools.py:132` puts the `asta` threshold at 32 KB, and paper searches are hundreds of KB
     by that file's own comment). The corpus ids we need are in the part that gets cut.
     """
-    original = getattr(module, "_wrap_mcp_tools", None)
+    # **Named from the file, not from memory.** The first version hooked `_wrap_mcp_tools`, which
+    # does not exist and never did — it was a plausible name for a function whose *body* had been
+    # read. It installed nothing, said so, and the corpus id was never captured. §113 exactly: a
+    # wrapper that assumed something about code it does not own.
+    #
+    # A tuple because the real name is private and upstream may rename it. Ordered by what is
+    # there today.
+    candidates = ("_make_mcp_tools_resilient", "_wrap_mcp_tools")
+    # **The name is kept, not just the function.** The first fix looked up the right name and
+    # then assigned the wrapper back to the wrong one — so `_recording` was stored under an
+    # attribute nothing calls, the installer logged success, and not one corpus id was recorded.
+    # A rename fixed in one of its two places is a rename not fixed.
+    found = next((name for name in candidates if getattr(module, name, None)), None)
+    original = getattr(module, found) if found else None
     if original is None:
-        logger.warning("minime_local: no _wrap_mcp_tools — sources keep the model's own links")
+        # **Reports what *is* there.** The previous failure said only that the name it wanted was
+        # absent, which named the guess and not the fact — so the log identified the symptom and
+        # left the answer in the file it had just failed to read.
+        present = [
+            name
+            for name in dir(module)
+            if name.startswith("_") and callable(getattr(module, name, None))
+        ]
+        logger.warning(
+            "minime_local: none of %s in %s — sources keep the model's own links; "
+            "candidates present: %s",
+            candidates,
+            module.__name__,
+            present,
+        )
         return
 
     @functools.wraps(original)
@@ -318,8 +345,10 @@ def install_mcp(module) -> None:
                 pass
         return original(tools)
 
-    module._wrap_mcp_tools = _recording
-    logger.warning("minime_local: recording the corpus id of every paper Asta returns")
+    setattr(module, found, _recording)
+    logger.warning(
+        "minime_local: recording the corpus id of every paper Asta returns (via %s)", found
+    )
 
 
 def install_artifacts(module) -> None:

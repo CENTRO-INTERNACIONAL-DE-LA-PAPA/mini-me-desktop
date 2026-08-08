@@ -7384,3 +7384,56 @@ evidence rather than a guess — which is the only reason to build the expensive
 *Three explanations for one defect, in three days: the client dropped the field (§119), the tool
 does not return it (§120), the document naming the tool that does was never delivered (§124). Each
 was true. Only the last one was the cause.*
+
+## 125. The installer said yes and did nothing (2026-08-07)
+
+The prompt patch and the artifact patch fired on the first real run. The recorder did not:
+
+```
+minime_local: no _wrap_mcp_tools — sources keep the model's own links
+minime_local: academic sources link through Semantic Scholar
+minime_local: academic_researcher told which tools return identifiers
+```
+
+`_wrap_mcp_tools` does not exist and never did. The real name is `_make_mcp_tools_resilient`
+(`backend/mcp_tools.py:351`). I had read that function's *body* while working out where to hook,
+and then named it from memory — **§113 exactly**, the wrapper that assumed something about code it
+does not own, and the second time this week.
+
+### The second mistake was worse than the first
+
+The fix looked up the right name through a candidate list — and then assigned the wrapper back to
+`module._wrap_mcp_tools`, the name that does not exist. So `_recording` was stored under an
+attribute nothing calls, `_make_mcp_tools_resilient` was left untouched, and the installer logged:
+
+```
+minime_local: recording the corpus id of every paper Asta returns
+```
+
+A success line, for an installation that had installed nothing. That is a worse failure than the
+original, because the original *told the truth*.
+
+Caught only by driving the real chain — upstream's wrapper around ours, the tool call in a child
+task — and asserting on the store afterwards. The unit tests had exercised `observe` and
+`link_for`, both of which were correct throughout.
+
+*A rename fixed in one of its two places is a rename not fixed.*
+
+### What the logging earned
+
+Three §81 arguments paid off in one run:
+
+* the installer that speaks **on success** is why the missing hook was noticed at all — the two
+  that worked and the one that did not were distinguishable at a glance;
+* the failure line now reports **what is actually in the module**, not merely that the guessed name
+  was absent. The first version named the guess and not the fact, leaving the answer in the file it
+  had just failed to read;
+* the success line now names the hook it installed (`via _make_mcp_tools_resilient`), so "installed
+  under the wrong name" can never again look like "installed".
+
+### Still unproven
+
+The chain is verified against upstream's real function name, its real wrapping order, and a child
+task — but not yet against a live backend. The number to look for is
+`minime_local: N of M sources carry the corpus id Asta returned`. Until that reads something other
+than `0 of M`, this remains a patch that has passed a rehearsal.
