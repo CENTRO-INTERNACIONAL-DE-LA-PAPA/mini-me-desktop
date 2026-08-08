@@ -17,6 +17,7 @@ mod menu;
 mod preflight;
 mod protocol;
 mod provenance;
+mod references;
 mod selection;
 mod settings;
 mod sidecar;
@@ -1645,6 +1646,17 @@ struct Workbench {
     reports: Vec<protocol::Report>,
     /// Whole citations, for a rendered report's bibliography. Not the panel's truncated ones.
     sources: Vec<protocol::Source>,
+    /// What checking each DOI against Crossref found, keyed by the DOI.
+    ///
+    /// Keyed by identifier rather than by position, because a turn can add sources while the
+    /// check is running and a verdict shown against the wrong reference is worse than none.
+    checked: HashMap<String, references::Verdict>,
+    /// Whether a reference check is in flight, and how much of it is done.
+    ///
+    /// `checking_references`, not `checking` — that name already belongs to the preflight, and
+    /// two unrelated progress flags one word apart is how a spinner ends up reporting the wrong
+    /// job.
+    checking_references: Option<(usize, usize)>,
     /// Whether the About window is showing.
     about_open: bool,
     /// Whether the provenance window is showing, and which of its two views.
@@ -1924,6 +1936,8 @@ impl Workbench {
             saved_reports: std::collections::HashSet::new(),
             reports: Vec::new(),
             sources: Vec::new(),
+            checked: HashMap::new(),
+            checking_references: None,
             about_open: false,
             provenance_open: false,
             provenance_view: ProvenanceView::Timeline,
@@ -6249,6 +6263,70 @@ impl Workbench {
         block.child(moves)
     }
 
+    /// Ask the registry whether each cited DOI is the paper the citation names.
+    ///
+    /// The DOIs go out one at a time; verdicts come back as they arrive, so the panel fills in
+    /// rather than sitting blank until the last one. A source with no DOI is settled here without
+    /// any network at all — there is nothing to ask about.
+    fn check_references(&mut self, cx: &mut Context<Self>) {
+        let mut wanted: Vec<(String, String)> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for source in &self.sources {
+            match link_for(source).as_deref().and_then(references::doi_in) {
+                // Deduplicated: the same paper cited twice is one question for the registry.
+                Some(doi) if seen.insert(doi.clone()) => {
+                    wanted.push((doi, source.citation.clone()))
+                }
+                Some(_) => {}
+                None => {}
+            }
+        }
+        if wanted.is_empty() {
+            self.say("no DOIs among these sources to check", cx);
+            return;
+        }
+
+        let total = wanted.len();
+        self.checking_references = Some((0, total));
+        let mut results = self.sidecar.check_references(wanted);
+        cx.spawn(async move |this, cx| {
+            while let Some((doi, verdict)) = results.next().await {
+                if this
+                    .update(cx, |workbench, cx| {
+                        workbench.checked.insert(doi, verdict);
+                        let done = workbench
+                            .checking_references
+                            .map(|(done, _)| done + 1)
+                            .unwrap_or(0);
+                        workbench.checking_references = (done < total).then_some((done, total));
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            // The stream ends whether it finished or stopped early; either way nothing is still
+            // running, and a progress line that never clears is a spinner nobody trusts again.
+            let _ = this.update(cx, |workbench, cx| {
+                workbench.checking_references = None;
+                let wrong = workbench
+                    .checked
+                    .values()
+                    .filter(|verdict| verdict.is_problem())
+                    .count();
+                let note = match wrong {
+                    0 => "every DOI resolves to the paper cited".to_string(),
+                    1 => "1 reference does not check out — see the sources panel".to_string(),
+                    many => format!("{many} references do not check out — see the sources panel"),
+                };
+                workbench.say(note, cx);
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     /// Whether an Asta-backed specialist actually ran in this conversation.
     ///
     /// **What the report footer's attribution should be decided by.** That footer reads
@@ -8652,7 +8730,7 @@ impl Workbench {
                 )
                 .child(self.jobs_section(cx))
                 .child(self.outputs_section(cx))
-                .child(self.sources_section());
+                .child(self.sources_section(cx));
         };
 
         panel = panel.child(if project.mission.is_empty() {
@@ -8747,7 +8825,7 @@ impl Workbench {
         panel
             .child(self.jobs_section(cx))
             .child(self.outputs_section(cx))
-            .child(self.sources_section())
+            .child(self.sources_section(cx))
     }
 
     /// Long jobs still running, and the ones that finished this session.
@@ -8995,7 +9073,7 @@ impl Workbench {
     /// `Plant Pathology · 2021 · CIP Dataverse` would mean parsing prose into fields and being
     /// confidently wrong about some of them — a bibliography that quietly mis-attributes is worse
     /// than one that is merely plain.
-    fn sources_section(&self) -> impl IntoElement {
+    fn sources_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut section = div()
             .flex()
             .flex_col()
@@ -9011,8 +9089,72 @@ impl Workbench {
                     )))
             });
 
+        // Checking references is a *deliberate* act, not something that happens on its own.
+        // It sends a DOI to a public registry, and an app that silently makes network calls
+        // about a researcher's unpublished bibliography is not one they can vouch for to an
+        // ethics board. So: a button, and one line saying exactly what leaves the machine.
+        if !self.sources.is_empty() {
+            let wrong = self
+                .checked
+                .values()
+                .filter(|verdict| verdict.is_problem())
+                .count();
+            section = section.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .w_full()
+                    .min_w_0()
+                    .child(
+                        ui::Button::new("check-references", "Check DOIs")
+                            .size(ui::Size::Compact)
+                            .disabled(self.checking_references.is_some())
+                            .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                workbench.check_references(cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex_grow()
+                            .min_w_0()
+                            .text_color(rgb(if wrong > 0 {
+                                theme::error()
+                            } else {
+                                theme::text_faint()
+                            }))
+                            .text_size(px(11.))
+                            .child(match (self.checking_references, wrong, self.checked.len()) {
+                                (Some((done, total)), _, _) => {
+                                    format!("checking {done} of {total}…")
+                                }
+                                (None, 0, 0) => {
+                                    "sends each DOI to crossref.org — nothing else".to_string()
+                                }
+                                (None, 0, checked) => {
+                                    format!("{checked} checked, all resolve to the paper cited")
+                                }
+                                (None, 1, _) => "1 reference does not check out".to_string(),
+                                (None, wrong, _) => {
+                                    format!("{wrong} references do not check out")
+                                }
+                            }),
+                    ),
+            );
+        }
+
         for (at, source) in self.sources.iter().enumerate() {
             let opened = link_for(source);
+            // Once a check has run, a reference with no DOI says so. Left blank it would look
+            // exactly like one that passed — and in a run where the model wrote its citations,
+            // *having no identifier at all* is the strongest signal of the three: it means
+            // nothing structured ever produced this reference.
+            let verdict = match opened.as_deref().and_then(references::doi_in) {
+                Some(doi) => self.checked.get(&doi).cloned(),
+                None if !self.checked.is_empty() => Some(references::Verdict::NoIdentifier),
+                None => None,
+            };
             // The prose the reader sees, with the URL taken out of it. A DOI written into a
             // sentence wraps mid-token in a 330px column — `https://doi.org` on one line and
             // `/10.1007/…` on the next — and a link that *looks* broken is one somebody retypes
@@ -9068,6 +9210,23 @@ impl Workbench {
                                 .text_size(px(11.))
                                 .line_height(px(15.))
                                 .child(format!("the citation text says {written} — check which"))
+                        }))
+                        // What the registry said, once it has been asked. Only a verdict about
+                        // the *reference* is coloured as a fault — being offline is not the
+                        // citation's doing, and showing it in red would have somebody delete a
+                        // reference that was fine.
+                        .children(verdict.map(|verdict| {
+                            div()
+                                .text_color(rgb(if verdict.is_problem() {
+                                    theme::error()
+                                } else if matches!(verdict, references::Verdict::Confirmed) {
+                                    theme::success()
+                                } else {
+                                    theme::text_faint()
+                                }))
+                                .text_size(px(11.))
+                                .line_height(px(15.))
+                                .child(verdict.label())
                         })),
                 );
             // Only a source with a link is clickable. A row that looks interactive and does

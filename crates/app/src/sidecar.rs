@@ -16,6 +16,8 @@ use futures::channel::mpsc;
 use tokio::sync::Mutex;
 
 use crate::backend::{BackendConfig, BackendSupervisor, Started};
+use crate::protocol::urlencode;
+use crate::references;
 use crate::protocol::{
     AgentRef, AsyncTask, Conversation, Decision, Job, LangGraphClient, ModelChoice, Project,
     TurnEvent, TurnOutcome,
@@ -580,6 +582,63 @@ impl Sidecar {
         rx
     }
 
+    /// Check each DOI against Crossref, and report a verdict per reference.
+    ///
+    /// **The one call in this app that does not go to the backend.** Everything else here talks
+    /// to the local sidecar; this reaches a public registry, so the rules are stricter and worth
+    /// stating where the request is made:
+    ///
+    /// * **A DOI goes out, and nothing else.** Not the citation, not the question, not the
+    ///   conversation. The comparison happens on this machine against text that never leaves it.
+    /// * **Sequentially, with a small delay.** Crossref is a free service run for everyone; forty
+    ///   parallel requests from a desktop app is not how to use it. A bibliography is tens of
+    ///   items and the check is not something anyone waits on with a stopwatch.
+    /// * **Bounded.** A conversation that gathered hundreds of sources checks the first
+    ///   [`MAX_CHECKS`] and says so, rather than quietly stopping — §51's rule.
+    ///
+    /// Results arrive one at a time so the panel fills in as it goes, keyed by DOI because a
+    /// source's position can change while the check is running.
+    pub fn check_references(
+        &self,
+        wanted: Vec<(String, String)>,
+    ) -> mpsc::UnboundedReceiver<(String, references::Verdict)> {
+        /// Enough for any real bibliography; a guard against a runaway list, not a policy.
+        const MAX_CHECKS: usize = 60;
+
+        let (tx, rx) = mpsc::unbounded();
+        self.runtime.spawn(async move {
+            // Identifies the app to Crossref, as their etiquette asks. **No contact address**:
+            // that would be the researcher's own email leaving the machine to a third party on
+            // every reference, which is the one thing org policy names outright.
+            let client = match reqwest::Client::builder()
+                .user_agent(concat!(
+                    "mini-me-desktop/",
+                    env!("CARGO_PKG_VERSION"),
+                    " (research reference checker)"
+                ))
+                .timeout(std::time::Duration::from_secs(20))
+                .build()
+            {
+                Ok(client) => client,
+                Err(error) => {
+                    tracing::warn!(%error, "could not build the reference checker");
+                    return;
+                }
+            };
+
+            for (doi, citation) in wanted.into_iter().take(MAX_CHECKS) {
+                let verdict = check_one(&client, &doi, &citation).await;
+                if tx.unbounded_send((doi, verdict)).is_err() {
+                    // The window has gone, or the conversation changed. Stop rather than keep
+                    // asking a public service for answers nobody is waiting for.
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            }
+        });
+        rx
+    }
+
     /// Record a conversation's project on the thread itself.
     ///
     /// Fire-and-forget: the folder has already moved and the app already shows the new grouping,
@@ -980,4 +1039,57 @@ async fn run_turn(
 
     emit(TurnEvent::Status("streaming…".into()));
     client.stream_turn(&thread_id, prompt, emit).await
+}
+
+/// Ask Crossref about one DOI.
+///
+/// Every failure is distinguished, because they mean different things to a researcher. A **404**
+/// is the registry saying no such DOI was ever registered — a fact about the reference. Anything
+/// else is a fact about the network, and must not be shown as though the reference were at
+/// fault: reporting "unregistered" to somebody on a train would be worse than reporting nothing,
+/// because they would go and delete a citation that was fine.
+async fn check_one(
+    client: &reqwest::Client,
+    doi: &str,
+    citation: &str,
+) -> references::Verdict {
+    // Percent-encoded: a DOI suffix may legally contain characters that would otherwise start a
+    // query string or a fragment, and a truncated DOI would be reported as unregistered.
+    let url = format!("https://api.crossref.org/works/{}", urlencode(doi));
+    let response = match client.get(&url).send().await {
+        Ok(response) => response,
+        Err(error) => {
+            return references::Verdict::Unreachable {
+                why: if error.is_timeout() {
+                    "timed out".to_string()
+                } else {
+                    "no connection".to_string()
+                },
+            }
+        }
+    };
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return references::Verdict::Unregistered;
+    }
+    if !response.status().is_success() {
+        return references::Verdict::Unreachable {
+            why: format!("registry returned {}", response.status().as_u16()),
+        };
+    }
+    let body: serde_json::Value = match response.json().await {
+        Ok(body) => body,
+        Err(_) => {
+            return references::Verdict::Unreachable {
+                why: "unreadable reply".to_string(),
+            }
+        }
+    };
+    match references::title_of(&body) {
+        Some(title) => references::judge(citation, &title),
+        // It resolved, but the record carries no title to compare against — a data gap at the
+        // registry, not a wrong citation.
+        None => references::Verdict::Unreachable {
+            why: "the record has no title".to_string(),
+        },
+    }
 }

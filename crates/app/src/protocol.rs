@@ -672,7 +672,7 @@ fn decode_async_tasks(artifacts: &Value, root: &Value) -> Vec<AsyncTask> {
 /// Hand-rolled rather than pulling in a URL crate for one function: the values here are a
 /// UUID, a thread id and a research question, and the question is the only one that
 /// reliably contains spaces, punctuation and accented Spanish.
-fn urlencode(value: &str) -> String {
+pub(crate) fn urlencode(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.as_bytes() {
         match byte {
