@@ -137,23 +137,78 @@ fn section_label(text: &'static str) -> impl IntoElement {
 /// entry is verbatim, and nothing is attributed to anyone the agent did not name. A researcher
 /// fills in the fields their journal wants, which they were going to check anyway (org policy:
 /// *validate AI-generated content with subject matter experts*).
-fn bibliography(sources: &[String]) -> String {
+fn bibliography(sources: &[protocol::Source]) -> String {
     let mut out = String::new();
     for (at, source) in sources.iter().enumerate() {
-        let source = source.trim();
-        if source.is_empty() {
+        let citation = source.citation.trim();
+        if citation.is_empty() {
             continue;
         }
         // Braces and backslashes are BibTeX's own syntax; left in they would truncate the entry
         // at the first one and take the rest of the file with it.
-        let safe = source.replace('\\', "\\\\").replace(['{', '}'], "");
+        let safe = citation.replace('\\', "\\\\").replace(['{', '}'], "");
         out.push_str(&format!("@misc{{minime{},\n  note = {{{safe}}},\n", at + 1));
-        if let Some(url) = first_url(source) {
+        if let Some(url) = link_for(source) {
             out.push_str(&format!("  url = {{{url}}},\n"));
+        }
+        // A disagreement travels with the entry rather than being resolved here. A reference
+        // manager shows `annote`, and someone importing forty references should not have to come
+        // back to this window to find out which two were doubtful.
+        if let Some(written) = disputed_link(source) {
+            out.push_str(&format!(
+                "  annote = {{unverified: the citation text gives {written}}},\n"
+            ));
         }
         out.push_str("}\n\n");
     }
     out
+}
+
+/// The link to actually use for a source.
+///
+/// The backend's own field first, and the URL inside the citation only when there is no field.
+/// See [`protocol::Source`] for why that order is not arbitrary: one is what Semantic Scholar
+/// returned, the other is what the model wrote down.
+fn link_for(source: &protocol::Source) -> Option<String> {
+    source
+        .link
+        .clone()
+        .or_else(|| first_url(&source.citation))
+}
+
+/// The URL written into the citation text, when it contradicts the structured one.
+///
+/// `None` when they agree, when either is missing, or when they differ only in the ways URLs
+/// harmlessly differ — a trailing slash, `http` against `https`, or the `doi.org` host spelled
+/// with `dx.`. Those are the same resolver and flagging them would train people to ignore this.
+fn disputed_link(source: &protocol::Source) -> Option<String> {
+    let structured = source.link.as_deref()?;
+    let written = first_url(&source.citation)?;
+    let normalise = |url: &str| {
+        url.trim_end_matches('/')
+            .replace("http://", "https://")
+            .replace("://dx.doi.org/", "://doi.org/")
+            .to_ascii_lowercase()
+    };
+    (normalise(structured) != normalise(&written)).then_some(written)
+}
+
+/// A citation with its URL removed, and the punctuation left tidy.
+///
+/// So the prose can be read as prose and the link shown once, on its own line, where it cannot
+/// wrap into something that looks mistyped.
+fn without_url(citation: &str) -> String {
+    let Some(url) = first_url(citation) else {
+        return citation.trim().to_string();
+    };
+    let Some(at) = citation.find(&url) else {
+        return citation.trim().to_string();
+    };
+    let mut out = String::with_capacity(citation.len());
+    out.push_str(&citation[..at]);
+    out.push_str(&citation[at + url.len()..]);
+    // "…potato. https://doi.org/10.1/x." leaves "…potato. ." behind.
+    out.trim().trim_end_matches(['.', ',', ';', ' ']).trim().to_string()
 }
 
 /// The provenance graph as a Mermaid `flowchart`.
@@ -1589,7 +1644,7 @@ struct Workbench {
     /// The reports this conversation has produced, bodies included, newest last.
     reports: Vec<protocol::Report>,
     /// Whole citations, for a rendered report's bibliography. Not the panel's truncated ones.
-    sources: Vec<String>,
+    sources: Vec<protocol::Source>,
     /// Whether the About window is showing.
     about_open: bool,
     /// Whether the provenance window is showing, and which of its two views.
@@ -3504,7 +3559,13 @@ impl Workbench {
         let mut rendered = self.sidecar.render_report(
             report.title.clone(),
             report.markdown.clone(),
-            self.sources.clone(),
+            // The backend's Typst template takes a list of citation strings, so the links stay
+            // on this side. Worth revisiting upstream — a rendered bibliography with resolvable
+            // DOIs is more use than one without.
+            self.sources
+                .iter()
+                .map(|source| source.citation.clone())
+                .collect(),
             into,
         );
         cx.spawn(async move |this, cx| {
@@ -8919,7 +8980,12 @@ impl Workbench {
             });
 
         for (at, source) in self.sources.iter().enumerate() {
-            let opened = first_url(source);
+            let opened = link_for(source);
+            // The prose the reader sees, with the URL taken out of it. A DOI written into a
+            // sentence wraps mid-token in a 330px column — `https://doi.org` on one line and
+            // `/10.1007/…` on the next — and a link that *looks* broken is one somebody retypes
+            // with a space in it. It goes on its own line below instead.
+            let prose = without_url(&source.citation);
             let mut row = div()
                 .id(SharedString::from(format!("source-{at}")))
                 .flex()
@@ -8939,14 +9005,40 @@ impl Workbench {
                 )
                 .child(
                     div()
+                        .flex()
+                        .flex_col()
                         .flex_grow()
                         .min_w_0()
-                        .text_color(rgb(theme::text()))
-                        .text_size(px(13.))
-                        .line_height(px(18.))
-                        .child(source.clone()),
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_color(rgb(theme::text()))
+                                .text_size(px(13.))
+                                .line_height(px(18.))
+                                .child(prose),
+                        )
+                        .children(opened.clone().map(|url| {
+                            div()
+                                .text_color(rgb(theme::accent()))
+                                .text_size(px(11.))
+                                .line_height(px(15.))
+                                .child(url)
+                        }))
+                        // **Said out loud when they differ.** The link comes from the backend's
+                        // structured field; the DOI inside the citation was composed by the model
+                        // along with the rest of the sentence. When the two disagree, one of them
+                        // is wrong about which paper this is — and that is exactly the moment org
+                        // policy means by *validate AI-generated content with subject matter
+                        // experts*. Silently preferring the good one would hide the warning.
+                        .children(disputed_link(source).map(|written| {
+                            div()
+                                .text_color(rgb(theme::warning()))
+                                .text_size(px(11.))
+                                .line_height(px(15.))
+                                .child(format!("the citation text says {written} — check which"))
+                        })),
                 );
-            // Only a citation carrying a URL is clickable. A row that looks interactive and does
+            // Only a source with a link is clickable. A row that looks interactive and does
             // nothing teaches people that rows here do nothing.
             if let Some(url) = opened {
                 row = row
@@ -9812,14 +9904,81 @@ mod tests {
         assert!(provenance_svg(&nothing).ends_with("</svg>\n"));
     }
 
+    /// A source as the backend sends it: prose, and optionally a structured link.
+    fn cited(citation: &str, link: Option<&str>) -> protocol::Source {
+        protocol::Source {
+            citation: citation.to_string(),
+            link: link.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn the_structured_link_wins_and_a_disagreement_is_said_out_loud() {
+        // The whole point of decoding `link`: the DOI in the prose is written by the model, the
+        // field is what Semantic Scholar returned. When only one exists, use it.
+        let field_only = cited("Hijmans & Spooner (2001).", Some("https://doi.org/10.2307/3558433"));
+        assert_eq!(
+            link_for(&field_only).as_deref(),
+            Some("https://doi.org/10.2307/3558433")
+        );
+        assert_eq!(disputed_link(&field_only), None, "nothing to disagree with");
+
+        let prose_only = cited("Smith (2021). https://doi.org/10.1111/ppa.13400", None);
+        assert_eq!(
+            link_for(&prose_only).as_deref(),
+            Some("https://doi.org/10.1111/ppa.13400"),
+            "with no field, the prose is all there is"
+        );
+
+        // Both present and pointing at different papers — the case that sent someone to the
+        // wrong article. The field is used, and the discrepancy is reported rather than hidden.
+        let disagreeing = cited(
+            "Hijmans & Spooner (2001). Am. J. Bot. https://doi.org/10.2307/3558457",
+            Some("https://doi.org/10.2307/3558433"),
+        );
+        assert_eq!(
+            link_for(&disagreeing).as_deref(),
+            Some("https://doi.org/10.2307/3558433")
+        );
+        assert_eq!(
+            disputed_link(&disagreeing).as_deref(),
+            Some("https://doi.org/10.2307/3558457")
+        );
+
+        // Differences that are not disagreements. Flagging these would teach people to ignore
+        // the warning, which costs more than the warning is worth.
+        for same in [
+            "https://doi.org/10.1111/ppa.13400/",
+            "http://doi.org/10.1111/ppa.13400",
+            "https://dx.doi.org/10.1111/ppa.13400",
+            "https://doi.org/10.1111/PPA.13400",
+        ] {
+            let pair = cited(
+                &format!("Smith (2021). {same}"),
+                Some("https://doi.org/10.1111/ppa.13400"),
+            );
+            assert_eq!(disputed_link(&pair), None, "{same} is the same paper");
+        }
+
+        // The prose loses its URL so it can be read as prose, and the trailing full stop that
+        // the URL was carrying goes with it.
+        assert_eq!(
+            without_url("Smith (2021). Late blight. https://doi.org/10.1/x."),
+            "Smith (2021). Late blight"
+        );
+        assert_eq!(without_url("No link here."), "No link here.");
+    }
+
     #[test]
     fn bibtex_is_importable_and_invents_nothing() {
         let entries = bibliography(&[
-            "Smith, J. et al. (2021). Late blight resistance. Plant Pathology 70(4). \
-             https://doi.org/10.1111/ppa.13400"
-                .to_string(),
-            "CIP Dataverse: Andean potato trials, 2019".to_string(),
-            "   ".to_string(),
+            cited(
+                "Smith, J. et al. (2021). Late blight resistance. Plant Pathology 70(4). \
+                 https://doi.org/10.1111/ppa.13400",
+                None,
+            ),
+            cited("CIP Dataverse: Andean potato trials, 2019", None),
+            cited("   ", None),
         ]);
 
         // Two entries, not three: a blank source is not a reference.
@@ -9839,10 +9998,19 @@ mod tests {
 
         // BibTeX's own syntax cannot come out of a citation and truncate the file. A stray
         // brace ends an entry early and takes every entry after it.
-        let hostile = bibliography(&["A title with {braces} and a \\command".to_string()]);
+        let hostile = bibliography(&[cited("A title with {braces} and a \\command", None)]);
         assert_eq!(hostile.matches('{').count(), hostile.matches('}').count());
         assert!(!hostile.contains("{braces}"));
         assert!(hostile.contains("\\\\command"));
+
+        // A doubtful reference carries its doubt into the reference manager. Somebody importing
+        // forty of these should not have to come back here to find out which two to check.
+        let doubtful = bibliography(&[cited(
+            "Hijmans & Spooner (2001). https://doi.org/10.2307/3558457",
+            Some("https://doi.org/10.2307/3558433"),
+        )]);
+        assert!(doubtful.contains("url = {https://doi.org/10.2307/3558433}"));
+        assert!(doubtful.contains("annote = {unverified:"), "{doubtful}");
 
         assert!(bibliography(&[]).is_empty(), "nothing to copy is empty");
     }

@@ -129,7 +129,35 @@ pub struct Snapshot {
     /// Separate from the `sources` bucket, whose items are truncated to 96 characters for a
     /// side panel that has to stay scannable. A rendered report's citation list must not be —
     /// a bibliography ending in `…` is not a bibliography.
-    pub sources: Vec<String>,
+    pub sources: Vec<Source>,
+}
+
+/// One work this conversation cited.
+///
+/// # Why the link is a field and not something read out of the citation
+///
+/// `citation` is **written by the model.** `AcademicSourceFinding.citation`
+/// (`backend/schemas.py:31`) is a Pydantic field described as *"APA-style or equivalent citation
+/// for the source"*, so the model composes the authors, the year, the journal — and the DOI — as
+/// one sentence. A DOI produced that way is as reliable as any other detail an LLM writes from
+/// memory, which is to say: usually right, and wrong without warning.
+///
+/// `link` is the *separate* field the same payload carries
+/// (`SourceArtifactPayload.link`), and for a theory's papers it is built by
+/// `backend/theory_tools.py:_paper_ref` straight from `s2Metadata.externalIds.DOI` — the
+/// identifier Semantic Scholar returned, not one recalled. That function carries a comment about
+/// having already sent users to the wrong paper once, via an S2 URL form that resolved
+/// unreliably. Somebody has paid for this mistake before.
+///
+/// The client used to decode `citation` and drop the rest, so every link in the app was scraped
+/// out of the prose by regex while the real one sat one key away — the §91/§115 shape again: a
+/// value the program already had and never read.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Source {
+    /// The citation as the agent wrote it, whole.
+    pub citation: String,
+    /// The stable link the backend supplied, if it supplied one.
+    pub link: Option<String>,
 }
 
 /// A written report, whole.
@@ -1692,7 +1720,7 @@ fn decode_values(data: &str) -> Option<Snapshot> {
 }
 
 /// Full citations, for the bibliography of a rendered report.
-fn decode_sources(artifacts: &Value) -> Vec<String> {
+fn decode_sources(artifacts: &Value) -> Vec<Source> {
     let Some(entries) = artifacts.get("sources").and_then(Value::as_array) else {
         return Vec::new();
     };
@@ -1700,9 +1728,44 @@ fn decode_sources(artifacts: &Value) -> Vec<String> {
         .iter()
         .filter_map(|entry| {
             let citation = entry.get("citation").and_then(Value::as_str)?.trim();
-            (!citation.is_empty()).then(|| citation.to_string())
+            if citation.is_empty() {
+                return None;
+            }
+            Some(Source {
+                citation: citation.to_string(),
+                link: stable_link(entry),
+            })
         })
         .collect()
+}
+
+/// The trustworthy link on an artifact, whichever shape it arrived in.
+///
+/// Three keys because two payloads carry this and they do not agree on a name:
+/// `SourceArtifactPayload` has `link`, `PaperRefPayload` has `url` **and** a bare `doi`
+/// (`backend/schemas.py:316,334`). Tried in that order — `link` and `url` are already complete
+/// URLs, while `doi` is the identifier alone and has to be given a resolver.
+///
+/// Only `http(s)`, for the same reason [`crate::workspace::browse`] refuses anything else: this
+/// value is on its way to a process launcher, and it reaches us from a model.
+fn stable_link(entry: &Value) -> Option<String> {
+    for key in ["link", "url"] {
+        if let Some(found) = entry.get(key).and_then(Value::as_str).map(str::trim) {
+            if found.starts_with("https://") || found.starts_with("http://") {
+                return Some(found.to_string());
+            }
+        }
+    }
+    let doi = entry.get("doi").and_then(Value::as_str)?.trim();
+    if doi.is_empty() {
+        return None;
+    }
+    // A bare `10.1007/…`, which is how `_paper_ref` reports it beside the URL it built.
+    Some(match doi.strip_prefix("doi:") {
+        Some(bare) => format!("https://doi.org/{}", bare.trim()),
+        None if doi.starts_with("http") => doi.to_string(),
+        None => format!("https://doi.org/{doi}"),
+    })
 }
 
 /// Pull whole reports, bodies and all, out of a `values` payload.
@@ -2820,7 +2883,7 @@ mod tests {
         // The bibliography gets the citation *whole*. The `sources` bucket beside it is
         // truncated for the side panel, and a reference list ending in `…` is not one.
         assert_eq!(snapshot.sources.len(), 1);
-        assert!(snapshot.sources[0].ends_with("Genome Biology, 15, 550."));
+        assert!(snapshot.sources[0].citation.ends_with("Genome Biology, 15, 550."));
         let panel = snapshot
             .buckets
             .iter()
@@ -2828,9 +2891,53 @@ mod tests {
             .expect("the panel still lists sources");
         assert!(panel.items[0].ends_with('…'), "{}", panel.items[0]);
         assert!(
-            snapshot.sources[0].len() > panel.items[0].len(),
+            snapshot.sources[0].citation.len() > panel.items[0].len(),
             "the rendered citation must outlive the panel's truncation"
         );
+        // This payload carried no link, and inventing one would be worse than having none.
+        assert_eq!(snapshot.sources[0].link, None);
+    }
+
+    #[test]
+    fn the_stable_link_is_read_from_whichever_field_carries_it() {
+        // The three shapes `backend/schemas.py` actually sends. `SourceArtifactPayload` has
+        // `link`; `PaperRefPayload` has `url` and a bare `doi`. The client used to read
+        // `citation` and drop all three, so every link in the app was scraped out of prose the
+        // model wrote while the identifier Semantic Scholar returned sat one key away.
+        let decoded = decode_sources(&json!({
+            "sources": [
+                {"citation": "A. (2021).", "link": "https://doi.org/10.1/a"},
+                {"citation": "B. (2020).", "url": "https://arxiv.org/abs/2401.00001"},
+                {"citation": "C. (2019).", "doi": "10.2307/3558433"},
+                {"citation": "D. (2018).", "doi": "doi:10.1/d"},
+                {"citation": "E. — no link anywhere"},
+                // A link we will not hand to a process launcher. This value reaches us from a
+                // model and ends up as an argument to `explorer.exe`.
+                {"citation": "F.", "link": "file:///etc/passwd"},
+            ]
+        }));
+        let links: Vec<Option<&str>> = decoded
+            .iter()
+            .map(|source| source.link.as_deref())
+            .collect();
+        assert_eq!(
+            links,
+            [
+                Some("https://doi.org/10.1/a"),
+                Some("https://arxiv.org/abs/2401.00001"),
+                // A bare DOI is given a resolver; it is an identifier, not a URL.
+                Some("https://doi.org/10.2307/3558433"),
+                Some("https://doi.org/10.1/d"),
+                None,
+                None,
+            ]
+        );
+        // `link` wins over `url` when a payload somehow carries both, matching the order the
+        // two payload types are documented in.
+        let both = decode_sources(&json!({
+            "sources": [{"citation": "G.", "link": "https://doi.org/10.1/g", "url": "https://example.org/g"}]
+        }));
+        assert_eq!(both[0].link.as_deref(), Some("https://doi.org/10.1/g"));
     }
 
     #[test]
