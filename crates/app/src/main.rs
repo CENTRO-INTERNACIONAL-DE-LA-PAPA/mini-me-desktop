@@ -9159,7 +9159,16 @@ impl Workbench {
 
         for (at, source) in self.sources.iter().enumerate() {
             let verdict = self.checked.get(&source.citation);
-            let repair = self.repaired.get(&source.citation).cloned().flatten();
+            // **Three states, not two.** `None` is *not looked up yet*; `Some(None)` is *looked
+            // up, and the registry has nothing*. Collapsing them with `.flatten()` — which this
+            // did — made a reference still being resolved display the message meant for one that
+            // came back empty, which is how a correctly cited Magurran 1988 was told it matched
+            // nothing while its lookup was still in flight.
+            //
+            // This is the distinction the whole feature is about, reintroduced one call inside
+            // it. Kept unflattened here so the match below can see all three.
+            let looked_up = self.repaired.get(&source.citation);
+            let repair = looked_up.cloned().flatten();
             // **Semantic Scholar, whichever identifier we ended up with.** Asked for directly:
             // *"when I press it I am redirected to the paper in semantic scholar not to the
             // article in the main page where the article was published."* `api.semanticscholar.org`
@@ -9228,25 +9237,25 @@ impl Workbench {
             // **Only when something is wrong.** A line under every reference saying it checked
             // out is fourteen lines of reassurance nobody reads, and it buries the two that
             // matter. Silence here means verified.
-            let note = match (verdict, &repair) {
-                (Some(references::Verdict::Mismatch { .. }), Some(_)) => Some((
+            let note = match (verdict, looked_up) {
+                (Some(references::Verdict::Mismatch { .. }), Some(Some(_))) => Some((
                     theme::warning(),
                     "the citation's own DOI named a different paper; this link is the work it \
                      describes"
                         .to_string(),
                 )),
-                (Some(references::Verdict::Unregistered), Some(_)) => Some((
+                (Some(references::Verdict::Unregistered), Some(Some(_))) => Some((
                     theme::warning(),
                     "the citation's own DOI is not registered; this link is the work it describes"
                         .to_string(),
                 )),
-                (Some(verdict), None) if verdict.is_problem() => Some((
+                (Some(verdict), Some(None)) if verdict.is_problem() => Some((
                     theme::error(),
                     "this reference does not check out, and nothing in Crossref matches it — \
                      Crossref covers journal articles, so a book or thesis may not be there"
                         .to_string(),
                 )),
-                (Some(references::Verdict::NoIdentifier), None) => Some((
+                (Some(references::Verdict::NoIdentifier), Some(None)) => Some((
                     theme::warning(),
                     "no identifier, and nothing in Crossref matches this citation".to_string(),
                 )),
