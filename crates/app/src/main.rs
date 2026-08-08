@@ -122,6 +122,80 @@ fn section_label(text: &'static str) -> impl IntoElement {
         .child(text)
 }
 
+/// This conversation's citations as BibTeX a reference manager will import.
+///
+/// # Why every entry is `@misc` with a `note`
+///
+/// A source arrives as **one line of the agent's prose** — `Smith, J. et al. (2021). Late blight
+/// resistance in Andean potato. Plant Pathology 70(4).` BibTeX wants `author`, `title`, `year`,
+/// `journal` as separate fields, and splitting that sentence into them means a parser that is
+/// right about most citations and confidently wrong about the rest. A mis-split reference does
+/// not look broken in a manuscript; it looks like a citation, with the wrong author on it.
+///
+/// So the whole string goes in `note`, which is what `note` is for, and the URL — the one part
+/// that can be extracted without interpretation — goes in `url`. Every entry is importable, every
+/// entry is verbatim, and nothing is attributed to anyone the agent did not name. A researcher
+/// fills in the fields their journal wants, which they were going to check anyway (org policy:
+/// *validate AI-generated content with subject matter experts*).
+fn bibliography(sources: &[String]) -> String {
+    let mut out = String::new();
+    for (at, source) in sources.iter().enumerate() {
+        let source = source.trim();
+        if source.is_empty() {
+            continue;
+        }
+        // Braces and backslashes are BibTeX's own syntax; left in they would truncate the entry
+        // at the first one and take the rest of the file with it.
+        let safe = source.replace('\\', "\\\\").replace(['{', '}'], "");
+        out.push_str(&format!("@misc{{minime{},\n  note = {{{safe}}},\n", at + 1));
+        if let Some(url) = first_url(source) {
+            out.push_str(&format!("  url = {{{url}}},\n"));
+        }
+        out.push_str("}\n\n");
+    }
+    out
+}
+
+/// What kind of work a specialist does, as a colour.
+///
+/// **Two colours, and `None` for anything else.** The design is explicit that a colour per
+/// specialist is a legend nobody memorises; the distinction worth carrying is between work that
+/// goes and reads, and work that touches the data. Matched on the name because that is all the
+/// chip has — a heuristic, and one whose worst outcome is a chip in the ordinary text colour
+/// rather than a wrong claim. A specialist this does not recognise is left uncoloured on purpose:
+/// guessing which of two kinds a new one is would be the mistake.
+fn specialist_ink(name: &str) -> Option<u32> {
+    let name = name.to_ascii_lowercase();
+    if ["search", "research", "literature", "paper", "citation", "theor"]
+        .iter()
+        .any(|mark| name.contains(mark))
+    {
+        return Some(theme::running());
+    }
+    if ["data", "analy", "clean", "profil", "stat"]
+        .iter()
+        .any(|mark| name.contains(mark))
+    {
+        return Some(theme::success());
+    }
+    None
+}
+
+/// The specialists a turn consulted, in order, with a run of the same one collapsed.
+///
+/// `a → a → b` is one visit to `a` then one to `b`; `a → b → a` keeps both visits to `a`, because
+/// coming *back* to a specialist after another is the loop the whole provenance feature exists to
+/// show (§73). Only consecutive repeats collapse.
+fn consulted(agents: &[AgentTrace]) -> Vec<String> {
+    let mut path: Vec<String> = Vec::new();
+    for agent in agents {
+        if path.last().map(String::as_str) != Some(agent.name.as_str()) {
+            path.push(agent.name.clone());
+        }
+    }
+    path
+}
+
 /// The glyph and colour that stand for a file's kind.
 ///
 /// Finer than [`workspace::Kind`], which groups by what a researcher *does* with a file and is
@@ -5153,6 +5227,181 @@ impl Workbench {
             }))
     }
 
+    /// Who was consulted for this answer, how long it took, how many steps.
+    ///
+    /// The path reads `academic_researcher → theorizer → data_analysis · 19s · 4 steps`, which is
+    /// the summary people were expanding the trace to reconstruct.
+    fn answer_chips(&self, index: usize, message: &Message) -> impl IntoElement {
+        /// Past this the row wraps into a paragraph and stops being a glance.
+        const MAX_PILLS: usize = 6;
+
+        let path = consulted(&message.agents);
+        let mut row = div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap_1()
+            .w_full()
+            .min_w_0();
+
+        for (at, name) in path.iter().take(MAX_PILLS).enumerate() {
+            if at > 0 {
+                row = row.child(
+                    div()
+                        .flex_none()
+                        .text_color(rgb(theme::text_muted()))
+                        .text_size(px(11.))
+                        .child("→"),
+                );
+            }
+            row = row.child(
+                div()
+                    .flex_none()
+                    .px_2()
+                    .py_1()
+                    .rounded_full()
+                    .bg(rgb(theme::elevated()))
+                    .border_1()
+                    .border_color(rgb(theme::border()))
+                    .text_color(rgb(specialist_ink(name).unwrap_or(theme::text_muted())))
+                    .text_size(px(11.))
+                    .child(name.replace('_', " ")),
+            );
+        }
+        if path.len() > MAX_PILLS {
+            row = row.child(
+                div()
+                    .flex_none()
+                    .text_color(rgb(theme::text_faint()))
+                    .text_size(px(11.))
+                    .child(format!("+{}", path.len() - MAX_PILLS)),
+            );
+        }
+
+        // Steps across the whole turn: the coordinator's own, plus every specialist's.
+        let steps: usize = message.steps.len()
+            + message
+                .agents
+                .iter()
+                .map(|agent| agent.steps.len())
+                .sum::<usize>();
+        let mut note = String::new();
+        if let Some(turn) = self.turn_for(index) {
+            let span = turn
+                .invocations
+                .iter()
+                .map(|invocation| invocation.last_seen)
+                .max()
+                .unwrap_or(turn.sent_at)
+                .saturating_sub(turn.sent_at);
+            if span >= 1_000 {
+                note.push_str(&format!(" · {}", duration_label(span)));
+            }
+        }
+        if steps > 0 {
+            note.push_str(&format!(" · {steps} steps"));
+        }
+        if !note.is_empty() {
+            row = row.child(
+                div()
+                    .flex_none()
+                    .text_color(rgb(theme::text_faint()))
+                    .text_size(px(11.))
+                    .child(note),
+            );
+        }
+        row
+    }
+
+    /// The provenance turn that produced the assistant message at `index`, if it can be known.
+    ///
+    /// **Matched from the end, not the start.** Reopening a conversation loads its messages from
+    /// the server and its record from disk, and the two have different lengths on purpose: the
+    /// activity trace does not survive a reload (§46) while the record does. Counting forwards
+    /// would then pair message three with turn three and be wrong by however many turns the
+    /// reload dropped. Both grow at the tail, so aligning the tails is the pairing that holds.
+    fn turn_for(&self, index: usize) -> Option<&provenance::Turn> {
+        let after = self
+            .transcript
+            .iter()
+            .skip(index + 1)
+            .filter(|message| message.role != "you")
+            .count();
+        let at = self.provenance.turns.len().checked_sub(after + 1)?;
+        self.provenance.turns.get(at)
+    }
+
+    /// What to do with a finished answer.
+    fn export_row(&self, message: &Message, cx: &mut Context<Self>) -> impl IntoElement {
+        let again = self
+            .transcript
+            .iter()
+            .rev()
+            .find(|earlier| earlier.role == "you")
+            .map(|earlier| earlier.body.clone());
+        let bibtex = bibliography(&self.sources);
+        let answer = message.body.clone();
+
+        div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .w_full()
+            .min_w_0()
+            .pt_1()
+            .child(
+                ui::Button::new("export-pdf", "Save as PDF with references")
+                    .tone(ui::Tone::Accent)
+                    .size(ui::Size::Compact)
+                    // Disabled rather than hidden, so the affordance is discoverable before
+                    // there is a report to use it on.
+                    .disabled(self.reports.is_empty())
+                    .on_click(cx.listener(|workbench, _event, _window, cx| {
+                        workbench.render_report(cx);
+                    })),
+            )
+            .child(
+                ui::Button::new("export-bibtex", "Copy BibTeX")
+                    .size(ui::Size::Compact)
+                    .disabled(bibtex.is_empty())
+                    .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                        let entries = bibtex.matches("@misc").count();
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(bibtex.clone()));
+                        workbench.say(
+                            &format!("{entries} references copied as BibTeX"),
+                            cx,
+                        );
+                    })),
+            )
+            .child(
+                ui::Button::new("export-rerun", "Re-run this turn")
+                    .size(ui::Size::Compact)
+                    .disabled(again.is_none() || self.streaming)
+                    .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                        // Into the composer, not straight to the backend. Re-running is a
+                        // decision, and a question worth asking twice is usually worth editing
+                        // first — the same rule every other suggestion here follows.
+                        if let Some(prompt) = again.clone() {
+                            workbench
+                                .composer
+                                .update(cx, |composer, cx| composer.set_text(prompt, cx));
+                            workbench.restore_focus = true;
+                            cx.notify();
+                        }
+                    })),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(rgb(theme::text_faint()))
+                    .text_size(px(11.))
+                    .child(format!("{} words", answer.split_whitespace().count())),
+            )
+    }
+
     /// What an empty transcript says.
     ///
     /// It used to say one grey sentence. The replacement answers the two questions a researcher
@@ -5691,6 +5940,13 @@ impl Workbench {
                 .min_w_0()
                 .gap_1()
                 .when(asked, |block| block.items_end());
+            // A one-line summary of the work, above the answer it produced. The collapsible
+            // trace stays underneath for anyone who wants the detail — this replaces nothing,
+            // it just means the common question ("who did this, and how long did it take")
+            // no longer requires expanding anything.
+            if !asked && !message.agents.is_empty() {
+                block = block.child(self.answer_chips(index, message));
+            }
             // The trace goes *above* the answer, because that is the order it
             // happened in and because the answer should be the last thing read.
             if has_activity {
@@ -5785,6 +6041,18 @@ impl Workbench {
                                 }),
                         ),
                 );
+            }
+            // What to do with the answer, under the answer. All three exist already — the first
+            // is a palette command, and a command nobody knows the name of is a feature nobody
+            // has. Only under the *last* completed one: three buttons after every answer in a
+            // twelve-turn conversation is a wall of chrome, and it is the latest answer a person
+            // exports.
+            if !asked
+                && !message.body.is_empty()
+                && index + 1 == self.transcript.len()
+                && !self.streaming
+            {
+                block = block.child(self.export_row(message, cx));
             }
             col = col.child(block);
         }
@@ -8835,6 +9103,41 @@ mod tests {
         );
         assert_eq!(device_code("https://example.org/plain"), None);
         assert_eq!(device_code("https://example.org/a?user_code="), None);
+    }
+
+    #[test]
+    fn bibtex_is_importable_and_invents_nothing() {
+        let entries = bibliography(&[
+            "Smith, J. et al. (2021). Late blight resistance. Plant Pathology 70(4). \
+             https://doi.org/10.1111/ppa.13400"
+                .to_string(),
+            "CIP Dataverse: Andean potato trials, 2019".to_string(),
+            "   ".to_string(),
+        ]);
+
+        // Two entries, not three: a blank source is not a reference.
+        assert_eq!(entries.matches("@misc{").count(), 2);
+        // Keys are distinct, or a reference manager silently keeps one of them.
+        assert!(entries.contains("@misc{minime1,"));
+        assert!(entries.contains("@misc{minime2,"));
+        // Verbatim in `note`, with nothing split into author/title/year — a mis-split citation
+        // does not look broken in a manuscript, it looks like a citation with the wrong author.
+        assert!(entries.contains("note = {Smith, J. et al. (2021). Late blight resistance."));
+        assert!(!entries.contains("author ="), "no field is inferred");
+        // The URL is the one part extractable without interpretation.
+        assert!(entries.contains("url = {https://doi.org/10.1111/ppa.13400}"));
+        // A source with no link gets no empty `url`, which would import as a broken one.
+        let second = entries.split("@misc{minime2,").nth(1).expect("the entry");
+        assert!(!second.contains("url ="));
+
+        // BibTeX's own syntax cannot come out of a citation and truncate the file. A stray
+        // brace ends an entry early and takes every entry after it.
+        let hostile = bibliography(&["A title with {braces} and a \\command".to_string()]);
+        assert_eq!(hostile.matches('{').count(), hostile.matches('}').count());
+        assert!(!hostile.contains("{braces}"));
+        assert!(hostile.contains("\\\\command"));
+
+        assert!(bibliography(&[]).is_empty(), "nothing to copy is empty");
     }
 
     #[test]
