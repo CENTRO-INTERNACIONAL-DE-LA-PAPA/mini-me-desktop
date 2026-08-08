@@ -598,6 +598,90 @@ mod tests {
         }
     }
 
+    /// The overlay builds APA references in code. This checks it against the real records the
+    /// model got wrong.
+    ///
+    /// Driven from Rust for the same reason `the_rust_and_python_matchers_agree` is: this repo has
+    /// no Python harness, and a rule that only runs in production is a rule nobody checks.
+    #[test]
+    fn the_overlay_builds_a_citation_the_model_could_not() {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: python3 is not on PATH");
+            return;
+        }
+        let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
+
+        // Real Semantic Scholar records, verbatim. The first two are the papers whose DOIs the
+        // model invented in a live run (§119, §120): it wrote BF02853934 for Plaisted, whose real
+        // DOI is BF02853982, and 3558457 for Hijmans, whose real DOI is 3558435 — the wrong one
+        // belonging to a study of lichen symbioses.
+        let cases: [(&str, &str); 4] = [
+            (
+                r#"{"authors":[{"name":"R. Plaisted"},{"name":"R. Hoopes"}],"year":1989,
+                    "title":"The past record and future prospects for the use of exotic potato germplasm",
+                    "journal":{"name":"American Potato Journal","volume":"66","pages":"603-627"},
+                    "externalIds":{"DOI":"10.1007/BF02853982"}}"#,
+                "Plaisted, R., & Hoopes, R. (1989). The past record and future prospects for the \
+                 use of exotic potato germplasm. American Potato Journal, 66, 603–627. \
+                 https://doi.org/10.1007/BF02853982",
+            ),
+            (
+                // `"88 11"` is how S2 packs volume and issue — it must render as 88(11).
+                r#"{"authors":[{"name":"R. Hijmans"},{"name":"D. Spooner"}],"year":2001,
+                    "title":"Geographic distribution of wild potato species",
+                    "journal":{"name":"American Journal of Botany","volume":"88 11","pages":"2101-2112"},
+                    "externalIds":{"DOI":"10.2307/3558435"}}"#,
+                "Hijmans, R., & Spooner, D. (2001). Geographic distribution of wild potato \
+                 species. American Journal of Botany, 88(11), 2101–2112. \
+                 https://doi.org/10.2307/3558435",
+            ),
+            (
+                // A surname particle. CIP authors have these, and splitting one wrongly is a
+                // misattribution rather than a formatting slip.
+                r#"{"authors":[{"name":"M. del R. Herrera"},{"name":"Jonathan D. G. Jones"}],
+                    "year":2004,"title":"A paper",
+                    "journal":{"name":"Theoretical and Applied Genetics"},
+                    "externalIds":{}}"#,
+                "Herrera, M. del R., & Jones, J. D. G. (2004). A paper. Theoretical and Applied \
+                 Genetics.",
+            ),
+            (
+                // Nothing but a title: an incomplete reference a person can finish, rather than
+                // a complete one they cannot check.
+                r#"{"title":"An orphan record"}"#,
+                "(n.d.). An orphan record.",
+            ),
+        ];
+
+        for (record, expected) in cases {
+            let script = format!(
+                "import json,sys\nsys.path.insert(0,{overlay:?})\n\
+                 from minime_local import citations\n\
+                 print(citations.apa(json.loads(sys.argv[1])))",
+                overlay = overlay.to_string_lossy()
+            );
+            let out = std::process::Command::new("python3")
+                .arg("-c")
+                .arg(&script)
+                .arg(record)
+                .output()
+                .expect("python3 runs");
+            assert!(
+                out.status.success(),
+                "python failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let got = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            // The expected strings are line-continued in this source; compare on collapsed space.
+            let squash = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert_eq!(squash(&got), squash(expected), "record: {record}");
+        }
+    }
+
     #[test]
     fn a_corpus_link_is_recognised_and_never_treated_as_a_doi() {
         // The form `overlay/minime_local/sources.py` writes, and the one `_paper_ref` established
