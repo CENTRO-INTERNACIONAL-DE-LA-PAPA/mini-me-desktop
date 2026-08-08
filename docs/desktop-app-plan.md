@@ -6987,3 +6987,84 @@ searched. Worth checking on the run that produced these five.
 *Two rules, and the second is the one that generalises: **an attribution is a claim, so it should
 be derived from the record and not from a proxy** — and **the fields a reader can check are the
 ones a model gets right.***
+
+## 120. Asta returns a corpus id, and we asked the model for a DOI (2026-08-07)
+
+§119 left one question open: *why* are the DOIs wrong. The answer came from the researcher, not
+from me — they noticed that Semantic Scholar shows a **Corpus ID** where our citations show a DOI,
+and said: *"Asta mcp when search papers I think return the corpus ID so we must check if we are
+using it well."*
+
+That was the whole thing.
+
+### What the tool actually returns
+
+```
+$ asta papers snippet-search "late blight resistance Andean potato landraces" --limit 2
+paper keys: ['authors', 'corpusId', 'openAccessInfo', 'title']
+```
+
+A title, an author list, and a numeric `corpusId`. **No DOI, no year, no venue, no volume, no
+pages.**
+
+And `AcademicSourceFinding.citation` asks the model for *"APA-style or equivalent citation"* —
+which needs every one of those. So the model is handed a paper it cannot cite and asked to cite
+it. It fills the gaps from memory, which is the only move available.
+
+This is not a model behaving badly. **It is being asked for data it was never given.**
+
+### Why the failure looked the way it did
+
+The Plaisted case pins it exactly. Our citation said *American Potato Journal, 66, 603–627* — both
+correct — and gave `10.1007/BF02853934`. The real DOI is `BF02853982`. The model reconstructed the
+volume and pages accurately from the title and authors it *was* given, and then produced a DOI,
+which is a high-entropy string with no meaning in it and therefore the one field that cannot be
+reconstructed.
+
+So every field a reader checks by eye comes out right, and the one nobody checks is wrong. In
+three of six cases it resolves, so the link works and opens a real paper on a related subject.
+
+### The fix already existed, forty lines away
+
+`theory_tools.py:_paper_ref` handles this for the theorizer path, with a comment that reads like a
+scar:
+
+> Theorizer papers usually carry ONLY a numeric corpusId (no DOI/url). … the website's
+> `/paper/CorpusID:<n>` path resolves UNRELIABLY (**it sent users to the wrong paper**). The API
+> endpoint `api.semanticscholar.org/CorpusID:<n>` 302-redirects to the correct canonical paper
+> page — verified across ids — so link through that instead.
+
+Somebody met this, worked out that a corpus id is all that arrives, established which URL form
+resolves, and wrote it down. The academic-research path has no equivalent: `corpusId` never
+reaches `SourceArtifactPayload` at all. Written up as
+`docs/upstream/mini-me/academic-sources-drop-the-corpus-id.md`.
+
+### What was built on this side
+
+**Find the right DOI.** The citation still contains a real title — that much *did* come from the
+search — so Crossref's `query.bibliographic` can be given the whole reference and asked which
+registered work it describes. On the real Plaisted citation, including its invented title wording,
+it returns the correct paper at 0.75.
+
+The runner-up scored **0.57** against a 0.6 floor: *Solanum amayanum: A new wild Peruvian potato
+species*, which shares "wild", "potato" and "Solanum" with the model's invented title. Six points
+of separation is not grounds for telling a researcher which paper they meant, so a repair must also
+beat the next candidate by 0.15.
+
+That threshold is the interesting decision. Verifying a DOI answers *"is this the paper"* about a
+work the citation already named. Repairing **picks** one and says *"this is it"* — a stronger
+claim, and one made with the app's authority rather than the model's. A near-tie there is not a
+weak yes; it is precisely the case where answering reproduces the bug being fixed.
+
+*Two plausible answers is not an answer.*
+
+### The shape, stated
+
+Three of the last five defects in this document are the same one. §119 was a value the program had
+and never read. §118 was a distinction that lived in a comment and never in the data. This one is
+**a field asked of a component that was never given the data to fill it** — and the tell, in every
+case, is that the wrong answer is well-formed. A fabricated DOI parses. An `Edge::Then` that should
+have been `Returned` draws fine. A regexed link opens something.
+
+*Nothing about a plausible answer tells you where it came from. Only the record does — which is
+why the provenance work and the citation work turned out to be the same project.*

@@ -16,6 +16,7 @@ somebody else's repository, and the decision of when and by whom is the maintain
 | [dev-store-docstring.md](mini-me/dev-store-docstring.md) | low | `make_backend` says the dev store loses content on restart. It does not, and the app tells people to restart |
 | [start-async-task-config.md](mini-me/start-async-task-config.md) | **high** | `deepagents` launches background runs with no config, so they inherit no model, key or recursion limit |
 | [project-spine-is-not-per-project.md](mini-me/project-spine-is-not-per-project.md) | medium | The research spine is keyed per *user*, so it mixes every study a person has run and never forgets a deleted conversation |
+| [academic-sources-drop-the-corpus-id.md](mini-me/academic-sources-drop-the-corpus-id.md) | **high** | Asta's paper search returns only a `corpusId`; it is dropped, and the model is asked for an APA citation it has no data for — so it invents the DOI |
 
 ## langgraph (`langgraph_runtime_inmem`, LangChain)
 
