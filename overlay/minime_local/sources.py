@@ -324,6 +324,7 @@ def install_mcp(module) -> None:
 
     @functools.wraps(original)
     def _recording(tools):
+        wrapped: list[str] = []
         for tool in tools:
             # **Read here, not borrowed from upstream's loop.** The previous version referenced a
             # bare `name` — which exists in `_make_mcp_tools_resilient`, whose body I had read,
@@ -362,8 +363,20 @@ def install_mcp(module) -> None:
 
             try:
                 tool.coroutine = _watched
+                wrapped.append(name)
             except Exception:  # noqa: BLE001
-                pass
+                logger.warning("minime_local: could not wrap %s for recording", name)
+        # **Named, not counted.** "0 of 7 sources carry the corpus id" told us the outcome and the
+        # per-call line told us no wrapped tool ran — but that still had two causes: the tools were
+        # never wrapped, or they were wrapped and the model never called one. This says which, and
+        # names them, so "wrapped nothing" and "wrapped seven and none was used" cannot look alike
+        # (docs §81, for the fourth time this week).
+        logger.warning(
+            "minime_local: wrapped %d of %d tool(s) for recording: %s",
+            len(wrapped),
+            len(list(tools)),
+            ", ".join(wrapped) or "none",
+        )
         return original(tools)
 
     setattr(module, found, _recording)
