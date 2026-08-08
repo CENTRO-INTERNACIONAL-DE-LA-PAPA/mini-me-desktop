@@ -5370,10 +5370,7 @@ impl Workbench {
                     .on_click(cx.listener(move |workbench, _event, _window, cx| {
                         let entries = bibtex.matches("@misc").count();
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(bibtex.clone()));
-                        workbench.say(
-                            &format!("{entries} references copied as BibTeX"),
-                            cx,
-                        );
+                        workbench.say(format!("{entries} references copied as BibTeX"), cx);
                     })),
             )
             .child(
@@ -6203,12 +6200,45 @@ impl Workbench {
             .rounded_lg()
             .border_1()
             .border_color(rgb(theme::accent()))
-            .bg(rgb(theme::elevated()))
+            .bg(rgb(theme::surface()))
             .child(
                 div()
-                    .text_color(rgb(theme::accent()))
-                    .text_xs()
-                    .child("RUN THIS ON YOUR MACHINE?"),
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .w_full()
+                    .min_w_0()
+                    .child(
+                        // The one heading in the app that keeps the accent. It is not a label
+                        // for a surface, it is the question — and the thing being asked about
+                        // is whether to run code on the researcher's own machine.
+                        div()
+                            .flex_none()
+                            .text_color(rgb(theme::accent()))
+                            .text_size(px(11.))
+                            .child("RUN THIS ON YOUR MACHINE?"),
+                    )
+                    .child(
+                        // **The tool, not the specialist.** The design names the subagent that
+                        // asked; nothing in `ApprovalRequest` carries one. It could be inferred
+                        // from whichever specialist spoke most recently — very likely right, and
+                        // an inference stated as fact beside a security decision, which is the
+                        // one place in this app that must not happen. The tool name is exact.
+                        div()
+                            .flex_none()
+                            .text_color(rgb(theme::text_faint()))
+                            .text_size(px(11.))
+                            .child(match request.actions.len() {
+                                0 | 1 => request
+                                    .actions
+                                    .first()
+                                    .map(|action| action.tool.clone())
+                                    .unwrap_or_default(),
+                                many => format!("{many} commands"),
+                            }),
+                    ),
             );
 
         // The command scrolls; the decision does not. An agent-written script runs to
@@ -6243,19 +6273,58 @@ impl Workbench {
                     .flex_none()
                     .p_2()
                     .rounded_md()
+                    // Sunk, not raised: the card is `surface`, so the command sitting on
+                    // `background` reads as a thing quoted inside it.
+                    .bg(rgb(theme::background()))
                     .border_1()
                     .border_color(rgb(theme::border()))
                     .text_color(rgb(theme::text()))
-                    .text_sm()
+                    // Monospaced, which is not decoration on this element. This is the text a
+                    // researcher is being asked to actually review, and a proportional font hides
+                    // the differences that matter in a shell command — spacing, `l` against `1`,
+                    // where a quote opens and closes.
+                    .font(ui::code_font())
+                    .text_size(px(12.5))
+                    .line_height(px(19.))
                     .child(action.detail.clone()),
             );
         }
 
-        card.child(commands).child(
+        // What is knowable about the effect, and nothing more. The design's line reads "Reads 1
+        // file, writes 1 file, in …" — which would mean deciding what an arbitrary shell command
+        // touches, by reading it. A wrong "reads 1 file" beside a command that deletes a
+        // directory is worse than no line, and this is the gate that exists because the agent's
+        // `execute` runs with the researcher's own permissions.
+        let effect = match self.thread_workspace() {
+            Some(dir) => format!(
+                "Runs on {} with your permissions, in {}.",
+                self.sidecar.execution(),
+                dir.display()
+            ),
+            None => format!(
+                "Runs on {} with your permissions.",
+                self.sidecar.execution()
+            ),
+        };
+
+        card.child(commands)
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .text_color(rgb(theme::text_muted()))
+                    .text_xs()
+                    .child(effect),
+            )
+            .child(
             div()
                 .flex()
                 .flex_row()
-                .gap_3()
+                .flex_wrap()
+                .items_center()
+                .gap_2()
+                .w_full()
+                .min_w_0()
                 .child(
                     ui::Button::new("approve", "Approve")
                         .tone(ui::Tone::Accent)
@@ -6274,13 +6343,19 @@ impl Workbench {
                 // then neither is the eleventh — which is the one that mattered.
                 // Approving the rest of one task is a decision someone can actually
                 // hold in their head, and it expires on its own.
+                // Both grants pushed right and set `Compact`, so the row reads as two decisions
+                // about *this* command and two ways to stop being asked. The design shows only
+                // the wider one; neither is dropped, because the narrower grant is the safer
+                // habit and removing it would leave "approve everything" as the only way out of
+                // clicking — which is how a gate becomes a formality.
+                .child(div().flex_grow())
                 .child(
-                    ui::Button::new("approve-turn", "Approve the rest of this turn").on_click(
-                        cx.listener(|workbench, _event, _window, cx| {
+                    ui::Button::new("approve-turn", "Approve the rest of this turn")
+                        .size(ui::Size::Compact)
+                        .on_click(cx.listener(|workbench, _event, _window, cx| {
                             workbench.approve_rest_of_turn = true;
                             workbench.decide(true, cx);
-                        }),
-                    ),
+                        })),
                 )
                 // The wider grant, asked for because one analysis is a dozen commands
                 // across several turns and nobody reads the twelfth dialog. It covers
@@ -6293,6 +6368,7 @@ impl Workbench {
                         "approve-conversation",
                         "Approve everything in this conversation",
                     )
+                    .size(ui::Size::Compact)
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
                         workbench.approve_conversation = true;
                         workbench.decide(true, cx);

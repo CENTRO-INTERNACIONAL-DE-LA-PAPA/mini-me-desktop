@@ -404,12 +404,15 @@ pub fn how_long_ago(stamp: &str, now: i64) -> String {
     // Named because a range pattern takes a path or a literal, not an expression.
     const MONTH: i64 = 30 * DAY;
     const YEAR: i64 = 365 * DAY;
+    // Bounded on both sides rather than a ladder of `..X`. Those match correctly — arms are
+    // tried in order — but each one contains the last, so the intent has to be read out of the
+    // ordering instead of the arm.
     let (count, unit) = match seconds {
-        ..MINUTE => return "just now".to_string(),
-        ..HOUR => (seconds / MINUTE, "minute"),
-        ..DAY => (seconds / HOUR, "hour"),
-        ..MONTH => (seconds / DAY, "day"),
-        ..YEAR => (seconds / MONTH, "month"),
+        0..MINUTE => return "just now".to_string(),
+        MINUTE..HOUR => (seconds / MINUTE, "minute"),
+        HOUR..DAY => (seconds / HOUR, "hour"),
+        DAY..MONTH => (seconds / DAY, "day"),
+        MONTH..YEAR => (seconds / MONTH, "month"),
         _ => (seconds / YEAR, "year"),
     };
     if count == 1 {
