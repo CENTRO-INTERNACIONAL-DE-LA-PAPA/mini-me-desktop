@@ -600,7 +600,10 @@ impl Sidecar {
     /// source's position can change while the check is running.
     pub fn check_references(
         &self,
-        wanted: Vec<(String, String)>,
+        // `(key, doi, citation)`. The key is the caller's — it is what the verdict is filed
+        // against, and it is not the DOI: the references that most need an answer are the ones
+        // that have none.
+        wanted: Vec<(String, String, String)>,
     ) -> mpsc::UnboundedReceiver<(String, references::Verdict)> {
         /// Enough for any real bibliography; a guard against a runaway list, not a policy.
         const MAX_CHECKS: usize = 60;
@@ -626,14 +629,59 @@ impl Sidecar {
                 }
             };
 
-            for (doi, citation) in wanted.into_iter().take(MAX_CHECKS) {
+            for (key, doi, citation) in wanted.into_iter().take(MAX_CHECKS) {
                 let verdict = check_one(&client, &doi, &citation).await;
-                if tx.unbounded_send((doi, verdict)).is_err() {
+                if tx.unbounded_send((key, verdict)).is_err() {
                     // The window has gone, or the conversation changed. Stop rather than keep
                     // asking a public service for answers nobody is waiting for.
                     return;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            }
+        });
+        rx
+    }
+
+    /// For each citation, ask the registry which work it actually describes.
+    ///
+    /// **A wider disclosure than [`Self::check_references`], and the reason it is a separate
+    /// action rather than part of the same click.** Checking a DOI sends an identifier. This
+    /// sends the *citation text* — because that is the query, and because the whole reason it
+    /// works is that the title in the citation came from the search even when the DOI did not.
+    ///
+    /// A citation names a published work, so it is public bibliographic data. But it is more
+    /// than an identifier, and a researcher should decide to send it rather than discover
+    /// afterwards that they did. The panel says so before the button is pressed.
+    pub fn repair_references(
+        &self,
+        wanted: Vec<(String, String)>,
+    ) -> mpsc::UnboundedReceiver<(String, Option<references::Repair>)> {
+        const MAX_REPAIRS: usize = 40;
+
+        let (tx, rx) = mpsc::unbounded();
+        self.runtime.spawn(async move {
+            let client = match reqwest::Client::builder()
+                .user_agent(concat!(
+                    "mini-me-desktop/",
+                    env!("CARGO_PKG_VERSION"),
+                    " (research reference checker)"
+                ))
+                .timeout(std::time::Duration::from_secs(20))
+                .build()
+            {
+                Ok(client) => client,
+                Err(error) => {
+                    tracing::warn!(%error, "could not build the reference repairer");
+                    return;
+                }
+            };
+
+            for (key, citation) in wanted.into_iter().take(MAX_REPAIRS) {
+                let found = repair_one(&client, &citation).await;
+                if tx.unbounded_send((key, found)).is_err() {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
             }
         });
         rx
@@ -1092,4 +1140,29 @@ async fn check_one(
             why: "the record has no title".to_string(),
         },
     }
+}
+
+/// Ask Crossref which registered work a citation describes.
+///
+/// `query.bibliographic` is the field built for this: it takes a whole reference string —
+/// authors, year, title, journal, pages, in whatever order — and ranks registered works against
+/// it. That is why the citation goes out whole rather than being parsed into a title first: APA
+/// prose is not reliably splittable, and the registry is better at this than a regex would be.
+///
+/// Only the top few candidates are fetched, and [`references::best_match`] then refuses any of
+/// them that does not actually match. A failure here yields `None`, never a guess.
+async fn repair_one(
+    client: &reqwest::Client,
+    citation: &str,
+) -> Option<references::Repair> {
+    let url = format!(
+        "https://api.crossref.org/works?rows=5&select=DOI,title&query.bibliographic={}",
+        urlencode(citation)
+    );
+    let response = client.get(&url).send().await.ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let body: serde_json::Value = response.json().await.ok()?;
+    references::best_match(citation, &references::candidates_of(&body))
 }

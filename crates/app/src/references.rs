@@ -149,6 +149,86 @@ pub fn judge(citation: &str, registry_title: &str) -> Verdict {
     }
 }
 
+/// The work a bad citation was probably pointing at.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Repair {
+    pub doi: String,
+    pub title: String,
+}
+
+/// The `(doi, title)` pairs in a Crossref `/works?query.bibliographic=…` response.
+pub fn candidates_of(body: &serde_json::Value) -> Vec<(String, String)> {
+    let Some(items) = body
+        .get("message")
+        .and_then(|message| message.get("items"))
+        .and_then(|items| items.as_array())
+    else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let doi = item.get("DOI")?.as_str()?.trim();
+            let title = item.get("title")?.as_array()?.first()?.as_str()?.trim();
+            if doi.is_empty() || title.is_empty() {
+                return None;
+            }
+            Some((
+                doi.to_string(),
+                title.split_whitespace().collect::<Vec<_>>().join(" "),
+            ))
+        })
+        .collect()
+}
+
+/// The best candidate that is actually the cited work, or `None`.
+///
+/// **Held to the same bar as [`judge`], deliberately.** A bibliographic search always returns
+/// *something* — Crossref ranks by relevance, not by correctness — so accepting its top hit would
+/// replace a wrong DOI with a differently wrong one and present it as the answer. The whole point
+/// of this feature is that a researcher can trust what it says, which means it has to be allowed
+/// to say nothing.
+///
+/// The best *scoring* candidate is not used either: the one whose title actually matches the
+/// citation is. Those are usually the same and, when they are not, the ranking is what is wrong.
+pub fn best_match(citation: &str, candidates: &[(String, String)]) -> Option<Repair> {
+    /// How far clear of the runner-up the winner has to be.
+    ///
+    /// **Because this is a stronger claim than [`judge`] makes.** Verifying a DOI answers "is
+    /// this the paper" about one work the citation already named. Repairing *picks* a work and
+    /// says "this is the one", so a near-tie is not a weak yes — it is the case where offering
+    /// an answer would reproduce the exact bug being fixed, with the app's authority behind it
+    /// instead of the model's.
+    ///
+    /// Measured on the real Plaisted citation: the right paper scored 0.75 and the best wrong
+    /// one — *Solanum amayanum: A new wild Peruvian potato species*, which shares "wild",
+    /// "potato" and "Solanum" with the model's invented title — scored 0.57. Six points of
+    /// threshold is not a margin worth trusting; eighteen points of separation is.
+    const MARGIN: f32 = 0.15;
+
+    let mut ranked: Vec<(f32, &String, &String)> = candidates
+        .iter()
+        .map(|(doi, title)| (overlap(citation, title), doi, title))
+        .collect();
+    ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
+
+    let (score, doi, title) = ranked.first()?;
+    if *score < SAME_WORK {
+        return None;
+    }
+    // Two plausible answers is not an answer. Ambiguity is a real result and saying so costs
+    // nothing; naming the wrong paper costs a correction in a manuscript.
+    if let Some((runner_up, _, _)) = ranked.get(1) {
+        if score - runner_up < MARGIN {
+            return None;
+        }
+    }
+    Some(Repair {
+        doi: (*doi).clone(),
+        title: (*title).clone(),
+    })
+}
+
 /// Pull the work's title out of a Crossref `/works/{doi}` response.
 pub fn title_of(body: &serde_json::Value) -> Option<String> {
     let title = body
@@ -278,6 +358,113 @@ mod tests {
         assert_eq!(title_of(&serde_json::json!({"message": {}})), None);
         assert_eq!(title_of(&serde_json::json!({"message": {"title": []}})), None);
         assert_eq!(title_of(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn the_repair_finds_the_cited_work_or_says_nothing() {
+        // The real case: the model wrote the authors, journal, year and pages of Plaisted &
+        // Hoopes correctly and produced `…3934` for a DOI. Crossref's bibliographic search
+        // returns the right paper among others; the one whose title matches is the answer.
+        let citation = "Plaisted, R. L., & Hoopes, R. W. (1989). The past record and future \
+                        prospects for the use of exotic potato germplasm. American Potato \
+                        Journal, 66, 603–627.";
+        let candidates = vec![
+            (
+                "10.1007/BF02854333".to_string(),
+                "Breeding for resistance to potato virus Y".to_string(),
+            ),
+            (
+                "10.1007/BF02853982".to_string(),
+                "The past record and future prospects for the use of exotic potato germplasm"
+                    .to_string(),
+            ),
+        ];
+        assert_eq!(
+            best_match(citation, &candidates),
+            Some(Repair {
+                doi: "10.1007/BF02853982".to_string(),
+                title: "The past record and future prospects for the use of exotic potato \
+                        germplasm"
+                    .to_string(),
+            }),
+            "the matching title wins, not the first result"
+        );
+
+        // **Nothing rather than the top hit.** A bibliographic search always returns something;
+        // accepting it blindly would swap a wrong DOI for a differently wrong one and present
+        // that as the answer, which is worse than the bug being fixed.
+        let unrelated = vec![
+            (
+                "10.1/x".to_string(),
+                "Algal switching among lichen symbioses".to_string(),
+            ),
+            (
+                "10.1/y".to_string(),
+                "Gender topics on potato research and development".to_string(),
+            ),
+        ];
+        assert_eq!(best_match(citation, &unrelated), None);
+        assert_eq!(best_match(citation, &[]), None);
+
+        // **A near-tie is not an answer.** These are the top two Crossref actually returned for
+        // the model's *invented* wording of that citation ("the use of wild species for the
+        // improvement of potato (Solanum tuberosum) varieties"): the right paper at 0.75 and a
+        // wild-species paper at 0.57, because the invented title shares "wild", "potato" and
+        // "Solanum" with it. Clearing the threshold by six points is not grounds for telling a
+        // researcher which paper they meant.
+        let invented = "Plaisted, R. L., & Hoopes, R. W. (1989). The past record and future \
+                        prospects for the use of wild species for the improvement of potato \
+                        (Solanum tuberosum) varieties. American Potato Journal, 66, 603-627.";
+        let close = vec![
+            (
+                "10.1007/bf02853982".to_string(),
+                "The past record and future prospects for the use of exotic potato germplasm"
+                    .to_string(),
+            ),
+            (
+                "10.1007/bf02853483".to_string(),
+                "Solanum amayanum: A new wild Peruvian potato species".to_string(),
+            ),
+        ];
+        let found = best_match(invented, &close).expect("0.75 against 0.57 clears the margin");
+        assert_eq!(found.doi, "10.1007/bf02853982");
+
+        // Nudge the runner-up up until the two are close, and it refuses.
+        let tied = vec![
+            close[0].clone(),
+            (
+                "10.1/rival".to_string(),
+                "The past record and future prospects for the use of exotic potato varieties"
+                    .to_string(),
+            ),
+        ];
+        assert_eq!(
+            best_match(invented, &tied),
+            None,
+            "two plausible answers is not an answer"
+        );
+    }
+
+    #[test]
+    fn crossref_search_results_are_read_as_pairs() {
+        let body = serde_json::json!({
+            "message": {
+                "items": [
+                    {"DOI": "10.1007/BF02853982",
+                     "title": ["The past record and future\n prospects for the use of exotic potato germplasm"],
+                     "container-title": ["American Potato Journal"]},
+                    // No title: nothing to compare against, so nothing to offer.
+                    {"DOI": "10.1/x"},
+                    {"title": ["Orphaned, no DOI"]},
+                ]
+            }
+        });
+        let found = candidates_of(&body);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, "10.1007/BF02853982");
+        assert!(found[0].1.starts_with("The past record and future prospects"));
+        assert!(!found[0].1.contains('\n'), "the registry's whitespace is normalised");
+        assert!(candidates_of(&serde_json::json!({})).is_empty());
     }
 
     #[test]

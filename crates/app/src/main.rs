@@ -1646,11 +1646,17 @@ struct Workbench {
     reports: Vec<protocol::Report>,
     /// Whole citations, for a rendered report's bibliography. Not the panel's truncated ones.
     sources: Vec<protocol::Source>,
-    /// What checking each DOI against Crossref found, keyed by the DOI.
+    /// What checking each reference against Crossref found, keyed by its citation text.
     ///
-    /// Keyed by identifier rather than by position, because a turn can add sources while the
-    /// check is running and a verdict shown against the wrong reference is worse than none.
+    /// **Keyed by the citation, not by position and not by DOI.** Not by position because a turn
+    /// can add sources while a check is running, and a verdict shown against the wrong reference
+    /// is worse than none. Not by DOI because the references that most need an answer are the
+    /// ones that have no DOI at all — which is the shape a fabricated citation takes.
     checked: HashMap<String, references::Verdict>,
+    /// The work each bad citation actually describes, once the registry has been asked.
+    repaired: HashMap<String, references::Repair>,
+    /// Whether a repair pass is in flight.
+    repairing: bool,
     /// Whether a reference check is in flight, and how much of it is done.
     ///
     /// `checking_references`, not `checking` — that name already belongs to the preflight, and
@@ -1937,6 +1943,8 @@ impl Workbench {
             reports: Vec::new(),
             sources: Vec::new(),
             checked: HashMap::new(),
+            repaired: HashMap::new(),
+            repairing: false,
             checking_references: None,
             about_open: false,
             provenance_open: false,
@@ -6269,20 +6277,31 @@ impl Workbench {
     /// rather than sitting blank until the last one. A source with no DOI is settled here without
     /// any network at all — there is nothing to ask about.
     fn check_references(&mut self, cx: &mut Context<Self>) {
-        let mut wanted: Vec<(String, String)> = Vec::new();
+        let mut wanted: Vec<(String, String, String)> = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for source in &self.sources {
+            // Deduplicated: the same paper cited twice is one question for the registry.
+            if !seen.insert(source.citation.clone()) {
+                continue;
+            }
             match link_for(source).as_deref().and_then(references::doi_in) {
-                // Deduplicated: the same paper cited twice is one question for the registry.
-                Some(doi) if seen.insert(doi.clone()) => {
-                    wanted.push((doi, source.citation.clone()))
+                Some(doi) => wanted.push((source.citation.clone(), doi, source.citation.clone())),
+                // Settled here, with no network call: there is nothing to ask about, and that
+                // absence is itself the finding.
+                None => {
+                    self.checked.insert(
+                        source.citation.clone(),
+                        references::Verdict::NoIdentifier,
+                    );
                 }
-                Some(_) => {}
-                None => {}
             }
         }
         if wanted.is_empty() {
-            self.say("no DOIs among these sources to check", cx);
+            self.say(
+                "none of these sources carry a DOI — nothing to check against the registry",
+                cx,
+            );
+            cx.notify();
             return;
         }
 
@@ -6290,10 +6309,10 @@ impl Workbench {
         self.checking_references = Some((0, total));
         let mut results = self.sidecar.check_references(wanted);
         cx.spawn(async move |this, cx| {
-            while let Some((doi, verdict)) = results.next().await {
+            while let Some((key, verdict)) = results.next().await {
                 if this
                     .update(cx, |workbench, cx| {
-                        workbench.checked.insert(doi, verdict);
+                        workbench.checked.insert(key, verdict);
                         let done = workbench
                             .checking_references
                             .map(|(done, _)| done + 1)
@@ -6321,6 +6340,68 @@ impl Workbench {
                     many => format!("{many} references do not check out — see the sources panel"),
                 };
                 workbench.say(note, cx);
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Ask the registry which work each failing citation actually describes.
+    ///
+    /// Only the ones that failed. A reference whose DOI already resolves to the paper it names
+    /// needs nothing, and asking about it would send its text to a third party for no reason.
+    fn repair_references(&mut self, cx: &mut Context<Self>) {
+        let wanted: Vec<(String, String)> = self
+            .sources
+            .iter()
+            .filter(|source| {
+                self.checked
+                    .get(&source.citation)
+                    .is_some_and(references::Verdict::is_problem)
+                    || matches!(
+                        self.checked.get(&source.citation),
+                        Some(references::Verdict::NoIdentifier)
+                    )
+            })
+            .filter(|source| !self.repaired.contains_key(&source.citation))
+            .map(|source| (source.citation.clone(), source.citation.clone()))
+            .collect();
+        if wanted.is_empty() {
+            self.say("nothing to look up — every reference checked out", cx);
+            return;
+        }
+
+        let total = wanted.len();
+        self.repairing = true;
+        let mut results = self.sidecar.repair_references(wanted);
+        cx.spawn(async move |this, cx| {
+            let mut found = 0usize;
+            while let Some((key, repair)) = results.next().await {
+                let Some(repair) = repair else { continue };
+                found += 1;
+                if this
+                    .update(cx, |workbench, cx| {
+                        workbench.repaired.insert(key, repair);
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            let _ = this.update(cx, |workbench, cx| {
+                workbench.repairing = false;
+                // Said either way. "Found none" is a result — it means the registry has no work
+                // matching those citations, which for a fabricated reference is the right answer
+                // and a much stronger statement than silence.
+                workbench.say(
+                    match found {
+                        0 => format!("no registered work matches any of those {total} references"),
+                        1 => "found the work 1 reference describes".to_string(),
+                        many => format!("found the work {many} of {total} references describe"),
+                    },
+                    cx,
+                );
             });
         })
         .detach();
@@ -9142,19 +9223,69 @@ impl Workbench {
                             }),
                     ),
             );
+
+            // **A second, separate act, because it discloses more.** Checking a DOI sends an
+            // identifier; this sends the citation text, since that *is* the query — the title in
+            // a bad citation still came from the search even when the DOI did not. A citation
+            // names published work, so it is public bibliographic data, but it is more than an
+            // identifier and the researcher should choose to send it rather than find out later.
+            let broken = self
+                .sources
+                .iter()
+                .filter(|source| {
+                    self.checked
+                        .get(&source.citation)
+                        .is_some_and(|verdict| {
+                            verdict.is_problem()
+                                || matches!(verdict, references::Verdict::NoIdentifier)
+                        })
+                })
+                .count();
+            if broken > 0 {
+                section = section.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .w_full()
+                        .min_w_0()
+                        .child(
+                            ui::Button::new("repair-references", "Find the right DOI")
+                                .tone(ui::Tone::Accent)
+                                .size(ui::Size::Compact)
+                                .disabled(self.repairing)
+                                .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                    workbench.repair_references(cx);
+                                })),
+                        )
+                        .child(
+                            div()
+                                .flex_grow()
+                                .min_w_0()
+                                .text_color(rgb(theme::text_faint()))
+                                .text_size(px(11.))
+                                .child(if self.repairing {
+                                    "asking the registry…".to_string()
+                                } else {
+                                    format!(
+                                        "sends the text of {broken} citation{} to crossref.org",
+                                        if broken == 1 { "" } else { "s" }
+                                    )
+                                }),
+                        ),
+                );
+            }
         }
 
         for (at, source) in self.sources.iter().enumerate() {
             let opened = link_for(source);
-            // Once a check has run, a reference with no DOI says so. Left blank it would look
+            // A reference with no DOI says so once a check has run. Left blank it would look
             // exactly like one that passed — and in a run where the model wrote its citations,
             // *having no identifier at all* is the strongest signal of the three: it means
             // nothing structured ever produced this reference.
-            let verdict = match opened.as_deref().and_then(references::doi_in) {
-                Some(doi) => self.checked.get(&doi).cloned(),
-                None if !self.checked.is_empty() => Some(references::Verdict::NoIdentifier),
-                None => None,
-            };
+            let verdict = self.checked.get(&source.citation).cloned();
+            let repair = self.repaired.get(&source.citation).cloned();
             // The prose the reader sees, with the URL taken out of it. A DOI written into a
             // sentence wraps mid-token in a 330px column — `https://doi.org` on one line and
             // `/10.1007/…` on the next — and a link that *looks* broken is one somebody retypes
@@ -9227,6 +9358,44 @@ impl Workbench {
                                 .text_size(px(11.))
                                 .line_height(px(15.))
                                 .child(verdict.label())
+                        }))
+                        // The work the citation actually describes. Clicking copies the real
+                        // DOI, because the next thing anyone does with it is paste it into a
+                        // manuscript or a reference manager.
+                        .children(repair.map(|repair| {
+                            let copied = format!("https://doi.org/{}", repair.doi);
+                            div()
+                                .id(SharedString::from(format!("repair-{at}")))
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .p_2()
+                                .rounded_md()
+                                .bg(rgb(theme::accent_soft()))
+                                .hover(|style| style.cursor_pointer())
+                                .child(
+                                    div()
+                                        .text_color(rgb(theme::accent()))
+                                        .text_size(px(11.))
+                                        .line_height(px(15.))
+                                        .child(format!(
+                                            "the registry has this as {} — click to copy",
+                                            repair.doi
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .text_color(rgb(theme::text_muted()))
+                                        .text_size(px(11.))
+                                        .line_height(px(15.))
+                                        .child(repair.title.clone()),
+                                )
+                                .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                        copied.clone(),
+                                    ));
+                                    workbench.say("the correct DOI is on the clipboard", cx);
+                                }))
                         })),
                 );
             // Only a source with a link is clickable. A row that looks interactive and does
