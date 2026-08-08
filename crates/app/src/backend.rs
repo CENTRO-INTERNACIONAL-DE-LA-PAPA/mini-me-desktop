@@ -1125,6 +1125,14 @@ impl BackendSupervisor {
     /// otherwise spawn and wait. Returns a status string for the UI.
     pub async fn ensure_running(&mut self, client: &LangGraphClient) -> Result<Started> {
         if client.is_healthy().await {
+            // **Says so rather than silently doing nothing.** A backend left running from a
+            // previous session is attached to as-is, which means the version pin never applies —
+            // and the researcher, who just ran `git pull`, has no way to know the Python did not
+            // move. Worth a line, because "attached to what was already there" and "started the
+            // version you asked for" are different facts about the same launch.
+            tracing::info!(
+                "a backend was already running — attaching to it, so the version pin is not applied"
+            );
             return Ok(Started::Attached);
         }
         if self.config.attach_only {
@@ -1178,7 +1186,7 @@ impl BackendSupervisor {
             return;
         };
         if !self.config.owned {
-            tracing::debug!("backend checkout is not ours to move; leaving it alone");
+            tracing::info!(%want, "the backend checkout is not ours to move; leaving it alone");
             return;
         }
         let dir = self.config.backend_dir();
@@ -1190,7 +1198,7 @@ impl BackendSupervisor {
             .run_git(&dir, &["rev-parse", "HEAD"])
             .unwrap_or_default();
         if !head.is_empty() && head.starts_with(want) && want.len() >= 7 {
-            tracing::debug!(%want, "backend already at the expected commit");
+            tracing::info!(%want, "backend already at the expected commit");
             return;
         }
 
@@ -1205,7 +1213,11 @@ impl BackendSupervisor {
                 return;
             }
             None => {
-                tracing::debug!("no git in the backend checkout; leaving it alone");
+                tracing::warn!(
+                    %want,
+                    dir = %dir,
+                    "could not read git status in the backend checkout; leaving it alone"
+                );
                 return;
             }
             _ => {}

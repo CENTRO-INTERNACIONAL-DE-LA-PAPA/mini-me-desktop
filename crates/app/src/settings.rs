@@ -221,10 +221,11 @@ impl Default for Settings {
 /// the pin lives in this repository, so `git pull` on the app carries it, and `sync_to_pin`
 /// brings the backend to it on the next launch (docs §127).
 ///
-/// A branch rather than a commit while `desktop_to_web` is open, so the backend follows that
-/// branch as it moves. It becomes a commit — or `main` — once the work merges.
+/// `main` now that the citation work has merged (Mini-Me #38 and #39). A branch rather than a
+/// commit so a researcher's backend follows fixes as they land; pin a commit here instead when a
+/// release needs to hold still.
 pub fn default_backend_ref() -> String {
-    "desktop_to_web".to_string()
+    "main".to_string()
 }
 
 /// `true`, as a path serde can name.
