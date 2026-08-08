@@ -7534,3 +7534,57 @@ of thing where "already right", "moved" and "silently skipped" must not produce 
 
 *Two repositories is a real cost, and this is the first instalment of it. The answer is not to
 avoid the split — it is that the seam has to be as automatic as the thing it replaced.*
+
+## 128. `ast.parse` is not "it runs" (2026-08-07)
+
+Every turn failed with *"An internal error occurred"*. The backend log:
+
+```
+NameError: name 'name' is not defined
+```
+
+Mine, shipped an hour earlier, in the diagnostic added to tell §127's two causes apart:
+
+```python
+async def _watched(*args, _inner=coroutine, _tool=name, **kwargs):
+```
+
+`name` is defined in **`_make_mcp_tools_resilient`** — upstream's loop, whose body I had read while
+working out where to hook — and not in `_recording`, which is ours. Python evaluates a default
+argument when the `def` executes, so it raised the moment the tool list was wrapped, on every turn,
+before any work began.
+
+### How it went out
+
+I checked it with:
+
+```
+python3 -c "import ast; ast.parse(open('overlay/minime_local/sources.py').read())"
+```
+
+which proves a file is syntactically valid and says nothing about whether a line of it runs. Then
+`cargo test`, which exercises the Rust and never touches the overlay. Both passed. Neither could
+have failed.
+
+*A check that cannot fail for the reason you are worried about is not a check.*
+
+### The pattern, now four deep
+
+This is the same borrowed-from-a-file-I-do-not-own mistake as §113 (restated a signature), §125
+(guessed a private function name, twice) — and now a bare identifier lifted out of somebody else's
+scope. Each time the fix was correct in intent and wrong about a detail of code the overlay reaches
+into but does not own.
+
+The overlay's whole premise is patching internals by name from outside. That premise has now cost
+four defects in three days, and it is the strongest argument yet for §126's direction: this belongs
+*in* Mini-Me, as ordinary code, where a name that does not exist is a name a reader can see.
+
+### What changed besides the fix
+
+`the_overlays_tool_wrapper_runs` drives the real arrangement from Rust — upstream's wrapper around
+ours, the tool call in a child task — and asserts the store afterwards. Verified load-bearing by
+reintroducing the bug and watching it fail with the same `NameError`.
+
+That is the third overlay path now covered by an executing test rather than an imagined one, after
+§123's task boundary and §125's hook name. All three were written *after* the failure they would
+have caught, which is the honest description of this week.

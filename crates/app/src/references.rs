@@ -696,6 +696,84 @@ mod tests {
         }
     }
 
+    /// The overlay's tool wrapper must actually *run*, not merely parse.
+    ///
+    /// **This test exists because of a shipped crash.** `install_mcp` built its wrapper with
+    /// `_tool=name`, where `name` belonged to upstream's loop and not to ours. Python evaluates a
+    /// default argument when the `def` executes, so it raised `NameError: name 'name' is not
+    /// defined` the moment the tool list was wrapped — and every turn in the app failed with
+    /// "An internal error occurred". It went out because it was checked with `ast.parse`, which
+    /// proves a file is syntactically valid and never that a line of it runs (docs §128).
+    ///
+    /// Driven from Rust because this repository has no Python harness, and an overlay that only
+    /// executes in production is one nobody tests.
+    #[test]
+    fn the_overlays_tool_wrapper_runs() {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: python3 is not on PATH");
+            return;
+        }
+        let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
+        // Upstream's wrapper around ours, with the tool call in a child task — the arrangement
+        // the backend actually uses, and the one where a ContextVar store silently failed (§123).
+        let script = format!(
+            r#"
+import sys, types, asyncio, json
+sys.path.insert(0, {overlay:?})
+from minime_local import sources
+
+mod = types.ModuleType("backend.mcp_tools")
+def _make_mcp_tools_resilient(tools):
+    for t in tools:
+        inner = t.coroutine
+        async def capped(*a, _i=inner, **k):
+            await _i(*a, **k)
+            return "TRUNCATED"
+        t.coroutine = capped
+    return tools
+mod._make_mcp_tools_resilient = _make_mcp_tools_resilient
+
+payload = [{{"type": "text", "text": json.dumps(
+    {{"data": [{{"paper": {{"corpusId": "237744014", "title": "A recorded paper title"}}}}]}})}}]
+
+class Tool:
+    name = "snippet_search"
+    def __init__(self):
+        async def coro(**kw):
+            return payload
+        self.coroutine = coro
+
+sources.install_mcp(mod)
+tools = mod._make_mcp_tools_resilient([Tool()])
+async def main():
+    await asyncio.create_task(tools[0].coroutine())
+    print(len(sources._papers()))
+asyncio.run(main())
+"#,
+            overlay = overlay.to_string_lossy()
+        );
+        let out = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("python3 runs");
+        assert!(
+            out.status.success(),
+            "the overlay's wrapper raised:
+{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "1",
+            "the recorder saw the raw result before upstream truncated it"
+        );
+    }
+
     #[test]
     fn a_corpus_link_is_recognised_and_never_treated_as_a_doi() {
         // The form `overlay/minime_local/sources.py` writes, and the one `_paper_ref` established

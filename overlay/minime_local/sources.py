@@ -325,6 +325,14 @@ def install_mcp(module) -> None:
     @functools.wraps(original)
     def _recording(tools):
         for tool in tools:
+            # **Read here, not borrowed from upstream's loop.** The previous version referenced a
+            # bare `name` — which exists in `_make_mcp_tools_resilient`, whose body I had read,
+            # and not in this one. Python evaluates a default argument when the `def` executes, so
+            # it raised `NameError: name 'name' is not defined` the moment the tool list was
+            # wrapped, and every turn failed with "An internal error occurred". Shipped after
+            # checking only that the file parsed — `ast.parse` proves syntax, never that a line
+            # runs (docs §128).
+            name = getattr(tool, "name", "<unknown>")
             coroutine = getattr(tool, "coroutine", None)
             if not asyncio.iscoroutinefunction(coroutine):
                 continue
