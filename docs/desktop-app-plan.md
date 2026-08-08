@@ -7639,3 +7639,45 @@ blocked sync and a working one give different answers. Verified failing without
 
 *Three of this week's tests passed while the defect they were written for was still present
 (§125, §128, and this one). Each was a test of what I meant rather than of what the code does.*
+
+## 130. The sync ran after the return that skipped it (2026-08-08)
+
+Third launch reporting nothing wrong, backend still on a commit from two merges ago.
+
+`sync_to_pin` was called inside `ensure_running` — **below** this:
+
+```rust
+if client.is_healthy().await {
+    return Ok(Started::Attached);
+}
+```
+
+`langgraph dev` survives the app closing. So "a backend is already running" is not an edge case,
+it is what happens every time somebody restarts the app without killing the sidecar — which is
+every time. The sync sat on the branch that only runs when there is *no* backend, which is the one
+launch where the version was already going to be read fresh anyway.
+
+Worse, §129 *found* this and logged it instead of fixing it: `"a backend was already running —
+attaching to it, so the version pin is not applied"`. An accurate line about a thing that should
+not have been true. Naming a defect is not the same as repairing it, and the line went out in the
+same commit that could have moved three statements.
+
+Now the sync runs first, unconditionally. And when it moves the checkout while a server is already
+up, the app says what that means and what to do:
+
+> the backend files were updated, but a server was already running and is still on the old ones —
+> close this app, then run: `wsl bash -lc "pkill -f 'langgraph dev'"`
+
+`sync_to_pin` returns whether it moved anything, because the warning depends on it and a bool that
+nothing asserts is a bool that drifts.
+
+### Four bugs in one delivery mechanism
+
+§127 built it; §129 found the pin overriding itself from `settings.toml` and the dirty guard
+tripping on the app's own untracked files; this one is the ordering. Every one of them produced the
+same visible outcome — the researcher pulls, the app starts, nothing has changed — and each had a
+different cause.
+
+*A mechanism whose failure mode is silence needs its diagnostics written before its logic, not
+after each failure.* Every fix in this chain arrived one launch late because the line that would
+have named the cause did not exist yet.

@@ -1122,15 +1122,26 @@ impl BackendSupervisor {
     /// Ensure *something* healthy is listening: attach if it is already up,
     /// otherwise spawn and wait. Returns a status string for the UI.
     pub async fn ensure_running(&mut self, client: &LangGraphClient) -> Result<Started> {
+        // **Before the health check, not after it.** This sat below the early return, so a
+        // backend left running from a previous session meant the checkout was never brought
+        // forward at all — and `langgraph dev` survives the app closing, so that is the *usual*
+        // case rather than an edge one. Three launches in a row reported success while the
+        // backend stayed on a commit from two merges ago (docs §130).
+        let moved = self.sync_to_pin();
+
         if client.is_healthy().await {
-            // **Says so rather than silently doing nothing.** A backend left running from a
-            // previous session is attached to as-is, which means the version pin never applies —
-            // and the researcher, who just ran `git pull`, has no way to know the Python did not
-            // move. Worth a line, because "attached to what was already there" and "started the
-            // version you asked for" are different facts about the same launch.
-            tracing::info!(
-                "a backend was already running — attaching to it, so the version pin is not applied"
-            );
+            // Moving the checkout does nothing to a server that has already imported it. Said
+            // plainly, with what to do about it, because the researcher just ran `git pull` and
+            // has every reason to believe the new code is running.
+            if moved {
+                tracing::warn!(
+                    "the backend files were updated, but a server was already running and is \
+                     still on the old ones — close this app, then run: \
+                     wsl bash -lc \"pkill -f 'langgraph dev'\""
+                );
+            } else {
+                tracing::info!("attached to a backend that was already running");
+            }
             return Ok(Started::Attached);
         }
         if self.config.attach_only {
@@ -1145,9 +1156,6 @@ impl BackendSupervisor {
                 self.config.base_url()
             );
         }
-        // Bring the backend to the version this build of the app expects, before starting it.
-        // Here rather than at provisioning because provisioning happens once and the pin moves.
-        self.sync_to_pin();
         self.start()?;
         // `langgraph dev` imports the graph on boot, so first health can take a
         // while on a cold venv.
@@ -1179,13 +1187,13 @@ impl BackendSupervisor {
     /// * **Block the launch.** Every failure here — offline, no `git`, a ref that does not exist
     ///   — logs and returns. A backend one version behind still runs; a backend that would not
     ///   start because the network was down would be a worse app.
-    fn sync_to_pin(&self) {
+    fn sync_to_pin(&self) -> bool {
         let Some(want) = self.config.backend_ref.clone() else {
-            return;
+            return false;
         };
         if !self.config.owned {
             tracing::info!(%want, "the backend checkout is not ours to move; leaving it alone");
-            return;
+            return false;
         }
         let dir = self.config.backend_dir();
 
@@ -1197,7 +1205,7 @@ impl BackendSupervisor {
             .unwrap_or_default();
         if !head.is_empty() && head.starts_with(want) && want.len() >= 7 {
             tracing::info!(%want, "backend already at the expected commit");
-            return;
+            return false;
         }
 
         // A tree with local edits belongs to whoever made them.
@@ -1213,7 +1221,7 @@ impl BackendSupervisor {
                     "the backend checkout has uncommitted changes — leaving it at its current \
                      version rather than overwriting them"
                 );
-                return;
+                return false;
             }
             None => {
                 tracing::warn!(
@@ -1221,14 +1229,14 @@ impl BackendSupervisor {
                     dir = %dir,
                     "could not read git status in the backend checkout; leaving it alone"
                 );
-                return;
+                return false;
             }
             _ => {}
         }
 
         if self.run_git(&dir, &["fetch", "--quiet", "origin"]).is_none() {
             tracing::warn!(%want, "could not reach the backend's remote — staying on the current version");
-            return;
+            return false;
         }
         // `origin/<ref>` first so a branch name tracks the remote rather than a stale local copy
         // of it; a bare commit or tag falls through to the second form.
@@ -1244,12 +1252,14 @@ impl BackendSupervisor {
                 // when it broke would make "already right", "moved" and "silently skipped"
                 // produce identical evidence — which is how three overlay patches hid this week.
                 tracing::warn!(%want, at = %at.trim(), "backend moved to the version this app expects");
+                return true;
             }
             None => tracing::warn!(
                 %want,
                 "could not check out the expected backend version — staying where it is"
             ),
         }
+        false
     }
 
     /// Run one git command in `dir`, or `None` if it could not run or failed.
@@ -2373,7 +2383,7 @@ mod pin_tests {
         let before = head(&dir);
 
         // Not ours: never touched, whatever the pin says.
-        supervisor(&dir, false, Some("some-other-branch")).sync_to_pin();
+        assert!(!supervisor(&dir, false, Some("some-other-branch")).sync_to_pin());
         assert_eq!(head(&dir), before, "a checkout we do not own must be left alone");
 
         // **A file the app itself wrote must not count as somebody's work in progress.** The
@@ -2387,7 +2397,11 @@ mod pin_tests {
         std::fs::write(dir.join(".mini-me-desktop.langgraph.json"), "{}").expect("write");
         std::fs::create_dir_all(dir.join(".desktop-overlay")).expect("mkdir");
         std::fs::write(dir.join(".desktop-overlay/sitecustomize.py"), "").expect("write");
-        supervisor(&dir, true, Some("target")).sync_to_pin();
+        assert!(
+            supervisor(&dir, true, Some("target")).sync_to_pin(),
+            "a sync that moved the checkout must report that it did — the caller uses it to warn \
+             when a server is already running on the old files"
+        );
         assert_ne!(
             head(&dir),
             before,
@@ -2403,7 +2417,7 @@ mod pin_tests {
 
         // Ours, but with a *tracked* file edited: never touched. Somebody is editing it.
         std::fs::write(dir.join("a.txt"), "edited").expect("write");
-        supervisor(&dir, true, Some("some-other-branch")).sync_to_pin();
+        assert!(!supervisor(&dir, true, Some("some-other-branch")).sync_to_pin());
         assert_eq!(head(&dir), before, "uncommitted work must not be overwritten");
         assert_eq!(
             std::fs::read_to_string(dir.join("a.txt")).expect("read"),
