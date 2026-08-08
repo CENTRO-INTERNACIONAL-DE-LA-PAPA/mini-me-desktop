@@ -346,6 +346,79 @@ pub struct Conversation {
     pub updated_at: String,
 }
 
+/// An ISO-8601 UTC stamp as seconds since the epoch, or `None` if it is not one.
+///
+/// Only the fixed-width prefix `YYYY-MM-DDTHH:MM:SS` is read; a fractional part and the trailing
+/// `Z` are ignored, and an offset other than UTC is refused rather than silently misread. That is
+/// what LangGraph sends (`langgraph_api/schema.py` stamps these in UTC).
+///
+/// Civil date to days by Howard Hinnant's algorithm, which is the standard one and needs no
+/// lookup table: shift the year so it starts in March, and leap days land at the end where they
+/// stop perturbing the month lengths.
+pub fn epoch_seconds(stamp: &str) -> Option<i64> {
+    let bytes = stamp.as_bytes();
+    if bytes.len() < 19 || bytes[4] != b'-' || bytes[7] != b'-' || bytes[13] != b':' {
+        return None;
+    }
+    // A stamp carrying a non-UTC offset would be hours out if read as UTC.
+    if let Some(rest) = stamp.get(19..) {
+        let rest = rest.trim_end_matches('Z');
+        let rest = rest.split('.').next_back().unwrap_or(rest);
+        if rest.contains('+') || rest.contains('-') {
+            return None;
+        }
+    }
+    let number = |from: usize, to: usize| stamp.get(from..to)?.parse::<i64>().ok();
+    let (year, month, day) = (number(0, 4)?, number(5, 7)?, number(8, 10)?);
+    let (hour, minute, second) = (number(11, 13)?, number(14, 16)?, number(17, 19)?);
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let day_of_year = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+    Some(days * 86_400 + hour * 3_600 + minute * 60 + second)
+}
+
+/// How long ago `stamp` was, said the way a person would.
+///
+/// **Relative, not "today 14:22".** A wall-clock time needs the researcher's timezone, and
+/// converting a UTC stamp to local time means either a timezone database or a dependency — for a
+/// line whose whole job is to say how fresh a conversation is. "2 hours ago" answers that exactly,
+/// in every timezone, with no table.
+///
+/// Empty for a stamp that cannot be read, so the caller renders nothing rather than "unknown".
+pub fn how_long_ago(stamp: &str, now: i64) -> String {
+    let Some(then) = epoch_seconds(stamp) else {
+        return String::new();
+    };
+    // A clock that has been corrected backwards, or a server slightly ahead. "just now" is the
+    // one answer that is never absurd; "in 4 seconds" would be.
+    let seconds = (now - then).max(0);
+    const MINUTE: i64 = 60;
+    const HOUR: i64 = 60 * MINUTE;
+    const DAY: i64 = 24 * HOUR;
+    // Named because a range pattern takes a path or a literal, not an expression.
+    const MONTH: i64 = 30 * DAY;
+    const YEAR: i64 = 365 * DAY;
+    let (count, unit) = match seconds {
+        ..MINUTE => return "just now".to_string(),
+        ..HOUR => (seconds / MINUTE, "minute"),
+        ..DAY => (seconds / HOUR, "hour"),
+        ..MONTH => (seconds / DAY, "day"),
+        ..YEAR => (seconds / MONTH, "month"),
+        _ => (seconds / YEAR, "year"),
+    };
+    if count == 1 {
+        format!("1 {unit} ago")
+    } else {
+        format!("{count} {unit}s ago")
+    }
+}
+
 /// A thread from `POST /threads/search`, or `None` if it has no usable id.
 fn decode_conversation(thread: &Value) -> Option<Conversation> {
     let thread_id = thread
@@ -2113,6 +2186,51 @@ fn summarize_error(data: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_iso_stamp_becomes_seconds_and_then_something_a_person_reads() {
+        // Known anchors. The epoch itself, and a date past 2000 so the era arithmetic is
+        // exercised rather than just the year-zero case.
+        assert_eq!(epoch_seconds("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(epoch_seconds("2000-03-01T00:00:00Z"), Some(951_868_800));
+        // 2024 is a leap year: the 29th exists and the 1st of March is the day after.
+        assert_eq!(
+            epoch_seconds("2024-03-01T00:00:00Z").unwrap()
+                - epoch_seconds("2024-02-29T00:00:00Z").unwrap(),
+            86_400
+        );
+        // 1900 is not a leap year — the century rule, which a naive `% 4` gets wrong.
+        assert_eq!(
+            epoch_seconds("1900-03-01T00:00:00Z").unwrap()
+                - epoch_seconds("1900-02-28T00:00:00Z").unwrap(),
+            86_400
+        );
+        // The real shape LangGraph sends, fractional seconds and all.
+        assert_eq!(
+            epoch_seconds("2026-08-07T14:22:31.482913Z"),
+            epoch_seconds("2026-08-07T14:22:31Z")
+        );
+        // Not readable, and — importantly — not *misread*: an offset that is not UTC would be
+        // hours out if this returned a number anyway.
+        assert_eq!(epoch_seconds("2026-08-07T14:22:31+05:00"), None);
+        assert_eq!(epoch_seconds("yesterday"), None);
+        assert_eq!(epoch_seconds(""), None);
+        assert_eq!(epoch_seconds("2026-13-07T14:22:31Z"), None, "no 13th month");
+
+        let now = epoch_seconds("2026-08-07T14:22:31Z").expect("a stamp");
+        assert_eq!(how_long_ago("2026-08-07T14:22:30Z", now), "just now");
+        assert_eq!(how_long_ago("2026-08-07T14:21:31Z", now), "1 minute ago");
+        assert_eq!(how_long_ago("2026-08-07T13:52:31Z", now), "30 minutes ago");
+        assert_eq!(how_long_ago("2026-08-07T12:22:31Z", now), "2 hours ago");
+        assert_eq!(how_long_ago("2026-08-05T14:22:31Z", now), "2 days ago");
+        assert_eq!(how_long_ago("2026-06-07T14:22:31Z", now), "2 months ago");
+        assert_eq!(how_long_ago("2024-08-07T14:22:31Z", now), "2 years ago");
+        // A server marginally ahead of this clock reads as "just now", never as the future.
+        assert_eq!(how_long_ago("2026-08-07T14:22:35Z", now), "just now");
+        // Unreadable renders nothing at all, so the caller shows a card with no sub-line
+        // rather than a card that says "unknown".
+        assert_eq!(how_long_ago("not a date", now), "");
+    }
 
     /// Decode a single event in isolation. Anything that depends on *sequence*
     /// (tool-call argument fragments) drives a `TurnDecoder` directly instead.

@@ -5153,6 +5153,212 @@ impl Workbench {
             }))
     }
 
+    /// What an empty transcript says.
+    ///
+    /// It used to say one grey sentence. The replacement answers the two questions a researcher
+    /// actually opens this window with — *where was I* and *what can this thing do* — using what
+    /// the app already knows: their own recent conversations, and three things it is genuinely
+    /// good at.
+    ///
+    /// **Nothing here runs anything.** Every starting move loads the composer and stops, which is
+    /// the rule the project suggestions already follow and is org policy besides: the human
+    /// decides what is asked.
+    fn empty_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        /// Three, because a row of them has to stay readable in a narrow pane, and because a
+        /// list of recent work long enough to scroll is the sidebar's job.
+        const RECENT: usize = 3;
+
+        let now = provenance::now_ms() as i64 / 1_000;
+
+        let mut block = div()
+            .flex()
+            .flex_col()
+            .flex_grow()
+            .min_w_0()
+            // Centred vertically: with nothing in the transcript there is no reading order to
+            // preserve, and a page of prose pinned to the top of a tall window reads as a header.
+            .justify_center()
+            .gap_6()
+            .px(px(60.))
+            .py(px(34.))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_color(rgb(theme::text()))
+                            .text_size(px(22.))
+                            .line_height(px(29.))
+                            .child("What are you working on?"),
+                    )
+                    .child(
+                        div()
+                            .text_color(rgb(theme::text_muted()))
+                            .text_size(px(14.))
+                            .line_height(px(21.))
+                            .child(
+                                "Ask below, or drop a file on this window. Everything a turn \
+                                 produces is saved into your Documents folder.",
+                            ),
+                    ),
+            );
+
+        // Where they left off. Only conversations that have actually been used — a list whose
+        // first card is an empty thread from a mis-click is a list nobody trusts.
+        let recent: Vec<&protocol::Conversation> = self
+            .conversations
+            .iter()
+            .filter(|conversation| Some(&conversation.thread_id) != self.sidecar.thread_id().as_ref())
+            .take(RECENT)
+            .collect();
+        if !recent.is_empty() {
+            let mut cards = div().flex().flex_row().gap_2().w_full().min_w_0();
+            for conversation in recent {
+                let thread_id = conversation.thread_id.clone();
+                // What is in it, counted off disk rather than remembered — the same source the
+                // research panel reads, so the two cannot disagree.
+                let outputs: usize = workspace::outputs(&workspace::thread_dir_in(
+                    conversation.project.as_deref(),
+                    &conversation.thread_id,
+                ))
+                .iter()
+                .map(|(_, items)| items.len())
+                .sum();
+                let when = protocol::how_long_ago(&conversation.updated_at, now);
+                let note = match (outputs, when.is_empty()) {
+                    (0, true) => String::new(),
+                    (0, false) => when,
+                    (1, true) => "1 output".to_string(),
+                    (1, false) => format!("1 output · {when}"),
+                    (many, true) => format!("{many} outputs"),
+                    (many, false) => format!("{many} outputs · {when}"),
+                };
+                cards = cards.child(
+                    div()
+                        .id(SharedString::from(format!("resume-{thread_id}")))
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        // Equal thirds, and `min_w_0` so a long title ellipsises instead of
+                        // widening its own card past the other two.
+                        .flex_grow()
+                        .flex_basis(relative(0.33))
+                        .min_w_0()
+                        .p_3()
+                        .rounded_lg()
+                        .bg(rgb(theme::elevated()))
+                        .border_1()
+                        .border_color(rgb(theme::border()))
+                        .hover(|style| {
+                            style
+                                .border_color(rgb(theme::accent()))
+                                .cursor_pointer()
+                        })
+                        .child(
+                            ui::Label::new(conversation.title.clone())
+                                .size(ui::Size::Compact)
+                                .ellipsis(),
+                        )
+                        .child(
+                            div()
+                                .text_color(rgb(theme::text_faint()))
+                                .text_size(px(11.))
+                                .child(note),
+                        )
+                        .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                            workbench.open_conversation(thread_id.clone(), cx);
+                        })),
+                );
+            }
+            block = block.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(section_label("PICK UP WHERE YOU LEFT OFF"))
+                    .child(cards),
+            );
+        }
+
+        // Three things this is good at, in the researcher's words. Deliberately not a feature
+        // list: each one is a sentence they could have typed themselves, and clicking it puts
+        // exactly that in the composer for them to edit.
+        const MOVES: [(&str, &str, &str); 3] = [
+            (
+                "◎",
+                "Find datasets in CIP Dataverse on a topic",
+                "Search CIP Dataverse for datasets about ",
+            ),
+            (
+                "▤",
+                "Summarise what the literature says, with references",
+                "Summarise what the literature says about , with references.",
+            ),
+            (
+                "▩",
+                "Clean and profile a file I drop here",
+                "Clean and profile the file I am about to drop, and tell me what is in it.",
+            ),
+        ];
+        let mut moves = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .w_full()
+            .min_w_0()
+            .child(section_label("OR START SOMETHING"));
+        for (at, (glyph, label, prompt)) in MOVES.into_iter().enumerate() {
+            let leading = at == 0;
+            moves = moves.child(
+                div()
+                    .id(SharedString::from(format!("start-{at}")))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_3()
+                    .w_full()
+                    .min_w_0()
+                    .p_2()
+                    .rounded_lg()
+                    .border_1()
+                    // The first is marked, not louder: one suggestion carrying the accent is a
+                    // recommendation, three would be a menu shouting.
+                    .when(leading, |row| {
+                        row.bg(rgb(theme::accent_soft()))
+                            .border_color(rgb(theme::accent()))
+                    })
+                    .when(!leading, |row| row.border_color(rgb(theme::border())))
+                    .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(rgb(theme::accent()))
+                            .text_size(px(13.))
+                            .child(glyph),
+                    )
+                    .child(
+                        div()
+                            .flex_grow()
+                            .min_w_0()
+                            .text_color(rgb(theme::text()))
+                            .text_size(px(13.))
+                            .child(label),
+                    )
+                    .on_click(cx.listener(move |workbench, _event, window, cx| {
+                        workbench.composer.update(cx, |composer, cx| {
+                            composer.set_text(prompt, cx);
+                        });
+                        // Focused, because the prompt is a stem they have to finish.
+                        window.focus(&workbench.composer.focus_handle(cx));
+                        cx.notify();
+                    })),
+            );
+        }
+        block.child(moves)
+    }
+
     /// The road: where this enquiry has been, down the left edge of the chat.
     ///
     /// **Why a strip and not the modal.** The provenance modal has held this since §75 and it is
@@ -5463,11 +5669,7 @@ impl Workbench {
             );
 
         if self.transcript.is_empty() {
-            col = col.child(
-                div()
-                    .text_color(rgb(theme::text_muted()))
-                    .child("Ask a question below to begin. Files you drop on this window become part of the question."),
-            );
+            col = col.child(self.empty_state(cx));
         }
         for (index, message) in self.transcript.iter().enumerate() {
             let asked = message.role == "you";
