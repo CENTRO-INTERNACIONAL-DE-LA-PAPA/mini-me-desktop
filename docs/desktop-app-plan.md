@@ -7783,3 +7783,66 @@ task, and asserts the DOI link survives rather than being rebuilt as a corpus id
 
 *The question that mattered tonight — did the subagent call a tool — was answerable all along by a
 line that was never written, and unanswerable from the one that was.*
+
+## 133. The exit that was always cheaper than the work (2026-08-08)
+
+> `minime_local: recording the link of every paper find_papers returns`
+> `minime_local: no search recorded — the 8 source(s) keep the links the subagent supplied`
+
+The wrapper installed, the tool was present, and the subagent called **nothing**. Eight references
+composed from memory. §132 made the question answerable; this is the answer.
+
+### It was never the prompt
+
+Four days went into the prompt — *"Use available tools"*, then a whole appended block of identifier
+rules on top of it, and the behaviour did not move once. It could not have.
+
+`academic_researcher` carries `response_format=AcademicResearchResults`. Anthropic models report
+`structured_output: False` in their profile, so LangChain resolves that to a `ToolStrategy`: **the
+schema is bound as a tool.** And then, in `langchain/agents/factory.py:1273`:
+
+```python
+# Force tool use if we have structured output tools
+tool_choice = "any" if structured_output_tools else request.tool_choice
+```
+
+The first model call is *compelled* to call a tool. Among its options is one that answers the whole
+question in a single step, from memory, and ends the episode. Every other option is work. The model
+was doing the rational thing with the choices it had, every single time, and a sentence in a system
+prompt asking for diligence was never going to outweigh the shape of the loop it runs in.
+
+### The line that also decided the fix
+
+That same statement discards `request.tool_choice` whenever a structured output tool is bound. So
+the obvious repair — middleware that sets `tool_choice="find_papers"` — writes a value nothing
+reads. It would have installed cleanly, logged nothing wrong, and changed no behaviour: the exact
+shape of §125, §129 and §131, and it would have taken another launch to notice.
+
+Found by reading the binding path before writing the middleware rather than after it failed. That
+is the only reason this is one section and not three.
+
+### The fix
+
+Withhold the exit until the work is done:
+
+```python
+request.override(response_format=None, tool_choice=SEARCH_TOOL)
+```
+
+Both halves are load-bearing. Dropping the response format un-binds the structured output tool,
+which is what lets `tool_choice` reach the model at all; naming the tool makes the forced call a
+*search* rather than whichever of `ls`, `execute` or `write_todos` it picks when told only that it
+must call something.
+
+The gate opens on a search result **existing**, not on it being useful — an empty result, a
+timeout, a missing sandbox each still leave a `ToolMessage` behind. A failed search costs a
+citation and never a turn.
+
+Upstream as [Mini-Me #40](https://github.com/CENTRO-INTERNACIONAL-DE-LA-PAPA/Mini-Me/pull/40), in
+the repository rather than the overlay: the constraint that put four of these patches in
+`overlay/` was *"the checkout is reference material"*, and that ended with *"I myself mantain it"*.
+
+*A tool the model may call is a suggestion. The whole DOI investigation — corpus ids, Crossref
+verification, a citation builder, a CLI search — was built on the assumption that the subagent was
+searching badly. It was not searching at all, and nothing we added on that assumption could have
+found that out.*
