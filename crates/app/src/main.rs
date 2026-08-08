@@ -1324,6 +1324,8 @@ struct Workbench {
     sidebar_open: bool,
     /// Whether the research panel on the right is showing.
     panel_open: bool,
+    /// Whether the road strip down the left of the chat is showing.
+    road_open: bool,
     /// What the sidebar's search box holds. Empty means "show everything".
     conversation_query: Entity<Composer>,
     /// A file being previewed in the centre, if any.
@@ -1453,6 +1455,10 @@ impl Workbench {
             })
             .collect();
 
+        // Read once. It used to be read twice in this literal and the panel states would have
+        // made it three — one file, opened three times, in a constructor.
+        let stored = settings::Settings::load();
+
         let mut workbench = Self {
             project: None,
             buckets: Vec::new(),
@@ -1475,7 +1481,7 @@ impl Workbench {
             palette_selected: 0,
             palette_query,
             settings_open: false,
-            draft: settings::Settings::load(),
+            draft: stored.clone(),
             fields,
             settings_note: String::new(),
             settings_section: Section::default(),
@@ -1506,9 +1512,10 @@ impl Workbench {
             dragging: None,
             toasts: Vec::new(),
             panel_scroll: gpui::ScrollHandle::new(),
-            applied_theme: settings::Settings::load().theme,
-            sidebar_open: true,
-            panel_open: true,
+            applied_theme: stored.theme.clone(),
+            sidebar_open: stored.sidebar_open,
+            panel_open: stored.panel_open,
+            road_open: stored.road_open,
             conversation_query,
             preview: None,
             conversations: Vec::new(),
@@ -5093,6 +5100,238 @@ impl Workbench {
             }))
     }
 
+    /// The road: where this enquiry has been, down the left edge of the chat.
+    ///
+    /// **Why a strip and not the modal.** The provenance modal has held this since §75 and it is
+    /// the wrong place for the question people actually ask, which is *where am I* — a question
+    /// you have while the turn is running and will not interrupt it to open a window for. The
+    /// modal answers *what happened*, afterwards, in detail. This answers the live one, and costs
+    /// 172px to do it.
+    ///
+    /// Fed from [`provenance::Record`], which is already written on every frame that carries an
+    /// agent ([`Self::note_provenance`]) — so nothing new is collected, something already
+    /// collected is finally shown while it still matters.
+    fn road_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        const OPEN: f32 = 172.;
+        const FOLDED: f32 = 38.;
+        /// The dot's own size, and the gutter it is centred in.
+        const DOT: f32 = 9.;
+        const GUTTER: f32 = 12.;
+
+        let stages = self.provenance.road();
+        // The stage still producing output. Only meaningful while a turn is in flight: after it
+        // ends, every stage has been seen and none is running. The *strongest true statement*
+        // available — we know which invocation spoke most recently, and nothing else (§74).
+        let running = self
+            .streaming
+            .then(|| stages.iter().max_by_key(|stage| stage.last_seen))
+            .flatten()
+            .map(|stage| stage.name.clone());
+
+        let mut strip = div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .h_full()
+            .w(px(if self.road_open { OPEN } else { FOLDED }))
+            .pt(px(18.))
+            .pb(px(14.))
+            .when(self.road_open, |strip| strip.px(px(14.)).gap_3())
+            .when(!self.road_open, |strip| strip.items_center().gap_2())
+            // One step up from the pane's `background`, which is what makes it read as a rail
+            // rather than as the transcript with something in the margin.
+            .bg(rgb(theme::surface()))
+            .border_r_1()
+            .border_color(rgb(theme::border()));
+
+        // Header: the name, and the chevron that folds it. Folded, the chevron is the whole
+        // header — there is no room for a word and no need for one.
+        strip = strip.child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .w_full()
+                .flex_none()
+                .when(self.road_open, |header| {
+                    header.child(
+                        div()
+                            .text_color(rgb(theme::text_faint()))
+                            .text_size(px(11.))
+                            .child("THE ROAD"),
+                    )
+                })
+                .child(
+                    div()
+                        .id("fold-road")
+                        .flex_none()
+                        .text_color(rgb(theme::text_faint()))
+                        .text_size(px(12.))
+                        .hover(|style| style.text_color(rgb(theme::accent())).cursor_pointer())
+                        .child(if self.road_open { "‹" } else { "›" })
+                        .on_click(cx.listener(|workbench, _event, _window, cx| {
+                            workbench.toggle_road(cx);
+                        })),
+                ),
+        );
+
+        if stages.is_empty() {
+            // Folded, an explanation would not fit and the empty gutter says it anyway.
+            if self.road_open {
+                strip = strip.child(
+                    div()
+                        .text_color(rgb(theme::text_faint()))
+                        .text_size(px(11.))
+                        .line_height(px(16.))
+                        .child("The specialists this enquiry consults appear here as it reaches them."),
+                );
+            }
+            return strip;
+        }
+
+        let mut body = div().flex().flex_col().flex_grow().min_h_0().w_full();
+        let last = stages.len().saturating_sub(1);
+        for (at, stage) in stages.iter().enumerate() {
+            let is_running = running.as_deref() == Some(stage.name.as_str());
+
+            // The dot, and the connector that continues down to the next one. Both live in a
+            // fixed-width gutter so every label starts on the same x whatever the dot is doing.
+            let gutter = div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .flex_none()
+                .w(px(GUTTER))
+                .child(
+                    div()
+                        .flex_none()
+                        .size(px(DOT))
+                        .rounded_full()
+                        // Filled when it has been, ringed while it is. A ring is a shape that
+                        // has not closed, which is the state it stands for.
+                        .when(is_running, |dot| {
+                            dot.border_2().border_color(rgb(theme::running()))
+                        })
+                        .when(!is_running, |dot| dot.bg(rgb(theme::accent()))),
+                )
+                .when(at < last, |gutter| {
+                    gutter.child(
+                        div()
+                            .flex_grow()
+                            .w(px(2.))
+                            .min_h(px(14.))
+                            .bg(rgb(theme::border_strong())),
+                    )
+                });
+
+            let mut row = div()
+                .flex()
+                .flex_row()
+                .items_start()
+                .w_full()
+                .min_w_0()
+                .when(at < last, |row| row.min_h(px(46.)))
+                .child(gutter);
+
+            if self.road_open {
+                // `visited twice · 11s` — the count and how long it was producing. Not
+                // `6 found · Asta`: nothing on this side knows how many results a specialist
+                // returned, or which of them Asta served.
+                let note = if is_running {
+                    format!("running · {}", duration_label(stage.busy_ms))
+                } else if stage.visits > 1 {
+                    format!(
+                        "visited {} times · {}",
+                        stage.visits,
+                        duration_label(stage.busy_ms)
+                    )
+                } else {
+                    duration_label(stage.busy_ms)
+                };
+                row = row.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_grow()
+                        .min_w_0()
+                        .pl_2()
+                        // Pulls the label's cap-height level with the dot beside it.
+                        .mt(px(-3.))
+                        .child(
+                            ui::Label::new(stage.name.replace('_', " "))
+                                .colour(if is_running { theme::running() } else { theme::text() })
+                                .ellipsis(),
+                        )
+                        .child(
+                            div()
+                                .text_color(rgb(theme::text_faint()))
+                                .text_size(px(11.))
+                                .child(note),
+                        ),
+                );
+            }
+            body = body.child(row);
+        }
+        strip = strip.child(body);
+
+        // Pinned to the bottom by the body's `flex_grow` above it.
+        if self.road_open {
+            strip = strip
+                .child(
+                    div().w_full().flex_none().child(
+                        ui::Button::new("road-full-graph", "Full graph")
+                            .tone(ui::Tone::Accent)
+                            .size(ui::Size::Compact)
+                            .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                workbench.provenance_view = ProvenanceView::Graph;
+                                workbench.provenance_open = true;
+                                cx.notify();
+                            })),
+                    ),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(rgb(theme::text_faint()))
+                        .text_size(px(11.))
+                        .line_height(px(15.))
+                        .child("Written beside this conversation's files, so it survives a reload."),
+                );
+        }
+        strip
+    }
+
+    /// Fold the road, and remember that it is folded.
+    fn toggle_road(&mut self, cx: &mut Context<Self>) {
+        self.road_open = !self.road_open;
+        self.remember_panels();
+        cx.notify();
+    }
+
+    /// Persist which panels are open.
+    ///
+    /// Re-read from disk and written back rather than saving `self.draft`, which is the *Settings
+    /// pane's* editing buffer: someone with half-typed changes in that pane who then folds a panel
+    /// must not have those changes committed by the fold.
+    fn remember_panels(&self) {
+        let mut stored = settings::Settings::load();
+        if stored.sidebar_open == self.sidebar_open
+            && stored.panel_open == self.panel_open
+            && stored.road_open == self.road_open
+        {
+            return;
+        }
+        stored.sidebar_open = self.sidebar_open;
+        stored.panel_open = self.panel_open;
+        stored.road_open = self.road_open;
+        if let Err(error) = stored.save() {
+            // Not a toast. The panel *did* fold; all that failed is remembering it for next
+            // time, and a modal about that would be louder than the thing it reports.
+            tracing::warn!(%error, "could not remember which panels are open");
+        }
+    }
+
     fn chat_pane(&self, cx: &mut Context<Self>) -> impl IntoElement {
         // `min_w_0` is what makes long assistant text *wrap* instead of running off
         // the right edge: a flex item defaults to min-width:auto, so its content
@@ -5325,18 +5564,15 @@ impl Workbench {
             );
         }
 
-        let mut pane = div()
+        // Everything that is not the road: transcript, approval, picker, composer. Built as its
+        // own column so the road can sit *beside* all of it rather than above the transcript
+        // and below the composer.
+        let mut column = div()
             .flex()
             .flex_col()
             .flex_grow()
             .min_w_0()
             .h_full()
-            .m_1()
-            .rounded_lg()
-            .overflow_hidden()
-            .bg(rgb(theme::background()))
-            .border_1()
-            .border_color(rgb(theme::border()))
             .child(
                 div()
                     .relative()
@@ -5351,10 +5587,31 @@ impl Workbench {
         // Above the composer, so the decision sits where the user's attention already
         // is and cannot be scrolled out of view.
         if let Some(request) = &self.pending_approval {
-            pane = pane.child(self.approval_card(request, cx));
+            column = column.child(self.approval_card(request, cx));
         }
-        pane.children(self.subagent_picker(cx))
-            .child(self.composer_row(cx))
+        let column = column
+            .children(self.subagent_picker(cx))
+            .child(self.composer_row(cx));
+
+        div()
+            .flex()
+            // A row now: the road, then everything else.
+            .flex_row()
+            .flex_grow()
+            .min_w_0()
+            .h_full()
+            .m_1()
+            .rounded_lg()
+            .overflow_hidden()
+            .bg(rgb(theme::background()))
+            .border_1()
+            .border_color(rgb(theme::border()))
+            // Not before the first question. An empty road beside an empty transcript is a
+            // frame around nothing, and the empty state has its own things to say.
+            .when(!self.transcript.is_empty(), |pane| {
+                pane.child(self.road_strip(cx))
+            })
+            .child(column)
     }
 
     /// Answer the pending approval and pump the continuation into the same turn.
@@ -6999,7 +7256,31 @@ impl Workbench {
                     .child("▤ conversations")
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
                         workbench.sidebar_open = !workbench.sidebar_open;
+                        workbench.remember_panels();
                         cx.notify();
+                    })),
+            )
+            // The third of the same kind, between the two it belongs with — the road folds from
+            // here as well as from its own chevron, because a strip folded to 38px hides its
+            // chevron among the dots and the status bar is where the other two live.
+            .child(
+                div()
+                    .id("toggle-road")
+                    .flex_none()
+                    .text_color(rgb(if self.road_open {
+                        theme::accent()
+                    } else {
+                        theme::text_faint()
+                    }))
+                    .text_xs()
+                    .hover(|style| {
+                        style
+                            .text_color(rgb(theme::accent_hover()))
+                            .cursor_pointer()
+                    })
+                    .child("◧ road")
+                    .on_click(cx.listener(|workbench, _event, _window, cx| {
+                        workbench.toggle_road(cx);
                     })),
             )
             .child(
@@ -7020,6 +7301,7 @@ impl Workbench {
                     .child("▥ research")
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
                         workbench.panel_open = !workbench.panel_open;
+                        workbench.remember_panels();
                         cx.notify();
                     })),
             )

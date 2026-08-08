@@ -154,6 +154,23 @@ pub struct Settings {
     /// question is not (docs §106).
     #[serde(default)]
     pub project: String,
+    /// Whether the conversation list on the left is showing.
+    ///
+    /// The three panel states are remembered for the same reason the project is: someone who
+    /// closed the conversation list to get the screen back did not mean "until I next launch".
+    /// They were `true` on every start until now, which made folding a panel a thing you had to
+    /// do again every morning.
+    ///
+    /// Safe to persist closed because all three toggles live in the status bar and are always
+    /// present — a folded panel is never a one-way door.
+    #[serde(default = "yes")]
+    pub sidebar_open: bool,
+    /// Whether the research panel on the right is showing.
+    #[serde(default = "yes")]
+    pub panel_open: bool,
+    /// Whether the road strip down the left of the chat is showing.
+    #[serde(default = "yes")]
+    pub road_open: bool,
     /// Whether the app created that directory.
     ///
     /// **Load-bearing.** Updating means `git fetch && git checkout <pin> && uv sync`, and
@@ -177,9 +194,20 @@ impl Default for Settings {
             theme: crate::theme::DEFAULT_NAME.to_string(),
             subagents: std::collections::BTreeMap::new(),
             project: String::new(),
+            sidebar_open: true,
+            panel_open: true,
+            road_open: true,
             backend_dir_owned: true,
         }
     }
+}
+
+/// `true`, as a path serde can name.
+///
+/// A bare `#[serde(default)]` on a `bool` field is `false`, which for these three would mean an
+/// older `settings.toml` opening with every panel folded shut.
+fn yes() -> bool {
+    true
 }
 
 impl Settings {
@@ -505,6 +533,12 @@ mod tests {
             subagents: [("report_writer".to_string(), "openai::gpt-5.4".to_string())]
                 .into_iter()
                 .collect(),
+            // All three deliberately *not* the default, so a round trip that silently reset
+            // them to `true` would be caught here rather than by someone whose folded panels
+            // kept reappearing.
+            sidebar_open: false,
+            panel_open: false,
+            road_open: false,
             backend_dir_owned: false,
         };
         let text = toml::to_string_pretty(&settings).expect("serialise");
@@ -523,6 +557,10 @@ mod tests {
         assert_eq!(settings.provider, "openai");
         assert_eq!(settings.backend_port, Settings::default().backend_port);
         assert!(settings.approve_execute, "the gate must not default off");
+        // A `bool` with a bare `#[serde(default)]` is `false`. These three carry `default = "yes"`
+        // precisely so an existing settings.toml — every one written before this build — does not
+        // open with all three panels shut.
+        assert!(settings.sidebar_open && settings.panel_open && settings.road_open);
     }
 
     #[test]

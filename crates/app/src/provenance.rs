@@ -237,6 +237,40 @@ impl Record {
             .max(1)
     }
 
+    /// The stages of the enquiry, in the order they were first reached.
+    ///
+    /// What the road strip draws. A projection of the same invocations the graph is built from —
+    /// never a second store — collapsed to **kinds**, so a specialist consulted three times is one
+    /// stage that says three rather than three stages saying the same word.
+    ///
+    /// Spans the whole conversation rather than the turn in flight. The road is the account of
+    /// where this enquiry has been, and a strip that emptied itself every time the researcher
+    /// asked a follow-up would be describing the question rather than the work.
+    pub fn road(&self) -> Vec<Stage> {
+        let mut stages: Vec<Stage> = Vec::new();
+        let mut index: HashMap<&str, usize> = HashMap::new();
+        for invocation in self.turns.iter().flat_map(|turn| &turn.invocations) {
+            match index.get(invocation.name.as_str()) {
+                Some(&at) => {
+                    let stage: &mut Stage = &mut stages[at];
+                    stage.visits += 1;
+                    stage.busy_ms += invocation.last_seen.saturating_sub(invocation.first_seen);
+                    stage.last_seen = stage.last_seen.max(invocation.last_seen);
+                }
+                None => {
+                    index.insert(invocation.name.as_str(), stages.len());
+                    stages.push(Stage {
+                        name: invocation.name.clone(),
+                        visits: 1,
+                        busy_ms: invocation.last_seen.saturating_sub(invocation.first_seen),
+                        last_seen: invocation.last_seen,
+                    });
+                }
+            }
+        }
+        stages
+    }
+
     /// Collapse invocations into kinds, and derive the edges between them.
     pub fn graph(&self) -> Graph {
         let mut nodes: Vec<Node> = Vec::new();
@@ -395,6 +429,35 @@ pub struct Node {
     pub visits: usize,
 }
 
+/// One stop on the road: a kind of specialist, how often it was reached, and for how long.
+///
+/// # Two states, not three
+///
+/// The design draws a third kind of node — *anticipated*, a dashed ring for a stage the enquiry
+/// has not reached yet. It is not drawn, because nothing in this client knows what is coming.
+/// There is no plan in the run: `Snapshot` carries buckets, jobs, tasks, reports and sources, and
+/// no list of intended steps; the coordinator decides its next delegation while answering. Drawing
+/// a dashed `analyze data` under a running `get data` would be inventing a plan and showing it to
+/// a researcher as a record.
+///
+/// That is the module's own rule, from §73: *a provenance record that quietly guesses is worse
+/// than no provenance record, because it will be believed.* If a plan ever does arrive on the
+/// wire — deepagents' todo list is the obvious candidate — this is where it attaches.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Stage {
+    pub name: String,
+    /// How many separate invocations of this kind the conversation has seen.
+    pub visits: usize,
+    /// Arrival time summed across those invocations.
+    ///
+    /// A sum rather than first-to-last, so two concurrent visits do not report the wall-clock
+    /// span between them as though the specialist had been working throughout it.
+    pub busy_ms: u64,
+    /// The most recent frame from any invocation of this kind — how the view tells which stage
+    /// is the one currently producing output.
+    pub last_seen: u64,
+}
+
 /// An observed transition and how many times it happened.
 ///
 /// `theories → paper search` traversed three times is one edge that says three, not three edges
@@ -482,6 +545,36 @@ mod tests {
         record.observe("tools:b", "theorizer", 2_000);
         record.observe("tools:b", "theorizer", 2_400);
         record
+    }
+
+    #[test]
+    fn the_road_is_one_stop_per_kind_across_the_whole_conversation() {
+        let mut record = sequential();
+        // A second question that goes back to the first specialist — §73's loop, and the reason
+        // the road spans the conversation rather than the turn in flight.
+        record.begin_turn("and what does the data say", 3_000);
+        record.observe("tools:c", "academic_researcher", 3_100);
+        record.observe("tools:c", "academic_researcher", 3_600);
+
+        let road = record.road();
+        assert_eq!(
+            road.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["academic_researcher", "theorizer"],
+            "first-seen order, and a revisit is not a second stop"
+        );
+        assert_eq!(road[0].visits, 2);
+        // 400ms in the first turn plus 500ms in the second — summed, not the 2,500ms wall-clock
+        // span from the first frame to the last.
+        assert_eq!(road[0].busy_ms, 900);
+        assert_eq!(road[0].last_seen, 3_600);
+        assert_eq!(road[1].visits, 1);
+
+        // The stage producing output most recently is the one the view rings as running. Here
+        // that is the revisited specialist, not the one that happens to be last in the strip.
+        let newest = road.iter().max_by_key(|stage| stage.last_seen).expect("a stage");
+        assert_eq!(newest.name, "academic_researcher");
+
+        assert!(Record::default().road().is_empty());
     }
 
     #[test]
