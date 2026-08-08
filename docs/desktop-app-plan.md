@@ -7588,3 +7588,54 @@ reintroducing the bug and watching it fail with the same `NameError`.
 That is the third overlay path now covered by an executing test rather than an imagined one, after
 §123's task boundary and §125's hook name. All three were written *after* the failure they would
 have caught, which is the honest description of this week.
+
+## 129. The pin pinned itself, and the guard guarded against us (2026-08-08)
+
+§127's version sync shipped, and the backend still did not move. The line added an hour later said
+why, in one go:
+
+```
+WARN the backend checkout has uncommitted changes — leaving it at its current
+     version rather than overwriting them   want=desktop_to_web
+```
+
+Two defects in eleven words.
+
+### `want=desktop_to_web`, after that branch had merged
+
+`backend_ref` was a **saved setting** with a constant default. The constant had already moved to
+`main`; `settings.toml` had `desktop_to_web` written into it by an unrelated save — a panel toggle
+is enough — and a persisted value beats a default forever.
+
+Which destroys the only property the pin has. The whole point is that the version travels with
+`git pull`; a setting that overrides it means the first researcher to run any build is frozen at
+that build's pin for good. **The pin pinned itself.**
+
+Now a constant with `MINIME_BACKEND_REF` as the override. An environment variable is the right
+shape for "test an unmerged branch": deliberate, scoped to one session, impossible to leave behind
+by accident. The setting was over-engineering that broke the feature.
+
+### "Uncommitted changes" that were ours
+
+The app writes into that checkout **by design** — the generated `.mini-me-desktop.langgraph.json`
+(§30) and the copied `.desktop-overlay/`. So `git status --porcelain` is never empty there, and the
+guard fired on every launch, reporting somebody's work in progress where there was none.
+
+`--untracked-files=no`. What the guard is for is a *tracked* file somebody edited, which is the
+only thing a checkout could actually lose.
+
+### The test that passed with the bug in it
+
+Worse than either. The first version wrote the untracked files and then synced to `Some(&before)` —
+the commit already checked out — which returns at the *"already at the expected commit"* line,
+before the dirty check is reached. Both the fixed and the broken code left `HEAD` where it was, so
+the assertion held either way.
+
+Caught only by deleting the fix and re-running, which is now the habit worth keeping: **a test
+written for a bug should be watched failing on that bug before it is trusted.** Rebuilt around a
+bare repository standing in for `origin` and a branch the checkout can actually move to, so a
+blocked sync and a working one give different answers. Verified failing without
+`--untracked-files=no`.
+
+*Three of this week's tests passed while the defect they were written for was still present
+(§125, §128, and this one). Each was a test of what I meant rather than of what the code does.*

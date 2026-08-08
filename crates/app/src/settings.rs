@@ -171,18 +171,6 @@ pub struct Settings {
     /// Whether the road strip down the left of the chat is showing.
     #[serde(default = "yes")]
     pub road_open: bool,
-    /// Which version of the Mini-Me backend this app expects.
-    ///
-    /// A branch name, tag or commit. Empty means "leave the checkout wherever it is", which is
-    /// what someone pointed at their own clone wants.
-    ///
-    /// **Why a setting and not only a constant.** The default travels with `git pull`, so a
-    /// researcher who updates the app gets the backend the app was built against — that is the
-    /// point, and it is what removes the hand-typed `git checkout` inside WSL. But a developer
-    /// testing an unmerged backend branch should not have to rebuild the Rust app to do it, and
-    /// a researcher whose network cannot reach GitHub should be able to pin themselves in place.
-    #[serde(default = "default_backend_ref")]
-    pub backend_ref: String,
     /// Whether the app created that directory.
     ///
     /// **Load-bearing.** Updating means `git fetch && git checkout <pin> && uv sync`, and
@@ -206,7 +194,6 @@ impl Default for Settings {
             theme: crate::theme::DEFAULT_NAME.to_string(),
             subagents: std::collections::BTreeMap::new(),
             project: String::new(),
-            backend_ref: default_backend_ref(),
             sidebar_open: true,
             panel_open: true,
             road_open: true,
@@ -221,11 +208,26 @@ impl Default for Settings {
 /// the pin lives in this repository, so `git pull` on the app carries it, and `sync_to_pin`
 /// brings the backend to it on the next launch (docs §127).
 ///
-/// `main` now that the citation work has merged (Mini-Me #38 and #39). A branch rather than a
-/// commit so a researcher's backend follows fixes as they land; pin a commit here instead when a
-/// release needs to hold still.
-pub fn default_backend_ref() -> String {
-    "main".to_string()
+/// The Mini-Me version this build of the app expects.
+///
+/// **A constant with an environment override, and deliberately *not* a saved setting.** It was
+/// one for an afternoon, and that broke the only property it has: the pin is supposed to travel
+/// with `git pull`, and a value written into `settings.toml` overrides the constant forever. The
+/// first researcher to run it kept `desktop_to_web` after that branch had merged and the constant
+/// had moved on — the pin pinned itself.
+///
+/// `MINIME_BACKEND_REF` is the escape hatch for testing an unmerged backend branch, which is what
+/// the setting was for. An environment variable is the right shape for that: deliberate, scoped
+/// to one session, and impossible to leave behind by accident.
+///
+/// `main` rather than a commit, so a researcher's backend follows fixes as they land. Pin a commit
+/// here when a release needs to hold still.
+pub fn backend_ref() -> String {
+    std::env::var("MINIME_BACKEND_REF")
+        .ok()
+        .map(|want| want.trim().to_string())
+        .filter(|want| !want.is_empty())
+        .unwrap_or_else(|| "main".to_string())
 }
 
 /// `true`, as a path serde can name.
@@ -562,8 +564,6 @@ mod tests {
             // All three deliberately *not* the default, so a round trip that silently reset
             // them to `true` would be caught here rather than by someone whose folded panels
             // kept reappearing.
-            // Not the default, so a round trip that silently reset it would be caught here.
-            backend_ref: "some-branch".into(),
             sidebar_open: false,
             panel_open: false,
             road_open: false,
@@ -589,10 +589,9 @@ mod tests {
         // precisely so an existing settings.toml — every one written before this build — does not
         // open with all three panels shut.
         assert!(settings.sidebar_open && settings.panel_open && settings.road_open);
-        // A settings file written before the pin existed still gets one, or the backend would
-        // stay wherever it was cloned — which is the whole defect being fixed.
-        assert_eq!(settings.backend_ref, default_backend_ref());
-        assert!(!settings.backend_ref.is_empty(), "an empty pin moves nothing");
+        // The pin is not a saved setting — see `backend_ref` for why a persisted one defeated
+        // the only property it has.
+        assert!(!backend_ref().is_empty(), "an empty pin moves nothing");
     }
 
     #[test]

@@ -287,9 +287,7 @@ impl BackendConfig {
             .filter(|dir| !dir.is_empty())
             .map(|dir| (dir.to_string(), settings.backend_dir_owned));
         let mut config = Self::build(recorded);
-        config.backend_ref = Some(settings.backend_ref.trim())
-            .filter(|want| !want.is_empty())
-            .map(str::to_string);
+        config.backend_ref = Some(crate::settings::backend_ref());
         config
     }
 
@@ -1203,7 +1201,12 @@ impl BackendSupervisor {
         }
 
         // A tree with local edits belongs to whoever made them.
-        match self.run_git(&dir, &["status", "--porcelain"]) {
+        // **Tracked files only.** The app writes into this checkout by design — the generated
+        // `.mini-me-desktop.langgraph.json` (§30) and the copied `.desktop-overlay/` — so a plain
+        // `git status --porcelain` is *never* empty here and the guard fired on every launch,
+        // reporting somebody's uncommitted work where there was none. What the guard is actually
+        // for is a tracked file somebody edited, which is the only thing a checkout could lose.
+        match self.run_git(&dir, &["status", "--porcelain", "--untracked-files=no"]) {
             Some(changes) if !changes.trim().is_empty() => {
                 tracing::warn!(
                     %want,
@@ -2290,26 +2293,45 @@ mod tests {
 mod pin_tests {
     use super::*;
 
-    /// A real git repository with one commit, to check the guards without mocking git.
-    fn repo() -> Option<std::path::PathBuf> {
-        let dir = std::env::temp_dir().join(format!("minime-pin-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).ok()?;
-        let git = |args: &[&str]| {
+    /// A real clone with a real remote, so `fetch` and `checkout` do what they do in the field.
+    ///
+    /// A bare repository standing in for `origin`, carrying two commits: `main` and a `target`
+    /// branch one commit ahead. Without a reachable remote `sync_to_pin` returns at the fetch and
+    /// every later assertion passes for the wrong reason — which is exactly how the first version
+    /// of this test "passed" with the bug it was written to catch still in place.
+    fn repo() -> Option<(std::path::PathBuf, String)> {
+        let base = std::env::temp_dir().join(format!("minime-pin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let origin = base.join("origin.git");
+        let work = base.join("work");
+        std::fs::create_dir_all(&origin).ok()?;
+
+        let run = |at: &std::path::Path, args: &[&str]| {
             std::process::Command::new("git")
-                .current_dir(&dir)
+                .current_dir(at)
                 .args(args)
                 .output()
                 .ok()
                 .filter(|out| out.status.success())
         };
-        git(&["init", "-q"])?;
-        git(&["config", "user.email", "t@example.org"])?;
-        git(&["config", "user.name", "t"])?;
-        std::fs::write(dir.join("a.txt"), "one").ok()?;
-        git(&["add", "-A"])?;
-        git(&["commit", "-qm", "one"])?;
-        Some(dir)
+        run(&origin, &["init", "-q", "--bare", "--initial-branch=main"])?;
+        std::fs::create_dir_all(&work).ok()?;
+        run(&work, &["init", "-q", "--initial-branch=main"])?;
+        run(&work, &["config", "user.email", "t@example.org"])?;
+        run(&work, &["config", "user.name", "t"])?;
+        run(&work, &["remote", "add", "origin", &origin.to_string_lossy()])?;
+        std::fs::write(work.join("a.txt"), "one").ok()?;
+        run(&work, &["add", "-A"])?;
+        run(&work, &["commit", "-qm", "one"])?;
+        run(&work, &["push", "-q", "origin", "main"])?;
+        // A branch the checkout can actually be moved to.
+        run(&work, &["checkout", "-q", "-b", "target"])?;
+        std::fs::write(work.join("b.txt"), "two").ok()?;
+        run(&work, &["add", "-A"])?;
+        run(&work, &["commit", "-qm", "two"])?;
+        run(&work, &["push", "-q", "origin", "target"])?;
+        run(&work, &["checkout", "-q", "main"])?;
+        Some((work, base.to_string_lossy().into_owned()))
     }
 
     fn supervisor(dir: &std::path::Path, owned: bool, want: Option<&str>) -> BackendSupervisor {
@@ -2332,7 +2354,7 @@ mod pin_tests {
             eprintln!("skipping: git is not on PATH");
             return;
         }
-        let Some(dir) = repo() else {
+        let Some((dir, base)) = repo() else {
             eprintln!("skipping: could not build a temp repository");
             return;
         };
@@ -2354,7 +2376,32 @@ mod pin_tests {
         supervisor(&dir, false, Some("some-other-branch")).sync_to_pin();
         assert_eq!(head(&dir), before, "a checkout we do not own must be left alone");
 
-        // Ours, but with uncommitted work: still never touched. Somebody is editing it.
+        // **A file the app itself wrote must not count as somebody's work in progress.** The
+        // generated config and the copied overlay are untracked files in this checkout, so a
+        // plain porcelain check is never clean and the guard fired on every launch — reporting
+        // uncommitted changes that were the app's own.
+        //
+        // Asserted by moving to a branch that *exists*, so a blocked sync and a working one give
+        // different answers. The first version of this pinned `want` to the current commit, which
+        // returns before the dirty check is even reached — it passed with the bug still in.
+        std::fs::write(dir.join(".mini-me-desktop.langgraph.json"), "{}").expect("write");
+        std::fs::create_dir_all(dir.join(".desktop-overlay")).expect("mkdir");
+        std::fs::write(dir.join(".desktop-overlay/sitecustomize.py"), "").expect("write");
+        supervisor(&dir, true, Some("target")).sync_to_pin();
+        assert_ne!(
+            head(&dir),
+            before,
+            "untracked files the app wrote must not block the sync"
+        );
+        let moved = head(&dir);
+        // Back to where the rest of the assertions expect it.
+        let _ = std::process::Command::new("git")
+            .current_dir(&dir)
+            .args(["checkout", "-q", "main"])
+            .output();
+        assert_eq!(head(&dir), before, "{moved} was reachable, so main still is");
+
+        // Ours, but with a *tracked* file edited: never touched. Somebody is editing it.
         std::fs::write(dir.join("a.txt"), "edited").expect("write");
         supervisor(&dir, true, Some("some-other-branch")).sync_to_pin();
         assert_eq!(head(&dir), before, "uncommitted work must not be overwritten");
@@ -2378,6 +2425,6 @@ mod pin_tests {
         supervisor(&dir, true, Some("no-such-ref")).sync_to_pin();
         assert_eq!(head(&dir), before);
 
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
