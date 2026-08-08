@@ -17,13 +17,20 @@
 //! and the last thing a reader can verify by eye. That asymmetry is the whole argument for doing
 //! it in software.
 //!
-//! # What leaves the machine
+//! # What leaves the machine, and when
 //!
-//! **A DOI, and nothing else.** Not the citation, not the question that produced it, not the
-//! conversation. A DOI is a public identifier for a published work, which is the one part of this
-//! that is already world-readable — and the check is a lookup *by* that identifier, with the
-//! comparison done here against text that never leaves. Org policy is explicit that confidential
-//! and unpublished material must not be sent to third parties; this sends neither.
+//! This runs **automatically**, as sources arrive, with no control to press — see
+//! `Workbench::resolve_sources` for why. That makes the disclosure worth stating precisely rather
+//! than leaving to a button someone chose to click:
+//!
+//! * A **DOI**, for every reference that carries one.
+//! * The **citation text**, for a reference whose DOI turned out wrong or missing — because that
+//!   text *is* the query that finds the real work.
+//!
+//! Both go to `crossref.org` and nowhere else. Never the researcher's question, never the
+//! conversation, never a file, never anything the agent produced. A citation and a DOI both name
+//! published work, which is the one part of this that is already world-readable. Org policy
+//! forbids sending confidential or unpublished material to third parties; this sends neither.
 //!
 //! # What a negative result does *not* mean
 //!
@@ -77,17 +84,11 @@ impl Verdict {
         matches!(self, Verdict::Mismatch { .. } | Verdict::Unregistered)
     }
 
-    /// One line, in the researcher's terms.
-    pub fn label(&self) -> String {
-        match self {
-            Verdict::Confirmed => "DOI checked — resolves to this paper".to_string(),
-            Verdict::FromSearch => "Semantic Scholar — the id Asta returned for this paper".to_string(),
-            Verdict::Mismatch { found } => format!("DOI resolves to a different paper: {found}"),
-            Verdict::Unregistered => "this DOI is not registered — no such record".to_string(),
-            Verdict::NoIdentifier => "no DOI to check".to_string(),
-            Verdict::Unreachable { why } => format!("could not check ({why})"),
-        }
-    }
+    // No `label`. Each verdict used to render one canned line, and the panel now writes a
+    // sentence from the verdict *and* what the lookup found — "the citation's own DOI named a
+    // different paper; this link is the work it describes" says in one line what two rows of
+    // machine phrasing said in two. The distinctions live in the type; the wording belongs where
+    // the two facts meet.
 }
 
 /// Whether a link is the Semantic Scholar corpus-id form.

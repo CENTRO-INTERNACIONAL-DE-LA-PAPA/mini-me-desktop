@@ -598,13 +598,13 @@ impl Sidecar {
     ///
     /// Results arrive one at a time so the panel fills in as it goes, keyed by DOI because a
     /// source's position can change while the check is running.
-    pub fn check_references(
+    pub fn resolve_references(
         &self,
-        // `(key, doi, citation)`. The key is the caller's — it is what the verdict is filed
-        // against, and it is not the DOI: the references that most need an answer are the ones
-        // that have none.
-        wanted: Vec<(String, String, String)>,
-    ) -> mpsc::UnboundedReceiver<(String, references::Verdict)> {
+        // `(key, doi or none, citation)`. The key is the caller's — it is what the answer is
+        // filed against, and it is not the DOI: the references that most need resolving are the
+        // ones that have none.
+        wanted: Vec<(String, Option<String>, String)>,
+    ) -> mpsc::UnboundedReceiver<(String, references::Verdict, Option<references::Repair>)> {
         /// Enough for any real bibliography; a guard against a runaway list, not a policy.
         const MAX_CHECKS: usize = 60;
 
@@ -630,58 +630,29 @@ impl Sidecar {
             };
 
             for (key, doi, citation) in wanted.into_iter().take(MAX_CHECKS) {
-                let verdict = check_one(&client, &doi, &citation).await;
-                if tx.unbounded_send((key, verdict)).is_err() {
+                // Verify the identifier the citation carries, if it carries one.
+                let verdict = match &doi {
+                    Some(doi) => check_one(&client, doi, &citation).await,
+                    None => references::Verdict::NoIdentifier,
+                };
+                // And, without being asked again, find the work it actually describes whenever
+                // that identifier turned out to be wrong or missing. Making the researcher press
+                // a second button to learn which paper their citation meant is asking them to do
+                // the job this exists to do.
+                let repair = if verdict.is_problem()
+                    || matches!(verdict, references::Verdict::NoIdentifier)
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+                    repair_one(&client, &citation).await
+                } else {
+                    None
+                };
+                if tx.unbounded_send((key, verdict, repair)).is_err() {
                     // The window has gone, or the conversation changed. Stop rather than keep
                     // asking a public service for answers nobody is waiting for.
                     return;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(120)).await;
-            }
-        });
-        rx
-    }
-
-    /// For each citation, ask the registry which work it actually describes.
-    ///
-    /// **A wider disclosure than [`Self::check_references`], and the reason it is a separate
-    /// action rather than part of the same click.** Checking a DOI sends an identifier. This
-    /// sends the *citation text* — because that is the query, and because the whole reason it
-    /// works is that the title in the citation came from the search even when the DOI did not.
-    ///
-    /// A citation names a published work, so it is public bibliographic data. But it is more
-    /// than an identifier, and a researcher should decide to send it rather than discover
-    /// afterwards that they did. The panel says so before the button is pressed.
-    pub fn repair_references(
-        &self,
-        wanted: Vec<(String, String)>,
-    ) -> mpsc::UnboundedReceiver<(String, Option<references::Repair>)> {
-        const MAX_REPAIRS: usize = 40;
-
-        let (tx, rx) = mpsc::unbounded();
-        self.runtime.spawn(async move {
-            let client = match reqwest::Client::builder()
-                .user_agent(concat!(
-                    "mini-me-desktop/",
-                    env!("CARGO_PKG_VERSION"),
-                    " (research reference checker)"
-                ))
-                .timeout(std::time::Duration::from_secs(20))
-                .build()
-            {
-                Ok(client) => client,
-                Err(error) => {
-                    tracing::warn!(%error, "could not build the reference repairer");
-                    return;
-                }
-            };
-
-            for (key, citation) in wanted.into_iter().take(MAX_REPAIRS) {
-                let found = repair_one(&client, &citation).await;
-                if tx.unbounded_send((key, found)).is_err() {
-                    return;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
             }
         });
         rx

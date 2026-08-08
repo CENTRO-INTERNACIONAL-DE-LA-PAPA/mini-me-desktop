@@ -7214,3 +7214,58 @@ no amount of identifier plumbing reaches it. It stays in the upstream report as 
 recommendation.
 
 *The fix was never a lookup. It was carrying a value forty lines further than it had been carried.*
+
+## 122. The buttons were the bug (2026-08-07)
+
+> *"Sorry but having these button is dumb. Why the user must check something we should do for them
+> before put that into the ui? … I told you I dont want to show the doi link just the word link and
+> when I press it I am redirected to the paper in semantic scholar."*
+
+Correct on all three counts, and the first one is a design error rather than a preference.
+
+### Why a button was the wrong shape
+
+**Check DOIs** asked the researcher to request a check on data the app had already decided to show
+them. That is the wrong way round: either a citation is worth verifying, in which case verify it,
+or it is not, in which case do not offer to. And it asked for work only the app can do — a network
+call per reference and a title comparison — whose answer is the same every time it is asked.
+
+**Find the right DOI** was worse: a *second* button, to learn which paper a citation meant, after
+the first had already established that the one written down was wrong. Two clicks to be told
+something the app knew how to find out on its own.
+
+Both are gone. Verification runs in the background as sources arrive, only for citations not
+already answered, and says nothing when everything checks out — a line under each of fourteen
+references confirming it is fine buries the two that are not.
+
+*A control that asks the user to authorise work they cannot do themselves, on a question with one
+right answer, is not a choice. It is unfinished work with a button in front of it.*
+
+### The link is the word "link"
+
+The row showed a full DOI URL, which wraps mid-token in a 330px column and is not information
+anyone wants to read. It now shows **link**, and it points at the paper's page on Semantic Scholar
+— not the publisher's landing page, which is a paywall as often as not.
+
+`api.semanticscholar.org/<id>` 301-redirects for both id forms, verified live:
+
+```
+CorpusID:45447591                  → /paper/117e16e7774ff0616b461a075feadcee7a33d793
+DOI:10.1016/0304-3878(92)90044-a   → /paper/bbec167725ba916adafcaa221f934b759e2cd131
+```
+
+So the link is always a Semantic Scholar link, whichever identifier survives: the corpus id the
+search returned (§121), the DOI the registry says the citation describes, or the DOI it carried
+when that one checked out. Only a source with none of the three — a thesis in a university
+repository — keeps its own URL, because a working link to the right document beats a Semantic
+Scholar page that does not exist.
+
+### The disclosure has to be stated, not clicked
+
+Automatic means nobody is choosing per use, so the module now says exactly what goes out: a DOI for
+every reference, and the citation text for one whose DOI is wrong or missing — because that text is
+the query that finds the real work. To `crossref.org` and nowhere else. Never the question, never
+the conversation, never a file.
+
+That is the trade the button was standing in for, and stating it once in the code is more honest
+than making somebody re-consent every time they want a reference checked.
