@@ -184,16 +184,47 @@ fn bibliography(sources: &[protocol::Source]) -> String {
 /// citation describes; the DOI the citation carries, when that one checked out. Failing all three
 /// — a thesis in a university repository, say — whatever link the source came with, because a
 /// working link to the right document beats a Semantic Scholar page that does not exist.
-fn scholar_link(source: &protocol::Source, repair: Option<&references::Repair>) -> Option<String> {
+fn scholar_link(
+    source: &protocol::Source,
+    verdict: Option<&references::Verdict>,
+    repair: Option<&references::Repair>,
+) -> Option<String> {
     let existing = link_for(source);
+
+    // Trustworthy by construction: built from the `corpusId` in the search result this paper came
+    // from. Nothing composed it, so there is nothing to check.
     if existing.as_deref().is_some_and(references::is_corpus_link) {
         return existing;
     }
-    let doi = repair
-        .map(|repair| repair.doi.clone())
-        .or_else(|| existing.as_deref().and_then(references::doi_in));
-    match doi {
-        Some(doi) => Some(format!("https://api.semanticscholar.org/DOI:{doi}")),
+
+    // The work the registry says this citation describes. Checked, so usable.
+    if let Some(repair) = repair {
+        return Some(format!("https://api.semanticscholar.org/DOI:{}", repair.doi));
+    }
+
+    // The citation's own DOI — **only once it has been verified**.
+    //
+    // This is the line that shipped wrong, and it made things worse rather than merely failing.
+    // It used to wrap *any* DOI, verified or not, as `api.semanticscholar.org/DOI:<doi>`. An
+    // invented DOI is a real DOI belonging to somebody else, so instead of 404ing it resolved —
+    // cleanly, to a real Semantic Scholar page. A researcher clicking `link` on a paper about
+    // potato late blight was taken to one about recombination in the mammalian germ line, with no
+    // warning, because the row renders before the check returns.
+    //
+    // Routing through Semantic Scholar removed the one accidental safeguard a bad DOI had: that
+    // it often did not resolve at all. So the guard has to be explicit. An unverified identifier
+    // written by a model is not a link; it is a claim awaiting a check.
+    if matches!(verdict, Some(references::Verdict::Confirmed)) {
+        if let Some(doi) = existing.as_deref().and_then(references::doi_in) {
+            return Some(format!("https://api.semanticscholar.org/DOI:{doi}"));
+        }
+    }
+
+    // A link that carries no identifier at all — a thesis in a university repository — is the
+    // model's, and unverifiable, but at least it is not dressed up as a resolved paper. Kept only
+    // when there is no DOI in it to be wrong about.
+    match existing.as_deref().and_then(references::doi_in) {
+        Some(_) => None,
         None => existing,
     }
 }
@@ -9174,7 +9205,7 @@ impl Workbench {
             // article in the main page where the article was published."* `api.semanticscholar.org`
             // 301-redirects for both id forms — verified — so a corpus id and a DOI both land on
             // the paper's own page.
-            let link = scholar_link(source, repair.as_ref());
+            let link = scholar_link(source, verdict, repair.as_ref());
             // The citation without its URL. A DOI written into a sentence wraps mid-token in a
             // 330px column, and a link that *looks* broken is one somebody retypes with a space
             // in it — but more to the point, the raw URL is not information a reader wants. The
@@ -9237,7 +9268,21 @@ impl Workbench {
             // **Only when something is wrong.** A line under every reference saying it checked
             // out is fourteen lines of reassurance nobody reads, and it buries the two that
             // matter. Silence here means verified.
+            // Said while the check is still running, because the alternative is a reference that
+            // looks finished and is not. The link is withheld until then (see `scholar_link`), and
+            // a row with neither a link nor an explanation reads as a reference with nothing
+            // wrong with it.
             let note = match (verdict, looked_up) {
+                (None, _) if self.resolving > 0 => {
+                    Some((theme::text_faint(), "checking this reference…".to_string()))
+                }
+                (Some(references::Verdict::Mismatch { found }), None) => Some((
+                    theme::error(),
+                    format!(
+                        "the DOI in this citation belongs to a different paper ({found}) — \
+                         looking for the right one"
+                    ),
+                )),
                 (Some(references::Verdict::Mismatch { .. }), Some(Some(_))) => Some((
                     theme::warning(),
                     "the citation's own DOI named a different paper; this link is the work it \
@@ -10137,6 +10182,80 @@ mod tests {
             citation: citation.to_string(),
             link: link.map(str::to_string),
         }
+    }
+
+    #[test]
+    fn an_unverified_doi_never_becomes_a_link() {
+        // The real failure, reported from a live run: a citation about potato late blight linked
+        // to a paper on recombination in the mammalian germ line. The model had invented a DOI,
+        // and an invented DOI is a real DOI belonging to somebody else — so routing it through
+        // Semantic Scholar made it *resolve* instead of 404ing. The one accidental safeguard a
+        // bad DOI had was removed by the thing meant to improve it.
+        let invented = cited(
+            "Lindqvist-Kreuze, H., & Perez, W. G. (2010). Field resistance to Phytophthora \
+             infestans in native Andean potato landraces. Euphytica, 174(2), 217-227. \
+             https://doi.org/10.1007/s10681-010-0147-6",
+            None,
+        );
+
+        // Unchecked: no link at all. Not a plausible one.
+        assert_eq!(scholar_link(&invented, None, None), None);
+        // Checked and wrong: still no link.
+        assert_eq!(
+            scholar_link(
+                &invented,
+                Some(&references::Verdict::Mismatch {
+                    found: "Recombination in the mammalian germ line".into()
+                }),
+                None
+            ),
+            None
+        );
+        assert_eq!(
+            scholar_link(&invented, Some(&references::Verdict::Unregistered), None),
+            None
+        );
+
+        // Checked and right: the link appears, through Semantic Scholar.
+        assert_eq!(
+            scholar_link(&invented, Some(&references::Verdict::Confirmed), None).as_deref(),
+            Some("https://api.semanticscholar.org/DOI:10.1007/s10681-010-0147-6")
+        );
+
+        // Repaired: the registry's DOI, not the citation's.
+        assert_eq!(
+            scholar_link(
+                &invented,
+                Some(&references::Verdict::Unregistered),
+                Some(&references::Repair {
+                    doi: "10.1007/s10681-009-0053-y".into(),
+                    title: "The real paper".into()
+                })
+            )
+            .as_deref(),
+            Some("https://api.semanticscholar.org/DOI:10.1007/s10681-009-0053-y")
+        );
+
+        // A corpus id from the search needs no check — nothing composed it.
+        let from_search = cited(
+            "Monteros-Altamirano, Á. (2021). Late blight resistance of Ecuadorian landraces.",
+            Some("https://api.semanticscholar.org/CorpusID:237744014"),
+        );
+        assert_eq!(
+            scholar_link(&from_search, None, None).as_deref(),
+            Some("https://api.semanticscholar.org/CorpusID:237744014")
+        );
+
+        // A link with no DOI in it — a thesis in a repository — is kept: unverifiable, but not
+        // dressed up as a resolved paper.
+        let thesis = cited(
+            "de Haan, S. (2009). Potato Diversity at Height. PhD thesis, Wageningen University.",
+            Some("https://library.wur.nl/WebQuery/wurpubs/399292"),
+        );
+        assert_eq!(
+            scholar_link(&thesis, None, None).as_deref(),
+            Some("https://library.wur.nl/WebQuery/wurpubs/399292")
+        );
     }
 
     #[test]
