@@ -7480,3 +7480,57 @@ shape at all. Now pinned as a case, with the real value in it.
 `17/17` DOIs resolving is the headline, and it is worth being clear about *why* it is not
 impressive engineering: the DOI is copied out of the record it came with. It is the number that
 was wrong before because the number was previously being remembered instead of copied.
+
+## 127. One repo moved on `git pull`, and it was the wrong one (2026-08-07)
+
+> *"wait what, why I need to put something in wsl and not by doing git pull; cargo run?"*
+
+A fair question with an embarrassing answer: because the backend never updated at all.
+
+`setup-wsl.sh` clones Mini-Me once and says so in its own header — *"never overwrites an existing
+checkout, and never touches a checkout it did not create."* That is the right rule for
+provisioning and it was doing the whole job: there was no pin, no update path, and nothing that
+moved the checkout afterwards. The Python the agent actually runs stayed at whatever commit it was
+cloned at, forever.
+
+It went unnoticed because everything shipped so far lived in the *desktop* repository — including
+`overlay/minime_local/*.py`, which travels with the Rust app and reaches into the backend at
+import time. `git pull; cargo run` was genuinely enough. The moment a fix landed in Mini-Me itself
+(§126), the gap appeared, and the instruction that fell out of it was "type this into WSL" — which
+is precisely what a researcher who cannot code must never be asked to do.
+
+### The pin
+
+`Settings::backend_ref` names the Mini-Me version this build expects, defaulting to a constant in
+this repository. So the pin travels with `git pull`, and `BackendSupervisor::sync_to_pin` brings
+the checkout to it on the next launch. One command again.
+
+A setting as well as a constant, because a developer testing an unmerged backend branch should not
+have to rebuild the Rust app, and someone whose network cannot reach GitHub should be able to pin
+themselves in place.
+
+### The guards are the part worth reviewing
+
+Getting the happy path wrong costs a stale backend. Getting these wrong destroys a colleague's
+uncommitted work, which is the failure §231's ownership flag exists to prevent.
+
+* **Not ours, not touched.** `owned` is false for any checkout the app merely found or was pointed
+  at — the reference checkout on this machine has ten local branches, several live in worktrees.
+* **Dirty, not touched.** Refused rather than stashed or forced. A dirty tree means somebody is
+  editing the backend, and this is not the code that decides what happens to that.
+* **Never blocks the launch.** Offline, no `git`, a ref that does not exist — each logs and
+  returns. A backend one version behind still runs; a backend that would not start because the
+  network was down would be a worse app.
+* **Already at the pinned commit costs nothing.** A local `rev-parse` before any network call.
+
+Tested against a real temporary repository rather than a mock, because the thing being verified is
+what `git` does, and a mock of git would only confirm what I believe git does.
+
+### Logged on success
+
+`sync_to_pin` says when it moved the backend and to what. Three overlay patches hid this week
+behind installers that spoke only on failure (§123, §125), and a version sync is exactly the kind
+of thing where "already right", "moved" and "silently skipped" must not produce identical evidence.
+
+*Two repositories is a real cost, and this is the first instalment of it. The answer is not to
+avoid the split — it is that the seam has to be as automatic as the thing it replaced.*

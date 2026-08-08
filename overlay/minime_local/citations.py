@@ -198,6 +198,64 @@ def link(paper: dict[str, Any]) -> str:
     return f"https://api.semanticscholar.org/CorpusID:{corpus}" if corpus else ""
 
 
+def citable(node: Any) -> bool:
+    """Whether this object is a paper record carrying enough to cite.
+
+    A title plus at least one of the fields that make a citation more than a title. Deliberately
+    not "has a corpusId": a snippet-search result has one and no year, venue or DOI, and writing
+    `Smith. (n.d.). A title.` over it would replace a missing citation with a threadbare one while
+    claiming the same authority.
+    """
+    if not isinstance(node, dict) or not _clean(node.get("title")):
+        return False
+    journal = node.get("journal") if isinstance(node.get("journal"), dict) else {}
+    return bool(
+        node.get("year")
+        or _clean(node.get("venue"))
+        or _clean((journal or {}).get("name"))
+        or _clean((node.get("externalIds") or {}).get("DOI"))
+    )
+
+
+def enrich(payload: Any) -> int:
+    """Add `citation` and `link` to every paper record in a tool result, in place.
+
+    **This is the wiring, and its shape is the point.** The model is not asked to call anything:
+    a search result simply arrives with its reference already written. There is no path where it
+    holds a paper and lacks the citation for it, so there is no path where it fills the gap from
+    memory — which is what every previous fix was trying to detect after the fact.
+
+    Walks the whole structure rather than a known path, because the seven Asta tools nest their
+    papers differently and a walk keeps working when one of them changes shape.
+
+    Returns how many records were enriched, so the caller can log a number rather than a claim
+    (§81): "3 of 10" and "0 of 10" must not look alike.
+    """
+    count = 0
+
+    def walk(node: Any) -> None:
+        nonlocal count
+        if isinstance(node, dict):
+            if citable(node):
+                built = apa(node)
+                if built:
+                    # `citation`, the field name the rest of the pipeline already uses, so the
+                    # artifact layer and the desktop client need no new vocabulary.
+                    node["citation"] = built
+                    where = link(node)
+                    if where:
+                        node["link"] = where
+                    count += 1
+            for value in list(node.values()):
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(payload)
+    return count
+
+
 def describe(paper: dict[str, Any]) -> dict[str, str]:
     """One retrieved paper, as the model and the researcher should both see it.
 

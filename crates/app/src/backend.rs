@@ -231,6 +231,11 @@ pub struct BackendConfig {
     /// `git checkout <pin>` and `uv sync`, which on someone's own working clone destroys
     /// work — so this decides whether the update button exists at all (docs §25).
     pub owned: bool,
+    /// The Mini-Me version this build of the app expects, if any.
+    ///
+    /// See `Settings::backend_ref` and `BackendSupervisor::sync_to_pin`. `None` means leave the
+    /// checkout wherever it is.
+    pub backend_ref: Option<String>,
 }
 
 impl BackendConfig {
@@ -281,7 +286,11 @@ impl BackendConfig {
         let recorded = Some(settings.backend_dir.trim())
             .filter(|dir| !dir.is_empty())
             .map(|dir| (dir.to_string(), settings.backend_dir_owned));
-        Self::build(recorded)
+        let mut config = Self::build(recorded);
+        config.backend_ref = Some(settings.backend_ref.trim())
+            .filter(|want| !want.is_empty())
+            .map(str::to_string);
+        config
     }
 
     fn build(recorded: Option<(String, bool)>) -> Self {
@@ -323,6 +332,10 @@ impl BackendConfig {
             approve_execute: true,
             async_subagents: false,
             owned,
+            // Set by `with_recorded_dir`, which is the only path that has read settings.
+            // `build` is also reached from tests and from the environment-only path, where
+            // leaving the checkout alone is the right default.
+            backend_ref: None,
         }
     }
 }
@@ -1126,11 +1139,123 @@ impl BackendSupervisor {
                 self.config.base_url()
             );
         }
+        // Bring the backend to the version this build of the app expects, before starting it.
+        // Here rather than at provisioning because provisioning happens once and the pin moves.
+        self.sync_to_pin();
         self.start()?;
         // `langgraph dev` imports the graph on boot, so first health can take a
         // while on a cold venv.
         self.wait_until_healthy(client, 120).await?;
         Ok(Started::Spawned)
+    }
+
+    /// Bring the backend checkout to [`crate::settings::Settings::backend_ref`].
+    ///
+    /// **Why this exists.** The desktop app and the backend are two repositories, and until now
+    /// only one of them moved when a researcher ran `git pull`. The Python that the agent
+    /// actually executes was cloned once by `setup-wsl.sh` — which deliberately *"never
+    /// overwrites an existing checkout"* — and then stayed at whatever commit that was, forever.
+    /// So a backend fix reached nobody without a hand-typed `git checkout` inside WSL, which is
+    /// exactly the kind of manual step a researcher should never meet (docs §127).
+    ///
+    /// Now the app carries the version it expects, that version travels with `git pull`, and the
+    /// backend follows on the next launch.
+    ///
+    /// # What it will not do
+    ///
+    /// * **Touch a checkout the app does not own.** `backend_dir_owned` is false when someone
+    ///   pointed the app at their own clone — the reference checkout on this developer's machine
+    ///   has ten local branches, several live in worktrees — and running `git checkout` on that
+    ///   is how you destroy somebody's afternoon. Same rule as the updater (§231).
+    /// * **Touch a checkout with uncommitted work.** Refused, loudly, rather than stashed or
+    ///   forced: a dirty tree means somebody is editing the backend, and this is not the code to
+    ///   decide what happens to that.
+    /// * **Block the launch.** Every failure here — offline, no `git`, a ref that does not exist
+    ///   — logs and returns. A backend one version behind still runs; a backend that would not
+    ///   start because the network was down would be a worse app.
+    fn sync_to_pin(&self) {
+        let Some(want) = self.config.backend_ref.clone() else {
+            return;
+        };
+        if !self.config.owned {
+            tracing::debug!("backend checkout is not ours to move; leaving it alone");
+            return;
+        }
+        let dir = self.config.backend_dir();
+
+        // Cheap local check first, so the common case costs no network at all: a pinned commit
+        // that is already checked out needs nothing.
+        let want = want.as_str();
+        let head = self
+            .run_git(&dir, &["rev-parse", "HEAD"])
+            .unwrap_or_default();
+        if !head.is_empty() && head.starts_with(want) && want.len() >= 7 {
+            tracing::debug!(%want, "backend already at the expected commit");
+            return;
+        }
+
+        // A tree with local edits belongs to whoever made them.
+        match self.run_git(&dir, &["status", "--porcelain"]) {
+            Some(changes) if !changes.trim().is_empty() => {
+                tracing::warn!(
+                    %want,
+                    "the backend checkout has uncommitted changes — leaving it at its current \
+                     version rather than overwriting them"
+                );
+                return;
+            }
+            None => {
+                tracing::debug!("no git in the backend checkout; leaving it alone");
+                return;
+            }
+            _ => {}
+        }
+
+        if self.run_git(&dir, &["fetch", "--quiet", "origin"]).is_none() {
+            tracing::warn!(%want, "could not reach the backend's remote — staying on the current version");
+            return;
+        }
+        // `origin/<ref>` first so a branch name tracks the remote rather than a stale local copy
+        // of it; a bare commit or tag falls through to the second form.
+        let moved = self
+            .run_git(&dir, &["checkout", "--quiet", &format!("origin/{want}")])
+            .or_else(|| self.run_git(&dir, &["checkout", "--quiet", want]));
+        match moved {
+            Some(_) => {
+                let at = self
+                    .run_git(&dir, &["rev-parse", "--short", "HEAD"])
+                    .unwrap_or_default();
+                // Logged on **success**, not only on failure. A version sync that spoke only
+                // when it broke would make "already right", "moved" and "silently skipped"
+                // produce identical evidence — which is how three overlay patches hid this week.
+                tracing::warn!(%want, at = %at.trim(), "backend moved to the version this app expects");
+            }
+            None => tracing::warn!(
+                %want,
+                "could not check out the expected backend version — staying where it is"
+            ),
+        }
+    }
+
+    /// Run one git command in `dir`, or `None` if it could not run or failed.
+    fn run_git(&self, dir: &str, args: &[&str]) -> Option<String> {
+        let command = format!(
+            "git -C {} {}",
+            quote_path(dir),
+            args.iter()
+                .map(|arg| shell_quote(arg))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        let argv = self.config.shell_argv(&command);
+        let output = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
     /// Poll `GET /ok` until it responds or the budget runs out.
@@ -2146,5 +2271,101 @@ mod tests {
             Execution::Local { .. }
         ));
         std::env::remove_var("MINIME_EXECUTION_BACKEND");
+    }
+}
+
+#[cfg(test)]
+mod pin_tests {
+    use super::*;
+
+    /// A real git repository with one commit, to check the guards without mocking git.
+    fn repo() -> Option<std::path::PathBuf> {
+        let dir = std::env::temp_dir().join(format!("minime-pin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok()?;
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(&dir)
+                .args(args)
+                .output()
+                .ok()
+                .filter(|out| out.status.success())
+        };
+        git(&["init", "-q"])?;
+        git(&["config", "user.email", "t@example.org"])?;
+        git(&["config", "user.name", "t"])?;
+        std::fs::write(dir.join("a.txt"), "one").ok()?;
+        git(&["add", "-A"])?;
+        git(&["commit", "-qm", "one"])?;
+        Some(dir)
+    }
+
+    fn supervisor(dir: &std::path::Path, owned: bool, want: Option<&str>) -> BackendSupervisor {
+        let mut config = BackendConfig::build(None);
+        config.wsl = None;
+        config.project_dir = dir.to_path_buf();
+        config.owned = owned;
+        config.backend_ref = want.map(str::to_string);
+        BackendSupervisor::new(config)
+    }
+
+    /// The guards that decide whether `git checkout` runs on somebody's working tree.
+    ///
+    /// **These are the ones worth a test.** Getting the happy path wrong costs a stale backend;
+    /// getting these wrong destroys a colleague's uncommitted work — the failure §231 wrote the
+    /// ownership flag to prevent.
+    #[test]
+    fn a_checkout_is_only_moved_when_it_is_ours_and_clean() {
+        if std::process::Command::new("git").arg("--version").output().is_err() {
+            eprintln!("skipping: git is not on PATH");
+            return;
+        }
+        let Some(dir) = repo() else {
+            eprintln!("skipping: could not build a temp repository");
+            return;
+        };
+        let head = |at: &std::path::Path| {
+            String::from_utf8_lossy(
+                &std::process::Command::new("git")
+                    .current_dir(at)
+                    .args(["rev-parse", "HEAD"])
+                    .output()
+                    .expect("git")
+                    .stdout,
+            )
+            .trim()
+            .to_string()
+        };
+        let before = head(&dir);
+
+        // Not ours: never touched, whatever the pin says.
+        supervisor(&dir, false, Some("some-other-branch")).sync_to_pin();
+        assert_eq!(head(&dir), before, "a checkout we do not own must be left alone");
+
+        // Ours, but with uncommitted work: still never touched. Somebody is editing it.
+        std::fs::write(dir.join("a.txt"), "edited").expect("write");
+        supervisor(&dir, true, Some("some-other-branch")).sync_to_pin();
+        assert_eq!(head(&dir), before, "uncommitted work must not be overwritten");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a.txt")).expect("read"),
+            "edited",
+            "the edit itself must survive"
+        );
+        std::fs::write(dir.join("a.txt"), "one").expect("restore");
+
+        // No pin: nothing to move to.
+        supervisor(&dir, true, None).sync_to_pin();
+        assert_eq!(head(&dir), before);
+
+        // Already at the pinned commit: returns without reaching the network at all.
+        supervisor(&dir, true, Some(&before)).sync_to_pin();
+        assert_eq!(head(&dir), before);
+
+        // A ref that does not exist, with no reachable remote: logs and leaves it be, rather
+        // than failing the launch. A backend one version behind still runs.
+        supervisor(&dir, true, Some("no-such-ref")).sync_to_pin();
+        assert_eq!(head(&dir), before);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

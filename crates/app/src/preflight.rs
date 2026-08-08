@@ -1167,6 +1167,7 @@ mod tests {
 
     fn config() -> BackendConfig {
         BackendConfig {
+            backend_ref: None,
             port: 2024,
             project_dir: PathBuf::from("/nonexistent-checkout"),
             wsl: None,

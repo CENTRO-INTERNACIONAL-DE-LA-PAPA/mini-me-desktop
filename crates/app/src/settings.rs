@@ -171,6 +171,18 @@ pub struct Settings {
     /// Whether the road strip down the left of the chat is showing.
     #[serde(default = "yes")]
     pub road_open: bool,
+    /// Which version of the Mini-Me backend this app expects.
+    ///
+    /// A branch name, tag or commit. Empty means "leave the checkout wherever it is", which is
+    /// what someone pointed at their own clone wants.
+    ///
+    /// **Why a setting and not only a constant.** The default travels with `git pull`, so a
+    /// researcher who updates the app gets the backend the app was built against — that is the
+    /// point, and it is what removes the hand-typed `git checkout` inside WSL. But a developer
+    /// testing an unmerged backend branch should not have to rebuild the Rust app to do it, and
+    /// a researcher whose network cannot reach GitHub should be able to pin themselves in place.
+    #[serde(default = "default_backend_ref")]
+    pub backend_ref: String,
     /// Whether the app created that directory.
     ///
     /// **Load-bearing.** Updating means `git fetch && git checkout <pin> && uv sync`, and
@@ -194,12 +206,25 @@ impl Default for Settings {
             theme: crate::theme::DEFAULT_NAME.to_string(),
             subagents: std::collections::BTreeMap::new(),
             project: String::new(),
+            backend_ref: default_backend_ref(),
             sidebar_open: true,
             panel_open: true,
             road_open: true,
             backend_dir_owned: true,
         }
     }
+}
+
+/// The backend version this build expects.
+///
+/// **Bumped whenever a change lands in Mini-Me that the app needs.** That is the whole mechanism:
+/// the pin lives in this repository, so `git pull` on the app carries it, and `sync_to_pin`
+/// brings the backend to it on the next launch (docs §127).
+///
+/// A branch rather than a commit while `desktop_to_web` is open, so the backend follows that
+/// branch as it moves. It becomes a commit — or `main` — once the work merges.
+pub fn default_backend_ref() -> String {
+    "desktop_to_web".to_string()
 }
 
 /// `true`, as a path serde can name.
@@ -536,6 +561,8 @@ mod tests {
             // All three deliberately *not* the default, so a round trip that silently reset
             // them to `true` would be caught here rather than by someone whose folded panels
             // kept reappearing.
+            // Not the default, so a round trip that silently reset it would be caught here.
+            backend_ref: "some-branch".into(),
             sidebar_open: false,
             panel_open: false,
             road_open: false,
@@ -561,6 +588,10 @@ mod tests {
         // precisely so an existing settings.toml — every one written before this build — does not
         // open with all three panels shut.
         assert!(settings.sidebar_open && settings.panel_open && settings.road_open);
+        // A settings file written before the pin existed still gets one, or the backend would
+        // stay wherever it was cloned — which is the whole defect being fixed.
+        assert_eq!(settings.backend_ref, default_backend_ref());
+        assert!(!settings.backend_ref.is_empty(), "an empty pin moves nothing");
     }
 
     #[test]
