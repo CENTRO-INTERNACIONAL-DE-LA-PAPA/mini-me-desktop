@@ -272,18 +272,39 @@ impl Record {
     }
 
     /// Collapse invocations into kinds, and derive the edges between them.
-    pub fn graph(&self) -> Graph {
+    ///
+    /// `only` names a turn to restrict to, or `None` for the whole conversation.
+    ///
+    /// Filtering here rather than in the view because an edge is a statement about a pair of
+    /// invocations: a view that drew the whole graph and hid some rows would leave arcs pointing
+    /// at nothing, and one that hid arcs would still show a `came back to` count earned in a turn
+    /// the reader had filtered away.
+    pub fn graph_of(&self, only: Option<usize>) -> Graph {
+        let turns: Vec<&Turn> = match only {
+            Some(at) => self.turns.get(at).into_iter().collect(),
+            None => self.turns.iter().collect(),
+        };
+
         let mut nodes: Vec<Node> = Vec::new();
         let mut index: HashMap<&str, usize> = HashMap::new();
-        for invocation in self.turns.iter().flat_map(|turn| &turn.invocations) {
+        for invocation in turns.iter().flat_map(|turn| &turn.invocations) {
             let at = *index.entry(&invocation.name).or_insert_with(|| {
                 nodes.push(Node {
                     name: invocation.name.clone(),
                     visits: 0,
+                    spans: Vec::new(),
+                    depth: usize::MAX,
                 });
                 nodes.len() - 1
             });
             nodes[at].visits += 1;
+            nodes[at]
+                .spans
+                .push(invocation.last_seen.saturating_sub(invocation.first_seen));
+            // The *shallowest* place this kind was seen. A specialist dispatched by the
+            // coordinator in one turn and beneath another in the next is not two levels deep;
+            // it is something the coordinator can reach.
+            nodes[at].depth = nodes[at].depth.min(invocation.ns.matches('|').count());
         }
 
         let mut tally: HashMap<(usize, usize, Edge), usize> = HashMap::new();
@@ -296,7 +317,7 @@ impl Record {
         };
 
         let mut previous_last: Vec<usize> = Vec::new();
-        for turn in &self.turns {
+        for turn in &turns {
             let of = |invocation: &Invocation| index[invocation.name.as_str()];
 
             // Causal edges: who delegated to whom, straight off the namespace path.
@@ -330,10 +351,12 @@ impl Record {
             }
             // The turn boundary needs no hedge: the researcher read one answer before typing the
             // next question, so this ordering is a fact about a person, not an inference about a
-            // scheduler. It is also where §73's loop lives.
+            // scheduler. It is also where §73's loop lives — which is why it is `Returned` and
+            // not `Then`. The distinction was in this comment and nowhere in the data, so the
+            // view drew the two the same and the loop was the thing it could not point at.
             for before in &previous_last {
                 for after in &first {
-                    note(*before, *after, Edge::Then);
+                    note(*before, *after, Edge::Returned);
                 }
             }
             if !last.is_empty() {
@@ -427,6 +450,17 @@ pub struct Graph {
 pub struct Node {
     pub name: String,
     pub visits: usize,
+    /// How long each visit produced output for, in the order the visits happened.
+    ///
+    /// A list rather than a total: `11s, 6s` says a specialist was consulted twice and the second
+    /// look was shorter, which is the shape of a check; `17s` says it worked for seventeen
+    /// seconds, which is not what happened.
+    pub spans: Vec<u64>,
+    /// How deep the shallowest invocation of this kind sat in the delegation tree.
+    ///
+    /// `0` for anything the coordinator dispatched itself. The view indents by it, so a
+    /// specialist that only ever appears beneath another reads as beneath it.
+    pub depth: usize,
 }
 
 /// One stop on the road: a kind of specialist, how often it was reached, and for how long.
@@ -475,8 +509,17 @@ pub struct Traversal {
 pub enum Edge {
     /// One delegated to the other. True by construction from the namespace path.
     Delegated,
-    /// One was seen to finish before the other started. Order, not cause.
+    /// One was seen to finish before the other started, **within one turn**. Order, not cause.
     Then,
+    /// The enquiry came back to a specialist in a **later turn**.
+    ///
+    /// Its own kind rather than a [`Self::Then`] that happens to cross a boundary, because the
+    /// two are not equally hedged and this module's own docs say why: within a turn, order is an
+    /// inference about a scheduler; across turns it is a fact about a person, who read one answer
+    /// and then typed the next question. It was already computed that way and then filed under
+    /// the weaker label, so the view could not tell them apart — and these are the returns §73
+    /// asked for the feature to show.
+    Returned,
 }
 
 impl Edge {
@@ -485,6 +528,7 @@ impl Edge {
         match self {
             Edge::Delegated => "delegated to",
             Edge::Then => "then",
+            Edge::Returned => "came back to",
         }
     }
 }
@@ -631,7 +675,7 @@ mod tests {
         record.begin_turn("write it up", 0);
         record.observe("tools:a", "report_writer", 10);
         record.observe("tools:a|tools:b", "academic_researcher", 20);
-        let graph = record.graph();
+        let graph = record.graph_of(None);
         assert_eq!(graph.nodes.len(), 2);
         let [edge] = graph.edges.as_slice() else {
             panic!("expected one edge, got {:?}", graph.edges);
@@ -652,14 +696,14 @@ mod tests {
         record.observe("tools:a", "academic_researcher", 400);
         record.observe("tools:b", "dataverse_explorer", 500);
         assert!(
-            record.graph().edges.is_empty(),
+            record.graph_of(None).edges.is_empty(),
             "overlapping siblings ran together; there is no 'then' between them"
         );
     }
 
     #[test]
     fn siblings_that_do_not_overlap_get_an_observed_order() {
-        let graph = sequential().graph();
+        let graph = sequential().graph_of(None);
         let [edge] = graph.edges.as_slice() else {
             panic!("expected one edge, got {:?}", graph.edges);
         };
@@ -680,7 +724,7 @@ mod tests {
         record.observe("tools:b", "dataverse_explorer", 500);
         record.observe("tools:c", "data_cleaning", 600);
         record.observe("tools:c", "data_cleaning", 700);
-        let graph = record.graph();
+        let graph = record.graph_of(None);
         assert_eq!(graph.edges.len(), 2, "{:?}", graph.edges);
         assert!(graph.edges.iter().all(|edge| edge.kind == Edge::Then));
         assert!(graph
@@ -703,7 +747,7 @@ mod tests {
         record.begin_turn("now find papers on that", 600);
         record.observe("tools:c", "academic_researcher", 700);
         record.observe("tools:c", "academic_researcher", 800);
-        let graph = record.graph();
+        let graph = record.graph_of(None);
         assert_eq!(graph.nodes.len(), 2, "a revisit is one node, not two");
         let researcher = graph
             .nodes
@@ -724,6 +768,74 @@ mod tests {
             .iter()
             .any(|edge| graph.nodes[edge.from].name == "theorizer"
                 && graph.nodes[edge.to].name == "academic_researcher"));
+
+        // **Both are `Returned`, not `Then`.** Every edge here crosses a turn boundary, and that
+        // ordering is a fact about a person who read one answer before typing the next question —
+        // not the hedged inference about a scheduler that `Then` stands for. The view draws them
+        // differently, so filing them under one label made the loop the thing it could not point
+        // at.
+        assert!(
+            graph
+                .edges
+                .iter()
+                .all(|edge| edge.kind == Edge::Returned),
+            "{:?}",
+            graph.edges
+        );
+
+        // The durations the graph carries, per visit rather than summed: `11s, 6s` is a
+        // specialist consulted twice with a shorter second look, `17s` is one that worked for
+        // seventeen seconds, and only one of those happened.
+        assert_eq!(researcher.spans, vec![100, 100]);
+        assert_eq!(researcher.depth, 0, "the coordinator dispatched it");
+
+        // Filtered to one turn, the loop is not there to see — because in that turn it did not
+        // happen. A view that filtered rows but kept the edges would still show it.
+        let second = record.graph_of(Some(1));
+        assert_eq!(second.nodes.len(), 1);
+        assert_eq!(second.nodes[0].name, "theorizer");
+        assert!(second.edges.is_empty(), "{:?}", second.edges);
+        // A turn that does not exist is empty, not a panic.
+        assert!(record.graph_of(Some(9)).nodes.is_empty());
+    }
+
+    #[test]
+    fn a_nested_delegation_knows_how_deep_it_sat() {
+        let mut record = Record::default();
+        record.begin_turn("analyse this", 0);
+        record.observe("tools:a", "data_analysis", 100);
+        record.observe("tools:a|tools:b", "data_cleaning", 150);
+        record.observe("tools:a|tools:b", "data_cleaning", 200);
+        // The same specialist, dispatched by the coordinator itself in a later turn.
+        record.begin_turn("clean this one too", 300);
+        record.observe("tools:c", "data_cleaning", 400);
+
+        let graph = record.graph_of(None);
+        let cleaning = graph
+            .nodes
+            .iter()
+            .find(|node| node.name == "data_cleaning")
+            .expect("a node");
+        // The *shallowest* place it was seen. Something the coordinator can reach directly is not
+        // drawn as living two levels down just because it also appears there.
+        assert_eq!(cleaning.depth, 0);
+        assert_eq!(cleaning.visits, 2);
+
+        // Within the first turn alone it only ever appeared nested.
+        let first = record.graph_of(Some(0));
+        let nested = first
+            .nodes
+            .iter()
+            .find(|node| node.name == "data_cleaning")
+            .expect("a node");
+        assert_eq!(nested.depth, 1);
+        assert!(
+            first
+                .edges
+                .iter()
+                .any(|edge| edge.kind == Edge::Delegated),
+            "nesting inside one turn is still causal"
+        );
     }
 
     #[test]
@@ -737,7 +849,7 @@ mod tests {
             record.observe("tools:b", "theorizer", base + 300);
             record.observe("tools:b", "theorizer", base + 400);
         }
-        let graph = record.graph();
+        let graph = record.graph_of(None);
         let researcher_to_theorizer = graph
             .edges
             .iter()
@@ -762,7 +874,7 @@ mod tests {
         record.begin_turn("theorise from them", 600);
         record.observe("tools:b", "theorizer", 700);
         record.observe("tools:b", "theorizer", 800);
-        let graph = record.graph();
+        let graph = record.graph_of(None);
         assert_eq!(graph.edges.len(), 1, "{:?}", graph.edges);
         assert_eq!(graph.nodes[graph.edges[0].from].name, "academic_researcher");
     }
@@ -776,7 +888,7 @@ mod tests {
         record.begin_turn("find more", 300);
         record.observe("tools:b", "academic_researcher", 400);
         record.observe("tools:b", "academic_researcher", 500);
-        let graph = record.graph();
+        let graph = record.graph_of(None);
         assert_eq!(graph.nodes.len(), 1);
         assert_eq!(graph.nodes[0].visits, 2);
         assert!(
@@ -891,7 +1003,7 @@ mod tests {
         assert_eq!((task.first_seen, task.last_seen), (100, 2_500));
 
         // And it is one node, visited once — not three.
-        let graph = record.graph();
+        let graph = record.graph_of(None);
         assert_eq!(graph.nodes.len(), 1);
         assert_eq!(graph.nodes[0].visits, 1);
     }
@@ -907,9 +1019,9 @@ mod tests {
         assert_eq!(record.turns[0].invocations.len(), 2);
         // Overlapping, so no order is claimed between them — they were handed off together.
         assert!(
-            record.graph().edges.is_empty(),
+            record.graph_of(None).edges.is_empty(),
             "{:?}",
-            record.graph().edges
+            record.graph_of(None).edges
         );
     }
 
@@ -919,6 +1031,6 @@ mod tests {
         record.begin_turn("hola", 0);
         record.begin_turn("how are you", 100);
         assert!(record.is_empty(), "two turns, no work to show");
-        assert!(record.graph().nodes.is_empty());
+        assert!(record.graph_of(None).nodes.is_empty());
     }
 }

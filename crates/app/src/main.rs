@@ -156,6 +156,268 @@ fn bibliography(sources: &[String]) -> String {
     out
 }
 
+/// The provenance graph as a Mermaid `flowchart`.
+///
+/// Mermaid because it is the one diagram format a researcher can already paste somewhere useful:
+/// GitHub, Quarto, Obsidian and Typst all render it, and it stays readable as text if none of
+/// them are to hand. The link styles carry the same distinction the drawing does — `-->` is
+/// causal, `-.->` is arrival order — so a diagram pasted into a methods section does not quietly
+/// lose the hedge that makes it honest.
+fn mermaid(graph: &provenance::Graph) -> String {
+    let mut out = String::from("flowchart TD\n");
+    for (at, node) in graph.nodes.iter().enumerate() {
+        let label = match node.visits {
+            1 => node.name.replace('_', " "),
+            visits => format!("{} ×{visits}", node.name.replace('_', " ")),
+        };
+        // Quotes around the label so a name with a bracket or a space in it cannot end the node.
+        out.push_str(&format!("    n{at}[\"{}\"]\n", label.replace('"', "'")));
+    }
+    for edge in &graph.edges {
+        let arrow = match edge.kind {
+            provenance::Edge::Delegated => "-->",
+            _ => "-.->",
+        };
+        let label = match (edge.kind, edge.count) {
+            (provenance::Edge::Delegated, 1) => String::new(),
+            (kind, 1) => format!("|{}|", kind.label()),
+            (kind, count) => format!("|{} ×{count}|", kind.label()),
+        };
+        out.push_str(&format!(
+            "    n{} {arrow}{label} n{}\n",
+            edge.from, edge.to
+        ));
+    }
+    out
+}
+
+/// The provenance graph as a standalone SVG.
+///
+/// **SVG rather than the PNG the design asks for.** Rasterising what is on screen would mean a
+/// screenshot API gpui 0.2.2 does not expose, or a PNG encoder — a compressor and a CRC — written
+/// by hand or pulled in as a dependency, on a build that has to succeed on a colleague's Windows
+/// machine with nothing installed. SVG needs none of that: it is text, this function is the
+/// generator, and a vector figure is what a journal asks for anyway. It also survives being
+/// scaled into a poster, which a 760px raster does not.
+///
+/// Colours are baked from the live palette at the moment of export, because the file leaves the
+/// app and cannot ask a theme anything later.
+fn provenance_svg(graph: &provenance::Graph) -> String {
+    const ROW: f32 = 58.;
+    const LEFT: f32 = 16.;
+    const NAME_WIDTH: f32 = 260.;
+    const GUTTER: f32 = 236.;
+
+    let height = ROW * graph.nodes.len() as f32 + 24.;
+    let width = LEFT + NAME_WIDTH + GUTTER;
+    let ink = |colour: u32| format!("#{colour:06x}");
+
+    let mut out = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" \
+         viewBox=\"0 0 {width} {height}\" font-family=\"sans-serif\">\n\
+         <rect width=\"{width}\" height=\"{height}\" fill=\"{}\"/>\n",
+        ink(theme::background())
+    );
+
+    let anchor = LEFT + NAME_WIDTH;
+    for edge in &graph.edges {
+        let from = 12. + (edge.from as f32 + 0.5) * ROW;
+        let to = 12. + (edge.to as f32 + 0.5) * ROW;
+        let span = (edge.to as f32 - edge.from as f32).abs();
+        let bow = (24. + 50. * (span - 1.).max(0.)).min(GUTTER - 30.) * 2.;
+        let weight = match edge.kind {
+            provenance::Edge::Returned => 2.,
+            _ => 1.5,
+        } + (edge.count.saturating_sub(1) as f32 * 0.8).min(3.);
+        let dashes = match edge.kind {
+            provenance::Edge::Delegated => String::new(),
+            _ => " stroke-dasharray=\"4 4\"".to_string(),
+        };
+        out.push_str(&format!(
+            "<path d=\"M {anchor} {from} Q {} {} {anchor} {to}\" fill=\"none\" stroke=\"{}\" \
+             stroke-width=\"{weight}\"{dashes}/>\n",
+            anchor + bow,
+            (from + to) / 2.,
+            ink(edge_ink(edge.kind)),
+        ));
+    }
+
+    for (at, node) in graph.nodes.iter().enumerate() {
+        let y = 12. + (at as f32 + 0.5) * ROW;
+        let x = LEFT + 14. * node.depth.min(3) as f32;
+        out.push_str(&format!(
+            "<circle cx=\"{}\" cy=\"{y}\" r=\"5.5\" fill=\"{}\"/>\n",
+            x + 5.5,
+            ink(theme::accent())
+        ));
+        // `escape` rather than the name straight in: a specialist called `a<b` would otherwise
+        // open a tag and the rest of the file would not parse.
+        out.push_str(&format!(
+            "<text x=\"{}\" y=\"{}\" fill=\"{}\" font-size=\"13\">{}</text>\n",
+            x + 20.,
+            y - 1.,
+            ink(theme::text()),
+            escape_xml(&node.name.replace('_', " "))
+        ));
+        let spans: Vec<String> = node.spans.iter().map(|ms| duration_label(*ms)).collect();
+        let note = match node.visits {
+            1 => spans.join(", "),
+            visits => format!("visited {visits} times · {}", spans.join(", ")),
+        };
+        out.push_str(&format!(
+            "<text x=\"{}\" y=\"{}\" fill=\"{}\" font-size=\"11\">{}</text>\n",
+            x + 20.,
+            y + 14.,
+            ink(theme::text_faint()),
+            escape_xml(&note)
+        ));
+    }
+
+    out.push_str("</svg>\n");
+    out
+}
+
+/// The five characters that would otherwise be markup.
+fn escape_xml(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+/// One edge of the provenance graph, reduced to what the canvas needs to draw it.
+///
+/// Not `Arc` — that name is `std::sync::Arc` in this module, and the sidecar is behind one.
+struct EdgeArc {
+    from: f32,
+    to: f32,
+    /// Rows skipped, which decides how far the curve bows out.
+    span: f32,
+    weight: f32,
+    colour: u32,
+    dashed: bool,
+}
+
+/// The colour that stands for how much an edge can be trusted.
+///
+/// Shared by the arcs and the legend so the two cannot describe different pictures — which they
+/// did while each carried its own `match`.
+fn edge_ink(kind: provenance::Edge) -> u32 {
+    match kind {
+        provenance::Edge::Delegated => theme::text_muted(),
+        provenance::Edge::Then => theme::text_faint(),
+        // The one edge that gets the accent, because these returns are what §73 asked the
+        // feature to make visible.
+        provenance::Edge::Returned => theme::accent(),
+    }
+}
+
+/// Stroke a quadratic as a dashed line.
+///
+/// **Hand-rolled because there is no dash setting.** `PathBuilder::stroke` takes a width and
+/// nothing else, so a dashed curve has to be built out of short solid ones. The curve is walked at
+/// a fixed parameter step and alternate runs are emitted, which gives even-looking dashes on the
+/// gentle arcs this draws.
+///
+/// Why bother: solid versus dashed is the *only* thing separating "one specialist delegated to the
+/// other", which is true by construction, from "one was seen before the other", which is an
+/// inference. Drawing both as solid lines and explaining the difference in a paragraph underneath
+/// puts the hedge somewhere the reader has already stopped looking.
+fn paint_dashed_curve(
+    window: &mut Window,
+    start: gpui::Point<gpui::Pixels>,
+    control: gpui::Point<gpui::Pixels>,
+    finish: gpui::Point<gpui::Pixels>,
+    weight: f32,
+    colour: u32,
+) {
+    /// Samples along the curve. Enough that a dash is a dash rather than a chord across a bend.
+    const STEPS: usize = 48;
+    /// Samples per dash, and per gap — the 4/4 pattern the design asks for, in curve parameter
+    /// rather than in pixels.
+    const DASH: usize = 3;
+
+    let at = |t: f32| -> gpui::Point<gpui::Pixels> {
+        let inverse = 1. - t;
+        gpui::point(
+            px(inverse * inverse * f32::from(start.x)
+                + 2. * inverse * t * f32::from(control.x)
+                + t * t * f32::from(finish.x)),
+            px(inverse * inverse * f32::from(start.y)
+                + 2. * inverse * t * f32::from(control.y)
+                + t * t * f32::from(finish.y)),
+        )
+    };
+
+    let mut step = 0;
+    while step < STEPS {
+        let last = (step + DASH).min(STEPS);
+        let mut dash = gpui::PathBuilder::stroke(px(weight));
+        dash.move_to(at(step as f32 / STEPS as f32));
+        for point in step + 1..=last {
+            dash.line_to(at(point as f32 / STEPS as f32));
+        }
+        if let Ok(path) = dash.build() {
+            window.paint_path(path, gpui::rgb(colour));
+        }
+        step = last + DASH;
+    }
+}
+
+/// What each line in the graph means, drawn the way it is drawn.
+///
+/// A sample of the actual stroke rather than a coloured word: the reader is being asked to tell
+/// solid from dashed at 1.5px, and a legend that only names the colours does not help with that.
+fn graph_legend() -> impl IntoElement {
+    let mut rows = div().flex().flex_row().flex_wrap().gap_4().w_full().min_w_0();
+    for (kind, meaning) in [
+        (provenance::Edge::Delegated, "delegated to — causal"),
+        (provenance::Edge::Then, "then, within a turn — order only"),
+        (provenance::Edge::Returned, "came back to, in a later turn"),
+    ] {
+        let colour = edge_ink(kind);
+        let dashed = kind != provenance::Edge::Delegated;
+        let weight = if kind == provenance::Edge::Returned {
+            2.
+        } else {
+            1.5
+        };
+        rows = rows.child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .flex_none()
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(26.))
+                        .h(px(weight))
+                        .bg(rgb(colour))
+                        // A dashed sample, without a canvas: the gaps are drawn as a row of
+                        // background-coloured blocks over the line.
+                        .when(dashed, |sample| {
+                            sample
+                                .bg(rgb(theme::overlay()))
+                                .border_t(px(weight))
+                                .border_dashed()
+                                .border_color(rgb(colour))
+                        }),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(rgb(theme::text_faint()))
+                        .text_size(px(11.))
+                        .child(meaning),
+                ),
+        );
+    }
+    rows
+}
+
 /// What kind of work a specialist does, as a colour.
 ///
 /// **Two colours, and `None` for anything else.** The design is explicit that a colour per
@@ -1333,6 +1595,8 @@ struct Workbench {
     /// Whether the provenance window is showing, and which of its two views.
     provenance_open: bool,
     provenance_view: ProvenanceView,
+    /// Which turn the graph is filtered to, or `None` for the whole conversation.
+    provenance_turn: Option<usize>,
     /// What this conversation consulted, and in what order (docs §73–§75).
     ///
     /// Held here rather than derived from `transcript` because the transcript deliberately does
@@ -1608,6 +1872,7 @@ impl Workbench {
             about_open: false,
             provenance_open: false,
             provenance_view: ProvenanceView::Timeline,
+            provenance_turn: None,
             provenance: provenance::Record::default(),
             sidecar,
             status: "idle — type a prompt and press Enter".to_string(),
@@ -4718,6 +4983,40 @@ impl Workbench {
                 ),
             );
 
+        // Which turn the graph is showing. Only on the graph — the timeline is one row per turn
+        // already, so filtering it to a turn would leave a chart of one bar.
+        let rail = if view == ProvenanceView::Graph && self.provenance.turns.len() > 1 {
+            let mut rail = rail.child(div().pt_3().child(section_label("TURNS"))).child(
+                ui::NavEntry::new(
+                    "prov-turn-all",
+                    format!("All {}", self.provenance.turns.len()),
+                    self.provenance_turn.is_none(),
+                )
+                .on_click(cx.listener(|workbench, _event, _window, cx| {
+                    workbench.provenance_turn = None;
+                    cx.notify();
+                })),
+            );
+            for (at, turn) in self.provenance.turns.iter().enumerate() {
+                rail = rail.child(
+                    ui::NavEntry::new(
+                        SharedString::from(format!("prov-turn-{at}")),
+                        // The question, cut to a line. A turn numbered and not named is a row
+                        // the reader has to count to identify.
+                        SharedString::from(one_line(&turn.prompt)),
+                        self.provenance_turn == Some(at),
+                    )
+                    .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                        workbench.provenance_turn = Some(at);
+                        cx.notify();
+                    })),
+                );
+            }
+            rail
+        } else {
+            rail
+        };
+
         let body = if self.provenance.is_empty() {
             // Distinguished from "nothing happened": a conversation of plain questions has a
             // record and it is empty of delegations, which is a fact about the work rather than
@@ -4738,15 +5037,41 @@ impl Workbench {
             .focus(&self.provenance_focus)
             .nav(rail)
             .body(body)
-            .actions(ui::actions().child(div().flex_grow()).child(
-                ui::Button::new("provenance-close", "Close").on_click(cx.listener(
-                    |workbench, _event, _window, cx| {
-                        workbench.provenance_open = false;
-                        workbench.restore_focus = true;
-                        cx.notify();
-                    },
-                )),
-            ))
+            // The exports are what let a researcher put this record in a methods section, which
+            // is the whole reason it is kept. Both are text: Mermaid renders in GitHub, Quarto,
+            // Obsidian and Typst, and SVG is what a journal wants a figure in.
+            .actions(
+                ui::actions()
+                    .child(
+                        ui::Button::new("provenance-mermaid", "Copy as Mermaid")
+                            .size(ui::Size::Compact)
+                            .disabled(self.provenance.is_empty())
+                            .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                let text = mermaid(&workbench.provenance.graph_of(workbench.provenance_turn));
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                                workbench.say("provenance copied as a Mermaid diagram", cx);
+                            })),
+                    )
+                    .child(
+                        ui::Button::new("provenance-svg", "Save as SVG")
+                            .tone(ui::Tone::Accent)
+                            .size(ui::Size::Compact)
+                            .disabled(self.provenance.is_empty() || self.thread_workspace().is_none())
+                            .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                workbench.save_provenance_svg(cx);
+                            })),
+                    )
+                    .child(div().flex_grow())
+                    .child(
+                        ui::Button::new("provenance-close", "Close").on_click(cx.listener(
+                            |workbench, _event, _window, cx| {
+                                workbench.provenance_open = false;
+                                workbench.restore_focus = true;
+                                cx.notify();
+                            },
+                        )),
+                    ),
+            )
             .footer(
                 ui::Label::new(match self.thread_workspace() {
                     Some(dir) => format!("kept in {}", dir.join(provenance::FILENAME).display()),
@@ -4898,50 +5223,60 @@ impl Workbench {
     /// arrowhead carries direction, which is what makes the return edge — the one this feature
     /// exists for — visible as an arc running back *up* the column.
     fn provenance_graph(&self) -> gpui::Div {
-        let graph = self.provenance.graph();
+        let graph = self.provenance.graph_of(self.provenance_turn);
 
         // Two sides of one geometry. `canvas` cannot lay out text and a `div` cannot draw a
         // curve, so the nodes are real elements and the edges are painted beside them — which
         // means both have to agree on where a node is. One constant each, used by both.
-        const ROW: f32 = 44.;
-        const GUTTER: f32 = 170.;
+        const ROW: f32 = 58.;
+        const GUTTER: f32 = 236.;
+        /// How far an arc bows out per row it skips, so nested arcs stay separable.
+        const BOW_PER_ROW: f32 = 50.;
 
         let height = ROW * graph.nodes.len() as f32;
-        let arcs: Vec<(f32, f32, f32, f32, u32)> = graph
+        let arcs: Vec<EdgeArc> = graph
             .edges
             .iter()
-            .map(|edge| {
-                let from = (edge.from as f32 + 0.5) * ROW;
-                let to = (edge.to as f32 + 0.5) * ROW;
-                let span = (edge.to as f32 - edge.from as f32).abs();
+            .map(|edge| EdgeArc {
+                from: (edge.from as f32 + 0.5) * ROW,
+                to: (edge.to as f32 + 0.5) * ROW,
+                span: (edge.to as f32 - edge.from as f32).abs(),
                 // Heavier with each traversal, but bounded: a loop walked ten times should read
                 // as heavier than one walked twice without becoming a blob.
-                let weight = (1.5 + (edge.count.saturating_sub(1) as f32) * 1.2).min(6.);
-                let colour = match edge.kind {
-                    provenance::Edge::Delegated => theme::accent(),
-                    provenance::Edge::Then => theme::text_muted(),
-                };
-                (from, to, span, weight, colour)
+                weight: match edge.kind {
+                    provenance::Edge::Returned => 2.,
+                    _ => 1.5,
+                } + (edge.count.saturating_sub(1) as f32 * 0.8).min(3.),
+                colour: edge_ink(edge.kind),
+                // Solid means causal. Everything else is arrival order, and dashes are how a
+                // reader is told which is which without reading the legend first.
+                dashed: edge.kind != provenance::Edge::Delegated,
             })
             .collect();
 
         let edges = gpui::canvas(
             |_bounds, _window, _cx| {},
             move |bounds, _prepaint, window, _cx| {
-                for (from, to, span, weight, colour) in arcs {
-                    let x = bounds.origin.x;
-                    let start = gpui::point(x, bounds.origin.y + px(from));
-                    let finish = gpui::point(x, bounds.origin.y + px(to));
+                for arc in arcs {
+                    let x = bounds.origin.x + px(4.);
+                    let start = gpui::point(x, bounds.origin.y + px(arc.from));
+                    let finish = gpui::point(x, bounds.origin.y + px(arc.to));
                     // A quadratic reaches half-way to its control point, so the control sits at
-                    // twice the bow the arc should actually show.
-                    let bow = (24. + 22. * (span - 1.).max(0.)).min(GUTTER - 24.) * 2.;
+                    // twice the bow the arc should actually show. Bowing in proportion to the
+                    // rows skipped is what keeps an arc over three rows outside one over two,
+                    // rather than the two crossing where neither can be followed.
+                    let bow = (24. + BOW_PER_ROW * (arc.span - 1.).max(0.)).min(GUTTER - 30.) * 2.;
                     let control = gpui::point(x + px(bow), (start.y + finish.y) / 2.);
 
-                    let mut line = gpui::PathBuilder::stroke(px(weight));
-                    line.move_to(start);
-                    line.curve_to(finish, control);
-                    if let Ok(path) = line.build() {
-                        window.paint_path(path, gpui::rgb(colour));
+                    if arc.dashed {
+                        paint_dashed_curve(window, start, control, finish, arc.weight, arc.colour);
+                    } else {
+                        let mut line = gpui::PathBuilder::stroke(px(arc.weight));
+                        line.move_to(start);
+                        line.curve_to(finish, control);
+                        if let Ok(path) = line.build() {
+                            window.paint_path(path, gpui::rgb(arc.colour));
+                        }
                     }
 
                     // The arrowhead, pointing the way the curve travels as it lands: for a
@@ -4954,7 +5289,7 @@ impl Workbench {
                     );
                     let length = (dx * dx + dy * dy).sqrt().max(1.);
                     let (ux, uy) = (dx / length, dy / length);
-                    let size = 7. + weight;
+                    let size = 7. + arc.weight;
                     let back = gpui::point(finish.x - px(ux * size), finish.y - px(uy * size));
                     let (wx, wy) = (uy * size * 0.45, ux * size * 0.45);
                     let mut head = gpui::PathBuilder::fill();
@@ -4967,70 +5302,91 @@ impl Workbench {
                         true,
                     );
                     if let Ok(path) = head.build() {
-                        window.paint_path(path, gpui::rgb(colour));
+                        window.paint_path(path, gpui::rgb(arc.colour));
                     }
                 }
             },
         );
 
+        // The stage still producing output, by the same rule the road strip uses.
+        let running = self
+            .streaming
+            .then(|| {
+                self.provenance
+                    .road()
+                    .into_iter()
+                    .max_by_key(|stage| stage.last_seen)
+            })
+            .flatten()
+            .map(|stage| stage.name);
+
         let mut column = div().flex().flex_col().flex_grow().min_w_0();
         for node in &graph.nodes {
+            let is_running = running.as_deref() == Some(node.name.as_str());
+            // `visited twice · 11s, 6s` — the visits and how long each produced output for.
+            let mut note = match node.visits {
+                1 => String::new(),
+                2 => "visited twice".to_string(),
+                visits => format!("visited {visits} times"),
+            };
+            let spans: Vec<String> = node.spans.iter().map(|ms| duration_label(*ms)).collect();
+            if !spans.is_empty() {
+                if !note.is_empty() {
+                    note.push_str(" · ");
+                }
+                note.push_str(&spans.join(", "));
+            }
+
             column = column.child(
                 div()
                     .h(px(ROW))
                     .flex()
                     .flex_row()
                     .items_center()
+                    .gap_2()
                     .w_full()
                     .min_w_0()
+                    // A nested delegation sits under the one that dispatched it.
+                    .pl(px(14. * node.depth.min(3) as f32))
                     .child(
                         div()
-                            // **Full width, so every node ends at the same x.** The edges are
-                            // painted in a gutter that begins where this column stops, and the
-                            // canvas has no way to ask how wide a chip came out. With chips at
-                            // their natural width the arcs anchored to the gutter's edge and the
-                            // nodes stopped wherever their names did — an arc floating in space,
-                            // attached to nothing (docs §86). One shared right edge is what makes
-                            // the two halves of this drawing agree.
-                            .w_full()
-                            .px_2()
-                            .py(px(3.))
-                            .rounded_md()
-                            .border_1()
-                            .border_color(rgb(theme::border_strong()))
-                            .bg(rgb(theme::surface()))
-                            .text_color(rgb(theme::accent()))
-                            .text_xs()
-                            .child(match node.visits {
-                                // The count belongs on the node, because a revisit *is* the node
-                                // visited again — §73's `theories` twice is one node, and putting
-                                // the number anywhere else invites reading it as two.
-                                1 => node.name.clone(),
-                                visits => format!("{}  ×{visits}", node.name),
-                            }),
+                            .flex_none()
+                            .size(px(11.))
+                            .rounded_full()
+                            .when(is_running, |dot| {
+                                dot.border_2().border_color(rgb(theme::running()))
+                            })
+                            .when(!is_running, |dot| dot.bg(rgb(theme::accent()))),
+                    )
+                    .child(
+                        // **Full width, so every node ends at the same x.** The edges are
+                        // painted in a gutter that begins where this column stops, and the
+                        // canvas has no way to ask how wide a name came out. With names at their
+                        // natural width the arcs anchored to the gutter's edge and the nodes
+                        // stopped wherever their text did — an arc floating in space, attached to
+                        // nothing (docs §86). One shared right edge is what makes the two halves
+                        // of this drawing agree.
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_grow()
+                            .min_w_0()
+                            .child(
+                                ui::Label::new(node.name.replace('_', " "))
+                                    .colour(if is_running {
+                                        theme::running()
+                                    } else {
+                                        theme::text()
+                                    })
+                                    .ellipsis(),
+                            )
+                            .child(
+                                div()
+                                    .text_color(rgb(theme::text_faint()))
+                                    .text_size(px(11.))
+                                    .child(note),
+                            ),
                     ),
-            );
-        }
-
-        let mut transitions = div().flex().flex_col().w_full().min_w_0().gap_1();
-        for edge in &graph.edges {
-            transitions = transitions.child(
-                ui::Label::new(format!(
-                    "{} {} {}{}",
-                    graph.nodes[edge.from].name,
-                    edge.kind.label(),
-                    graph.nodes[edge.to].name,
-                    if edge.count > 1 {
-                        format!(" ×{}", edge.count)
-                    } else {
-                        String::new()
-                    },
-                ))
-                .size(ui::Size::Compact)
-                .colour(match edge.kind {
-                    provenance::Edge::Delegated => theme::accent(),
-                    provenance::Edge::Then => theme::text_muted(),
-                }),
             );
         }
 
@@ -5053,18 +5409,14 @@ impl Workbench {
                     // against it.
                     .child(div().flex_none().w(px(GUTTER)).h(px(height)).child(edges)),
             )
-            .child(
-                ui::Label::new("Transitions")
-                    .muted()
-                    .size(ui::Size::Compact),
-            )
-            .child(transitions)
+            .child(graph_legend())
             .child(
                 ui::Label::new(
-                    "Orange is \u{201c}delegated to\u{201d} — certain, because it comes from the \
-                     run\u{2019}s own structure. Grey is \u{201c}then\u{201d}: the order things \
-                     were observed in, which is not the same as one causing the other. A thicker \
-                     line was travelled more often.",
+                    "A solid line is causal: one specialist delegated to the other, which comes \
+                     from the run\u{2019}s own structure and cannot be wrong. A dashed line is \
+                     the order things were seen to arrive \u{2014} overlap proves two ran \
+                     together, but a gap only suggests one followed the other. A thicker line was \
+                     travelled more often.",
                 )
                 .muted()
                 .size(ui::Size::Compact),
@@ -5833,6 +6185,32 @@ impl Workbench {
             );
         }
         block.child(moves)
+    }
+
+    /// Write the graph beside the conversation's own files, and open it.
+    fn save_provenance_svg(&mut self, cx: &mut Context<Self>) {
+        let Some(dir) = self.thread_workspace() else {
+            self.say("ask something first — there is no folder to save into yet", cx);
+            return;
+        };
+        let graph = self.provenance.graph_of(self.provenance_turn);
+        // Named for the turn it shows, so exporting turn 2 and then turn 3 gives two files
+        // rather than one overwritten one.
+        let name = match self.provenance_turn {
+            Some(at) => format!("provenance-turn-{}.svg", at + 1),
+            None => "provenance.svg".to_string(),
+        };
+        let path = dir.join(&name);
+        if let Err(error) = std::fs::create_dir_all(&dir)
+            .and_then(|_| std::fs::write(&path, provenance_svg(&graph)))
+        {
+            self.say(format!("could not save {name}: {error}"), cx);
+            return;
+        }
+        self.say(format!("saved {name} beside this conversation's files"), cx);
+        if let Err(error) = workspace::open(&path) {
+            tracing::warn!(%error, "could not open the provenance drawing");
+        }
     }
 
     /// The road: where this enquiry has been, down the left edge of the chat.
@@ -9144,7 +9522,7 @@ mod tests {
             "{invocation:?}"
         );
         // One kind, visited once, and nothing invented around it.
-        let graph = record.graph();
+        let graph = record.graph_of(None);
         assert_eq!(graph.nodes.len(), 1);
         assert_eq!(graph.nodes[0].name, "academic_researcher");
         assert_eq!(graph.nodes[0].visits, 1);
@@ -9371,6 +9749,67 @@ mod tests {
         );
         assert_eq!(device_code("https://example.org/plain"), None);
         assert_eq!(device_code("https://example.org/a?user_code="), None);
+    }
+
+    /// The loop §73 asked for: two specialists, and a return across a turn boundary.
+    fn a_loop() -> provenance::Record {
+        let mut record = provenance::Record::default();
+        record.begin_turn("find papers", 0);
+        record.observe("tools:a", "academic_researcher", 100);
+        record.observe("tools:a", "academic_researcher", 1_200);
+        record.begin_turn("theorise", 1_300);
+        record.observe("tools:b", "theorizer", 1_400);
+        record.observe("tools:b", "theorizer", 2_000);
+        record.begin_turn("and check that", 2_100);
+        record.observe("tools:c", "academic_researcher", 2_200);
+        record.observe("tools:c", "academic_researcher", 2_800);
+        record
+    }
+
+    #[test]
+    fn the_graph_exports_carry_the_hedge_the_drawing_does() {
+        let graph = a_loop().graph_of(None);
+
+        let diagram = mermaid(&graph);
+        assert!(diagram.starts_with("flowchart TD\n"));
+        // A revisited specialist is one node saying twice, exactly as on screen.
+        assert!(diagram.contains("[\"academic researcher ×2\"]"), "{diagram}");
+        // **The distinction survives the export.** A diagram pasted into a methods section that
+        // drew observed order as a causal arrow would be a stronger claim than the record makes.
+        assert!(diagram.contains("-.->"), "{diagram}");
+        assert!(diagram.contains("came back to"), "{diagram}");
+        // Every node referenced by an edge is one the diagram declared.
+        for line in diagram.lines().filter(|line| line.contains("->")) {
+            for token in line.split_whitespace().filter(|t| t.starts_with('n')) {
+                assert!(
+                    diagram.contains(&format!("    {token}[")),
+                    "{token} is used but never declared\n{diagram}"
+                );
+            }
+        }
+
+        let drawing = provenance_svg(&graph);
+        assert!(drawing.starts_with("<svg xmlns="));
+        assert!(drawing.ends_with("</svg>\n"));
+        // One dashed path per cross-turn edge, and the arcs are quadratics.
+        assert_eq!(drawing.matches("stroke-dasharray").count(), graph.edges.len());
+        assert!(drawing.contains(" Q "), "{drawing}");
+        // Tags open and close in pairs — the cheapest check that this parses at all.
+        assert_eq!(drawing.matches("<text").count(), graph.nodes.len() * 2);
+
+        // A name carrying markup must not become markup. `escape_xml` is the only thing between
+        // a subagent name and a file that will not open.
+        let mut hostile = provenance::Record::default();
+        hostile.begin_turn("q", 0);
+        hostile.observe("tools:a", "a<b & \"c\"", 10);
+        let escaped = provenance_svg(&hostile.graph_of(None));
+        assert!(escaped.contains("a&lt;b &amp; &quot;c&quot;"), "{escaped}");
+        assert!(!escaped.contains("a<b"), "{escaped}");
+
+        // An empty record exports an empty diagram rather than something malformed.
+        let nothing = provenance::Record::default().graph_of(None);
+        assert_eq!(mermaid(&nothing), "flowchart TD\n");
+        assert!(provenance_svg(&nothing).ends_with("</svg>\n"));
     }
 
     #[test]
