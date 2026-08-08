@@ -6891,3 +6891,99 @@ warnings that predate this work. What has not happened is a **real-window pass**
 was built against the README's measurements and the existing code, not looked at on Windows at
 125% scaling — which is where §72, §85, §88 and §99 were all caught. That is the next step, and it
 is the researcher's, not the developer's.
+
+## 119. Five references, and none of the DOIs were real (2026-08-07)
+
+Reported from a real run: *"I noticed that the doi links are wrong. Asta search on semantic
+scholar but not sure why the doi are not redirecting to the correct papers."*
+
+### What was checked, and against what
+
+First against Semantic Scholar, then — after the reasonable objection that **we** might be using
+the API wrongly, or that "these papers have a unique ID" — against **Crossref**, which is the DOI
+registrar rather than an index. That second check is the one that counts, and it was the right
+challenge to make: an S2 404 proves nothing about a book chapter or a 1997 journal article, and
+two of the five conclusions had been drawn from exactly that.
+
+Crossref agreed with Semantic Scholar on every one. S2 was not at fault.
+
+| The citation claims | The DOI is registered to |
+|---|---|
+| Lindqvist-Kreuze & Forbes 2018, ch. 14, pp. 467-486 | *Gender Topics on Potato Research and Development*, Mudege et al., pp. 475-506 — right book, wrong chapter |
+| Hijmans & Spooner 2001, AJB 88(11), 2101-2112 | *Algal switching among lichen symbioses*, AJB 88(8) |
+| Vargas et al. 2012, AJPR 89(6), 444-453 | *Resistance to Aphids, Late Blight and Viruses…*, Davis et al., AJPR 89(6), 489-500 |
+| Douches et al. 1997, Potato Research 40(4) | **not registered**, and no such title in Crossref |
+| Ellis et al. 2018, Euphytica 214 | **not registered**, and no such title in Crossref |
+
+### The mechanism, from the one case that pins it exactly
+
+Hijmans & Spooner 2001 is a real paper, and the model got **volume 88, issue 11, pages
+2101-2112** — all correct. Its DOI is `10.2307/3558435`. The model wrote `…3558457`, which is a
+real DOI, in the same journal, in the same year, belonging to a study of lichens. Vargas is the
+same shape: the model said AJPR 89(6), and the DOI it produced genuinely is AJPR 89(6) — a
+different article in that issue.
+
+So every field a person sanity-checks — journal, year, volume, pages — comes out right. A DOI
+suffix is a high-entropy string carrying no meaning, which makes it the first thing a language
+model loses and the last thing a reader can catch by eye. **That asymmetry is the entire argument
+for checking it in software rather than telling people to be careful.**
+
+### Where the client was complicit
+
+`AcademicSourceFinding.citation` (`backend/schemas.py:31`) is a Pydantic field the *model* fills.
+The stable link is a **separate** field — `SourceArtifactPayload.link`, and for a theory's papers
+`PaperRefPayload.url`/`.doi`, built by `theory_tools.py:_paper_ref` straight from
+`s2Metadata.externalIds.DOI`.
+
+`decode_sources` read `citation` and dropped all three. Every link in the app was regexed out of
+the model's prose while the identifier the API returned sat one key away. `grep -n '"link"\|"url"\|"doi"'`
+over `protocol.rs` returned nothing.
+
+`_paper_ref` carries a comment recording that an S2 URL form *"resolves UNRELIABLY (it sent users
+to the wrong paper)"*. Somebody upstream had already paid for this exact mistake and fixed it on
+their side; we reintroduced it on ours.
+
+**Fourth instance of the recurring shape** (§91, §99, §115): *a value the program already had and
+never read.*
+
+### The attribution was unearned
+
+`used_asta` was `len(sources) > 0` — the number of citation objects the model emitted — and it
+controls a footer reading *"Academic literature search performed using Asta tools (Allen Institute
+for AI). Please cite the AstaBench paper."*
+
+On this run that footer would have credited AI2 for five references their tools never returned.
+Attribution is a claim about provenance, so it now comes from the provenance record: an
+Asta-backed specialist must actually have run. Which specialists those are is read from
+`subagents.json` — three describe themselves that way — rather than listed in the client, which is
+what §55 built that file to prevent. An unreadable registry credits nobody: a missing
+acknowledgement can be added, a false one has to be retracted.
+
+### What now exists
+
+A **Check DOIs** button in the sources panel. Each DOI goes to Crossref, the returned title is
+compared against the citation *here*, and every reference gets a verdict. Verified against live
+Crossref: the model's Hijmans DOI scores 0.00, the correct one 1.00, Douches comes back
+unregistered.
+
+Three rules it is built to:
+
+- **A DOI leaves the machine and nothing else** — not the citation, not the question. The
+  user-agent names the app and carries no contact address, because that would be the researcher's
+  own email going to a third party on every reference.
+- **`Unreachable` is not a verdict about a reference.** Telling somebody on a train that a
+  citation is unregistered would have them delete one that was fine.
+- **A reference with no identifier is reported**, not left blank looking like one that passed. In
+  a run where the model wrote its own citations, that is the strongest signal of the three.
+
+### What none of this fixes
+
+If the model invented the paper, a structured `link` can be invented alongside it — on the
+academic-research path that field is model-filled too. Only `_paper_ref` is built from real API
+metadata. The open question is whether the literature search ran at all, and the provenance graph
+built in §118 is what answers it: if no search specialist appears in the record, nothing was
+searched. Worth checking on the run that produced these five.
+
+*Two rules, and the second is the one that generalises: **an attribution is a claim, so it should
+be derived from the record and not from a proxy** — and **the fields a reader can check are the
+ones a model gets right.***
