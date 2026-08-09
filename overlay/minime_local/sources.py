@@ -489,28 +489,55 @@ def install_artifacts(module) -> None:
         except AttributeError:
             return produced
         replaced = 0
+        unmatched: list[str] = []
         for source in sources:
             if not isinstance(source, dict):
                 continue
-            found = link_for(source.get("citation") or "")
+            citation = source.get("citation") or ""
+            found = link_for(citation)
             if found:
                 # **Overwrites whatever the model put here.** That field is the one it is least
                 # able to fill: it has the title and the authors, and it has never seen a DOI.
                 source["link"] = found
                 replaced += 1
+            elif _papers():
+                unmatched.append(citation)
         if sources:
             # Logged on success as well as failure. Three attempts at the subagent registry were
             # misdiagnosed because its installer spoke only when it broke, so "absent", "never
             # reached" and "ran and did nothing" produced identical evidence (docs §81).
             known = len(_papers())
             if known:
+                # **Counts both directions.** `replaced` says how much of the answer is anchored
+                # to a real record; it says nothing about how much of the search never reached
+                # the answer at all. A run that found nineteen papers and reported eleven scores
+                # ten-of-eleven and looks healthy, while a third of the literature it retrieved
+                # was dropped somewhere the researcher cannot see — and dropping papers on the
+                # model's judgement of relevance is the thing this whole line of work exists to
+                # stop (*"is up to the scietinst to selct and drop the ones they want"*).
+                shown = {
+                    source.get("link")
+                    for source in sources
+                    if isinstance(source, dict)
+                }
+                unreported = len(set(_papers().values()) - shown)
                 logger.warning(
                     "minime_local: %d of %d sources relinked to a paper the search returned "
-                    "(%d recorded)",
+                    "(%d recorded, %d never reported)",
                     replaced,
                     len(sources),
                     known,
+                    unreported,
                 )
+                # Named, not counted. "10 of 11" has two causes needing opposite fixes: a paper
+                # the model invented after searching, or a real one whose citation drifted far
+                # enough that the matcher's ambiguity guard refused to choose between two
+                # near-identical titles. Printing the citation is what tells them apart.
+                for citation in unmatched:
+                    logger.warning(
+                        "minime_local: no recorded paper matches this citation — %s",
+                        citation[:160],
+                    )
             else:
                 # **Not a count of failures — a statement that there is nothing to count.** The
                 # old line said "0 of 7 sources carry the corpus id" here, which reads as seven

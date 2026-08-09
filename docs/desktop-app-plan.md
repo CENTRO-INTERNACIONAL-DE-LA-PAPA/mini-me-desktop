@@ -7930,3 +7930,34 @@ Now at `17aa310` — [#42](https://github.com/CENTRO-INTERNACIONAL-DE-LA-PAPA/Mi
 which stopped the academic researcher discarding two thirds of what it found: a run that returned
 43 distinct papers reported 7, because its prompt still carried a 15-source cap written back when
 citations came from the model's memory and every one of them was a liability.
+
+## 137. Ten of eleven, and the eight nobody counted (2026-08-09)
+
+The first run with #40 and #42 both live:
+
+> `find_papers('late blight resistance in Andean potato landraces …') -> 20 paper(s)`
+> `minime_local: 10 of 11 sources relinked to a paper the search returned (19 recorded)`
+
+The gate holds and the links are real. Two things that line does not say:
+
+**Which source was the eleventh.** "10 of 11" has two causes needing opposite fixes — a paper the
+model added from memory *after* searching, or a real one whose citation drifted far enough that
+`link_for`'s ambiguity guard refused to choose between two near-identical titles. With nineteen
+papers on one topic, near-ties are the expected case, not the exotic one. The line now prints the
+citation, because §81 keeps being the answer.
+
+**That eight papers never reached the answer at all.** Nineteen recorded, eleven reported. The
+count of what was relinked says how much of the answer is anchored to a record; it says nothing
+about how much of the search was dropped before the researcher could see it. A run that retrieves
+nineteen papers and shows eleven scores ten-of-eleven and reads as healthy.
+
+That second number is the researcher's actual request — *"is up to the scietinst to selct and drop
+the ones they want"* — and #42 asked the model for it in a prompt. It filtered anyway. Which is
+tonight's lesson for the second time: **a prompt is a request, and the model is free to decline.**
+The search only became reliable when the alternative was removed from the loop rather than argued
+against, and reporting will likely need the same treatment — the papers `find_papers` returned are
+already recorded here, so the artifact can carry them whether or not the model chose to mention
+them.
+
+*Measured first, on purpose. The last structural fix was built on four days of assuming the wrong
+cause; this one starts with a number.*
