@@ -23,7 +23,7 @@ sidecar** that the client spawns and supervises.
 | **P6.6** — outputs the researcher can see | ✅ **done** — files land in `Documents\Mini-Me\<thread>`, figures render in the chat, and OUTPUTS opens the folder. §42 |
 | **P6.7** — the UI itself | ✅ **done, verified on Windows** — a role-based palette with four built-ins **and Zed's whole theme gallery** installable in-app; conversation sidebar with fuzzy search and rename; collapsible panels; a file preview modal; visible scrollbars; rainbow CSV; a three-state send button; rounded panels and a window-wide status bar. §43/§47–§53 |
 
-### What is left (updated 2026-08-03)
+### What is left (updated 2026-08-09)
 
 Every milestone P6.0–P6.7 is closed and the app is in daily use by its first researcher.
 What remains splits three ways: **shipping it to anyone else**, **paying down the UI debt
@@ -42,7 +42,11 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
 - ⬜ **Code signing.** SmartScreen shows "Windows protected your PC" and most researchers
   stop there. An organizational decision on a certificate; the release notes and README
   say which two words to click in the meantime.
-- ⬜ **Click-to-update.** The app detects a stale checkout but cannot update itself (§27).
+- ✅ **Click-to-update** — answered by making it unnecessary (§135/§139). The backend source
+  ships in this repository at `mini-me/`, and the launch mirrors it into the checkout, so
+  **`git pull` on the app *is* the backend update**. The `git fetch` it replaces was against a
+  private remote WSL has no credentials for: it hung on a sign-in nobody was watching (§131), or
+  failed fast and left the checkout a month behind while every log line read healthy (§134).
 
 **UI debt — the same call-site mistake, six times now**
 - ✅ **`Button`, `Label`, `Modal`, `Toggle`** (§67, §68) — confirmed on a real window across all
@@ -97,10 +101,33 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
 - ✅ **The filter field** (§92, §97, §99) — measured rather than guessed: 0.0px in the popup
   against 204 and 533 elsewhere. One link in the chain stated no width; confirmed fixed on a real
   window.
-- 🟡 **Six upstream reports** — written (§101), in `docs/upstream/`, each with evidence and a
-  suggested fix. **Not filed**: that is an outward-facing act on someone else's repository and
-  the decision is not this repo's. The two `langgraph_runtime_inmem` ones are silent data loss
-  and affect anyone running `langgraph dev`.
+- 🟡 **Nine upstream reports** — written, in `docs/upstream/`, each with evidence and a suggested
+  fix. Two have since landed as Mini-Me PRs (the corpus id and the skills path). The two
+  `langgraph_runtime_inmem` ones are silent data loss and affect anyone running `langgraph dev`;
+  filing those is an outward-facing act on someone else's repository, and the decision is not
+  this repo's.
+
+**The literature path** *(new — §119–§139)*
+- ✅ **Citations are built in code** from the publisher's record, not composed from the model's
+  memory. Verified against Crossref on 17 papers across 6 fields: 17/17 DOIs resolve, 17/17
+  titles, 17/17 years, 0 contradictions.
+- ✅ **The subagent searches before it can answer** (§133). Its structured response was bound as a
+  tool and `tool_choice` forced, so answering from memory in one step was the cheapest legal move
+  it had. Prompts had been arguing with that for four days.
+- ✅ **Nothing retrieved is dropped** (§137) — a run that found 24 papers reported 9; the rest are
+  appended where the list leaves the backend.
+- ✅ **The backend log says which commit produced it** (§134) and its diagnostics distinguish
+  success from failure (§132), which four nights of misdiagnosis said they had to.
+- ⬜ **Papers the model adds from memory are not marked.** Barrera et al. (2016) came back real
+  and relevant from a journal Semantic Scholar indexes poorly — much of CIP's own literature
+  looks like that. Those sit beside record-backed citations looking identical, and their links
+  are still the model's guess.
+- ⬜ **A paper with no DOI and no corpus id** is invisible to the "never reported" accounting
+  (7 returned, 6 recorded, on 2026-08-09).
+- ⬜ **~10s of every startup** is an Asta token minted fresh with no validity check
+  (`backend.rs`, §131).
+- ⬜ **`setup-wsl.sh` leaves a checkout with every file modified** from line endings, which breaks
+  any git operation on it.
 - ⬜ **Publish `v0.1.0`** — tagged and built; the draft needs a decision about who may have it.
 - ⬜ **A custom store** (§93) — deliberately after the checkpointer, and only with numbers:
   alpha API, and replacing it means owning semantic search and TTL.
