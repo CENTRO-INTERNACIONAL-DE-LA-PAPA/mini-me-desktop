@@ -124,6 +124,10 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   are still the model's guess.
 - ⬜ **A paper with no DOI and no corpus id** is invisible to the "never reported" accounting
   (7 returned, 6 recorded, on 2026-08-09).
+- ⬜ **The other nine subagents still hold their invariants in prompts** (§140). Each carries a
+  `response_format` and so each has the §133 exit; `dataverse_explorer` is first, because a
+  `DataVerseSearchResults` from memory carries invented persistent ids and a researcher will paste
+  one into a citation exactly as they clicked the DOIs.
 - ⬜ **~10s of every startup** is an Asta token minted fresh with no validity check
   (`backend.rs`, §131).
 - ⬜ **`setup-wsl.sh` leaves a checkout with every file modified** from line endings, which breaks
@@ -8083,3 +8087,42 @@ mechanism it depended on no longer exists.
 **One case remains, and it is honest about itself:** a `langgraph dev` left running from a previous
 session has already imported its code, and nothing at launch can change that. The app now says so
 on attach, with the command to fix it, rather than reporting success.
+
+## 140. Where else a prompt is holding an invariant (2026-08-09)
+
+> *"Do you think each async subagent needs specific customed middlewares?"*
+
+Not each. Only where a subagent has an invariant a prompt cannot enforce — and there is a way to
+find those without guessing. **Grep the prompts for shouting.** Every `NEVER`, `ALWAYS` and
+`Mandatory` in `backend/subagents.py` marks a place where somebody already suspected the model
+would decline, and wrote in capitals instead of in code:
+
+| subagent | the rule, in its own words | checkable from the run? |
+|---|---|---|
+| `dataverse_explorer` | *"Mandatory fixed filename rule: ALWAYS call `SearchCIPDataverse` with `output_filename="dataverse_search.json"`"* | yes — the tool call's arguments |
+| `hypothesis_generator` | *"Never fabricate theories or citations. ALWAYS return a structured HypothesisOutput"* | yes — did `generate_theories` return? |
+| `pdf_librarian` | *"NEVER claim you extracted... Never fabricate documents or matches"* | yes — did the extraction tool return? |
+| `data_voyager`, `diagnostic_analytics` | *"NEVER invent findings, numbers, or charts"* | yes — did an analysis tool run? |
+| `report_writer` | *"the `markdown` field MUST contain the full report content"* | yes — a shape assertion on the output |
+| `research_planner` | *"You NEVER run anything"* | **already structural** — `tools: []`, `skills: []` |
+
+`research_planner` is the contrast worth keeping in view: its rule is not a rule, it is a fact
+about what it was given. Nothing to enforce, so nothing to write.
+
+### Every one of these shares the §133 exit
+
+Each carries a `response_format`, which LangChain binds as a tool and then forces
+`tool_choice="any"` around. So on the first model call each of them is compelled to call
+something, and each has one option that answers the whole question from memory in a single step
+and ends the turn. `academic_researcher` took it every time for four days. There is no reason to
+believe the others behave differently — only that nobody has looked, because their output is
+harder to check than a DOI.
+
+**`dataverse_explorer` first.** It is the same failure with a shorter fuse: a `DataVerseSearchResults`
+composed from memory carries invented `persistent_id`s, and a persistent id is a thing a researcher
+will paste into a citation without thinking, exactly as they clicked the DOIs. Its mandatory
+filename rule is purely mechanical besides — a wrapper should set that argument, not ask for it.
+
+*The rule this project keeps arriving at: if it must be true, it cannot be asked for. What is worth
+adding is that the places to look are already marked, in capital letters, by whoever wrote the
+prompt.*
