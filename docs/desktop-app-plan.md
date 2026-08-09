@@ -7926,10 +7926,9 @@ vendored copy becomes a fork, which is precisely what §5's "bundled, never fork
 against and the one part of that decision worth keeping. A change to the backend goes upstream
 first and arrives here by re-vendoring, so `mini-me/` is always a commit somebody can name.
 
-Now at `17aa310` — [#42](https://github.com/CENTRO-INTERNACIONAL-DE-LA-PAPA/Mini-Me/pull/42),
-which stopped the academic researcher discarding two thirds of what it found: a run that returned
-43 distinct papers reported 7, because its prompt still carried a 15-source cap written back when
-citations came from the model's memory and every one of them was a liability.
+Now at `8017be5` — [#42](https://github.com/CENTRO-INTERNACIONAL-DE-LA-PAPA/Mini-Me/pull/42) and
+[#43](https://github.com/CENTRO-INTERNACIONAL-DE-LA-PAPA/Mini-Me/pull/43), which between them
+stopped the academic researcher discarding most of what it found.
 
 ## 137. Ten of eleven, and the eight nobody counted (2026-08-09)
 
@@ -7961,3 +7960,52 @@ them.
 
 *Measured first, on purpose. The last structural fix was built on four days of assuming the wrong
 cause; this one starts with a number.*
+
+## 138. What the DOI thread was actually about (2026-08-09)
+
+> *"the links are great!"*
+
+Five days, and the citations now come from the publisher's record, the links open the paper they
+name, and nothing the search finds is thrown away. Verified on a live run: `6 of 6 sources
+relinked to a paper the search returned (6 recorded, 0 never reported)`, and by opening them.
+
+### The cause, and how far away it was from where we looked
+
+The subagent was never searching badly. **It was not searching.** Its structured response was bound
+as a tool, LangChain forces `tool_choice="any"` whenever one is present, and among its options sat
+one that answered the whole question from memory in a single step and ended the turn. It took the
+cheapest legal move, every time.
+
+Everything built before that — the corpus id capture, the Crossref verification, the citation
+builder, the CLI search, the automatic link repair — was correct, is still in use, and **none of it
+could have found this**, because all of it assumed a search was happening. Four days of work
+downstream of an assumption nobody had checked. The check, when it finally came, was one log line
+saying whether a tool had been called.
+
+### The rule this subsystem kept teaching
+
+Three times in one evening, in three different places:
+
+| asked the model | outcome |
+|---|---|
+| *"Use available tools"* | it did not (§133) |
+| *"report every paper, rank rather than filter"* | reported 9 of 24 (§137) |
+| *"use the citation exactly as given"* | rewrote them (§119) |
+
+And three times, removing the alternative from the loop held: withhold the structured response
+until a search returns; append the missing papers where the list leaves the backend; build the
+reference in code so there is no field left to invent.
+
+**A prompt is a request the model is free to decline. A structure is not.** Prompts are still the
+right tool for judgement — which papers bear on the question, how to rank them — but never for an
+invariant. If it must be true, it cannot be asked for.
+
+### And the corollary, which cost more than the bug
+
+Every one of those three was diagnosed from a log line that could not distinguish success from
+failure. `0 of 7 sources carry the corpus id` printed identically whether the search had worked
+perfectly or never run (§132). `10 of 11 relinked` read as healthy on a run that dropped sixteen
+papers (§137). Both were written when the system had one path, and neither was revisited when it
+grew a second.
+
+*The diagnostics were wrong for longer than the code was, and they are why the code stayed wrong.*

@@ -170,6 +170,76 @@ async def find_papers(query: str, limit: int = 10) -> str:
     return json.dumps({"query": query, "count": len(found), "papers": found}, indent=2)
 
 
+def _key(text: str) -> str:
+    """A title reduced to something two spellings of it can be compared by."""
+    return " ".join("".join(c if c.isalnum() else " " for c in (text or "").lower()).split())
+
+
+def papers_in(messages: list[Any]) -> list[dict[str, str]]:
+    """Every paper this conversation's searches returned, in order, deduplicated.
+
+    Reads the agent's own `find_papers` tool results, which makes it correctly scoped to one run
+    with no bookkeeping: a subagent's message list *is* the record of what it retrieved. The
+    desktop overlay reached the same information through a process-global dict, and had to,
+    because it hooks the tool from outside where the conversation is not in reach.
+    """
+    found: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for message in messages or []:
+        if getattr(message, "type", None) != "tool":
+            continue
+        if getattr(message, "name", None) != "find_papers":
+            continue
+        content = getattr(message, "content", None)
+        if not isinstance(content, str):
+            continue
+        try:
+            payload = json.loads(content)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        for paper in payload.get("papers") or []:
+            if not isinstance(paper, dict):
+                continue
+            # The link identifies a paper; the title is the fallback for a record that had no
+            # usable identifier, where two results with the same title really are one paper.
+            key = (paper.get("link") or "").strip() or _key(paper.get("title", ""))
+            if key and key not in seen:
+                seen.add(key)
+                found.append(paper)
+    return found
+
+
+def unreported(papers: list[dict[str, str]], sources: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """The retrieved papers that did not survive into the answer.
+
+    **Why this exists.** A run that retrieved 24 papers reported 9. The subagent's prompt asks it
+    to report everything and rank rather than filter, and it filtered anyway — the same way the
+    prompt asked it to use its tools and it did not (`middleware/search_first.py`). A prompt is a
+    request the model is free to decline, so what must not be dropped cannot be left to one.
+
+    Matched by link first, then by the paper's title appearing in the citation, because a model
+    that keeps a paper usually rewrites its reference a little and almost never its identifier.
+    """
+    shown_links = {
+        (source.get("link") or "").strip()
+        for source in sources
+        if isinstance(source, dict) and (source.get("link") or "").strip()
+    }
+    shown_text = [_key(source.get("citation", "")) for source in sources if isinstance(source, dict)]
+    missing = []
+    for paper in papers:
+        link = (paper.get("link") or "").strip()
+        if link and link in shown_links:
+            continue
+        title = _key(paper.get("title", ""))
+        if title and any(title in citation for citation in shown_text):
+            continue
+        missing.append(paper)
+    return missing
+
+
 async def get_paper_tools() -> list[Any]:
     """The paper tools the academic researcher should have."""
     return [find_papers]

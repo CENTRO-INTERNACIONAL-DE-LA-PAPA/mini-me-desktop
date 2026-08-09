@@ -7,6 +7,7 @@ from typing import Any
 from langgraph.runtime import Runtime
 from langchain.agents.middleware import AgentMiddleware
 
+from backend import paper_tools
 from backend.schemas import (
     ArtifactState,
     artifact_node_id,
@@ -219,30 +220,49 @@ class ArtifactCaptureMiddleware(AgentMiddleware[ArtifactState, Any, Any]):
             return None
 
         if self.source == "academic_researcher":
+            sources = [
+                {
+                    "citation": source.citation,
+                    "relevance": source.relevance,
+                    "link": source.link,
+                }
+                for source in getattr(structured, "sources", [])
+            ]
+            # **Everything the search returned reaches the reader.** *"We should get all the
+            # papers that asta finds and is up to the scietinst to selct and drop the ones they
+            # want."* The subagent is asked for exactly that and still returns a shortlist — 9 of
+            # 24 on the run that prompted this — so the papers it left out are added back here,
+            # where the list leaves the backend and no model gets a further say.
+            #
+            # Appended rather than merged in, so the order the subagent chose still leads: its
+            # ranking is genuinely useful, it just must not be subtractive.
+            sources.extend(
+                {
+                    "citation": paper.get("citation") or paper.get("title", ""),
+                    "relevance": "Returned by the search; not discussed in the summary.",
+                    "link": paper.get("link", ""),
+                }
+                for paper in paper_tools.unreported(
+                    paper_tools.papers_in(state.get("messages", [])), sources
+                )
+            )
             return {
                 "artifacts": {
                     "datasets": [],
-                    "sources": [
-                        {
-                            "citation": source.citation,
-                            "relevance": source.relevance,
-                            "link": source.link,
-                        }
-                        for source in getattr(structured, "sources", [])
-                    ],
+                    "sources": sources,
                     "reports": [],
                     "files": [],
+                    # Over `sources`, not the structured response: a paper added back above is
+                    # every bit as much this subagent's output, and an artifact with no
+                    # provenance edge is one the research spine cannot account for.
                     "edges": [
                         e
-                        for source in getattr(structured, "sources", [])
+                        for source in sources
                         if (
                             e := _produced_by_edge(
-                                artifact_node_id(
-                                    "source",
-                                    {"link": source.link, "citation": source.citation},
-                                ),
+                                artifact_node_id("source", source),
                                 "source",
-                                source.citation,
+                                source["citation"],
                                 "academic_researcher",
                             )
                         )
