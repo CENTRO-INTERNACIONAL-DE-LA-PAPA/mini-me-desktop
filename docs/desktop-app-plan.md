@@ -8009,3 +8009,50 @@ papers (§137). Both were written when the system had one path, and neither was 
 grew a second.
 
 *The diagnostics were wrong for longer than the code was, and they are why the code stayed wrong.*
+
+## 139. One repository, finished (2026-08-09)
+
+> *"I want minime desktop as a mono repo so we dont need to pull and copy the backend"*
+
+§135 put the source in `mini-me/` and left the update path alone, which meant a fresh machine
+provisioned from this repository and every existing one still fetched from Mini-Me's private
+remote. That half is now gone.
+
+### What was removed
+
+`sync_to_pin`, `run_git`, `backend_ref`, `MINIME_BACKEND_REF` and the pin tests — about 220 lines.
+Deleted rather than disabled. Machinery that cannot run is not neutral: three of this week's four
+delivery bugs were safeguards behaving exactly as designed, in a combination nobody had in mind,
+and a dead `git fetch` sitting behind a live file copy is the next one waiting.
+
+### What replaced it
+
+`sync_source_command` — the same shape as `sync_overlay_command`, which has worked since §25:
+
+```sh
+for d in backend skills; do
+  rm -rf DIR/.$d.new && cp -r SRC/$d DIR/.$d.new && rm -rf DIR/$d && mv DIR/.$d.new DIR/$d
+done
+```
+
+Staged beside the target and swapped in only once the copy has fully succeeded, so an unreachable
+source — a Windows drive that is not mounted, the case the in-distro copies exist to survive —
+leaves the working checkout alone instead of deleting it. `uv sync` runs only when `uv.lock`
+actually moved, compared against a stamp; without it a dependency added upstream would surface as
+an ImportError at boot, naming the wrong problem.
+
+**Stdout is discarded and stderr is not.** A mirror that failed silently would be §134 in a new
+coat.
+
+Only for a checkout the app owns — someone who pointed us at their own clone keeps it. That was
+the one part of the pin worth keeping.
+
+### What this buys
+
+`git pull` on this repository *is* the backend update. No network, no token, no second remote, no
+copying by hand. The thing that cost four test cycles on 2026-08-08 cannot recur, because the
+mechanism it depended on no longer exists.
+
+**One case remains, and it is honest about itself:** a `langgraph dev` left running from a previous
+session has already imported its code, and nothing at launch can change that. The app now says so
+on attach, with the command to fix it, rather than reporting success.

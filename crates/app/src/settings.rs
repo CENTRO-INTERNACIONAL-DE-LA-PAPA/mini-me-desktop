@@ -202,34 +202,6 @@ impl Default for Settings {
     }
 }
 
-/// The backend version this build expects.
-///
-/// **Bumped whenever a change lands in Mini-Me that the app needs.** That is the whole mechanism:
-/// the pin lives in this repository, so `git pull` on the app carries it, and `sync_to_pin`
-/// brings the backend to it on the next launch (docs §127).
-///
-/// The Mini-Me version this build of the app expects.
-///
-/// **A constant with an environment override, and deliberately *not* a saved setting.** It was
-/// one for an afternoon, and that broke the only property it has: the pin is supposed to travel
-/// with `git pull`, and a value written into `settings.toml` overrides the constant forever. The
-/// first researcher to run it kept `desktop_to_web` after that branch had merged and the constant
-/// had moved on — the pin pinned itself.
-///
-/// `MINIME_BACKEND_REF` is the escape hatch for testing an unmerged backend branch, which is what
-/// the setting was for. An environment variable is the right shape for that: deliberate, scoped
-/// to one session, and impossible to leave behind by accident.
-///
-/// `main` rather than a commit, so a researcher's backend follows fixes as they land. Pin a commit
-/// here when a release needs to hold still.
-pub fn backend_ref() -> String {
-    std::env::var("MINIME_BACKEND_REF")
-        .ok()
-        .map(|want| want.trim().to_string())
-        .filter(|want| !want.is_empty())
-        .unwrap_or_else(|| "main".to_string())
-}
-
 /// `true`, as a path serde can name.
 ///
 /// A bare `#[serde(default)]` on a `bool` field is `false`, which for these three would mean an
@@ -589,9 +561,6 @@ mod tests {
         // precisely so an existing settings.toml — every one written before this build — does not
         // open with all three panels shut.
         assert!(settings.sidebar_open && settings.panel_open && settings.road_open);
-        // The pin is not a saved setting — see `backend_ref` for why a persisted one defeated
-        // the only property it has.
-        assert!(!backend_ref().is_empty(), "an empty pin moves nothing");
     }
 
     #[test]

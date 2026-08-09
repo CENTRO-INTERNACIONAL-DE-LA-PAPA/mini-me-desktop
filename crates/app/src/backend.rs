@@ -245,11 +245,6 @@ pub struct BackendConfig {
     /// `git checkout <pin>` and `uv sync`, which on someone's own working clone destroys
     /// work — so this decides whether the update button exists at all (docs §25).
     pub owned: bool,
-    /// The Mini-Me version this build of the app expects, if any.
-    ///
-    /// See `Settings::backend_ref` and `BackendSupervisor::sync_to_pin`. `None` means leave the
-    /// checkout wherever it is.
-    pub backend_ref: Option<String>,
 }
 
 impl BackendConfig {
@@ -300,9 +295,7 @@ impl BackendConfig {
         let recorded = Some(settings.backend_dir.trim())
             .filter(|dir| !dir.is_empty())
             .map(|dir| (dir.to_string(), settings.backend_dir_owned));
-        let mut config = Self::build(recorded);
-        config.backend_ref = Some(crate::settings::backend_ref());
-        config
+        Self::build(recorded)
     }
 
     fn build(recorded: Option<(String, bool)>) -> Self {
@@ -347,7 +340,6 @@ impl BackendConfig {
             // Set by `with_recorded_dir`, which is the only path that has read settings.
             // `build` is also reached from tests and from the environment-only path, where
             // leaving the checkout alone is the right default.
-            backend_ref: None,
         }
     }
 }
@@ -418,6 +410,16 @@ fn launch_command_for(
         // so without this an updated app keeps running the overlay it was provisioned
         // with (see `sync_overlay_command`).
         let mut prepare = String::new();
+        // First, so the overlay and the generated config are written over a checkout that is
+        // already current. Only for a checkout the app owns: someone who pointed us at their own
+        // clone gets to keep it — same rule the version pin had, and the only part of it worth
+        // keeping.
+        if owned {
+            if let Some(bundled) = bundled_backend_dir() {
+                prepare.push_str(&sync_source_command(&wsl_path(&bundled), &wsl.dir));
+                prepare.push_str("; ");
+            }
+        }
         if !overlay.is_empty() {
             prepare.push_str(&sync_overlay_command(&overlay, &wsl.dir));
             prepare.push_str("; ");
@@ -577,6 +579,62 @@ const GENERATED_CONFIG: &str = ".mini-me-desktop.langgraph.json";
 /// Three small files, so copying them on every launch is cheaper than reasoning about
 /// when to. `|| true` because a *stale* overlay still beats a failed launch, and the
 /// repo's copy may genuinely be unreachable — the case the in-distro copy exists for.
+/// Everything the server imports, mirrored from `mini-me/` — and nothing else.
+///
+/// `.venv` is built inside the distro and must never be copied over; `frontend/` is the web app.
+const SOURCE_DIRS: [&str; 2] = ["backend", "skills"];
+const SOURCE_FILES: [&str; 7] = [
+    "langgraph.json",
+    "pyproject.toml",
+    "uv.lock",
+    "conftest.py",
+    "deepagents.toml",
+    "mcp.json",
+    ".python-version",
+];
+
+/// Bring the backend checkout up to the source this app ships, every launch.
+///
+/// **This replaces a `git fetch` that could never work.** The backend used to be updated by
+/// fetching its own repository from inside WSL. Mini-Me is private, WSL holds no credentials for
+/// it, and so the fetch either hung waiting for a sign-in nobody was watching (§131) or failed
+/// fast and left the checkout a month behind while every log line looked healthy (§134). A merged,
+/// pulled, verified fix took four test cycles to reach the machine, and never did on its own.
+///
+/// The source now ships in this repository, so the update is a file copy: no network, no token,
+/// no second remote. **`git pull` on the app is the backend update**, which is what the
+/// researcher asked for — *"so we dont need to pull and copy the backend"*.
+///
+/// Same reasoning as [`sync_overlay_command`], and the same lesson §25 records: a copy taken at
+/// provisioning time goes stale, and the failure it produces is a fix that silently never runs.
+///
+/// # Why it is safe to run unconditionally
+///
+/// Each directory is staged beside its target and swapped in only once the copy has fully
+/// succeeded, so an unreachable source — a Windows drive that is not mounted, which is exactly
+/// what the in-distro copy exists to survive — leaves the working checkout untouched rather than
+/// deleted. Stdout is discarded and **stderr is not**: a mirror that failed silently would be
+/// this week's bug wearing a new coat.
+///
+/// `uv sync` runs only when `uv.lock` actually changed, compared against a stamp written after
+/// the last successful sync. Without it a dependency added upstream would surface as an
+/// ImportError at boot, which names the wrong problem.
+fn sync_source_command(source: &str, backend_dir: &str) -> String {
+    let dir = quote_path(backend_dir);
+    let src = shell_quote(source.trim_end_matches('/'));
+    format!(
+        "{{ for d in {dirs}; do [ -d {src}/$d ] || continue; \
+         rm -rf {dir}/.$d.new && cp -r {src}/$d {dir}/.$d.new \
+         && rm -rf {dir}/$d && mv {dir}/.$d.new {dir}/$d; done; \
+         for f in {files}; do [ -f {src}/$f ] && cp {src}/$f {dir}/; done; \
+         cmp -s {dir}/uv.lock {dir}/.mini-me-lock \
+         || {{ (cd {dir} && uv sync --extra dev) && cp {dir}/uv.lock {dir}/.mini-me-lock; }}; \
+         }} >/dev/null || true",
+        dirs = SOURCE_DIRS.join(" "),
+        files = SOURCE_FILES.join(" "),
+    )
+}
+
 fn sync_overlay_command(source: &str, backend_dir: &str) -> String {
     let target = quote_path(&provisioned_overlay(backend_dir));
     format!(
@@ -1136,26 +1194,18 @@ impl BackendSupervisor {
     /// Ensure *something* healthy is listening: attach if it is already up,
     /// otherwise spawn and wait. Returns a status string for the UI.
     pub async fn ensure_running(&mut self, client: &LangGraphClient) -> Result<Started> {
-        // **Before the health check, not after it.** This sat below the early return, so a
-        // backend left running from a previous session meant the checkout was never brought
-        // forward at all — and `langgraph dev` survives the app closing, so that is the *usual*
-        // case rather than an edge one. Three launches in a row reported success while the
-        // backend stayed on a commit from two merges ago (docs §130).
-        let moved = self.sync_to_pin();
-
         if client.is_healthy().await {
-            // Moving the checkout does nothing to a server that has already imported it. Said
-            // plainly, with what to do about it, because the researcher just ran `git pull` and
-            // has every reason to believe the new code is running.
-            if moved {
-                tracing::warn!(
-                    "the backend files were updated, but a server was already running and is \
-                     still on the old ones — close this app, then run: \
-                     wsl bash -lc \"pkill -f 'langgraph dev'\""
-                );
-            } else {
-                tracing::info!("attached to a backend that was already running");
-            }
+            // **The one case the source mirror cannot reach.** It runs as part of the launch
+            // command, so a server left over from a previous session has already imported
+            // whatever it imported and nothing here can change that — and `langgraph dev`
+            // survives the app closing, so this is the usual case rather than an edge one.
+            // Said plainly, with what to do about it, because the researcher just ran `git pull`
+            // and has every reason to believe the new code is running (docs §130).
+            tracing::warn!(
+                "attached to a backend that was already running — it is on the code it started \
+                 with, not what this app now ships. To pick up a backend change, close this app \
+                 and run: wsl bash -lc \"pkill -f 'langgraph dev'\""
+            );
             return Ok(Started::Attached);
         }
         if self.config.attach_only {
@@ -1175,143 +1225,6 @@ impl BackendSupervisor {
         // while on a cold venv.
         self.wait_until_healthy(client, 120).await?;
         Ok(Started::Spawned)
-    }
-
-    /// Bring the backend checkout to [`crate::settings::Settings::backend_ref`].
-    ///
-    /// **Why this exists.** The desktop app and the backend are two repositories, and until now
-    /// only one of them moved when a researcher ran `git pull`. The Python that the agent
-    /// actually executes was cloned once by `setup-wsl.sh` — which deliberately *"never
-    /// overwrites an existing checkout"* — and then stayed at whatever commit that was, forever.
-    /// So a backend fix reached nobody without a hand-typed `git checkout` inside WSL, which is
-    /// exactly the kind of manual step a researcher should never meet (docs §127).
-    ///
-    /// Now the app carries the version it expects, that version travels with `git pull`, and the
-    /// backend follows on the next launch.
-    ///
-    /// # What it will not do
-    ///
-    /// * **Touch a checkout the app does not own.** `backend_dir_owned` is false when someone
-    ///   pointed the app at their own clone — the reference checkout on this developer's machine
-    ///   has ten local branches, several live in worktrees — and running `git checkout` on that
-    ///   is how you destroy somebody's afternoon. Same rule as the updater (§231).
-    /// * **Touch a checkout with uncommitted work.** Refused, loudly, rather than stashed or
-    ///   forced: a dirty tree means somebody is editing the backend, and this is not the code to
-    ///   decide what happens to that.
-    /// * **Block the launch.** Every failure here — offline, no `git`, a ref that does not exist
-    ///   — logs and returns. A backend one version behind still runs; a backend that would not
-    ///   start because the network was down would be a worse app.
-    fn sync_to_pin(&self) -> bool {
-        let Some(want) = self.config.backend_ref.clone() else {
-            return false;
-        };
-        if !self.config.owned {
-            tracing::info!(%want, "the backend checkout is not ours to move; leaving it alone");
-            return false;
-        }
-        let dir = self.config.backend_dir();
-
-        // Cheap local check first, so the common case costs no network at all: a pinned commit
-        // that is already checked out needs nothing.
-        let want = want.as_str();
-        let head = self
-            .run_git(&dir, &["rev-parse", "HEAD"])
-            .unwrap_or_default();
-        if !head.is_empty() && head.starts_with(want) && want.len() >= 7 {
-            tracing::info!(%want, "backend already at the expected commit");
-            return false;
-        }
-
-        // A tree with local edits belongs to whoever made them.
-        // **Tracked files only.** The app writes into this checkout by design — the generated
-        // `.mini-me-desktop.langgraph.json` (§30) and the copied `.desktop-overlay/` — so a plain
-        // `git status --porcelain` is *never* empty here and the guard fired on every launch,
-        // reporting somebody's uncommitted work where there was none. What the guard is actually
-        // for is a tracked file somebody edited, which is the only thing a checkout could lose.
-        match self.run_git(&dir, &["status", "--porcelain", "--untracked-files=no"]) {
-            Some(changes) if !changes.trim().is_empty() => {
-                tracing::warn!(
-                    %want,
-                    "the backend checkout has uncommitted changes — leaving it at its current \
-                     version rather than overwriting them"
-                );
-                return false;
-            }
-            None => {
-                tracing::warn!(
-                    %want,
-                    dir = %dir,
-                    "could not read git status in the backend checkout; leaving it alone"
-                );
-                return false;
-            }
-            _ => {}
-        }
-
-        if self.run_git(&dir, &["fetch", "--quiet", "origin"]).is_none() {
-            tracing::warn!(%want, "could not reach the backend's remote — staying on the current version");
-            return false;
-        }
-        // `origin/<ref>` first so a branch name tracks the remote rather than a stale local copy
-        // of it; a bare commit or tag falls through to the second form.
-        let moved = self
-            .run_git(&dir, &["checkout", "--quiet", &format!("origin/{want}")])
-            .or_else(|| self.run_git(&dir, &["checkout", "--quiet", want]));
-        match moved {
-            Some(_) => {
-                let at = self
-                    .run_git(&dir, &["rev-parse", "--short", "HEAD"])
-                    .unwrap_or_default();
-                // Logged on **success**, not only on failure. A version sync that spoke only
-                // when it broke would make "already right", "moved" and "silently skipped"
-                // produce identical evidence — which is how three overlay patches hid this week.
-                tracing::warn!(%want, at = %at.trim(), "backend moved to the version this app expects");
-                return true;
-            }
-            None => tracing::warn!(
-                %want,
-                "could not check out the expected backend version — staying where it is"
-            ),
-        }
-        false
-    }
-
-    /// How long any one git command may take before the launch gives up on it.
-    ///
-    /// Generous for a `fetch` over a slow link, short enough that a researcher does not conclude
-    /// the app is broken.
-    const GIT_TIMEOUT_S: u32 = 20;
-
-    /// Run one git command in `dir`, or `None` if it could not run or failed.
-    fn run_git(&self, dir: &str, args: &[&str]) -> Option<String> {
-        // **Never wait for a human, never wait forever.** This runs on the startup path, before
-        // the backend is spawned, and Mini-Me is a *private* repository — so `git fetch` with a
-        // credential helper configured will sit there waiting for a sign-in that nobody is
-        // watching for, and the app looks hung. `GIT_TERMINAL_PROMPT=0` and an askpass that
-        // answers nothing turn "ask the user" into "fail immediately", and `timeout` bounds the
-        // rest: DNS, a stalled TLS handshake, a repository that has moved.
-        //
-        // A version check is worth a few seconds and is worth nothing at all if it costs the
-        // researcher a window that will not open (docs §131).
-        let command = format!(
-            "GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=true GCM_INTERACTIVE=never \
-             timeout {} git -C {} {}",
-            Self::GIT_TIMEOUT_S,
-            quote_path(dir),
-            args.iter()
-                .map(|arg| shell_quote(arg))
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
-        let argv = self.config.shell_argv(&command);
-        let output = std::process::Command::new(&argv[0])
-            .args(&argv[1..])
-            .output()
-            .ok()?;
-        output
-            .status
-            .success()
-            .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
     /// Poll `GET /ok` until it responds or the budget runs out.
@@ -1842,8 +1755,15 @@ mod tests {
         assert!(!command.contains("MINIME_EXECUTION_BACKEND"), "{command}");
         // No overlay copy and no generated config: both are host-execution machinery, and the
         // sandbox path must not acquire either.
-        assert!(!command.contains("cp -r"), "{command}");
+        //
+        // Named by what it copies, not by `cp -r`. That proxy meant "the overlay" only while the
+        // overlay was the sole thing copied into the distro; the source mirror uses the same
+        // command and made this assertion fail for a change it was never about.
+        assert!(!command.contains(".desktop-overlay"), "{command}");
         assert!(!command.contains("--config"), "{command}");
+        // The source mirror, however, belongs on **both** paths. Which commit the checkout runs
+        // is not an execution concern — the same reasoning as the checkpointer below.
+        assert!(command.contains("for d in backend skills"), "{command}");
         // Storage, however, is not an execution concern. Where conversations are kept is the
         // same question whichever side runs the agent's code, so the checkpointer install
         // belongs on this path too (docs §96).
@@ -2235,7 +2155,8 @@ mod tests {
         // copy may be genuinely unreachable — the case the in-distro copy exists for.
         assert!(command.contains("|| true"), "{command}");
 
-        // The sandbox path stays untouched: no overlay, nothing to sync.
+        // The sandbox path carries no *overlay*: it is host-execution machinery. It still
+        // mirrors the source, which is why this asks about the overlay by name.
         let sandbox = launch_command_for(
             Path::new("/tmp/mini-me"),
             2024,
@@ -2248,7 +2169,72 @@ mod tests {
             false,
             true,
         );
-        assert!(!sandbox.last().unwrap().contains("cp -r"), "{sandbox:?}");
+        assert!(
+            !sandbox.last().unwrap().contains(".desktop-overlay"),
+            "{sandbox:?}"
+        );
+    }
+
+    /// The backend source is mirrored from this repository on every launch.
+    ///
+    /// **This is what a `git pull` has to be enough for.** It replaces a `git fetch` against
+    /// Mini-Me's own remote, which is private and which WSL has no credentials for — so the
+    /// update either hung waiting for a sign-in (§131) or failed fast and left the checkout a
+    /// month behind while every log line read healthy (§134). A merged and verified fix took four
+    /// test cycles to reach the machine and never arrived on its own.
+    #[test]
+    fn every_launch_brings_the_backend_source_forward() {
+        let _env = env_lock::hold();
+        let wsl = WslTarget {
+            distro: None,
+            dir: "~/Mini-Me".into(),
+        };
+        let ours = launch_command_for(
+            Path::new("/tmp/mini-me"),
+            2024,
+            Some(&wsl),
+            &Execution::Sandbox,
+            true,
+            false,
+            true,
+        );
+        let command = ours.last().expect("the bash -lc payload");
+
+        // Before the server, and before the overlay and generated config are written over it.
+        let mirror = command.find("for d in backend skills").expect("the mirror");
+        assert!(mirror < command.find("exec .venv/bin").expect("serve"), "{command}");
+
+        // Staged beside the target and swapped in only once the copy succeeded. An unreachable
+        // source — a Windows drive that is not mounted, the case the in-distro copies exist to
+        // survive — must leave the working checkout alone, not delete it.
+        let staged = command.find(".new").expect("staged copy");
+        let removed = command.find("&& rm -rf ~/'Mini-Me'/$d").expect("swap");
+        assert!(staged < removed, "the live copy is removed before the new one exists");
+
+        // `uv sync` only when the lock actually moved: otherwise every launch pays for it.
+        assert!(command.contains("cmp -s"), "{command}");
+        assert!(command.contains("uv sync --extra dev"), "{command}");
+
+        // Never fatal, and **stderr is not discarded**: a mirror that failed silently would be
+        // this week's bug in a new coat (§134).
+        assert!(command.contains("|| true"), "{command}");
+        assert!(!command.contains("2>/dev/null } "), "{command}");
+
+        // A checkout somebody else owns is theirs. Same rule the version pin had, and the only
+        // part of it worth keeping.
+        let theirs = launch_command_for(
+            Path::new("/tmp/mini-me"),
+            2024,
+            Some(&wsl),
+            &Execution::Sandbox,
+            true,
+            false,
+            false,
+        );
+        assert!(
+            !theirs.last().unwrap().contains("for d in backend skills"),
+            "{theirs:?}"
+        );
     }
 
     #[test]
@@ -2357,15 +2343,9 @@ mod tests {
 }
 
 #[cfg(test)]
-mod pin_tests {
-    use super::*;
-
-    /// A real clone with a real remote, so `fetch` and `checkout` do what they do in the field.
-    ///
-    /// A bare repository standing in for `origin`, carrying two commits: `main` and a `target`
-    /// branch one commit ahead. Without a reachable remote `sync_to_pin` returns at the fetch and
-    /// every later assertion passes for the wrong reason — which is exactly how the first version
-    /// of this test "passed" with the bug it was written to catch still in place.
+mod source_tests {
+    /// A real repository, so the version stamp reads what git actually writes rather than a
+    /// fixture of what we believe it writes.
     fn repo() -> Option<(std::path::PathBuf, String)> {
         let base = std::env::temp_dir().join(format!("minime-pin-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
@@ -2401,19 +2381,7 @@ mod pin_tests {
         Some((work, base.to_string_lossy().into_owned()))
     }
 
-    fn supervisor(dir: &std::path::Path, owned: bool, want: Option<&str>) -> BackendSupervisor {
-        let mut config = BackendConfig::build(None);
-        config.wsl = None;
-        config.project_dir = dir.to_path_buf();
-        config.owned = owned;
-        config.backend_ref = want.map(str::to_string);
-        BackendSupervisor::new(config)
-    }
 
-    /// The guards that decide whether `git checkout` runs on somebody's working tree.
-    ///
-    /// **These are the ones worth a test.** Getting the happy path wrong costs a stale backend;
-    /// getting these wrong destroys a colleague's uncommitted work — the failure §231 wrote the
     /// The version stamp reads a real checkout, including a linked worktree.
     ///
     /// **Because the whole point of it is to be trusted at 11pm.** Four diagnoses this week were
@@ -2493,88 +2461,4 @@ mod pin_tests {
         assert_eq!(read(std::env::temp_dir().as_path()), "not a git checkout");
     }
 
-    /// ownership flag to prevent.
-    #[test]
-    fn a_checkout_is_only_moved_when_it_is_ours_and_clean() {
-        if std::process::Command::new("git").arg("--version").output().is_err() {
-            eprintln!("skipping: git is not on PATH");
-            return;
-        }
-        let Some((dir, base)) = repo() else {
-            eprintln!("skipping: could not build a temp repository");
-            return;
-        };
-        let head = |at: &std::path::Path| {
-            String::from_utf8_lossy(
-                &std::process::Command::new("git")
-                    .current_dir(at)
-                    .args(["rev-parse", "HEAD"])
-                    .output()
-                    .expect("git")
-                    .stdout,
-            )
-            .trim()
-            .to_string()
-        };
-        let before = head(&dir);
-
-        // Not ours: never touched, whatever the pin says.
-        assert!(!supervisor(&dir, false, Some("some-other-branch")).sync_to_pin());
-        assert_eq!(head(&dir), before, "a checkout we do not own must be left alone");
-
-        // **A file the app itself wrote must not count as somebody's work in progress.** The
-        // generated config and the copied overlay are untracked files in this checkout, so a
-        // plain porcelain check is never clean and the guard fired on every launch — reporting
-        // uncommitted changes that were the app's own.
-        //
-        // Asserted by moving to a branch that *exists*, so a blocked sync and a working one give
-        // different answers. The first version of this pinned `want` to the current commit, which
-        // returns before the dirty check is even reached — it passed with the bug still in.
-        std::fs::write(dir.join(".mini-me-desktop.langgraph.json"), "{}").expect("write");
-        std::fs::create_dir_all(dir.join(".desktop-overlay")).expect("mkdir");
-        std::fs::write(dir.join(".desktop-overlay/sitecustomize.py"), "").expect("write");
-        assert!(
-            supervisor(&dir, true, Some("target")).sync_to_pin(),
-            "a sync that moved the checkout must report that it did — the caller uses it to warn \
-             when a server is already running on the old files"
-        );
-        assert_ne!(
-            head(&dir),
-            before,
-            "untracked files the app wrote must not block the sync"
-        );
-        let moved = head(&dir);
-        // Back to where the rest of the assertions expect it.
-        let _ = std::process::Command::new("git")
-            .current_dir(&dir)
-            .args(["checkout", "-q", "main"])
-            .output();
-        assert_eq!(head(&dir), before, "{moved} was reachable, so main still is");
-
-        // Ours, but with a *tracked* file edited: never touched. Somebody is editing it.
-        std::fs::write(dir.join("a.txt"), "edited").expect("write");
-        assert!(!supervisor(&dir, true, Some("some-other-branch")).sync_to_pin());
-        assert_eq!(head(&dir), before, "uncommitted work must not be overwritten");
-        assert_eq!(
-            std::fs::read_to_string(dir.join("a.txt")).expect("read"),
-            "edited",
-            "the edit itself must survive"
-        );
-        std::fs::write(dir.join("a.txt"), "one").expect("restore");
-
-        // No pin: nothing to move to.
-        supervisor(&dir, true, None).sync_to_pin();
-        assert_eq!(head(&dir), before);
-
-        // Already at the pinned commit: returns without reaching the network at all.
-        supervisor(&dir, true, Some(&before)).sync_to_pin();
-        assert_eq!(head(&dir), before);
-
-        // A ref that does not exist, with no reachable remote: logs and leaves it be, rather
-        // than failing the launch. A backend one version behind still runs.
-        supervisor(&dir, true, Some("no-such-ref")).sync_to_pin();
-        assert_eq!(head(&dir), before);
-
-        let _ = std::fs::remove_dir_all(&base);
-    }
 }
