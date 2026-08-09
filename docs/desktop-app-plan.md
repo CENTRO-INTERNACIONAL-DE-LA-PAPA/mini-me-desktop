@@ -7912,3 +7912,21 @@ clear head rather than the end of this session.
 *Written down rather than done, because the failure being fixed is a delivery mechanism whose
 failure mode is silence — and shipping half of one at midnight is how §127, §129, §130 and §131
 each happened.*
+
+## 136. Keeping the vendored copy honest (2026-08-08)
+
+`mini-me/` is re-vendored from Mini-Me `main` after each merge, whole, never patched in place:
+
+```sh
+rm -rf mini-me && mkdir mini-me && git -C ../Mini-Me archive <sha> | tar -x -C mini-me
+```
+
+**The rule is: `mini-me/` equals an upstream commit, exactly.** Editing it directly is how a
+vendored copy becomes a fork, which is precisely what §5's "bundled, never forked" was protecting
+against and the one part of that decision worth keeping. A change to the backend goes upstream
+first and arrives here by re-vendoring, so `mini-me/` is always a commit somebody can name.
+
+Now at `17aa310` — [#42](https://github.com/CENTRO-INTERNACIONAL-DE-LA-PAPA/Mini-Me/pull/42),
+which stopped the academic researcher discarding two thirds of what it found: a run that returned
+43 distinct papers reported 7, because its prompt still carried a 15-source cap written back when
+citations came from the model's memory and every one of them was a liability.

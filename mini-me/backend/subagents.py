@@ -41,9 +41,13 @@ academic_subagent = {
     Do not include raw search results or unnecessary detail.
     Cite all claims with corresponding APA-format references.
 
-    Source limit: return at most 15 sources in your structured response,
-    ranked by direct relevance to the user's question. If you find more
-    than 15 relevant papers, keep only the most directly applicable ones.
+    Report every paper your searches returned, in your structured response, ordered
+    with the most directly relevant first. Do not drop a paper because you judge it
+    marginal — say so in its `relevance` field and let the reader decide. Choosing
+    which results matter is the researcher's job, not yours.
+
+    Use the `citation` and `link` exactly as `find_papers` gave them. Never rewrite a
+    citation, and never write a DOI, year, volume or page number yourself.
     Never emit raw tool output as the response body.
     """,
     "skills": ["/skills/"],

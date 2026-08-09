@@ -106,6 +106,11 @@ class SearchBeforeCiting(AgentMiddleware):
         # output tool — which is what makes `tool_choice` reach the model at all — and naming the
         # tool is what makes the forced call a search rather than whichever of `ls`, `execute` or
         # `write_todos` the model happens to pick when told only that it must call *something*.
+        # INFO, and it arrives: a working run shows this line in the deployment log. It was
+        # briefly moved to WARNING on the theory that INFO never reached that file — a conclusion
+        # drawn from this line being absent, when the reason it was absent is that the gate had
+        # never run. The absence of a diagnostic is evidence about the code that emits it, not
+        # about the channel, unless the channel has been shown to carry something else.
         logger.info("academic_researcher has not searched yet — forcing %s", SEARCH_TOOL)
         return request.override(response_format=None, tool_choice=SEARCH_TOOL)
 
