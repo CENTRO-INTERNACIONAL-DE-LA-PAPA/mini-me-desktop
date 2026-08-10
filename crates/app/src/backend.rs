@@ -241,6 +241,12 @@ pub struct BackendConfig {
     /// When on, the launch regenerates an extended LangGraph config declaring a second
     /// graph — see `generate_config_command` and docs §30.
     pub async_subagents: bool,
+    /// The `"provider::model_id"` the researcher chose, or `None` before settings are read.
+    ///
+    /// Reaches the backend as `MINIME_DEFAULT_MODEL`, so a graph built without a run config —
+    /// `GET /threads/{id}/state`, which the client polls — does not fall back to the OpenAI
+    /// default this installation can never satisfy. See `model_env`.
+    pub default_model: Option<String>,
     /// Whether the app provisioned the checkout, and so may update it.
     ///
     /// False for anything it merely *found* or was pointed at. Updating runs
@@ -279,7 +285,9 @@ impl BackendConfig {
             settings.approve_execute,
             settings.async_subagents,
             config.owned,
+            Some(&settings.model_spec()),
         );
+        config.default_model = Some(settings.model_spec());
         config.execution = execution;
         config.approve_execute = settings.approve_execute;
         config.async_subagents = settings.async_subagents;
@@ -329,6 +337,7 @@ impl BackendConfig {
                 true,
                 false,
                 owned,
+                None,
             ),
             project_dir,
             wsl,
@@ -338,6 +347,7 @@ impl BackendConfig {
             secrets: Vec::new(),
             approve_execute: true,
             async_subagents: false,
+            default_model: None,
             owned,
             // Set by `with_recorded_dir`, which is the only path that has read settings.
             // `build` is also reached from tests and from the environment-only path, where
@@ -366,6 +376,9 @@ fn launch_command_for(
     approve_execute: bool,
     async_subagents: bool,
     owned: bool,
+    // The `"provider::model_id"` the researcher chose, for calls that arrive with no run
+    // config. See `model_env` — without it the backend reaches for an OpenAI default.
+    default_model: Option<&str>,
 ) -> Vec<String> {
     if let Some(wsl) = wsl {
         let mut argv = vec!["wsl.exe".to_string()];
@@ -389,6 +402,7 @@ fn launch_command_for(
         for (name, value) in execution_env(execution, true, approve_execute)
             .into_iter()
             .chain(feature_env(async_subagents))
+            .chain(model_env(default_model))
         {
             if name == "PYTHONPATH" {
                 exports.push_str(&format!(
@@ -694,6 +708,39 @@ fn generate_config_command(overlay: &str, python: &str) -> String {
         "{python} \"{}/minime_local/make_config.py\" .",
         overlay.trim_end_matches('/')
     )
+}
+
+/// Tell the backend which model to build when a request did not choose one.
+///
+/// # Why this is not cosmetic
+///
+/// `backend/models.py` reads `MINIME_DEFAULT_MODEL` and falls back to **`openai::gpt-5.4`**. This
+/// app never set it, and never puts an OpenAI key anywhere — provider keys ride in the run request
+/// precisely so the agent's own `execute` tool cannot read them off the environment.
+///
+/// That is fine for a *run*, which carries its own model. It is fatal for every call that builds
+/// the graph **without** a run config, and `GET /threads/{id}/state` is one — the route the client
+/// polls while watching a background task. Constructing an OpenAI client with no key raises at
+/// construction:
+///
+/// ```text
+/// openai.OpenAIError: The api_key client option must be set ...
+/// GET /threads/019fe9aa-.../state 500
+/// ```
+///
+/// So a background run would finish, the poll would 500, and the coordinator would report
+/// *"completed, but it returned no result text"* — the work done and the answer unreadable. The
+/// same 500 is why older conversations reported `could not read a conversation` (docs §148).
+///
+/// **Only the name travels, never the key.** `anthropic:…` constructs happily with no credential
+/// — measured, not assumed — so naming the configured model is enough to keep a config-less build
+/// on a provider this installation can actually use. A model id is not a secret, so the rule that
+/// sent this project down the request-only-keys path is untouched.
+fn model_env(spec: Option<&str>) -> Vec<(String, String)> {
+    let Some(spec) = spec.map(str::trim).filter(|spec| spec.contains("::")) else {
+        return Vec::new();
+    };
+    vec![("MINIME_DEFAULT_MODEL".to_string(), spec.to_string())]
 }
 
 /// The variable that turns background work on inside the backend.
@@ -1153,6 +1200,7 @@ impl BackendSupervisor {
                 execution_env(&self.config.execution, false, self.config.approve_execute)
                     .into_iter()
                     .chain(feature_env(self.config.async_subagents))
+                    .chain(model_env(self.config.default_model.as_deref()))
             {
                 if name == "PYTHONPATH" {
                     // Prepend rather than replace: whatever the user had still works.
@@ -1645,6 +1693,7 @@ mod tests {
             // Async subagents on, which is what asks for a generated config at all.
             true,
             true,
+            None,
         );
         let command = argv.last().expect("the bash -lc payload");
 
@@ -1690,6 +1739,7 @@ mod tests {
                 true,
                 false,
                 owned,
+                None,
             )
             .last()
             .expect("the bash -lc payload")
@@ -1845,6 +1895,7 @@ mod tests {
             true,
             false,
             true,
+            None,
         );
         let command = argv.last().expect("the bash -lc payload");
         assert!(!command.contains("MINIME_EXECUTION_BACKEND"), "{command}");
@@ -2263,6 +2314,7 @@ mod tests {
             true,
             true,
             true,
+            None,
         );
         let command = argv.last().expect("the bash -lc payload");
         // Assignments must land *before* `exec`, or the server never sees them.
@@ -2347,6 +2399,7 @@ mod tests {
             true,
             false,
             true,
+            None,
         );
         let command = argv.last().expect("the bash -lc payload");
         let sync = command.find("cp -r").expect("the overlay sync");
@@ -2375,6 +2428,7 @@ mod tests {
             true,
             false,
             true,
+            None,
         );
         assert!(
             !sandbox.last().unwrap().contains(".desktop-overlay"),
@@ -2390,6 +2444,47 @@ mod tests {
     /// month behind while every log line read healthy (§134). A merged and verified fix took four
     /// test cycles to reach the machine and never arrived on its own.
     #[test]
+    fn a_config_less_graph_build_never_reaches_for_a_provider_we_have_no_key_for() {
+        // `backend/models.py` falls back to `openai::gpt-5.4` when `MINIME_DEFAULT_MODEL` is
+        // unset, and this app deliberately keeps provider keys **out** of the environment. So
+        // every call that builds the graph without a run config — `GET /threads/{id}/state`,
+        // which the client polls while watching a background task — constructed an OpenAI client
+        // with no key and returned 500. A background run finished and its result was unreadable
+        // (docs §148).
+        let _env = env_lock::hold();
+        let wsl = WslTarget {
+            distro: None,
+            dir: "~/Mini-Me".into(),
+        };
+        let named = launch_command_for(
+            Path::new("/tmp/mini-me"),
+            2024,
+            Some(&wsl),
+            &Execution::Sandbox,
+            true,
+            false,
+            true,
+            Some("anthropic::claude-sonnet-4-5"),
+        );
+        let command = named.last().expect("the bash -lc payload");
+        assert!(
+            command.contains("MINIME_DEFAULT_MODEL='anthropic::claude-sonnet-4-5'"),
+            "{command}"
+        );
+
+        // The name and nothing else. A key on the backend's environment is readable by the
+        // agent's own `execute` tool, which is the whole reason they ride in the run request.
+        assert!(!command.contains("API_KEY="), "{command}");
+
+        // A spec that is not a spec is not exported: half a variable would send the backend to a
+        // provider named after the whole string, which fails later and less clearly than the
+        // default it replaced.
+        assert!(model_env(None).is_empty());
+        assert!(model_env(Some("claude-sonnet-4-5")).is_empty());
+        assert!(model_env(Some("   ")).is_empty());
+    }
+
+    #[test]
     fn every_launch_brings_the_backend_source_forward() {
         let _env = env_lock::hold();
         let wsl = WslTarget {
@@ -2404,6 +2499,7 @@ mod tests {
             true,
             false,
             true,
+            None,
         );
         let command = ours.last().expect("the bash -lc payload");
 
@@ -2455,6 +2551,7 @@ mod tests {
             true,
             false,
             false,
+            None,
         );
         assert!(
             !theirs.last().unwrap().contains("for d in backend skills"),
@@ -2480,6 +2577,7 @@ mod tests {
             true,
             true,
             true,
+            None,
         );
         let command = argv.last().expect("the bash -lc payload");
 
@@ -2514,6 +2612,7 @@ mod tests {
             true,
             false,
             true,
+            None,
         );
         let plain = plain.last().expect("payload");
         assert!(!plain.contains("make_config"), "{plain}");
