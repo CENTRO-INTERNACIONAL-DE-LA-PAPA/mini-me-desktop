@@ -624,16 +624,46 @@ const SOURCE_FILES: [&str; 7] = [
 fn sync_source_command(source: &str, backend_dir: &str) -> String {
     let dir = quote_path(backend_dir);
     let src = shell_quote(source.trim_end_matches('/'));
+
+    // **Written out, one command per name, with no shell variable anywhere.** The first version
+    // of this was a `for d in backend skills` loop, and on a real Windows machine `$d` arrived
+    // *empty* — so `rm -rf {dir}/$d` was `rm -rf {dir}/` and every launch deleted the backend
+    // checkout, `.venv` and conversation database included. The log said
+    // `cp: cannot create directory '.../backend/..new'`, and `..new` is `.$d.new` with nothing
+    // in the middle (docs §147).
+    //
+    // Why a loop cannot be trusted here is not fully explained, and that is exactly why this does
+    // not use one: the same machine loses variables assigned inside `wsl bash -lc` when a command
+    // is typed by hand too. Two names and seven files do not need iteration, and a literal name
+    // cannot expand to nothing.
+    let mut steps: Vec<String> = Vec::new();
+    for name in SOURCE_DIRS {
+        // Staged beside the target and swapped in only once the copy has succeeded, so an
+        // unreachable source — an unmounted Windows drive — leaves the working checkout intact.
+        // Every path here is a literal, so `rm -rf` can never be handed the directory itself.
+        steps.push(format!(
+            "[ -d {src}/{name} ] && rm -rf {dir}/.{name}.new \
+             && cp -r {src}/{name} {dir}/.{name}.new \
+             && rm -rf {dir}/{name} && mv {dir}/.{name}.new {dir}/{name}"
+        ));
+    }
+    for name in SOURCE_FILES {
+        steps.push(format!("[ -f {src}/{name} ] && cp {src}/{name} {dir}/"));
+    }
+    steps.push(format!(
+        "cmp -s {dir}/uv.lock {dir}/.mini-me-lock \
+         || {{ (cd {dir} && uv sync --extra dev) && cp {dir}/uv.lock {dir}/.mini-me-lock; }}"
+    ));
+
+    // Guarded on the checkout still being a checkout. Mirroring into a directory that has lost
+    // its `pyproject.toml` is how a half-populated tree gets treated as current — and the whole
+    // chain is `|| true`, so without this the damage stays silent until `cd` fails four commands
+    // later with a message about the wrong thing.
     format!(
-        "{{ for d in {dirs}; do [ -d {src}/$d ] || continue; \
-         rm -rf {dir}/.$d.new && cp -r {src}/$d {dir}/.$d.new \
-         && rm -rf {dir}/$d && mv {dir}/.$d.new {dir}/$d; done; \
-         for f in {files}; do [ -f {src}/$f ] && cp {src}/$f {dir}/; done; \
-         cmp -s {dir}/uv.lock {dir}/.mini-me-lock \
-         || {{ (cd {dir} && uv sync --extra dev) && cp {dir}/uv.lock {dir}/.mini-me-lock; }}; \
-         }} >/dev/null || true",
-        dirs = SOURCE_DIRS.join(" "),
-        files = SOURCE_FILES.join(" "),
+        "{{ [ -f {dir}/pyproject.toml ] || echo \
+         'mini-me: the backend checkout looks incomplete — run Setup' >&2; \
+         {steps}; }} >/dev/null || true",
+        steps = steps.join("; "),
     )
 }
 
@@ -1828,7 +1858,7 @@ mod tests {
         assert!(!command.contains("--config"), "{command}");
         // The source mirror, however, belongs on **both** paths. Which commit the checkout runs
         // is not an execution concern — the same reasoning as the checkpointer below.
-        assert!(command.contains("for d in backend skills"), "{command}");
+        assert!(command.contains("mv ~/'Mini-Me'/.backend.new"), "{command}");
         // Storage, however, is not an execution concern. Where conversations are kept is the
         // same question whichever side runs the agent's code, so the checkpointer install
         // belongs on this path too (docs §96).
@@ -2378,15 +2408,33 @@ mod tests {
         let command = ours.last().expect("the bash -lc payload");
 
         // Before the server, and before the overlay and generated config are written over it.
-        let mirror = command.find("for d in backend skills").expect("the mirror");
+        let mirror = command.find("rm -rf ~/'Mini-Me'/.backend.new").expect("the mirror");
         assert!(mirror < command.find("exec .venv/bin").expect("serve"), "{command}");
+
+        // **No shell variable, anywhere in the mirror.** A `for d in …` loop here arrived with
+        // `$d` empty on a real Windows machine, which made `rm -rf {dir}/$d` into `rm -rf {dir}/`
+        // — every launch deleted the checkout, `.venv` and conversation database included, and
+        // the researcher saw only `exit code: 127` (docs §147). Two names do not need iteration.
+        let mirror_end = command.find("cmp -s").expect("the lock check ends the mirror");
+        let mirror_text = &command[..mirror_end];
+        assert!(
+            !mirror_text.contains('$'),
+            "a variable in the mirror can expand to nothing: {mirror_text}"
+        );
 
         // Staged beside the target and swapped in only once the copy succeeded. An unreachable
         // source — a Windows drive that is not mounted, the case the in-distro copies exist to
         // survive — must leave the working checkout alone, not delete it.
-        let staged = command.find(".new").expect("staged copy");
-        let removed = command.find("&& rm -rf ~/'Mini-Me'/$d").expect("swap");
+        let staged = command.find(".backend.new").expect("staged copy");
+        let removed = command.find("&& rm -rf ~/'Mini-Me'/backend ").expect("swap");
         assert!(staged < removed, "the live copy is removed before the new one exists");
+
+        // And the `rm -rf` targets are named files, never a computed path that could reduce to
+        // the checkout root. This is the assertion that would have caught the deletion.
+        assert!(
+            !command.contains("rm -rf ~/'Mini-Me'/ ") && !command.contains("rm -rf ~/'Mini-Me';"),
+            "the mirror can remove the checkout itself: {command}"
+        );
 
         // `uv sync` only when the lock actually moved: otherwise every launch pays for it.
         assert!(command.contains("cmp -s"), "{command}");
@@ -2639,3 +2687,4 @@ mod source_tests {
     }
 
 }
+

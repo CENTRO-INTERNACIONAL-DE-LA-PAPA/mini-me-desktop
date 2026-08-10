@@ -130,10 +130,10 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
 - ⬜ **A paper with no DOI and no corpus id** is invisible to the "never reported" accounting
   (7 returned, 6 recorded, on 2026-08-09).
 - ✅ **`dataverse_explorer` searches, and reads what it found, before it can recommend** (§142,
-  Mini-Me PR #45). Two steps, because `SearchCIPDataverse` writes to a file and `read_search_results`
-  is what puts the metadata in front of the model. Its mandatory-filename paragraph is now set in
-  the call instead of asked for in capitals. **Awaiting a live run**: the persistent ids it returns
-  must resolve in CIP Dataverse.
+  Mini-Me PR #45). **Verified on a live run**: both gates fired, and all four persistent ids
+  resolved to real CIP datasets on late blight clone trials in Peru. The filename it was asked for
+  in capitals was wrong **9 times out of 9** and silently corrected each time — before this, every
+  search wrote to a different file and every read looked for one that did not exist.
 - ⬜ **Seven subagents still hold their invariants in prompts** (§140). Each carries a
   `response_format` and so each has the §133 exit. `hypothesis_generator` is next — it emits
   citations too, so it can reproduce the §138 bug somewhere nobody would think to look. The
@@ -8257,6 +8257,34 @@ the two override disjoint hooks — `wrap_model_call` and `wrap_tool_call` — s
 around the other and the order is free. One day after §141, which was a comment asserting a
 contract the code did not have.
 
+### Verified, and the filename result is the finding
+
+Both gates fired on the first live run, and all four persistent ids resolved to real CIP datasets
+— *Stability of resistance and yield of 15 advanced clones* (2016), two *Participatory Varietal
+Selection* datasets from La Libertad (2017), and *Phenotypic Stability for Tuber Yield and Late
+Blight Resistance in B3C3* (2018). On topic, and real.
+
+The filename log is the part worth keeping:
+
+```
+SearchCIPDataverse(output_filename='cip_late_blight_peru.json') -> 'dataverse_search.json'
+SearchCIPDataverse(output_filename='q1.json')  -> 'dataverse_search.json'
+SearchCIPDataverse(output_filename='pvs.json') -> 'dataverse_search.json'
+read_search_results(filename=None)             -> 'dataverse_search.json'
+```
+
+**Nine searches, nine different names, and no filename at all on every read.** The prompt said
+*"ALWAYS… Do not invent or vary this name"*, and compliance was zero out of twelve. Which means
+`dataverse_explorer` was not merely at risk of inventing datasets — **it was broken**: every search
+wrote to a file no read would look for, and the subagent narrated around the failure convincingly
+enough that nobody had noticed. A capital-letter rule was the only thing holding a two-tool
+handshake together, and it held it none of the time.
+
+*One id looked like a five-character truncation and was called a transcription loss here before the
+researcher pointed out the missing character was in their paste. The model got all four right. It
+is worth recording that the first instinct on seeing a bad identifier is now to blame the model,
+and that instinct was wrong.*
+
 ### The copy that reported `ok` and had not
 
 The first real-machine run of §139's monorepo install failed two steps *after* the mistake:
@@ -8364,3 +8392,61 @@ The transcript virtualization and SVG glyph replacement remain open too. They we
 lower priority, and the former requires a before/after measurement in a real GPUI window. The app
 cannot be run here, and replacing a variable-height transcript without that measurement would
 repeat §70's mistake in a different type.
+
+## 147. The mirror deleted the checkout it was mirroring into (2026-08-10)
+
+The worst defect this project has shipped, and it ran on every launch for a day.
+
+`sync_source_command` (§139) staged each directory beside its target and swapped it in:
+
+```sh
+for d in backend skills; do
+  rm -rf $DIR/.$d.new && cp -r $SRC/$d $DIR/.$d.new && rm -rf $DIR/$d && mv $DIR/.$d.new $DIR/$d
+done
+```
+
+On a real Windows machine `$d` arrived **empty**. So `.$d.new` was `..new`, and `rm -rf $DIR/$d` was
+`rm -rf $DIR/` — **the backend checkout, its `.venv`, and `.langgraph_api/checkpoints.sqlite` with
+every conversation in it.** Deleted, silently, before the server it was preparing for could start.
+
+What the researcher saw was `backend exited during startup with exit code: 127`.
+
+### Four wrong answers before the log was read
+
+The install failed at `uv sync` with *"No `pyproject.toml` found"*. From reading the script I
+concluded `cp -r SRC DEST` had nested the checkout one level deep, wrote that into §141's section,
+shipped a fix for it, and told the researcher it was the cause. **It was not.** A later `uv sync`
+succeeded at the top level, which proved the directory had never been nested.
+
+Then a diagnostic was handed over that assigned a shell variable inside `wsl bash -lc`. On this
+machine those arrive empty — a failure already recorded in this project — so it printed nothing,
+and the nothing was read as evidence about the install.
+
+The log had it in four lines the whole time:
+
+```
+mv: cannot stat '/home/piero_linux/.local/share/mini-me-desktop/backend/..new'
+cp: cannot create directory '.../backend/..new'
+bash: line 1: cd: /home/.../backend: No such file or directory
+bash: line 1: .venv/bin/python: No such file or directory
+```
+
+`..new` is `.$d.new` with nothing in the middle. **The diagnostic that names the failure was
+written and shipped and then not read for three exchanges**, which is the actual lesson here — §132
+was about a diagnostic that could not distinguish success from failure, and this one could, and it
+was still argued past.
+
+### The fix
+
+No shell variable anywhere in the mirror. Two directories and seven files do not need iteration,
+and a literal name cannot expand to nothing — so `rm -rf` is now only ever handed
+`~/Mini-Me/backend`, never a path that could reduce to `~/Mini-Me/`. The mirror also says so out
+loud when the checkout has lost its `pyproject.toml`, because the whole chain is `|| true` and the
+damage was otherwise silent until `cd` failed four commands later complaining about something else.
+
+Two assertions now stand where the loop was: that the mirror text contains no `$` at all, and that
+no `rm -rf` targets the checkout root. Either would have caught this.
+
+*Why the loop variable is lost is still unexplained. That is precisely why the fix does not use
+one: the same machine loses variables assigned in a hand-typed `wsl bash -lc` too, so whatever the
+mechanism, it is not something this code should be relying on.*
