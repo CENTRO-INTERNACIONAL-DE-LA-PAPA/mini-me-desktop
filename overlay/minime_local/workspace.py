@@ -387,7 +387,24 @@ class LocalWorkspaceBackend(LocalShellBackend):
         self._thread_id = workspace_thread(thread_id)
         project = workspace_project()
         root = workspace_root()
-        self._work_dir = (root / project / self._thread_id) if project else (root / self._thread_id)
+        # **A background worker gets a folder *inside* the conversation's, named after itself.**
+        #
+        # Three earlier attempts moved these files between sibling directories and none of them
+        # answered the actual requirement, which the researcher put plainly: *"the idea is to
+        # somehow view it in the app, not as a different folder outside the conversation folder."*
+        #
+        # Nesting answers it without the app changing at all. `workspace::outputs` already descends
+        # through named subfolders and shows the relative path (§143), so `019fe.../plot_yield.png`
+        # appears in the conversation's Outputs panel by itself — and *which run produced it* stays
+        # legible, which writing straight into the conversation's folder would have destroyed by
+        # mixing every worker's files together.
+        #
+        # The coordinator's own runs are unaffected: `workspace_thread` returns their own id, the
+        # two are equal, and there is nothing to nest.
+        parts = [self._thread_id]
+        if thread_id and thread_id != self._thread_id:
+            parts.append(thread_id)
+        self._work_dir = root.joinpath(*([project] if project else []), *parts)
         # **The value everything else depends on, printed once.**
         #
         # A background worker that cannot find a file the conversation just wrote has exactly two

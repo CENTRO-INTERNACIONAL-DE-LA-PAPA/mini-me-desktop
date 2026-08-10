@@ -103,7 +103,10 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
 - 🟡 **A background worker guessed where it was** (§149) — `pd.read_csv('/data/…')`, then
   `/home/piero_linux/Mini-Me/…`, both exit 1, when the bare filename would have worked. A failed
   command now names the directory it ran in. **Awaiting a live run.**
-- 🔴 **A background worker's output is not visible in the app.** The researcher's framing is the
+- 🟡 **A background worker's output is visible in the app** (§151) — its folder is now created
+  *inside* the conversation's rather than beside it, so `workspace::outputs` finds it by descending
+  (§143) and shows `<task-id>/plot_yield.png` with the run that made it still legible. **Awaiting a
+  live run.** Previously: The researcher's framing is the
   right one: *"the idea is to somehow view it in the app, not as a different folder outside the
   conversation folder."* §150 pinned the worker to the conversation's thread so its files land
   beside the conversation's, and on the run after that fix the Files panel still showed only
@@ -8672,3 +8675,36 @@ own plots does not care which of the two failed.
 *Left open, and the harder one: the run that listed ten filenames believed it. Nothing checks a
 claim about files against the workspace, and until something does, "I saved the plots" is a
 sentence the agent can produce whatever happened.*
+
+
+### The answer was one directory deeper, not one directory over
+
+The pin (§150) worked on the next run — `background work pinned to 019fe9d7-… (from
+configurable.thread_id)` — and the researcher supplied the design the three previous attempts had
+all missed:
+
+> *"from thread lets say A I send the background task. Then the subagent created a subfolder B and
+> the files were in B not in A. When B must be inside A."*
+
+Not *instead of* A. **Inside** it.
+
+```
+Documents/Mini-Me/<project>/A/        the conversation
+Documents/Mini-Me/<project>/A/B/      the background task it started
+```
+
+`workspace::outputs` already descends through named subfolders and shows the relative path — that
+was §143, built the same day for an unrelated reason. So nesting makes the worker's files appear in
+the conversation's Outputs panel **with no client change at all**, labelled `B/plot_yield.png`, and
+*which run produced them* survives.
+
+Writing straight into the conversation's folder — which is what the pin alone did — would have
+shown the files and destroyed that, mixing every worker's output together with the conversation's
+own. The nesting keeps both.
+
+`LocalSandbox.__init__` composes the path from parts now: `[pinned]` when a run is its own
+conversation, `[pinned, own]` when it is not. An unpinned worker still gets its own folder, because
+a failed pin must cost discoverability and never the files.
+
+*Three sections of moving files sideways, and the fix was to go one level down. The researcher saw
+it in one sentence.*

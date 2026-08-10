@@ -990,6 +990,69 @@ print("ok")
         );
     }
 
+    /// A background worker's folder sits **inside** the conversation's, not beside it.
+    ///
+    /// > *"the idea its to somehow view it in the app not as a diferent folder outside the
+    /// > conversation folder"*
+    ///
+    /// Three attempts moved these files between sibling directories and none answered that.
+    /// Nesting does, with no client change: `workspace::outputs` already descends through named
+    /// subfolders and shows the relative path (§143), so the worker's files appear in the
+    /// conversation's Outputs panel labelled by the run that made them — which writing straight
+    /// into the conversation's folder would have destroyed by mixing every worker together.
+    #[test]
+    fn a_background_workers_folder_is_nested_inside_the_conversations() {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: python3 is not on PATH");
+            return;
+        }
+        let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
+        // The layout is lifted out of `LocalSandbox.__init__` verbatim — importing the module
+        // drags in deepagents and langgraph.
+        let script = format!(
+            r#"
+import pathlib
+src = pathlib.Path({overlay:?} + "/minime_local/workspace.py").read_text()
+
+# Tied to the real code: if the nesting line is edited away, this fails rather than passing
+# against a copy that no longer matches.
+assert "parts.append(thread_id)" in src, "the worker no longer nests"
+assert "root.joinpath(" in src, "the work dir is no longer composed from parts"
+
+def layout(root, project, pinned, own):
+    parts = [pinned] + ([own] if own and own != pinned else [])
+    return str(pathlib.Path(root).joinpath(*([project] if project else []), *parts))
+
+# A worker nests inside the conversation; the conversation itself does not move.
+assert layout("/w", "proj", "A", "B") == "/w/proj/A/B", layout("/w", "proj", "A", "B")
+assert layout("/w", "proj", "A", "A") == "/w/proj/A"
+assert layout("/w", "", "A", "B") == "/w/A/B"
+assert layout("/w", "", "A", "A") == "/w/A"
+
+# An unpinned worker still gets its own folder rather than none: a failed pin must cost
+# discoverability, never the files (§150).
+assert layout("/w", "", "B", "B") == "/w/B"
+print("ok")
+"#,
+            overlay = overlay.to_string_lossy()
+        );
+        let out = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("python3 runs");
+        assert!(
+            out.status.success(),
+            "the workspace layout is wrong:
+{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
     #[test]
     fn a_corpus_link_is_recognised_and_never_treated_as_a_doi() {
         // The form `overlay/minime_local/sources.py` writes, and the one `_paper_ref` established
