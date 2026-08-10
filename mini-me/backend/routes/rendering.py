@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import tempfile
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -15,6 +17,8 @@ from backend.routes.common import (
     _require_auth,
     _resolve_within,
 )
+
+logger = logging.getLogger(__name__)
 
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".svg", ".webp", ".gif"}
@@ -110,9 +114,39 @@ def _typst_content(value: str) -> str:
     return "".join(out).strip()
 
 
+def _text(value: Any) -> str:
+    """A field that is supposed to be a string, as one — or empty if it is not."""
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _as_source(entry: Any) -> tuple[str, str] | None:
+    """One bibliography entry as `(citation, link)`, whatever shape it arrived in.
+
+    **Why this is not just `entry["citation"]`.** This route's only caller for its first year was
+    the web client, which sends `{"citation": ..., "link": ...}`. The desktop app sends a list of
+    bare citation strings, and the first report anyone tried to download through it failed with
+    `'str' object has no attribute 'get'` — a 502 for the whole PDF, because of the bibliography,
+    with the report itself perfectly renderable.
+
+    `render_report` checks that `sources` *is a list* and stops there, so the shape of what is in
+    it was never anyone's contract. Both readings are reasonable; accepting both costs four lines
+    and means the next client to guess differently gets a PDF instead of a stack trace.
+
+    Anything that is neither returns `None` and is dropped — with a line in the log, because a
+    bibliography that is quietly one entry short is worse than one that is visibly missing.
+    """
+    if isinstance(entry, str):
+        citation = entry.strip()
+        return (citation, "") if citation else None
+    if isinstance(entry, dict):
+        citation = _text(entry.get("citation"))
+        return (citation, _text(entry.get("link"))) if citation else None
+    return None
+
+
 def _build_typst_wrapper(
     title: str,
-    sources: list[dict],
+    sources: list,
     used_asta: bool,
 ) -> str:
     from datetime import datetime
@@ -124,11 +158,13 @@ def _build_typst_wrapper(
     sources_block = ""
     cleaned_sources: list[tuple[str, str]] = []
     for source in sources or []:
-        citation_raw = (source.get("citation") or "").strip()
-        link_raw = (source.get("link") or "").strip()
-        if not citation_raw:
+        cleaned = _as_source(source)
+        if cleaned is None:
+            logger.warning(
+                "dropping a source the bibliography cannot read: %.120r", source
+            )
             continue
-        cleaned_sources.append((citation_raw, link_raw))
+        cleaned_sources.append(cleaned)
 
     if cleaned_sources:
         lines = ["#pagebreak()", "= Sources", ""]

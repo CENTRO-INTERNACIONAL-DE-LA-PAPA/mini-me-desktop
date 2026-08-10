@@ -5,6 +5,10 @@ them from ``backend.middleware`` without knowing which submodule each lives in.
 """
 
 from backend.middleware.artifacts import ArtifactCaptureMiddleware
+from backend.middleware.dataverse_first import (
+    FixedSearchFilename,
+    SearchBeforeRecommending,
+)
 from backend.middleware.guardrails import (
     _build_filesystem_permissions,
     _build_guardrail_middleware,
@@ -12,6 +16,7 @@ from backend.middleware.guardrails import (
 )
 from backend.middleware.project import ProjectSpineMiddleware
 from backend.middleware.search_first import SearchBeforeCiting
+from backend.middleware.tool_gate import Step, ToolsBeforeAnswering
 from backend.middleware.sync import (
     FileSyncMiddleware,
     SandboxSyncMiddleware,
@@ -21,9 +26,13 @@ from backend.middleware.sync import (
 __all__ = [
     "ArtifactCaptureMiddleware",
     "FileSyncMiddleware",
+    "FixedSearchFilename",
     "ProjectSpineMiddleware",
     "SearchBeforeCiting",
+    "SearchBeforeRecommending",
     "SandboxSyncMiddleware",
+    "Step",
+    "ToolsBeforeAnswering",
     "_collect_sandbox_files",
     "_build_filesystem_permissions",
     "_build_pii_middleware",

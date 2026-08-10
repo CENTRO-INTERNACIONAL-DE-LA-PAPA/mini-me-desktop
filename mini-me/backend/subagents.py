@@ -23,7 +23,12 @@ from backend.schemas import (
     ReportWriterOutput,
     ResearchPlan,
 )
-from backend.middleware import ArtifactCaptureMiddleware, SearchBeforeCiting
+from backend.middleware import (
+    ArtifactCaptureMiddleware,
+    FixedSearchFilename,
+    SearchBeforeCiting,
+    SearchBeforeRecommending,
+)
 from backend.theory_tools import generate_theories
 
 if TYPE_CHECKING:
@@ -70,13 +75,15 @@ dataverse_subagent = {
         Return only the relevant metadata that answers the user's question.
         Do not include raw search results or unnecessary detail.
 
-        Mandatory fixed filename rule: ALWAYS call `SearchCIPDataverse` with
-        `output_filename="dataverse_search.json"` and ALWAYS call
-        `read_search_results` with `filename="dataverse_search.json"`. Do not
-        invent or vary this name. Successive searches simply overwrite this
-        file. Any other filename will cause `read_search_results` to fail
-        with "File ... not found".
+        Every dataset you recommend must come from what the search returned.
+        Report the `persistent_id` exactly as it appears in the results — a
+        researcher will paste it into a citation, and one you reconstructed
+        will look no different from one you read.
     """,
+    # The fixed-filename paragraph that stood here is now `FixedSearchFilename`: the two tools
+    # spell the argument differently (`output_filename` / `filename`) and have to agree on one
+    # string, which is a mechanical fact, not a judgement. It is set in the call rather than asked
+    # for in capitals — see `middleware/dataverse_first.py`.
     "skills": ["/skills/"],
     "middleware": [],
     "tools": [],
@@ -543,6 +550,17 @@ def _build_runtime_subagents(
             extra_middleware.append(SearchBeforeCiting())
         elif name == "dataverse_explorer":
             extra_middleware.append(ArtifactCaptureMiddleware("dataverse_explorer"))
+            # Same exit as `academic_researcher`, and a worse thing to come out of it: every
+            # `DataVerseFindings` requires a `persistent_id`, and one composed from memory is a
+            # dataset citation that looks exactly like a real one. Search, then read what the
+            # search wrote, before recommending — `middleware/dataverse_first.py`.
+            extra_middleware.append(SearchBeforeRecommending())
+            # Order between these two does not matter, and the reason is worth stating rather than
+            # leaving to look like an accident: they override disjoint hooks. The gate is
+            # `wrap_model_call`, the filename is `wrap_tool_call`, so neither composes around the
+            # other. (Checked, not assumed — a comment here first claimed a composition order that
+            # does not exist.)
+            extra_middleware.append(FixedSearchFilename())
         elif name == "report_writer":
             extra_middleware.append(ArtifactCaptureMiddleware("report_writer"))
         elif name == "hypothesis_generator":
