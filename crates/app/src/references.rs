@@ -1036,6 +1036,29 @@ assert layout("/w", "", "A", "A") == "/w/A"
 # An unpinned worker still gets its own folder rather than none: a failed pin must cost
 # discoverability, never the files (§150).
 assert layout("/w", "", "B", "B") == "/w/B"
+
+# **The pin is remembered per thread.** A single background run built its sandbox twice — once
+# where `get_config()` carried the pin and once where it did not — producing two directories
+# for one task: the nested one, empty, and a sibling holding every file (§151). The same shape
+# as §123, where a ContextVar store did not survive a task boundary.
+import logging
+body = src[src.index("_PINNED_BY_THREAD: dict[str, str] = {{}}"):src.index("logger = logging.getLogger(__name__)")]
+cfg = {{"value": {{}}}}
+ns = {{"logger": logging.getLogger("t"), "_configurable": lambda: cfg["value"],
+      "WORKSPACE_THREAD_KEY": "__workspace_thread__"}}
+exec(body, ns)
+thread = ns["workspace_thread"]
+
+cfg["value"] = {{}}
+assert thread("A") == "A", "a coordinator must never nest"
+cfg["value"] = {{"__workspace_thread__": "A"}}
+assert thread("B") == "A"
+cfg["value"] = {{}}
+assert thread("B") == "A", "the pin was lost at the second construction site"
+cfg["value"] = {{"__workspace_thread__": "C"}}
+assert thread("D") == "C"
+cfg["value"] = {{}}
+assert thread("D") == "C" and thread("A") == "A", "one task belongs to one conversation"
 print("ok")
 "#,
             overlay = overlay.to_string_lossy()
