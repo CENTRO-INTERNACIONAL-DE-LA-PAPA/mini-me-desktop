@@ -8708,3 +8708,31 @@ a failed pin must cost discoverability and never the files.
 
 *Three sections of moving files sideways, and the fix was to go one level down. The researcher saw
 it in one sentence.*
+
+
+### Two directories for one task
+
+Nesting shipped, and the next run produced **both**:
+
+```
+…/test subagents/019fe9ed-bb8a-…/019fe9ee-5b78-…/   created, and empty
+…/test subagents/019fe9ee-5b78-…/                   a sibling, holding all ten plots
+```
+
+The same task, filed twice. Which means the sandbox is constructed **more than once per run**, and
+`get_config()` carries the pin at one site and not at another:
+
+```
+pinned:   parts = [conversation, task]  ->  …/conv/task/   (created, empty)
+unpinned: parts = [task]                ->  …/task/        (gets the files)
+```
+
+From the outside that is indistinguishable from "the nesting did not work" — and it is §123 again,
+where a `ContextVar` store did not survive a task boundary. The answer is the same one: keep the
+fact where the process shares it. `_PINNED_BY_THREAD` remembers the conversation the first time we
+are told, keyed by the task's own id, which is unique to one background run and so cannot mis-file
+one conversation's work under another's. A later pin that *disagrees* is logged rather than
+honoured, because a thread belongs to one conversation for its whole life.
+
+*Eighth time the value needed was one the program already had — and the second time in this thread
+that it was held somewhere a later caller could not reach.*

@@ -117,6 +117,20 @@ def workspace_project() -> str:
     return cleaned[:96]
 
 
+#: Which conversation a background thread belongs to, remembered the first time we are told.
+#:
+#: **The config is not visible at every construction site.** A single background run built its
+#: sandbox twice — once where `get_config()` carried the pin, and once where it did not — so two
+#: directories appeared for one task: the nested one, empty, and a sibling holding every file. From
+#: the outside they are indistinguishable from "the nesting did not work" (docs §151).
+#:
+#: This is the same shape as §123, where a `ContextVar` store did not survive a task boundary. The
+#: answer there was the same as here: keep the fact somewhere the process shares, keyed by
+#: something that cannot collide. A task id is unique to one background run, so the map is small,
+#: correct, and cannot mis-file one conversation's work under another's.
+_PINNED_BY_THREAD: dict[str, str] = {}
+
+
 def workspace_thread(default: str) -> str:
     """Which thread's workspace this run should use.
 
@@ -124,10 +138,24 @@ def workspace_thread(default: str) -> str:
     :data:`WORKSPACE_THREAD_KEY`. Read from the live run config rather than passed in,
     because upstream constructs the backend as ``LazyLangsmithSandbox(thread_id)`` at two
     call sites this overlay deliberately does not touch.
+
+    Remembered per thread, because that config is visible at some of those sites and not others.
     """
     pinned = _configurable().get(WORKSPACE_THREAD_KEY)
     pinned = str(pinned).strip() if pinned else ""
-    return pinned or default
+    if pinned and default:
+        # First sighting wins, and later ones must agree: a thread belongs to one conversation for
+        # its whole life, so a *changed* pin is a bug worth seeing rather than silently honouring.
+        remembered = _PINNED_BY_THREAD.setdefault(default, pinned)
+        if remembered != pinned:
+            logger.warning(
+                "minime_local: thread %s was pinned to %s and is now %s — keeping the first",
+                default,
+                remembered,
+                pinned,
+            )
+        return remembered
+    return _PINNED_BY_THREAD.get(default, "") or default
 
 
 logger = logging.getLogger(__name__)
