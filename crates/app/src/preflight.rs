@@ -1177,6 +1177,7 @@ mod tests {
             secrets: Vec::new(),
             approve_execute: true,
             async_subagents: false,
+            default_model: None,
             owned: true,
         }
     }

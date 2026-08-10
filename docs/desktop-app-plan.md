@@ -95,13 +95,10 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   transition between two.
 
 **Found on the machine, 2026-08-10, not yet diagnosed**
-- ⬜ **`GET /threads/{id}/state` returns 500** — every poll, `error_detail=None`,
-  `response_size_bytes=0`. This is why a finished background task reports *"completed, but it
-  returned no result text"*: the run succeeded and its state cannot be read, so the result is lost
-  on the way back. The same 500 is behind `could not read a conversation` on older threads. **Our
-  overlay is in that path** — `LocalSandbox.__init__` logs immediately before each failure — so the
-  first question is whether we are the cause, and the traceback in the backend log answers it.
-  Everything below is downstream of this.
+- ✅ **`GET /threads/{id}/state` returned 500 on every poll** (§148) — the backend fell back to
+  `openai::gpt-5.4` on any graph build without a run config, and this app never puts an OpenAI key
+  anywhere. The launch now names the configured model in `MINIME_DEFAULT_MODEL`. **Awaiting a live
+  run.**
 - ⬜ **A background worker produced no files.** 36s, `success`, and an empty workspace at
   `/mnt/c/Users/…/Documents/Mini-Me/<task-id>`. Cannot be separated from the 500 until that is
   fixed — "it did nothing" and "what it did was unreadable" look identical from here.
@@ -8470,3 +8467,55 @@ no `rm -rf` targets the checkout root. Either would have caught this.
 *Why the loop variable is lost is still unexplained. That is precisely why the fix does not use
 one: the same machine loses variables assigned in a hand-typed `wsl bash -lc` too, so whatever the
 mechanism, it is not something this code should be relying on.*
+
+
+## 148. An OpenAI default in an app with no OpenAI key (2026-08-10)
+
+A background run finished, and the coordinator said *"completed, but it returned no result text."*
+The task had done its work; the answer could not be read back. Behind it, once per poll:
+
+```
+GET /threads/019fe9aa-.../state 500 11ms   error_detail=None   response_size_bytes=0
+openai.OpenAIError: The api_key client option must be set ...
+```
+
+```python
+DEFAULT_MODEL_SPEC = os.getenv("MINIME_DEFAULT_MODEL", "openai::gpt-5.4")
+```
+
+`backend/models.py` falls back to OpenAI when nothing names a model, and the app **never set that
+variable**. Its own comment says exactly when the fallback bites: *"when the request does not
+specify one — e.g. assistant schema inspection calls that never execute a node."*
+`GET /threads/{id}/state` is one of those, and it is the route the client polls while watching a
+background task.
+
+### The invariant that caused it was the right invariant
+
+Provider keys ride in the **run request** and are never written to the backend's environment,
+because the agent's own `execute` tool can read that environment (§19). That rule is correct and
+stays. But it means a graph built *without* a run has no key at all — and `ChatOpenAI` raises at
+**construction**, not at first call. Measured, both ways:
+
+```
+openai:gpt-4o             -> RAISES OpenAIError
+anthropic:claude-sonnet-4-5 -> constructs fine with no key
+```
+
+So the fix is to name the model, not to supply a key: `MINIME_DEFAULT_MODEL=anthropic::…` on the
+launch. A model id is not a secret, so nothing about §19 is weakened — and a test asserts the
+export carries no `API_KEY=` beside it, so a later convenience cannot quietly undo that.
+
+### What it had been costing, invisibly
+
+- **Every background task's result.** The run succeeded, the poll 500'd, and the coordinator
+  reported an empty result — which reads as *"the worker did nothing"*, sending a day of
+  investigation at the worker instead of at the read.
+- **Old conversations.** `could not read a conversation` in the app log, on the same route.
+- **The nested-outputs test**, which could never run, because the background task it needed was the
+  thing being lost.
+
+Three symptoms, one line of fallback. The traceback naming it was in the backend log from the first
+failure — the same log, the same day, as §147.
+
+*The shape, again, and worth counting: the value the program needed was one it already had. The
+researcher had chosen a model in Settings; the run request carried it; the environment did not.*
