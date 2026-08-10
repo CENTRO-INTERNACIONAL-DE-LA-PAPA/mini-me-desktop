@@ -5,7 +5,7 @@
 //! spawned backend process: it starts it on a localhost port, waits for health,
 //! and tears it down on quit. Running the backend locally is what lets the app
 //! inherit the local `asta` CLI's auth story (the web app has to paste a token
-//! that expires; locally it is minted once from the CLI into the repo's `.env`).
+//! that expires; locally the CLI refreshes it only when its seven-day lifetime is ending).
 //!
 //! Verified against the Mini-Me repo (2026-07-30): the backend is a LangGraph
 //! server started with `uv run langgraph dev`, defaulting to `127.0.0.1:2024`,
@@ -14,9 +14,11 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
+use base64::Engine as _;
 
 use crate::protocol::LangGraphClient;
 
@@ -1101,10 +1103,10 @@ impl BackendSupervisor {
         // Secrets always go on the process environment, in both modes — see
         // `secret_env` for why they must not travel on the command line.
         let mut secrets = self.config.secrets.clone();
-        // A minted token beats a stored one. Asta access tokens last **seven days**
-        // (measured: `exp - iat` = 604800), so a token pasted into Settings becomes a
-        // weekly chore — and its expiry surfaces as "the theorizer returned no task id",
-        // which names neither the token nor the fix.
+        // A usable stored or CLI-cached token beats a freshly minted one. Asta access tokens last
+        // **seven days** (measured: `exp - iat` = 604800), while `--refresh` costs about ten
+        // seconds on the startup path. `mint_asta_token` checks `exp` before paying that cost;
+        // the name survives because refreshing is still its final fallback (§131/§145).
         if let Some(token) = mint_asta_token(&self.config) {
             secrets.retain(|(name, _)| name != "ASTA_TOKEN");
             secrets.push(("ASTA_TOKEN".to_string(), token));
@@ -1329,17 +1331,19 @@ impl Drop for BackendSupervisor {
     }
 }
 
-/// Ask the `asta` CLI for a fresh access token, where the backend runs.
+/// Reuse a valid Asta token, or ask the CLI for a fresh one where the backend runs.
 ///
 /// **Why the app does this instead of the user.** Asta access tokens last seven days
 /// (`exp - iat` = 604800 on a real one), so storing one in the keychain means re-pasting
 /// it every week — and when it lapses the failure reads "the Asta theorizer returned no
 /// task id", which names neither the token nor the fix. `asta auth login` already leaves a
 /// *refresh* credential behind, and `print-token --refresh` turns that into a valid access
-/// token on demand. So the app mints one per launch and the researcher logs in once.
+/// token on demand. So the researcher logs in once.
 ///
-/// Run at spawn rather than at window-open: this can cost seconds on a cold WSL distro,
-/// and by here we are already starting the backend, which the user is waiting on anyway.
+/// The order is load-bearing: the keychain value costs no process at all; `print-token --raw`
+/// reads the CLI's cache; only an absent or nearly expired token reaches the network through
+/// `--refresh`. Before §145 the last command ran unconditionally and consumed about ten of every
+/// seventeen startup seconds measured in §131.
 ///
 /// `None` on any failure — no CLI, not logged in, a changed flag. The stored token (if
 /// any) still applies, and the Setup pane reports a missing `asta` separately.
@@ -1347,7 +1351,31 @@ fn mint_asta_token(config: &BackendConfig) -> Option<String> {
     if std::env::var_os("MINIME_NO_ASTA_MINT").is_some() {
         return None;
     }
-    let argv = config.shell_argv("asta auth print-token --raw --refresh 2>/dev/null");
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    if let Some(token) = reusable_stored_asta_token(&config.secrets, now) {
+        tracing::info!("reusing the valid Asta token from the keychain");
+        return Some(token.to_string());
+    }
+
+    if let Some(token) = read_asta_token(config, false) {
+        if asta_token_is_valid_at(&token, now) {
+            tracing::info!("reusing the valid Asta token cached by the CLI");
+            return Some(token);
+        }
+    }
+
+    let token = read_asta_token(config, true)?;
+    if !asta_token_is_valid_at(&token, now) {
+        tracing::debug!("asta returned a token without enough lifetime; using whatever is stored");
+        return None;
+    }
+    tracing::info!("minted a fresh Asta token from the CLI");
+    Some(token)
+}
+
+fn read_asta_token(config: &BackendConfig, refresh: bool) -> Option<String> {
+    let refresh = if refresh { " --refresh" } else { "" };
+    let argv = config.shell_argv(&format!("asta auth print-token --raw{refresh} 2>/dev/null"));
     let (program, rest) = argv.split_first()?;
     let output = Command::new(program)
         .args(rest)
@@ -1365,8 +1393,45 @@ fn mint_asta_token(config: &BackendConfig) -> Option<String> {
         tracing::debug!("asta did not return a token; using whatever is stored");
         return None;
     }
-    tracing::info!("minted a fresh Asta token from the CLI");
     Some(token)
+}
+
+/// Five minutes is negligible beside a seven-day token and avoids starting a long turn with a
+/// credential that expires while the backend is still importing or assembling its MCP tools.
+const ASTA_TOKEN_MIN_VALIDITY_SECS: u64 = 5 * 60;
+
+fn reusable_stored_asta_token(secrets: &[(String, String)], now: u64) -> Option<&str> {
+    secrets
+        .iter()
+        .find(|(name, token)| name == "ASTA_TOKEN" && asta_token_is_valid_at(token, now))
+        .map(|(_, token)| token.as_str())
+}
+
+/// Read the unverified `exp` claim only to decide whether refreshing is worth doing.
+///
+/// This is not authentication: the backend and Asta still verify the signature. A forged or
+/// corrupted token can at worst defer a refresh and fail exactly as it did before; it cannot gain
+/// trust here. Missing, non-numeric and malformed claims all choose the safe slow path.
+fn asta_token_is_valid_at(value: &str, now: u64) -> bool {
+    if !looks_like_a_jwt(value) {
+        return false;
+    }
+    let Some(payload) = value.split('.').nth(1) else {
+        return false;
+    };
+    let decoded = URL_SAFE_NO_PAD
+        .decode(payload)
+        .or_else(|_| URL_SAFE.decode(payload));
+    let Ok(decoded) = decoded else {
+        return false;
+    };
+    let Ok(claims) = serde_json::from_slice::<serde_json::Value>(&decoded) else {
+        return false;
+    };
+    claims
+        .get("exp")
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|expires| expires > now.saturating_add(ASTA_TOKEN_MIN_VALIDITY_SECS))
 }
 
 /// Whether a string is shaped like a JWT: three dot-separated base64url segments.
@@ -1997,6 +2062,73 @@ mod tests {
     }
 
     #[test]
+    fn provisioning_keeps_a_windows_checkout_clean_for_git_inside_wsl() {
+        let script = include_str!("../../../scripts/setup-wsl.sh");
+        assert!(
+            script.contains("git -C \"$DIR\" config core.autocrlf input"),
+            "a copied Windows worktree needs a checkout-local CRLF policy inside WSL"
+        );
+        assert!(
+            script.contains("git -C \"$DIR\" add --renormalize -- ."),
+            "Git's cached clean filter must be refreshed after the policy changes"
+        );
+        assert!(
+            !script.contains("git -C \"$DIR\" reset --hard"),
+            "line-ending repair must not overwrite real work copied with a developer checkout"
+        );
+    }
+
+    #[test]
+    fn git_input_treats_a_windows_crlf_worktree_as_clean_inside_wsl() {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: git is not on PATH");
+            return;
+        }
+        let dir =
+            std::env::temp_dir().join(format!("minime-crlf-policy-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a temp repository");
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(&dir)
+                .args(args)
+                .output()
+                .expect("git runs")
+        };
+        assert!(run(&["init", "-q"]).status.success());
+        assert!(run(&["config", "user.email", "test@example.org"])
+            .status
+            .success());
+        assert!(run(&["config", "user.name", "test"]).status.success());
+        assert!(run(&["config", "core.autocrlf", "false"]).status.success());
+        std::fs::write(dir.join("tracked.txt"), b"one\ntwo\n").expect("an LF source file");
+        assert!(run(&["add", "tracked.txt"]).status.success());
+        assert!(run(&["commit", "-qm", "base"]).status.success());
+
+        // The bytes a clean Git-for-Windows checkout carries. Without the Windows global
+        // policy, the Git process inside WSL sees both lines as edited.
+        std::fs::write(dir.join("tracked.txt"), b"one\r\ntwo\r\n").expect("a CRLF worktree");
+        assert!(
+            !run(&["status", "--porcelain"]).stdout.is_empty(),
+            "the fixture must reproduce the dirty checkout before testing the fix"
+        );
+        assert!(run(&["config", "core.autocrlf", "input"]).status.success());
+        assert!(run(&["add", "--renormalize", "--", "."]).status.success());
+        let status = run(&["status", "--porcelain"]);
+        assert!(status.status.success());
+        assert!(
+            status.stdout.is_empty(),
+            "the same CRLF bytes should be clean under the policy setup-wsl installs: {}",
+            String::from_utf8_lossy(&status.stdout)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn only_something_shaped_like_a_token_is_treated_as_one() {
         // Without `--raw` the CLI pretty-prints a decoded header and payload, and when
         // nobody is logged in it prints prose. Handing either to the backend as a
@@ -2015,6 +2147,51 @@ mod tests {
         ] {
             assert!(!looks_like_a_jwt(not_a_token), "{not_a_token:?}");
         }
+    }
+
+    fn token_expiring_at(expires: u64) -> String {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine as _;
+
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"none"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(format!(r#"{{"exp":{expires}}}"#));
+        format!("{header}.{payload}.signature")
+    }
+
+    #[test]
+    fn a_stored_asta_token_with_time_left_avoids_a_refresh() {
+        let now = 1_800_000_000;
+        let token = token_expiring_at(now + 604_800);
+        let secrets = vec![("ASTA_TOKEN".to_string(), token.clone())];
+
+        assert_eq!(
+            reusable_stored_asta_token(&secrets, now),
+            Some(token.as_str())
+        );
+    }
+
+    #[test]
+    fn an_asta_token_near_expiry_is_refreshed_before_a_turn_can_outlive_it() {
+        let now = 1_800_000_000;
+        assert!(!asta_token_is_valid_at(
+            &token_expiring_at(now + ASTA_TOKEN_MIN_VALIDITY_SECS),
+            now
+        ));
+        assert!(asta_token_is_valid_at(
+            &token_expiring_at(now + ASTA_TOKEN_MIN_VALIDITY_SECS + 1),
+            now
+        ));
+    }
+
+    #[test]
+    fn a_token_without_a_numeric_expiry_never_skips_the_refresh() {
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"none"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(br#"{"exp":"next week"}"#);
+        assert!(!asta_token_is_valid_at(
+            &format!("{header}.{payload}.signature"),
+            1_800_000_000
+        ));
+        assert!(!asta_token_is_valid_at("not-a-token", 1_800_000_000));
     }
 
     #[test]

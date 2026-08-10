@@ -137,6 +137,27 @@ fi
 
 cd "$DIR"
 
+# A checkout copied from /mnt/c carries Windows' CRLF working files, but not Git for Windows'
+# *global* `core.autocrlf=true`. WSL Git therefore used to call every tracked file modified the
+# moment provisioning finished, which made the checkout unusable for any later Git operation.
+#
+# Make the policy local to the checkout because Windows is the source we deliberately support,
+# not an exceptional environment to tell the researcher to repair. `input` normalises CRLF when
+# Git reads it and keeps future checkouts inside WSL at LF. Git also caches the old clean filter in
+# its index, so a guarded `--renormalize` is required once after changing the policy. It runs only
+# when every unstaged difference is a CR at end-of-line; a real edit leaves the tree untouched.
+# Do not `reset --hard`: find_source may have copied a developer checkout with real work (§144).
+if git -C "$DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  git -C "$DIR" config core.autocrlf input
+  if ! git -C "$DIR" diff --quiet -- && \
+      git -C "$DIR" diff --ignore-cr-at-eol --quiet --; then
+    git -C "$DIR" add --renormalize -- .
+    ok "normalised the copied checkout's Windows line endings"
+  else
+    ok "configured the copied checkout for Windows line endings"
+  fi
+fi
+
 # ------------------------------------------------------------------ the overlay
 #
 # Copied *into the distro* rather than left on the Windows filesystem. Host

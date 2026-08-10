@@ -273,6 +273,25 @@ pub struct Output {
     pub modified: std::time::SystemTime,
 }
 
+/// A bounded view of everything a conversation wrote.
+///
+/// `truncated` is deliberately part of the result rather than a log line. The person looking at
+/// the Outputs panel is the one who needs to know that the folder contains more than the app is
+/// showing; silently stopping at a safety limit would recreate §117 with a larger threshold.
+pub struct OutputListing {
+    pub groups: Vec<(Kind, Vec<Output>)>,
+    pub truncated: bool,
+}
+
+/// Enough depth for the named output folders analysis tools normally create, without walking a
+/// virtualenv or a copied dataset tree forever. Four means files remain visible through
+/// `turn/analysis/tables/final/file.csv`; anything deeper is still reachable through Explorer.
+const MAX_OUTPUT_DEPTH: usize = 4;
+/// Bound directory entries as well as files: a tree of thousands of empty folders is just as
+/// capable of freezing a render-time scan as a tree of thousands of artifacts (plan §117).
+const MAX_OUTPUT_ENTRIES: usize = 2_048;
+const MAX_OUTPUT_FILES: usize = 512;
+
 /// The kinds of output worth telling apart.
 ///
 /// Deliberately about *what a researcher does with it*, not about file format: a figure is
@@ -319,33 +338,25 @@ impl Kind {
 /// plots are diffed off disk (§42): a file written by a script inside `execute` registers
 /// no artifact, and those are most of them.
 pub fn outputs(dir: &Path) -> Vec<(Kind, Vec<Output>)> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut found: Vec<Output> = entries
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            let metadata = entry.metadata().ok()?;
-            if !metadata.is_file() {
-                return None;
-            }
-            let name = path.file_name()?.to_str()?.to_string();
-            // Dotfiles are the agent's business, not the researcher's.
-            if name.starts_with('.') {
-                return None;
-            }
-            Some(Output {
-                kind: Kind::of(&path),
-                path,
-                name,
-                bytes: metadata.len(),
-                modified: metadata.modified().ok()?,
-            })
-        })
-        .collect();
+    output_listing(dir).groups
+}
+
+/// The same grouped files as [`outputs`], plus whether its documented safety bounds hid any.
+///
+/// The ordinary callers only need the files. The Outputs panel uses this fuller answer so a
+/// bounded walk never pretends it was exhaustive (plan §117).
+pub fn output_listing(dir: &Path) -> OutputListing {
+    let mut found = Vec::new();
+    let mut entries_seen = 0;
+    let mut truncated = false;
+    collect_outputs(dir, dir, 0, &mut found, &mut entries_seen, &mut truncated);
+
     // Newest first: the file someone wants is nearly always the one just written.
-    found.sort_by(|a, b| b.modified.cmp(&a.modified));
+    found.sort_by(|a, b| {
+        b.modified
+            .cmp(&a.modified)
+            .then_with(|| a.name.cmp(&b.name))
+    });
 
     let mut groups: Vec<(Kind, Vec<Output>)> = Vec::new();
     for kind in [Kind::Figure, Kind::Data, Kind::Document, Kind::Other] {
@@ -358,7 +369,79 @@ pub fn outputs(dir: &Path) -> Vec<(Kind, Vec<Output>)> {
             groups.push((kind, items));
         }
     }
-    groups
+    OutputListing { groups, truncated }
+}
+
+fn collect_outputs(
+    root: &Path,
+    dir: &Path,
+    depth: usize,
+    found: &mut Vec<Output>,
+    entries_seen: &mut usize,
+    truncated: &mut bool,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        if *entries_seen >= MAX_OUTPUT_ENTRIES || found.len() >= MAX_OUTPUT_FILES {
+            *truncated = true;
+            break;
+        }
+        *entries_seen += 1;
+
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        // A symlinked directory can lead outside the conversation or back to an ancestor. The
+        // panel is an index of files the turn wrote here, not a general filesystem crawler.
+        if file_type.is_symlink() {
+            continue;
+        }
+
+        let path = entry.path();
+        let Some(base_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        // Dotfiles and tool caches are the agent's business, not the researcher's. Apply the
+        // existing top-level rule at every depth now that §117 makes those depths visible.
+        if base_name.starts_with('.') || base_name == "__pycache__" {
+            continue;
+        }
+
+        if file_type.is_dir() {
+            if depth < MAX_OUTPUT_DEPTH {
+                collect_outputs(root, &path, depth + 1, found, entries_seen, truncated);
+            } else {
+                *truncated = true;
+            }
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let Some(relative) = path.strip_prefix(root).ok() else {
+            continue;
+        };
+        let Some(name) = relative.to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        found.push(Output {
+            kind: Kind::of(&path),
+            path,
+            name,
+            bytes: metadata.len(),
+            modified,
+        });
+    }
 }
 
 /// A size a person can read at a glance.
@@ -1298,6 +1381,82 @@ mod tests {
         assert_eq!(human_size(512), "512 B");
         assert_eq!(human_size(2048), "2 KB");
         assert_eq!(human_size(5 * 1024 * 1024), "5.0 MB");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn outputs_inside_an_agents_named_folder_remain_visible() {
+        let dir =
+            std::env::temp_dir().join(format!("minime-nested-outputs-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("eda_outputs/tables")).expect("nested output folders");
+        std::fs::write(dir.join("eda_outputs/yield.png"), b"plot").expect("a nested plot");
+        std::fs::write(dir.join("eda_outputs/tables/summary.csv"), b"clone,yield")
+            .expect("a nested table");
+
+        let found: Vec<Output> = outputs(&dir)
+            .into_iter()
+            .flat_map(|(_, items)| items)
+            .collect();
+        let names: Vec<&str> = found.iter().map(|output| output.name.as_str()).collect();
+        assert!(
+            names.contains(&if cfg!(windows) {
+                "eda_outputs\\yield.png"
+            } else {
+                "eda_outputs/yield.png"
+            }),
+            "{names:?}"
+        );
+        assert!(
+            names.contains(&if cfg!(windows) {
+                "eda_outputs\\tables\\summary.csv"
+            } else {
+                "eda_outputs/tables/summary.csv"
+            }),
+            "{names:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hidden_caches_stay_hidden_at_every_output_depth() {
+        let dir =
+            std::env::temp_dir().join(format!("minime-hidden-output-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("eda_outputs/.ipynb_checkpoints"))
+            .expect("a notebook cache");
+        std::fs::create_dir_all(dir.join("eda_outputs/__pycache__")).expect("a Python cache");
+        std::fs::write(
+            dir.join("eda_outputs/.ipynb_checkpoints/draft.csv"),
+            b"hidden",
+        )
+        .expect("a cached notebook output");
+        std::fs::write(dir.join("eda_outputs/__pycache__/analysis.pyc"), b"hidden")
+            .expect("a cached Python output");
+        std::fs::write(dir.join("eda_outputs/report.md"), b"visible").expect("a visible report");
+
+        let names: Vec<String> = outputs(&dir)
+            .into_iter()
+            .flat_map(|(_, items)| items.into_iter().map(|output| output.name))
+            .collect();
+        assert_eq!(names.len(), 1, "{names:?}");
+        assert!(names[0].ends_with("report.md"), "{names:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_deeper_output_tree_says_when_the_bounded_view_stops() {
+        let dir =
+            std::env::temp_dir().join(format!("minime-bounded-output-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let too_deep = dir.join("one/two/three/four/five");
+        std::fs::create_dir_all(&too_deep).expect("a deep output tree");
+        std::fs::write(too_deep.join("buried.csv"), b"hidden by bound")
+            .expect("a deeply nested output");
+
+        let listing = output_listing(&dir);
+        assert!(listing.truncated);
+        assert!(listing.groups.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

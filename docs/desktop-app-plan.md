@@ -95,9 +95,9 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   transition between two.
 
 **Next**
-- ⬜ **Outputs a turn wrote into a folder** (§117) — `outputs` and `images` read one level, so an
-  agent that organises its work into `./eda_outputs/` disappears from the panel entirely. Sixteen
-  files invisible on the first working background analysis.
+- ✅ **Outputs a turn wrote into a folder** (§117, §143) — the panel now descends through named
+  output folders with explicit depth/file bounds, keeps the relative path visible, skips tool
+  caches, and says when the bounded view omitted anything.
 - ✅ **The filter field** (§92, §97, §99) — measured rather than guessed: 0.0px in the popup
   against 204 and 533 elsewhere. One link in the chain stated no width; confirmed fixed on a real
   window.
@@ -129,10 +129,15 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   are still the model's guess.
 - ⬜ **A paper with no DOI and no corpus id** is invisible to the "never reported" accounting
   (7 returned, 6 recorded, on 2026-08-09).
-- ⬜ **The other nine subagents still hold their invariants in prompts** (§140). Each carries a
-  `response_format` and so each has the §133 exit; `dataverse_explorer` is first, because a
-  `DataVerseSearchResults` from memory carries invented persistent ids and a researcher will paste
-  one into a citation exactly as they clicked the DOIs.
+- ✅ **`dataverse_explorer` searches, and reads what it found, before it can recommend** (§142,
+  Mini-Me PR #45). Two steps, because `SearchCIPDataverse` writes to a file and `read_search_results`
+  is what puts the metadata in front of the model. Its mandatory-filename paragraph is now set in
+  the call instead of asked for in capitals. **Awaiting a live run**: the persistent ids it returns
+  must resolve in CIP Dataverse.
+- ⬜ **Seven subagents still hold their invariants in prompts** (§140). Each carries a
+  `response_format` and so each has the §133 exit. `hypothesis_generator` is next — it emits
+  citations too, so it can reproduce the §138 bug somewhere nobody would think to look. The
+  mechanism is a base class now (`middleware/tool_gate.py`), so each costs a `steps` tuple.
 - ⬜ **~10s of every startup** is an Asta token minted fresh with no validity check
   (`backend.rs`, §131).
 - ⬜ **`setup-wsl.sh` leaves a checkout with every file modified** from line endings, which breaks
@@ -8202,3 +8207,135 @@ arriving through a different door.
 
 Verified with the exact payload that produced the 502: `PDF bytes: 35382 b'%PDF-'`. Nine Python
 tests, one Rust test that asserts every entry `is_object()` — 210 and 228 green.
+
+## 142. The second of nine (2026-08-09)
+
+§140 listed the subagents holding an invariant in a prompt and named `dataverse_explorer` first.
+This is that one, as Mini-Me PR #45.
+
+The exit is identical to §133's: `response_format=DataVerseSearchResults` is bound as a tool,
+`tool_choice="any"` is forced, and one of the options answers the whole question from memory in a
+single step. What comes out when it does is a list of `DataVerseFindings`, each carrying a required
+`persistent_id` — *"Dataset DOI or persistent identifier"*. **A researcher pastes that into a
+citation without checking it**, exactly as they clicked the DOIs. And unlike an invented reference,
+a wrong persistent id cannot be caught by recognising the title.
+
+### Two steps, because one proves nothing
+
+`SearchCIPDataverse` writes its results to a **file**. `read_search_results` is what puts the
+metadata in front of the model. So a gate that opened as soon as a search returned would let the
+subagent search, satisfy the gate, and still compose every field from memory — having demonstrated
+only that it can call a tool. Both are forced, in order. `list_dataset_files` is not: it is for
+shortlisted datasets only and nothing in the schema depends on it.
+
+### The rule came out of the prompt
+
+    Mandatory fixed filename rule: ALWAYS call `SearchCIPDataverse` with
+    `output_filename="dataverse_search.json"` and ALWAYS call `read_search_results` with
+    `filename="dataverse_search.json"`.
+
+Two tools that must agree on one string, spelling the argument differently on the way out and the
+way back. That is mechanical, so `FixedSearchFilename` sets it in the call. **The paragraph is
+deleted rather than kept beside the middleware** — a rule that is enforced *and* still requested
+teaches the next reader that the prompt is where such things live, which is the belief this whole
+sequence has been dismantling.
+
+### Why it is a base class now
+
+The mechanism moved to `middleware/tool_gate.py`. Seven subagents still carry the same exit, and
+writing it a third time by hand is how the ninth ends up subtly different from the first.
+`SearchBeforeCiting` became a subclass **with its seven tests unchanged and passing**, which is the
+only proof worth having that a refactor of the one thing that finally worked changed nothing. Its
+log line is byte-identical too, so anything grepping `has not searched yet` still matches.
+
+Two of the sixteen new tests run against LangChain's real `ModelRequest` and `ToolCallRequest`
+rather than a double, because this entire family of bugs is *a value written where nothing reads
+it* and a hand-written stub cannot catch that by construction.
+
+**A comment in `subagents.py` first claimed `FixedSearchFilename` had to be outermost.** Checked:
+the two override disjoint hooks — `wrap_model_call` and `wrap_tool_call` — so neither composes
+around the other and the order is free. One day after §141, which was a comment asserting a
+contract the code did not have.
+
+## 143. Sixteen outputs that were one directory too deep (2026-08-09)
+
+§117's real case is fixed at the source: `workspace::outputs` now descends into an agent's named
+folders, so `eda_outputs/yield.png` and `eda_outputs/tables/summary.csv` reach both the Outputs
+panel and the transcript diff. The displayed name is the path relative to the conversation rather
+than only the basename. That preserves the useful folder name and keeps two `summary.csv` files in
+different analyses distinguishable.
+
+The walk is deliberately not general-purpose file indexing. It stops after four subdirectory
+levels, 2,048 directory entries or 512 files; skips dotted entries and `__pycache__` at every
+level; and never follows symlinks. When any bound bites, the panel says it is showing a bounded
+view and points to the folder for the rest. A silent cap would have reproduced the same defect at
+file 513.
+
+Three sentence-named tests pin the behaviour: nested output folders remain visible, hidden caches
+remain hidden below the top level, and a deeper tree reports truncation instead of pretending the
+scan was exhaustive.
+
+## 144. CRLF was not uncommitted work (2026-08-09)
+
+`setup-wsl.sh` copies an existing Windows checkout into the distro, including its Git index and
+working files. It does not copy Git for Windows' *global* `core.autocrlf=true`. WSL Git therefore
+saw the CRLF bytes the Windows checkout deliberately contained without the policy that normalised
+them for comparison and reported essentially every tracked file as modified.
+
+Provisioning now sets `core.autocrlf=input` in the copied checkout, on new installs and re-runs.
+That normalises CRLF when Git reads it, while future checkouts made inside WSL stay LF. Git caches
+the previous clean filter in its index, so the script runs `git add --renormalize -- .` once — but
+only when the ordinary diff is non-empty and `--ignore-cr-at-eol` proves every unstaged difference
+is the line ending. A genuine edit leaves the tree untouched. It does not run `reset --hard` or
+rewrite working files: `find_source` can copy a developer's checkout with genuine edits, and
+fixing line-ending interpretation does not authorize destroying those edits. One regression test
+pins the shipped script and absence of a hard reset; another
+creates an LF-indexed repository, replaces its working file with CRLF bytes, proves it is dirty
+under `core.autocrlf=false`, and proves the same bytes are clean under the installed `input`
+policy.
+
+The shell parser could not be run in this Windows sandbox because creating a WSL instance returns
+`E_ACCESSDENIED`; the Rust test that embeds the shipped script passes. The remaining proof belongs
+on the target machine: after Setup finishes, `git status --short` inside the provisioned checkout
+must print nothing.
+
+## 145. The token already had six days left (2026-08-09)
+
+§131 measured about ten of seventeen startup seconds in
+`asta auth print-token --raw --refresh`. The command forced a network refresh on every backend
+spawn even though a real Asta JWT says `exp - iat = 604800` — seven days.
+
+Startup now takes the cheapest valid answer in order:
+
+1. the `ASTA_TOKEN` already read from the OS keychain, with no subprocess;
+2. the CLI's cached `print-token --raw`, without `--refresh`;
+3. a fresh `print-token --raw --refresh`, only when the first two are absent, malformed or near
+   expiry.
+
+"Near" means five minutes. That margin is negligible against seven days and avoids beginning a
+turn with a credential that can expire while LangGraph imports the graph or the agent assembles
+its MCP tools. The app base64url-decodes only the JWT payload and reads numeric `exp`; it does not
+trust that unverified claim for authentication. Asta still verifies the signature. Here the claim
+only decides whether spending ten seconds on a refresh is worthwhile, and every malformed shape
+chooses the safe slow path.
+
+Three tests cover a week-valid stored token, the exact five-minute boundary, and missing or
+non-numeric expiry. A real before/after startup timing still needs the Windows machine with its
+signed-in Asta CLI; this headless sandbox cannot start its WSL distro or run the app.
+
+## 146. Left open: stopping a setup repair has two process boundaries (2026-08-09)
+
+§28's cancel remains open, deliberately. A repair on the target platform is usually a Linux
+process behind `wsl.exe`; installing WSL itself is an elevated process behind PowerShell and UAC.
+This repository already proved that killing `wsl.exe` does not reliably reap the Linux process it
+fronted (§26). A button that only drops the receiver or kills the Windows wrapper would say
+"cancelled" while `uv sync` or an installer continued changing the machine.
+
+The correct implementation needs a uniquely identified process group inside the distro and a
+separate, honest policy for an already-elevated install. That is larger than the three real-machine
+defects above and cannot be verified in this sandbox, so no cosmetic Stop button was added.
+
+The transcript virtualization and SVG glyph replacement remain open too. They were explicitly
+lower priority, and the former requires a before/after measurement in a real GPUI window. The app
+cannot be run here, and replacing a variable-height transcript without that measurement would
+repeat §70's mistake in a different type.

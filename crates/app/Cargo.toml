@@ -32,6 +32,9 @@ futures = "0.3"
 # Protocol payloads (mirror the backend's run/stream shapes as they are needed).
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Asta credentials are JWTs. Reading only their base64url `exp` claim lets startup reuse a
+# seven-day token instead of forcing the CLI through a ten-second network refresh (§131/§145).
+base64 = "0.22"
 
 # Reading a Zed theme extension, which ships as a .tar.gz. Both are pure-Rust and tiny;
 # `flate2`'s rust_backend keeps a C toolchain out of the build, which matters because a

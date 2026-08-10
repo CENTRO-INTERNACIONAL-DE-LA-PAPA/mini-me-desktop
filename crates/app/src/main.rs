@@ -9345,9 +9345,12 @@ impl Workbench {
     fn outputs_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
         // What is actually on disk, rather than the agent's own artifact list: a file written by
         // a script inside `execute` registers no artifact, and those are most of them.
-        let files = self
+        let listing = self
             .thread_workspace()
-            .map(|dir| workspace::outputs(&dir))
+            .map(|dir| workspace::output_listing(&dir));
+        let files = listing
+            .as_ref()
+            .map(|listing| listing.groups.as_slice())
             .unwrap_or_default();
         let count: usize = files.iter().map(|(_, items)| items.len()).sum();
 
@@ -9359,11 +9362,9 @@ impl Workbench {
             .border_t_1()
             .border_color(rgb(theme::border()));
 
-        // **Nothing at all when there is nothing.** This used to say "Papers, datasets, theories
-        // and reports show up here as a turn produces them" — which was untrue: `outputs` reads
-        // one level of the thread's directory, so a turn that wrote into a subfolder produced
-        // files this panel would never show, and the sentence promised otherwise (docs §117).
-        // An empty section says less and is right.
+        // **Nothing at all when there is nothing.** This used to promise which artifacts would
+        // appear before the filesystem had any. The recursive scan now makes §117's subfolders
+        // visible, but an empty section still says less and is right.
         if count == 0 && self.buckets.is_empty() {
             return section;
         }
@@ -9372,7 +9373,19 @@ impl Workbench {
             section = section.child(section_label_owned(format!("FILES · {count}")));
         }
 
-        for (_, items) in &files {
+        if listing.as_ref().is_some_and(|listing| listing.truncated) {
+            // The scan is intentionally bounded: an agent can create a virtualenv or unpack a
+            // dataset under its workspace. Say when that protection bites, because a silent cap
+            // would only turn §117's missing-folder defect into a missing-513th-file defect.
+            section = section.child(
+                div()
+                    .text_color(rgb(theme::text_muted()))
+                    .text_xs()
+                    .child("Showing a bounded view. Open the folder to see the rest."),
+            );
+        }
+
+        for (_, items) in files {
             for output in items {
                 let shown = output.clone();
                 let (glyph, ink) = file_mark(&output.path);
@@ -9437,7 +9450,7 @@ impl Workbench {
         // ever for a way to get at them.
         //
         // Dashed and last, because it is a way *out* of the panel rather than another row in it —
-        // and it is where the files this list cannot reach are (docs §117).
+        // and it reaches anything beyond §143's deliberate scan bounds.
         if let Some(dir) = self.thread_workspace() {
             section = section.child(
                 div()
