@@ -103,7 +103,23 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
 - 🟡 **A background worker guessed where it was** (§149) — `pd.read_csv('/data/…')`, then
   `/home/piero_linux/Mini-Me/…`, both exit 1, when the bare filename would have worked. A failed
   command now names the directory it ran in. **Awaiting a live run.**
-- 🟡 **A background worker's output is visible in the app** (§151) — its folder is now created
+- ✅ **A background worker's output is visible in the app** (§151) — **verified on a live run**:
+  plots render in the transcript and the panel lists
+  `<task>/guinea_pig_eda_output/plots/health_by_activity_box.png`. Its folder is created *inside*
+  the conversation's, and the conversation it belongs to is remembered per thread because the run
+  config is not visible at every construction site.
+- ⬜ **The Outputs panel does not survive a productive run** (§152). One EDA produced twelve
+  artifacts and the panel became twelve near-identical rows, each truncated to
+  `019fe9f6-9126-7710-a806-35d5e09170a4\guin…` — **the 36 characters they share are shown and the
+  part that tells them apart is cut off.** The transcript renders every figure at full width, so
+  ten plots is ten screens of scrolling. Wanted, in the researcher's words: *"when we have too many
+  plots and tables, maybe do something like what's done with too many photos — group them, and only
+  when you click can you view it and scroll on the x axis."* A gallery: grouped by the folder the
+  agent chose, collapsed to a strip of thumbnails, opened on click, scrollable sideways. Note the
+  agent already organises its own work into `guinea_pig_eda_output/plots/` — that structure is a
+  grouping the panel is currently flattening rather than using.
+- 🟡 **superseded** *(kept for the trail)* — **A background worker's output is visible in the app**
+  (§151) — its folder is now created
   *inside* the conversation's rather than beside it, so `workspace::outputs` finds it by descending
   (§143) and shows `<task-id>/plot_yield.png` with the run that made it still legible. **Awaiting a
   live run.** Previously: The researcher's framing is the
@@ -8736,3 +8752,37 @@ honoured, because a thread belongs to one conversation for its whole life.
 
 *Eighth time the value needed was one the program already had — and the second time in this thread
 that it was held somewhere a later caller could not reach.*
+
+
+## 152. Twelve rows that all begin the same way (2026-08-10)
+
+It works. A background worker generated a dataset, analysed it, drew ten figures, and the researcher
+saw them without being told a path:
+
+    019fe9f6-9126-7710-a806-35d5e09170a4/guinea_pig_eda_output/plots/health_by_activity_box.png
+
+And the panel showing them is now the problem. Twelve artifacts, twelve rows, every one truncated to
+
+    019fe9f6-9126-7710-a806-35d5e09170a4\guin…
+
+**The characters they share are displayed; the characters that distinguish them are cut off.** A
+list where every row reads the same is not a list, and this is the §59 failure in a new place — a
+label that collapses under its own length — arriving because the workspace finally has enough in it
+to expose it.
+
+The transcript has the matching problem: every figure renders at full width, so a productive run is
+ten screens of scrolling past pictures the researcher has not chosen to look at yet.
+
+### What the researcher asked for
+
+> *"when we have too many plots and table maybe doing something like whats do with too many photos.
+> Group them and only when click you can view it and scroll in x axis."*
+
+A gallery. Grouped, collapsed to thumbnails, opened on click, scrollable sideways.
+
+**And the grouping already exists in the data.** The agent organised its own work into
+`guinea_pig_eda_output/plots/` — §143 taught the panel to descend through exactly that structure
+and then flattens it back into one list. The folder the agent chose is a statement about what
+belongs together, and the panel is discarding it.
+
+*Ninth: the value needed was one the program already had.*
