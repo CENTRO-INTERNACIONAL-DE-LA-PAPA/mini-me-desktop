@@ -26,6 +26,7 @@ mod theme;
 mod ui;
 mod workspace;
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -33,9 +34,10 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use futures::StreamExt;
 use gpui::{
-    actions, div, img, prelude::*, px, relative, rgb, size, AnimationExt as _, App, Application,
-    Bounds, ClipboardItem, Context, Entity, Focusable, FontStyle, FontWeight, HighlightStyle,
-    KeyBinding, SharedString, StyledText, Window, WindowBounds, WindowOptions,
+    actions, div, img, prelude::*, px, relative, rgb, size, svg, AnimationExt as _, App,
+    Application, AssetSource, Bounds, ClipboardItem, Context, Entity, Focusable, FontStyle,
+    FontWeight, HighlightStyle, KeyBinding, SharedString, StyledText, Window, WindowBounds,
+    WindowOptions,
 };
 
 use composer::{Composer, ComposerEvent};
@@ -60,6 +62,49 @@ const CHECK_PROMPT: &str = "In one short paragraph, what is your role as the Min
 /// have to open a browser to finish the job.
 const ASTA_CITATION: &str = "AstaBench: Rigorous Benchmarking of AI Agents with a Scientific \
      Research Suite. arXiv:2510.21652 — https://arxiv.org/abs/2510.21652";
+
+const ICON_PATHS: [&str; 4] = [
+    "icons/settings.svg",
+    "icons/conversations.svg",
+    "icons/research.svg",
+    "icons/enter.svg",
+];
+
+/// The four small UI icons, compiled into the executable rather than read beside it.
+///
+/// Windows installs do not preserve a source-tree-relative assets directory. GPUI still needs an
+/// [`AssetSource`] to resolve `svg().path(...)`, so embedding the hand-authored files makes the
+/// packaged and development builds follow the same path (docs §157).
+struct Assets;
+
+impl AssetSource for Assets {
+    fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
+        let bytes: Option<&'static [u8]> = match path {
+            "icons/settings.svg" => Some(include_bytes!("../assets/icons/settings.svg")),
+            "icons/conversations.svg" => {
+                Some(include_bytes!("../assets/icons/conversations.svg"))
+            }
+            "icons/research.svg" => Some(include_bytes!("../assets/icons/research.svg")),
+            "icons/enter.svg" => Some(include_bytes!("../assets/icons/enter.svg")),
+            _ => None,
+        };
+        Ok(bytes.map(Cow::Borrowed))
+    }
+
+    fn list(&self, path: &str) -> anyhow::Result<Vec<SharedString>> {
+        Ok(ICON_PATHS
+            .iter()
+            .filter(|asset| path.is_empty() || asset.starts_with(path))
+            .copied()
+            .map(SharedString::from)
+            .collect())
+    }
+}
+
+/// A theme-tinted 14px icon, matching the text it replaces without changing control geometry.
+fn app_icon(path: &'static str) -> impl IntoElement {
+    svg().path(path).w(px(14.)).h(px(14.)).flex_none()
+}
 
 /// [`section_label`] for a heading only known at runtime.
 fn section_label_owned(text: String) -> impl IntoElement {
@@ -4149,7 +4194,7 @@ impl Workbench {
                                     .text_color(rgb(theme::accent_hover()))
                                     .cursor_pointer()
                             })
-                            .child("◎")
+                            .child(app_icon("icons/settings.svg"))
                             .on_click(cx.listener(|workbench, _event, _window, cx| {
                                 workbench.run_command(Command::OpenSettings, cx);
                             })),
@@ -8383,11 +8428,17 @@ impl Workbench {
                         div()
                             .px_2()
                             .py_1()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
                             .border_t_1()
                             .border_color(rgb(theme::border()))
                             .text_color(rgb(theme::text_muted()))
                             .text_xs()
-                            .child("↑↓ select · ⏎ run · esc close"),
+                            .child("↑↓ select ·")
+                            .child(app_icon("icons/enter.svg"))
+                            .child("run · esc close"),
                     ),
             )
     }
@@ -8667,6 +8718,10 @@ impl Workbench {
             .child(
                 div()
                     .id("toggle-sidebar")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
                     .flex_none()
                     .text_color(rgb(if self.sidebar_open {
                         theme::accent()
@@ -8679,7 +8734,8 @@ impl Workbench {
                             .text_color(rgb(theme::accent_hover()))
                             .cursor_pointer()
                     })
-                    .child("▤ conversations")
+                    .child(app_icon("icons/conversations.svg"))
+                    .child("conversations")
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
                         workbench.sidebar_open = !workbench.sidebar_open;
                         workbench.remember_panels();
@@ -8712,6 +8768,10 @@ impl Workbench {
             .child(
                 div()
                     .id("toggle-panel")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
                     .flex_none()
                     .text_color(rgb(if self.panel_open {
                         theme::accent()
@@ -8724,7 +8784,8 @@ impl Workbench {
                             .text_color(rgb(theme::accent_hover()))
                             .cursor_pointer()
                     })
-                    .child("▥ research")
+                    .child(app_icon("icons/research.svg"))
+                    .child("research")
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
                         workbench.panel_open = !workbench.panel_open;
                         workbench.remember_panels();
@@ -9752,6 +9813,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_ui_icon_is_embedded_and_tintable_in_a_packaged_build() {
+        let assets = Assets;
+        assert_eq!(assets.list("icons/").unwrap().len(), ICON_PATHS.len());
+        for path in ICON_PATHS {
+            let bytes = assets.load(path).unwrap().expect("declared icon is loadable");
+            let source = std::str::from_utf8(&bytes).expect("hand-authored SVG is UTF-8");
+            assert!(source.contains("currentColor"), "{path} cannot follow the theme");
+            assert!(source.contains("viewBox=\"0 0 24 24\""), "{path} has no common canvas");
+        }
+        assert!(assets.load("icons/missing.svg").unwrap().is_none());
+    }
+
+    #[test]
     fn csv_columns_get_distinct_colours_from_the_live_palette() {
         assert!(is_delimited("papas.csv"));
         assert!(is_delimited("MODELO.TSV"), "case is not a format");
@@ -10687,7 +10761,7 @@ fn main() {
         return;
     }
 
-    Application::new().run(move |cx: &mut App| {
+    Application::new().with_assets(Assets).run(move |cx: &mut App| {
         // Without these the composer receives no editing keys at all — GPUI
         // dispatches actions, and nothing binds to them by default.
         cx.bind_keys(composer::key_bindings());

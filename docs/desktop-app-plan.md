@@ -8786,3 +8786,22 @@ and then flattens it back into one list. The folder the agent chose is a stateme
 belongs together, and the panel is discarding it.
 
 *Ninth: the value needed was one the program already had.*
+
+
+## 157. Four glyphs become four packaged icons (2026-08-10)
+
+The deferred §70 item was kept deliberately narrow. Settings, the conversations toggle, the
+research toggle and the command palette's Enter hint now use four hand-authored 24×24 SVGs. Their
+labels, hit targets, colours and surrounding layout are unchanged; this is an asset substitution,
+not another navigation redesign.
+
+GPUI resolves `svg().path(...)` only through an `AssetSource`. Reading an `assets/` path at runtime
+would work in a checkout and fail in the installed Windows executable, so the source maps four
+known paths to `include_bytes!` data compiled into the binary. Every stroke uses `currentColor`,
+which lets the existing semantic text colour and hover state tint it. A test loads every declared
+path through the same source, checks the shared view box and tint token, and proves an unknown path
+returns absence instead of a misleading asset.
+
+The identical glyphs used as data/file-type marks and in the empty-state suggestions were not
+changed. They describe different concepts and replacing them would widen a four-control cleanup
+into an icon-system redesign — exactly the scope this deferred item said to avoid.
