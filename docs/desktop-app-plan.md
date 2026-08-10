@@ -8364,3 +8364,61 @@ The transcript virtualization and SVG glyph replacement remain open too. They we
 lower priority, and the former requires a before/after measurement in a real GPUI window. The app
 cannot be run here, and replacing a variable-height transcript without that measurement would
 repeat §70's mistake in a different type.
+
+## 147. The mirror deleted the checkout it was mirroring into (2026-08-10)
+
+The worst defect this project has shipped, and it ran on every launch for a day.
+
+`sync_source_command` (§139) staged each directory beside its target and swapped it in:
+
+```sh
+for d in backend skills; do
+  rm -rf $DIR/.$d.new && cp -r $SRC/$d $DIR/.$d.new && rm -rf $DIR/$d && mv $DIR/.$d.new $DIR/$d
+done
+```
+
+On a real Windows machine `$d` arrived **empty**. So `.$d.new` was `..new`, and `rm -rf $DIR/$d` was
+`rm -rf $DIR/` — **the backend checkout, its `.venv`, and `.langgraph_api/checkpoints.sqlite` with
+every conversation in it.** Deleted, silently, before the server it was preparing for could start.
+
+What the researcher saw was `backend exited during startup with exit code: 127`.
+
+### Four wrong answers before the log was read
+
+The install failed at `uv sync` with *"No `pyproject.toml` found"*. From reading the script I
+concluded `cp -r SRC DEST` had nested the checkout one level deep, wrote that into §141's section,
+shipped a fix for it, and told the researcher it was the cause. **It was not.** A later `uv sync`
+succeeded at the top level, which proved the directory had never been nested.
+
+Then a diagnostic was handed over that assigned a shell variable inside `wsl bash -lc`. On this
+machine those arrive empty — a failure already recorded in this project — so it printed nothing,
+and the nothing was read as evidence about the install.
+
+The log had it in four lines the whole time:
+
+```
+mv: cannot stat '/home/piero_linux/.local/share/mini-me-desktop/backend/..new'
+cp: cannot create directory '.../backend/..new'
+bash: line 1: cd: /home/.../backend: No such file or directory
+bash: line 1: .venv/bin/python: No such file or directory
+```
+
+`..new` is `.$d.new` with nothing in the middle. **The diagnostic that names the failure was
+written and shipped and then not read for three exchanges**, which is the actual lesson here — §132
+was about a diagnostic that could not distinguish success from failure, and this one could, and it
+was still argued past.
+
+### The fix
+
+No shell variable anywhere in the mirror. Two directories and seven files do not need iteration,
+and a literal name cannot expand to nothing — so `rm -rf` is now only ever handed
+`~/Mini-Me/backend`, never a path that could reduce to `~/Mini-Me/`. The mirror also says so out
+loud when the checkout has lost its `pyproject.toml`, because the whole chain is `|| true` and the
+damage was otherwise silent until `cd` failed four commands later complaining about something else.
+
+Two assertions now stand where the loop was: that the mirror text contains no `$` at all, and that
+no `rm -rf` targets the checkout root. Either would have caught this.
+
+*Why the loop variable is lost is still unexplained. That is precisely why the fix does not use
+one: the same machine loses variables assigned in a hand-typed `wsl bash -lc` too, so whatever the
+mechanism, it is not something this code should be relying on.*
