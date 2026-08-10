@@ -94,6 +94,26 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   that answer in seconds, because every test covered a construct alone and the bug lived in the
   transition between two.
 
+**Found on the machine, 2026-08-10, not yet diagnosed**
+- ⬜ **`GET /threads/{id}/state` returns 500** — every poll, `error_detail=None`,
+  `response_size_bytes=0`. This is why a finished background task reports *"completed, but it
+  returned no result text"*: the run succeeded and its state cannot be read, so the result is lost
+  on the way back. The same 500 is behind `could not read a conversation` on older threads. **Our
+  overlay is in that path** — `LocalSandbox.__init__` logs immediately before each failure — so the
+  first question is whether we are the cause, and the traceback in the backend log answers it.
+  Everything below is downstream of this.
+- ⬜ **A background worker produced no files.** 36s, `success`, and an empty workspace at
+  `/mnt/c/Users/…/Documents/Mini-Me/<task-id>`. Cannot be separated from the 500 until that is
+  fixed — "it did nothing" and "what it did was unreadable" look identical from here.
+- ⬜ **Conversations start already inside a project, and a deleted project comes back on the next
+  launch.** Reported by the researcher: *"the conversations start already in a project and thats
+  bad. Also I delete the project and when start up they appear again."* Related to
+  `docs/upstream/mini-me/project-spine-is-not-per-project.md`, but the resurrection after deletion
+  is new and is the worse half — a delete that does not delete.
+- ⬜ **`start_async_task` accepts only `background_worker`**, by design (§114), while `/subagent`
+  lists ten specialist names. Every researcher will reach for `exploratory_data_analysis` first, as
+  this one did twice. Either the tool description says so, or it routes.
+
 **Next**
 - ✅ **Outputs a turn wrote into a folder** (§117, §143) — the panel now descends through named
   output folders with explicit depth/file bounds, keeps the relative path visible, skips tool
