@@ -173,10 +173,14 @@ pub struct Settings {
     pub road_open: bool,
     /// Whether the app created that directory.
     ///
-    /// **Load-bearing.** Updating means `git fetch && git checkout <pin> && uv sync`, and
-    /// running that on a checkout the user cloned themselves can destroy work — the
-    /// reference checkout on this developer's own machine has ten local branches, several
-    /// live in worktrees. The app may only update what it made.
+    /// **Load-bearing.** Updating means `rm -rf backend skills` and copying this repo's
+    /// `mini-me/` over them (`backend::sync_source_command`), and running that on a checkout
+    /// the user cloned themselves would destroy work — the reference checkout on this
+    /// developer's own machine has ten local branches, several live in worktrees. The app may
+    /// only overwrite what it made.
+    ///
+    /// The mechanism changed with §139 — it used to be `git fetch && git checkout <pin>` — and
+    /// the reason did not, so this comment is the one place the old sentence survived.
     pub backend_dir_owned: bool,
 }
 
