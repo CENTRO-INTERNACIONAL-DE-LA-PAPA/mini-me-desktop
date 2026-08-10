@@ -94,30 +94,39 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   that answer in seconds, because every test covered a construct alone and the bug lived in the
   transition between two.
 
-**Found on the machine, 2026-08-10, not yet diagnosed**
-- ✅ **`GET /threads/{id}/state` returned 500 on every poll** (§148) — the backend fell back to
-  `openai::gpt-5.4` on any graph build without a run config, and this app never puts an OpenAI key
-  anywhere. The launch now names the configured model in `MINIME_DEFAULT_MODEL`. **Awaiting a live
-  run.**
-- 🟡 **A background worker's plots never appeared** (§149). Resolved as far as the cause: it ran
-  `pd.read_csv('/data/potato_late_blight.csv')`, failed, retried with `/home/piero_linux/Mini-Me/`,
-  failed again. Commands run *with the workspace as their working directory*, so the bare filename
-  would have worked; nothing had ever told the model where it was. A failed command now names the
-  directory it ran in. **Awaiting a live run.**
-- 🟡 **A background worker wrote into its own folder, not the conversation's** (§150). Thirteen
-  files produced correctly, filed under the task id while the coordinator reported them under the
-  conversation id and the Files panel showed neither. The pin read one config key that was not
-  there; it now tries each source and logs which one answered. **Awaiting a live run.**
-- ⬜ **The turn then said the plots had been saved.** Two honest attempts, both failed, and the
-  answer reported success anyway. The subagent prompt says *"NEVER invent findings, numbers, or
-  charts"*, which by now is known to mean nothing. The structural version is `paper_tools.unreported`
-  applied to files: diff the workspace after the run, and if it claims files that are not there,
-  say so instead of passing the claim through.
+**Background work — found on the machine, 2026-08-10**
+- ✅ **`GET /threads/{id}/state` returned 500 on every poll** (§148) — `build_chat_model` claimed
+  in its docstring that constructing without a key never raises, which is false for OpenAI and
+  Google. This app keeps provider keys off the backend's environment on purpose, so every route
+  that builds the graph without a run config had none. **Verified fixed**: background results come
+  back, conversations open, switching between them works.
+- 🟡 **A background worker guessed where it was** (§149) — `pd.read_csv('/data/…')`, then
+  `/home/piero_linux/Mini-Me/…`, both exit 1, when the bare filename would have worked. A failed
+  command now names the directory it ran in. **Awaiting a live run.**
+- 🟡 **A background worker's output is visible in the app** (§151) — its folder is now created
+  *inside* the conversation's rather than beside it, so `workspace::outputs` finds it by descending
+  (§143) and shows `<task-id>/plot_yield.png` with the run that made it still legible. **Awaiting a
+  live run.** Previously: The researcher's framing is the
+  right one: *"the idea is to somehow view it in the app, not as a different folder outside the
+  conversation folder."* §150 pinned the worker to the conversation's thread so its files land
+  beside the conversation's, and on the run after that fix the Files panel still showed only
+  `provenance.json` while the answer listed ten plots. **The pin is a means; the requirement is
+  that a researcher sees the work without being told a path.** Two ways to satisfy it and they are
+  not exclusive:
+  - the worker writes into the conversation's folder (§150's pin), and
+  - the app reads a finished task's own folder and folds it into Outputs, so a worker that lands
+    anywhere is still visible.
+  The second is the one that cannot silently fail, and it is not built.
+- ⬜ **The turn says files were saved without checking.** Two failed attempts and the answer
+  reported plots on disk; a later run listed ten filenames the panel could not show. The prompt
+  says *"NEVER invent findings, numbers, or charts"* — the third capital-letter rule measured at
+  zero compliance. Structural version: the workspace diff already exists (§42 finds figures that
+  way), so a claim about files can be checked against it and corrected instead of relayed.
 - ⬜ **Conversations start already inside a project, and a deleted project comes back on the next
-  launch.** Reported by the researcher: *"the conversations start already in a project and thats
-  bad. Also I delete the project and when start up they appear again."* Related to
-  `docs/upstream/mini-me/project-spine-is-not-per-project.md`, but the resurrection after deletion
-  is new and is the worse half — a delete that does not delete.
+  launch.** *"the conversations start already in a project and thats bad. Also I delete the project
+  and when start up they appear again."* Related to
+  `docs/upstream/mini-me/project-spine-is-not-per-project.md`; the resurrection after deletion is
+  new and is the worse half — a delete that does not delete.
 - ⬜ **`start_async_task` accepts only `background_worker`**, by design (§114), while `/subagent`
   lists ten specialist names. Every researcher will reach for `exploratory_data_analysis` first, as
   this one did twice. Either the tool description says so, or it routes.
@@ -8623,3 +8632,79 @@ A chain of fallbacks that also failed silently would have been the same bug with
 *Left open beside this: the turn said the plots were saved. It believed that. Nothing checks a
 claim about files against the workspace, and until something does, the next one will be wrong in a
 way no fallback chain can catch.*
+
+
+## 151. The folder was never the point (2026-08-10)
+
+§150 pinned a background worker to the conversation's thread, so its files would stop landing under
+the task id. The run after it produced ten plots, listed them by name, and the Files panel showed
+`provenance.json`.
+
+The researcher's reply reframed the whole thread:
+
+> *"ok it seems it worked but the idea its to somehow view it in the app not as a diferent folder
+> outside the conversation folder right?"*
+
+Right. **Three sections have been spent moving files between directories, and not one of them was
+the requirement.** The requirement is that a researcher sees what the agent produced without being
+told where to look — and every fix so far has been a different way of hoping the file lands
+somewhere the panel already reads.
+
+### Why the pin is the wrong shape of fix
+
+It depends on a config key reaching a tool call. When it does not, the failure is silent by
+construction: a real directory is created, filled correctly, and reported under a different id, so
+every signal says success (§150). A fallback chain makes that less likely and cannot make it
+impossible, because the app is still only ever looking in one place and guessing that the worker
+agreed.
+
+The version that cannot fail that way is the opposite one: **the app reads the finished task's own
+folder.** It knows the task id — it displays it, polls it, and prints it in the answer. A worker
+that writes anywhere reachable is then visible, whether or not the pin worked, and the pin becomes
+an optimisation rather than a load-bearing guess.
+
+That is the §91/§115 shape one more time, and worth counting because it is now seven: *the value
+needed was one the program already had.* The task id is on screen.
+
+### Both, not either
+
+Keep the pin — files beside the conversation is the right filing, and the log line it now emits is
+how we learn whether the key ever arrives. Add the read — because a researcher who cannot see their
+own plots does not care which of the two failed.
+
+*Left open, and the harder one: the run that listed ten filenames believed it. Nothing checks a
+claim about files against the workspace, and until something does, "I saved the plots" is a
+sentence the agent can produce whatever happened.*
+
+
+### The answer was one directory deeper, not one directory over
+
+The pin (§150) worked on the next run — `background work pinned to 019fe9d7-… (from
+configurable.thread_id)` — and the researcher supplied the design the three previous attempts had
+all missed:
+
+> *"from thread lets say A I send the background task. Then the subagent created a subfolder B and
+> the files were in B not in A. When B must be inside A."*
+
+Not *instead of* A. **Inside** it.
+
+```
+Documents/Mini-Me/<project>/A/        the conversation
+Documents/Mini-Me/<project>/A/B/      the background task it started
+```
+
+`workspace::outputs` already descends through named subfolders and shows the relative path — that
+was §143, built the same day for an unrelated reason. So nesting makes the worker's files appear in
+the conversation's Outputs panel **with no client change at all**, labelled `B/plot_yield.png`, and
+*which run produced them* survives.
+
+Writing straight into the conversation's folder — which is what the pin alone did — would have
+shown the files and destroyed that, mixing every worker's output together with the conversation's
+own. The nesting keeps both.
+
+`LocalSandbox.__init__` composes the path from parts now: `[pinned]` when a run is its own
+conversation, `[pinned, own]` when it is not. An unpinned worker still gets its own folder, because
+a failed pin must cost discoverability and never the files.
+
+*Three sections of moving files sideways, and the fix was to go one level down. The researcher saw
+it in one sentence.*
