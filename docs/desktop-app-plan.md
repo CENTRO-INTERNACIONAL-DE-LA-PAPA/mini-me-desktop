@@ -99,9 +99,20 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   `openai::gpt-5.4` on any graph build without a run config, and this app never puts an OpenAI key
   anywhere. The launch now names the configured model in `MINIME_DEFAULT_MODEL`. **Awaiting a live
   run.**
-- ⬜ **A background worker produced no files.** 36s, `success`, and an empty workspace at
-  `/mnt/c/Users/…/Documents/Mini-Me/<task-id>`. Cannot be separated from the 500 until that is
-  fixed — "it did nothing" and "what it did was unreadable" look identical from here.
+- 🟡 **A background worker's plots never appeared** (§149). Resolved as far as the cause: it ran
+  `pd.read_csv('/data/potato_late_blight.csv')`, failed, retried with `/home/piero_linux/Mini-Me/`,
+  failed again. Commands run *with the workspace as their working directory*, so the bare filename
+  would have worked; nothing had ever told the model where it was. A failed command now names the
+  directory it ran in. **Awaiting a live run.**
+- 🟡 **A background worker wrote into its own folder, not the conversation's** (§150). Thirteen
+  files produced correctly, filed under the task id while the coordinator reported them under the
+  conversation id and the Files panel showed neither. The pin read one config key that was not
+  there; it now tries each source and logs which one answered. **Awaiting a live run.**
+- ⬜ **The turn then said the plots had been saved.** Two honest attempts, both failed, and the
+  answer reported success anyway. The subagent prompt says *"NEVER invent findings, numbers, or
+  charts"*, which by now is known to mean nothing. The structural version is `paper_tools.unreported`
+  applied to files: diff the workspace after the run, and if it claims files that are not there,
+  say so instead of passing the claim through.
 - ⬜ **Conversations start already inside a project, and a deleted project comes back on the next
   launch.** Reported by the researcher: *"the conversations start already in a project and thats
   bad. Also I delete the project and when start up they appear again."* Related to
@@ -8519,3 +8530,96 @@ failure — the same log, the same day, as §147.
 
 *The shape, again, and worth counting: the value the program needed was one it already had. The
 researcher had chosen a model in Settings; the run request carried it; the environment did not.*
+
+
+## 149. Two honest attempts, both blind (2026-08-10)
+
+With §148 merged the background worker finally reported real text and wrote a real file. It also
+said *"The plots and summary tables have been saved to files."* There was one CSV.
+
+It had tried. Twice:
+
+```
+command failed (exit 1): python -c "... pd.read_csv('/data/potato_late_blight.csv');
+                                    ... plt.savefig('/plots/histograms.png')"
+command failed (exit 1): python -c "... pd.read_csv('/home/piero_linux/Mini-Me/potato_late_blight.csv')"
+```
+
+`/data`, `/plots`, `/home/piero_linux/Mini-Me` — none exist. The workspace was
+`/mnt/c/Users/.../Documents/Mini-Me/<thread>`, **commands already run with that as their working
+directory**, and `pd.read_csv('potato_late_blight.csv')` would have worked on the first attempt.
+
+### The path was never a secret
+
+`aresolve` announces it — to the *desktop status line*, so the researcher can see where their files
+are. The one participant that needed it could not, and the error it got back named the directory it
+had invented rather than the one it had. It guessed twice, differently, which is what a model does
+when it has no way to find out.
+
+**Sixth time in this document: the thing needed to end the argument was a value the program already
+had.** §91's adoptable threads, §99's laid-out width, §110's overlay path, §114's config keys,
+§115's work dir — announced to the wrong audience — and now the same work dir again, to the same
+wrong audience.
+
+A failed command now carries `[cwd] <path> — this command ran here; use paths relative to it`.
+Only on failure: a line appended to every `execute` is a line the model learns to skip, which is
+exactly how the corpus-id diagnostic stopped being read (§116/§132).
+
+### The claim is a separate defect and the worse one
+
+Two failed attempts and the turn still reported plots on disk. `exploratory_data_analysis`'s prompt
+says *"NEVER invent findings, numbers, or charts"* — §140 has it in the table — and it is the third
+capital-letter rule in three days measured at zero compliance. Telling the model where it is may
+well stop this instance; it does nothing about the next one, because **the report is not checked
+against the workspace at all.**
+
+The structural version is `paper_tools.unreported` pointed at files instead of papers: the workspace
+diff already exists (§42 finds figures that way), so a run that claims files which are not there can
+be corrected rather than relayed. Left open, deliberately — the cause is fixed, the honesty is not,
+and they are different jobs.
+
+
+## 150. Thirteen files in a directory nobody opens (2026-08-10)
+
+The background worker finally worked. Eight minutes, six plots, seven tables, all correct — and
+the researcher could not find any of them.
+
+```
+files on disk : Documents/Mini-Me/test subagents/019fe9cb-dbfc-…/   <- the task's id
+agent reported: Documents/Mini-Me/test subagents/019fe9c1-e605-…/   <- the conversation's id
+Files panel   : the conversation's folder                            <- neither
+```
+
+Three places, two directories, no overlap. The work was never lost; it was one directory sideways,
+and every surface that could have said so pointed somewhere else.
+
+### The half that worked is what identifies the half that did not
+
+`_forwarded_config` copies `model_config`, `__llm_keys` and `__workspace_project__` out of the
+parent run's `configurable`, then separately reads the thread to pin:
+
+```python
+pinned = configurable.get(WORKSPACE_THREAD_KEY) or configurable.get("thread_id")
+```
+
+The project arrived — the files are under `test subagents/`. The thread did not. **Same dict, two
+lines apart.** So this was never "the config did not forward"; it was one key that is not reliably
+in `configurable` when a tool call reads it, even though LangGraph's own `pregel/main.py` reads
+`saved.config[CONF]["thread_id"]`.
+
+Which version of that is true on a researcher's machine is not something to reason about from here.
+`_conversation_thread` now tries the existing pin, `configurable.thread_id`, `metadata.thread_id`
+and `configurable.__thread_id__` in turn — **and reports which one answered**, or that none did.
+
+### Why the report matters more than the chain
+
+An unpinned worker does not crash. It creates a real directory, fills it correctly, and reports
+paths under a different one. Every signal available to the researcher says success. That is the
+same shape as §148's 500 — where a run finished and the answer could not be read — and as §132's
+diagnostic that printed identically either way.
+
+A chain of fallbacks that also failed silently would have been the same bug with more code in it.
+
+*Left open beside this: the turn said the plots were saved. It believed that. Nothing checks a
+claim about files against the workspace, and until something does, the next one will be wrong in a
+way no fallback chain can catch.*
