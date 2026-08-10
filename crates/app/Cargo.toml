@@ -67,6 +67,12 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+[dev-dependencies]
+# Enables GPUI's headless window harness only for tests. §156 measures the list at layout time;
+# a helper that merely counts our own iterator would prove the old eager path, not that GPUI
+# actually stops constructing rows outside the viewport.
+gpui = { version = "=0.2.2", features = ["test-support"] }
+
 # Signalling the sidecar's whole process group on shutdown (see backend.rs).
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

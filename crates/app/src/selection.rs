@@ -52,8 +52,14 @@ use gpui::{
 /// Ordered by span first, so comparing two spots says which comes first in the transcript —
 /// that is what lets a drag upwards select the same text as a drag downwards.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct SpanId {
+    message: usize,
+    run: usize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Spot {
-    pub span: usize,
+    pub span: SpanId,
     pub offset: usize,
 }
 
@@ -112,7 +118,7 @@ impl Selection {
     ///
     /// `len` is that span's own length, used to mean "to the end" for the spans a selection
     /// passes straight through.
-    fn range_in(&self, span: usize, len: usize) -> Option<Range<usize>> {
+    fn range_in(&self, span: SpanId, len: usize) -> Option<Range<usize>> {
         let (start, end) = self.ordered()?;
         if span < start.span || span > end.span {
             return None;
@@ -130,7 +136,7 @@ impl Selection {
 /// depend on: the key *is* the document position, assigned while the transcript is built.
 #[derive(Default)]
 pub struct Spans {
-    entries: BTreeMap<usize, Entry>,
+    entries: BTreeMap<SpanId, Entry>,
 }
 
 struct Entry {
@@ -139,7 +145,7 @@ struct Entry {
 }
 
 impl Spans {
-    fn insert(&mut self, span: usize, text: SharedString, layout: TextLayout) {
+    fn insert(&mut self, span: SpanId, text: SharedString, layout: TextLayout) {
         self.entries.insert(span, Entry { text, layout });
     }
 
@@ -149,7 +155,7 @@ impl Spans {
     /// past the last one, belongs to the vertically nearest span — which is what makes a drag
     /// that leaves the text still extend the selection instead of stopping dead.
     pub fn spot_at(&self, position: Point<Pixels>) -> Option<Spot> {
-        let mut nearest: Option<(Pixels, usize, &Entry)> = None;
+        let mut nearest: Option<(Pixels, SpanId, &Entry)> = None;
         for (&span, entry) in &self.entries {
             let bounds = entry.layout.bounds();
             let distance = if position.y < bounds.top() {
@@ -176,43 +182,6 @@ impl Spans {
         })
     }
 
-    /// The first and last spot in the transcript, for "select everything".
-    pub fn whole(&self) -> Option<(Spot, Spot)> {
-        let (&first, _) = self.entries.iter().next()?;
-        let (&last, entry) = self.entries.iter().next_back()?;
-        Some((
-            Spot {
-                span: first,
-                offset: 0,
-            },
-            Spot {
-                span: last,
-                offset: entry.text.len(),
-            },
-        ))
-    }
-
-    /// The selected text, ready for the clipboard.
-    ///
-    /// Spans are joined with newlines because each one is a paragraph, a heading, a list item
-    /// or a table cell — separate blocks in the original Markdown, and running them together
-    /// would produce a wall of text nobody can paste into a paper.
-    pub fn selected_text(&self, selection: &Selection) -> Option<String> {
-        let (start, end) = selection.ordered()?;
-        let mut parts = Vec::new();
-        for (&span, entry) in self.entries.range(start.span..=end.span) {
-            if let Some(range) = selection.range_in(span, entry.text.len()) {
-                // A span whose bytes moved under us — the transcript changed mid-drag —
-                // must not panic on a slice that is no longer a char boundary.
-                if entry.text.is_char_boundary(range.start)
-                    && entry.text.is_char_boundary(range.end)
-                {
-                    parts.push(entry.text[range].to_string());
-                }
-            }
-        }
-        (!parts.is_empty()).then(|| parts.join("\n"))
-    }
 }
 
 /// Where in a span a point falls.
@@ -243,7 +212,12 @@ struct State {
     /// question was always answered "nothing selected" — the menu greyed Copy over text the
     /// user could see was highlighted (docs §71).
     building: Spans,
-    /// Handed out as the transcript is built, so document order and span index agree.
+    /// Text survives after a row scrolls away; its layout rectangles cannot (§156).
+    texts: BTreeMap<SpanId, SharedString>,
+    /// Select All's complete logical copy, including rows that were never painted (§156).
+    selected_all_text: Option<String>,
+    /// Handed out inside one stable message namespace, because a list can build out of order.
+    current_message: usize,
     next_span: usize,
 }
 
@@ -258,10 +232,23 @@ impl Transcript {
         state.next_span = 0;
     }
 
-    /// The next span index, in document order.
-    pub fn claim(&self) -> usize {
+    /// Start assigning selectable runs for one virtualized message row (docs §156).
+    pub fn begin_message(&self, message: usize) {
         let mut state = self.0.borrow_mut();
-        let span = state.next_span;
+        state.current_message = message;
+        state.next_span = 0;
+        // Streaming punctuation can split or merge Markdown blocks. Do not retain a logical run
+        // that the current parse removed.
+        state.texts.retain(|span, _| span.message != message);
+    }
+
+    /// The next span index, in document order.
+    pub fn claim(&self) -> SpanId {
+        let mut state = self.0.borrow_mut();
+        let span = SpanId {
+            message: state.current_message,
+            run: state.next_span,
+        };
         state.next_span += 1;
         span
     }
@@ -271,7 +258,21 @@ impl Transcript {
     }
 
     pub fn update(&self, change: impl FnOnce(&mut Selection)) {
-        change(&mut self.0.borrow_mut().selection);
+        let mut state = self.0.borrow_mut();
+        state.selected_all_text = None;
+        change(&mut state.selection);
+    }
+
+    /// Discard every logical and painted run when the workbench changes conversations.
+    pub fn clear_document(&self) {
+        let mut state = self.0.borrow_mut();
+        state.selection = Selection::default();
+        state.spans = Spans::default();
+        state.building = Spans::default();
+        state.texts.clear();
+        state.selected_all_text = None;
+        state.current_message = 0;
+        state.next_span = 0;
     }
 
     /// Point-to-spot in one borrow, so a caller cannot hold the registry while mutating.
@@ -281,15 +282,34 @@ impl Transcript {
 
     pub fn selected_text(&self) -> Option<String> {
         let state = self.0.borrow();
-        state.spans.selected_text(&state.selection)
+        if let Some(text) = &state.selected_all_text {
+            return Some(text.clone());
+        }
+        let (start, end) = state.selection.ordered()?;
+        let mut parts = Vec::new();
+        for (&span, text) in state.texts.range(start.span..=end.span) {
+            if let Some(range) = state.selection.range_in(span, text.len()) {
+                if text.is_char_boundary(range.start) && text.is_char_boundary(range.end) {
+                    parts.push(text[range].to_string());
+                }
+            }
+        }
+        (!parts.is_empty()).then(|| parts.join("\n"))
     }
 
-    pub fn select_all(&self) {
+    pub fn select_all(&self, text: String) {
         let mut state = self.0.borrow_mut();
-        if let Some((start, end)) = state.spans.whole() {
-            state.selection.anchor = Some(start);
-            state.selection.head = Some(end);
+        if !text.is_empty() {
+            state.selection.anchor = Some(Spot {
+                span: SpanId { message: 0, run: 0 },
+                offset: 0,
+            });
+            state.selection.head = Some(Spot {
+                span: SpanId { message: usize::MAX, run: usize::MAX },
+                offset: usize::MAX,
+            });
             state.selection.dragging = false;
+            state.selected_all_text = Some(text);
         }
     }
 }
@@ -301,7 +321,7 @@ impl Transcript {
 /// quads. Markdown styling is therefore unaffected by construction, which is the point —
 /// bold, links and inline code all still work because nothing about them changed.
 pub struct Selectable {
-    span: usize,
+    span: SpanId,
     text: SharedString,
     styled: StyledText,
     transcript: Transcript,
@@ -363,11 +383,10 @@ impl Element for Selectable {
         self.styled
             .prepaint(id, inspector, bounds, &mut (), window, cx);
         let layout = self.styled.layout().clone();
-        self.transcript.0.borrow_mut().building.insert(
-            self.span,
-            self.text.clone(),
-            layout.clone(),
-        );
+        let mut state = self.transcript.0.borrow_mut();
+        state.building.insert(self.span, self.text.clone(), layout.clone());
+        state.texts.insert(self.span, self.text.clone());
+        drop(state);
 
         let selection = self.transcript.selection();
         let Some(range) = selection.range_in(self.span, self.text.len()) else {
@@ -462,8 +481,12 @@ fn rows_between(
 mod tests {
     use super::*;
 
+    fn span(run: usize) -> SpanId {
+        SpanId { message: 0, run }
+    }
+
     fn spot(span: usize, offset: usize) -> Spot {
-        Spot { span, offset }
+        Spot { span: self::span(span), offset }
     }
 
     #[test]
@@ -473,7 +496,7 @@ mod tests {
         let mut selection = Selection::default();
         selection.begin(spot(2, 7));
         assert_eq!(selection.ordered(), None);
-        assert_eq!(selection.range_in(2, 40), None);
+        assert_eq!(selection.range_in(span(2), 40), None);
     }
 
     #[test]
@@ -488,8 +511,8 @@ mod tests {
 
         assert_eq!(down.ordered(), up.ordered());
         // The span in the middle is covered end to end, not skipped.
-        assert_eq!(down.range_in(2, 12), Some(0..12));
-        assert_eq!(up.range_in(2, 12), Some(0..12));
+        assert_eq!(down.range_in(span(2), 12), Some(0..12));
+        assert_eq!(up.range_in(span(2), 12), Some(0..12));
     }
 
     #[test]
@@ -498,18 +521,18 @@ mod tests {
         selection.begin(spot(1, 4));
         selection.extend(spot(3, 2));
         assert_eq!(
-            selection.range_in(1, 10),
+            selection.range_in(span(1), 10),
             Some(4..10),
             "first span, from the click"
         );
         assert_eq!(
-            selection.range_in(3, 10),
+            selection.range_in(span(3), 10),
             Some(0..2),
             "last span, up to the pointer"
         );
         // Outside the drag entirely.
-        assert_eq!(selection.range_in(0, 10), None);
-        assert_eq!(selection.range_in(4, 10), None);
+        assert_eq!(selection.range_in(span(0), 10), None);
+        assert_eq!(selection.range_in(span(4), 10), None);
     }
 
     #[test]
@@ -519,7 +542,7 @@ mod tests {
         let mut selection = Selection::default();
         selection.begin(spot(0, 0));
         selection.extend(spot(0, 999));
-        assert_eq!(selection.range_in(0, 5), Some(0..5));
+        assert_eq!(selection.range_in(span(0), 5), Some(0..5));
     }
 
     #[test]
@@ -527,9 +550,9 @@ mod tests {
         let mut selection = Selection::default();
         selection.begin(spot(7, 2));
         selection.extend(spot(7, 6));
-        assert_eq!(selection.range_in(7, 20), Some(2..6));
-        assert_eq!(selection.range_in(6, 20), None);
-        assert_eq!(selection.range_in(8, 20), None);
+        assert_eq!(selection.range_in(span(7), 20), Some(2..6));
+        assert_eq!(selection.range_in(span(6), 20), None);
+        assert_eq!(selection.range_in(span(8), 20), None);
     }
 
     #[test]
@@ -619,10 +642,27 @@ mod tests {
         transcript.begin_frame();
         assert_eq!(
             (transcript.claim(), transcript.claim(), transcript.claim()),
-            (0, 1, 2)
+            (span(0), span(1), span(2))
         );
         transcript.begin_frame();
-        assert_eq!(transcript.claim(), 0);
+        assert_eq!(transcript.claim(), span(0));
+    }
+
+    #[test]
+    fn virtual_rows_keep_span_ids_in_message_order() {
+        let transcript = Transcript::default();
+        transcript.begin_message(9);
+        let later = transcript.claim();
+        transcript.begin_message(2);
+        let earlier = transcript.claim();
+        assert!(earlier < later);
+    }
+
+    #[test]
+    fn select_all_copies_text_from_rows_that_were_never_painted() {
+        let transcript = Transcript::default();
+        transcript.select_all("first row\noff-screen row".into());
+        assert_eq!(transcript.selected_text().as_deref(), Some("first row\noff-screen row"));
     }
 
     #[test]
@@ -644,7 +684,7 @@ mod tests {
         // Nothing registered yet this frame, so there is nothing to copy — and asking to
         // select everything finds no spans and leaves the user's selection alone.
         assert_eq!(transcript.selected_text(), None);
-        transcript.select_all();
+        transcript.select_all(String::new());
         assert_eq!(
             transcript.selection().ordered(),
             Some((spot(0, 1), spot(0, 4)))
