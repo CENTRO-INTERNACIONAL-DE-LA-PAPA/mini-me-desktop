@@ -244,6 +244,49 @@ FORWARDED_CONFIG_KEYS = (
 BACKGROUND_RECURSION_LIMIT = 10_000
 
 
+def _conversation_thread(config: dict, configurable: dict) -> tuple[str, str]:
+    """The thread whose folder a background worker should write into, and where it came from.
+
+    # Why this is a chain and not one key
+
+    It was `configurable.get(WORKSPACE_THREAD_KEY) or configurable.get("thread_id")`, and on a real
+    run neither was there — while `model_config` and `__workspace_project__`, read from the *same*
+    `configurable` two lines above, arrived intact. So the worker inherited the conversation's
+    project folder and **not** its thread, and wrote thirteen files to
+
+        Documents/Mini-Me/test subagents/<the task's own id>/
+
+    while the coordinator reported them under the conversation's id, and the Files panel showed
+    neither. Six plots, produced correctly, that the researcher had to be told how to go and find.
+
+    LangGraph does put `thread_id` in `configurable` — `pregel/main.py` reads
+    `saved.config[CONF]["thread_id"]` — but evidently not in every context a tool call sees, and
+    the version that matters is whichever is installed on a researcher's machine. So: try each
+    source and **say which one answered**. A chain that fails silently would be the same bug with
+    more code.
+
+    Returns ``("", "nothing")`` when no source has it, which the caller reports rather than
+    swallowing.
+    """
+    # Imported here, as the caller does: `minime_local.workspace` pulls in deepagents, and this
+    # module is imported during graph construction where that is not yet guaranteed.
+    from minime_local.workspace import WORKSPACE_THREAD_KEY
+
+    pin = str(configurable.get(WORKSPACE_THREAD_KEY) or "").strip()
+    if pin:
+        # A worker started by a worker keeps the original conversation, not its parent.
+        return pin, "an existing pin"
+    for source, value in (
+        ("configurable.thread_id", configurable.get("thread_id")),
+        ("metadata.thread_id", (config.get("metadata") or {}).get("thread_id")),
+        ("configurable.__thread_id__", configurable.get("__thread_id__")),
+    ):
+        text = str(value or "").strip()
+        if text:
+            return text, source
+    return "", "nothing"
+
+
 def _forwarded_config() -> dict:
     """The run config to start background work with, taken from the live run.
 
@@ -278,9 +321,18 @@ def _forwarded_config() -> dict:
     # parent's.
     from minime_local.workspace import WORKSPACE_THREAD_KEY
 
-    pinned = configurable.get(WORKSPACE_THREAD_KEY) or configurable.get("thread_id")
+    pinned, source = _conversation_thread(config, configurable)
     if pinned:
         forwarded[WORKSPACE_THREAD_KEY] = pinned
+    # Said either way, because the two outcomes were indistinguishable and the failing one is
+    # silent by construction: an unpinned worker writes to a directory that exists, fills it
+    # correctly, and reports paths under the conversation instead. The researcher is told their
+    # plots were saved, opens the folder, and finds nothing (docs §150).
+    logger.warning(
+        "minime_local: background work pinned to %s (from %s)",
+        pinned or "<the worker's own thread — its files will not join the conversation>",
+        source,
+    )
     if "model_config" not in forwarded:
         # Worth saying out loud: the run will still start, and will still fail later on a
         # model it could not build. This line is the difference between a diagnosable

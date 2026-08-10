@@ -921,6 +921,75 @@ print("ok")
         );
     }
 
+    /// A background worker writes into the conversation's folder, not its own.
+    ///
+    /// **Thirteen files in a directory nobody opens.** A worker produced six plots and seven
+    /// tables correctly, and they landed under its *task* id while the coordinator reported them
+    /// under the *conversation* id and the Files panel showed neither. The researcher was told the
+    /// plots were saved, opened the folder, and found one stale CSV.
+    ///
+    /// The pin came from `configurable["thread_id"]` alone, and on that run it was absent — while
+    /// `model_config` and `__workspace_project__`, read from the same `configurable` two lines
+    /// above, arrived intact. So the worker inherited the conversation's *project folder* and not
+    /// its thread, which is why the files were one directory sideways rather than lost.
+    #[test]
+    fn background_work_is_pinned_to_the_conversation_from_whichever_key_has_it() {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: python3 is not on PATH");
+            return;
+        }
+        let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
+        let script = format!(
+            r#"
+import pathlib, sys, types
+src = pathlib.Path({overlay:?} + "/minime_local/async_agents.py").read_text()
+stub = types.ModuleType("minime_local.workspace")
+stub.WORKSPACE_THREAD_KEY = "__workspace_thread__"
+sys.modules["minime_local"] = types.ModuleType("minime_local")
+sys.modules["minime_local.workspace"] = stub
+ns = {{}}
+exec(src[src.index("def _conversation_thread"):src.index("def _forwarded_config")], ns)
+thread = ns["_conversation_thread"]
+
+# An existing pin wins, so a worker started by a worker keeps the original conversation
+# rather than adopting its parent's.
+assert thread({{}}, {{"__workspace_thread__": "conv", "thread_id": "parent"}})[0] == "conv"
+
+# Each remaining source, in turn. `configurable.thread_id` is where LangGraph documents it
+# (`pregel/main.py` reads `saved.config[CONF]["thread_id"]`) and is tried first.
+assert thread({{}}, {{"thread_id": "conv"}}) == ("conv", "configurable.thread_id")
+assert thread({{"metadata": {{"thread_id": "conv"}}}}, {{}}) == ("conv", "metadata.thread_id")
+assert thread({{}}, {{"__thread_id__": "conv"}})[0] == "conv"
+
+# Whitespace is not an id: a blank must fall through, not win and produce a directory
+# named after nothing.
+assert thread({{"metadata": {{"thread_id": "conv"}}}}, {{"thread_id": "   "}})[0] == "conv"
+
+# And when nothing has it, that is reported rather than guessed at. The caller logs this,
+# because an unpinned worker fails *silently* — it fills a real directory correctly and
+# reports paths under a different one.
+assert thread({{}}, {{}}) == ("", "nothing")
+print("ok")
+"#,
+            overlay = overlay.to_string_lossy()
+        );
+        let out = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("python3 runs");
+        assert!(
+            out.status.success(),
+            "the workspace pin is wrong:
+{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
     #[test]
     fn a_corpus_link_is_recognised_and_never_treated_as_a_doi() {
         // The form `overlay/minime_local/sources.py` writes, and the one `_paper_ref` established
