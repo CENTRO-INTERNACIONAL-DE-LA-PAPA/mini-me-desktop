@@ -1,0 +1,20 @@
+Store stable user preferences and recurring research interests here.
+
+Save:
+- preferred answer style
+- preferred level of detail
+- recurring domains of research
+- recurring analytical preferences
+- recurring reporting preferences
+- stable tool or workflow preferences
+
+Do not save:
+- temporary task details
+- one-off file paths
+- transient datasets
+- intermediate results unless the user explicitly says they should be remembered
+
+Current user preferences:
+- Prefer clear and concise answers.
+- Expand only when needed.
+- Favor direct, practical guidance over long explanations.

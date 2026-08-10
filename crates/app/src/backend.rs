@@ -5,7 +5,7 @@
 //! spawned backend process: it starts it on a localhost port, waits for health,
 //! and tears it down on quit. Running the backend locally is what lets the app
 //! inherit the local `asta` CLI's auth story (the web app has to paste a token
-//! that expires; locally it is minted once from the CLI into the repo's `.env`).
+//! that expires; locally the CLI refreshes it only when its seven-day lifetime is ending).
 //!
 //! Verified against the Mini-Me repo (2026-07-30): the backend is a LangGraph
 //! server started with `uv run langgraph dev`, defaulting to `127.0.0.1:2024`,
@@ -14,9 +14,11 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
+use base64::Engine as _;
 
 use crate::protocol::LangGraphClient;
 
@@ -128,7 +130,11 @@ fn resource(env_var: &str, name: &str) -> PathBuf {
         return beside;
     }
     // `CARGO_MANIFEST_DIR` is `crates/app`; these sit at the repo root.
-    normalized(Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(name))
+    normalized(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(name),
+    )
 }
 
 /// Resolve `..` segments lexically, so a path built by joining reads like a path.
@@ -159,18 +165,32 @@ fn scripts_dir() -> PathBuf {
     resource("MINIME_SCRIPTS_DIR", "scripts")
 }
 
-/// A Mini-Me copy shipped with the app, if there is one.
+/// The Mini-Me source this app runs.
 ///
-/// `vendor/Mini-Me`, populated by `scripts/bundle-backend.sh` and gitignored. Its
-/// presence is what lets provisioning skip GitHub entirely — see [`BackendConfig::setup_script`].
+/// **`mini-me/` in this repository, tracked.** *"from now I want a mono repo in mini me desktop.
+/// I dont want to depende on a secod repo anymmore."*
+///
+/// It is also what makes updates work at all. The backend used to be fetched from its own
+/// repository, which is private: WSL has no credentials for it, so `git fetch` either hung waiting
+/// for a sign-in dialog (§131) or failed fast and left the checkout on last month's commit while
+/// every log line looked healthy (§134). Shipping the source here replaces a network call needing
+/// credentials with a file copy needing nothing — `git pull` on this repo *is* the backend update.
+///
+/// `vendor/Mini-Me` is still honoured behind it, for a packaged build laid out by
+/// `scripts/bundle-backend.sh`, and `MINIME_BUNDLED_BACKEND` overrides both.
 fn bundled_backend_dir() -> Option<PathBuf> {
-    // The variable names the checkout itself, not the directory holding it — the default
-    // is `vendor/Mini-Me`, but someone overriding it is pointing at a specific copy.
-    let dir = match std::env::var_os("MINIME_BUNDLED_BACKEND") {
-        Some(dir) => PathBuf::from(dir),
-        None => resource("MINIME_VENDOR_DIR", "vendor").join("Mini-Me"),
-    };
-    dir.join("langgraph.json").is_file().then_some(dir)
+    // The variable names the checkout itself, not the directory holding it — someone overriding
+    // it is pointing at a specific copy.
+    if let Some(dir) = std::env::var_os("MINIME_BUNDLED_BACKEND") {
+        let dir = PathBuf::from(dir);
+        return dir.join("langgraph.json").is_file().then_some(dir);
+    }
+    [
+        resource("MINIME_SOURCE_DIR", "mini-me"),
+        resource("MINIME_VENDOR_DIR", "vendor").join("Mini-Me"),
+    ]
+    .into_iter()
+    .find(|dir| dir.join("langgraph.json").is_file())
 }
 
 /// Render a path the way WSL sees it: `C:\\Users\\x` becomes `/mnt/c/Users/x`.
@@ -242,26 +262,24 @@ impl BackendConfig {
         if std::env::var_os("MINIME_BACKEND_PORT").is_none() {
             config.port = settings.backend_port;
         }
-        let execution = resolve_execution(
-            override_local.or_else(|| {
-                if std::env::var_os("MINIME_EXECUTION_BACKEND").is_some() {
-                    None
-                } else {
-                    Some(settings.local_execution)
-                }
-            }),
-        );
+        let execution = resolve_execution(override_local.or_else(|| {
+            if std::env::var_os("MINIME_EXECUTION_BACKEND").is_some() {
+                None
+            } else {
+                Some(settings.local_execution)
+            }
+        }));
         // The launch command embeds both the port and the execution environment, so it is
         // rebuilt rather than patched.
-        config.launch_command =
-            launch_command_for(
-                &config.project_dir,
-                config.port,
-                config.wsl.as_ref(),
-                &execution,
-                settings.approve_execute,
-                settings.async_subagents,
-            );
+        config.launch_command = launch_command_for(
+            &config.project_dir,
+            config.port,
+            config.wsl.as_ref(),
+            &execution,
+            settings.approve_execute,
+            settings.async_subagents,
+            config.owned,
+        );
         config.execution = execution;
         config.approve_execute = settings.approve_execute;
         config.async_subagents = settings.async_subagents;
@@ -303,7 +321,15 @@ impl BackendConfig {
         let execution = resolve_execution(None);
         Self {
             port,
-            launch_command: launch_command_for(&project_dir, port, wsl.as_ref(), &execution, true, false),
+            launch_command: launch_command_for(
+                &project_dir,
+                port,
+                wsl.as_ref(),
+                &execution,
+                true,
+                false,
+                owned,
+            ),
             project_dir,
             wsl,
             attach_only: std::env::var_os("MINIME_BACKEND_ATTACH_ONLY").is_some(),
@@ -313,6 +339,9 @@ impl BackendConfig {
             approve_execute: true,
             async_subagents: false,
             owned,
+            // Set by `with_recorded_dir`, which is the only path that has read settings.
+            // `build` is also reached from tests and from the environment-only path, where
+            // leaving the checkout alone is the right default.
         }
     }
 }
@@ -336,6 +365,7 @@ fn launch_command_for(
     execution: &Execution,
     approve_execute: bool,
     async_subagents: bool,
+    owned: bool,
 ) -> Vec<String> {
     if let Some(wsl) = wsl {
         let mut argv = vec!["wsl.exe".to_string()];
@@ -382,12 +412,32 @@ fn launch_command_for(
         // so without this an updated app keeps running the overlay it was provisioned
         // with (see `sync_overlay_command`).
         let mut prepare = String::new();
+        // First, so the overlay and the generated config are written over a checkout that is
+        // already current. Only for a checkout the app owns: someone who pointed us at their own
+        // clone gets to keep it — same rule the version pin had, and the only part of it worth
+        // keeping.
+        if owned {
+            if let Some(bundled) = bundled_backend_dir() {
+                prepare.push_str(&sync_source_command(&wsl_path(&bundled), &wsl.dir));
+                prepare.push_str("; ");
+            }
+        }
         if !overlay.is_empty() {
             prepare.push_str(&sync_overlay_command(&overlay, &wsl.dir));
             prepare.push_str("; ");
         }
+        // Durable conversation storage, for installs that were provisioned before it existed.
+        // New ones get it from `setup-wsl.sh`; this is how the researchers already using the
+        // app stop paying for a pickle store without having to be told about one (docs §96).
+        if owned {
+            prepare.push_str(&ensure_checkpointer_command());
+            prepare.push_str("; ");
+        }
         let config_flag = if async_subagents {
-            prepare.push_str(&generate_config_command(&overlay, ".venv/bin/python"));
+            prepare.push_str(&generate_config_command(
+                &overlay_expression(&wsl.dir, &overlay),
+                ".venv/bin/python",
+            ));
             prepare.push_str(" && ");
             format!(" --config {GENERATED_CONFIG}")
         } else {
@@ -440,6 +490,28 @@ fn launch_command_for(
         argv.push(GENERATED_CONFIG.into());
     }
     argv
+}
+
+/// Install the SQLite checkpointer if it is not already there.
+///
+/// **Only ever on a checkout the app provisioned and owns.** Installing a package into someone
+/// else's virtualenv is a change to an environment they are responsible for, and the rule that
+/// keeps this app welcome on a developer's own clone is that it never runs anything destructive
+/// or surprising there (see `resolve_project_dir`). For those, Setup offers the same command and
+/// a person decides.
+///
+/// **Why at launch and not only at provisioning.** Everyone already using the app provisioned
+/// before this existed, and the alternative was a warning row in Setup that a researcher has to
+/// notice, understand and act on. They would have to know the pickle store's failure modes to go
+/// looking for the switch — which is the opposite of who this app is for (docs §96).
+///
+/// The import check makes the common case one fast subprocess: after the first launch the
+/// install never runs again. `|| true` throughout, because a backend that starts with the old
+/// store is strictly better than one that does not start.
+fn ensure_checkpointer_command() -> String {
+    "{ .venv/bin/python -c 'import langgraph.checkpoint.sqlite' 2>/dev/null \
+     || uv pip install langgraph-checkpoint-sqlite ; } >/dev/null 2>&1 || true"
+        .to_string()
 }
 
 /// The overlay copy that provisioning installs next to the checkout.
@@ -509,6 +581,62 @@ const GENERATED_CONFIG: &str = ".mini-me-desktop.langgraph.json";
 /// Three small files, so copying them on every launch is cheaper than reasoning about
 /// when to. `|| true` because a *stale* overlay still beats a failed launch, and the
 /// repo's copy may genuinely be unreachable — the case the in-distro copy exists for.
+/// Everything the server imports, mirrored from `mini-me/` — and nothing else.
+///
+/// `.venv` is built inside the distro and must never be copied over; `frontend/` is the web app.
+const SOURCE_DIRS: [&str; 2] = ["backend", "skills"];
+const SOURCE_FILES: [&str; 7] = [
+    "langgraph.json",
+    "pyproject.toml",
+    "uv.lock",
+    "conftest.py",
+    "deepagents.toml",
+    "mcp.json",
+    ".python-version",
+];
+
+/// Bring the backend checkout up to the source this app ships, every launch.
+///
+/// **This replaces a `git fetch` that could never work.** The backend used to be updated by
+/// fetching its own repository from inside WSL. Mini-Me is private, WSL holds no credentials for
+/// it, and so the fetch either hung waiting for a sign-in nobody was watching (§131) or failed
+/// fast and left the checkout a month behind while every log line looked healthy (§134). A merged,
+/// pulled, verified fix took four test cycles to reach the machine, and never did on its own.
+///
+/// The source now ships in this repository, so the update is a file copy: no network, no token,
+/// no second remote. **`git pull` on the app is the backend update**, which is what the
+/// researcher asked for — *"so we dont need to pull and copy the backend"*.
+///
+/// Same reasoning as [`sync_overlay_command`], and the same lesson §25 records: a copy taken at
+/// provisioning time goes stale, and the failure it produces is a fix that silently never runs.
+///
+/// # Why it is safe to run unconditionally
+///
+/// Each directory is staged beside its target and swapped in only once the copy has fully
+/// succeeded, so an unreachable source — a Windows drive that is not mounted, which is exactly
+/// what the in-distro copy exists to survive — leaves the working checkout untouched rather than
+/// deleted. Stdout is discarded and **stderr is not**: a mirror that failed silently would be
+/// this week's bug wearing a new coat.
+///
+/// `uv sync` runs only when `uv.lock` actually changed, compared against a stamp written after
+/// the last successful sync. Without it a dependency added upstream would surface as an
+/// ImportError at boot, which names the wrong problem.
+fn sync_source_command(source: &str, backend_dir: &str) -> String {
+    let dir = quote_path(backend_dir);
+    let src = shell_quote(source.trim_end_matches('/'));
+    format!(
+        "{{ for d in {dirs}; do [ -d {src}/$d ] || continue; \
+         rm -rf {dir}/.$d.new && cp -r {src}/$d {dir}/.$d.new \
+         && rm -rf {dir}/$d && mv {dir}/.$d.new {dir}/$d; done; \
+         for f in {files}; do [ -f {src}/$f ] && cp {src}/$f {dir}/; done; \
+         cmp -s {dir}/uv.lock {dir}/.mini-me-lock \
+         || {{ (cd {dir} && uv sync --extra dev) && cp {dir}/uv.lock {dir}/.mini-me-lock; }}; \
+         }} >/dev/null || true",
+        dirs = SOURCE_DIRS.join(" "),
+        files = SOURCE_FILES.join(" "),
+    )
+}
+
 fn sync_overlay_command(source: &str, backend_dir: &str) -> String {
     let target = quote_path(&provisioned_overlay(backend_dir));
     format!(
@@ -517,10 +645,24 @@ fn sync_overlay_command(source: &str, backend_dir: &str) -> String {
     )
 }
 
+/// Run the config generator **from the copy the server will actually import**.
+///
+/// `overlay` is the same shell expression the runtime `PYTHONPATH` gets — it resolves to the
+/// in-distro copy when there is one and the Windows path only as a fallback. That matters more
+/// than it looks, because `make_config.py` writes *absolute* paths into the generated config,
+/// derived from its own `__file__`. Run it from `/mnt/c` and the config names `/mnt/c` — so the
+/// background graph and the SQLite checkpointer are imported across WSL's 9p mount every launch,
+/// which is slow, breaks when the Windows drive is not reachable, and re-opens the very
+/// dependence §25 removed. Measured in a real log: `Configuring custom checkpointer at
+/// /mnt/c/Users/.../overlay/minime_local/checkpointer.py` (docs §110).
+///
+/// Double-quoted rather than `shell_quote`d: the value is a command substitution, and quoting it
+/// as a literal would defeat it. Inside double quotes the substitution still runs and word
+/// splitting is suppressed, so a path with a space in it survives.
 fn generate_config_command(overlay: &str, python: &str) -> String {
     format!(
-        "{python} {} .",
-        shell_quote(&format!("{}/minime_local/make_config.py", overlay.trim_end_matches('/')))
+        "{python} \"{}/minime_local/make_config.py\" .",
+        overlay.trim_end_matches('/')
     )
 }
 
@@ -961,10 +1103,10 @@ impl BackendSupervisor {
         // Secrets always go on the process environment, in both modes — see
         // `secret_env` for why they must not travel on the command line.
         let mut secrets = self.config.secrets.clone();
-        // A minted token beats a stored one. Asta access tokens last **seven days**
-        // (measured: `exp - iat` = 604800), so a token pasted into Settings becomes a
-        // weekly chore — and its expiry surfaces as "the theorizer returned no task id",
-        // which names neither the token nor the fix.
+        // A usable stored or CLI-cached token beats a freshly minted one. Asta access tokens last
+        // **seven days** (measured: `exp - iat` = 604800), while `--refresh` costs about ten
+        // seconds on the startup path. `mint_asta_token` checks `exp` before paying that cost;
+        // the name survives because refreshing is still its final fallback (§131/§145).
         if let Some(token) = mint_asta_token(&self.config) {
             secrets.retain(|(name, _)| name != "ASTA_TOKEN");
             secrets.push(("ASTA_TOKEN".to_string(), token));
@@ -977,9 +1119,10 @@ impl BackendSupervisor {
         // child. (In WSL mode they are already inside the `bash -lc` string, because
         // `wsl.exe`'s own environment does not cross into the distro.)
         if self.config.wsl.is_none() {
-            for (name, value) in execution_env(&self.config.execution, false, self.config.approve_execute)
-                .into_iter()
-                .chain(feature_env(self.config.async_subagents))
+            for (name, value) in
+                execution_env(&self.config.execution, false, self.config.approve_execute)
+                    .into_iter()
+                    .chain(feature_env(self.config.async_subagents))
             {
                 if name == "PYTHONPATH" {
                     // Prepend rather than replace: whatever the user had still works.
@@ -1054,6 +1197,17 @@ impl BackendSupervisor {
     /// otherwise spawn and wait. Returns a status string for the UI.
     pub async fn ensure_running(&mut self, client: &LangGraphClient) -> Result<Started> {
         if client.is_healthy().await {
+            // **The one case the source mirror cannot reach.** It runs as part of the launch
+            // command, so a server left over from a previous session has already imported
+            // whatever it imported and nothing here can change that — and `langgraph dev`
+            // survives the app closing, so this is the usual case rather than an edge one.
+            // Said plainly, with what to do about it, because the researcher just ran `git pull`
+            // and has every reason to believe the new code is running (docs §130).
+            tracing::warn!(
+                "attached to a backend that was already running — it is on the code it started \
+                 with, not what this app now ships. To pick up a backend change, close this app \
+                 and run: wsl bash -lc \"pkill -f 'langgraph dev'\""
+            );
             return Ok(Started::Attached);
         }
         if self.config.attach_only {
@@ -1177,17 +1331,19 @@ impl Drop for BackendSupervisor {
     }
 }
 
-/// Ask the `asta` CLI for a fresh access token, where the backend runs.
+/// Reuse a valid Asta token, or ask the CLI for a fresh one where the backend runs.
 ///
 /// **Why the app does this instead of the user.** Asta access tokens last seven days
 /// (`exp - iat` = 604800 on a real one), so storing one in the keychain means re-pasting
 /// it every week — and when it lapses the failure reads "the Asta theorizer returned no
 /// task id", which names neither the token nor the fix. `asta auth login` already leaves a
 /// *refresh* credential behind, and `print-token --refresh` turns that into a valid access
-/// token on demand. So the app mints one per launch and the researcher logs in once.
+/// token on demand. So the researcher logs in once.
 ///
-/// Run at spawn rather than at window-open: this can cost seconds on a cold WSL distro,
-/// and by here we are already starting the backend, which the user is waiting on anyway.
+/// The order is load-bearing: the keychain value costs no process at all; `print-token --raw`
+/// reads the CLI's cache; only an absent or nearly expired token reaches the network through
+/// `--refresh`. Before §145 the last command ran unconditionally and consumed about ten of every
+/// seventeen startup seconds measured in §131.
 ///
 /// `None` on any failure — no CLI, not logged in, a changed flag. The stored token (if
 /// any) still applies, and the Setup pane reports a missing `asta` separately.
@@ -1195,7 +1351,31 @@ fn mint_asta_token(config: &BackendConfig) -> Option<String> {
     if std::env::var_os("MINIME_NO_ASTA_MINT").is_some() {
         return None;
     }
-    let argv = config.shell_argv("asta auth print-token --raw --refresh 2>/dev/null");
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    if let Some(token) = reusable_stored_asta_token(&config.secrets, now) {
+        tracing::info!("reusing the valid Asta token from the keychain");
+        return Some(token.to_string());
+    }
+
+    if let Some(token) = read_asta_token(config, false) {
+        if asta_token_is_valid_at(&token, now) {
+            tracing::info!("reusing the valid Asta token cached by the CLI");
+            return Some(token);
+        }
+    }
+
+    let token = read_asta_token(config, true)?;
+    if !asta_token_is_valid_at(&token, now) {
+        tracing::debug!("asta returned a token without enough lifetime; using whatever is stored");
+        return None;
+    }
+    tracing::info!("minted a fresh Asta token from the CLI");
+    Some(token)
+}
+
+fn read_asta_token(config: &BackendConfig, refresh: bool) -> Option<String> {
+    let refresh = if refresh { " --refresh" } else { "" };
+    let argv = config.shell_argv(&format!("asta auth print-token --raw{refresh} 2>/dev/null"));
     let (program, rest) = argv.split_first()?;
     let output = Command::new(program)
         .args(rest)
@@ -1213,8 +1393,45 @@ fn mint_asta_token(config: &BackendConfig) -> Option<String> {
         tracing::debug!("asta did not return a token; using whatever is stored");
         return None;
     }
-    tracing::info!("minted a fresh Asta token from the CLI");
     Some(token)
+}
+
+/// Five minutes is negligible beside a seven-day token and avoids starting a long turn with a
+/// credential that expires while the backend is still importing or assembling its MCP tools.
+const ASTA_TOKEN_MIN_VALIDITY_SECS: u64 = 5 * 60;
+
+fn reusable_stored_asta_token(secrets: &[(String, String)], now: u64) -> Option<&str> {
+    secrets
+        .iter()
+        .find(|(name, token)| name == "ASTA_TOKEN" && asta_token_is_valid_at(token, now))
+        .map(|(_, token)| token.as_str())
+}
+
+/// Read the unverified `exp` claim only to decide whether refreshing is worth doing.
+///
+/// This is not authentication: the backend and Asta still verify the signature. A forged or
+/// corrupted token can at worst defer a refresh and fail exactly as it did before; it cannot gain
+/// trust here. Missing, non-numeric and malformed claims all choose the safe slow path.
+fn asta_token_is_valid_at(value: &str, now: u64) -> bool {
+    if !looks_like_a_jwt(value) {
+        return false;
+    }
+    let Some(payload) = value.split('.').nth(1) else {
+        return false;
+    };
+    let decoded = URL_SAFE_NO_PAD
+        .decode(payload)
+        .or_else(|_| URL_SAFE.decode(payload));
+    let Ok(decoded) = decoded else {
+        return false;
+    };
+    let Ok(claims) = serde_json::from_slice::<serde_json::Value>(&decoded) else {
+        return false;
+    };
+    claims
+        .get("exp")
+        .and_then(serde_json::Value::as_u64)
+        .is_some_and(|expires| expires > now.saturating_add(ASTA_TOKEN_MIN_VALIDITY_SECS))
 }
 
 /// Whether a string is shaped like a JWT: three dot-separated base64url segments.
@@ -1371,6 +1588,193 @@ pub(crate) mod env_lock {
 
 #[cfg(test)]
 mod tests {
+
+    /// The generated config must be written by the copy the server imports, not the other one.
+    ///
+    /// `make_config.py` writes **absolute** paths into that config, taken from its own
+    /// `__file__`. So whichever copy runs it decides where the background graph and the SQLite
+    /// checkpointer are loaded from for the life of the process. Running it from `/mnt/c` puts
+    /// both across WSL's 9p mount — slow, and broken the moment the Windows drive is not
+    /// reachable, which is the dependence §25 existed to remove.
+    ///
+    /// It went unnoticed because nothing fails: the imports work, just from the wrong side, and
+    /// the only evidence is a path in a log line nobody reads (docs §110).
+    #[test]
+    fn the_config_generator_runs_from_the_in_distro_overlay() {
+        let argv = launch_command_for(
+            Path::new("/tmp/mini-me"),
+            2024,
+            Some(&WslTarget {
+                distro: None,
+                dir: "~/Mini-Me".into(),
+            }),
+            &Execution::Local {
+                overlay_dir: PathBuf::from(r"C:\repo\overlay"),
+            },
+            true,
+            // Async subagents on, which is what asks for a generated config at all.
+            true,
+            true,
+        );
+        let command = argv.last().expect("the bash -lc payload");
+
+        // The generator is invoked through the same expression the runtime PYTHONPATH uses, so
+        // it prefers the provisioned copy and falls back to the Windows path only if that copy is
+        // missing. Counting the probe is what distinguishes the fix: before it there was exactly
+        // one — PYTHONPATH's — and the generator ran from a hardcoded Windows path.
+        assert_eq!(
+            command.matches("sitecustomize.py").count(),
+            2,
+            "the generator and PYTHONPATH must resolve the overlay the same way: {command}"
+        );
+        assert!(
+            command.contains("/minime_local/make_config.py\" ."),
+            "{command}"
+        );
+        // Not a quoted literal: `shell_quote` would have emitted a single-quoted /mnt/c path
+        // with no command substitution around it, which is exactly what shipped.
+        assert!(
+            !command.contains("'/mnt/c/repo/overlay/minime_local/make_config.py'"),
+            "the generator must not be pinned to the Windows copy: {command}"
+        );
+    }
+
+    /// The install is offered on a checkout the app provisioned, and never on someone else's.
+    ///
+    /// The rule that keeps this app welcome on a developer's own clone: it may run destructive
+    /// or environment-changing commands only where it owns the environment (`resolve_project_dir`).
+    /// Installing a package is exactly that kind of change, so it is gated on `owned` — and this
+    /// pins the gate, because the cost of getting it wrong is silent and lands on somebody else's
+    /// virtualenv (docs §96).
+    #[test]
+    fn the_checkpointer_install_is_gated_on_owning_the_checkout() {
+        let launch = |owned: bool| {
+            launch_command_for(
+                Path::new("/tmp/mini-me"),
+                2024,
+                Some(&WslTarget {
+                    distro: None,
+                    dir: "~/Mini-Me".into(),
+                }),
+                &Execution::Sandbox,
+                true,
+                false,
+                owned,
+            )
+            .last()
+            .expect("the bash -lc payload")
+            .clone()
+        };
+
+        let ours = launch(true);
+        assert!(ours.contains("langgraph-checkpoint-sqlite"), "{ours}");
+        // Guarded by an import check, so the common case is one fast subprocess and the install
+        // runs exactly once in the life of an installation.
+        assert!(
+            ours.contains("import langgraph.checkpoint.sqlite"),
+            "{ours}"
+        );
+        // And it can never stop the backend starting: a server on the old store beats no server.
+        assert!(ours.contains("|| true"), "{ours}");
+
+        let theirs = launch(false);
+        assert!(
+            !theirs.contains("langgraph-checkpoint-sqlite"),
+            "a checkout we do not own must be left alone: {theirs}"
+        );
+    }
+
+    /// The generated config must extend upstream's, not replace it — and the generator must run
+    /// **the way the launch command runs it**: as a script, with nothing arranged on `sys.path`.
+    ///
+    /// That last clause is the whole point. The first version of this test imported
+    /// `make_config` as a module with the overlay root on `sys.path`, which passed while
+    /// production was failing: the launch invokes
+    /// `.venv/bin/python <overlay>/minime_local/make_config.py .`, and Python then puts the
+    /// *script's* directory on the path — `minime_local/`, not the overlay above it. A
+    /// `from minime_local import ...` at the top of the file therefore raised
+    /// `ModuleNotFoundError`, the generator exited non-zero, and the `&&` in the launch
+    /// expression stopped the backend from starting at all (docs §98).
+    ///
+    /// So this shells out to the file by path, exactly as `generate_config_command` does. A test
+    /// that exercises a different invocation than production is not testing production.
+    ///
+    /// Skipped rather than failed when `python3` is absent, and it says so — a test that quietly
+    /// covers nothing is one nobody notices has stopped (docs §81).
+    #[test]
+    fn the_generated_config_survives_being_run_as_a_script() {
+        let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
+        let script = overlay.join("minime_local/make_config.py");
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: python3 is not on PATH");
+            return;
+        }
+
+        let scratch = std::env::temp_dir().join(format!("mini-me-config-{}", std::process::id()));
+        std::fs::create_dir_all(&scratch).expect("scratch");
+        std::fs::write(
+            scratch.join("langgraph.json"),
+            r#"{"graphs":{"agent":"./backend/agent.py:agent"},
+                "http":{"app":"./backend/routes/__init__.py:app"},
+                "env":".env","dependencies":["."]}"#,
+        )
+        .expect("upstream config");
+
+        // No PYTHONPATH, no cwd trickery, no `-c` wrapper: the launch sets none of those for
+        // this step, and every one of them would hide the failure it shipped with.
+        let out = std::process::Command::new("python3")
+            .arg(&script)
+            .arg(&scratch)
+            .env_remove("PYTHONPATH")
+            .output()
+            .expect("running make_config");
+        assert!(
+            out.status.success(),
+            "the generator must not fail — the launch joins it with `&&`:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let written = scratch.join(".mini-me-desktop.langgraph.json");
+        let config: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&written).expect("generated config"))
+                .expect("valid JSON");
+
+        // Everything upstream carries survives. `http` is the load-bearing one: it mounts the
+        // routes the project spine and the report renderer depend on, and rebuilding the file
+        // by hand instead of extending it is how that gets dropped.
+        assert_eq!(config["http"]["app"], "./backend/routes/__init__.py:app");
+        assert_eq!(config["env"], ".env");
+        assert!(config["graphs"]["agent"].is_string());
+        // The background graph the async subagents need (docs §30).
+        assert!(config["graphs"]["background"]
+            .as_str()
+            .is_some_and(|path| path.ends_with("async_agents.py:background_graph")));
+        // The checkpointer key tracks whether the package is importable *in this interpreter*,
+        // so assert the relationship rather than a fixed answer — the test has to pass on a
+        // machine with the package and on one without.
+        let available = std::process::Command::new("python3")
+            .arg("-c")
+            .arg("import langgraph.checkpoint.sqlite.aio")
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false);
+        assert_eq!(
+            config.get("checkpointer").is_some(),
+            available,
+            "the key must appear exactly when the backend could load it"
+        );
+        if available {
+            assert!(config["checkpointer"]["path"]
+                .as_str()
+                .is_some_and(|path| path.ends_with("checkpointer.py:checkpointer")));
+        }
+
+        std::fs::remove_dir_all(&scratch).ok();
+    }
     use super::*;
 
     #[test]
@@ -1381,9 +1785,15 @@ mod tests {
             wsl_path(Path::new(r"C:\Users\piero\mini-me-desktop\overlay")),
             "/mnt/c/Users/piero/mini-me-desktop/overlay"
         );
-        assert_eq!(wsl_path(Path::new(r"D:\repos\overlay")), "/mnt/d/repos/overlay");
+        assert_eq!(
+            wsl_path(Path::new(r"D:\repos\overlay")),
+            "/mnt/d/repos/overlay"
+        );
         // A POSIX path is already what WSL wants.
-        assert_eq!(wsl_path(Path::new("/home/piero/overlay")), "/home/piero/overlay");
+        assert_eq!(
+            wsl_path(Path::new("/home/piero/overlay")),
+            "/home/piero/overlay"
+        );
     }
 
     #[test]
@@ -1404,10 +1814,30 @@ mod tests {
             &Execution::Sandbox,
             true,
             false,
+            true,
         );
         let command = argv.last().expect("the bash -lc payload");
         assert!(!command.contains("MINIME_EXECUTION_BACKEND"), "{command}");
-        assert!(command.contains("cd ~/'Mini-Me' && exec .venv/bin/langgraph dev"), "{command}");
+        // No overlay copy and no generated config: both are host-execution machinery, and the
+        // sandbox path must not acquire either.
+        //
+        // Named by what it copies, not by `cp -r`. That proxy meant "the overlay" only while the
+        // overlay was the sole thing copied into the distro; the source mirror uses the same
+        // command and made this assertion fail for a change it was never about.
+        assert!(!command.contains(".desktop-overlay"), "{command}");
+        assert!(!command.contains("--config"), "{command}");
+        // The source mirror, however, belongs on **both** paths. Which commit the checkout runs
+        // is not an execution concern — the same reasoning as the checkpointer below.
+        assert!(command.contains("for d in backend skills"), "{command}");
+        // Storage, however, is not an execution concern. Where conversations are kept is the
+        // same question whichever side runs the agent's code, so the checkpointer install
+        // belongs on this path too (docs §96).
+        assert!(command.contains("langgraph-checkpoint-sqlite"), "{command}");
+        assert!(command.contains("cd ~/'Mini-Me' && "), "{command}");
+        assert!(
+            command.contains("exec .venv/bin/langgraph dev"),
+            "{command}"
+        );
     }
 
     #[test]
@@ -1502,9 +1932,35 @@ mod tests {
             dir: "~/Mini-Me".into(),
         });
         let command = config.setup_script();
-        assert!(command.starts_with("bash '"), "{command}");
+        // The source now ships in this repository (`mini-me/`), so provisioning always has one
+        // to copy from and the script never reaches GitHub for it. This assertion used to be
+        // `starts_with("bash '")` — true only while a developer tree had no bundled copy, which
+        // stopped being the case the moment the backend moved in here.
+        assert!(command.contains("MINIME_BUNDLED_SOURCE="), "{command}");
+        assert!(command.contains("bash '"), "{command}");
         assert!(command.contains("setup-wsl.sh"), "{command}");
         assert!(command.ends_with("~/'Mini-Me'"), "{command}");
+    }
+
+    /// The backend source is found in this repository, without an environment variable.
+    ///
+    /// **The point of the monorepo, as an assertion.** Provisioning and updates both hang off
+    /// `bundled_backend_dir()`; if it stops finding `mini-me/`, the app silently falls back to
+    /// cloning a *private* repository that WSL cannot authenticate to — which is the failure
+    /// that cost §131 and §134, and it presents as a backend that simply never changes.
+    #[test]
+    fn the_backend_source_ships_in_this_repository() {
+        let _env = env_lock::hold();
+        std::env::remove_var("MINIME_BUNDLED_BACKEND");
+        std::env::remove_var("MINIME_SOURCE_DIR");
+        std::env::remove_var("MINIME_VENDOR_DIR");
+        let found = bundled_backend_dir().expect("mini-me/ is part of this repo");
+        assert!(
+            found.ends_with("mini-me"),
+            "expected the in-repo source, found {found:?}"
+        );
+        assert!(found.join("backend/agent.py").is_file(), "{found:?}");
+        assert!(found.join("skills").is_dir(), "{found:?}");
     }
 
     #[test]
@@ -1606,6 +2062,73 @@ mod tests {
     }
 
     #[test]
+    fn provisioning_keeps_a_windows_checkout_clean_for_git_inside_wsl() {
+        let script = include_str!("../../../scripts/setup-wsl.sh");
+        assert!(
+            script.contains("git -C \"$DIR\" config core.autocrlf input"),
+            "a copied Windows worktree needs a checkout-local CRLF policy inside WSL"
+        );
+        assert!(
+            script.contains("git -C \"$DIR\" add --renormalize -- ."),
+            "Git's cached clean filter must be refreshed after the policy changes"
+        );
+        assert!(
+            !script.contains("git -C \"$DIR\" reset --hard"),
+            "line-ending repair must not overwrite real work copied with a developer checkout"
+        );
+    }
+
+    #[test]
+    fn git_input_treats_a_windows_crlf_worktree_as_clean_inside_wsl() {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: git is not on PATH");
+            return;
+        }
+        let dir =
+            std::env::temp_dir().join(format!("minime-crlf-policy-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a temp repository");
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(&dir)
+                .args(args)
+                .output()
+                .expect("git runs")
+        };
+        assert!(run(&["init", "-q"]).status.success());
+        assert!(run(&["config", "user.email", "test@example.org"])
+            .status
+            .success());
+        assert!(run(&["config", "user.name", "test"]).status.success());
+        assert!(run(&["config", "core.autocrlf", "false"]).status.success());
+        std::fs::write(dir.join("tracked.txt"), b"one\ntwo\n").expect("an LF source file");
+        assert!(run(&["add", "tracked.txt"]).status.success());
+        assert!(run(&["commit", "-qm", "base"]).status.success());
+
+        // The bytes a clean Git-for-Windows checkout carries. Without the Windows global
+        // policy, the Git process inside WSL sees both lines as edited.
+        std::fs::write(dir.join("tracked.txt"), b"one\r\ntwo\r\n").expect("a CRLF worktree");
+        assert!(
+            !run(&["status", "--porcelain"]).stdout.is_empty(),
+            "the fixture must reproduce the dirty checkout before testing the fix"
+        );
+        assert!(run(&["config", "core.autocrlf", "input"]).status.success());
+        assert!(run(&["add", "--renormalize", "--", "."]).status.success());
+        let status = run(&["status", "--porcelain"]);
+        assert!(status.status.success());
+        assert!(
+            status.stdout.is_empty(),
+            "the same CRLF bytes should be clean under the policy setup-wsl installs: {}",
+            String::from_utf8_lossy(&status.stdout)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn only_something_shaped_like_a_token_is_treated_as_one() {
         // Without `--raw` the CLI pretty-prints a decoded header and payload, and when
         // nobody is logged in it prints prose. Handing either to the backend as a
@@ -1624,6 +2147,51 @@ mod tests {
         ] {
             assert!(!looks_like_a_jwt(not_a_token), "{not_a_token:?}");
         }
+    }
+
+    fn token_expiring_at(expires: u64) -> String {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine as _;
+
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"none"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(format!(r#"{{"exp":{expires}}}"#));
+        format!("{header}.{payload}.signature")
+    }
+
+    #[test]
+    fn a_stored_asta_token_with_time_left_avoids_a_refresh() {
+        let now = 1_800_000_000;
+        let token = token_expiring_at(now + 604_800);
+        let secrets = vec![("ASTA_TOKEN".to_string(), token.clone())];
+
+        assert_eq!(
+            reusable_stored_asta_token(&secrets, now),
+            Some(token.as_str())
+        );
+    }
+
+    #[test]
+    fn an_asta_token_near_expiry_is_refreshed_before_a_turn_can_outlive_it() {
+        let now = 1_800_000_000;
+        assert!(!asta_token_is_valid_at(
+            &token_expiring_at(now + ASTA_TOKEN_MIN_VALIDITY_SECS),
+            now
+        ));
+        assert!(asta_token_is_valid_at(
+            &token_expiring_at(now + ASTA_TOKEN_MIN_VALIDITY_SECS + 1),
+            now
+        ));
+    }
+
+    #[test]
+    fn a_token_without_a_numeric_expiry_never_skips_the_refresh() {
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"none"}"#);
+        let payload = URL_SAFE_NO_PAD.encode(br#"{"exp":"next week"}"#);
+        assert!(!asta_token_is_valid_at(
+            &format!("{header}.{payload}.signature"),
+            1_800_000_000
+        ));
+        assert!(!asta_token_is_valid_at("not-a-token", 1_800_000_000));
     }
 
     #[test]
@@ -1664,6 +2232,7 @@ mod tests {
             &execution,
             true,
             true,
+            true,
         );
         let command = argv.last().expect("the bash -lc payload");
         // Assignments must land *before* `exec`, or the server never sees them.
@@ -1690,12 +2259,17 @@ mod tests {
             command.contains("~/'Mini-Me/.desktop-overlay'/sitecustomize.py"),
             "{command}"
         );
-        assert!(command.contains("printf %s '/mnt/c/repo/overlay'"), "{command}");
+        assert!(
+            command.contains("printf %s '/mnt/c/repo/overlay'"),
+            "{command}"
+        );
         // And it still ends up as one assignment in front of exec.
         // The assignments end and `exec` begins — checked without pinning the exact
         // neighbour, so adding a variable does not fail a test about the overlay path.
         let exports_end = command.find("fi)\"").expect("the PYTHONPATH expression");
-        let exec_at = command.find("exec .venv/bin/langgraph dev").expect("the server");
+        let exec_at = command
+            .find("exec .venv/bin/langgraph dev")
+            .expect("the server");
         assert!(exports_end < exec_at, "{command}");
     }
 
@@ -1709,7 +2283,10 @@ mod tests {
         // Reading the sources rather than importing them keeps this a plain unit test; the
         // Python is not ours to run from here.
         let overlay = normalized(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay"));
-        for file in ["minime_local/make_config.py", "minime_local/async_agents.py"] {
+        for file in [
+            "minime_local/make_config.py",
+            "minime_local/async_agents.py",
+        ] {
             let path = overlay.join(file);
             let source = std::fs::read_to_string(&path)
                 .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
@@ -1739,17 +2316,24 @@ mod tests {
             },
             true,
             false,
+            true,
         );
         let command = argv.last().expect("the bash -lc payload");
         let sync = command.find("cp -r").expect("the overlay sync");
-        let serve = command.find("exec .venv/bin/langgraph").expect("the server");
+        let serve = command
+            .find("exec .venv/bin/langgraph")
+            .expect("the server");
         assert!(sync < serve, "{command}");
-        assert!(command.contains("~/'Mini-Me/.desktop-overlay'"), "{command}");
+        assert!(
+            command.contains("~/'Mini-Me/.desktop-overlay'"),
+            "{command}"
+        );
         // Never fatal: a stale overlay beats a backend that will not start, and the repo's
         // copy may be genuinely unreachable — the case the in-distro copy exists for.
         assert!(command.contains("|| true"), "{command}");
 
-        // The sandbox path stays untouched: no overlay, nothing to sync.
+        // The sandbox path carries no *overlay*: it is host-execution machinery. It still
+        // mirrors the source, which is why this asks about the overlay by name.
         let sandbox = launch_command_for(
             Path::new("/tmp/mini-me"),
             2024,
@@ -1760,8 +2344,74 @@ mod tests {
             &Execution::Sandbox,
             true,
             false,
+            true,
         );
-        assert!(!sandbox.last().unwrap().contains("cp -r"), "{sandbox:?}");
+        assert!(
+            !sandbox.last().unwrap().contains(".desktop-overlay"),
+            "{sandbox:?}"
+        );
+    }
+
+    /// The backend source is mirrored from this repository on every launch.
+    ///
+    /// **This is what a `git pull` has to be enough for.** It replaces a `git fetch` against
+    /// Mini-Me's own remote, which is private and which WSL has no credentials for — so the
+    /// update either hung waiting for a sign-in (§131) or failed fast and left the checkout a
+    /// month behind while every log line read healthy (§134). A merged and verified fix took four
+    /// test cycles to reach the machine and never arrived on its own.
+    #[test]
+    fn every_launch_brings_the_backend_source_forward() {
+        let _env = env_lock::hold();
+        let wsl = WslTarget {
+            distro: None,
+            dir: "~/Mini-Me".into(),
+        };
+        let ours = launch_command_for(
+            Path::new("/tmp/mini-me"),
+            2024,
+            Some(&wsl),
+            &Execution::Sandbox,
+            true,
+            false,
+            true,
+        );
+        let command = ours.last().expect("the bash -lc payload");
+
+        // Before the server, and before the overlay and generated config are written over it.
+        let mirror = command.find("for d in backend skills").expect("the mirror");
+        assert!(mirror < command.find("exec .venv/bin").expect("serve"), "{command}");
+
+        // Staged beside the target and swapped in only once the copy succeeded. An unreachable
+        // source — a Windows drive that is not mounted, the case the in-distro copies exist to
+        // survive — must leave the working checkout alone, not delete it.
+        let staged = command.find(".new").expect("staged copy");
+        let removed = command.find("&& rm -rf ~/'Mini-Me'/$d").expect("swap");
+        assert!(staged < removed, "the live copy is removed before the new one exists");
+
+        // `uv sync` only when the lock actually moved: otherwise every launch pays for it.
+        assert!(command.contains("cmp -s"), "{command}");
+        assert!(command.contains("uv sync --extra dev"), "{command}");
+
+        // Never fatal, and **stderr is not discarded**: a mirror that failed silently would be
+        // this week's bug in a new coat (§134).
+        assert!(command.contains("|| true"), "{command}");
+        assert!(!command.contains("2>/dev/null } "), "{command}");
+
+        // A checkout somebody else owns is theirs. Same rule the version pin had, and the only
+        // part of it worth keeping.
+        let theirs = launch_command_for(
+            Path::new("/tmp/mini-me"),
+            2024,
+            Some(&wsl),
+            &Execution::Sandbox,
+            true,
+            false,
+            false,
+        );
+        assert!(
+            !theirs.last().unwrap().contains("for d in backend skills"),
+            "{theirs:?}"
+        );
     }
 
     #[test]
@@ -1781,6 +2431,7 @@ mod tests {
             &execution,
             true,
             true,
+            true,
         );
         let command = argv.last().expect("the bash -lc payload");
 
@@ -1788,10 +2439,18 @@ mod tests {
         // launch must stop, not start a coordinator holding tools that point at a graph
         // nobody serves.
         let generate = command.find("make_config.py").expect("the generator");
-        let serve = command.find("exec .venv/bin/langgraph").expect("the server");
+        let serve = command
+            .find("exec .venv/bin/langgraph")
+            .expect("the server");
         assert!(generate < serve, "{command}");
-        assert!(command.contains("&& exec") || command.contains("&& MINIME"), "{command}");
-        assert!(command.contains("--config .mini-me-desktop.langgraph.json"), "{command}");
+        assert!(
+            command.contains("&& exec") || command.contains("&& MINIME"),
+            "{command}"
+        );
+        assert!(
+            command.contains("--config .mini-me-desktop.langgraph.json"),
+            "{command}"
+        );
         // Registering the graph is only half of it: without this variable the overlay
         // never installs the middleware, so the coordinator has no `start_async_task`
         // and quietly delegates to a normal subagent instead — which blocks the chat,
@@ -1806,6 +2465,7 @@ mod tests {
             &execution,
             true,
             false,
+            true,
         );
         let plain = plain.last().expect("payload");
         assert!(!plain.contains("make_config"), "{plain}");
@@ -1851,7 +2511,131 @@ mod tests {
         std::env::set_var("MINIME_EXECUTION_BACKEND", "local");
         assert!(matches!(resolve_execution(Some(false)), Execution::Sandbox));
         std::env::set_var("MINIME_EXECUTION_BACKEND", "sandbox");
-        assert!(matches!(resolve_execution(Some(true)), Execution::Local { .. }));
+        assert!(matches!(
+            resolve_execution(Some(true)),
+            Execution::Local { .. }
+        ));
         std::env::remove_var("MINIME_EXECUTION_BACKEND");
     }
+}
+
+#[cfg(test)]
+mod source_tests {
+    /// A real repository, so the version stamp reads what git actually writes rather than a
+    /// fixture of what we believe it writes.
+    fn repo() -> Option<(std::path::PathBuf, String)> {
+        let base = std::env::temp_dir().join(format!("minime-pin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let origin = base.join("origin.git");
+        let work = base.join("work");
+        std::fs::create_dir_all(&origin).ok()?;
+
+        let run = |at: &std::path::Path, args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(at)
+                .args(args)
+                .output()
+                .ok()
+                .filter(|out| out.status.success())
+        };
+        run(&origin, &["init", "-q", "--bare", "--initial-branch=main"])?;
+        std::fs::create_dir_all(&work).ok()?;
+        run(&work, &["init", "-q", "--initial-branch=main"])?;
+        run(&work, &["config", "user.email", "t@example.org"])?;
+        run(&work, &["config", "user.name", "t"])?;
+        run(&work, &["remote", "add", "origin", &origin.to_string_lossy()])?;
+        std::fs::write(work.join("a.txt"), "one").ok()?;
+        run(&work, &["add", "-A"])?;
+        run(&work, &["commit", "-qm", "one"])?;
+        run(&work, &["push", "-q", "origin", "main"])?;
+        // A branch the checkout can actually be moved to.
+        run(&work, &["checkout", "-q", "-b", "target"])?;
+        std::fs::write(work.join("b.txt"), "two").ok()?;
+        run(&work, &["add", "-A"])?;
+        run(&work, &["commit", "-qm", "two"])?;
+        run(&work, &["push", "-q", "origin", "target"])?;
+        run(&work, &["checkout", "-q", "main"])?;
+        Some((work, base.to_string_lossy().into_owned()))
+    }
+
+
+    /// The version stamp reads a real checkout, including a linked worktree.
+    ///
+    /// **Because the whole point of it is to be trusted at 11pm.** Four diagnoses this week were
+    /// made without knowing which commit was running, and two of them were wrong because of it.
+    /// A stamp that prints `unresolved refs/heads/…` for an ordinary layout would be worse than
+    /// none: it invites the shrug it exists to prevent. The worktree case was broken when first
+    /// written — a linked worktree keeps its own `HEAD` and shares refs with the repository it
+    /// came from, via `commondir`.
+    #[test]
+    fn the_backend_says_which_commit_it_is_running() {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: python3 is not on PATH");
+            return;
+        }
+        let Some((clone, _)) = repo() else {
+            eprintln!("skipping: git is not on PATH");
+            return;
+        };
+        let tree = clone.parent().unwrap_or(&clone).join("linked");
+        let linked = std::process::Command::new("git")
+            .args(["-C", &clone.to_string_lossy(), "worktree", "add", "-q"])
+            .arg(&tree)
+            .arg("HEAD")
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false);
+        let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
+        let read = |dir: &std::path::Path| -> String {
+            let script = format!(
+                "import sys; sys.path.insert(0, {overlay:?})\n\
+                 from minime_local import _checkout_version\n\
+                 print(_checkout_version({dir:?}))",
+                overlay = overlay.to_string_lossy(),
+                dir = dir.to_string_lossy(),
+            );
+            let out = std::process::Command::new("python3")
+                .arg("-c")
+                .arg(&script)
+                .output()
+                .expect("python3 runs");
+            assert!(
+                out.status.success(),
+                "reading the checkout version raised:
+{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+
+        let head = String::from_utf8_lossy(
+            &std::process::Command::new("git")
+                .current_dir(&clone)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .expect("git")
+                .stdout,
+        )
+        .trim()
+        .to_string();
+        let stamp = read(&clone);
+        assert!(
+            !head.is_empty() && stamp.starts_with(&head[..7]),
+            "a plain clone should stamp its own HEAD, said {stamp:?} for {head:?}"
+        );
+        if linked {
+            let stamp = read(&tree);
+            assert!(
+                stamp.starts_with(&head[..7]),
+                "a linked worktree shares its refs through commondir, said {stamp:?}"
+            );
+        }
+        // Somewhere with no repository at all must say so rather than guessing.
+        assert_eq!(read(std::env::temp_dir().as_path()), "not a git checkout");
+    }
+
 }

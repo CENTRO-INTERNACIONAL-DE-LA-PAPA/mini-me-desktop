@@ -74,7 +74,11 @@ pub const PROVIDERS: [Provider; 5] = [
         label: "Mistral",
         needs_base_url: false,
         suggested_model: "mistral-large-latest",
-        models: &["mistral-large-latest", "mistral-small-latest", "codestral-latest"],
+        models: &[
+            "mistral-large-latest",
+            "mistral-small-latest",
+            "codestral-latest",
+        ],
     },
     Provider {
         id: "custom",
@@ -127,12 +131,56 @@ pub struct Settings {
     /// taste *and* everyone's room — the same charcoal that reads well at a desk is
     /// unusable on a projector (docs §49).
     pub theme: String,
+    /// A model per specialist, by name — `{"academic_researcher": "openai::gpt-4.1"}`.
+    ///
+    /// Absent means "use the coordinator's". The backend has accepted this since before the
+    /// desktop app existed: `configurable.model_config.subagents` is read at
+    /// `backend/models.py:114` and merged into the provider set the request needs keys for. Only
+    /// the client had never sent it (docs §104).
+    ///
+    /// **Why anyone wants it.** The specialists do genuinely different work. Literature search
+    /// wants a long context window and cheap tokens across many calls; a report wants the best
+    /// prose available; data cleaning wants neither and is run dozens of times. One model for all
+    /// ten is either an expensive way to grep or a cheap way to write a paper.
+    ///
+    /// A `BTreeMap` so the file has a stable order — a settings file that reshuffles itself on
+    /// every save is one nobody can diff.
+    #[serde(default)]
+    pub subagents: std::collections::BTreeMap<String, String>,
+    /// The project new conversations start in. Empty means none.
+    ///
+    /// Remembered rather than asked, because a researcher works through one line of enquiry over
+    /// days: choosing once and continuing is the shape of the work, and a dialog before every
+    /// question is not (docs §106).
+    #[serde(default)]
+    pub project: String,
+    /// Whether the conversation list on the left is showing.
+    ///
+    /// The three panel states are remembered for the same reason the project is: someone who
+    /// closed the conversation list to get the screen back did not mean "until I next launch".
+    /// They were `true` on every start until now, which made folding a panel a thing you had to
+    /// do again every morning.
+    ///
+    /// Safe to persist closed because all three toggles live in the status bar and are always
+    /// present — a folded panel is never a one-way door.
+    #[serde(default = "yes")]
+    pub sidebar_open: bool,
+    /// Whether the research panel on the right is showing.
+    #[serde(default = "yes")]
+    pub panel_open: bool,
+    /// Whether the road strip down the left of the chat is showing.
+    #[serde(default = "yes")]
+    pub road_open: bool,
     /// Whether the app created that directory.
     ///
-    /// **Load-bearing.** Updating means `git fetch && git checkout <pin> && uv sync`, and
-    /// running that on a checkout the user cloned themselves can destroy work — the
-    /// reference checkout on this developer's own machine has ten local branches, several
-    /// live in worktrees. The app may only update what it made.
+    /// **Load-bearing.** Updating means `rm -rf backend skills` and copying this repo's
+    /// `mini-me/` over them (`backend::sync_source_command`), and running that on a checkout
+    /// the user cloned themselves would destroy work — the reference checkout on this
+    /// developer's own machine has ten local branches, several live in worktrees. The app may
+    /// only overwrite what it made.
+    ///
+    /// The mechanism changed with §139 — it used to be `git fetch && git checkout <pin>` — and
+    /// the reason did not, so this comment is the one place the old sentence survived.
     pub backend_dir_owned: bool,
 }
 
@@ -147,10 +195,23 @@ impl Default for Settings {
             backend_port: 2024,
             backend_dir: String::new(),
             async_subagents: false,
-            theme: "Mini-Me Dark".to_string(),
+            theme: crate::theme::DEFAULT_NAME.to_string(),
+            subagents: std::collections::BTreeMap::new(),
+            project: String::new(),
+            sidebar_open: true,
+            panel_open: true,
+            road_open: true,
             backend_dir_owned: true,
         }
     }
+}
+
+/// `true`, as a path serde can name.
+///
+/// A bare `#[serde(default)]` on a `bool` field is `false`, which for these three would mean an
+/// older `settings.toml` opening with every panel folded shut.
+fn yes() -> bool {
+    true
 }
 
 impl Settings {
@@ -294,7 +355,7 @@ pub fn apply_theme(settings: &Settings) {
         .into_iter()
         .find(|(name, _)| name.eq_ignore_ascii_case(&settings.theme))
         .map(|(_, theme)| theme)
-        .unwrap_or(crate::theme::MINI_ME_DARK);
+        .unwrap_or(crate::theme::DEFAULT);
     crate::theme::apply(&chosen);
 }
 
@@ -430,7 +491,11 @@ mod tests {
         )
         .expect("write");
         let themes = available_themes();
-        assert_eq!(themes.len(), crate::theme::THEMES.len(), "replaced, not appended");
+        assert_eq!(
+            themes.len(),
+            crate::theme::THEMES.len(),
+            "replaced, not appended"
+        );
         let replaced = themes
             .iter()
             .find(|(name, _)| name == "Mini-Me Dark")
@@ -448,7 +513,9 @@ mod tests {
             ..Default::default()
         };
         apply_theme(&settings);
-        assert_eq!(crate::theme::current(), crate::theme::MINI_ME_DARK);
+        // Named as `DEFAULT`, not as whichever palette that currently is: this test is about
+        // *falling back*, and it should not have to be edited every time the default moves.
+        assert_eq!(crate::theme::current(), crate::theme::DEFAULT);
 
         unsafe { std::env::remove_var("MINIME_SETTINGS") };
         let _ = std::fs::remove_dir_all(&dir);
@@ -466,6 +533,16 @@ mod tests {
             backend_dir: "~/Mini-Me".into(),
             async_subagents: true,
             theme: "Slate".into(),
+            project: "Late blight".into(),
+            subagents: [("report_writer".to_string(), "openai::gpt-5.4".to_string())]
+                .into_iter()
+                .collect(),
+            // All three deliberately *not* the default, so a round trip that silently reset
+            // them to `true` would be caught here rather than by someone whose folded panels
+            // kept reappearing.
+            sidebar_open: false,
+            panel_open: false,
+            road_open: false,
             backend_dir_owned: false,
         };
         let text = toml::to_string_pretty(&settings).expect("serialise");
@@ -484,6 +561,10 @@ mod tests {
         assert_eq!(settings.provider, "openai");
         assert_eq!(settings.backend_port, Settings::default().backend_port);
         assert!(settings.approve_execute, "the gate must not default off");
+        // A `bool` with a bare `#[serde(default)]` is `false`. These three carry `default = "yes"`
+        // precisely so an existing settings.toml — every one written before this build — does not
+        // open with all three panels shut.
+        assert!(settings.sidebar_open && settings.panel_open && settings.road_open);
     }
 
     #[test]

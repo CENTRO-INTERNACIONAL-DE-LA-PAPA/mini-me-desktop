@@ -16,6 +16,8 @@ use futures::channel::mpsc;
 use tokio::sync::Mutex;
 
 use crate::backend::{BackendConfig, BackendSupervisor, Started};
+use crate::protocol::urlencode;
+use crate::references;
 use crate::protocol::{
     AgentRef, AsyncTask, Conversation, Decision, Job, LangGraphClient, ModelChoice, Project,
     TurnEvent, TurnOutcome,
@@ -75,6 +77,12 @@ pub struct Sidecar {
     /// Behind a lock so Settings can change it without a restart: `submit` clones it per
     /// turn, so the next turn simply uses the new one.
     model: SyncMutex<Option<ModelChoice>>,
+    /// The project folder the current conversation's outputs belong in.
+    ///
+    /// Beside the model because it has the same lifetime and the same problem: it is chosen in
+    /// the UI and needed on a background task, and both are read afresh per request so a change
+    /// applies to the next turn without restarting anything.
+    project: SyncMutex<Option<String>>,
     /// Where the agent's code runs, for the status bar. The user should be able to
     /// see at a glance that commands are landing on their own machine.
     execution: &'static str,
@@ -113,6 +121,7 @@ impl Sidecar {
             supervisor: Arc::new(Mutex::new(BackendSupervisor::new(config))),
             thread: Arc::new(SyncMutex::new(None)),
             model: SyncMutex::new(model),
+            project: SyncMutex::new(None),
             base_url,
             log_path,
             execution,
@@ -134,6 +143,22 @@ impl Sidecar {
         self.execution
     }
 
+    /// Whether the agent's code runs on this machine.
+    ///
+    /// **A typed answer, not a string comparison.** The About box asked
+    /// `execution() == "local"`, and the label is `"host (local)"` — so it never matched and the
+    /// window told every researcher their code ran in an isolated sandbox when it was running on
+    /// their own filesystem. That is the exact defect this repo reported upstream against
+    /// `guardrails.py` the same morning, reintroduced by comparing against a string I assumed
+    /// instead of read (docs §107). §79 had already settled the rule — matching on prose to
+    /// discover a fact is how the two get confused.
+    pub fn runs_locally(&self) -> bool {
+        matches!(
+            self.config.execution,
+            crate::backend::Execution::Local { .. }
+        )
+    }
+
     /// Where the sidecar's own logs land — the first place to look when a turn
     /// fails for reasons the HTTP layer can't explain.
     pub fn log_path(&self) -> &str {
@@ -148,11 +173,14 @@ impl Sidecar {
         let thread = self.thread.clone();
         let base_url = self.base_url.clone();
         let model = self.model.lock().expect("model mutex").clone();
+        let project = self.project();
 
         let running = self.running.clone();
         let record = running.clone();
         let task = self.runtime.spawn(async move {
-            let client = LangGraphClient::new(base_url).with_model(model);
+            let client = LangGraphClient::new(base_url)
+                .with_model(model)
+                .with_project(project);
             // Send failures just mean the UI dropped the receiver (window closed).
             let mut emit = |event: TurnEvent| {
                 // Noted on the way past rather than asked for separately: this is the only
@@ -244,6 +272,16 @@ impl Sidecar {
         *self.model.lock().expect("model mutex") = model;
     }
 
+    /// Name the project this conversation's outputs belong in, or clear it.
+    pub fn set_project(&self, project: Option<String>) {
+        *self.project.lock().expect("project mutex") = project;
+    }
+
+    /// What the current conversation is filed under.
+    pub fn project(&self) -> Option<String> {
+        self.project.lock().expect("project mutex").clone()
+    }
+
     /// Answer a paused run's approval request and stream what follows.
     ///
     /// Runs on the conversation's existing thread, so the continuation lands in the
@@ -253,6 +291,7 @@ impl Sidecar {
         let thread = self.thread.clone();
         let base_url = self.base_url.clone();
         let model = self.model.lock().expect("model mutex").clone();
+        let project = self.project();
 
         // A resumed continuation is as cancellable as the turn that started it: an approved
         // command can be the slowest part of a run, and that is exactly when someone reaches
@@ -260,7 +299,9 @@ impl Sidecar {
         let running = self.running.clone();
         let record = running.clone();
         let task = self.runtime.spawn(async move {
-            let client = LangGraphClient::new(base_url).with_model(model);
+            let client = LangGraphClient::new(base_url)
+                .with_model(model)
+                .with_project(project);
             let mut emit = |event: TurnEvent| {
                 if let TurnEvent::Started { run_id } = &event {
                     if let Ok(mut slot) = record.lock() {
@@ -319,9 +360,11 @@ impl Sidecar {
     pub fn fetch_project(&self) -> mpsc::UnboundedReceiver<Result<Project, String>> {
         let (tx, rx) = mpsc::unbounded();
         let base_url = self.base_url.clone();
+        // The spine belongs to the project, not to the person (docs §109).
+        let project = self.project();
 
         self.runtime.spawn(async move {
-            let client = LangGraphClient::new(base_url);
+            let client = LangGraphClient::new(base_url).with_project(project);
             let outcome = client
                 .fetch_project()
                 .await
@@ -336,7 +379,10 @@ impl Sidecar {
     ///
     /// On the sidecar's runtime because that is where this app's HTTP lives; it has
     /// nothing to do with the backend, which may not even be running.
-    pub fn search_themes(&self, query: String) -> mpsc::UnboundedReceiver<Result<Vec<crate::gallery::Listing>, String>> {
+    pub fn search_themes(
+        &self,
+        query: String,
+    ) -> mpsc::UnboundedReceiver<Result<Vec<crate::gallery::Listing>, String>> {
         let (tx, rx) = mpsc::unbounded();
         self.runtime.spawn(async move {
             let client = reqwest::Client::new();
@@ -349,7 +395,10 @@ impl Sidecar {
     }
 
     /// Install one theme extension into the researcher's `themes/` directory.
-    pub fn install_theme(&self, id: String) -> mpsc::UnboundedReceiver<Result<Vec<String>, String>> {
+    pub fn install_theme(
+        &self,
+        id: String,
+    ) -> mpsc::UnboundedReceiver<Result<Vec<String>, String>> {
         let (tx, rx) = mpsc::unbounded();
         let dir = crate::settings::themes_dir();
         self.runtime.spawn(async move {
@@ -422,6 +471,19 @@ impl Sidecar {
         let base_url = self.base_url.clone();
         self.runtime.spawn(async move {
             let client = LangGraphClient::new(base_url);
+            // Before the first listing, adopt anything that predates the tag. Cheap and
+            // self-cancelling — it returns at once as soon as one tagged thread exists — and
+            // it is the difference between a researcher's history being there and appearing
+            // to have been deleted by an update (docs §90).
+            match client.adopt_untagged_conversations().await {
+                Ok(0) => {}
+                Ok(adopted) => tracing::info!(adopted, "adopted conversations from before the tag"),
+                // `debug`, not `warn`. The first refresh fires while the backend is still
+                // starting, so this fails once on every launch — and a warning that appears every
+                // time is one nobody reads the day it means something. `list_conversations`
+                // beside it already reasoned exactly this way.
+                Err(error) => tracing::debug!(%error, "could not adopt older conversations yet"),
+            }
             // 200 is far past what the sidebar can usefully show and still one request.
             match client.list_conversations(200).await {
                 Ok(conversations) => {
@@ -439,7 +501,7 @@ impl Sidecar {
     pub fn open_conversation(
         &self,
         thread_id: String,
-    ) -> mpsc::UnboundedReceiver<Vec<(String, String)>> {
+    ) -> mpsc::UnboundedReceiver<crate::protocol::StoredConversation> {
         let (tx, rx) = mpsc::unbounded();
         let base_url = self.base_url.clone();
         // Switch first, so a turn sent before the history arrives still lands on the right
@@ -447,9 +509,9 @@ impl Sidecar {
         *self.thread.lock().expect("thread id mutex") = Some(thread_id.clone());
         self.runtime.spawn(async move {
             let client = LangGraphClient::new(base_url);
-            match client.conversation_messages(&thread_id).await {
-                Ok(messages) => {
-                    let _ = tx.unbounded_send(messages);
+            match client.conversation_state(&thread_id).await {
+                Ok(state) => {
+                    let _ = tx.unbounded_send(state);
                 }
                 Err(error) => tracing::warn!(%error, "could not read a conversation"),
             }
@@ -475,6 +537,140 @@ impl Sidecar {
             let client = LangGraphClient::new(base_url);
             if let Err(error) = client.rename_conversation(&thread_id, &title).await {
                 tracing::warn!(%error, "could not rename a conversation");
+            }
+        });
+    }
+
+    /// Render a report to PDF and write it beside the conversation's other outputs.
+    ///
+    /// Reports the path it wrote, or why it could not. Off the UI thread because a Typst compile
+    /// with figures in it takes seconds, and this is a button press, not a frame.
+    pub fn render_report(
+        &self,
+        title: String,
+        markdown: String,
+        // Whole, links included — the route builds the bibliography from `citation` *and* `link`,
+        // and reducing these to strings is what made the first download a 502 (§141).
+        sources: Vec<crate::protocol::Source>,
+        // Whether an Asta-backed specialist actually ran — see `Workbench::used_asta`. Passed
+        // through rather than derived here: this layer cannot see the provenance record, and
+        // guessing from `sources` is the mistake being fixed.
+        used_asta: bool,
+        into: std::path::PathBuf,
+    ) -> mpsc::UnboundedReceiver<Result<std::path::PathBuf>> {
+        let (tx, rx) = mpsc::unbounded();
+        let base_url = self.base_url.clone();
+        let Some(thread_id) = self.thread_id() else {
+            // Nothing to render against: the route resolves image references relative to the
+            // thread's own working directory, so there is no sensible thread-less version.
+            let _ = tx.unbounded_send(Err(anyhow::anyhow!(
+                "there is no conversation to render a report from yet"
+            )));
+            return rx;
+        };
+        self.runtime.spawn(async move {
+            let client = LangGraphClient::new(base_url);
+            let result = client
+                .render_report(&thread_id, &title, &markdown, &sources, used_asta)
+                .await
+                .and_then(|pdf| {
+                    let path = into.with_extension("pdf");
+                    std::fs::write(&path, pdf)
+                        .with_context(|| format!("writing {}", path.display()))?;
+                    Ok(path)
+                });
+            let _ = tx.unbounded_send(result);
+        });
+        rx
+    }
+
+    /// Check each DOI against Crossref, and report a verdict per reference.
+    ///
+    /// **The one call in this app that does not go to the backend.** Everything else here talks
+    /// to the local sidecar; this reaches a public registry, so the rules are stricter and worth
+    /// stating where the request is made:
+    ///
+    /// * **A DOI goes out, and nothing else.** Not the citation, not the question, not the
+    ///   conversation. The comparison happens on this machine against text that never leaves it.
+    /// * **Sequentially, with a small delay.** Crossref is a free service run for everyone; forty
+    ///   parallel requests from a desktop app is not how to use it. A bibliography is tens of
+    ///   items and the check is not something anyone waits on with a stopwatch.
+    /// * **Bounded.** A conversation that gathered hundreds of sources checks the first
+    ///   [`MAX_CHECKS`] and says so, rather than quietly stopping — §51's rule.
+    ///
+    /// Results arrive one at a time so the panel fills in as it goes, keyed by DOI because a
+    /// source's position can change while the check is running.
+    pub fn resolve_references(
+        &self,
+        // `(key, doi or none, citation)`. The key is the caller's — it is what the answer is
+        // filed against, and it is not the DOI: the references that most need resolving are the
+        // ones that have none.
+        wanted: Vec<(String, Option<String>, String)>,
+    ) -> mpsc::UnboundedReceiver<(String, references::Verdict, Option<references::Repair>)> {
+        /// Enough for any real bibliography; a guard against a runaway list, not a policy.
+        const MAX_CHECKS: usize = 60;
+
+        let (tx, rx) = mpsc::unbounded();
+        self.runtime.spawn(async move {
+            // Identifies the app to Crossref, as their etiquette asks. **No contact address**:
+            // that would be the researcher's own email leaving the machine to a third party on
+            // every reference, which is the one thing org policy names outright.
+            let client = match reqwest::Client::builder()
+                .user_agent(concat!(
+                    "mini-me-desktop/",
+                    env!("CARGO_PKG_VERSION"),
+                    " (research reference checker)"
+                ))
+                .timeout(std::time::Duration::from_secs(20))
+                .build()
+            {
+                Ok(client) => client,
+                Err(error) => {
+                    tracing::warn!(%error, "could not build the reference checker");
+                    return;
+                }
+            };
+
+            for (key, doi, citation) in wanted.into_iter().take(MAX_CHECKS) {
+                // Verify the identifier the citation carries, if it carries one.
+                let verdict = match &doi {
+                    Some(doi) => check_one(&client, doi, &citation).await,
+                    None => references::Verdict::NoIdentifier,
+                };
+                // And, without being asked again, find the work it actually describes whenever
+                // that identifier turned out to be wrong or missing. Making the researcher press
+                // a second button to learn which paper their citation meant is asking them to do
+                // the job this exists to do.
+                let repair = if verdict.is_problem()
+                    || matches!(verdict, references::Verdict::NoIdentifier)
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+                    repair_one(&client, &citation).await
+                } else {
+                    None
+                };
+                if tx.unbounded_send((key, verdict, repair)).is_err() {
+                    // The window has gone, or the conversation changed. Stop rather than keep
+                    // asking a public service for answers nobody is waiting for.
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            }
+        });
+        rx
+    }
+
+    /// Record a conversation's project on the thread itself.
+    ///
+    /// Fire-and-forget: the folder has already moved and the app already shows the new grouping,
+    /// so a failure here means the label and the disk disagree until the next successful write —
+    /// worth logging, not worth blocking the researcher on.
+    pub fn set_thread_project(&self, thread_id: String, project: Option<String>) {
+        let base_url = self.base_url.clone();
+        self.runtime.spawn(async move {
+            let client = LangGraphClient::new(base_url);
+            if let Err(error) = client.set_project(&thread_id, project.as_deref()).await {
+                tracing::warn!(%error, "could not record the conversation's project");
             }
         });
     }
@@ -587,8 +783,11 @@ impl Sidecar {
     pub fn decide_task(&self, thread_id: String, decisions: Vec<Decision>) {
         let base_url = self.base_url.clone();
         let model = self.model.lock().expect("model mutex").clone();
+        let project = self.project();
         self.runtime.spawn(async move {
-            let client = LangGraphClient::new(base_url).with_model(model);
+            let client = LangGraphClient::new(base_url)
+                .with_model(model)
+                .with_project(project);
             if let Err(error) = client.resume_background(&thread_id, &decisions).await {
                 tracing::error!(%thread_id, %error, "could not answer a background task");
             }
@@ -610,9 +809,10 @@ impl Sidecar {
         let (tx, rx) = mpsc::unbounded();
         let config = self.config.clone();
         self.runtime.spawn(async move {
-            let report =
-                tokio::task::spawn_blocking(move || crate::preflight::inspect(&config, has_model_key))
-                    .await;
+            let report = tokio::task::spawn_blocking(move || {
+                crate::preflight::inspect(&config, has_model_key)
+            })
+            .await;
             match report {
                 Ok(report) => {
                     let _ = tx.unbounded_send(report);
@@ -681,10 +881,13 @@ impl Sidecar {
         let thread = self.thread.clone();
         let base_url = self.base_url.clone();
         let model = self.model.lock().expect("model mutex").clone();
+        let project = self.project();
         println!("url      : {base_url}");
         println!("log      : {}", self.log_path);
         self.runtime.block_on(async move {
-            let client = LangGraphClient::new(base_url).with_model(model);
+            let client = LangGraphClient::new(base_url)
+                .with_model(model)
+                .with_project(project);
             // Scoped: `run_turn` locks the supervisor itself, so holding it here
             // would deadlock the first turn.
             {
@@ -796,7 +999,9 @@ impl Sidecar {
                         .expect("thread id mutex")
                         .clone()
                         .context("the run paused but no thread was recorded")?;
-                    outcome = client.resume_turn(&thread_id, &decisions, &mut handle).await?;
+                    outcome = client
+                        .resume_turn(&thread_id, &decisions, &mut handle)
+                        .await?;
                 }
 
                 println!("stream   : {chunks} chunk(s), {} chars", text.len());
@@ -855,4 +1060,82 @@ async fn run_turn(
 
     emit(TurnEvent::Status("streaming…".into()));
     client.stream_turn(&thread_id, prompt, emit).await
+}
+
+/// Ask Crossref about one DOI.
+///
+/// Every failure is distinguished, because they mean different things to a researcher. A **404**
+/// is the registry saying no such DOI was ever registered — a fact about the reference. Anything
+/// else is a fact about the network, and must not be shown as though the reference were at
+/// fault: reporting "unregistered" to somebody on a train would be worse than reporting nothing,
+/// because they would go and delete a citation that was fine.
+async fn check_one(
+    client: &reqwest::Client,
+    doi: &str,
+    citation: &str,
+) -> references::Verdict {
+    // Percent-encoded: a DOI suffix may legally contain characters that would otherwise start a
+    // query string or a fragment, and a truncated DOI would be reported as unregistered.
+    let url = format!("https://api.crossref.org/works/{}", urlencode(doi));
+    let response = match client.get(&url).send().await {
+        Ok(response) => response,
+        Err(error) => {
+            return references::Verdict::Unreachable {
+                why: if error.is_timeout() {
+                    "timed out".to_string()
+                } else {
+                    "no connection".to_string()
+                },
+            }
+        }
+    };
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return references::Verdict::Unregistered;
+    }
+    if !response.status().is_success() {
+        return references::Verdict::Unreachable {
+            why: format!("registry returned {}", response.status().as_u16()),
+        };
+    }
+    let body: serde_json::Value = match response.json().await {
+        Ok(body) => body,
+        Err(_) => {
+            return references::Verdict::Unreachable {
+                why: "unreadable reply".to_string(),
+            }
+        }
+    };
+    match references::title_of(&body) {
+        Some(title) => references::judge(citation, &title),
+        // It resolved, but the record carries no title to compare against — a data gap at the
+        // registry, not a wrong citation.
+        None => references::Verdict::Unreachable {
+            why: "the record has no title".to_string(),
+        },
+    }
+}
+
+/// Ask Crossref which registered work a citation describes.
+///
+/// `query.bibliographic` is the field built for this: it takes a whole reference string —
+/// authors, year, title, journal, pages, in whatever order — and ranks registered works against
+/// it. That is why the citation goes out whole rather than being parsed into a title first: APA
+/// prose is not reliably splittable, and the registry is better at this than a regex would be.
+///
+/// Only the top few candidates are fetched, and [`references::best_match`] then refuses any of
+/// them that does not actually match. A failure here yields `None`, never a guess.
+async fn repair_one(
+    client: &reqwest::Client,
+    citation: &str,
+) -> Option<references::Repair> {
+    let url = format!(
+        "https://api.crossref.org/works?rows=5&select=DOI,title&query.bibliographic={}",
+        urlencode(citation)
+    );
+    let response = client.get(&url).send().await.ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let body: serde_json::Value = response.json().await.ok()?;
+    references::best_match(citation, &references::candidates_of(&body))
 }

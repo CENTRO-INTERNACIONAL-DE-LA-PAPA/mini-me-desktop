@@ -14,7 +14,7 @@
 //!
 //! - `messages-tuple` → `event: messages` frames, `[chunk, metadata]` — the tokens
 //! - `values`         → full state snapshots carrying `artifacts` (and the spine
-//!                      nested at `artifacts.project`)
+//!   nested at `artifacts.project`)
 //! - `custom`         → `sandbox_status` provisioning progress
 //! - `messages|tools:<uuid>` → the same, but produced *inside* a subagent
 //!
@@ -122,6 +122,59 @@ pub struct Snapshot {
     pub jobs: Vec<Job>,
     /// Work handed to a background worker. See [`AsyncTask`].
     pub tasks: Vec<AsyncTask>,
+    /// Reports, with their bodies. See [`Report`].
+    pub reports: Vec<Report>,
+    /// Citations gathered so far, **whole**.
+    ///
+    /// Separate from the `sources` bucket, whose items are truncated to 96 characters for a
+    /// side panel that has to stay scannable. A rendered report's citation list must not be —
+    /// a bibliography ending in `…` is not a bibliography.
+    pub sources: Vec<Source>,
+}
+
+/// One work this conversation cited.
+///
+/// # Why the link is a field and not something read out of the citation
+///
+/// `citation` is **written by the model.** `AcademicSourceFinding.citation`
+/// (`backend/schemas.py:31`) is a Pydantic field described as *"APA-style or equivalent citation
+/// for the source"*, so the model composes the authors, the year, the journal — and the DOI — as
+/// one sentence. A DOI produced that way is as reliable as any other detail an LLM writes from
+/// memory, which is to say: usually right, and wrong without warning.
+///
+/// `link` is the *separate* field the same payload carries
+/// (`SourceArtifactPayload.link`), and for a theory's papers it is built by
+/// `backend/theory_tools.py:_paper_ref` straight from `s2Metadata.externalIds.DOI` — the
+/// identifier Semantic Scholar returned, not one recalled. That function carries a comment about
+/// having already sent users to the wrong paper once, via an S2 URL form that resolved
+/// unreliably. Somebody has paid for this mistake before.
+///
+/// The client used to decode `citation` and drop the rest, so every link in the app was scraped
+/// out of the prose by regex while the real one sat one key away — the §91/§115 shape again: a
+/// value the program already had and never read.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Source {
+    /// The citation as the agent wrote it, whole.
+    pub citation: String,
+    /// The stable link the backend supplied, if it supplied one.
+    pub link: Option<String>,
+}
+
+/// A written report, whole.
+///
+/// **The one output that never reaches disk.** Figures are written by a plotting script inside
+/// `execute` and found by diffing the workspace (§42); datasets and downloaded papers are files
+/// by nature. A report is neither — `ReportArtifactPayload` is `{title, markdown}`
+/// (`backend/schemas.py:321`), it lives in the run's state, and the only copy that ever leaves
+/// the backend is the one in this snapshot.
+///
+/// So the client used to reduce it to a title for the Outputs panel and drop the body, which is
+/// how the agent could say "the report is in the Outputs panel" and be right, while the
+/// researcher opened the thread's folder and found no report at all (docs §89).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Report {
+    pub title: String,
+    pub markdown: String,
 }
 
 /// A long-running Asta job that outlived the turn that started it.
@@ -266,14 +319,135 @@ impl AsyncTask {
 /// that keeps being wrong.
 const CONVERSATION_TAG: &str = "minime_conversation";
 
+/// Metadata key naming the project a conversation belongs to.
+///
+/// Paired with the folder the backend writes into (`__workspace_project__`, see
+/// `overlay/minime_local/workspace.py`). The folder is where the files are; this is how the app
+/// knows which folder to look in — see docs §105 for why it is both and not either.
+const PROJECT_KEY: &str = "minime_project";
+
+/// A stored thread that is not yet tagged, by id.
+///
+/// Only the cheap half of the decision. Whether it is a *conversation* is settled by asking
+/// whether it holds any messages, which needs a request per thread — see
+/// [`LangGraphClient::adopt_untagged_conversations`].
+///
+/// **A title is not the test, though it was.** The first version of this filtered on
+/// `metadata.title`, on the reasoning that `rename_conversation` writes it and nothing else does.
+/// That is true and it is useless here: `rename_conversation` shipped in `4911094`, the *same day*
+/// as the filter it was meant to work around. No thread old enough to be hidden is new enough to
+/// have a title. Measured against a real store, it adopted **1 of 30** and left 25 threads with
+/// genuine history exactly as invisible as before — the identical mistake as the original bug,
+/// one level down, and caught only because the numbers were checked (docs §91).
+fn untagged(thread: &Value) -> Option<&str> {
+    if thread
+        .get("metadata")
+        .and_then(|metadata| metadata.get(CONVERSATION_TAG))
+        .is_some()
+    {
+        return None;
+    }
+    thread
+        .get("thread_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+}
+
+/// What reopening a conversation yields: its transcript, and whatever else the thread still
+/// holds — outputs, the spine, and the task ids of work that is still running somewhere else.
+pub type StoredConversation = (Vec<(String, String)>, Option<Snapshot>);
+
 /// One past conversation, for the sidebar.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Conversation {
     pub thread_id: String,
+    /// Which project it belongs to, or `None` for ungrouped.
+    ///
+    /// On the thread rather than inferred from the folder: renaming a directory in Explorer is
+    /// something a scientist will do, and an app that read the project only from the path would
+    /// then be silently wrong about where a conversation lives (docs §106).
+    pub project: Option<String>,
     /// What to call it in the list. Never empty — see [`decode_conversation`].
     pub title: String,
     /// ISO-8601, as the server reports it. Used for grouping, not for display.
     pub updated_at: String,
+}
+
+/// An ISO-8601 UTC stamp as seconds since the epoch, or `None` if it is not one.
+///
+/// Only the fixed-width prefix `YYYY-MM-DDTHH:MM:SS` is read; a fractional part and the trailing
+/// `Z` are ignored, and an offset other than UTC is refused rather than silently misread. That is
+/// what LangGraph sends (`langgraph_api/schema.py` stamps these in UTC).
+///
+/// Civil date to days by Howard Hinnant's algorithm, which is the standard one and needs no
+/// lookup table: shift the year so it starts in March, and leap days land at the end where they
+/// stop perturbing the month lengths.
+pub fn epoch_seconds(stamp: &str) -> Option<i64> {
+    let bytes = stamp.as_bytes();
+    if bytes.len() < 19 || bytes[4] != b'-' || bytes[7] != b'-' || bytes[13] != b':' {
+        return None;
+    }
+    // A stamp carrying a non-UTC offset would be hours out if read as UTC.
+    if let Some(rest) = stamp.get(19..) {
+        let rest = rest.trim_end_matches('Z');
+        let rest = rest.split('.').next_back().unwrap_or(rest);
+        if rest.contains('+') || rest.contains('-') {
+            return None;
+        }
+    }
+    let number = |from: usize, to: usize| stamp.get(from..to)?.parse::<i64>().ok();
+    let (year, month, day) = (number(0, 4)?, number(5, 7)?, number(8, 10)?);
+    let (hour, minute, second) = (number(11, 13)?, number(14, 16)?, number(17, 19)?);
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let day_of_year = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+    Some(days * 86_400 + hour * 3_600 + minute * 60 + second)
+}
+
+/// How long ago `stamp` was, said the way a person would.
+///
+/// **Relative, not "today 14:22".** A wall-clock time needs the researcher's timezone, and
+/// converting a UTC stamp to local time means either a timezone database or a dependency — for a
+/// line whose whole job is to say how fresh a conversation is. "2 hours ago" answers that exactly,
+/// in every timezone, with no table.
+///
+/// Empty for a stamp that cannot be read, so the caller renders nothing rather than "unknown".
+pub fn how_long_ago(stamp: &str, now: i64) -> String {
+    let Some(then) = epoch_seconds(stamp) else {
+        return String::new();
+    };
+    // A clock that has been corrected backwards, or a server slightly ahead. "just now" is the
+    // one answer that is never absurd; "in 4 seconds" would be.
+    let seconds = (now - then).max(0);
+    const MINUTE: i64 = 60;
+    const HOUR: i64 = 60 * MINUTE;
+    const DAY: i64 = 24 * HOUR;
+    // Named because a range pattern takes a path or a literal, not an expression.
+    const MONTH: i64 = 30 * DAY;
+    const YEAR: i64 = 365 * DAY;
+    // Bounded on both sides rather than a ladder of `..X`. Those match correctly — arms are
+    // tried in order — but each one contains the last, so the intent has to be read out of the
+    // ordering instead of the arm.
+    let (count, unit) = match seconds {
+        0..MINUTE => return "just now".to_string(),
+        MINUTE..HOUR => (seconds / MINUTE, "minute"),
+        HOUR..DAY => (seconds / HOUR, "hour"),
+        DAY..MONTH => (seconds / DAY, "day"),
+        MONTH..YEAR => (seconds / MONTH, "month"),
+        _ => (seconds / YEAR, "year"),
+    };
+    if count == 1 {
+        format!("1 {unit} ago")
+    } else {
+        format!("{count} {unit}s ago")
+    }
 }
 
 /// A thread from `POST /threads/search`, or `None` if it has no usable id.
@@ -295,6 +469,12 @@ fn decode_conversation(thread: &Value) -> Option<Conversation> {
         .unwrap_or_else(|| "New conversation".to_string());
     Some(Conversation {
         thread_id: thread_id.to_string(),
+        project: metadata
+            .and_then(|metadata| metadata.get(PROJECT_KEY))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|project| !project.is_empty())
+            .map(str::to_string),
         title,
         updated_at: thread
             .get("updated_at")
@@ -492,7 +672,7 @@ fn decode_async_tasks(artifacts: &Value, root: &Value) -> Vec<AsyncTask> {
 /// Hand-rolled rather than pulling in a URL crate for one function: the values here are a
 /// UUID, a thread id and a research question, and the question is the only one that
 /// reliably contains spaces, punctuation and accented Spanish.
-fn urlencode(value: &str) -> String {
+pub(crate) fn urlencode(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.as_bytes() {
         match byte {
@@ -577,6 +757,18 @@ pub struct ModelChoice {
     pub api_key: Option<String>,
     /// Mandatory for the `custom` provider, ignored otherwise.
     pub base_url: Option<String>,
+    /// A model per specialist, by name. Empty means every one follows the coordinator.
+    ///
+    /// Sent as `model_config.subagents`, which `backend/models.py:114` reads and folds into the
+    /// set of providers the request needs keys for.
+    pub subagents: std::collections::BTreeMap<String, String>,
+    /// A key per *other* provider a specialist uses, by provider id.
+    ///
+    /// **Necessary, and easy to miss.** The backend gathers providers from the coordinator's spec
+    /// *and every override* (`models.py:117-122`), so pointing one specialist at a second
+    /// provider makes that provider's key part of the request. Without it the turn fails inside a
+    /// subagent, several minutes in, for a reason that reads like the specialist being broken.
+    pub extra_keys: std::collections::BTreeMap<String, String>,
 }
 
 /// Thin HTTP client bound to a backend base URL.
@@ -584,6 +776,8 @@ pub struct LangGraphClient {
     http: reqwest::Client,
     base_url: String,
     model: Option<ModelChoice>,
+    /// The project whose folder this thread's outputs belong in, if any.
+    project: Option<String>,
 }
 
 impl LangGraphClient {
@@ -592,7 +786,14 @@ impl LangGraphClient {
             http: reqwest::Client::new(),
             base_url: base_url.into(),
             model: None,
+            project: None,
         }
+    }
+
+    /// Name the project folder the backend should write this thread's outputs into.
+    pub fn with_project(mut self, project: Option<String>) -> Self {
+        self.project = project;
+        self
     }
 
     /// Attach the user's model choice and key. Without one the backend falls back to
@@ -619,7 +820,25 @@ impl LangGraphClient {
     pub async fn fetch_project(&self) -> Result<Project> {
         let resp = self
             .http
-            .get(format!("{}/project", self.base_url))
+            // The project this spine belongs to. Upstream keys it `(user_id, "project")` — one
+            // per person, accumulating forever — which mixes every line of work a researcher has
+            // ever had and never forgets a deleted conversation. The overlay reads this
+            // parameter and scopes the namespace to match what a turn writes; without it the two
+            // sides would disagree and the panel would go blank rather than become correct
+            // (`overlay/minime_local/spine.py`, docs §109).
+            .get(format!(
+                "{}/project{}",
+                self.base_url,
+                match self
+                    .project
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty())
+                {
+                    Some(project) => format!("?project={}", urlencode(project)),
+                    None => String::new(),
+                }
+            ))
             .send()
             .await
             .context("GET /project failed (is the sidecar running?)")?
@@ -752,7 +971,7 @@ impl LangGraphClient {
     pub async fn resume_background(&self, thread_id: &str, decisions: &[Decision]) -> Result<()> {
         // The same body a foreground resume sends — one definition, so a change to the
         // decision shape cannot fix one path and leave the other broken.
-        let payload = resume_request_body(decisions, self.model.as_ref());
+        let payload = resume_request_body(decisions, self.model.as_ref(), self.project.as_deref());
         self.http
             .post(format!(
                 "{}/threads/{}/runs",
@@ -769,6 +988,16 @@ impl LangGraphClient {
     }
 
     /// `POST /threads` → a fresh thread id.
+    /// The body `POST /threads` is sent, separated so it can be asserted without a server.
+    fn new_thread_body(&self) -> Value {
+        json!({
+            "metadata": {
+                CONVERSATION_TAG: true,
+                PROJECT_KEY: self.project.as_deref().map(str::trim).filter(|p| !p.is_empty()),
+            }
+        })
+    }
+
     pub async fn create_thread(&self) -> Result<String> {
         let resp = self
             .http
@@ -776,7 +1005,14 @@ impl LangGraphClient {
             // Marked as *ours*. Every background worker creates a thread of its own
             // (§43), and without this the sidebar filled with dozens of "New
             // conversation" rows that were machinery, not conversations (docs §51).
-            .json(&json!({ "metadata": { CONVERSATION_TAG: true } }))
+            //
+            // **And filed, at birth.** The project drives two different things and they were
+            // wired separately: `self.project` tells the backend which folder to write into,
+            // and this key tells the sidebar which heading to show it under. Setting only the
+            // first meant a conversation started with the `+` on a project heading had its
+            // files in the right folder and its row under "No project" — right by one measure
+            // and wrong by the other, which is the worst of both (docs §108).
+            .json(&self.new_thread_body())
             .send()
             .await
             .context("POST /threads failed (is the sidecar running?)")?
@@ -821,6 +1057,121 @@ impl LangGraphClient {
             .unwrap_or_default())
     }
 
+    /// Adopt conversations that predate the tag, once.
+    ///
+    /// **Why this is needed at all.** `dfea94a` started filtering the sidebar on
+    /// [`CONVERSATION_TAG`] so that background workers' threads (§43, §51) stopped filling the
+    /// list with machinery. The tag is written by [`Self::create_thread`], so only threads
+    /// created *after* that commit carry it — and every conversation from before became
+    /// invisible the moment the researcher pulled. The commit anticipated that and judged the
+    /// affected threads to be "almost all junk rows". Measured on a real checkout: 26 of 30 had
+    /// genuine message history, and at least one was a titled piece of research. Reported, fairly,
+    /// as *"the conversations doesn't load, like this was erased"* — which is exactly what a
+    /// filtered-out history looks like from the outside (docs §90).
+    ///
+    /// **Why messages are the test.** The obvious discriminator — a title — does not exist on the
+    /// data that needs adopting: `rename_conversation` shipped the same day as the filter, so no
+    /// thread old enough to be hidden carries one. What every hidden conversation does have, and
+    /// no background worker does, is **human messages**. So each untagged thread is read once and
+    /// adopted if anyone wrote in it. That costs a request per thread on a list bounded at 200,
+    /// paid on the single launch that repairs the history and never again.
+    ///
+    /// **Runs once, and only when there is nothing to lose.** It returns immediately unless the
+    /// tagged search comes back empty, so a researcher who has since started a conversation is
+    /// never re-scanned, and an installation that never had old threads pays one extra request.
+    /// Failures are the caller's to report but not to panic over: a migration that cannot run is
+    /// a sidebar that stays short, not a broken app.
+    pub async fn adopt_untagged_conversations(&self) -> Result<usize> {
+        if !self.list_conversations(1).await?.is_empty() {
+            return Ok(0);
+        }
+        let resp = self
+            .http
+            .post(format!("{}/threads/search", self.base_url))
+            .json(&json!({
+                "limit": 200,
+                "sort_by": "updated_at",
+                "sort_order": "desc",
+            }))
+            .send()
+            .await
+            .context("searching for untagged conversations failed")?
+            .error_for_status()
+            .context("the thread-search route returned an error status")?;
+        let threads: Value = resp
+            .json()
+            .await
+            .context("could not decode the untagged conversation list")?;
+
+        let mut adopted = 0;
+        for id in threads
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(untagged)
+        {
+            // The test that actually holds on old data: does anyone's writing live in here?
+            // A background worker's thread carries the machinery of a delegation and no human
+            // messages, so this excludes them without depending on a marker that postdates them.
+            // One request per thread, once, on a list bounded at 200 — the only time this app
+            // pays it is the single launch that repairs a hidden history.
+            match self.conversation_messages(id).await {
+                Ok(messages) if messages.is_empty() => continue,
+                Err(error) => {
+                    tracing::warn!(%error, thread = id, "could not read a thread while adopting");
+                    continue;
+                }
+                Ok(_) => {}
+            }
+            // One thread failing to adopt must not abandon the rest: the next one may be the
+            // conversation the researcher is actually looking for.
+            match self.tag_conversation(id).await {
+                Ok(()) => adopted += 1,
+                Err(error) => tracing::warn!(%error, thread = id, "could not adopt a thread"),
+            }
+        }
+        Ok(adopted)
+    }
+
+    /// File a conversation under a project, or take it out of one.
+    ///
+    /// Metadata only — the caller moves the folder, because that has to happen while no turn is
+    /// running and this does not know.
+    pub async fn set_project(&self, thread_id: &str, project: Option<&str>) -> Result<()> {
+        self.http
+            .patch(format!(
+                "{}/threads/{}",
+                self.base_url,
+                urlencode(thread_id)
+            ))
+            // `null` clears it: LangGraph merges metadata, so omitting the key would leave the
+            // old project in place and the conversation would file itself back on next read.
+            .json(&json!({ "metadata": { PROJECT_KEY: project } }))
+            .send()
+            .await
+            .context("filing the conversation failed")?
+            .error_for_status()
+            .context("the thread-update route returned an error status")?;
+        Ok(())
+    }
+
+    /// Mark an existing thread as one of ours, leaving its other metadata alone.
+    async fn tag_conversation(&self, thread_id: &str) -> Result<()> {
+        self.http
+            .patch(format!(
+                "{}/threads/{}",
+                self.base_url,
+                urlencode(thread_id)
+            ))
+            .json(&json!({ "metadata": { CONVERSATION_TAG: true } }))
+            .send()
+            .await
+            .context("tagging the thread failed")?
+            .error_for_status()
+            .context("the thread-update route returned an error status")?;
+        Ok(())
+    }
+
     /// Give a conversation a name, stored on the thread itself.
     ///
     /// Metadata rather than a local file: the title belongs with the conversation, so it
@@ -839,6 +1190,66 @@ impl LangGraphClient {
             .error_for_status()
             .context("the thread-update route returned an error status")?;
         Ok(())
+    }
+
+    /// Render a report to PDF, on the backend, and hand back the bytes.
+    ///
+    /// **The rendering already existed and had never been called.** `POST /render-report/{thread}`
+    /// converts markdown through `pypandoc` to Typst, wraps it in a template that lays out a title
+    /// page and a citation list, and compiles it with `typst` — all of it host-side, in-process,
+    /// no LaTeX (`backend/routes/rendering.py:253`). It also resolves image references against the
+    /// thread's working directory, so the figures a turn drew end up *in* the PDF rather than as
+    /// broken links.
+    ///
+    /// Doing it here rather than in Rust is not a shortcut. A faithful markdown-to-PDF pipeline is
+    /// a large dependency and a long tail of edge cases, and this one is already written, already
+    /// installed in the backend's venv, and already the thing the web client uses — so a report
+    /// rendered from the desktop app comes out identical to one rendered anywhere else.
+    ///
+    /// # Each source goes as an object, because that is what the route reads
+    ///
+    /// This sent a list of bare citation strings, on the belief — written into a comment in
+    /// `main.rs` — that *"the backend's Typst template takes a list of citation strings"*. It does
+    /// not. `_build_typst_wrapper` calls `source.get("citation")` on every entry, so the first
+    /// report a researcher tried to download came back `502 PDF render failed: 'str' object has no
+    /// attribute 'get'` (docs §141). Nothing had caught it because the loop it dies in does not
+    /// run when there are no sources, and until the literature path started working there usually
+    /// were none.
+    ///
+    /// Sending the object also sends the `link` — which [`Source`] has held all along, straight
+    /// from the backend, and which the old mapping dropped on the floor. The DOIs in a rendered
+    /// bibliography are now the ones Semantic Scholar returned rather than nothing at all.
+    pub async fn render_report(
+        &self,
+        thread_id: &str,
+        title: &str,
+        markdown: &str,
+        sources: &[Source],
+        used_asta: bool,
+    ) -> Result<Vec<u8>> {
+        let response = self
+            .http
+            .post(format!(
+                "{}/render-report/{}",
+                self.base_url,
+                urlencode(thread_id)
+            ))
+            .json(&render_request_body(title, markdown, sources, used_asta))
+            .send()
+            .await
+            .context("asking the backend to render the report failed")?;
+        let status = response.status();
+        let bytes = response
+            .bytes()
+            .await
+            .context("reading the rendered report failed")?;
+        if !status.is_success() {
+            // The route answers a failed Typst compile with JSON, so the reason is in the body
+            // and saying "502" alone would throw away the only useful part.
+            let detail = String::from_utf8_lossy(&bytes);
+            anyhow::bail!("the backend could not render the report ({status}): {detail}");
+        }
+        Ok(bytes.to_vec())
     }
 
     /// Delete a conversation and everything the backend stored for it.
@@ -867,7 +1278,7 @@ impl LangGraphClient {
     /// Only role and text: the activity trace is not replayable — it was assembled from a
     /// stream that is over — and pretending otherwise would show an empty trace next to a
     /// real answer, which reads as a bug rather than as history.
-    pub async fn conversation_messages(&self, thread_id: &str) -> Result<Vec<(String, String)>> {
+    pub async fn conversation_state(&self, thread_id: &str) -> Result<StoredConversation> {
         let resp = self
             .http
             .get(format!(
@@ -884,14 +1295,28 @@ impl LangGraphClient {
             .json()
             .await
             .context("could not decode the conversation")?;
-        let Some(messages) = state
-            .get("values")
-            .and_then(|values| values.get("messages"))
-            .and_then(Value::as_array)
-        else {
-            return Ok(Vec::new());
+        let Some(values) = state.get("values") else {
+            return Ok((Vec::new(), None));
         };
-        Ok(messages.iter().filter_map(decode_stored_message).collect())
+        let messages = values
+            .get("messages")
+            .and_then(Value::as_array)
+            .map(|messages| {
+                messages
+                    .iter()
+                    .filter_map(decode_stored_message)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        // The same response already carries `artifacts` — the outputs, the spine, and the
+        // **task ids of background jobs**. Decoding it here costs nothing and is what lets a
+        // reopened conversation pick a long run back up (docs §102).
+        Ok((messages, decode_values(&values.to_string())))
+    }
+
+    /// Just the messages, for callers that do not care what else the thread holds.
+    pub async fn conversation_messages(&self, thread_id: &str) -> Result<Vec<(String, String)>> {
+        Ok(self.conversation_state(thread_id).await?.0)
     }
 
     /// Stream one coordinator turn, invoking `on_event` for each decoded event.
@@ -905,8 +1330,12 @@ impl LangGraphClient {
         prompt: &str,
         on_event: impl FnMut(TurnEvent),
     ) -> Result<TurnOutcome> {
-        self.stream(thread_id, run_request_body(prompt, self.model.as_ref()), on_event)
-            .await
+        self.stream(
+            thread_id,
+            run_request_body(prompt, self.model.as_ref(), self.project.as_deref()),
+            on_event,
+        )
+        .await
     }
 
     /// Resume a run that stopped at the approval gate, streaming the continuation.
@@ -918,7 +1347,7 @@ impl LangGraphClient {
     ) -> Result<TurnOutcome> {
         self.stream(
             thread_id,
-            resume_request_body(decisions, self.model.as_ref()),
+            resume_request_body(decisions, self.model.as_ref(), self.project.as_deref()),
             on_event,
         )
         .await
@@ -955,7 +1384,6 @@ impl LangGraphClient {
         body: Value,
         mut on_event: impl FnMut(TurnEvent),
     ) -> Result<TurnOutcome> {
-
         let resp = self
             .http
             .post(format!(
@@ -1014,8 +1442,8 @@ impl LangGraphClient {
 /// Asking for `messages` instead selects the v1 path, which emits
 /// `messages/partial` + `messages/complete` with a different payload shape — and
 /// yields no tokens through this decoder.
-fn run_request_body(prompt: &str, model: Option<&ModelChoice>) -> Value {
-    let mut body = stream_request_body(model);
+fn run_request_body(prompt: &str, model: Option<&ModelChoice>, project: Option<&str>) -> Value {
+    let mut body = stream_request_body(model, project);
     body["input"] = json!({ "messages": [ { "type": "human", "content": prompt } ] });
     body
 }
@@ -1025,7 +1453,11 @@ fn run_request_body(prompt: &str, model: Option<&ModelChoice>) -> Value {
 /// Shape from the HITL middleware (`human_in_the_loop.py`:
 /// `decisions = interrupt(hitl_request)["decisions"]`): exactly one decision per
 /// held action, in the order they were presented.
-fn resume_request_body(decisions: &[Decision], model: Option<&ModelChoice>) -> Value {
+fn resume_request_body(
+    decisions: &[Decision],
+    model: Option<&ModelChoice>,
+    project: Option<&str>,
+) -> Value {
     let decisions: Vec<Value> = decisions
         .iter()
         .map(|decision| match decision {
@@ -1033,7 +1465,7 @@ fn resume_request_body(decisions: &[Decision], model: Option<&ModelChoice>) -> V
             Decision::Reject { message } => json!({ "type": "reject", "message": message }),
         })
         .collect();
-    let mut body = stream_request_body(model);
+    let mut body = stream_request_body(model, project);
     body["command"] = json!({ "resume": { "decisions": decisions } });
     body
 }
@@ -1053,7 +1485,7 @@ pub enum TurnOutcome {
 }
 
 /// The parts of the request body shared by a fresh run and a resume.
-fn stream_request_body(model: Option<&ModelChoice>) -> Value {
+fn stream_request_body(model: Option<&ModelChoice>, project: Option<&str>) -> Value {
     json!({
         "assistant_id": "agent",
         "stream_mode": ["messages-tuple", "values", "custom"],
@@ -1062,17 +1494,24 @@ fn stream_request_body(model: Option<&ModelChoice>) -> Value {
         // the silent gap the activity trace exists to close. On a measured turn this
         // flag is the difference between 176 and 495 message events.
         "stream_subgraphs": true,
-        "config": config_for(model),
+        "config": config_for(model, project),
     })
 }
 
 /// The `config` object: recursion limit, model routing, and the key.
-fn config_for(model: Option<&ModelChoice>) -> Value {
+fn config_for(model: Option<&ModelChoice>, project: Option<&str>) -> Value {
     let mut configurable = json!({
         // Marks this as a real run rather than a read-only graph load, which is what the
         // backend's key check keys off.
         "__is_for_execution__": true,
     });
+
+    // Which folder under the workspace root this turn's outputs belong in. The overlay reads
+    // this key and sanitises it again on its own side — a project name is a path segment and a
+    // thing a person types (docs §105).
+    if let Some(project) = project.map(str::trim).filter(|name| !name.is_empty()) {
+        configurable["__workspace_project__"] = json!(project);
+    }
 
     if let Some(model) = model {
         let mut model_config = json!({
@@ -1089,15 +1528,33 @@ fn config_for(model: Option<&ModelChoice>) -> Value {
                 .expect("object")
                 .remove("storage_mode");
         }
+        if !model.subagents.is_empty() {
+            model_config
+                .as_object_mut()
+                .expect("object")
+                .insert("subagents".into(), json!(model.subagents));
+        }
         configurable["model_config"] = model_config;
 
+        // One entry per provider the request will actually touch — the coordinator's, plus any a
+        // specialist was pointed at. The backend derives that same set from the specs
+        // (`models.py:117-122`); sending fewer keys than providers is the failure that surfaces
+        // minutes later, inside a subagent, looking like the subagent's fault.
+        let mut keys = serde_json::Map::new();
         if let Some(api_key) = &model.api_key {
-            configurable["__llm_keys"] = json!({
-                model.provider.clone(): {
-                    "api_key": api_key,
-                    "base_url": model.base_url,
-                }
-            });
+            keys.insert(
+                model.provider.clone(),
+                json!({ "api_key": api_key, "base_url": model.base_url }),
+            );
+        }
+        for (provider, api_key) in &model.extra_keys {
+            // The coordinator's own entry carries its base_url and must not be flattened by a
+            // specialist that happens to share its provider.
+            keys.entry(provider.clone())
+                .or_insert_with(|| json!({ "api_key": api_key, "base_url": null }));
+        }
+        if !keys.is_empty() {
+            configurable["__llm_keys"] = Value::Object(keys);
         }
     }
 
@@ -1249,8 +1706,15 @@ fn decode_values(data: &str) -> Option<Snapshot> {
 
     let jobs = decode_jobs(artifacts);
     let tasks = decode_async_tasks(artifacts, &value);
+    let reports = decode_reports(artifacts);
+    let sources = decode_sources(artifacts);
 
-    if buckets.is_empty() && project.is_none() && jobs.is_empty() && tasks.is_empty() {
+    if buckets.is_empty()
+        && project.is_none()
+        && jobs.is_empty()
+        && tasks.is_empty()
+        && reports.is_empty()
+    {
         return None;
     }
     Some(Snapshot {
@@ -1258,7 +1722,133 @@ fn decode_values(data: &str) -> Option<Snapshot> {
         project,
         jobs,
         tasks,
+        reports,
+        sources,
     })
+}
+
+/// The body of a `POST /render-report` request.
+///
+/// **Pure, so the wire shape can be pinned by a test.** The bug this replaced was a payload the
+/// route could not read, and no test could have caught it while the JSON was assembled inline in
+/// the middle of an HTTP call — the only way to see the shape was to make the call. It is the
+/// reason `paper_tools._build_search_command` upstream is a separate function too.
+fn render_request_body(
+    title: &str,
+    markdown: &str,
+    sources: &[Source],
+    used_asta: bool,
+) -> Value {
+    json!({
+        "markdown": markdown,
+        "title": title,
+        // Objects, not strings: `_build_typst_wrapper` reads `citation` and `link` off each entry.
+        // The link is sent even when empty, because the route distinguishes "no link" from a
+        // missing key by the same emptiness check either way, and an explicit field says which of
+        // the two this is.
+        "sources": sources
+            .iter()
+            .map(|source| json!({
+                "citation": source.citation,
+                "link": source.link.clone().unwrap_or_default(),
+            }))
+            .collect::<Vec<_>>(),
+        // **Decided by the caller from the provenance record, not from this list.**
+        //
+        // The backend's own default is `len(sources) > 0` (`backend/routes/rendering.py`), and the
+        // footer it controls reads *"Academic literature search performed using Asta tools (Allen
+        // Institute for AI)"*. Those two do not match: `sources` is a list of citation objects the
+        // **model** produced, so a run where nothing was ever searched — where the model wrote
+        // five plausible references from memory — puts that sentence in the report and credits AI2
+        // for work their tools did not do.
+        //
+        // That is not hypothetical. Five references from a real run were checked against Crossref:
+        // three DOIs resolved to different papers (one to a paper about lichens) and two did not
+        // exist at all. The footer would have claimed Asta for every one of them (docs §119).
+        //
+        // An attribution is a claim about provenance, so it should come from the provenance
+        // record. See `Workbench::used_asta`.
+        "used_asta": used_asta,
+    })
+}
+
+/// Full citations, for the bibliography of a rendered report.
+fn decode_sources(artifacts: &Value) -> Vec<Source> {
+    let Some(entries) = artifacts.get("sources").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let citation = entry.get("citation").and_then(Value::as_str)?.trim();
+            if citation.is_empty() {
+                return None;
+            }
+            Some(Source {
+                citation: citation.to_string(),
+                link: stable_link(entry),
+            })
+        })
+        .collect()
+}
+
+/// The trustworthy link on an artifact, whichever shape it arrived in.
+///
+/// Three keys because two payloads carry this and they do not agree on a name:
+/// `SourceArtifactPayload` has `link`, `PaperRefPayload` has `url` **and** a bare `doi`
+/// (`backend/schemas.py:316,334`). Tried in that order — `link` and `url` are already complete
+/// URLs, while `doi` is the identifier alone and has to be given a resolver.
+///
+/// Only `http(s)`, for the same reason [`crate::workspace::browse`] refuses anything else: this
+/// value is on its way to a process launcher, and it reaches us from a model.
+fn stable_link(entry: &Value) -> Option<String> {
+    for key in ["link", "url"] {
+        if let Some(found) = entry.get(key).and_then(Value::as_str).map(str::trim) {
+            if found.starts_with("https://") || found.starts_with("http://") {
+                return Some(found.to_string());
+            }
+        }
+    }
+    let doi = entry.get("doi").and_then(Value::as_str)?.trim();
+    if doi.is_empty() {
+        return None;
+    }
+    // A bare `10.1007/…`, which is how `_paper_ref` reports it beside the URL it built.
+    Some(match doi.strip_prefix("doi:") {
+        Some(bare) => format!("https://doi.org/{}", bare.trim()),
+        None if doi.starts_with("http") => doi.to_string(),
+        None => format!("https://doi.org/{doi}"),
+    })
+}
+
+/// Pull whole reports, bodies and all, out of a `values` payload.
+///
+/// Tolerant of a missing title and strict about a missing body: a report with no markdown is
+/// nothing to write to disk, and writing an empty file would be worse than writing none — it
+/// would look like the report had been saved.
+fn decode_reports(artifacts: &Value) -> Vec<Report> {
+    let Some(entries) = artifacts.get("reports").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let markdown = entry.get("markdown").and_then(Value::as_str)?.trim();
+            if markdown.is_empty() {
+                return None;
+            }
+            let title = entry
+                .get("title")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+                .unwrap_or("Report");
+            Some(Report {
+                title: title.to_string(),
+                markdown: markdown.to_string(),
+            })
+        })
+        .collect()
 }
 
 /// Pull the still-running long jobs out of a `values` payload.
@@ -1353,14 +1943,7 @@ const MAX_LABEL_CHARS: usize = 96;
 /// would misrepresent work that actually happened.
 fn artifact_label(item: &Value) -> String {
     const LABEL_KEYS: [&str; 8] = [
-        "title",
-        "citation",
-        "name",
-        "question",
-        "summary",
-        "filename",
-        "label",
-        "id",
+        "title", "citation", "name", "question", "summary", "filename", "label", "id",
     ];
 
     let text = LABEL_KEYS
@@ -1723,6 +2306,51 @@ fn summarize_error(data: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn an_iso_stamp_becomes_seconds_and_then_something_a_person_reads() {
+        // Known anchors. The epoch itself, and a date past 2000 so the era arithmetic is
+        // exercised rather than just the year-zero case.
+        assert_eq!(epoch_seconds("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(epoch_seconds("2000-03-01T00:00:00Z"), Some(951_868_800));
+        // 2024 is a leap year: the 29th exists and the 1st of March is the day after.
+        assert_eq!(
+            epoch_seconds("2024-03-01T00:00:00Z").unwrap()
+                - epoch_seconds("2024-02-29T00:00:00Z").unwrap(),
+            86_400
+        );
+        // 1900 is not a leap year — the century rule, which a naive `% 4` gets wrong.
+        assert_eq!(
+            epoch_seconds("1900-03-01T00:00:00Z").unwrap()
+                - epoch_seconds("1900-02-28T00:00:00Z").unwrap(),
+            86_400
+        );
+        // The real shape LangGraph sends, fractional seconds and all.
+        assert_eq!(
+            epoch_seconds("2026-08-07T14:22:31.482913Z"),
+            epoch_seconds("2026-08-07T14:22:31Z")
+        );
+        // Not readable, and — importantly — not *misread*: an offset that is not UTC would be
+        // hours out if this returned a number anyway.
+        assert_eq!(epoch_seconds("2026-08-07T14:22:31+05:00"), None);
+        assert_eq!(epoch_seconds("yesterday"), None);
+        assert_eq!(epoch_seconds(""), None);
+        assert_eq!(epoch_seconds("2026-13-07T14:22:31Z"), None, "no 13th month");
+
+        let now = epoch_seconds("2026-08-07T14:22:31Z").expect("a stamp");
+        assert_eq!(how_long_ago("2026-08-07T14:22:30Z", now), "just now");
+        assert_eq!(how_long_ago("2026-08-07T14:21:31Z", now), "1 minute ago");
+        assert_eq!(how_long_ago("2026-08-07T13:52:31Z", now), "30 minutes ago");
+        assert_eq!(how_long_ago("2026-08-07T12:22:31Z", now), "2 hours ago");
+        assert_eq!(how_long_ago("2026-08-05T14:22:31Z", now), "2 days ago");
+        assert_eq!(how_long_ago("2026-06-07T14:22:31Z", now), "2 months ago");
+        assert_eq!(how_long_ago("2024-08-07T14:22:31Z", now), "2 years ago");
+        // A server marginally ahead of this clock reads as "just now", never as the future.
+        assert_eq!(how_long_ago("2026-08-07T14:22:35Z", now), "just now");
+        // Unreadable renders nothing at all, so the caller shows a card with no sub-line
+        // rather than a card that says "unknown".
+        assert_eq!(how_long_ago("not a date", now), "");
+    }
+
     /// Decode a single event in isolation. Anything that depends on *sequence*
     /// (tool-call argument fragments) drives a `TurnDecoder` directly instead.
     /// The run id is the only thing that makes the stop button able to stop anything, and it
@@ -1734,10 +2362,13 @@ mod tests {
             name: "metadata".into(),
             data: r#"{"run_id":"019fb670-c72a-7330-98be-0f52520fb23b","attempt":1}"#.into(),
         });
-        assert!(events.iter().any(|event| matches!(
-            event,
-            TurnEvent::Started { run_id } if run_id == "019fb670-c72a-7330-98be-0f52520fb23b"
-        )), "{events:?}");
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                TurnEvent::Started { run_id } if run_id == "019fb670-c72a-7330-98be-0f52520fb23b"
+            )),
+            "{events:?}"
+        );
         // Still says the run started, because that is what the status line shows.
         assert!(events
             .iter()
@@ -1820,7 +2451,7 @@ mod tests {
         // tokens, because the server then emits `messages/partial` frames.
         // `values` rides alongside for the artifacts/spine snapshot — verified on a
         // live backend that asking for both still produces `event: messages`.
-        let body = run_request_body("hi", None);
+        let body = run_request_body("hi", None, None);
         assert_eq!(
             body["stream_mode"],
             json!(["messages-tuple", "values", "custom"])
@@ -1843,10 +2474,14 @@ mod tests {
             provider: "custom".into(),
             api_key: Some("sk-test".into()),
             base_url: Some("https://openrouter.ai/api/v1".into()),
+            ..Default::default()
         };
-        let body = run_request_body("hi", Some(&model));
+        let body = run_request_body("hi", Some(&model), None);
         let configurable = &body["config"]["configurable"];
-        assert_eq!(configurable["model_config"]["default"], "custom::openai/gpt-4o-mini");
+        assert_eq!(
+            configurable["model_config"]["default"],
+            "custom::openai/gpt-4o-mini"
+        );
         assert_eq!(configurable["model_config"]["storage_mode"], "client");
         assert_eq!(configurable["__llm_keys"]["custom"]["api_key"], "sk-test");
         assert_eq!(
@@ -1860,12 +2495,94 @@ mod tests {
 
         // A resume carries the same routing: the continuation must not silently switch
         // model or lose the key mid-turn.
-        let resumed = resume_request_body(&[Decision::Approve], Some(&model));
+        let resumed = resume_request_body(&[Decision::Approve], Some(&model), None);
         assert_eq!(
             resumed["config"]["configurable"]["__llm_keys"],
             configurable["__llm_keys"]
         );
-        assert_eq!(resumed["command"]["resume"]["decisions"][0]["type"], "approve");
+        assert_eq!(
+            resumed["command"]["resume"]["decisions"][0]["type"],
+            "approve"
+        );
+    }
+
+    #[test]
+    fn a_specialist_on_a_second_provider_takes_its_key_with_it() {
+        // The failure this prevents is expensive and misleading: the backend collects providers
+        // from the coordinator's spec *and every override* (`backend/models.py:117-122`), so
+        // pointing one specialist at a second provider makes that provider's key part of the
+        // request. Send the overrides without the key and the turn dies inside a subagent,
+        // minutes in, reading like the specialist is broken (docs §104).
+        let model = ModelChoice {
+            spec: "anthropic::claude-sonnet-4-5".into(),
+            provider: "anthropic".into(),
+            api_key: Some("sk-ant".into()),
+            base_url: None,
+            subagents: [
+                (
+                    "academic_researcher".to_string(),
+                    "openai::gpt-4.1".to_string(),
+                ),
+                (
+                    "report_writer".to_string(),
+                    "anthropic::claude-opus-4-1".to_string(),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            extra_keys: [("openai".to_string(), "sk-openai".to_string())]
+                .into_iter()
+                .collect(),
+        };
+        let body = run_request_body("hi", Some(&model), None);
+        let configurable = &body["config"]["configurable"];
+
+        assert_eq!(
+            configurable["model_config"]["subagents"]["academic_researcher"],
+            "openai::gpt-4.1"
+        );
+        // A key per provider the request will actually touch — both of them.
+        assert_eq!(configurable["__llm_keys"]["anthropic"]["api_key"], "sk-ant");
+        assert_eq!(configurable["__llm_keys"]["openai"]["api_key"], "sk-openai");
+        // The coordinator's own entry keeps its base_url; a specialist sharing its provider
+        // must not flatten it.
+        let model = ModelChoice {
+            spec: "custom::openai/gpt-4o-mini".into(),
+            provider: "custom".into(),
+            api_key: Some("sk-custom".into()),
+            base_url: Some("https://openrouter.ai/api/v1".into()),
+            subagents: [(
+                "data_cleaning".to_string(),
+                "custom::openai/gpt-4o".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+            extra_keys: [("custom".to_string(), "sk-should-not-win".to_string())]
+                .into_iter()
+                .collect(),
+        };
+        let keys =
+            &run_request_body("hi", Some(&model), None)["config"]["configurable"]["__llm_keys"];
+        assert_eq!(keys["custom"]["api_key"], "sk-custom");
+        assert_eq!(keys["custom"]["base_url"], "https://openrouter.ai/api/v1");
+    }
+
+    #[test]
+    fn no_overrides_means_no_subagents_key_at_all() {
+        // Every specialist follows the coordinator by default, and an empty map in the request
+        // would be a shape the backend has to interpret for no reason.
+        let model = ModelChoice {
+            spec: "openai::gpt-5.4".into(),
+            provider: "openai".into(),
+            api_key: Some("sk".into()),
+            ..Default::default()
+        };
+        let configurable = &run_request_body("hi", Some(&model), None)["config"]["configurable"];
+        assert!(
+            configurable["model_config"].get("subagents").is_none(),
+            "{}",
+            configurable["model_config"]
+        );
     }
 
     #[test]
@@ -1877,8 +2594,9 @@ mod tests {
             provider: "openai".into(),
             api_key: None,
             base_url: None,
+            ..Default::default()
         };
-        let body = run_request_body("hi", Some(&model));
+        let body = run_request_body("hi", Some(&model), None);
         let configurable = &body["config"]["configurable"];
         assert_eq!(configurable["model_config"]["default"], "openai::gpt-5.4");
         assert!(configurable["model_config"]["storage_mode"].is_null());
@@ -1924,7 +2642,10 @@ mod tests {
     #[test]
     fn a_conversation_is_named_by_its_first_question() {
         // Short enough to stand as the title unchanged.
-        assert_eq!(title_from_prompt("What drives yield?"), "What drives yield?");
+        assert_eq!(
+            title_from_prompt("What drives yield?"),
+            "What drives yield?"
+        );
         // Whitespace from a pasted prompt would otherwise reach the sidebar verbatim.
         assert_eq!(title_from_prompt("  many\n\n spaces  "), "many spaces");
 
@@ -1934,7 +2655,10 @@ mod tests {
         let title = title_from_prompt(long);
         assert!(title.ends_with('…'), "{title}");
         assert!(title.chars().count() <= 49, "{title}");
-        assert!(long.starts_with(title.trim_end_matches('…').trim()), "{title}");
+        assert!(
+            long.starts_with(title.trim_end_matches('…').trim()),
+            "{title}"
+        );
 
         // One unbroken word longer than the limit still has to produce something.
         let wall = "x".repeat(200);
@@ -1972,8 +2696,14 @@ mod tests {
             ),
             Some(("mini-me".to_string(), "hi there".to_string()))
         );
-        assert_eq!(decode_stored_message(&json!({"type": "tool", "content": "{}"})), None);
-        assert_eq!(decode_stored_message(&json!({"type": "ai", "content": "  "})), None);
+        assert_eq!(
+            decode_stored_message(&json!({"type": "tool", "content": "{}"})),
+            None
+        );
+        assert_eq!(
+            decode_stored_message(&json!({"type": "ai", "content": "  "})),
+            None
+        );
     }
 
     #[test]
@@ -2010,6 +2740,300 @@ mod tests {
     }
 
     #[test]
+    fn adoption_screens_on_the_tag_and_nothing_a_hidden_thread_could_not_have() {
+        // The first version of this filtered on `metadata.title`, which sounded exact and was
+        // measured at 1 adoption out of 30 — because `rename_conversation` shipped the same day
+        // as the filter it was working around, so no thread old enough to be hidden has a title
+        // (docs §91). The cheap screen is now *only* "not already ours"; whether it is a
+        // conversation is decided by reading its messages, which is the one property every
+        // hidden conversation has and no background worker does.
+
+        // A thread from before any of this: no tag, no title, no metadata to speak of.
+        let ancient = json!({"thread_id": "t-1", "metadata": {"assistant_id": "agent"}});
+        assert_eq!(
+            untagged(&ancient),
+            Some("t-1"),
+            "a thread with no title must still be considered — that was the whole bug"
+        );
+        assert_eq!(untagged(&json!({"thread_id": "t-2"})), Some("t-2"));
+
+        // Already ours: adopting again would be a wasted request on every launch.
+        let tagged = json!({
+            "thread_id": "t-3",
+            "metadata": {"title": "Yield trials", CONVERSATION_TAG: true}
+        });
+        assert_eq!(untagged(&tagged), None);
+
+        // Nothing to PATCH.
+        assert_eq!(untagged(&json!({"metadata": {"title": "No id"}})), None);
+        assert_eq!(untagged(&json!({"thread_id": "   "})), None);
+    }
+
+    #[test]
+    fn a_new_thread_is_filed_at_birth() {
+        // The project drives two things that were wired separately: which folder the backend
+        // writes into, and which heading the sidebar shows the row under. Setting only the first
+        // put a conversation started from a project's `+` into the right folder and under
+        // "No project" — right by one measure, wrong by the other (docs §108).
+        let filed = LangGraphClient::new("http://x").with_project(Some("Late blight".into()));
+        let body = filed.new_thread_body();
+        assert_eq!(body["metadata"][CONVERSATION_TAG], true);
+        assert_eq!(body["metadata"][PROJECT_KEY], "Late blight");
+
+        // Ungrouped stays ungrouped, and sends `null` rather than an empty string — the sidebar
+        // treats blank as no project, but only one of the two is honest about it.
+        let plain = LangGraphClient::new("http://x");
+        assert!(plain.new_thread_body()["metadata"][PROJECT_KEY].is_null());
+        let blank = LangGraphClient::new("http://x").with_project(Some("   ".into()));
+        assert!(blank.new_thread_body()["metadata"][PROJECT_KEY].is_null());
+    }
+
+    #[test]
+    fn a_conversations_project_is_read_from_the_thread_not_the_folder() {
+        // The label is what survives contact with a scientist. Rename a project folder in
+        // Explorer, or move one to a shared drive, and an app that inferred the project only
+        // from the path is silently wrong about where a conversation lives (docs §105).
+        let filed = json!({
+            "thread_id": "t-1",
+            "metadata": {"title": "Late blight resistance", "minime_project": "Late blight"}
+        });
+        let conversation = decode_conversation(&filed).expect("decodes");
+        assert_eq!(conversation.project.as_deref(), Some("Late blight"));
+
+        // Ungrouped is the absence of the key, and stays that way — every conversation from
+        // before projects existed reads as ungrouped rather than as an error.
+        let old = json!({"thread_id": "t-2", "metadata": {"title": "Older work"}});
+        assert_eq!(decode_conversation(&old).expect("decodes").project, None);
+        // Blank is not a project name.
+        let blank = json!({"thread_id": "t-3", "metadata": {"minime_project": "   "}});
+        assert_eq!(decode_conversation(&blank).expect("decodes").project, None);
+    }
+
+    #[test]
+    fn a_run_names_the_project_folder_its_outputs_belong_in() {
+        // The other half of §105's pair: the label tells the app where to look, this tells the
+        // backend where to write. They are computed from the same string by two sanitisers that
+        // `workspace.rs` has a test to keep byte-identical.
+        let body = run_request_body("hi", None, Some("Late blight"));
+        assert_eq!(
+            body["config"]["configurable"]["__workspace_project__"],
+            "Late blight"
+        );
+        // No project, no key — an ungrouped conversation keeps the path it always had.
+        let plain = run_request_body("hi", None, None);
+        assert!(
+            plain["config"]["configurable"]
+                .get("__workspace_project__")
+                .is_none(),
+            "{}",
+            plain["config"]["configurable"]
+        );
+        assert!(
+            run_request_body("hi", None, Some("   "))["config"]["configurable"]
+                .get("__workspace_project__")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_stored_thread_still_carries_the_task_ids_of_running_work() {
+        // The observation this rests on: a theorizer or DataVoyager run lives on Asta's own
+        // hosted service, keyed by a task id. Closing the window never stopped the work — it
+        // stopped our watching of it, and the poll is also what persists the result. So the ids
+        // have to survive a reopen, and they do: `GET /threads/{id}/state` returns `values`
+        // holding both the messages *and* the artifacts, and the client used to read only the
+        // messages out of it (docs §102).
+        //
+        // This is the `values` half of a real stored state, in the shape `conversation_state`
+        // hands to `decode_values`.
+        let snapshot = decode_values(
+            &json!({
+                "messages": [{"type": "human", "content": "generate theories about X"}],
+                "artifacts": {
+                    "hypotheses": [
+                        {"question": "how do lightning strikes form?",
+                         "task_id": "task-still-going", "status": "running"},
+                        {"question": "an older one", "task_id": "task-done",
+                         "status": "completed"},
+                    ],
+                    "analyses": [
+                        {"question": "yield vs rainfall", "task_id": "voyager-1",
+                         "status": "running", "context_id": "ctx-9"},
+                    ],
+                }
+            })
+            .to_string(),
+        )
+        .expect("a stored state with artifacts decodes");
+
+        let ids: Vec<&str> = snapshot
+            .jobs
+            .iter()
+            .map(|job| job.task_id.as_str())
+            .collect();
+        assert_eq!(ids, ["task-still-going", "task-done", "voyager-1"]);
+
+        // Finished ones come back too — the Jobs panel should show what a conversation did, not
+        // only what it is still doing. `track_job` is what declines to poll them.
+        let running: Vec<&str> = snapshot
+            .jobs
+            .iter()
+            .filter(|job| !job.is_finished())
+            .map(|job| job.task_id.as_str())
+            .collect();
+        assert_eq!(running, ["task-still-going", "voyager-1"]);
+
+        // The question rides along, because the theorizer's poll route needs it in the query
+        // string to persist the outcome under the right heading.
+        let theorizer = &snapshot.jobs[0];
+        assert!(
+            theorizer.route("t-1").contains("how%20do%20lightning"),
+            "{}",
+            theorizer.route("t-1")
+        );
+    }
+
+    #[test]
+    fn a_report_arrives_whole_and_a_bodyless_one_is_not_a_file() {
+        // The shape is `ReportArtifactPayload = {title, markdown}` (`backend/schemas.py:321`) —
+        // a cross-repo contract, so it is pinned here rather than assumed. The body was being
+        // decoded to a label and thrown away, which is how the agent could truthfully say the
+        // report was in the Outputs panel while the folder held no report at all (docs §89).
+        let snapshot = decode_values(
+            &json!({
+                "artifacts": {
+                    "reports": [
+                        {"title": "EDA Report: Simulated Potato Field Trials",
+                         "markdown": "# Yield\n\nClone A led on every site.\n"},
+                        // No body: nothing to write, and an empty file would look like a saved
+                        // report rather than a missing one.
+                        {"title": "Draft", "markdown": "   "},
+                        {"title": "Untitled but real", "markdown": "# Something"},
+                    ],
+                    "sources": [
+                        {"citation": "Love, M. I., Huber, W., & Anders, S. (2014). Moderated estimation of fold change and dispersion for RNA-seq data with DESeq2. Genome Biology, 15, 550."}
+                    ],
+                }
+            })
+            .to_string(),
+        )
+        .expect("a payload with reports decodes");
+
+        let titles: Vec<&str> = snapshot
+            .reports
+            .iter()
+            .map(|report| report.title.as_str())
+            .collect();
+        assert_eq!(
+            titles,
+            [
+                "EDA Report: Simulated Potato Field Trials",
+                "Untitled but real"
+            ]
+        );
+        assert!(snapshot.reports[0].markdown.contains("Clone A led"));
+
+        // The bibliography gets the citation *whole*. The `sources` bucket beside it is
+        // truncated for the side panel, and a reference list ending in `…` is not one.
+        assert_eq!(snapshot.sources.len(), 1);
+        assert!(snapshot.sources[0].citation.ends_with("Genome Biology, 15, 550."));
+        let panel = snapshot
+            .buckets
+            .iter()
+            .find(|bucket| bucket.name == "sources")
+            .expect("the panel still lists sources");
+        assert!(panel.items[0].ends_with('…'), "{}", panel.items[0]);
+        assert!(
+            snapshot.sources[0].citation.len() > panel.items[0].len(),
+            "the rendered citation must outlive the panel's truncation"
+        );
+        // This payload carried no link, and inventing one would be worse than having none.
+        assert_eq!(snapshot.sources[0].link, None);
+    }
+
+    #[test]
+    fn the_stable_link_is_read_from_whichever_field_carries_it() {
+        // The three shapes `backend/schemas.py` actually sends. `SourceArtifactPayload` has
+        // `link`; `PaperRefPayload` has `url` and a bare `doi`. The client used to read
+        // `citation` and drop all three, so every link in the app was scraped out of prose the
+        // model wrote while the identifier Semantic Scholar returned sat one key away.
+        let decoded = decode_sources(&json!({
+            "sources": [
+                {"citation": "A. (2021).", "link": "https://doi.org/10.1/a"},
+                {"citation": "B. (2020).", "url": "https://arxiv.org/abs/2401.00001"},
+                {"citation": "C. (2019).", "doi": "10.2307/3558433"},
+                {"citation": "D. (2018).", "doi": "doi:10.1/d"},
+                {"citation": "E. — no link anywhere"},
+                // A link we will not hand to a process launcher. This value reaches us from a
+                // model and ends up as an argument to `explorer.exe`.
+                {"citation": "F.", "link": "file:///etc/passwd"},
+            ]
+        }));
+        let links: Vec<Option<&str>> = decoded
+            .iter()
+            .map(|source| source.link.as_deref())
+            .collect();
+        assert_eq!(
+            links,
+            [
+                Some("https://doi.org/10.1/a"),
+                Some("https://arxiv.org/abs/2401.00001"),
+                // A bare DOI is given a resolver; it is an identifier, not a URL.
+                Some("https://doi.org/10.2307/3558433"),
+                Some("https://doi.org/10.1/d"),
+                None,
+                None,
+            ]
+        );
+        // `link` wins over `url` when a payload somehow carries both, matching the order the
+        // two payload types are documented in.
+        let both = decode_sources(&json!({
+            "sources": [{"citation": "G.", "link": "https://doi.org/10.1/g", "url": "https://example.org/g"}]
+        }));
+        assert_eq!(both[0].link.as_deref(), Some("https://doi.org/10.1/g"));
+    }
+
+    #[test]
+    fn a_rendered_report_sends_each_source_the_way_the_route_reads_it() {
+        // `_build_typst_wrapper` does `source.get("citation")` on every entry
+        // (`mini-me/backend/routes/rendering.py`). Sending strings made the first report anybody
+        // downloaded come back `502 PDF render failed: 'str' object has no attribute 'get'`, and
+        // it went unnoticed because that loop does not run when the list is empty (docs §141).
+        let sources = vec![
+            Source {
+                citation: "Barrera, V. (2016). Pests and diseases affecting potato landraces."
+                    .into(),
+                link: Some("https://doi.org/10.1234/rlp".into()),
+            },
+            Source {
+                citation: "Ames, M. (2010). Blight in landraces.".into(),
+                link: None,
+            },
+        ];
+        let body = render_request_body("Late blight", "# Findings", &sources, true);
+
+        let entries = body["sources"].as_array().expect("sources is a list");
+        assert!(
+            entries.iter().all(|entry| entry.is_object()),
+            "a bare string here is the 502: {body}"
+        );
+        assert_eq!(entries[0]["citation"], json!(sources[0].citation));
+        // The link the backend supplied travels with it — `Source` has carried it all along and
+        // the old mapping to `Vec<String>` dropped it, so no rendered bibliography ever resolved.
+        assert_eq!(entries[0]["link"], json!("https://doi.org/10.1234/rlp"));
+        // A source with no link still renders; it just renders without one.
+        assert_eq!(entries[1]["link"], json!(""));
+
+        // Attribution stays the caller's call, not `len(sources) > 0`.
+        assert_eq!(body["used_asta"], json!(true));
+        assert_eq!(
+            render_request_body("t", "m", &sources, false)["used_asta"],
+            json!(false),
+            "a report whose citations came from memory must not credit Asta"
+        );
+    }
+
+    #[test]
     fn a_failed_background_run_reports_what_went_wrong() {
         // The shape `/threads/{id}/state` returns: the failure hangs off the pending task,
         // and `next` is *not* empty because the task that died is still pending. Both
@@ -2026,7 +3050,8 @@ mod tests {
 
         // An object-shaped error must not render as JSON at the user.
         assert_eq!(
-            error_text(&json!({"message": "no API key configured", "type": "ValueError"})).as_deref(),
+            error_text(&json!({"message": "no API key configured", "type": "ValueError"}))
+                .as_deref(),
             Some("no API key configured")
         );
         // A task that simply has not failed contributes nothing.
@@ -2099,13 +3124,23 @@ mod tests {
         // The question rides in the query string, and the theorizer route uses it when
         // persisting results — so accented Spanish has to survive encoding intact.
         let route = theorizer.route("thread-1");
-        assert!(route.starts_with("/theorizer/thread-1/1f0a2b3c-"), "{route}");
+        assert!(
+            route.starts_with("/theorizer/thread-1/1f0a2b3c-"),
+            "{route}"
+        );
         assert!(route.contains("q=%C2%BFqu%C3%A9%20papa"), "{route}");
-        assert!(!route.contains(' '), "a raw space would break the request: {route}");
+        assert!(
+            !route.contains(' '),
+            "a raw space would break the request: {route}"
+        );
 
         let analysis = &snapshot.jobs[1];
         assert_eq!(analysis.kind, JobKind::Analysis);
-        assert!(analysis.route("t").contains("ctx=ctx-42"), "{}", analysis.route("t"));
+        assert!(
+            analysis.route("t").contains("ctx=ctx-42"),
+            "{}",
+            analysis.route("t")
+        );
     }
 
     #[test]
@@ -2133,13 +3168,7 @@ mod tests {
     fn every_terminal_state_the_backend_can_report_stops_the_poll() {
         // `unavailable` is the subtle one: the thread's sandbox is gone, so no further
         // poll can ever tell us anything and looping would burn requests forever.
-        for status in [
-            "completed",
-            "failed",
-            "canceled",
-            "unavailable",
-            "error",
-        ] {
+        for status in ["completed", "failed", "canceled", "unavailable", "error"] {
             let job = Job {
                 kind: JobKind::Theorizer,
                 task_id: "x".into(),
@@ -2211,10 +3240,7 @@ mod tests {
             data: json!({"sandbox_status": {"state": "preparing", "message": "Creating sandbox…"}})
                 .to_string(),
         });
-        assert_eq!(
-            decoded,
-            vec![TurnEvent::Status("Creating sandbox…".into())]
-        );
+        assert_eq!(decoded, vec![TurnEvent::Status("Creating sandbox…".into())]);
 
         // Falls back to the state when no message is given.
         let decoded = decode(&SseEvent {
@@ -2237,7 +3263,10 @@ mod tests {
         // `title`, and rendered as "(untitled)" until this list covered it.
         let cases = [
             (json!({"title": "A dataset"}), "A dataset"),
-            (json!({"citation": "Love MI et al. 2014."}), "Love MI et al. 2014."),
+            (
+                json!({"citation": "Love MI et al. 2014."}),
+                "Love MI et al. 2014.",
+            ),
             (json!({"name": "eda.png"}), "eda.png"),
             (json!({"question": "Does X affect Y?"}), "Does X affect Y?"),
             (json!({"summary": "Indexed 12 papers"}), "Indexed 12 papers"),
@@ -2302,14 +3331,8 @@ mod tests {
             name: "messages".into(),
             data: r#"[{"type":"AIMessageChunk","id":"m1","content":[{"type":"text","text":"blocks"},{"type":"other","text":"skip"}]},{}]"#.into(),
         };
-        assert_eq!(
-            decode(&string_form),
-            vec![TurnEvent::Token("plain".into())]
-        );
-        assert_eq!(
-            decode(&block_form),
-            vec![TurnEvent::Token("blocks".into())]
-        );
+        assert_eq!(decode(&string_form), vec![TurnEvent::Token("plain".into())]);
+        assert_eq!(decode(&block_form), vec![TurnEvent::Token("blocks".into())]);
     }
 
     #[test]
@@ -2383,7 +3406,10 @@ mod tests {
         // The JS SDK keys on the *first* `tools:` segment, which would file an inner
         // agent's work under its parent's group while labelling it with the inner
         // agent's name. We key on the whole namespace instead.
-        let outer = agent_ref("tools:aaa", Some(&json!({"lc_agent_name": "coordinator_two"})));
+        let outer = agent_ref(
+            "tools:aaa",
+            Some(&json!({"lc_agent_name": "coordinator_two"})),
+        );
         let inner = agent_ref(
             "tools:aaa|tools:bbb",
             Some(&json!({"lc_agent_name": "report_writer"})),
@@ -2417,7 +3443,8 @@ mod tests {
             events,
             vec![TurnEvent::Step {
                 agent: None,
-                label: "delegating to academic_researcher — Find the canonical DESeq2 paper.".into(),
+                label: "delegating to academic_researcher — Find the canonical DESeq2 paper."
+                    .into(),
             }]
         );
         // Replaying the closing fragment must not announce a second time.
@@ -2485,7 +3512,10 @@ mod tests {
         // Prose is untouched, and so is a partial object still streaming in — which
         // is what makes the trace look alive rather than empty.
         assert_eq!(summarize_agent_result("  plain prose  "), "plain prose");
-        assert_eq!(summarize_agent_result(r#"{"summary":"half"#), r#"{"summary":"half"#);
+        assert_eq!(
+            summarize_agent_result(r#"{"summary":"half"#),
+            r#"{"summary":"half"#
+        );
     }
 
     #[test]
@@ -2494,10 +3524,7 @@ mod tests {
             name: "error".into(),
             data: r#"{"message":"boom"}"#.into(),
         };
-        assert_eq!(
-            decode(&err),
-            vec![TurnEvent::Error("boom".into())]
-        );
+        assert_eq!(decode(&err), vec![TurnEvent::Error("boom".into())]);
     }
 
     #[test]
@@ -2507,9 +3534,6 @@ mod tests {
             b"event: messages\r\ndata: [{\"type\":\"AIMessageChunk\",\"content\":\"crlf\"},{}]\r\n\r\n",
         );
         assert_eq!(events.len(), 1);
-        assert_eq!(
-            decode(&events[0]),
-            vec![TurnEvent::Token("crlf".into())]
-        );
+        assert_eq!(decode(&events[0]), vec![TurnEvent::Token("crlf".into())]);
     }
 }

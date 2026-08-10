@@ -117,7 +117,20 @@ else
   if SOURCE="$(find_source)"; then
     say "Copying Mini-Me from $SOURCE"
     echo "    (faster than downloading, and it needs no password)"
-    cp -r "$SOURCE" "$DIR"
+    # `cp -r SRC DEST` means two different things depending on whether DEST exists: it *becomes*
+    # SRC when it does not, and gains a `DEST/<basename SRC>` when it does. So a `$DIR` left
+    # behind non-empty by an interrupted run — or by anything else — turned the copy into
+    # `$DIR/mini-me/pyproject.toml`, and `uv sync` two steps later reported
+    # "No `pyproject.toml` found in current directory or any parent directory" while the copy
+    # above it said `ok`. Trailing `/.` copies the *contents*, which means one thing only.
+    mkdir -p "$DIR"
+    cp -r "$SOURCE/." "$DIR/"
+    # Said out loud, because the failure above was silent for exactly as long as it took to
+    # reach a step that needed a file: the copy reported success either way.
+    if [ ! -f "$DIR/pyproject.toml" ]; then
+      bad "the copy did not bring pyproject.toml — $SOURCE may be incomplete"
+      exit 1
+    fi
     # A copied .venv holds the *other* machine's compiled packages — Windows
     # Scripts/*.exe, or wheels built for a different Python. Unusable here.
     if [ -d "$DIR/.venv" ]; then
@@ -136,6 +149,27 @@ else
 fi
 
 cd "$DIR"
+
+# A checkout copied from /mnt/c carries Windows' CRLF working files, but not Git for Windows'
+# *global* `core.autocrlf=true`. WSL Git therefore used to call every tracked file modified the
+# moment provisioning finished, which made the checkout unusable for any later Git operation.
+#
+# Make the policy local to the checkout because Windows is the source we deliberately support,
+# not an exceptional environment to tell the researcher to repair. `input` normalises CRLF when
+# Git reads it and keeps future checkouts inside WSL at LF. Git also caches the old clean filter in
+# its index, so a guarded `--renormalize` is required once after changing the policy. It runs only
+# when every unstaged difference is a CR at end-of-line; a real edit leaves the tree untouched.
+# Do not `reset --hard`: find_source may have copied a developer checkout with real work (§144).
+if git -C "$DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  git -C "$DIR" config core.autocrlf input
+  if ! git -C "$DIR" diff --quiet -- && \
+      git -C "$DIR" diff --ignore-cr-at-eol --quiet --; then
+    git -C "$DIR" add --renormalize -- .
+    ok "normalised the copied checkout's Windows line endings"
+  else
+    ok "configured the copied checkout for Windows line endings"
+  fi
+fi
 
 # ------------------------------------------------------------------ the overlay
 #
@@ -162,6 +196,21 @@ fi
 say "Installing Python packages (a few minutes the first time)"
 echo "    This pulls the scientific stack — PyMC, scikit-learn and friends."
 uv sync --extra dev
+
+# Durable conversation storage, installed by default and not left to a checkbox.
+#
+# Without it the backend keeps `langgraph dev`'s pickle checkpointer, which loads every
+# conversation in the installation before answering anything, and which — on a load that
+# fails after a dependency change — flushes an empty dict over the real file ten seconds
+# later (docs §90/§94). Neither cost is one a researcher can be expected to opt out of;
+# they would have to know the failure exists to go looking for the switch.
+#
+# `|| true` because this is an improvement, not a requirement: a machine that cannot reach
+# the index still gets a working backend, and Setup will offer the install again.
+say "Installing durable conversation storage"
+uv pip install langgraph-checkpoint-sqlite || \
+  bad "could not install langgraph-checkpoint-sqlite - Setup will offer it again"
+
 if [ -x .venv/bin/langgraph ]; then
   ok "the backend can be started"
 else

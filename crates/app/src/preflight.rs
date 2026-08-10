@@ -192,9 +192,7 @@ impl Report {
 
     /// The first thing standing in the way, for a one-line status message.
     pub fn first_problem(&self) -> Option<&Check> {
-        self.checks
-            .iter()
-            .find(|check| check.state == State::Fail)
+        self.checks.iter().find(|check| check.state == State::Fail)
     }
 }
 
@@ -297,10 +295,7 @@ fn probe(argv: &[String]) -> Probe {
 fn exists(config: &BackendConfig, relative: &str) -> bool {
     match &config.wsl {
         Some(_) => {
-            let script = format!(
-                "test -e {}/{relative}",
-                quote_path(&config.backend_dir())
-            );
+            let script = format!("test -e {}/{relative}", quote_path(&config.backend_dir()));
             probe(&config.shell_argv(&script)).ok
         }
         None => config.project_dir.join(relative).exists(),
@@ -341,9 +336,7 @@ fn discover_checkout(config: &BackendConfig) -> Option<String> {
                 std::path::PathBuf::from("../Mini-Me"),
             ]
             .into_iter()
-            .find(|dir| {
-                dir.join("langgraph.json").is_file() && dir.to_string_lossy() != configured
-            })
+            .find(|dir| dir.join("langgraph.json").is_file() && dir.to_string_lossy() != configured)
             .map(|dir| dir.to_string_lossy().into_owned())
         }
     }
@@ -450,7 +443,10 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
             let mut fixes = Vec::new();
             let mut detail = format!("not installed in {}", config.backend_dir());
             if let Some(found) = discover_checkout(config) {
-                detail = format!("not in {}, but there is one at {found}", config.backend_dir());
+                detail = format!(
+                    "not in {}, but there is one at {found}",
+                    config.backend_dir()
+                );
                 fixes.push(Fix::Adopt {
                     label: "Use the one I have",
                     dir: found,
@@ -519,6 +515,61 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
         ));
     }
 
+    // ------------------------------------------- 3b. durable conversation storage
+    //
+    // Optional, and deliberately a *check* rather than a hard dependency. Without it the
+    // backend keeps `langgraph dev`'s pickle checkpointer and works exactly as it always
+    // has — slow to boot and able to lose everything, but working. With it, conversations
+    // move to SQLite: constant boot instead of one that grows with history (docs §80), and
+    // per-row writes instead of a format where one unreadable byte takes every conversation
+    // with it (docs §90/§94).
+    //
+    // A `Warn`, not a `Fail`. Nothing is broken without it, and a red row for something
+    // optional is how a Setup pane stops being read.
+    //
+    // **And it is not how most people get it.** On a checkout the app owns — every ordinary
+    // install — provisioning installs it and the launch command re-checks, so this row is a
+    // report, not a chore. It only asks anything of a developer pointed at their own clone,
+    // whose virtualenv is not ours to change (docs §96). A researcher who cannot code should
+    // never have had to notice a warning to avoid losing their history.
+    if checkout_ok {
+        let module = if in_wsl || !cfg!(windows) {
+            ".venv/lib/python3.12/site-packages/langgraph/checkpoint/sqlite"
+        } else {
+            ".venv/Lib/site-packages/langgraph/checkpoint/sqlite"
+        };
+        if exists(config, module) {
+            checks.push(Check::pass(
+                "checkpointer",
+                "Conversation storage",
+                "SQLite — conversations load without unpickling the whole history",
+            ));
+        } else {
+            checks.push(Check::failing(
+                "checkpointer",
+                "Conversation storage",
+                State::Warn,
+                "the pickle store — boot slows as history grows, and a failed load can \
+                 overwrite it"
+                    .to_string(),
+                vec![Fix::Run {
+                    label: "Move conversations to SQLite",
+                    argv: config.shell_argv(&format!(
+                        "cd {} && uv pip install langgraph-checkpoint-sqlite",
+                        quote_path(&config.backend_dir())
+                    )),
+                    note: "existing conversations stay in the old store until they are opened",
+                }],
+            ));
+        }
+    } else {
+        checks.push(Check::skip(
+            "checkpointer",
+            "Conversation storage",
+            "the checkout above has to be there",
+        ));
+    }
+
     // ---------------------------------------------------------------- 4. the overlay
     //
     // The check that exists because this failure is *silent*. Host execution works by
@@ -568,7 +619,11 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
                 ));
             }
         } else {
-            checks.push(Check::skip("overlay", "Host execution overlay", RUNTIME_FIRST));
+            checks.push(Check::skip(
+                "overlay",
+                "Host execution overlay",
+                RUNTIME_FIRST,
+            ));
         }
     } else if matches!(config.execution, Execution::Sandbox) {
         checks.push(Check::failing(
@@ -813,7 +868,13 @@ fn looks_utf16(bytes: &[u8]) -> bool {
     // ASCII in UTF-16LE is every other byte zero. Two of the first eight is already a
     // pattern no UTF-8 text produces.
     let window = &bytes[..bytes.len().min(16)];
-    window.iter().skip(1).step_by(2).filter(|b| **b == 0).count() >= 2
+    window
+        .iter()
+        .skip(1)
+        .step_by(2)
+        .filter(|b| **b == 0)
+        .count()
+        >= 2
 }
 
 fn find_newline(bytes: &[u8], wide: bool) -> Option<usize> {
@@ -838,7 +899,9 @@ fn decode(bytes: &[u8], wide: bool) -> String {
         String::from_utf8_lossy(bytes).into_owned()
     };
     // The BOM and the CR are not content.
-    text.trim_start_matches('\u{feff}').trim_end_matches('\r').to_string()
+    text.trim_start_matches('\u{feff}')
+        .trim_end_matches('\r')
+        .to_string()
 }
 
 /// stdout and stderr are read on separate threads and interleaved. Reading them in
@@ -1272,12 +1335,18 @@ mod tests {
         assert_eq!(status_field(REAL_STATUS, "Not A Property"), None);
 
         let identity = asta_identity(REAL_STATUS);
-        assert_eq!(identity, "piero.palacios@cipotato.org · token 167h 55m left");
+        assert_eq!(
+            identity,
+            "piero.palacios@cipotato.org · token 167h 55m left"
+        );
         // On a shared machine "signed in" is not enough to explain odd permissions.
         assert!(identity.contains('@'), "{identity}");
 
         // A changed table format loses the label, never the check.
-        assert_eq!(asta_identity("something else entirely"), "installed and signed in");
+        assert_eq!(
+            asta_identity("something else entirely"),
+            "installed and signed in"
+        );
     }
 
     #[test]
@@ -1302,7 +1371,10 @@ mod tests {
     "enroll:theory_generation"
   ]
 }"#;
-        assert!(!without.contains(THEORY_PERMISSION), "the account that could not");
+        assert!(
+            !without.contains(THEORY_PERMISSION),
+            "the account that could not"
+        );
         assert!(with.contains(THEORY_PERMISSION), "the account that could");
         // `print-token` without --raw is what carries the claims — with --raw it is opaque
         // base64 and this check would silently always fail.
@@ -1346,13 +1418,19 @@ mod encoding_tests {
     fn utf8_output_still_reads_normally() {
         // Everything else — uv, git, python — writes UTF-8, including non-ASCII.
         let bytes = b"Resolved 42 packages\ncreando el entorno\n".to_vec();
-        assert_eq!(lines_of(&bytes), vec!["Resolved 42 packages", "creando el entorno"]);
+        assert_eq!(
+            lines_of(&bytes),
+            vec!["Resolved 42 packages", "creando el entorno"]
+        );
     }
 
     #[test]
     fn a_last_line_without_a_newline_is_not_lost() {
         // Often the *only* line a failing command produces, so losing it loses the reason.
-        assert_eq!(lines_of(b"fatal: no such distro"), vec!["fatal: no such distro"]);
+        assert_eq!(
+            lines_of(b"fatal: no such distro"),
+            vec!["fatal: no such distro"]
+        );
         assert_eq!(lines_of(&utf16("access denied")), vec!["access denied"]);
     }
 
@@ -1417,7 +1495,10 @@ mod encoding_tests {
 
         assert!(ok);
         let lines: Vec<&str> = seen.iter().map(|(line, _)| line.as_str()).collect();
-        assert_eq!(lines, vec!["Descargando: WSL 2.7.11", "Instalando: WSL 2.7.11"]);
+        assert_eq!(
+            lines,
+            vec!["Descargando: WSL 2.7.11", "Instalando: WSL 2.7.11"]
+        );
         // The first line has to reach the pane while the command is still going, or the
         // tailing does nothing that draining at the end would not have done.
         let first = seen[0].1;

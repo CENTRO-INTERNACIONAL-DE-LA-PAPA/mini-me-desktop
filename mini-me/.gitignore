@@ -1,0 +1,22 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Frontend-generated files
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+.langgraph_api/
+.claude
+.codex
+.env
+.pytest_cache
+.ruff_cache
+.agents

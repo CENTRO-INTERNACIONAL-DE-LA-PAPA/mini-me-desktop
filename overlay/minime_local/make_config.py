@@ -33,6 +33,28 @@ BACKGROUND_GRAPH_ID = "background"
 OUTPUT_NAME = ".mini-me-desktop.langgraph.json"
 
 
+def sqlite_available() -> bool:
+    """Whether the backend can load the SQLite checkpointer.
+
+    **Inlined rather than imported from `minime_local.checkpointer`, which is the sibling that
+    owns this question.** The launch command runs this file *as a script*
+    (`.venv/bin/python <overlay>/minime_local/make_config.py .`), and Python then puts the
+    script's own directory on `sys.path` — `minime_local/`, not the overlay root above it. So
+    `from minime_local import ...` raises `ModuleNotFoundError`, the generator exits non-zero,
+    and the `&&` in the launch expression stops the backend from starting at all. Which is
+    exactly what shipping the import did: *"backend exited during startup with exit code: 1"*
+    (docs §98).
+
+    Three lines of duplication against a launch that cannot start. The sibling keeps its own copy
+    for the server's benefit; this one exists because a script is not a package.
+    """
+    try:
+        import langgraph.checkpoint.sqlite.aio  # noqa: F401
+    except Exception:  # noqa: BLE001 — any import failure means "not available"
+        return False
+    return True
+
+
 def build(checkout: str, overlay: str) -> str:
     """Write the extended config beside upstream's and return its path."""
     source = os.path.join(checkout, "langgraph.json")
@@ -54,6 +76,23 @@ def build(checkout: str, overlay: str) -> str:
         os.path.join(overlay, "minime_local", "async_agents.py") + ":background_graph"
     )
 
+    # Conversations in SQLite rather than one pickle of everything: constant boot instead of a
+    # boot that grows with history, and per-row writes instead of a format where one unreadable
+    # byte takes every conversation with it (docs §93, §95).
+    #
+    # **Only when the package is importable.** Naming a checkpointer the backend cannot load
+    # would turn a missing optional dependency into a server that does not start; leaving the
+    # key out gives exactly today's behaviour. The Setup pane checks for it and offers to
+    # install it, so this is a choice a researcher can see and make, not a silent downgrade.
+    if sqlite_available():
+        config["checkpointer"] = {
+            "path": os.path.join(overlay, "minime_local", "checkpointer.py")
+            + ":checkpointer"
+        }
+    elif "checkpointer" in config:
+        # Upstream declared one and we cannot honour ours: leave theirs alone.
+        pass
+
     destination = os.path.join(checkout, OUTPUT_NAME)
     with open(destination, "w", encoding="utf-8") as handle:
         json.dump(config, handle, indent=2)
@@ -67,7 +106,10 @@ def main(argv: list[str]) -> int:
     # stays correct when provisioning copies the overlay into the distro.
     overlay = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     written = build(checkout, overlay)
-    print(f"minime_local: wrote {written}", file=sys.stderr)
+    storage = (
+        "sqlite" if sqlite_available() else "the built-in pickle (see Setup)"
+    )
+    print(f"minime_local: wrote {written}; conversations in {storage}", file=sys.stderr)
     return 0
 
 

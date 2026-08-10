@@ -23,7 +23,7 @@ sidecar** that the client spawns and supervises.
 | **P6.6** — outputs the researcher can see | ✅ **done** — files land in `Documents\Mini-Me\<thread>`, figures render in the chat, and OUTPUTS opens the folder. §42 |
 | **P6.7** — the UI itself | ✅ **done, verified on Windows** — a role-based palette with four built-ins **and Zed's whole theme gallery** installable in-app; conversation sidebar with fuzzy search and rename; collapsible panels; a file preview modal; visible scrollbars; rainbow CSV; a three-state send button; rounded panels and a window-wide status bar. §43/§47–§53 |
 
-### What is left (updated 2026-08-03)
+### What is left (updated 2026-08-09)
 
 Every milestone P6.0–P6.7 is closed and the app is in daily use by its first researcher.
 What remains splits three ways: **shipping it to anyone else**, **paying down the UI debt
@@ -42,7 +42,11 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
 - ⬜ **Code signing.** SmartScreen shows "Windows protected your PC" and most researchers
   stop there. An organizational decision on a certificate; the release notes and README
   say which two words to click in the meantime.
-- ⬜ **Click-to-update.** The app detects a stale checkout but cannot update itself (§27).
+- ✅ **Click-to-update** — answered by making it unnecessary (§135/§139). The backend source
+  ships in this repository at `mini-me/`, and the launch mirrors it into the checkout, so
+  **`git pull` on the app *is* the backend update**. The `git fetch` it replaces was against a
+  private remote WSL has no credentials for: it hung on a sign-in nobody was watching (§131), or
+  failed fast and left the checkout a month behind while every log line read healthy (§134).
 
 **UI debt — the same call-site mistake, six times now**
 - ✅ **`Button`, `Label`, `Modal`, `Toggle`** (§67, §68) — confirmed on a real window across all
@@ -90,25 +94,81 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   that answer in seconds, because every test covered a construct alone and the bug lived in the
   transition between two.
 
+**Next**
+- ✅ **Outputs a turn wrote into a folder** (§117, §143) — the panel now descends through named
+  output folders with explicit depth/file bounds, keeps the relative path visible, skips tool
+  caches, and says when the bounded view omitted anything.
+- ✅ **The filter field** (§92, §97, §99) — measured rather than guessed: 0.0px in the popup
+  against 204 and 533 elsewhere. One link in the chain stated no width; confirmed fixed on a real
+  window.
+- 🟡 **Nine upstream reports** — written, in `docs/upstream/`, each with evidence and a suggested
+  fix. Two have since landed as Mini-Me PRs (the corpus id and the skills path). The two
+  `langgraph_runtime_inmem` ones are silent data loss and affect anyone running `langgraph dev`;
+  filing those is an outward-facing act on someone else's repository, and the decision is not
+  this repo's.
+
+**The literature path** *(new — §119–§139)*
+- ✅ **Citations are built in code** from the publisher's record, not composed from the model's
+  memory. Verified against Crossref on 17 papers across 6 fields: 17/17 DOIs resolve, 17/17
+  titles, 17/17 years, 0 contradictions.
+- ✅ **The subagent searches before it can answer** (§133). Its structured response was bound as a
+  tool and `tool_choice` forced, so answering from memory in one step was the cheapest legal move
+  it had. Prompts had been arguing with that for four days.
+- ✅ **Nothing retrieved is dropped** (§137) — a run that found 24 papers reported 9; the rest are
+  appended where the list leaves the backend.
+- ✅ **The backend log says which commit produced it** (§134) and its diagnostics distinguish
+  success from failure (§132), which four nights of misdiagnosis said they had to.
+- ✅ **A report with citations downloads as a PDF** (§141). It had never been tried with a source
+  in the list: this app sent bare citation strings and the route reads `source.get("citation")`, so
+  the first attempt was a 502 on the whole PDF over the reference list alone. Fixed on both sides —
+  and sending the object sends the `link` the client had held and dropped since §91, so a rendered
+  bibliography now resolves.
+- ⬜ **Papers the model adds from memory are not marked.** Barrera et al. (2016) came back real
+  and relevant from a journal Semantic Scholar indexes poorly — much of CIP's own literature
+  looks like that. Those sit beside record-backed citations looking identical, and their links
+  are still the model's guess.
+- ⬜ **A paper with no DOI and no corpus id** is invisible to the "never reported" accounting
+  (7 returned, 6 recorded, on 2026-08-09).
+- ✅ **`dataverse_explorer` searches, and reads what it found, before it can recommend** (§142,
+  Mini-Me PR #45). Two steps, because `SearchCIPDataverse` writes to a file and `read_search_results`
+  is what puts the metadata in front of the model. Its mandatory-filename paragraph is now set in
+  the call instead of asked for in capitals. **Awaiting a live run**: the persistent ids it returns
+  must resolve in CIP Dataverse.
+- ⬜ **Seven subagents still hold their invariants in prompts** (§140). Each carries a
+  `response_format` and so each has the §133 exit. `hypothesis_generator` is next — it emits
+  citations too, so it can reproduce the §138 bug somewhere nobody would think to look. The
+  mechanism is a base class now (`middleware/tool_gate.py`), so each costs a `steps` tuple.
+- ⬜ **~10s of every startup** is an Asta token minted fresh with no validity check
+  (`backend.rs`, §131).
+- ⬜ **`setup-wsl.sh` leaves a checkout with every file modified** from line endings, which breaks
+  any git operation on it.
+- ⬜ **Publish `v0.1.0`** — tagged and built; the draft needs a decision about who may have it.
+- ⬜ **A custom store** (§93) — deliberately after the checkpointer, and only with numbers:
+  alpha API, and replacing it means owning semantic search and TTL.
+- ⬜ **A native Windows backend?** (§95) — the case is the WSL install, not storage. Its own
+  experiment: run a real turn without the distro and see what actually breaks.
+
 **Proposed — P7**
-- ⬜ **The provenance graph** (§73) — a modal showing which subagents a conversation used and
-  where it doubled back: *paper search → theories → get data → clean data → analyze → theories*.
-  Cycles are the point, not a defect. The live data exists; **what does not is any of it after a
-  reload**, so this is a persistence problem first — the record has to be written to the thread's
-  directory as it streams. Edges come from **namespace nesting** (§75) — `langgraph_checkpoint_ns`
-  is a `|`-joined path, so the parent is a prefix and the edge is *causal*, not chronological.
-  Already on the wire; the client stores it and uses it only for grouping. Arrival stamps are
-  still worth adding, but for **duration** — the wire carries no time at all. Cycles across
-  turns, a tree within one. Sequenced after `/subagent`.
-- 🟡 **`/subagent` slash commands** — built (§76–§81): a registry captured from the coordinator
+- ✅ **The provenance record** — done (§73–§75 designed it, §83 built it, §85–§86 fixed it on
+  real data): a `Record` written to `provenance.json` in the thread's own directory as each turn
+  finishes, and a modal with two views — a **timeline** of bars on one shared scale, and the
+  **graph**, drawn with `canvas` and `PathBuilder`. Edges are causal where the namespace path
+  says so (`delegated to`) and observed where only arrival does (`then`), and the modal says
+  which is which. Cycles across turns, a tree within one. The chain-of-chips §73 proposed as the
+  first stage was built, shown, and rejected in one screenshot — *"the other image its not a
+  graph"* — which is what the staging was for.
+- ✅ **`/subagent` slash commands** — done (§76–§81): a registry captured from the coordinator
   as it is assembled, a `/` picker over the real ten specialists, name validation that suggests
-  the nearest match, and background dispatch from the palette. **Awaiting one confirmation** —
-  that the coordinator honours "delegate this to `X`", which is a request to a model and cannot
-  be tested from this repo.
+  the nearest match, and background dispatch from the palette. The one thing no test in this
+  repo could settle — whether the coordinator *honours* "delegate this to `X`" — is
+  **confirmed** on a real turn: `/academic_researcher search deseq2 paper` delegated, and the
+  transcript carries the specialist's own trace (`academic_researcher · 4 steps · 1879 chars`)
+  rather than a coordinator answer.
 
 **Deliberate deferrals**
-- ⬜ **Old workspaces are not migrated** (§42), and **threads from before §51's tag do not
-  appear** in the sidebar.
+- ⬜ **Old workspaces are not migrated** (§42). Threads from before §51's tag **do** appear
+  again: §90 found them filtered rather than lost, and §91 fixed the repair after measuring that
+  the first attempt recovered 1 of 26.
 - ⬜ **Async subagents stay opt-in**, on a preview deepagents API.
 
 **A correction, since it changes what is possible.** This document said text selection was
@@ -125,6 +185,9 @@ three).
   rounds, the most expensive defect of this project.
 - ⬜ `deepagents`' `start_async_task` passes no config, so no self-hosted deployment can
   give a background run its model, key or recursion limit (§38/§39).
+- ⬜ `agent.py`'s `make_backend` docstring says the `langgraph dev` store "loses content on
+  process restart" (§82). It does not — the dev runtime's store is disk-backed. A docstring,
+  but a load-bearing one: this app tells researchers to restart the backend.
 
 **Health of the bet.** The two risks that could have killed this are both down:
 **R1** (GPUI as an unstable `git` dep) — GPUI is a *published* crate, pinned at
@@ -4926,3 +4989,3378 @@ The pull-based redesign floated in §80 — the app asking Python for the list d
 **not** needed. It was proposed because push had failed three times for three different reasons,
 which looked like evidence against the design. It was evidence against the *instrumentation*. The
 mechanism was sound each time.
+
+## 82. What the store is, what the checkpointer is, and why not Postgres (2026-08-06)
+
+Asked directly, after §80 answered *where* conversations live but not *what holds what*. Two
+different things sit in `.langgraph_api/`, and confusing them is how a "let's use Postgres"
+decision gets made for the wrong reason.
+
+**The checkpointer is one conversation.** Every message, tool call, interrupt and resume in a
+thread, pickled to `.langgraph_api/.langgraph_checkpoint.N.pckl` — sharded, written by the
+runtime with no involvement from this app or the overlay
+(`langgraph_runtime_inmem/checkpoint.py:59,69`). It is what the sidebar reads through
+`GET /threads/search`, and it is the thing that grows with history, which makes it the whole of
+§80's boot cost.
+
+**The store is everything that outlives a conversation.** `DiskBackedInMemStore(InMemoryStore)`
+— so the answer to "are we using an `InMemoryStore`?" is *yes, a disk-backed subclass*. It swaps
+`_data` and `_vectors` for `PersistentDict`s over `store.pckl` and `store.vectors.pckl`
+(`store.py:83-84`), flushed by a daemon thread every ten seconds (`_persistence.py`). Three
+namespaces live in it, and `backend/agent.py:64` routes the first two there with a
+`CompositeBackend` while everything else goes to the sandbox:
+
+- `/memories/` → `(assistant_id, user_id)` — per-researcher scratch memory
+- `/skills/` → `("skills", assistant_id)` — shared across users of one assistant
+- the project spine → `(user_id, "project")` — deliberately *not* keyed by assistant, so it
+  spans every thread and the `/project` route can rebuild the namespace from
+  `request.user.identity` without resolving an assistant_id it never sees
+
+`StoreBackend(store=None)` holds no store; it calls `get_store()` at request time and takes what
+the server runtime provides. Which is why none of this needed wiring from the desktop app.
+
+The line between them, in one sentence: **checkpointer is within a conversation, store is across
+conversations.** `rm -rf .langgraph_api` takes both — every past thread *and* every memory.
+
+### Postgres: no, and the reason matters
+
+The question was whether a real store would be faster. It would make things **slower**, and the
+temptation comes from mistaking §80's boot cost for a store problem.
+
+1. It needs `langgraph up --postgres-uri`, which needs Docker. On machines where WSL2 alone took
+   §57–§60 to install, a second required install is a second way to fail.
+2. Every read today is a dict lookup in RAM. Postgres makes each one a network round-trip — the
+   runtime cost goes up, permanently, on every turn.
+3. It helps exactly one thing: not having to unpickle at boot. That gain is real and it is the
+   only one, against those two costs.
+
+The actual fix for slow boot is **pruning** `.langgraph_api/`, most of which is background
+worker threads (§51 found dozens in the sidebar for the same reason). Measure before deleting.
+
+### A docstring that is load-bearing and wrong
+
+`make_backend`'s docstring says that under `langgraph dev` the store "loses content on process
+restart", and advises a durable store so memories survive. It has not been true for as long as
+the runtime has shipped `DiskBackedInMemStore`: persistence is on unless
+`LANGGRAPH_DISABLE_FILE_PERSISTENCE=true`, which nothing here sets.
+
+Ordinarily a stale docstring is worth a shrug. This one is not, because §79 added a **Restart
+backend** button and the Setup page tells people to press it. Believing the docstring means
+believing that button discards a researcher's memories. Owed upstream.
+
+## 83. The provenance record, built (2026-08-06)
+
+§73 asked for it, §74 and §75 argued out how the edges should be derived, and this section is the
+build. Sequenced after `/subagent` deliberately, and that sequencing paid: the delegations a
+researcher now asks for *by name* are recorded by the same code as the ones the coordinator makes
+on its own, because there was never a second path.
+
+### The record is the feature; the drawing is a view of it
+
+§73's ordering held. `crates/app/src/provenance.rs` is data — `Record` → `Turn` → `Invocation` —
+with no pixels in it, written to `provenance.json` in the thread's own directory as each turn
+finishes. That is the load-bearing part: `conversation_messages` returns role and text only,
+because the activity trace was assembled from a stream that is over (§46), so *nothing* about what
+was consulted survives a reload unless the client writes it down. It is the only thing that ever
+sees the stream.
+
+Written at `finish_turn` and only there, for the same reason the auto-title is: the thread id does
+not exist until the turn has run, so before that point there is no directory to write into.
+
+### Sibling order — the gap §75 named, filled without inventing anything
+
+§75 retired arrival-based ordering in favour of namespace nesting, which is causal and true by
+construction. It also flagged what nesting does *not* do: **it cannot order two siblings.** Both
+children of the coordinator are children of the coordinator whether one ran after the other or
+both ran at once, and `langgraph_step` — which would settle it — is not visible in the capture.
+
+That gap matters more than it sounds, because in practice almost every delegation is top-level:
+one segment, `tools:<uuid>`. A graph built from nesting alone would have drawn §73's example as
+five disconnected chips.
+
+So arrival comes back, in exactly the role §74 established for it and no wider:
+
+- Siblings are partitioned into **bands** by interval overlap. Everything in one band was running
+  while something else in that band was; everything in band *n* had finished before anything in
+  band *n + 1* began.
+- Between bands there is a `Then` edge. Within a band there is none — two subagents dispatched
+  together are joined by `+`, not by an arrow.
+
+Two edge kinds, and the modal says which is which: `delegated to` is certain, `then` is the order
+things were observed in. §73's third option asked for that line, and it is there because a
+provenance record that quietly guesses is worse than none — it will be believed.
+
+### What it looks like
+
+One modal, two views, one dataset (§74). **Timeline** is a row per turn headed by the question,
+with a bar per invocation laid out against *that turn's* clock — per turn, because the gaps
+between turns are however long the researcher took to read and type, and a shared axis would
+squash every bar to a sliver. Duration is on the right, which answers a question nobody could ask
+before: which step is slow. **Path** is §73's chain, in the notation the request was written in —
+chips and arrows, wrapping, a revisit simply repeating its chip. A repeated chip *is* the cycle,
+legible with no layout algorithm at all, which is why the canvas-and-`paint_path` graph §73
+sketched has not been built yet. It is worth building when the chain proves it wants one.
+
+### The test that will catch this breaking
+
+`the_same_real_turn_lands_in_the_provenance_record` replays the captured `delegated-turn.sse`
+through the **real** decoder into a real `Record`. Not hand-written events: if `AgentRef.ns` or
+`lc_agent_name` changes shape, it fails there rather than as an empty modal noticed weeks later.
+
+That test exists because of §81. Four attempts at the subagent registry failed, three of them
+diagnosed wrongly, and every one of those failures had the same signature — a component that only
+speaks when it fails, so "absent", "never reached" and "ran and failed" were indistinguishable.
+The provenance record has the same hazard in a worse form: a modal that shows nothing looks
+identical whether nothing was recorded, nothing was written, or nothing was read back. So the
+recording path is pinned to measured wire data, `save_provenance` reports a write failure in the
+status line instead of swallowing it, and an empty record is drawn as the *sentence* "no
+specialist has been consulted in this conversation yet" rather than as an empty canvas.
+
+## 84. "esc close", which it never did (2026-08-06)
+
+Reported alongside a screenshot of the palette missing its new entry: *"when ctrl + p and I press
+esc I cannot exit that menu."* Two findings, and only one of them was a bug.
+
+**The missing command was a stale binary.** `Command::ALL` carries `OpenProvenance`, and the
+palette's only render path is built from `Command::ALL`. The screenshot shows thirteen entries;
+the source has fourteen. Nothing to fix — but worth writing down that the first check was *"is the
+code actually wrong"* rather than a fix aimed at a symptom, because §78–§81 lost three rounds to
+exactly that reflex.
+
+**Escape was a real bug, and an old one.** `escape` is bound twice:
+
+```rust
+KeyBinding::new("escape", PaletteDismiss, Some("Palette")),
+…
+KeyBinding::new("escape", Dismiss, None),
+```
+
+with a comment claiming *"the palette's own binding above is more specific, so it still wins while
+it is open."* It does not, and gpui says so plainly:
+
+```rust
+fn binding_enabled(&self, binding: &KeyBinding, contexts: &[KeyContext]) -> Option<usize> {
+    if let Some(predicate) = &binding.context_predicate {
+        predicate.depth_of(contexts)
+    } else {
+        Some(contexts.len())          // ← no context = deeper than anything
+    }
+}
+```
+
+Matched bindings sort deepest-first, so the context-*less* `Dismiss` outranks the scoped
+`PaletteDismiss`. And an action that is handled ends the matter — `window.rs`, in the bubble
+phase: `cx.propagate_event = false; // Actions stop propagation by default`. So `Dismiss` ran,
+`dismiss()` had no palette branch, and `PaletteDismiss` was never reached. The palette's footer
+has read "esc close" since it was written.
+
+The fix does not touch precedence at all: the palette is now closed by `dismiss()`, in its place
+in the same inside-out chain every other overlay uses. Depending on which of two bindings wins was
+the fragile part; there is now one handler that receives the key however that resolves.
+
+### Proven, not reasoned
+
+`a_context_less_binding_outranks_a_scoped_one` builds the app's real bindings into a
+`gpui::Keymap`, asks it what `escape` resolves to under `[Palette, Composer]`, and asserts it is
+`Dismiss`. It was checked by inverting the assertion and watching it fail. A gpui bump that
+changes the rule now breaks a test instead of a key.
+
+### The pattern, for the seventh time
+
+A comment asserting the opposite of the behaviour is worse than no comment, because it stops the
+next reader from checking. This is the sixth confident claim in this project to dissolve on one
+reading of the source (§52 has three, §61 and §71 have the others) — and the second where **the
+wrong claim was written by me, in a comment, and then believed on re-reading**.
+
+The tell was available the whole time: the footer promised "esc close" and nobody had tested it.
+A UI that documents a key is making a claim, and this project now has a test for that one.
+
+## 85. Two rows that lied, and a picture that was not one (2026-08-06)
+
+The provenance modal opened on a real conversation, and both views were wrong in the same way:
+each showed something true and drew it so that it read as something false.
+
+### The timeline compared things it had no scale to compare
+
+Turn 2 ran `academic_researcher` for 8.2s. Turn 3 ran `dataverse_explorer` for 32.4s. Both bars
+were full width, one above the other, identical to the pixel. Reported exactly right: *"this
+doesn't make sense because I asked these in two different prompts."*
+
+The cause was a decision made deliberately and argued for in §83: normalise each turn against its
+**own** span, so the gaps between turns — however long a person took to read and type — could not
+squash every bar to a sliver. That reasoning is sound. What it missed is that a turn with one
+invocation has a span *equal to* that invocation, so its bar is always 100%. The overwhelmingly
+common case renders as a constant.
+
+And a constant is not neutral. Two bars of equal length, stacked, with different numbers beside
+them, make a claim — that these are commensurable — and the view had no basis for it. **A chart
+whose bars carry no information is worse than no chart, because it will be read anyway.**
+
+Fixed by scaling every row against the longest **turn span** in the conversation (`Record::scale`,
+tested). Spans rather than individual durations because a turn lays its own siblings out inside
+its row, and a smaller divisor would push a later sibling off the end. The gaps between turns stay
+excluded, so §83's original concern is still handled — it was the *denominator* that was wrong,
+not the exclusion.
+
+### "The other image its not a graph"
+
+Also correct. §73 proposed a chain of chips first and a drawn graph second, on the reasoning that
+a repeated chip *is* the cycle and needs no layout algorithm. That was a fair bet and it lost on
+contact: a row of chips is a sentence about the work, and what was asked for was its shape.
+
+So the graph is drawn — `gpui::canvas` with `PathBuilder`, which §73 had already established were
+the two pieces available.
+
+**Vertically**, which is the non-obvious part and the reason it fits. The specialists are named
+`exploratory_data_analysis` and `academic_researcher`; ten of those across the modal's usable
+570px is 57px each, so a horizontal row would clip every label or need text painted into the
+canvas. A column gives each name the full width, grows to any number of nodes, and leaves the
+right-hand gutter for the edges.
+
+Edges bow further right the further they travel, so a transition skipping three nodes cannot be
+confused with one between neighbours. Thickness is traversal count. The arrowhead is not
+decoration: without it the picture says two specialists are related but not which way the work
+went, and "which way" is the entire question. The return edge — the one this feature exists for —
+reads as an arc running back *up* the column.
+
+`canvas` cannot lay out text and a `div` cannot draw a curve, so nodes are real elements and edges
+are painted beside them. Both derive from the same two constants, `ROW` and `GUTTER`, because two
+independent copies of that geometry would drift the first time either changed.
+
+### What both had in common
+
+Neither was a coding error. Both were a **defensible choice whose failure mode only appears on
+real data** — per-turn normalisation is right until a turn has one bar; a chain of chips is
+legible until you wanted a shape. Every unit test passed throughout.
+
+That is the argument for putting a build in front of the person who asked for it early, rather
+than polishing against imagined data. The plan had already written down that the graph should
+wait until "the chain proves it wants one". It took one screenshot.
+
+## 86. Three things one screenshot showed (2026-08-06)
+
+### The theme picker was 400px wide and declared 320
+
+`ui::picker_popup` sets `.w(px(320.))`. The panel rendered at nearly 400, pushing the filter field
+and every colour swatch off the right-hand edge — which is why the search box "had a bug in the
+width": it was `w_full` of a parent that had silently grown, so most of it was off-screen.
+
+The cause was one line with no width constraint at the bottom of the theme list:
+
+```rust
+.child(format!("Or drop a Zed theme .json in {}.", settings::themes_dir().display()))
+```
+
+`C:\Users\LENOVO\AppData\Roaming\mini-me-desktop\themes` has no break opportunity, so its
+intrinsic width became the panel's minimum. **A declared width is not a promise on its own** — a
+flex child's `min-width: auto` lets content override it. `w_full` + `min_w_0` on that line makes
+it wrap; `min_w_0` + `overflow_hidden` on the popup itself makes the 320 mean 320 whatever a
+future caller puts inside.
+
+Same shape as §72, which was the *other* box in this same picker coming out a quarter-width. Both
+times: a size that looked stated in the source and was actually negotiated at layout.
+
+### Side now carries the role
+
+Questions ride right in a bubble, answers run full width on the left as plain prose — the shape
+of every chat client, asked for after a side-by-side. The `you` / `mini-me` captions are gone with
+it: the alignment already says which is which, and two signals for one fact is one more than the
+eye needs. The bubble is capped at 78% so it stays a bubble, and the ragged left edge is what lets
+a glance down the transcript separate questions from answers.
+
+The live status line moved to the **bottom of the transcript** while a turn runs. The trace still
+sits above the answer it produced — that is the order it happened in and it belongs with its
+message — but during a two-minute delegation it scrolls out of view behind the streaming answer,
+and the only question a waiting person has is whether anything is still happening.
+
+### The arc was attached to nothing
+
+The graph painted a correct curve, in the wrong place — floating in the right-hand third of the
+panel, connected to neither node.
+
+Nothing to do with layout algorithms. `canvas` cannot measure a `div`, so the nodes and the edges
+have to agree on where a node *ends* by construction. The column was `flex_grow`, so it took all
+the space and the gutter — where arcs anchor — began 170px from the right edge, while the chips
+stopped wherever their names happened to. Fixed by making every chip full width inside the column,
+so all of them end exactly where the gutter begins.
+
+**Worth naming, since a graph crate was offered:** this was not a case for one. `layout-rs` and
+friends compute node *positions*; the positions here were never in doubt for ten nodes in a
+column. What was wrong was the seam between a laid-out element and a painted one, which no layout
+crate crosses — it would have produced the same detached arc. A real layout algorithm becomes
+worth its dependency when the graph is dense enough that hand placement stops reading, and that
+is a question the drawing can now answer for itself.
+
+## 87. The composer opens empty (2026-08-06)
+
+Every launch since P6.0 has opened with *"In one short paragraph, what is your role as the Mini-Me
+coordinator?"* already typed into the composer. Reported plainly: *"when the app opens this
+appear. we should avoid this behaviour of the prefilled text."*
+
+It was a scaffold with a real job. In P6.0 the app could not be trusted to reach the backend at
+all, and Enter-with-no-typing was the fastest possible proof that the whole round trip worked. It
+outlived that the moment the round trip stopped being in doubt, and what was left was litter: a
+stranger's question to delete before your own could be asked, on every single launch.
+
+The constant survives as `CHECK_PROMPT`, which is what it actually is now — what `--stream` asks
+when no `--prompt` is given, so a headless check exercises a full turn without depending on the
+researcher's data. The composer opens empty and the placeholder says what to do, which is all a
+first launch needs.
+
+### On the six searches
+
+Reported in the same breath: *"its weird that it takes too long to search papers."* The trace
+showed `academic_researcher · 6 steps · 0 chars` — `search_papers_by_relevance ×2`,
+`search_paper_by_title ×2`, `get_paper ×2` — and the turn was stopped before it answered. The next
+turn, asking for one known paper, took 2 steps and 942 characters.
+
+That difference is the subagent's own choice of tool calls against the Asta MCP server, and
+nothing in this client shapes it. Two things are worth recording rather than fixing here:
+
+- `get_paper` returns a great deal — the last one landed as a 223 KB `.txt` in the thread
+  directory. Six round trips of that order is minutes, and the client is waiting on the network,
+  not on itself.
+- **From the user's side it looked frozen**, because six tool calls produced zero streamed
+  characters. That is the part this app can answer, and §83's timeline now does: each of those
+  steps is measured, so "which step is slow" stops being a guess. §86 pinned the elapsed time to
+  the bottom of the transcript for the same reason.
+
+If the searches are genuinely redundant — two relevance searches and two title searches for one
+request — that is a prompt or tool-description question in Mini-Me, and belongs upstream with the
+other three. Worth a look with the timeline open, which is now possible for the first time.
+
+## 88. §72 came back, and this time the mechanism got fixed (2026-08-06)
+
+Three faults in one screenshot, and the first is a repeat.
+
+### The filter box collapsed to a sliver, again
+
+`Filter themes` and `Search Zed's theme gallery` both rendered as a ~10px rounded rectangle with
+their placeholder painting straight out the right-hand side. §72 saw exactly this on one of those
+two boxes, diagnosed it as "relying on flex stretch", and fixed it by adding `w_full`. It came
+back on both.
+
+Because `w_full` was never the mechanism. Two facts, and neither alone is enough:
+
+- **`div()` in gpui is `Display::Block`** (`style.rs:734`), not flex. `filter_field` never called
+  `.flex()`, so its child had no row to fill.
+- **`ComposerElement` asks for `width: relative(1.)`** — 100% of its parent. A percentage needs a
+  *definite* parent width to resolve against, and inside `anchored()` — which lays its child out
+  as an absolutely positioned, shrink-to-fit flex container (`anchored.rs:111`) — there was none.
+  The percentage resolved to nothing, the border drew around nothing, and the text painted anyway.
+
+So the field is now a flex row, and `ComposerElement` sets **`flex_grow = 1.0` as well as** the
+percentage. `flex_grow` needs no definite parent — it takes whatever free space the row has — so
+the pair holds in either kind of container. That is the difference between fixing the box and
+fixing the reason: §72 fixed a box.
+
+The popup's own width, from §86, was fine. It reads as ~400px in the screenshots because Windows
+is at 125% scale: 320 × 1.27 ≈ 406.
+
+### Choosing a theme left the list covering the window it had just repainted
+
+The row applied the theme and did nothing else. Choosing is the thing the picker was opened to do,
+and a list that stays up over the window it just changed hides the very change being judged. It
+closes now.
+
+### Save did not close Settings
+
+`save_settings` wrote everything, set a note, raised a toast — and left the window open. So the
+only visible confirmation was a sentence inside a pane the user had already decided to leave,
+which is precisely what the toast was added to avoid. Saving is finishing; it closes.
+
+### What links them
+
+All three are the same omission in different clothes: **an action that completes without saying
+so, or a size that is stated without being enforced.** The plan has now recorded the second shape
+twice (§72, here) and the first four times (§60, §69, §80, here). The lesson that keeps being
+re-learnt is that a UI's claim — a declared width, a footer promising "esc close", a Save button —
+is a claim the code has to actually make true, and no test catches the ones made in CSS.
+
+## 89. The report that was never a file (2026-08-06)
+
+*"I cannot find the report!"* — and the folder listing proved it: a heatmap, three boxplots, a
+scatter, a CSV, a 151 KB search dump, `provenance.json`. Seven files, no report. Meanwhile the
+answer in the transcript said *"the report is in the Outputs panel"*, and it was.
+
+Both were true, which is the whole diagnosis. **A report is the one output that never reaches
+disk.** Figures are written by a plotting script inside `execute` and found by diffing the
+workspace (§42); datasets and downloaded papers are files by nature. A report is neither —
+`ReportArtifactPayload` is `{title, markdown}` (`backend/schemas.py:321`), it lives in the run's
+state, and the only copy that ever leaves the backend is the one in the `values` snapshot.
+
+Which the client received on every frame of the turn, reduced to a 96-character label for the side
+panel, and threw the body away.
+
+So: the markdown is decoded whole and written beside the other outputs the moment it arrives,
+under the name the agent itself proposed —
+`EDA_Report_Simulated_Potato_Field_Trials.md`. A snapshot arrives many times per turn and carries
+every report each time, so the write is skipped when the file already holds exactly that text;
+otherwise the modification time — which `images` sorts by and a researcher reads — would keep
+resetting to now. Each new report is announced once, because a file appearing silently in a folder
+is not something anyone notices, and not noticing was the complaint.
+
+### The PDF was already built, and had never been called
+
+Asked in the same message: *"how we can render it as pdf? Maybe using typst? I think we did it in
+the mini me repo."* Right on all three counts. `POST /render-report/{thread_id}`
+(`backend/routes/rendering.py:328`) takes `{markdown, title, sources, used_asta}`, converts through
+`pypandoc` to Typst, wraps it in a template with a title page and a citation list, resolves image
+references against the thread's working directory so the figures land *in* the document, and
+compiles with `typst` — host-side, in-process, no LaTeX. The desktop app had never called it.
+
+It does now, from the palette: **Save the latest report as a PDF**. Rendering in Rust instead was
+never worth considering — a faithful markdown-to-PDF pipeline is a large dependency and a long
+tail of edge cases, and this one is already installed in the backend's venv and already what the
+web client uses, so a report rendered from the desktop app is byte-comparable with one rendered
+anywhere else.
+
+One detail that would have been a quiet defect: the citation list is built from a **separate**
+decode of `sources`, not from the side panel's bucket. Panel items are truncated to 96 characters
+to stay scannable, and a bibliography ending in `…` is not a bibliography. Pinned by a test that
+asserts the rendered citation outlives the panel's truncation.
+
+### The shape, again
+
+An artifact the backend considers delivered because it is in the state, and a researcher considers
+missing because it is not in the folder. Same root as §42, which found figures the agent never
+reported, and the same fix: **the client is the only thing that sees both sides, so the client
+reconciles them.** What made this one harder to spot is that nothing was broken — the panel listed
+it, the agent described it, and every layer was telling the truth about a file that did not exist.
+
+## 90. The conversations were never erased (2026-08-07)
+
+*"when I run git pull; cargo run the conversations doesnt load like this was erased, is this
+normal? what if we have an update and the user click on the button update. The conversation will
+dissapear?"*
+
+Two questions, and I answered the second one first and got the first one wrong. Worth recording in
+that order, because the mistake is the more useful half.
+
+### What actually happened
+
+`dfea94a` — "Keep background workers out of the conversation list" — made the sidebar filter
+`POST /threads/search` on `metadata: { minime_conversation: true }` (`protocol.rs:832`). The tag is
+written by `create_thread` (`protocol.rs:804`), so it is carried only by threads created *from that
+commit onward*. Every earlier conversation stopped matching, the search returned `[]`, and the
+sidebar said "Conversations you start will appear here" — which from the outside is
+indistinguishable from deletion. `git pull` is what delivered that commit.
+
+Measured on a real checkout: **0 of 30 stored threads carried the tag, and 26 of them had genuine
+message history.** The commit message had anticipated the consequence — *"threads created before
+this change no longer appear"* — and judged the casualties to be "almost all junk rows". That
+judgement was mine and it was wrong.
+
+`adopt_untagged_conversations` repairs it: before the first listing, if the tagged search comes
+back empty, every untagged thread **with a title** is adopted. A title is written by
+`rename_conversation` from the first question asked and by nothing else — the async-subagent
+middleware names none of the threads it creates — so it is exactly the discriminator the tag was
+introduced to provide, applied retroactively. It self-cancels the moment one tagged thread exists,
+so the cost after the first launch is one request.
+
+### The data-loss paths are real, and neither of them fired
+
+Traced from source while looking for something that turned out not to be there. Both are live and
+both belong upstream:
+
+- `checkpoint.py:71-75` registers the `PersistentDict` with the flush loop **before** calling
+  `d.load()`. When the load throws, lines 91-97 swallow it and leave an empty dict that is already
+  registered; `_persistence.py` calls `sync()` every ten seconds; `PersistentDict.sync()` pickles
+  the empty dict and `shutil.move`s it over the real file, under a comment reading
+  `# atomic commit`. Ten seconds after a failed load, the history is gone.
+- `database.py:167-184` deletes the conversation index outright on any load exception. Unpickling
+  it *imports* `langgraph_api.config`, which reads `REDIS_URI`/`DATABASE_URI` at import time — so a
+  missing environment variable alone is enough to raise inside `pickle.load` and take the index
+  with it.
+
+The `ModuleNotFoundError` branch names the trigger itself: *"Pulled updates that modified class
+definitions in a way that's incompatible with the cache."* So the worry behind the question was
+sound even though the diagnosis of the symptom was not.
+
+### The mistake, named
+
+I told the researcher their conversations had probably already been destroyed, and offered a chain
+of source citations proving it *could* happen. Every link was real. None of it was what happened.
+Having proved a mechanism exists, I stopped looking for the simpler explanation — and the simpler
+explanation was a filter this project had added five days earlier and documented as safe.
+
+That is a new shape for this document, and worth naming precisely: **a correct proof of a possible
+cause is not evidence of the actual cause.** §81's lesson was that silence is ambiguous. This one
+is sharper — a confident, well-evidenced answer to the wrong question reads exactly like an answer
+to the right one, and it cost a researcher an afternoon of believing their work was gone.
+
+What broke the tie was measuring: counting how many stored threads actually carried the tag. One
+count, against the real data, decided between two mechanisms that both "explained" the symptom.
+
+## 91. The adoption fix repeated the bug it was fixing (2026-08-07)
+
+§90 shipped `adopt_untagged_conversations` and claimed it restored the hidden history. An
+adversarial pass measured it instead of reading it, and it did not.
+
+`adoptable` accepted a thread if `metadata.title` was non-empty, reasoning that
+`rename_conversation` is the only writer of that key and background workers name nothing. Both
+halves are true. The conclusion is still wrong, for a reason that was one `git log` away:
+
+> `rename_conversation` shipped in **`4911094`, 2026-08-02** — the *same day* as `dfea94a`, the
+> filter it was written to work around.
+
+**No thread old enough to be hidden is new enough to have a title.** Measured against a real store:
+1 adoption out of 30, leaving 25 of the 26 threads with genuine history exactly as invisible as
+before. The severity argument in §90 — *26 conversations lost* — was answered by a fix that
+recovered one.
+
+That is the same shape as the bug, one level down: **discriminating on a marker that postdates the
+data it has to identify.** Written twice, five days apart, by the same reasoning each time —
+"nothing else writes this key, so it is exact" — with the question *"has it always existed?"*
+unasked both times.
+
+The test now is **messages**. Every hidden conversation has human writing in it; a background
+worker's thread carries a delegation's machinery and none. It costs one `GET /threads/{id}/state`
+per untagged thread on a list bounded at 200, paid on the single launch that repairs the history
+and never again. It cannot fail the same way, because it screens on a property of the
+conversation rather than on a marker some release happened to add.
+
+### What caught it
+
+Not a re-reading. **Counting.** Loading the real `.langgraph_ops.pckl` and asking how many threads
+each rule would actually adopt turned an argument into a number, and the number was 1. Every
+confident claim in §90 was individually true; the arithmetic between them was never done.
+
+## 92. The filter field: three fixes, no reproduction (2026-08-07)
+
+Reported a third time — *"This bug persist! the search bar its to thin! Please be careful and check
+why that happens!"* — after §72 and §88 had each declared it fixed. So it went to an investigation
+with an adversarial pass instead of a fourth guess. **Both the diagnosis and its refutation are
+worth keeping, because the refutation won.**
+
+### The proposed mechanism
+
+`ComposerElement` is a taffy **leaf with zero intrinsic width**: `composer.rs:701-711` calls
+`window.request_layout(style, [], cx)` with no children and no measure function, which becomes
+`taffy.new_leaf` (`gpui/taffy.rs:62-68`), and gpui's measure callback returns `Size::default()` for
+a context-less node (`taffy.rs:196-199`). Its only width is `relative(1.)` — a percentage. Taffy
+resolves a percentage against the parent's known size; when that is `None`, `maybe_resolve` returns
+`None` and `compute_leaf_layout` falls back to `unwrap_or(0.0)`.
+
+So the field's width floor is literally zero, and every width above it is *derived* rather than
+*stated*: `anchored()` is shrink-to-fit (`anchored.rs:107-111`), `ui.rs:735` states 320px, and then
+four more links re-derive it — a bare `Display::Block` div, two `w_full` percentages, and the
+Composer's own auto-width root. A taffy 0.9.0 replay of the exact style set, with one ancestor
+content-sized, produced **`FIELD_BOX = 18px`** — 0 content + `px_2` + `border_1`, which is the
+"~10px rounded rectangle" exactly.
+
+It also explained the second half, which three sections had conflated with the first: the
+placeholder escapes because `composer.rs:784-789` shapes with no wrap width and
+`composer.rs:878-881` paints at `bounds.origin` with **no `with_content_mask`**, and `filter_field`
+sets no overflow. A zero-width box does not clip its own text. That is a separate defect and it is
+real regardless.
+
+### Why the refutation stands
+
+Every citation checked out verbatim. The mechanism still **cannot fire in this element tree**:
+
+- The 320px panel width is not a lucky survivor — `git log -S"px(320.)"` finds it in `43dd19e`,
+  older than §72. It has been stated for the entire life of the bug.
+- `anchored()`'s shrink-to-fit is defused by its own child: taffy hands absolute children
+  `AvailableSpace::Definite(container_width)` (`flexbox.rs:2144-2153`), so the anchored node's
+  content size is exactly the 320 its child states.
+- The bare `Display::Block` div at `main.rs:1899` is stretched **unconditionally**, not
+  incidentally: `align_items: None` and taffy's `unwrap_or(AlignItems::Stretch)` (`flexbox.rs:437`).
+
+So the chain resolves, and the collapse the simulation produced needs a content-sized ancestor this
+tree does not contain.
+
+### What that leaves
+
+**§88's stated mechanism is wrong regardless of the outcome** — the percentage does not fail to
+resolve inside `anchored()`, and that section says it does. Retracted here.
+
+And the correct next step is **not a fourth style change**. It is one measurement: log
+`bounds.size.width` from `ComposerElement::prepaint` (which already receives it) or put
+`.debug_below()` on the field, open the picker on the Windows machine at 125% scaling, and read the
+number. If it is ~302 the bug is elsewhere entirely — a paint or DPI issue, not layout. If it is 18,
+real gpui disagrees with the taffy replay and the next step is dumping the actual taffy styles.
+
+Three fixes have now been shipped against this without one reading of what the box actually
+measures. **The measurement costs one run and discriminates between every remaining hypothesis;
+each guess has cost a release and a report from the person using it.**
+
+## 93. Planned — the SQLite checkpointer
+
+Proposed by the researcher: *"Maybe its worth the effort to construct our custom store and custom
+checkpointer … so we can use the best of rust and accelerate the conversation loading and also
+avoid conversations lost."* Right on the problem, and the docs settle a constraint this document
+had assumed wrongly.
+
+**`langgraph.json` takes `checkpointer` and `store` keys**, each a path to an async context manager
+yielding a `BaseCheckpointSaver` / `BaseStore`, and it works under `langgraph dev`. This is
+configuration, not a reimplementation of the server — which is what the §80 Postgres analysis had
+implicitly assumed when it concluded the only alternative was `langgraph up` and Docker. That
+conclusion stands for *Postgres*; it was too broad about custom persistence generally.
+
+**Adopt a SQLite checkpointer.** It closes both open hazards and the boot cost with one change:
+
+- No pickle, so the §90 failure mode — a load that throws, then a flush that writes an empty dict
+  over good data ten seconds later — has nothing to act on.
+- Lazy reads, so §80's boot cost stops growing with history. That is the actual answer to "why is
+  it slow", and no client-side work could ever have provided it.
+- `langgraph-checkpoint-sqlite` already ships `AsyncSqliteSaver`, so this is roughly ten lines of
+  glue rather than an implementation of five async methods.
+
+**Not Rust, despite the framing of the request.** The bottleneck is unpickling megabytes at boot
+and writing them back every ten seconds — I/O and serialisation, not computation, so there is no
+work for a faster language to do. Reaching Rust from Python means PyO3 and a compiled wheel per
+platform, which is a new way for the install to fail on machines that already spent §57–§60
+fighting WSL2. Rust earns its keep in this project where it already is: the client.
+
+**Store: wait.** Custom stores are documented **alpha** ("may experience breaking changes in minor
+version updates"), and replacing the built-in one means owning semantic search and TTL. The store
+holds `/memories/` and `/skills/`, it is small, and it is not what makes boot slow. Do the
+checkpointer, measure, then decide with numbers.
+
+**The one real obstacle** is that `langgraph.json` lives in the checkout, and §18's whole overlay
+design exists because a checkout the app does not own must not be edited. This lands cleanly on the
+app-provisioned backend and needs a deliberate decision for anyone pointed at their own clone.
+
+## 94. Owed upstream, consolidated
+
+Four now, all found here, none of them this app's to fix.
+
+- ⬜ `guardrails.py` claims sandbox isolation that host execution does not provide (§18).
+- ⬜ The theorizer reports a *guess* instead of the command's real output (§35) — seven rounds, the
+  most expensive defect of this project.
+- ⬜ `deepagents`' `start_async_task` passes no config, so no self-hosted deployment can give a
+  background run its model, key or recursion limit (§38/§39).
+- ⬜ `agent.py`'s `make_backend` docstring says the `langgraph dev` store "loses content on process
+  restart" (§82). It does not — the dev runtime's store is disk-backed. Load-bearing, because this
+  app tells researchers to restart the backend.
+
+And two new ones against `langgraph_runtime_inmem`, both data-loss paths, neither yet observed
+firing but both live for anyone running `langgraph dev`:
+
+- ⬜ **A failed checkpoint load silently overwrites good data.** `checkpoint.py:71-75` registers the
+  `PersistentDict` with the flush loop *before* `d.load()`. When the load throws, lines 91-97
+  swallow it and leave an empty dict that is already registered; `_persistence.py` calls `sync()`
+  every ten seconds; `PersistentDict.sync()` pickles the empty dict and `shutil.move`s it over the
+  real file under a comment reading `# atomic commit`. Ten seconds after a failed load, the history
+  is gone. The `ModuleNotFoundError` branch names the trigger in its own message: *"Pulled updates
+  that modified class definitions in a way that's incompatible with the cache."*
+  There is also a latent bug in the recovery attempt itself: `os.remove(self.filename)` at lines 88
+  and 94 is given the *prefix* `.langgraph_api/.langgraph_checkpoint.` with no `N.pckl` suffix, so
+  it always raises and is always swallowed — dead code that hides how bad the outcome is.
+- ⬜ **The conversation index is deleted outright on any load exception.**
+  `database.py:167-184` has a bare `except Exception` whose remedy is `os.remove(OPS_FILENAME)`,
+  with no existence check and no backup.
+
+Both would be fixed by the same principle: **a persistence layer that cannot read its file must
+refuse to write it**, not carry on with an empty copy and flush.
+
+## 95. The SQLite checkpointer, built (2026-08-07)
+
+§93 planned it; this is the build. Three pieces, and the shape of them is the interesting part:
+**none of it patches Python and none of it touches the checkout.**
+
+### It is configuration, not a patch
+
+Everything else in `overlay/minime_local` works by import hook, because `langgraph.json` loads
+`http.app` by file path and so bypasses `sys.meta_path` (§18). The checkpointer needs none of that.
+`langgraph.json` takes a `checkpointer` key naming an async context manager, and the app has
+generated its own copy of that config since §30 — `make_config.py` reads upstream's, adds the
+background graph, and writes `.mini-me-desktop.langgraph.json` beside it. One more key in the same
+generator, and the checkout is as untouched as it ever was.
+
+That retires the obstacle §93 named as the only real one. It also means the change is legible: a
+researcher can open the generated file and see where their conversations go.
+
+### Optional by construction
+
+`make_config.py` adds the key **only if `langgraph.checkpoint.sqlite` imports**. Without the
+package the config is byte-identical to what it was, and the backend keeps the pickle checkpointer
+and behaves exactly as before. Naming a checkpointer the server cannot load would convert a missing
+optional dependency into a server that does not boot — a strictly worse failure than the one being
+fixed.
+
+The Setup pane carries it as a **`Warn`, not a `Fail`**, with a one-click
+`uv pip install langgraph-checkpoint-sqlite`: nothing is broken without it, and a red row for
+something optional is how a diagnostics pane stops being read.
+
+### What it actually buys
+
+- **Boot stops growing with history.** `PersistentDict` loads every conversation in the
+  installation before the server answers anything (§80). SQLite reads rows when asked.
+- **A failed load stops being fatal.** §90/§94's chain — registered with the flush loop *before*
+  `load()`, exception swallowed, empty dict flushed over the real file ten seconds later under a
+  comment reading `# atomic commit` — has nothing to act on. Writes are transactional and
+  per-checkpoint, so a version change that breaks one row cannot take the other thirty
+  conversations with it.
+
+Deliberately **not** Rust, despite the request being framed that way. The cost is unpickling
+megabytes and writing them back — serialisation and I/O, not computation — so there is no work for
+a faster language to do, and PyO3 plus a per-platform wheel is a new way for the install to fail on
+machines that spent §57–§60 fighting WSL2 alone.
+
+The database sits at `.langgraph_api/checkpoints.sqlite`, **inside the distro**. That placement is
+now load-bearing rather than incidental: SQLite's file locking over WSL's 9p mount is not reliable,
+so a Windows-visible path is the one location that could corrupt it. Asked directly whether SQLite
+was an argument for running the backend natively on Windows, the answer is no — it is an argument
+for keeping the database exactly where it already is. The case for a native backend is the WSL
+install itself, which is a separate question with a separate experiment.
+
+### Migration, stated plainly
+
+There is none. Conversations already in the pickle stay there; SQLite starts empty and takes
+everything from the moment it is switched on. Writing a converter would mean unpickling the old
+store — the operation whose unreliability is the reason for the change. The Setup row says so.
+
+### What is pinned
+
+`the_generated_config_extends_upstream_and_gates_the_checkpointer` runs the real `make_config.py`
+and asserts both branches: upstream's `http`, `env` and `graphs` survive, the background graph is
+added, and the `checkpointer` key appears **only** when the package is available. It is a contract
+between two languages — Rust chooses the filename and passes `--config`, Python decides the
+contents — and §76 established this pattern after three rounds of each side being individually
+correct about a file neither had produced together.
+
+The module logs on **success**, naming the database path. §81 paid for that lesson three times: a
+checkpointer that silently failed to take effect would look exactly like one that worked, until
+someone noticed their conversations were still slow.
+
+## 96. On by default, because the default is the whole decision (2026-08-07)
+
+§95 shipped the SQLite checkpointer as an opt-in: a `Warn` row in Setup with a one-click install.
+The response was one sentence and it was right —
+
+> *"so we did sqlite as default right? remember to think in users rather then in me the
+> developer"*
+
+It was not the default, and that made it nearly worthless. **~98% of the people this is for cannot
+code.** To take an opt-in they would have to open Setup, read a yellow row about a pickle
+checkpointer, understand that a boot which grows with history and a flush that can overwrite good
+data are things worth avoiding, and click. Every one of those steps is a filter, and what gets
+filtered out is exactly the researcher least able to recover from a lost conversation.
+
+An optional safety feature is a feature for the people who already knew about the hazard.
+
+### What changed
+
+- **`setup-wsl.sh` installs it during provisioning**, right after `uv sync --extra dev`. Every
+  new install has durable storage before it ever starts a conversation.
+- **The launch command re-checks, on a checkout the app owns.** Everyone already using the app
+  provisioned before this existed; a fix that only reaches new installs leaves the current users
+  on the store with the failure modes. Guarded by an import check, so after the first launch it is
+  one fast subprocess and the install never runs again. `|| true` throughout — a backend that
+  starts on the old store is strictly better than one that does not start.
+- **Only where the app owns the environment.** `resolve_project_dir` already distinguishes the
+  checkout this app provisioned from one a developer pointed it at, and the rule that keeps it
+  welcome on someone's own clone is that it runs nothing destructive or surprising there.
+  Installing a package is precisely that kind of change, so it is gated on `owned` and pinned by a
+  test — the cost of getting that wrong is silent and lands in somebody else's virtualenv.
+- **Setup's row stops being a chore and becomes a report.** It still offers the install, because
+  the unowned case is real, but nobody on an ordinary install has to act on it.
+
+One test changed meaning rather than breaking: `the_sandbox_path_is_left_exactly_as_it_was` pinned
+that sandbox execution adds no launch preamble. The overlay copy and the generated config are
+host-execution machinery and still must not appear there — but **storage is not an execution
+concern**. Where conversations are kept is the same question whichever side runs the agent's code,
+so the install belongs on that path too, and the test now says what it actually meant.
+
+### The shape
+
+This document has recorded plenty of bugs where the code did the wrong thing. This one did exactly
+what it was written to do, correctly, with a test — and was still the wrong answer, because the
+question was never "can the researcher turn this on?" but "what happens to the researcher who
+never opens Setup?"
+
+**A default is not a convenience; it is the decision, taken on behalf of everyone who will never
+revisit it.** The right test for any option in this app is not whether it can be found — it is what
+happens to someone who never looks.
+
+## 97. Measuring the box, finally (2026-08-07)
+
+Three fixes have shipped against a filter field that renders about ten pixels wide with its
+placeholder painting out the side — §72, §88, and a third diagnosis that §92's refutation
+dismantled. **Not one of them began by reading what the box actually measures.**
+
+`prepaint` has received `bounds` the entire time. The measurement was one line away through all
+three attempts, and each attempt instead reasoned from CSS intuition about a layout engine whose
+behaviour was checkable.
+
+So: `ComposerElement::prepaint` now reports its own width. Under 40px it **warns**, naming the
+field by its placeholder. Otherwise, with `MINIME_LAYOUT_DEBUG` set, it reports at info. Both
+branches speak, because §81 paid three times for the lesson that a component which only reports
+failure cannot be told from one that was never reached — "no warning" has to be confirmable as
+*measured and fine*, not assumed.
+
+The number discriminates between every hypothesis left:
+
+- **≈302** (÷ the display scale) — the field is laid out correctly and the bug is elsewhere:
+  paint, DPI, or something about how the window is composited. Layout is exonerated and §92's
+  simulation was right that the collapse cannot happen in this tree.
+- **≈18** — real gpui disagrees with a taffy 0.9.0 replay of its own styles, which is a finding in
+  itself, and the next step is dumping the styles taffy actually receives rather than the ones the
+  source appears to set.
+
+### The companion defect, which is not the width
+
+The text is shaped with **no wrap width** (`composer.rs:784-789`) and painted at `bounds.origin`
+with no clip, and `filter_field` sets no overflow. So a field that measures wrong does not
+truncate — it draws straight across whatever is beside it. That is why a ten-pixel box appeared to
+*contain* a full-length placeholder, and it is why three sections treated one symptom as one bug.
+
+`window.with_content_mask` now bounds the painting. It fixes no width. What it does is convert any
+future layout mistake from "text floating over unrelated UI" into "text visibly cut off" — a
+symptom that points at its own cause.
+
+### The rule this is really about
+
+**A measurement that is one line away is not an optimisation to reach for after the guesses run
+out; it is the first thing to write.** Three releases and three reports from the person using the
+app were spent avoiding it. The same shape as §91, where counting how many threads a rule would
+actually adopt turned an argument into the number 1 — and as §81, where one log line on success
+ended four rounds of misdiagnosis.
+
+Every one of those was cheap, available from the start, and skipped in favour of reasoning about
+code that could simply have been asked.
+
+## 98. The generator that could not import itself (2026-08-07)
+
+*"I noticed that when I moved the data to sqlite I see this message and I cannot start any
+conversation"* — `backend exited during startup with exit code: 1`.
+
+Mine, and squarely. §95 added one line to the top of `make_config.py`:
+
+```python
+from minime_local import checkpointer as sqlite_checkpointer
+```
+
+The launch command runs that file **as a script**:
+`.venv/bin/python <overlay>/minime_local/make_config.py .`. Python then puts the *script's own
+directory* on `sys.path` — `minime_local/`, not the overlay root above it — so the package
+`minime_local` is not importable from inside itself. `ModuleNotFoundError`, exit 1, and because the
+generator is joined to the server with `&&` (deliberately, §30: a config that failed to generate
+must stop the launch rather than start a coordinator holding tools pointing at a graph nobody
+serves), the backend never started at all.
+
+Fixed by inlining the three-line availability check. `checkpointer.py` keeps its own copy for the
+server, which loads it by file path and needs no package either. Duplication measured against a
+backend that cannot start is not a close call.
+
+### The test passed while production was broken
+
+This is the part worth keeping. §95 shipped with a test —
+`the_generated_config_extends_upstream_and_gates_the_checkpointer` — that ran the real
+`make_config.py` and asserted the real output. It passed. It kept passing while the app would not
+boot.
+
+Because it invoked the generator **differently from production**: `python3 -c` with
+`sys.path.insert(0, overlay)`, which is precisely the arrangement that makes the broken import
+work. The test constructed the one environment in which the bug is invisible, and did so in the
+course of being careful — the `sys.path` line was written to make the import succeed, which is
+exactly what production could not do.
+
+**A test that exercises a different invocation than production is not testing production.** The
+replacement, `the_generated_config_survives_being_run_as_a_script`, shells out to the file by path
+with `PYTHONPATH` removed — the same call `generate_config_command` builds. It fails against the
+shipped code and passes against the fix.
+
+That is a different failure from §81's and §91's, and worth distinguishing: those were about not
+looking. This one looked, wrote a test, and *arranged the conditions under which the answer would
+be reassuring*. The closest relative is §92 — a taffy simulation that reproduced a bug the real
+tree cannot produce. Both times the model of the system was built to be runnable rather than to be
+faithful, and the difference only showed on the real machine.
+
+## 99. 0.0px, 38.4px, 204px, 533px (2026-08-07)
+
+The measurement §97 added, from one real window:
+
+```
+INFO  text field width  width=204.0    field=Search conversations
+INFO  text field width  width=533.6    field=Ask Mini-Me…
+WARN  too narrow        width=0.0      field=Filter themes
+WARN  too narrow        width=38.4     field=Search Zed's theme gallery
+```
+
+Four numbers, and they settle in one reading what three fixes and two investigations could not.
+
+- **The field is not the problem.** The same `filter_field` helper, the same `ComposerElement`,
+  measures 204px in the sidebar and 533px in the composer. Nothing about the widget is broken.
+- **The popup is.** Both fields inside the theme picker collapse, and only those.
+- **One of them is exactly `0.0`** — not small, not rounded: zero. That is a percentage resolving
+  against an indefinite parent and falling back to `unwrap_or(0.0)`, which is precisely the
+  mechanism §92's investigation described.
+
+So the investigation was right about the mechanism, and **the refutation was wrong that it cannot
+fire here.** It argued the popup's declared 320px is definite and propagates by flexbox stretch,
+citing taffy's `unwrap_or(AlignItems::Stretch)`. The reasoning was sound, every citation checked
+out, and the window disagrees. Something between the popup and the fields is not carrying the
+number down — and 0.0 is proof, not inference.
+
+The chain had exactly one link that states nothing: the popup's content was wrapped in a bare
+`div().child(panel).on_mouse_down_out(…)`, which in gpui is `Display::Block` with `width: auto`.
+Every `w_full` beneath it was a percentage of that. It is now a flex column with `w_full` — a
+stated width, in the one place between the 320 and the fields that had none.
+
+### And a floor, because derived widths keep evaluating to nothing
+
+`ComposerElement` had two widths and both were *derived*: `relative(1.)` is a fraction of the
+parent, `flex_grow` is a share of the parent's spare room. Every fix in this saga added another
+derived width to a chain whose problem was that it was entirely derived — §72 added a percentage,
+§88 added a flex-grow, and the measured result of both was 0.0.
+
+`min_size.width = px(120.)` asks nothing of any ancestor. It does not fix the popup; it means the
+worst case is a small control rather than an invisible one, wherever this field is used next.
+
+### What actually ended it
+
+Not insight. `prepaint` has received `bounds` since the element was written, and printing it took
+one line. Three releases, three reports from the person using the app, one detailed investigation
+and one detailed refutation were spent on a question the program could answer about itself.
+
+§81 was one log line on success. §91 was counting how many threads a rule would adopt. This is one
+`f32` from a function that already had it. **The instrument is nearly always cheaper than the
+argument, and it is nearly always skipped.**
+
+Still to confirm on a real window: that the two fields now measure like their siblings. The
+logging stays in — it costs nothing, and it is the only reason this section exists.
+
+## 100. The filter field, confirmed — and the thumb on the swatches (2026-08-07)
+
+§99's fix is confirmed on a real window: *"the search bar its fixed."* Both fields in the theme
+picker now lay out like their siblings, and the `WARN` is gone. Four numbers ended a bug that had
+survived §72, §88, an investigation, and a refutation of that investigation.
+
+The logging stays. It costs nothing when there is nothing to say, and it is the only reason there
+is a §99 rather than a fourth guess.
+
+### The scrollbar was sitting on the rows
+
+Visible in the same screenshot. `scrollbar` paints at `right: 2px`, `6px` wide, so it owns the last
+eight pixels of whatever it is drawn over — and the theme rows ran the full width beneath it, which
+put the thumb on their right border and their last colour swatch.
+
+Two numbers that had to agree and never had to be written down together. `SCROLL_GUTTER` states it
+once and both sides use it: the bar's geometry on one side, `pr(SCROLL_GUTTER)` on the lists it
+covers on the other.
+
+Only the two picker lists needed it. The transcript and the artifacts panel already carry `p_4`,
+which is wider than the gutter — so this was never a general defect, just the two places where
+content was allowed to reach the edge.
+
+### The smallest version of a pattern this document keeps recording
+
+A constant in one file and a layout decision in another, agreeing by coincidence until one of them
+moved. §72's box "stated" a width that was a percentage; §88's `flex_grow` needed a row that was a
+block; §98's import needed a `sys.path` the launch never sets. Each time, two things had to hold
+together and only one of them said so.
+
+The fix is always the same shape: **write the number once, where both sides can read it.**
+
+## 101. The six reports, written (2026-08-07)
+
+Written up as filable documents in `docs/upstream/`, one per defect, each carrying evidence with
+`file:line`, what it costs, and a suggested fix. Not filed: filing is an outward-facing act on
+somebody else's repository, and who does it and when is not this repo's call.
+
+Two audiences, and they are not the same kind of ask.
+
+**Mini-Me** gets four, and three of them are about *what a component says*, not what it computes:
+
+- The **theorizer** reports an inferred cause where the command's real output belongs. The CLI it
+  wraps fails with exit 0 and empty output, so the two together defeat both "read the error" and
+  "log the failures" — six real defects were found and fixed while chasing a seventh that was
+  neither. The fix is to print the exit code, stdout, stderr and the *source* of the token; naming
+  the source alone would have ended it in one round.
+- **`guardrails.py`** tells the researcher a command is sandboxed at the moment they are deciding
+  whether to allow it. Under local execution it is not. That is the one sentence standing between
+  a person and a command on their own filesystem.
+- **`agent.py`'s docstring** says the dev store loses memories on restart; it does not, and this
+  app has a Restart button it tells people to press.
+- **`deepagents`' `start_async_task`** creates the run with no `config`, so background work
+  inherits no model, no key and no recursion limit — fine on LangGraph Platform, broken on every
+  self-hosted deployment, and silent because the run is created successfully and fails later
+  inside a graph nobody is watching.
+
+**langgraph** gets two, both silent data loss, both reachable by anyone running `langgraph dev`.
+They share a single sentence as their fix: **a persistence layer that cannot read its file must
+refuse to write it.** One registers an empty dict with a flush loop that overwrites the real file
+ten seconds later; the other deletes the thread index on any exception, including one caused by an
+unset environment variable.
+
+### What writing them up changed
+
+Two things sharpened in the writing that had been fuzzy in the plan.
+
+The `os.remove` in the checkpoint recovery path is **dead code** — it targets the filename prefix
+without the `N.pckl` suffix, so it always raises and is always swallowed. That looks like a
+harmless bug and is the opposite: because the delete fails, the file survives to be overwritten
+with valid empty data, instead of being left corrupt where a human might notice.
+
+And three of the four Mini-Me reports are the same defect in different clothes: **a component
+stating something it does not know.** A guessed cause, a safety claim that is conditionally false,
+a docstring describing a behaviour the runtime stopped having. None is a crash. All three cost
+somebody hours, because the wrong thing to say is more expensive than saying nothing.
+
+## 102. The work was never lost, only unwatched (2026-08-07)
+
+I had just flagged a limit on the theorizer: the poll that observes a terminal state is also the
+thing that persists the result, so closing the window during a 5–15 minute run means nothing local
+ever writes it. The reply reframed it:
+
+> *"but asta cli let you call theorizer so you can get metadata from their remote process"*
+
+Which is the whole answer. **The run lives on Asta's hosted service, keyed by a task id.** Closing
+the window never stopped the work — it stopped our watching of it. Nothing was lost; something
+merely stopped being observed, and those are only the same thing if the id is gone too.
+
+It is not gone. It is in the thread's artifacts, and — this is the part that makes the fix small —
+**in a response the client was already making.** `GET /threads/{id}/state` returns `values`
+carrying the messages *and* the artifacts, and `conversation_messages` read `values.messages` and
+threw the rest away.
+
+So reopening a conversation now decodes that same payload: outputs, spine, and every job's task id
+and status. `track_job` re-arms the poll for anything still running, and already declines to poll a
+finished one (a guard that existed for a different reason and turned out to be exactly right here).
+A theorizer left running yesterday is picked back up on open, and the poll that persists its
+theories happens after all.
+
+### The shape, which is becoming familiar
+
+The third time in three days that a response already on the wire was decoded down to the one field
+someone had needed at the time:
+
+- §89 — a report's `{title, markdown}` reduced to a title for a side panel, so the only copy of the
+  body was discarded and the researcher's folder held no report.
+- §99 — a width that `prepaint` had received all along, never read.
+- Here — artifacts fetched on every conversation open, parsed for messages only.
+
+None was a bug in the sense of code doing the wrong thing. Each was a decoder written to answer one
+question, then reused for a second question it silently could not answer. **The cost is never
+visible at the call site**, which is why all three survived so long: nothing was thrown, nothing
+was logged, and the missing capability looked like an absent feature rather than a discarded one.
+
+Worth asking of the next decoder: *what else was in that response, and who will need it?*
+
+## 103. About, and crediting Asta (2026-08-07)
+
+Four gaps named against the web app; this is the first two, which are one modal.
+
+**An About window.** Ten specialists delegate to each other, and a researcher meets them one at a
+time, in a trace, mid-answer. A list is the cheapest orientation there is — plus where the data
+comes from, since Asta, CIP Dataverse, AGROVOC and Crop Ontology are other people's catalogues and
+which one an answer leaned on changes how it should be read.
+
+**The team list is read from the live registry** (§76), never written into the modal. That list
+exists precisely so a copy in the client cannot drift the first time upstream renames a specialist,
+and an About box naming agents the backend no longer has would be that defect wearing a friendlier
+face. When the registry is empty it says why — the backend has not assembled a coordinator yet
+(§78) — rather than showing a blank space that reads as "there are none".
+
+### The attribution is an obligation, not a nicety
+
+The Allen Institute asks that work using Asta cite AstaBench. A tool that makes their search easy
+to use while making the citation hard to find is taking something without saying so. So the
+reference is in the modal, in full, and **selectable** — a citation you cannot copy is a citation
+someone will retype wrongly.
+
+Beside it, the disclosure this organisation requires of its own people: that generative AI produced
+the analysis, and that a subject-matter expert should check it. Both belong in the same place,
+because they answer the same question — *what do I owe when I publish this?*
+
+### Where code runs — and not repeating the bug we just reported
+
+The web app's About says every conversation runs in an isolated LangSmith sandbox. **On this app
+that is usually false.** Host execution is the default (§11): a local-first workbench shipping the
+researcher's own files to a rented VM to be read was the wrong shape.
+
+So the modal reads `sidecar.execution()` and says which one this install is actually in, naming the
+folder in the local case. Saying the reassuring thing regardless is exactly the defect this repo
+reported upstream against `guardrails.py` a few hours ago
+(`docs/upstream/mini-me/guardrails-claims-isolation.md`), and repeating it in the document that
+explains the product would be worse than leaving it there.
+
+That is the third component in two days caught **stating something it does not know** — the
+theorizer's guessed cause, the guardrail's conditional promise, and now nearly this. The tell is
+the same each time: a sentence written once, about a system that later grew a second mode.
+
+### Still to come from the same list
+
+- **Per-subagent model selection.** The backend already accepts it —
+  `configurable.model_config.subagents` is a `{name: "provider::model"}` map
+  (`backend/models.py:104-122`), and the client sends only `default` today. Client-side work only.
+- **Projects in the conversation list.** Conversations are flat; there is no grouping, so a
+  researcher with three lines of work has one undifferentiated column.
+
+## 104. A model per specialist (2026-08-07)
+
+The second of the four gaps against the web app, and the one with the most behind it.
+
+**The backend has accepted this the whole time.** `configurable.model_config.subagents` is a
+`{name: "provider::model"}` map, read at `backend/models.py:114` and folded into the provider set
+the request needs keys for at `:117-122`. The client sent `default` and nothing else. So this is
+client-side work only — no overlay, no upstream change, no new route.
+
+### Why it is worth having
+
+The specialists do genuinely different work, and one model for all ten is either an expensive way
+to grep or a cheap way to write a paper. Literature search wants a long context window and cheap
+tokens across many calls. A report wants the best prose available, once. Data cleaning wants
+neither and runs dozens of times a session.
+
+### The part that would have failed silently
+
+The backend derives the providers it needs keys for from the coordinator's spec **and every
+override**. Point one specialist at a second provider and that provider's key becomes part of the
+request — so sending the overrides without the key produces a turn that dies *inside a subagent*,
+several minutes in, reading exactly like the specialist being broken.
+
+So `model_choice` collects a key for every other provider an override reaches, and the picker
+**names a provider with no key stored, on the row, before it is chosen**. A researcher finds out
+at the moment of choosing rather than at the end of a long turn. It is muted rather than red: a
+missing key is a thing to do next, not a thing done wrong.
+
+Two details settled while writing it:
+
+- **"Use default" is not the same as choosing the coordinator's current model.** One follows
+  whatever the coordinator becomes; the other is a choice that happens to match today and will not
+  move with it. The picker offers both, and `model_choice` drops an override equal to the default
+  rather than sending a shape with no effect.
+- **The list is the live registry** (§76), so it cannot offer a specialist the backend does not
+  have — the same argument that put the registry there, and the same one behind §103's About list.
+
+### And a small consolidation
+
+The theme list, the model list and the new per-specialist list had drifted into three shapes for
+the same row: a label, a tick, a hover. `picker_row` is now one function, which is also where the
+"no key stored" note lives, so a future picker cannot forget to say it.
+
+### Where this leaves the four
+
+- ✅ Per-specialist models.
+- ✅ An About window, with the Asta attribution (§103).
+- ⬜ **Projects in the conversation list.** The remaining one, and the only one that is a data
+  question rather than a screen: is a project a folder on disk, or a name on the thread? Claude
+  Code groups by working directory, which is real but does not map — a researcher's three lines of
+  work all sit under `Documents\Mini-Me`. A name in thread metadata, grouped in the sidebar, is
+  the shape that fits what is already there.
+
+## 105. Projects are folders (2026-08-07)
+
+The last of the four gaps, and the only one that was a data question rather than a screen. Asked
+whether a project should be a label on the thread or a real directory, the answer was folders —
+*"I think working in folders makes more sense in science"* — and that is right for a reason this
+document had already written down once.
+
+§42 moved outputs out of the distro into `Documents\Mini-Me` on a single argument: **files a
+researcher cannot find are files that do not exist.** A project is the unit a scientist actually
+works in, so the same argument applies one level up. A grouping that lives only inside the app is
+not a grouping they can zip, back up, or drop on a shared drive.
+
+### Both, doing different jobs
+
+Folders and metadata were framed as alternatives. They are not:
+
+- **The folder** is where the files live: `Documents\Mini-Me\<project>\<conversation>\`.
+- **The label on the thread** is how the app knows which folder a conversation belongs to.
+
+The label is what survives contact with a scientist. Rename a folder in Explorer, or move one to a
+shared drive, and an app that inferred the project *only* from the path is now silently wrong. With
+the label it can notice and say so.
+
+### Three decisions, taken by the person who uses it
+
+- **Moving a conversation moves its folder.** What the app shows and what Explorer shows stay the
+  same story. Only possible while no turn is running, because the backend holds that path open.
+- **Existing conversations stay where they are.** They appear ungrouped; nothing on disk moves on
+  first launch. The answer to "what happens to my work" is *nothing*.
+- **New conversations inherit the last project used.** You pick once and keep working, rather than
+  answering a dialog before every question.
+
+### The mechanism was already there
+
+`overlay/minime_local/workspace.py` already chose a thread's directory from a config key — that is
+how a background worker gets pinned to the conversation's folder rather than its own (§43). A
+project is the same mechanism with a second key, `__workspace_project__`, so this needed no new
+seam, no upstream change, and no route.
+
+### The one genuinely dangerous part, and the test for it
+
+The project name becomes a **path segment**, computed twice: by Python when the backend writes a
+turn's outputs, and by Rust when the app goes looking for them. One character of disagreement and a
+researcher's figures land somewhere the app will never show them — §89's failure with a longer fuse
+and no error anywhere.
+
+It cannot be written once, since it lives in two languages. So it is checked instead:
+`the_rust_and_python_project_names_agree` runs both implementations over thirteen names — traversal
+attempts, Windows-illegal characters, accents, empty strings, a 200-character name — and asserts
+byte equality. That is the same defect shape as §100's scrollbar width in one file and layout in
+another, caught before it shipped rather than after.
+
+Sanitising happens on **both** sides rather than trusting the client, because a name is a thing a
+person types and `../..` must not write outside the workspace root.
+
+### Where this stands
+
+Built: the folder layout, both sanitisers, the move, and the cross-language test. Still to come:
+the sidebar grouping, the "move to project" action, and creating a project — which is now
+straightforward, because the part that could quietly lose someone's data is settled.
+
+## 106. Projects, visible (2026-08-07)
+
+§105 laid the ground — the folder layout, both sanitisers, the move, and the test keeping the two
+languages byte-identical. This is the half a researcher touches.
+
+**A project is exactly "a name some conversation is filed under".** There is no registry of
+projects, because a registry is a second place for the truth to live and the first thing to fall
+out of step with the sidebar. The picker derives its list from the conversations themselves, so a
+project exists while something is in it and stops existing when nothing is — which is also what a
+folder does.
+
+**Creating one is typing its name.** The picker's filter field doubles as the field a new project
+is named in: type something no project matches and the top row offers to create it. Choosing an
+existing project and creating a new one are the same gesture, so there is no second mode to learn
+and no "New project" dialog to find.
+
+### The order the work happens in
+
+`file_in_project` moves the folder **first**, and a failure stops there. Writing the metadata first
+and then failing to move would leave the app believing a conversation lives somewhere its files are
+not — §89's shape again, and worse here, because from the researcher's side it would look like the
+files had been deleted.
+
+It refuses mid-turn, and says why: the backend holds that path open for the length of a turn.
+
+### Three small decisions that are mostly about not being annoying
+
+- **Headings appear only once there is more than one group.** One project is not a grouping; the
+  heading would be noise above every row a researcher owns.
+- **The order is alphabetical, with "No project" pinned last.** A sidebar that reorders itself as
+  work moves is one nobody builds a memory of.
+- **Clicking a heading opens the folder.** That is the entire reason a project is a directory
+  rather than a label, and it should be one click from the thing that names it.
+
+### What the two halves each do, again
+
+The pairing is easy to lose, so: the **folder** is where the files are; the **label on the thread**
+is how the app knows which folder. Two tests hold the ends together —
+`a_conversations_project_is_read_from_the_thread_not_the_folder` and
+`a_run_names_the_project_folder_its_outputs_belong_in` — on top of §105's cross-language check that
+both sanitisers produce the same path segment.
+
+### The four gaps, closed
+
+- ✅ A model per specialist (§104).
+- ✅ An About window with the Asta attribution (§103).
+- ✅ Projects, as folders (§105, §106).
+
+Untested on a real window: all of it. The next screenshot is the one that matters, and on this
+project's record it will find something — §85 and §99 were both settled by one.
+
+## 107. "It says run in a sandbox" (2026-08-07)
+
+Three findings from the first real window on §106. Two were mine; the third was a good idea.
+
+### The About box told every researcher the wrong thing
+
+It read *"Runs in an isolated sandbox"* on a machine running host execution. The check was:
+
+```rust
+if self.sidecar.execution() == "local"
+```
+
+and the label is `"host (local)"` (`backend.rs:810`). The comparison never matched, so the false
+branch was the only one anyone ever saw.
+
+**This is the defect this repo reported upstream against `guardrails.py` the same morning** — a
+component telling the researcher their code is sandboxed when it is running on their own
+filesystem — reintroduced eight hours later, in the section written to avoid it, by comparing
+against a string I assumed instead of read.
+
+§79 had already settled the rule and I did not apply it: *"matching on prose to discover this is
+how the two get confused in the first place."* The fix is `runs_locally()`, answered from the
+`Execution` enum. There is no string to be wrong about.
+
+Worth stating plainly, because the pattern is now specific rather than general: **every time this
+project has compared against a human-readable label, the label has been the thing that changed.**
+§79 was `Started::{Attached, Spawned}`. This is the same fix, and the same lesson had a section
+number already.
+
+### New thread left the project
+
+Filed under `TEST2`, pressed New, landed in `No project`. `NewThread` consulted
+`settings.project`, which is only written when something is *filed* — so opening a conversation
+already in a project, then starting a new one, went outside it.
+
+Three changes, and the shape is that "the project you are in" has more than one source:
+
+- **New thread leaves the project alone.** `sidecar.project()` already holds it; overwriting from
+  a setting was the bug.
+- **Opening a conversation remembers its project**, not just adopting it. Looking at work counts
+  as being in it.
+- **Startup restores it**, so the first conversation of a morning lands where yesterday's work is.
+
+### A `+` on each heading
+
+Asked for, and right: starting work in a project should not mean starting it somewhere else and
+then filing it — which is a folder move for something that had never needed to be anywhere. It
+appears on hover, the same way the rename and delete controls on the rows below do.
+
+### The other two held
+
+Per-specialist models worked on a real turn, and the Asta citation copies. The provider tag on
+each row — *"Anthropic — no key stored"* — did the job it was added for: it says what is missing
+at the moment of choosing, rather than several minutes into a turn that fails inside a subagent.
+
+## 108. Filed at birth, and a spine that belongs to nobody (2026-08-07)
+
+### The `+` put files in the right folder and the row in the wrong place
+
+Pressing `+` on a project heading gave a conversation under **No project**. The project drives two
+different things, and §106 wired only one of them:
+
+- `sidecar.project()` → `configurable.__workspace_project__` → **which folder the backend writes
+  into**;
+- the thread's `minime_project` metadata → **which heading the sidebar shows the row under**.
+
+`file_in_project` sets both. Creating a thread set only the first, because `create_thread` was
+written before projects existed and nobody went back to it. So a conversation started from a
+project's own `+` had its files in the right place and its row outside — right by one measure and
+wrong by the other, which is worse than being wrong by both, because half of it looks like it
+worked.
+
+Fixed at the source: `POST /threads` carries the project alongside the conversation tag, so a
+conversation is filed at birth rather than needing a move it should never have needed.
+
+**The tell was there in §105 and I wrote it myself**: *"the folder is where the files live; the
+label is how the app knows"*. Two facts, deliberately kept separate — and then set in one place
+and not the other. Every appearance of this project's oldest shape has been two things that must
+agree, and this is the first where I had already written down that they were two.
+
+### The research spine is not per project, and never was
+
+Also reported: the right-hand panel shows completed work from conversations since deleted, and
+from other projects. That is not a bug in this app — it is Mini-Me's design, stated in
+`backend/runtime.py:141-154`:
+
+```python
+def _project_namespace(user_id: str) -> tuple[str, ...]:
+    """Namespace for the persistent research-project spine.
+
+    User-scoped as ``(user_id, "project")`` — deliberately **not** keyed by
+    assistant_id (unlike memories) …
+    * The research project is the user's, spanning every assistant/thread.
+```
+
+One spine per person, accumulating forever. That was right when a researcher had one line of work.
+With projects it is wrong twice over: it mixes them, and it never forgets.
+
+**Making it per project is not a small change**, because the namespace is computed in two places
+that must agree:
+
+- `_project_namespace_for_runtime` (`runtime.py:157`) runs inside a turn and *can* see
+  `__workspace_project__` through `get_config()`;
+- `routes/project.py:76,100` computes the same namespace in an **HTTP handler**, which has no run
+  config — and the docstring says that symmetry is the reason it is keyed the way it is.
+
+So patching the runtime side alone would leave `GET /project` reading a namespace the turns no
+longer write to: the panel would go blank rather than become correct.
+
+Three options, none of them free:
+
+1. **Namespace the spine by project, and give the route the project too** — a query parameter the
+   client already knows. Correct, and it needs the route to change, which means an upstream
+   change rather than an overlay patch.
+2. **Stop calling `GET /project` when a project is active** and rely on the spine that arrives in
+   each `values` snapshot, which is per-run and would carry the right namespace once the runtime
+   side is patched. No upstream change; the panel is empty until the first turn in that project.
+3. **Leave it user-wide and say so** — one line in the panel, so it reads as a career summary
+   rather than as this project's state.
+
+Not decided here. It is the researcher's call which of "correct but needs upstream", "works now
+but starts empty", or "honest about what it is" fits how they work — and this document has a bad
+record of choosing a default on someone's behalf and finding out later (§96).
+
+## 109. A spine per project (2026-08-07)
+
+§108 laid out three options for a research panel that mixed every project and never forgot a
+deleted conversation. The answer was the first: *"do 1, so we can change it properly."*
+
+Properly, here, means two things at once — because Mini-Me is a pinned, unmodified reference
+checkout and the locked decision is *bundled upstream, not forked*:
+
+1. **`overlay/minime_local/spine.py`**, so it works now, with the checkout byte-for-byte upstream.
+2. **`docs/upstream/mini-me/project-spine-is-not-per-project.md`**, so it can land at the source,
+   where the route can simply take a parameter instead of an overlay smuggling one through a
+   `ContextVar`.
+
+That is exactly the shape §18 chose for host execution, and the sentence it used still applies:
+*this is the bridge, not a rejection of the PR.*
+
+### Why both halves had to be patched
+
+`_project_namespace` has two callers that must agree: one inside a turn, which can see the run's
+`configurable`, and two HTTP handlers, which cannot. Scoping only the runtime side would leave
+`GET /project` reading a namespace turns no longer write to — the panel would go **blank** rather
+than become correct, which is a worse outcome than the bug.
+
+So the overlay patches the namespace function (covering both callers at once, since both import
+it) and wraps the two handlers to read `?project=` into a `ContextVar` the patched function
+consults. The client sends it. Backwards compatible by construction: with no project the namespace
+is unchanged, so every spine that exists today is what an ungrouped conversation reads.
+
+### Two things that would have failed quietly
+
+**The wrapper had to be `async`.** The handlers are coroutine functions, so a sync wrapper would
+set the variable, build the coroutine, reset the token, and return it *unawaited* — the value gone
+before the handler ran. Every request would have read the ungrouped spine while the code looked
+right. Caught while writing it, which is luck; the shape is §98's exactly, where a test passed
+because it exercised a different invocation than production.
+
+**The patch is armed unconditionally.** `install()` returns early unless host execution is on, and
+folding the spine patch into that would have tied "which project's spine am I seeing" to "where
+does the agent's code run" — two unrelated facts sharing one switch, which is §78 word for word.
+The targets are now split: host-execution patches stay conditional, the spine ones always run.
+
+### And the panel is cleared when the project changes
+
+`self.project = None` before each refresh. A stale mission sitting above a new project's empty
+list reads as that project having inherited the old one's work — the same reason §79's sidebar had
+to say "loading" rather than show nothing.
+
+## 110. The log said which copy (2026-08-07)
+
+Everything §109 asked for showed up in the backend log — the spine per project, both route handlers
+wrapped, and the SQLite checkpointer live with its database on ext4 inside the distro, where §95
+required it. But two lines further down:
+
+```
+Configuring custom checkpointer at
+  /mnt/c/Users/LENOVO/Documents/GitHub/mini-me-desktop/overlay/minime_local/checkpointer.py
+Importing graph  graph_id=background
+  path=/mnt/c/.../overlay/minime_local/async_agents.py
+```
+
+**`/mnt/c`.** The background graph and the checkpointer are being imported across WSL's 9p mount
+on every launch — the exact dependence §25 removed by provisioning a copy inside the distro, and
+§33 later found to have gone stale in the other direction.
+
+### Why, and why it was invisible
+
+`make_config.py` writes **absolute** paths into the generated config, derived from its own
+`__file__`. So whichever copy runs it decides where the server imports from for the life of the
+process. The launch resolved the overlay two different ways in the same command line:
+
+- `PYTHONPATH` used `overlay_expression`, which probes for the in-distro copy and falls back to
+  Windows — correct;
+- the generator was handed the raw host path — so it ran from `/mnt/c` and wrote `/mnt/c` into the
+  config.
+
+Nothing fails. The imports work, just from the wrong side, and the only evidence is a path inside a
+log line. That is the third finding in three days whose whole existence was a value nobody had
+looked at: §99's `bounds.size.width`, §91's count of adoptable threads, and now this.
+
+Fixed by handing the generator the same expression, double-quoted rather than `shell_quote`d —
+quoting a command substitution as a literal would defeat it, while double quotes keep it running
+and still suppress word splitting on a path with a space in it.
+
+### The test is a count
+
+`the_config_generator_runs_from_the_in_distro_overlay` asserts the launch probes for
+`sitecustomize.py` **twice** — once for the generator, once for `PYTHONPATH`. Before the fix there
+was exactly one. That is a more honest assertion than matching a path, because the thing that was
+wrong was not the path's shape; it was that only one of two places asked the question.
+
+### Also from the same log
+
+- `could not adopt older conversations` fired at `warn` on every launch: the adoption pass runs
+  before the first conversation list, which happens while the backend is still starting. A warning
+  that appears every time is one nobody reads on the day it means something — `debug` now, which
+  is what `list_conversations` beside it had already concluded for itself.
+- `thread_dir` was left behind when projects gave a conversation's folder a project component.
+  Removed.
+
+## 111. Background work was invisible twice over (2026-08-07)
+
+Two findings from one screenshot, and they share a cause: **a background worker runs on its own
+LangGraph thread**, so nothing it does reaches the conversation's stream. Everything this app
+knows about it comes from the `async_tasks` map in each snapshot.
+
+### The provenance record never heard of it
+
+*"the provenance plots dont capture async agent in the background."* Correct, and it had nothing to
+work with: the record is built from stream events, and a background worker emits none here. The
+`async_tasks` map was decoded — for the Jobs panel — and never passed on.
+
+It is now, through `observe_background`, which differs from `observe` in one way that matters:
+**it searches every turn, not just the one in progress.** Background work outlives its turn. A
+theorizer launched in turn three is still in the snapshot during turns four and five, and the
+per-turn lookup would file it three times, as three different pieces of work by the same
+specialist. The graph would show a node visited three times for one run.
+
+So the deliberate handoffs a researcher makes — the thing `/subagent`'s background mode exists for
+— now appear in the record beside the delegations the coordinator makes itself.
+
+### And it was writing to the wrong folder
+
+Found while reading the forwarding code rather than reported. `FORWARDED_CONFIG_KEYS` is an
+allowlist of what travels from a conversation's run onto a background run, and projects (§105)
+added `__workspace_project__` without adding it there. So a worker pinned to the conversation's
+thread — which §43 arranged specifically so its files land where the researcher looks — wrote to
+the workspace **root** instead of the project folder. Its report landed outside the project whose
+conversation asked for it, while the app looked inside.
+
+The comment sitting directly above that list explains the rule it needed: the thread pin is there
+for exactly this reason, and the project is the same kind of key. **A new config value that decides
+a path has to be added in two places, and only one of them is where you added it.**
+
+That is this project's oldest shape again — §100's scrollbar width, §108's project-at-birth,
+§110's overlay path — and the fourth time in three days. The others were caught by a screenshot, a
+log line and a warning. This one was caught by reading a list while looking for something else,
+which is the least reliable of the four.
+
+### The empty background results are a separate matter
+
+*"not sure why the background tasks are not working."* Both tasks reported `success` with nothing
+useful in the result. That is not diagnosable from this side: the worker's own thread has its own
+log, and this app only ever sees the status. What would settle it is the backend log around those
+two task ids — whether the worker built a model at all, and what its final state held.
+
+Worth noting the overlay already does the thing that would otherwise be the obvious suspect: it
+forwards `model_config`, `__llm_keys` and a recursion limit onto the background run, because
+upstream's `start_async_task` sends none (`docs/upstream/mini-me/start-async-task-config.md`). So
+the model and key should be there. The empty result is something after that.
+
+## 112. A log line that was wiring, not an event (2026-08-07)
+
+The §110 fix is confirmed in the same log that raised the question:
+
+```
+Importing graph  graph_id=background
+  path=/home/piero_linux/.local/share/mini-me-desktop/backend/.desktop-overlay/minime_local/async_agents.py
+```
+
+In the distro, not `/mnt/c`.
+
+### Why the background log said nothing useful
+
+Three copies of this, and nothing else about background work:
+
+```
+minime_local: background work will run on the conversation's own model
+  method=GET path=/threads/{thread_id}/state
+```
+
+On a **state read**. That looked like the smoking gun — config being captured during a read-only
+graph load, where there is no model to capture. It is not: `_forwarded_config()` is called inside
+the tool, at the moment a task is launched, and the config is read from the run that is live then.
+Checked in the source rather than inferred from the log, which is the only reason this section is
+not a fourth wrong diagnosis.
+
+The line was logged where the tool is **wrapped** — which happens on every graph build, including
+the read-only ones behind the `GET /threads/{id}/state` the client polls while watching a task. So
+it was a wiring step wearing the grammar of an event, at warning level, three times a minute.
+
+### What it says now
+
+Demoted to `info` and reworded to what it is. The line that matters moved into the tool, where a
+launch actually happens:
+
+```
+minime_local: launching data_voyager with config keys
+  ['__is_for_execution__', '__llm_keys', '__workspace_project__', 'model_config'],
+  recursion_limit=10000
+```
+
+and, when there is nothing to forward, `NONE — the worker will have no model`.
+
+Keys only, never values — one of those is an API key. And it is the **first** thing that would
+distinguish the two explanations for the reported symptom: a background run that starts without a
+model reports `success` with an empty result, which is indistinguishable from one that ran
+properly and found nothing. That ambiguity is §81's, exactly, and it cost four rounds there.
+
+### The task ids were not in the log at all
+
+The grep for the two ids from the transcript matched nothing. Not evidence of anything: the sidecar
+log is per launch and the backend had been restarted several times since. Worth stating because a
+missing line reads like a finding, and here it only meant the file was younger than the question.
+
+## 113. A wrapper that restated a signature it did not own (2026-08-07)
+
+`install_runtime.<locals>._project_namespace_scoped() takes 1 positional argument but 2 were
+given` — and the backend could not start. §109's patch, one launch old.
+
+I wrote the wrapper as `def _project_namespace_scoped(user_id: str)`, matching what
+`backend/runtime.py:141` says on **this developer's reference clone**. The checkout a researcher
+actually runs is a *pinned* provision of Mini-Me, and there it takes two. So every call into the
+research spine raised `TypeError`, on a code path every request touches.
+
+The fix is what the wrapper should always have been:
+
+```python
+@functools.wraps(original)
+def _project_namespace_scoped(*args, **kwargs):
+    base = original(*args, **kwargs)
+    project = current_project()
+    return (*base, project) if project else base
+```
+
+**A wrapper over someone else's function has no business knowing how it is called.** It needs to
+pass along whatever it was given and adjust what comes back — nothing more. The same applies to the
+route handlers, so they take `*args, **kwargs` too.
+
+Exercised against three arities — one argument, two, and keyword-only — because the whole failure
+was an assumption about exactly that, and "it works on the clone I read" is not a test.
+
+### The shape, and it is not a new one
+
+This repo has a rule for it, written down twice and not applied here:
+
+- §79: *"matching on prose to discover this is how the two get confused"* — answer from the type.
+- §107: the About box compared `execution()` to a string it had guessed rather than read.
+- Here: a signature copied from a file that is **not the one that runs**.
+
+Every one is the same act — treating a local reading of upstream as a fact about the deployed
+upstream. The reference checkout at `~/Documents/Mini-Me` is a *developer's* clone with its own
+branches; the backend a researcher runs is pinned and provisioned. §110 was the same gap in the
+other direction, where the config named `/mnt/c` while `PYTHONPATH` named the distro.
+
+The overlay exists precisely because upstream is not ours to hold still. Code in it should assume
+**less** about upstream than code anywhere else in this repo, and this assumed more.
+
+## 114. A worker spawning workers (2026-08-07)
+
+The line that answers the question, from a real launch:
+
+```
+launching background_worker with config keys
+  ['__is_for_execution__', '__llm_keys', '__workspace_project__',
+   '__workspace_thread__', 'model_config'], recursion_limit=10000
+  graph_id=agent      ← the coordinator, as intended
+
+launching background_worker with config keys [ …the same… ]
+  graph_id=background ← a background worker, launching another one
+```
+
+**Every key is there.** The model, the key, the project, the workspace pin, a ten-thousand
+superstep budget. So the empty results were never a missing model — which was the obvious suspect
+and the one I had said to check first.
+
+The second line is the finding. `graph_id=background` means a background worker executed
+`start_async_task` and started a worker of its own. §39 recorded that
+`_BUILDING_BACKGROUND` *"still stops a worker spawning workers"*, and on this deployment it does
+not. That explains the symptom exactly: a worker asked to do the analysis delegates it onward and
+returns `success` with nothing in it, because it did nothing — it handed the work to someone else
+and stopped watching.
+
+### Why it could not be seen
+
+`middleware_for` returns `None` when the guard fires, and said nothing either way. So "the guard
+worked" and "the guard was bypassed" produced identical evidence: a coordinator that starts.
+§81's lesson, for the fifth time in this document, and the first where the silent component was one
+I had already written a comment claiming worked.
+
+It now says so, at the moment it declines.
+
+### The second guard
+
+The ContextVar is set around the factory call and read during the build. Whether it survives
+depends on the context propagating across every `await` inside `backend.agent.agent` — MCP tool
+loading, model resolution, middleware assembly — and on the pinned checkout, evidently, it does
+not.
+
+So there is now a second signal that cannot be lost that way: `__is_background__`, set on the
+**run's own config** by the launching tool and read back by `building_background()`. Config is the
+same channel the model, the key and the workspace already travel on — if it were not reaching the
+worker, nothing would work at all.
+
+Two independent sources, either sufficient. That is deliberate: the ContextVar covers builds that
+happen inside the factory, the config key covers the run itself, and the failure mode of one is
+not the failure mode of the other.
+
+### What this does not yet prove
+
+That the empty results are *only* this. It is a sufficient explanation and it matches the evidence,
+but a worker that delegates onward and a worker that runs and returns nothing look the same from
+outside — which is the whole reason this took a log line to find. The next run with these two
+changes in place will say plainly whether a worker was built with the tool or without it.
+
+## 115. Where did it look? (2026-08-07)
+
+§114's guards held on the next run — one `launching` from `graph_id=agent`, and
+`background worker built WITHOUT start_async_task, as intended` from `graph_id=background`. **That
+is background work functioning end to end for the first time**, three months after §39 recorded
+that it "had never run once."
+
+The next thing it did was fail to find a file the conversation had just written:
+
+> it could not find `/potato_yield.csv` and asked for the exact sandbox-relative path
+
+Two explanations, and from outside they are the same sentence:
+
+1. the worker is looking in the wrong directory — the pin, or the project, did not travel;
+2. the file is not where the conversation thinks it is — the *coordinator* wrote it somewhere else.
+
+Both would produce exactly that message. Neither can be ruled out from the transcript.
+
+### The value that decides it was never printed
+
+`LocalWorkspaceBackend.__init__` computes the work directory from three inputs — the run's own
+thread, the pin that may override it, and the project — and reported none of them. So it now logs
+once per construction:
+
+```
+minime_local: workspace /mnt/c/Users/.../Mini-Me/TEST/019fddfc-…
+  (own thread 019fde02-…, pinned to 019fddfc-…, project 'TEST')
+```
+
+Which settles it in one reading: if the coordinator's line and the worker's line name the same
+directory, the pin works and the file is genuinely absent; if they differ, the difference *is* the
+bug and the line says which of the three inputs disagreed.
+
+### The fifth time this week
+
+Every argument this week has ended with a value the program already held and did not print:
+
+| | the value | what it settled |
+|---|---|---|
+| §91 | how many threads a rule would adopt | 1, not 26 — the fix was wrong |
+| §99 | `bounds.size.width` | 0.0px — three fixes had missed the mechanism |
+| §110 | the overlay path in a log line | `/mnt/c` — imports crossing the 9p mount |
+| §114 | the forwarded config keys | all present — the model was never the problem |
+| §115 | the resolved work directory | pending |
+
+Four of the five were one line of logging. The pattern is specific enough now to act on in advance:
+**when a component computes something from several inputs and then behaves surprisingly, print the
+thing it computed, not the inputs.** Every one of these was a derived value, and in every case the
+inputs looked fine.
+
+## 116. The pin works (2026-08-07)
+
+§115's line, from the background worker's own run:
+
+```
+minime_local: workspace /mnt/c/Users/LENOVO/Documents/Mini-Me/test2/019fdd9e-e0cd-…
+  (own thread 019fde06-e33c-…, pinned to 019fdd9e-e0cd-…, project 'test2')
+  graph_id=background
+```
+
+Its own thread is `019fde06-…`; it resolved to the **conversation's** `019fdd9e-…`, inside
+`test2`. Both §43's thread pin and §111's project key travelled onto a background run, and the
+coordinator's own turns name the same directory.
+
+So of §115's two explanations, it is the second: **the worker looked in the right place and the
+file was not there.** Which points the enquiry at the foreground turn that was supposed to write
+it — a completely different question from the one that was being asked, and one nobody could have
+reached from the transcript.
+
+Three sections of instrumentation to establish that nothing was wrong. That is a fair price:
+§114's guard bug and §111's missing config key were both found on the way, and neither would have
+surfaced without it.
+
+### And the log now knows what is worth saying
+
+The same run produced a dozen of these:
+
+```
+workspace .../Mini-Me/019fde06-… (own thread 019fde06-…, pinned to 019fde06-…, project '<none>')
+  method=GET path=/threads/{thread_id}/state
+```
+
+Read-only graph loads. `GET /threads/{id}/state` builds a backend too — the client polls it every
+few seconds while watching a task — and those have no run config, so they resolve to the run's own
+thread at the root and touch nothing. At warning level they outnumbered the lines that mattered six
+to one.
+
+`warning` when there is a live run, `debug` otherwise. **A log that reports everything is a log
+nobody reads**, and this project has now made that mistake twice in one day — §112's wrapper
+message was the other.
+
+The rule that falls out, and it is the counterpart to §115's: *print the derived value, at the
+moment something derives it for a reason.* Not on every construction, and not only when it fails.
+
+## 117. Proposed — outputs a turn wrote into a folder (2026-08-07)
+
+**Background work is done.** The worker found `potato_yield.csv` in the conversation's own
+directory, profiled it, and produced eight tables and eight plots. §39 recorded that background
+work "had never run once"; it now runs, on the researcher's model, in the right folder, without
+spawning workers of its own.
+
+And the moment it worked, it exposed the next thing:
+
+> Files created: `./hola_eda_outputs/dataset_summary.csv`,
+> `./hola_eda_outputs/yield_by_clone_boxplot.png`, … *(sixteen of them)*
+
+The Outputs panel showed two files. `provenance.json` and `potato_yield.csv` — the ones at the top
+level. **Every artefact of the analysis was invisible.**
+
+### The cause is one level deep, and it is not about background work
+
+`workspace::outputs` and `workspace::images` both call `read_dir` and then `is_file()`, so a
+directory is not descended into — it is dropped. Any turn that organises its output into a folder
+disappears from the app, and organising output into a folder is what analysis tooling does. A
+*foreground* EDA has exactly the same problem; the background worker only made it obvious, because
+naming an output directory is the first thing that specialist does.
+
+This is §42's argument for the third time. Outputs were moved to `Documents\Mini-Me` because
+*files a researcher cannot find are files that do not exist*; projects became folders for the same
+reason (§105); and now the app cannot see one level down from its own workspace.
+
+### What a fix has to decide
+
+Not difficult, but not a one-line recursion either — four judgement calls:
+
+- **How deep, and how many.** A turn can write a virtualenv, a cache, or a dataset tree of ten
+  thousand files. A bounded walk (a few levels, a capped count) with the cap *stated* when it
+  bites, rather than a silent truncation — §51's rule.
+- **What to skip.** `__pycache__`, `.ipynb_checkpoints`, anything dotted. The existing top-level
+  reader already drops dotfiles as "the agent's business, not the researcher's"; the same judgement
+  extends downward.
+- **How to group.** `hola_eda_outputs/` is a *meaningful* name the agent chose — the panel should
+  probably show the folder as the grouping rather than flattening sixteen files into one list. The
+  Kind buckets (Data, Figures, Reports) may want to become secondary to it.
+- **What `collect_plots` does with it.** §42 attaches new figures to the newest answer by diffing
+  the workspace. Recursing changes what that diff sees, and a turn that writes forty plots into a
+  folder would flood the transcript. Probably: the panel recurses, the transcript keeps a
+  conservative cap and says how many it did not show.
+
+### Why it is worth doing properly rather than quickly
+
+The panel is where a researcher goes to find what a turn produced, and it currently says *"Papers,
+datasets, theories and reports show up here as a turn produces them."* That sentence is a claim the
+code stopped making true the moment an agent organised its own work — and this document's most
+expensive defects have all been claims that quietly stopped being true (§107's sandbox line,
+§82's docstring, §72's stated width).
+
+Sequenced after the release, not before: it changes what the panel shows, and that is worth
+watching on a real conversation rather than shipping blind.
+
+## 118. The designer's brief, and the four places it could not be followed (2026-08-07)
+
+A design handoff arrived as a zip: a README written against this codebase — GPUI logical pixels,
+`p_4`/`text_xs` helpers, the exact `theme.rs` field names, and which function in `main.rs` each
+change touches — plus an HTML canvas of frames to look at rather than port. The instruction with it
+was specific: implement the `5a`/`5b` palette and the `2a`–`2d` frames; `0a`–`0h` are the current
+UI recreated as a baseline and `3a`–`4d` are rejected explorations kept for context.
+
+Implemented over seven commits: the **Bench** palette and the accent discipline that goes with it,
+the **road strip**, the **research panel**, the **empty state**, **provenance chips and an export
+row**, the **approval card**, **inline output cards**, and the **provenance graph**.
+
+### The claim that was checked before it was built on
+
+The README said of the two palettes: *"The two existing tests cover them unchanged — every
+ink/surface pair clears 4.5:1 and luminance rises across the ladder."* Running the numbers before
+writing any of it: **six of the pairs do not.** `text_faint` on Bench's background is 4.41:1,
+`running` 4.45:1, both again on `accent_soft`; Bench Night's `error` is 4.44:1 on `overlay` and
+4.13:1 on `accent_soft`. The floor `every_shipped_theme_is_readable` enforces is 4.5.
+
+Hue and saturation were kept; only lightness moved, by two or three points per channel — the
+smallest change that clears AA. Had this been taken on trust the theme would have failed its own
+test on first run, and the obvious repair under time pressure is to relax the test.
+
+**The rule, and it is not new here:** *a number in a handoff is a claim, and the cheapest ones are
+worth checking before they become the foundation.* This is §72 and §99 again, from the other
+direction: there the app stated a width nothing had measured; here a document stated a ratio
+nothing had computed.
+
+### Four things the design drew that the data cannot support
+
+Each of these is a place where following the drawing would have meant showing a researcher
+something the program does not know. They are listed together because they are one decision made
+four times, and it is §73's: *a record that quietly guesses is worse than no record, because it
+will be believed.*
+
+| Drawn | Built | Why |
+|---|---|---|
+| A dashed **"anticipated"** road node | Two states only | Nothing carries a plan. `Snapshot` has buckets, jobs, tasks, reports and sources; the coordinator decides its next delegation while answering. A dashed `analyze data` under a running `get data` is an invented plan shown as a record. |
+| `6 pages · 8 references` on a PDF | Size alone | Page counts need a parser or one of the folklore heuristics (`/Type /Page` double-counts and misses object streams; `/Count` finds the first of several). Reference counts are not in the file in any recoverable form. |
+| The **specialist** that asked for approval | The tool | `ApprovalRequest` carries no subagent. It could be inferred from whichever spoke most recently — very likely right, and an inference stated as fact beside a security decision. |
+| `today 14:22` on a resume card | `2 hours ago` | Local wall-clock needs a timezone database. Relative time is exact in every timezone and needs no table. |
+
+Two more were substitutions rather than omissions. **Save as PNG became Save as SVG**: rasterising
+needs a screenshot API gpui 0.2.2 does not expose, or a hand-written encoder, on a build that has
+to succeed on a colleague's Windows machine with nothing installed — and a vector figure is what a
+journal wants anyway. **Copy BibTeX emits `@misc` with the citation verbatim in `note`**, because a
+source is one line of the agent's prose and a parser for that is right about most citations and
+confidently wrong about the rest; a mis-split reference does not look broken in a manuscript, it
+looks like a citation with the wrong author on it.
+
+And one place the design was **not** followed for a safety reason: §4 shows three actions on the
+approval card, dropping *"Approve the rest of this turn"*. Both grants were kept and moved right at
+`Compact`. Removing the narrower one leaves "approve everything in this conversation" as the only
+way to stop clicking, which is how a gate becomes a formality — §41's argument, unchanged.
+
+### What the brief was right about that the code was not
+
+Three of its observations were about facts the codebase had let drift, and each was a real defect
+rather than a matter of taste:
+
+- **Headings wearing the accent.** `section_label`, `section_label_owned` and the modal title all
+  used `theme::accent()`, against `theme.rs`'s own first documented rule — *"the accent means 'you
+  can act on this', and nothing else"*. The module said it, the tests did not check it, and three
+  functions broke it. One line each.
+- **The default named in three places.** `Settings::default().theme`, `apply_theme`'s fallback and
+  the `live_theme!` seeds each restated the default palette. Changing "the default" therefore meant
+  changing three things that had no way to disagree out loud. `THEMES[0]` now says it and the other
+  three read it — the §91/§114 shape once more.
+- **The §117 placeholder.** *"Papers, datasets, theories and reports show up here as a turn
+  produces them"* is deleted. It was untrue, §117 says why, and an empty section now renders
+  nothing at all.
+
+The panel states this correctly now, but **§117 itself is still open**: `workspace::outputs` reads
+one level, so a turn that organises its work into a folder still has files the app cannot see. What
+changed is that the app no longer promises otherwise.
+
+### The distinction that was in a comment and not in the data
+
+Building the graph (`2d`) turned up the sharpest instance of this document's recurring bug. The
+design asks for four line styles, one of them for an edge crossing a turn boundary. `provenance.rs`
+computed that edge separately and had done since §75 — its comment reads *"the turn boundary needs
+no hedge: the researcher read one answer before typing the next question, so this ordering is a
+fact about a person, not an inference about a scheduler"* — and then filed it as `Edge::Then`,
+alongside the hedged within-turn case.
+
+So the view drew them identically, and the returns §73 asked the whole feature to make visible were
+the one thing it could not point at. `Edge::Returned` is the missing variant; the reasoning was
+already written down, in prose, one type short of being real.
+
+*A distinction that lives only in a comment is a distinction the program does not make.*
+
+### Where this leaves the release
+
+Everything in the brief's implement list is done, 208 tests pass, and clippy is at the seven
+warnings that predate this work. What has not happened is a **real-window pass**: every screen here
+was built against the README's measurements and the existing code, not looked at on Windows at
+125% scaling — which is where §72, §85, §88 and §99 were all caught. That is the next step, and it
+is the researcher's, not the developer's.
+
+## 119. Five references, and none of the DOIs were real (2026-08-07)
+
+Reported from a real run: *"I noticed that the doi links are wrong. Asta search on semantic
+scholar but not sure why the doi are not redirecting to the correct papers."*
+
+### What was checked, and against what
+
+First against Semantic Scholar, then — after the reasonable objection that **we** might be using
+the API wrongly, or that "these papers have a unique ID" — against **Crossref**, which is the DOI
+registrar rather than an index. That second check is the one that counts, and it was the right
+challenge to make: an S2 404 proves nothing about a book chapter or a 1997 journal article, and
+two of the five conclusions had been drawn from exactly that.
+
+Crossref agreed with Semantic Scholar on every one. S2 was not at fault.
+
+| The citation claims | The DOI is registered to |
+|---|---|
+| Lindqvist-Kreuze & Forbes 2018, ch. 14, pp. 467-486 | *Gender Topics on Potato Research and Development*, Mudege et al., pp. 475-506 — right book, wrong chapter |
+| Hijmans & Spooner 2001, AJB 88(11), 2101-2112 | *Algal switching among lichen symbioses*, AJB 88(8) |
+| Vargas et al. 2012, AJPR 89(6), 444-453 | *Resistance to Aphids, Late Blight and Viruses…*, Davis et al., AJPR 89(6), 489-500 |
+| Douches et al. 1997, Potato Research 40(4) | **not registered**, and no such title in Crossref |
+| Ellis et al. 2018, Euphytica 214 | **not registered**, and no such title in Crossref |
+
+### The mechanism, from the one case that pins it exactly
+
+Hijmans & Spooner 2001 is a real paper, and the model got **volume 88, issue 11, pages
+2101-2112** — all correct. Its DOI is `10.2307/3558435`. The model wrote `…3558457`, which is a
+real DOI, in the same journal, in the same year, belonging to a study of lichens. Vargas is the
+same shape: the model said AJPR 89(6), and the DOI it produced genuinely is AJPR 89(6) — a
+different article in that issue.
+
+So every field a person sanity-checks — journal, year, volume, pages — comes out right. A DOI
+suffix is a high-entropy string carrying no meaning, which makes it the first thing a language
+model loses and the last thing a reader can catch by eye. **That asymmetry is the entire argument
+for checking it in software rather than telling people to be careful.**
+
+### Where the client was complicit
+
+`AcademicSourceFinding.citation` (`backend/schemas.py:31`) is a Pydantic field the *model* fills.
+The stable link is a **separate** field — `SourceArtifactPayload.link`, and for a theory's papers
+`PaperRefPayload.url`/`.doi`, built by `theory_tools.py:_paper_ref` straight from
+`s2Metadata.externalIds.DOI`.
+
+`decode_sources` read `citation` and dropped all three. Every link in the app was regexed out of
+the model's prose while the identifier the API returned sat one key away. `grep -n '"link"\|"url"\|"doi"'`
+over `protocol.rs` returned nothing.
+
+`_paper_ref` carries a comment recording that an S2 URL form *"resolves UNRELIABLY (it sent users
+to the wrong paper)"*. Somebody upstream had already paid for this exact mistake and fixed it on
+their side; we reintroduced it on ours.
+
+**Fourth instance of the recurring shape** (§91, §99, §115): *a value the program already had and
+never read.*
+
+### The attribution was unearned
+
+`used_asta` was `len(sources) > 0` — the number of citation objects the model emitted — and it
+controls a footer reading *"Academic literature search performed using Asta tools (Allen Institute
+for AI). Please cite the AstaBench paper."*
+
+On this run that footer would have credited AI2 for five references their tools never returned.
+Attribution is a claim about provenance, so it now comes from the provenance record: an
+Asta-backed specialist must actually have run. Which specialists those are is read from
+`subagents.json` — three describe themselves that way — rather than listed in the client, which is
+what §55 built that file to prevent. An unreadable registry credits nobody: a missing
+acknowledgement can be added, a false one has to be retracted.
+
+### What now exists
+
+A **Check DOIs** button in the sources panel. Each DOI goes to Crossref, the returned title is
+compared against the citation *here*, and every reference gets a verdict. Verified against live
+Crossref: the model's Hijmans DOI scores 0.00, the correct one 1.00, Douches comes back
+unregistered.
+
+Three rules it is built to:
+
+- **A DOI leaves the machine and nothing else** — not the citation, not the question. The
+  user-agent names the app and carries no contact address, because that would be the researcher's
+  own email going to a third party on every reference.
+- **`Unreachable` is not a verdict about a reference.** Telling somebody on a train that a
+  citation is unregistered would have them delete one that was fine.
+- **A reference with no identifier is reported**, not left blank looking like one that passed. In
+  a run where the model wrote its own citations, that is the strongest signal of the three.
+
+### What none of this fixes
+
+If the model invented the paper, a structured `link` can be invented alongside it — on the
+academic-research path that field is model-filled too. Only `_paper_ref` is built from real API
+metadata. The open question is whether the literature search ran at all, and the provenance graph
+built in §118 is what answers it: if no search specialist appears in the record, nothing was
+searched. Worth checking on the run that produced these five.
+
+*Two rules, and the second is the one that generalises: **an attribution is a claim, so it should
+be derived from the record and not from a proxy** — and **the fields a reader can check are the
+ones a model gets right.***
+
+## 120. Asta returns a corpus id, and we asked the model for a DOI (2026-08-07)
+
+§119 left one question open: *why* are the DOIs wrong. The answer came from the researcher, not
+from me — they noticed that Semantic Scholar shows a **Corpus ID** where our citations show a DOI,
+and said: *"Asta mcp when search papers I think return the corpus ID so we must check if we are
+using it well."*
+
+That was the whole thing.
+
+### What the tool actually returns
+
+```
+$ asta papers snippet-search "late blight resistance Andean potato landraces" --limit 2
+paper keys: ['authors', 'corpusId', 'openAccessInfo', 'title']
+```
+
+A title, an author list, and a numeric `corpusId`. **No DOI, no year, no venue, no volume, no
+pages.**
+
+And `AcademicSourceFinding.citation` asks the model for *"APA-style or equivalent citation"* —
+which needs every one of those. So the model is handed a paper it cannot cite and asked to cite
+it. It fills the gaps from memory, which is the only move available.
+
+This is not a model behaving badly. **It is being asked for data it was never given.**
+
+### Why the failure looked the way it did
+
+The Plaisted case pins it exactly. Our citation said *American Potato Journal, 66, 603–627* — both
+correct — and gave `10.1007/BF02853934`. The real DOI is `BF02853982`. The model reconstructed the
+volume and pages accurately from the title and authors it *was* given, and then produced a DOI,
+which is a high-entropy string with no meaning in it and therefore the one field that cannot be
+reconstructed.
+
+So every field a reader checks by eye comes out right, and the one nobody checks is wrong. In
+three of six cases it resolves, so the link works and opens a real paper on a related subject.
+
+### The fix already existed, forty lines away
+
+`theory_tools.py:_paper_ref` handles this for the theorizer path, with a comment that reads like a
+scar:
+
+> Theorizer papers usually carry ONLY a numeric corpusId (no DOI/url). … the website's
+> `/paper/CorpusID:<n>` path resolves UNRELIABLY (**it sent users to the wrong paper**). The API
+> endpoint `api.semanticscholar.org/CorpusID:<n>` 302-redirects to the correct canonical paper
+> page — verified across ids — so link through that instead.
+
+Somebody met this, worked out that a corpus id is all that arrives, established which URL form
+resolves, and wrote it down. The academic-research path has no equivalent: `corpusId` never
+reaches `SourceArtifactPayload` at all. Written up as
+`docs/upstream/mini-me/academic-sources-drop-the-corpus-id.md`.
+
+### What was built on this side
+
+**Find the right DOI.** The citation still contains a real title — that much *did* come from the
+search — so Crossref's `query.bibliographic` can be given the whole reference and asked which
+registered work it describes. On the real Plaisted citation, including its invented title wording,
+it returns the correct paper at 0.75.
+
+The runner-up scored **0.57** against a 0.6 floor: *Solanum amayanum: A new wild Peruvian potato
+species*, which shares "wild", "potato" and "Solanum" with the model's invented title. Six points
+of separation is not grounds for telling a researcher which paper they meant, so a repair must also
+beat the next candidate by 0.15.
+
+That threshold is the interesting decision. Verifying a DOI answers *"is this the paper"* about a
+work the citation already named. Repairing **picks** one and says *"this is it"* — a stronger
+claim, and one made with the app's authority rather than the model's. A near-tie there is not a
+weak yes; it is precisely the case where answering reproduces the bug being fixed.
+
+*Two plausible answers is not an answer.*
+
+### The shape, stated
+
+Three of the last five defects in this document are the same one. §119 was a value the program had
+and never read. §118 was a distinction that lived in a comment and never in the data. This one is
+**a field asked of a component that was never given the data to fill it** — and the tell, in every
+case, is that the wrong answer is well-formed. A fabricated DOI parses. An `Edge::Then` that should
+have been `Returned` draws fine. A regexed link opens something.
+
+*Nothing about a plausible answer tells you where it came from. Only the record does — which is
+why the provenance work and the citation work turned out to be the same project.*
+
+### §120a — a second failure, hiding behind the first (2026-08-07)
+
+Testing the repair turned up a reference of a different kind:
+
+> Sørensen, K. J., Kirk, H. G., & Poulsen, K. (2006). Use of Andean potato landrace populations to
+> identify new sources of resistance to late blight. Euphytica, 152(3), 305–316.
+
+DOI unregistered. Title search: `total: 0`. No such paper in Semantic Scholar or Crossref, under
+the title or the authors. Douches 1997 and Ellis 2018 from §119 are the same.
+
+So the six references are **two defects**, not one:
+
+| | | corpus id fixes it? |
+|---|---|---|
+| Plaisted, Hijmans, Vargas, Lindqvist-Kreuze | real papers, invented identifiers | yes — §120 |
+| Sørensen, Douches, Ellis | no such paper, invented whole | **no** |
+
+The researcher's instinct — *"I don't care to have a DOI, we can have the corpusid url"* — is
+right for the first class and cannot touch the second. A CorpusID URL redirects to a paper, and
+there is no paper.
+
+**The reason this matters beyond the fix:** the second defect was invisible while the first
+existed. Every reference had a wrong DOI, so "wrong DOI" was the explanation for all six, and it
+was the correct explanation for four. Fixing the identifiers would have made the app produce four
+good citations and two that resolve to nothing — and that would have looked like a regression in
+the fix rather than a defect it uncovered.
+
+*A defect that explains every instance is not thereby the only defect. It is a reason the others
+have not been noticed.*
+
+### What the repair now says
+
+The lookup refusing to answer was correct — nothing matched, and §120's margin rule exists
+precisely so it stays quiet rather than naming the closest paper. But a red flag followed by
+silence is not a usable result, and the researcher's report was *"its not working"*, which is fair.
+
+`repaired` now records `None` as a finding rather than as an absence: **no registered work matches
+this reference — it does not appear to describe a real paper.** That is the strongest statement
+this feature can make, and it is more useful than a corrected DOI, because the answer is not
+"cite it differently" but "do not cite it".
+
+The same distinction that has run through §118–§120: *asked and found nothing* and *never asked*
+must not look the same on screen.
+
+### §120b — the negative was over-claimed (2026-08-07)
+
+The researcher, on being told Sørensen 2006 does not exist: *"Sorensen exists as a book not a
+paper. there is a betdiversity index by sorensen btw."*
+
+Both halves land, and the second is the sharper one.
+
+**Sørensen's 1948 similarity index** — the basis of the beta-diversity coefficient, one of the most
+cited works in plant ecology — is a monograph in *Biologiske Skrifter*, and Semantic Scholar has it
+with **no DOI at all**. Crossref registers journal articles; books, monographs, society series and
+grey literature are largely not in it, and older works generally are not.
+
+So `total: 0` is a fact about an index, not about the world — and §120a stated it as though it
+were about the world. The row read:
+
+> no registered work matches this reference — **it does not appear to describe a real paper**
+
+Told to a researcher who had correctly cited a monograph, that is worse than the fabrications the
+feature exists to catch, because it arrives with the app's authority instead of the model's. It now
+reads *"nothing in Crossref matches this — which covers journal articles, so a book or a monograph
+may not be there. Check it by hand."* Amber rather than red: something is wrong with the reference,
+and *which* thing is not established.
+
+**And the authors are real.** Searching them returns *Linkage and quantitative trait locus mapping
+of foliage late blight…* (2006) — **K. Sørensen, M. Madsen, H. Kirk**, D. K. Madsen. Right people,
+right year, right subject, different title. Not a reference conjured from nothing: a real research
+group with someone else's title and identifier attached to them, which is harder to catch than pure
+invention.
+
+### This is the same mistake, three times, from three directions
+
+| | the over-claim | what actually held |
+|---|---|---|
+| §119 | "these DOIs don't exist" — from a Semantic Scholar 404 | Crossref, the registrar, was needed to say it |
+| §120a | "this reference describes no real paper" — from `total: 0` | the index does not cover books |
+| — | the check's own copy | now says what was checked, not what was concluded |
+
+Each time the correction came from the researcher, and each time the pattern was identical:
+**a negative from one source, reported as a fact about the world.** The feature built to stop a
+model from over-claiming was itself over-claiming, in its error path, where nobody looks.
+
+*Report what was checked. A tool that says more than it verified is the thing it was built to
+replace.*
+
+## 121. The corpus id, put where it was always available (2026-08-07)
+
+> *"I dont care to have a doi url in the front end. If asta give a corpusId, we can put that ID
+> into an url from semanthic scholar and we can be redirected to semanthic scholar. Thats what I
+> want."*
+
+§120 established why the DOIs are wrong — Asta returns `corpusId`, `title` and `authors`, and
+`AcademicSourceFinding.citation` asks the model for an APA citation, which needs five fields it
+was never given. The report went upstream. This is the part that did not have to wait.
+
+### Where it goes in
+
+`overlay/minime_local/sources.py`, through the §18 import hook, in two places:
+
+- **`backend.mcp_tools`** — patches `_wrap_mcp_tools` and lets the original run *afterwards*, so
+  the recorder ends up **inside** upstream's capping wrapper. That ordering is the whole trick:
+  above it we would see the truncated result, or the 2 KB preview left behind when a large result
+  is written to the sandbox — and `mcp_tools.py:132` puts the `asta` threshold at 32 KB while its
+  own comment says paper searches run to hundreds of KB. The ids are in the part that gets cut.
+- **`backend.middleware.artifacts`** — wraps `ArtifactCaptureMiddleware.after_agent`, which is
+  where a subagent's structured output becomes the `sources` list the client reads, and replaces
+  `link` with `https://api.semanticscholar.org/CorpusID:<n>`.
+
+That URL form and not the website's, because `theory_tools.py:_paper_ref` already settled it: the
+`/paper/CorpusID:<n>` path *"resolves UNRELIABLY (it sent users to the wrong paper)"*. Somebody
+paid for that once and wrote it down.
+
+### Why capture at the tool rather than reconstruct later
+
+Because at the tool the identifier is **known**, and everywhere after it is a guess. The client's
+"Find the right DOI" repair takes the title out of a citation and searches for it, and carries
+every uncertainty a search has: near-matches, ties, an index that does not cover books (§120b).
+Here the corpus id is sitting in the response the model is reading. Nothing needs inferring.
+
+That difference now has a name in the client. `Verdict::FromSearch` is **not** a weaker answer than
+`Confirmed` — it is a stronger one. A DOI has to be verified because the model wrote it; a corpus
+link cannot name the wrong paper for the same reason a file path cannot, because nothing composed
+it. So a source carrying one is settled with no registry call at all.
+
+### One rule, two languages, checked
+
+The matcher — same noise words, same 0.6 threshold, same 0.15 margin — is now written in Python
+(which citation does this corpus id belong to) and in Rust (which registry record does this
+citation name). `the_rust_and_python_matchers_agree` runs both over the real §119/§120 cases and
+compares, the same discipline as `the_rust_and_python_project_names_agree` and for the same reason:
+two implementations of one rule is a shape this project has got wrong before, and here the failure
+would be the backend and the client silently disagreeing about which paper a citation names — in
+the one feature built to stop exactly that.
+
+### What is still not fixed
+
+A citation whose title matches nothing the search returned gets no link, because there is nothing
+to link it to. That is §120a's second class, it is the subagent citing papers it was not given, and
+no amount of identifier plumbing reaches it. It stays in the upstream report as its own
+recommendation.
+
+*The fix was never a lookup. It was carrying a value forty lines further than it had been carried.*
+
+## 122. The buttons were the bug (2026-08-07)
+
+> *"Sorry but having these button is dumb. Why the user must check something we should do for them
+> before put that into the ui? … I told you I dont want to show the doi link just the word link and
+> when I press it I am redirected to the paper in semantic scholar."*
+
+Correct on all three counts, and the first one is a design error rather than a preference.
+
+### Why a button was the wrong shape
+
+**Check DOIs** asked the researcher to request a check on data the app had already decided to show
+them. That is the wrong way round: either a citation is worth verifying, in which case verify it,
+or it is not, in which case do not offer to. And it asked for work only the app can do — a network
+call per reference and a title comparison — whose answer is the same every time it is asked.
+
+**Find the right DOI** was worse: a *second* button, to learn which paper a citation meant, after
+the first had already established that the one written down was wrong. Two clicks to be told
+something the app knew how to find out on its own.
+
+Both are gone. Verification runs in the background as sources arrive, only for citations not
+already answered, and says nothing when everything checks out — a line under each of fourteen
+references confirming it is fine buries the two that are not.
+
+*A control that asks the user to authorise work they cannot do themselves, on a question with one
+right answer, is not a choice. It is unfinished work with a button in front of it.*
+
+### The link is the word "link"
+
+The row showed a full DOI URL, which wraps mid-token in a 330px column and is not information
+anyone wants to read. It now shows **link**, and it points at the paper's page on Semantic Scholar
+— not the publisher's landing page, which is a paywall as often as not.
+
+`api.semanticscholar.org/<id>` 301-redirects for both id forms, verified live:
+
+```
+CorpusID:45447591                  → /paper/117e16e7774ff0616b461a075feadcee7a33d793
+DOI:10.1016/0304-3878(92)90044-a   → /paper/bbec167725ba916adafcaa221f934b759e2cd131
+```
+
+So the link is always a Semantic Scholar link, whichever identifier survives: the corpus id the
+search returned (§121), the DOI the registry says the citation describes, or the DOI it carried
+when that one checked out. Only a source with none of the three — a thesis in a university
+repository — keeps its own URL, because a working link to the right document beats a Semantic
+Scholar page that does not exist.
+
+### The disclosure has to be stated, not clicked
+
+Automatic means nobody is choosing per use, so the module now says exactly what goes out: a DOI for
+every reference, and the citation text for one whose DOI is wrong or missing — because that text is
+the query that finds the real work. To `crossref.org` and nowhere else. Never the question, never
+the conversation, never a file.
+
+That is the trade the button was standing in for, and stating it once in the code is more honest
+than making somebody re-consent every time they want a reference checked.
+
+## 123. The isolation that isolated the wrong thing (2026-08-07)
+
+Asked directly whether the Asta literature problem is solved. Checking before answering found that
+**§121's overlay would have done nothing at all.**
+
+`sources.py` kept its `{title: corpus id}` store in a `ContextVar`, reasoned as *"so two concurrent
+turns cannot read each other's papers"*. Measured:
+
+```python
+await asyncio.create_task(tool_call())   # records one paper
+len(_papers())                           # 0
+```
+
+A `ContextVar` set inside a child task is invisible to the parent — copy on write, one direction —
+and LangGraph runs a tool call in a task while the middleware that reads the store runs outside it.
+So every source would have kept the model's invented link, silently, and the success log would have
+printed `0 of 6 sources carry the corpus id`.
+
+That is **§114 exactly**: an isolation mechanism that isolated the wrong thing, written by me,
+one day after documenting §114. It was never run against a live backend — the unit tests exercised
+`remember` and `link_for` in one context, which is the only arrangement where it works.
+
+The store is now process-global and bounded. The isolation was not merely broken, it was
+unnecessary: the match is on the **title**, so a citation only takes a corpus id when it names that
+paper, and a paper named in one conversation is the same paper when named in another. Sharing can
+only produce the right answer sooner.
+
+*A test that exercises a function in the arrangement the author imagined is not a test of the
+arrangement the program uses.*
+
+### The MCP is not the limit — the tool choice is
+
+Compared, on one query:
+
+```
+MCP  snippet-search   → authors, corpusId, openAccessInfo, title
+CLI  asta papers      → authors, externalIds{DOI}, paperId, publicationDate, title, venue, year
+```
+
+Semantic Scholar holds the year, the venue and the DOI; `snippet_search` does not return them
+because it exists to return *passages*, with just enough paper attached to identify one. It is
+being used as the sole source for a task that needs bibliography.
+
+So `academic_researcher` has no tool that returns a year, a venue or a DOI, and is asked for all
+three. Added to the upstream report: the fix is a paper-lookup tool beside the snippet search, or a
+resolution step from `corpusId` — not more plumbing downstream of a tool that was never meant to
+answer this.
+
+## 124. Seven tools, and nothing that says so (2026-08-07)
+
+*"Ok and to be clear, what are the capabilities of the subagents that search papers? Only search?"*
+
+No — and answering it properly turned up why the citations are wrong, which is not what §120 said.
+
+### What `academic_researcher` actually holds
+
+Its declaration is `"tools": []` (`backend/subagents.py:50`). Everything arrives at runtime:
+
+* the **entire, unfiltered** Asta MCP bundle — `get_mcp_tools(("asta",))` with no allowlist
+  (`backend/mcp_tools.py:413-414`), against the Dataverse loader which whitelists three by name;
+* the **full deepagents filesystem toolkit** — `ls`, `read_file`, `write_file`, `edit_file`,
+  `glob`, `grep`, `execute` — prepended to *every* subagent (`deepagents/graph.py:547-560`,
+  `middleware/filesystem.py:789-797`).
+
+It cannot delegate: `task` belongs to the main agent alone (`deepagents/graph.py:683-695`). And it
+runs **outside the guardrail stack** — PII redaction and the model/tool-call limits are applied to
+the coordinator only (`backend/agent.py:124-143`) — while holding `execute`. Whether our own
+approval patch catches that combination is not established and is worth checking on its own.
+
+### The reason the DOIs are wrong is not the one §120 gave
+
+§120 concluded the model invents identifiers because `snippet_search` returns none. True, but
+incomplete: **it has six other tools that do**, and has had them all along.
+
+`skills/research/SKILL.md:69-82` names all seven by purpose, including which returns full metadata.
+The subagent almost certainly never reads it. Every subagent declares its skill one directory too
+deep:
+
+```
+on disk        skills/research/SKILL.md            SKILL.md is a file inside research/
+coordinator    skills=["/skills/"]                 scans subdirs → finds twelve ✓
+subagent       "skills": ["/skills/research/"]     scans subdirs of research/ → finds none ✗
+```
+
+The loader wants a path whose *subdirectories* hold a `SKILL.md`
+(`deepagents/middleware/skills.py:749-762`); the prompt then renders *"(No skills available
+yet…)"*. A child cannot inherit the parent's either — `skills_metadata` is stripped from the state
+passed down (`middleware/subagents.py:186-192`). **All ten subagents have the same path shape.**
+
+So the picture is complete: seven tools, no document explaining them, and an instruction to produce
+APA references. It reaches for the one tool whose purpose is guessable from its name and writes the
+rest from memory. Filed as `docs/upstream/mini-me/subagent-skills-point-one-level-too-deep.md`.
+
+### The cheap experiment, before the expensive one
+
+The obvious remedy — a code-side search tool over the `asta` CLI — is a permanent fork: our own
+tool definitions, parsing, and CLI version drift, re-checked on every upstream update. It is also
+premature, because the subagent already *has* the tools it needs.
+
+So the overlay appends to `academic_researcher`'s prompt instead: name the metadata tools, say what
+`snippet_search` does not return, and forbid the three inventions — never write a DOI from memory,
+never fill a year or a volume the tools did not give, **cite only papers a tool returned in this
+conversation.** That last one is the first thing aimed at §120a's fabricated references, which no
+amount of identifier plumbing could reach.
+
+Appended, not replaced: upstream's prompt sets the role and the source limit, and rewriting it here
+would silently drop whatever upstream adds next.
+
+If the identifiers come out right, the code-side tool is unnecessary. If they do not, that is
+evidence rather than a guess — which is the only reason to build the expensive thing.
+
+*Three explanations for one defect, in three days: the client dropped the field (§119), the tool
+does not return it (§120), the document naming the tool that does was never delivered (§124). Each
+was true. Only the last one was the cause.*
+
+## 125. The installer said yes and did nothing (2026-08-07)
+
+The prompt patch and the artifact patch fired on the first real run. The recorder did not:
+
+```
+minime_local: no _wrap_mcp_tools — sources keep the model's own links
+minime_local: academic sources link through Semantic Scholar
+minime_local: academic_researcher told which tools return identifiers
+```
+
+`_wrap_mcp_tools` does not exist and never did. The real name is `_make_mcp_tools_resilient`
+(`backend/mcp_tools.py:351`). I had read that function's *body* while working out where to hook,
+and then named it from memory — **§113 exactly**, the wrapper that assumed something about code it
+does not own, and the second time this week.
+
+### The second mistake was worse than the first
+
+The fix looked up the right name through a candidate list — and then assigned the wrapper back to
+`module._wrap_mcp_tools`, the name that does not exist. So `_recording` was stored under an
+attribute nothing calls, `_make_mcp_tools_resilient` was left untouched, and the installer logged:
+
+```
+minime_local: recording the corpus id of every paper Asta returns
+```
+
+A success line, for an installation that had installed nothing. That is a worse failure than the
+original, because the original *told the truth*.
+
+Caught only by driving the real chain — upstream's wrapper around ours, the tool call in a child
+task — and asserting on the store afterwards. The unit tests had exercised `observe` and
+`link_for`, both of which were correct throughout.
+
+*A rename fixed in one of its two places is a rename not fixed.*
+
+### What the logging earned
+
+Three §81 arguments paid off in one run:
+
+* the installer that speaks **on success** is why the missing hook was noticed at all — the two
+  that worked and the one that did not were distinguishable at a glance;
+* the failure line now reports **what is actually in the module**, not merely that the guessed name
+  was absent. The first version named the guess and not the fact, leaving the answer in the file it
+  had just failed to read;
+* the success line now names the hook it installed (`via _make_mcp_tools_resilient`), so "installed
+  under the wrong name" can never again look like "installed".
+
+### Still unproven
+
+The chain is verified against upstream's real function name, its real wrapping order, and a child
+task — but not yet against a live backend. The number to look for is
+`minime_local: N of M sources carry the corpus id Asta returned`. Until that reads something other
+than `0 of M`, this remains a patch that has passed a rehearsal.
+
+## 126. Seventeen papers, checked against the registry (2026-08-07)
+
+*"Test at least 15 papers from different themes to verify it works. You test must compare the
+builded doi and visit the doi link to check if its correct what we see in the web."*
+
+The right demand. A citation builder validated against its own inputs proves only that it is
+self-consistent. So: seventeen papers across six unrelated fields — potato late blight, CRISPR crop
+editing, protein-structure prediction, soil carbon, malaria vector control, Andean glacier retreat
+— built with `minime_local.citations`, then every DOI resolved at **Crossref** and every field
+compared with what the registry holds.
+
+| | |
+|---|---|
+| DOI resolves at Crossref | **17 / 17** |
+| title agrees | **17 / 17** |
+| year agrees | **17 / 17** |
+| volume — agrees / omitted / **contradicts** | 9 / 8 / **0** |
+| pages — agrees / omitted / **contradicts** | 8 / 9 / **0** |
+
+**Zero contradictions.** Where Semantic Scholar carries a field, it matches the registry; where it
+does not, the reference renders without it. That is the module's whole discipline holding under
+measurement rather than by assertion: eight references are missing a volume and none of them is
+wrong about one.
+
+Set against the same pipeline three days ago — six references, three DOIs resolving to different
+papers and three to nothing at all — the difference is not that the model got better. It is that
+the model is no longer the one producing the field.
+
+### What the check found that the unit tests could not
+
+Two rows first looked like disagreements and were not: Semantic Scholar indents `pages` across
+newlines, so the raw value is `"\n          1-8\n        "`. `_clean` already collapses it and the
+rendered citation was correct — but only the *live* comparison surfaced that the raw data has that
+shape at all. Now pinned as a case, with the real value in it.
+
+*A formatter tested against data its author invented is tested against their idea of the data.*
+
+### The result that matters is the one on the left
+
+`17/17` DOIs resolving is the headline, and it is worth being clear about *why* it is not
+impressive engineering: the DOI is copied out of the record it came with. It is the number that
+was wrong before because the number was previously being remembered instead of copied.
+
+## 127. One repo moved on `git pull`, and it was the wrong one (2026-08-07)
+
+> *"wait what, why I need to put something in wsl and not by doing git pull; cargo run?"*
+
+A fair question with an embarrassing answer: because the backend never updated at all.
+
+`setup-wsl.sh` clones Mini-Me once and says so in its own header — *"never overwrites an existing
+checkout, and never touches a checkout it did not create."* That is the right rule for
+provisioning and it was doing the whole job: there was no pin, no update path, and nothing that
+moved the checkout afterwards. The Python the agent actually runs stayed at whatever commit it was
+cloned at, forever.
+
+It went unnoticed because everything shipped so far lived in the *desktop* repository — including
+`overlay/minime_local/*.py`, which travels with the Rust app and reaches into the backend at
+import time. `git pull; cargo run` was genuinely enough. The moment a fix landed in Mini-Me itself
+(§126), the gap appeared, and the instruction that fell out of it was "type this into WSL" — which
+is precisely what a researcher who cannot code must never be asked to do.
+
+### The pin
+
+`Settings::backend_ref` names the Mini-Me version this build expects, defaulting to a constant in
+this repository. So the pin travels with `git pull`, and `BackendSupervisor::sync_to_pin` brings
+the checkout to it on the next launch. One command again.
+
+A setting as well as a constant, because a developer testing an unmerged backend branch should not
+have to rebuild the Rust app, and someone whose network cannot reach GitHub should be able to pin
+themselves in place.
+
+### The guards are the part worth reviewing
+
+Getting the happy path wrong costs a stale backend. Getting these wrong destroys a colleague's
+uncommitted work, which is the failure §231's ownership flag exists to prevent.
+
+* **Not ours, not touched.** `owned` is false for any checkout the app merely found or was pointed
+  at — the reference checkout on this machine has ten local branches, several live in worktrees.
+* **Dirty, not touched.** Refused rather than stashed or forced. A dirty tree means somebody is
+  editing the backend, and this is not the code that decides what happens to that.
+* **Never blocks the launch.** Offline, no `git`, a ref that does not exist — each logs and
+  returns. A backend one version behind still runs; a backend that would not start because the
+  network was down would be a worse app.
+* **Already at the pinned commit costs nothing.** A local `rev-parse` before any network call.
+
+Tested against a real temporary repository rather than a mock, because the thing being verified is
+what `git` does, and a mock of git would only confirm what I believe git does.
+
+### Logged on success
+
+`sync_to_pin` says when it moved the backend and to what. Three overlay patches hid this week
+behind installers that spoke only on failure (§123, §125), and a version sync is exactly the kind
+of thing where "already right", "moved" and "silently skipped" must not produce identical evidence.
+
+*Two repositories is a real cost, and this is the first instalment of it. The answer is not to
+avoid the split — it is that the seam has to be as automatic as the thing it replaced.*
+
+## 128. `ast.parse` is not "it runs" (2026-08-07)
+
+Every turn failed with *"An internal error occurred"*. The backend log:
+
+```
+NameError: name 'name' is not defined
+```
+
+Mine, shipped an hour earlier, in the diagnostic added to tell §127's two causes apart:
+
+```python
+async def _watched(*args, _inner=coroutine, _tool=name, **kwargs):
+```
+
+`name` is defined in **`_make_mcp_tools_resilient`** — upstream's loop, whose body I had read while
+working out where to hook — and not in `_recording`, which is ours. Python evaluates a default
+argument when the `def` executes, so it raised the moment the tool list was wrapped, on every turn,
+before any work began.
+
+### How it went out
+
+I checked it with:
+
+```
+python3 -c "import ast; ast.parse(open('overlay/minime_local/sources.py').read())"
+```
+
+which proves a file is syntactically valid and says nothing about whether a line of it runs. Then
+`cargo test`, which exercises the Rust and never touches the overlay. Both passed. Neither could
+have failed.
+
+*A check that cannot fail for the reason you are worried about is not a check.*
+
+### The pattern, now four deep
+
+This is the same borrowed-from-a-file-I-do-not-own mistake as §113 (restated a signature), §125
+(guessed a private function name, twice) — and now a bare identifier lifted out of somebody else's
+scope. Each time the fix was correct in intent and wrong about a detail of code the overlay reaches
+into but does not own.
+
+The overlay's whole premise is patching internals by name from outside. That premise has now cost
+four defects in three days, and it is the strongest argument yet for §126's direction: this belongs
+*in* Mini-Me, as ordinary code, where a name that does not exist is a name a reader can see.
+
+### What changed besides the fix
+
+`the_overlays_tool_wrapper_runs` drives the real arrangement from Rust — upstream's wrapper around
+ours, the tool call in a child task — and asserts the store afterwards. Verified load-bearing by
+reintroducing the bug and watching it fail with the same `NameError`.
+
+That is the third overlay path now covered by an executing test rather than an imagined one, after
+§123's task boundary and §125's hook name. All three were written *after* the failure they would
+have caught, which is the honest description of this week.
+
+## 129. The pin pinned itself, and the guard guarded against us (2026-08-08)
+
+§127's version sync shipped, and the backend still did not move. The line added an hour later said
+why, in one go:
+
+```
+WARN the backend checkout has uncommitted changes — leaving it at its current
+     version rather than overwriting them   want=desktop_to_web
+```
+
+Two defects in eleven words.
+
+### `want=desktop_to_web`, after that branch had merged
+
+`backend_ref` was a **saved setting** with a constant default. The constant had already moved to
+`main`; `settings.toml` had `desktop_to_web` written into it by an unrelated save — a panel toggle
+is enough — and a persisted value beats a default forever.
+
+Which destroys the only property the pin has. The whole point is that the version travels with
+`git pull`; a setting that overrides it means the first researcher to run any build is frozen at
+that build's pin for good. **The pin pinned itself.**
+
+Now a constant with `MINIME_BACKEND_REF` as the override. An environment variable is the right
+shape for "test an unmerged branch": deliberate, scoped to one session, impossible to leave behind
+by accident. The setting was over-engineering that broke the feature.
+
+### "Uncommitted changes" that were ours
+
+The app writes into that checkout **by design** — the generated `.mini-me-desktop.langgraph.json`
+(§30) and the copied `.desktop-overlay/`. So `git status --porcelain` is never empty there, and the
+guard fired on every launch, reporting somebody's work in progress where there was none.
+
+`--untracked-files=no`. What the guard is for is a *tracked* file somebody edited, which is the
+only thing a checkout could actually lose.
+
+### The test that passed with the bug in it
+
+Worse than either. The first version wrote the untracked files and then synced to `Some(&before)` —
+the commit already checked out — which returns at the *"already at the expected commit"* line,
+before the dirty check is reached. Both the fixed and the broken code left `HEAD` where it was, so
+the assertion held either way.
+
+Caught only by deleting the fix and re-running, which is now the habit worth keeping: **a test
+written for a bug should be watched failing on that bug before it is trusted.** Rebuilt around a
+bare repository standing in for `origin` and a branch the checkout can actually move to, so a
+blocked sync and a working one give different answers. Verified failing without
+`--untracked-files=no`.
+
+*Three of this week's tests passed while the defect they were written for was still present
+(§125, §128, and this one). Each was a test of what I meant rather than of what the code does.*
+
+## 130. The sync ran after the return that skipped it (2026-08-08)
+
+Third launch reporting nothing wrong, backend still on a commit from two merges ago.
+
+`sync_to_pin` was called inside `ensure_running` — **below** this:
+
+```rust
+if client.is_healthy().await {
+    return Ok(Started::Attached);
+}
+```
+
+`langgraph dev` survives the app closing. So "a backend is already running" is not an edge case,
+it is what happens every time somebody restarts the app without killing the sidecar — which is
+every time. The sync sat on the branch that only runs when there is *no* backend, which is the one
+launch where the version was already going to be read fresh anyway.
+
+Worse, §129 *found* this and logged it instead of fixing it: `"a backend was already running —
+attaching to it, so the version pin is not applied"`. An accurate line about a thing that should
+not have been true. Naming a defect is not the same as repairing it, and the line went out in the
+same commit that could have moved three statements.
+
+Now the sync runs first, unconditionally. And when it moves the checkout while a server is already
+up, the app says what that means and what to do:
+
+> the backend files were updated, but a server was already running and is still on the old ones —
+> close this app, then run: `wsl bash -lc "pkill -f 'langgraph dev'"`
+
+`sync_to_pin` returns whether it moved anything, because the warning depends on it and a bool that
+nothing asserts is a bool that drifts.
+
+### Four bugs in one delivery mechanism
+
+§127 built it; §129 found the pin overriding itself from `settings.toml` and the dirty guard
+tripping on the app's own untracked files; this one is the ordering. Every one of them produced the
+same visible outcome — the researcher pulls, the app starts, nothing has changed — and each had a
+different cause.
+
+*A mechanism whose failure mode is silence needs its diagnostics written before its logic, not
+after each failure.* Every fix in this chain arrived one launch late because the line that would
+have named the cause did not exist yet.
+
+## 131. A version check that waited for a password (2026-08-08)
+
+*"dont know why the backend takes to long to start."*
+
+§130 moved `sync_to_pin` above the health check, which was right, and made it the first thing every
+launch does — which turned two of its properties into defects.
+
+`run_git` shelled out with no timeout and no prompt suppression. Mini-Me is **private**, and once a
+credential helper is configured, `git fetch` against it does not fail — it *waits*, for a sign-in
+dialog nobody is watching for, before the backend is spawned. The app looks hung, and the thing it
+is hung on is a version check.
+
+Now: `GIT_TERMINAL_PROMPT=0`, an askpass that answers nothing, and `timeout 20`. "Ask the user"
+becomes "fail immediately", and the rest — DNS, a stalled handshake, a moved repository — is
+bounded. A version check is worth a few seconds and worth nothing at all if it costs a window that
+will not open.
+
+### Where the rest of the startup goes
+
+Measured from a real launch, spawn to healthy is about **17 seconds**:
+
+| | |
+|---|---|
+| `asta auth print-token --raw --refresh` | **~10s** |
+| `langgraph dev` importing the graph | ~7s |
+
+The token is minted **fresh on every launch** (`backend.rs:1423`) — `--refresh` unconditionally,
+with no check of whether the stored one is still valid. That is the single largest cost in getting
+the window usable, and it is a network round trip through the CLI for a credential that is
+typically still good. Worth a validity check before a refresh; not tonight.
+
+The MCP tool lists are a separate ~7s, paid on the **first turn** rather than at startup — 8 Asta,
+23 Dataverse, 9 AGROVOC, each fetched over HTTP when the agent is assembled.
+
+*The startup path is the one place where every network call is a call the researcher waits on with
+nothing on screen. It deserves an inventory, and it has never had one.*
+
+## 132. The diagnostic that reads the same when it works (2026-08-08)
+
+> `0 of 7 sources carry the corpus id Asta returned`
+
+That line is the whole of the evidence four days of DOI work has been steering by, and tonight —
+with `find_papers` finally on the machine and the skills path fixed — it printed again, unchanged.
+The reading each previous time was *the subagent called no search tool and wrote its citations from
+memory*. That reading is no longer sound, and the line is the reason.
+
+### What it actually measures
+
+`_seen` is filled by `install_mcp`, which hooks `_make_mcp_tools_resilient` — the function that
+wraps the **MCP bundle**. `find_papers` is ours: a plain `@tool` in `backend/paper_tools.py`,
+handed to the subagent alongside the bundle and never through it. It has never passed through that
+wrapper, so nothing it returns is recorded.
+
+So `_papers()` is empty whenever the CLI path is used — *including when it works perfectly* — and
+`link_for` returns nothing for every source, and the count is zero out of seven. The line reads
+identically in the two cases it exists to tell apart:
+
+| what happened | what the line says |
+|---|---|
+| no search ran; citations came from memory | `0 of 7` |
+| `find_papers` ran; every link built from the record | `0 of 7` |
+
+§81's rule, for the fifth time this week, and this time it cost the diagnosis rather than a
+launch: the message was written when there was one way to find a paper, and a second way was added
+without revisiting what the message claims.
+
+### The other half: a level nobody checked
+
+`find_papers` does log its result — `logger.info("find_papers(%r) -> %d paper(s)")`. Every line
+this overlay has ever been *seen* to produce in the backend log arrived at WARNING, and the spawn
+sets no log level. So the absence of that line was read as "the tool did not run" when it may only
+mean "INFO does not reach this file". A diagnostic on an unconfirmed channel is not a diagnostic.
+
+### The fix
+
+`install_papers` wraps `find_papers` the way `install_mcp` wraps the bundle, and says so at the
+level that demonstrably arrives:
+
+> `minime_local: find_papers returned 10 paper(s), 10 newly recorded (10 known so far)`
+
+`_seen` now stores a **finished URL** rather than a corpus id, because there are two shapes of
+answer and only one of them carries an id. `find_papers` arrives with a link already resolved
+against the publisher's record by `backend/citations.py`, which prefers the DOI when there is one —
+strictly better than anything reconstructible here. Storing the id would have meant discarding it
+and rebuilding something worse.
+
+And the artifact line no longer reports a count when there is nothing to count:
+
+> `no search recorded — the 7 source(s) keep the links the subagent supplied, which are their own
+> unless find_papers logged above`
+
+The tool object is **mutated**, not rebound: `backend/agent.py` does `from backend.paper_tools
+import find_papers`, so by patch time the agent already holds the object and replacing the module
+attribute would patch a name nothing reads — the §125 failure exactly, which took two attempts
+there and should not take a third here.
+
+`the_overlay_records_the_cli_search_as_well_as_the_mcp_one` drives it from Rust, through a child
+task, and asserts the DOI link survives rather than being rebuilt as a corpus id.
+
+*The question that mattered tonight — did the subagent call a tool — was answerable all along by a
+line that was never written, and unanswerable from the one that was.*
+
+## 133. The exit that was always cheaper than the work (2026-08-08)
+
+> `minime_local: recording the link of every paper find_papers returns`
+> `minime_local: no search recorded — the 8 source(s) keep the links the subagent supplied`
+
+The wrapper installed, the tool was present, and the subagent called **nothing**. Eight references
+composed from memory. §132 made the question answerable; this is the answer.
+
+### It was never the prompt
+
+Four days went into the prompt — *"Use available tools"*, then a whole appended block of identifier
+rules on top of it, and the behaviour did not move once. It could not have.
+
+`academic_researcher` carries `response_format=AcademicResearchResults`. Anthropic models report
+`structured_output: False` in their profile, so LangChain resolves that to a `ToolStrategy`: **the
+schema is bound as a tool.** And then, in `langchain/agents/factory.py:1273`:
+
+```python
+# Force tool use if we have structured output tools
+tool_choice = "any" if structured_output_tools else request.tool_choice
+```
+
+The first model call is *compelled* to call a tool. Among its options is one that answers the whole
+question in a single step, from memory, and ends the episode. Every other option is work. The model
+was doing the rational thing with the choices it had, every single time, and a sentence in a system
+prompt asking for diligence was never going to outweigh the shape of the loop it runs in.
+
+### The line that also decided the fix
+
+That same statement discards `request.tool_choice` whenever a structured output tool is bound. So
+the obvious repair — middleware that sets `tool_choice="find_papers"` — writes a value nothing
+reads. It would have installed cleanly, logged nothing wrong, and changed no behaviour: the exact
+shape of §125, §129 and §131, and it would have taken another launch to notice.
+
+Found by reading the binding path before writing the middleware rather than after it failed. That
+is the only reason this is one section and not three.
+
+### The fix
+
+Withhold the exit until the work is done:
+
+```python
+request.override(response_format=None, tool_choice=SEARCH_TOOL)
+```
+
+Both halves are load-bearing. Dropping the response format un-binds the structured output tool,
+which is what lets `tool_choice` reach the model at all; naming the tool makes the forced call a
+*search* rather than whichever of `ls`, `execute` or `write_todos` it picks when told only that it
+must call something.
+
+The gate opens on a search result **existing**, not on it being useful — an empty result, a
+timeout, a missing sandbox each still leave a `ToolMessage` behind. A failed search costs a
+citation and never a turn.
+
+Upstream as [Mini-Me #40](https://github.com/CENTRO-INTERNACIONAL-DE-LA-PAPA/Mini-Me/pull/40), in
+the repository rather than the overlay: the constraint that put four of these patches in
+`overlay/` was *"the checkout is reference material"*, and that ended with *"I myself mantain it"*.
+
+*A tool the model may call is a suggestion. The whole DOI investigation — corpus ids, Crossref
+verification, a citation builder, a CLI search — was built on the assumption that the subagent was
+searching badly. It was not searching at all, and nothing we added on that assumption could have
+found that out.*
+
+## 134. A fix that was merged, pulled, and never delivered (2026-08-08)
+
+§133's fix was merged at 23:22:57. The run at 23:24 behaved exactly as before, and the honest
+reading of that was *"the fix does not work"*. It had not run. The backend was still executing
+`77c8b94` — **three pull requests behind**.
+
+Every layer of the delivery chain reported success or said nothing:
+
+- `sync_to_pin` fetched from Mini-Me's own remote. It is a **private** repository and WSL holds
+  no credentials for it, so the fetch failed — quietly, and into the *app's* log, not the backend
+  log anyone reads.
+- The checkout also carried four hand-delivered files from an earlier attempt, so the dirty-tree
+  guard refused to move it. Correctly. It cannot tell an abandoned manual patch from a
+  colleague's work in progress.
+- And the backend log carried **no version at all**, so every line in it was read against an
+  assumption about which code produced it.
+
+Three independent safeguards, each behaving as designed, combining into a backend frozen a month
+back with nothing on screen to say so.
+
+### The stamp
+
+The overlay now logs the checkout's commit as its first line — read from `.git` directly, no
+subprocess, because this runs during start-up and a stalled `git` would delay the window:
+
+> `minime_local: backend checkout aab5790 (main)`
+
+It reads a linked worktree correctly too, via `commondir`, which it did not on the first attempt.
+A diagnostic that cannot read its own repository is worse than none: it earns the shrug it exists
+to prevent.
+
+## 135. One repository (2026-08-08)
+
+> *"from now I want a mono repo in mini me desktop. copy everything we need I dont want to depende
+> on a secod repo anymmore"*
+
+The backend source is now `mini-me/` in this repository, tracked, at `aab5790` — all 184 files,
+including the web frontend, so nothing is left behind that would keep the second repository alive.
+
+### What §5 was protecting, and why it stopped paying
+
+The locked decision was *"bundled, never forked"*, and its reasoning was sound: a vendored copy in
+git is a fork with extra steps, and a fork drifts. That held while the checkout was **reference
+material somebody else maintained**. It stopped holding at *"I myself mantain it"*, and what
+replaced it was not safety but four delivery bugs in three days, ending in §134 — a merged fix that
+never reached the machine because the update path needed credentials the machine did not have.
+
+The monorepo removes that path entirely. `bundled_backend_dir()` finds `mini-me/` first, and
+provisioning already knew how to copy from a bundled source rather than clone
+(`scripts/setup-wsl.sh`, `MINIME_BUNDLED_SOURCE`). **A `git pull` on this repository is now the
+backend update** — a file copy that needs no network and no token, instead of a `git fetch` against
+a private remote that WSL has never once succeeded at.
+
+### What is deliberately not done yet
+
+`sync_to_pin` still updates an existing checkout with `git fetch origin`. Provisioning a *new* one
+now uses the in-repo source, but a machine that already has `~/Mini-Me` keeps the old path, and the
+old path is the broken one. Replacing it means deciding what a WSL checkout even is once the source
+is here — a git clone with its own history, or a plain directory mirrored from `mini-me/` with a
+version stamp written beside it. The second is simpler and matches the monorepo, and it wants a
+clear head rather than the end of this session.
+
+*Written down rather than done, because the failure being fixed is a delivery mechanism whose
+failure mode is silence — and shipping half of one at midnight is how §127, §129, §130 and §131
+each happened.*
+
+## 136. Keeping the vendored copy honest (2026-08-08)
+
+`mini-me/` is re-vendored from Mini-Me `main` after each merge, whole, never patched in place:
+
+```sh
+rm -rf mini-me && mkdir mini-me && git -C ../Mini-Me archive <sha> | tar -x -C mini-me
+```
+
+**The rule is: `mini-me/` equals an upstream commit, exactly.** Editing it directly is how a
+vendored copy becomes a fork, which is precisely what §5's "bundled, never forked" was protecting
+against and the one part of that decision worth keeping. A change to the backend goes upstream
+first and arrives here by re-vendoring, so `mini-me/` is always a commit somebody can name.
+
+Now at `8017be5` — [#42](https://github.com/CENTRO-INTERNACIONAL-DE-LA-PAPA/Mini-Me/pull/42) and
+[#43](https://github.com/CENTRO-INTERNACIONAL-DE-LA-PAPA/Mini-Me/pull/43), which between them
+stopped the academic researcher discarding most of what it found.
+
+## 137. Ten of eleven, and the eight nobody counted (2026-08-09)
+
+The first run with #40 and #42 both live:
+
+> `find_papers('late blight resistance in Andean potato landraces …') -> 20 paper(s)`
+> `minime_local: 10 of 11 sources relinked to a paper the search returned (19 recorded)`
+
+The gate holds and the links are real. Two things that line does not say:
+
+**Which source was the eleventh.** "10 of 11" has two causes needing opposite fixes — a paper the
+model added from memory *after* searching, or a real one whose citation drifted far enough that
+`link_for`'s ambiguity guard refused to choose between two near-identical titles. With nineteen
+papers on one topic, near-ties are the expected case, not the exotic one. The line now prints the
+citation, because §81 keeps being the answer.
+
+**That eight papers never reached the answer at all.** Nineteen recorded, eleven reported. The
+count of what was relinked says how much of the answer is anchored to a record; it says nothing
+about how much of the search was dropped before the researcher could see it. A run that retrieves
+nineteen papers and shows eleven scores ten-of-eleven and reads as healthy.
+
+That second number is the researcher's actual request — *"is up to the scietinst to selct and drop
+the ones they want"* — and #42 asked the model for it in a prompt. It filtered anyway. Which is
+tonight's lesson for the second time: **a prompt is a request, and the model is free to decline.**
+The search only became reliable when the alternative was removed from the loop rather than argued
+against, and reporting will likely need the same treatment — the papers `find_papers` returned are
+already recorded here, so the artifact can carry them whether or not the model chose to mention
+them.
+
+*Measured first, on purpose. The last structural fix was built on four days of assuming the wrong
+cause; this one starts with a number.*
+
+## 138. What the DOI thread was actually about (2026-08-09)
+
+> *"the links are great!"*
+
+Five days, and the citations now come from the publisher's record, the links open the paper they
+name, and nothing the search finds is thrown away. Verified on a live run: `6 of 6 sources
+relinked to a paper the search returned (6 recorded, 0 never reported)`, and by opening them.
+
+### The cause, and how far away it was from where we looked
+
+The subagent was never searching badly. **It was not searching.** Its structured response was bound
+as a tool, LangChain forces `tool_choice="any"` whenever one is present, and among its options sat
+one that answered the whole question from memory in a single step and ended the turn. It took the
+cheapest legal move, every time.
+
+Everything built before that — the corpus id capture, the Crossref verification, the citation
+builder, the CLI search, the automatic link repair — was correct, is still in use, and **none of it
+could have found this**, because all of it assumed a search was happening. Four days of work
+downstream of an assumption nobody had checked. The check, when it finally came, was one log line
+saying whether a tool had been called.
+
+### The rule this subsystem kept teaching
+
+Three times in one evening, in three different places:
+
+| asked the model | outcome |
+|---|---|
+| *"Use available tools"* | it did not (§133) |
+| *"report every paper, rank rather than filter"* | reported 9 of 24 (§137) |
+| *"use the citation exactly as given"* | rewrote them (§119) |
+
+And three times, removing the alternative from the loop held: withhold the structured response
+until a search returns; append the missing papers where the list leaves the backend; build the
+reference in code so there is no field left to invent.
+
+**A prompt is a request the model is free to decline. A structure is not.** Prompts are still the
+right tool for judgement — which papers bear on the question, how to rank them — but never for an
+invariant. If it must be true, it cannot be asked for.
+
+### And the corollary, which cost more than the bug
+
+Every one of those three was diagnosed from a log line that could not distinguish success from
+failure. `0 of 7 sources carry the corpus id` printed identically whether the search had worked
+perfectly or never run (§132). `10 of 11 relinked` read as healthy on a run that dropped sixteen
+papers (§137). Both were written when the system had one path, and neither was revisited when it
+grew a second.
+
+*The diagnostics were wrong for longer than the code was, and they are why the code stayed wrong.*
+
+## 139. One repository, finished (2026-08-09)
+
+> *"I want minime desktop as a mono repo so we dont need to pull and copy the backend"*
+
+§135 put the source in `mini-me/` and left the update path alone, which meant a fresh machine
+provisioned from this repository and every existing one still fetched from Mini-Me's private
+remote. That half is now gone.
+
+### What was removed
+
+`sync_to_pin`, `run_git`, `backend_ref`, `MINIME_BACKEND_REF` and the pin tests — about 220 lines.
+Deleted rather than disabled. Machinery that cannot run is not neutral: three of this week's four
+delivery bugs were safeguards behaving exactly as designed, in a combination nobody had in mind,
+and a dead `git fetch` sitting behind a live file copy is the next one waiting.
+
+### What replaced it
+
+`sync_source_command` — the same shape as `sync_overlay_command`, which has worked since §25:
+
+```sh
+for d in backend skills; do
+  rm -rf DIR/.$d.new && cp -r SRC/$d DIR/.$d.new && rm -rf DIR/$d && mv DIR/.$d.new DIR/$d
+done
+```
+
+Staged beside the target and swapped in only once the copy has fully succeeded, so an unreachable
+source — a Windows drive that is not mounted, the case the in-distro copies exist to survive —
+leaves the working checkout alone instead of deleting it. `uv sync` runs only when `uv.lock`
+actually moved, compared against a stamp; without it a dependency added upstream would surface as
+an ImportError at boot, naming the wrong problem.
+
+**Stdout is discarded and stderr is not.** A mirror that failed silently would be §134 in a new
+coat.
+
+Only for a checkout the app owns — someone who pointed us at their own clone keeps it. That was
+the one part of the pin worth keeping.
+
+### What this buys
+
+`git pull` on this repository *is* the backend update. No network, no token, no second remote, no
+copying by hand. The thing that cost four test cycles on 2026-08-08 cannot recur, because the
+mechanism it depended on no longer exists.
+
+**One case remains, and it is honest about itself:** a `langgraph dev` left running from a previous
+session has already imported its code, and nothing at launch can change that. The app now says so
+on attach, with the command to fix it, rather than reporting success.
+
+## 140. Where else a prompt is holding an invariant (2026-08-09)
+
+> *"Do you think each async subagent needs specific customed middlewares?"*
+
+Not each. Only where a subagent has an invariant a prompt cannot enforce — and there is a way to
+find those without guessing. **Grep the prompts for shouting.** Every `NEVER`, `ALWAYS` and
+`Mandatory` in `backend/subagents.py` marks a place where somebody already suspected the model
+would decline, and wrote in capitals instead of in code:
+
+| subagent | the rule, in its own words | checkable from the run? |
+|---|---|---|
+| `dataverse_explorer` | *"Mandatory fixed filename rule: ALWAYS call `SearchCIPDataverse` with `output_filename="dataverse_search.json"`"* | yes — the tool call's arguments |
+| `hypothesis_generator` | *"Never fabricate theories or citations. ALWAYS return a structured HypothesisOutput"* | yes — did `generate_theories` return? |
+| `pdf_librarian` | *"NEVER claim you extracted... Never fabricate documents or matches"* | yes — did the extraction tool return? |
+| `data_voyager`, `diagnostic_analytics` | *"NEVER invent findings, numbers, or charts"* | yes — did an analysis tool run? |
+| `report_writer` | *"the `markdown` field MUST contain the full report content"* | yes — a shape assertion on the output |
+| `research_planner` | *"You NEVER run anything"* | **already structural** — `tools: []`, `skills: []` |
+
+`research_planner` is the contrast worth keeping in view: its rule is not a rule, it is a fact
+about what it was given. Nothing to enforce, so nothing to write.
+
+### Every one of these shares the §133 exit
+
+Each carries a `response_format`, which LangChain binds as a tool and then forces
+`tool_choice="any"` around. So on the first model call each of them is compelled to call
+something, and each has one option that answers the whole question from memory in a single step
+and ends the turn. `academic_researcher` took it every time for four days. There is no reason to
+believe the others behave differently — only that nobody has looked, because their output is
+harder to check than a DOI.
+
+**`dataverse_explorer` first.** It is the same failure with a shorter fuse: a `DataVerseSearchResults`
+composed from memory carries invented `persistent_id`s, and a persistent id is a thing a researcher
+will paste into a citation without thinking, exactly as they clicked the DOIs. Its mandatory
+filename rule is purely mechanical besides — a wrapper should set that argument, not ask for it.
+
+*The rule this project keeps arriving at: if it must be true, it cannot be asked for. What is worth
+adding is that the places to look are already marked, in capital letters, by whoever wrote the
+prompt.*
+
+## 141. The report the bibliography took down with it (2026-08-09)
+
+The literature path started working, so a researcher did the next obvious thing and pressed
+**download as PDF**:
+
+```
+the backend could not render the report (502 Bad Gateway):
+{"error":"PDF render failed: 'str' object has no attribute 'get'"}
+```
+
+`_build_typst_wrapper` reads each entry of `sources` as a mapping:
+
+```python
+citation_raw = (source.get("citation") or "").strip()
+```
+
+And this app sent a list of bare citation strings:
+
+```rust
+self.sources.iter().map(|source| source.citation.clone()).collect(),
+```
+
+under a comment stating, as fact, *"the backend's Typst template takes a list of citation
+strings."* It does not, and never did.
+
+### The comment was the whole bug
+
+Nobody wrote that line carelessly. §110 turned this route on — *"the rendering already existed and
+had never been called"* — and reading a Typst template that emits `- {citation}` per line, a list
+of citation strings is the obvious thing it wants. The `.get()` two lines above it decides
+otherwise, and the code was never run against a report that had a source, so the belief was never
+contradicted.
+
+This is the project's recurring shape at its purest: **a distinction that lived in a comment and
+not in the data.** Two clients read the same undocumented field two reasonable ways, and the field
+had no opinion. `render_report` validates that `sources` *is a list* and stops — the container's
+type is a contract, its contents are not.
+
+### Why it stayed hidden for a year
+
+```python
+for source in sources or []:
+```
+
+With no sources, the loop that dies never runs. Every report without citations rendered perfectly,
+which is nearly all of them until §133 made the searching reliable. **The feature that fixed the
+citations is what made this reachable** — the second time in this thread that getting something
+working exposed the thing behind it.
+
+### Fixed on both sides, deliberately
+
+**The app now sends the objects** (`protocol.rs::render_request_body`), which is not just the
+narrow fix. `Source` has carried `link` since §91 — the field whose own docstring explains that a
+model-written DOI is *"usually right, and wrong without warning"* while the real one sits one key
+away. The mapping to `Vec<String>` threw it away at the last step, so no rendered bibliography had
+ever had a resolvable link in it. **The §91/§115 shape again, in the one place it had survived: a
+value the program already had and never read.**
+
+Building the body is now a pure function beside `decode_sources` rather than JSON assembled inline
+inside an HTTP call, because the wire shape was untestable where it was — the only way to see it
+was to make the request. Same reasoning as upstream's `_build_search_command`, arrived at from the
+opposite direction.
+
+**The route now accepts either shape** (Mini-Me PR #44). Four lines, and the next client to guess
+differently gets a PDF instead of a stack trace. An entry it truly cannot read is dropped *with a
+warning*, because a bibliography quietly one entry short is `paper_tools.unreported`'s failure
+arriving through a different door.
+
+Verified with the exact payload that produced the 502: `PDF bytes: 35382 b'%PDF-'`. Nine Python
+tests, one Rust test that asserts every entry `is_object()` — 210 and 228 green.
+
+## 142. The second of nine (2026-08-09)
+
+§140 listed the subagents holding an invariant in a prompt and named `dataverse_explorer` first.
+This is that one, as Mini-Me PR #45.
+
+The exit is identical to §133's: `response_format=DataVerseSearchResults` is bound as a tool,
+`tool_choice="any"` is forced, and one of the options answers the whole question from memory in a
+single step. What comes out when it does is a list of `DataVerseFindings`, each carrying a required
+`persistent_id` — *"Dataset DOI or persistent identifier"*. **A researcher pastes that into a
+citation without checking it**, exactly as they clicked the DOIs. And unlike an invented reference,
+a wrong persistent id cannot be caught by recognising the title.
+
+### Two steps, because one proves nothing
+
+`SearchCIPDataverse` writes its results to a **file**. `read_search_results` is what puts the
+metadata in front of the model. So a gate that opened as soon as a search returned would let the
+subagent search, satisfy the gate, and still compose every field from memory — having demonstrated
+only that it can call a tool. Both are forced, in order. `list_dataset_files` is not: it is for
+shortlisted datasets only and nothing in the schema depends on it.
+
+### The rule came out of the prompt
+
+    Mandatory fixed filename rule: ALWAYS call `SearchCIPDataverse` with
+    `output_filename="dataverse_search.json"` and ALWAYS call `read_search_results` with
+    `filename="dataverse_search.json"`.
+
+Two tools that must agree on one string, spelling the argument differently on the way out and the
+way back. That is mechanical, so `FixedSearchFilename` sets it in the call. **The paragraph is
+deleted rather than kept beside the middleware** — a rule that is enforced *and* still requested
+teaches the next reader that the prompt is where such things live, which is the belief this whole
+sequence has been dismantling.
+
+### Why it is a base class now
+
+The mechanism moved to `middleware/tool_gate.py`. Seven subagents still carry the same exit, and
+writing it a third time by hand is how the ninth ends up subtly different from the first.
+`SearchBeforeCiting` became a subclass **with its seven tests unchanged and passing**, which is the
+only proof worth having that a refactor of the one thing that finally worked changed nothing. Its
+log line is byte-identical too, so anything grepping `has not searched yet` still matches.
+
+Two of the sixteen new tests run against LangChain's real `ModelRequest` and `ToolCallRequest`
+rather than a double, because this entire family of bugs is *a value written where nothing reads
+it* and a hand-written stub cannot catch that by construction.
+
+**A comment in `subagents.py` first claimed `FixedSearchFilename` had to be outermost.** Checked:
+the two override disjoint hooks — `wrap_model_call` and `wrap_tool_call` — so neither composes
+around the other and the order is free. One day after §141, which was a comment asserting a
+contract the code did not have.
+
+### The copy that reported `ok` and had not
+
+The first real-machine run of §139's monorepo install failed two steps *after* the mistake:
+
+```
+==> Copying Mini-Me from /mnt/c/.../mini-me-desktop/mini-me
+    ok  copied to /home/piero_linux/.local/share/mini-me-desktop/backend
+==> Installing Python packages
+error: No `pyproject.toml` found in current directory or any parent directory
+```
+
+`cp -r SRC DEST` means two different things. When `DEST` does not exist it *becomes* a copy of
+`SRC`; when it does, it gains a `DEST/<basename SRC>`. `setup-wsl.sh` removes `$DIR` only when it
+is *empty*, so a directory left behind non-empty by anything at all turned the copy into
+`$DIR/mini-me/pyproject.toml` — and reported `ok`, because the copy had in fact succeeded.
+
+Trailing `/.` copies the contents and means one thing only. The same distinction bit
+`sync_source_command` while §139 was being written, caught there by a test; here it reached a
+researcher, because the setup script's only test is running it.
+
+**And the check that was missing is the cheap one**: the step now asserts `pyproject.toml` is where
+it will be needed, instead of leaving a wrong layout to be discovered by the first command that
+required a file. A diagnostic that reads the same on success and failure is §132's shape, and this
+is the fourth time it has appeared in this document.
+
+## 143. Sixteen outputs that were one directory too deep (2026-08-09)
+
+§117's real case is fixed at the source: `workspace::outputs` now descends into an agent's named
+folders, so `eda_outputs/yield.png` and `eda_outputs/tables/summary.csv` reach both the Outputs
+panel and the transcript diff. The displayed name is the path relative to the conversation rather
+than only the basename. That preserves the useful folder name and keeps two `summary.csv` files in
+different analyses distinguishable.
+
+The walk is deliberately not general-purpose file indexing. It stops after four subdirectory
+levels, 2,048 directory entries or 512 files; skips dotted entries and `__pycache__` at every
+level; and never follows symlinks. When any bound bites, the panel says it is showing a bounded
+view and points to the folder for the rest. A silent cap would have reproduced the same defect at
+file 513.
+
+Three sentence-named tests pin the behaviour: nested output folders remain visible, hidden caches
+remain hidden below the top level, and a deeper tree reports truncation instead of pretending the
+scan was exhaustive.
+
+## 144. CRLF was not uncommitted work (2026-08-09)
+
+`setup-wsl.sh` copies an existing Windows checkout into the distro, including its Git index and
+working files. It does not copy Git for Windows' *global* `core.autocrlf=true`. WSL Git therefore
+saw the CRLF bytes the Windows checkout deliberately contained without the policy that normalised
+them for comparison and reported essentially every tracked file as modified.
+
+Provisioning now sets `core.autocrlf=input` in the copied checkout, on new installs and re-runs.
+That normalises CRLF when Git reads it, while future checkouts made inside WSL stay LF. Git caches
+the previous clean filter in its index, so the script runs `git add --renormalize -- .` once — but
+only when the ordinary diff is non-empty and `--ignore-cr-at-eol` proves every unstaged difference
+is the line ending. A genuine edit leaves the tree untouched. It does not run `reset --hard` or
+rewrite working files: `find_source` can copy a developer's checkout with genuine edits, and
+fixing line-ending interpretation does not authorize destroying those edits. One regression test
+pins the shipped script and absence of a hard reset; another
+creates an LF-indexed repository, replaces its working file with CRLF bytes, proves it is dirty
+under `core.autocrlf=false`, and proves the same bytes are clean under the installed `input`
+policy.
+
+The shell parser could not be run in this Windows sandbox because creating a WSL instance returns
+`E_ACCESSDENIED`; the Rust test that embeds the shipped script passes. The remaining proof belongs
+on the target machine: after Setup finishes, `git status --short` inside the provisioned checkout
+must print nothing.
+
+## 145. The token already had six days left (2026-08-09)
+
+§131 measured about ten of seventeen startup seconds in
+`asta auth print-token --raw --refresh`. The command forced a network refresh on every backend
+spawn even though a real Asta JWT says `exp - iat = 604800` — seven days.
+
+Startup now takes the cheapest valid answer in order:
+
+1. the `ASTA_TOKEN` already read from the OS keychain, with no subprocess;
+2. the CLI's cached `print-token --raw`, without `--refresh`;
+3. a fresh `print-token --raw --refresh`, only when the first two are absent, malformed or near
+   expiry.
+
+"Near" means five minutes. That margin is negligible against seven days and avoids beginning a
+turn with a credential that can expire while LangGraph imports the graph or the agent assembles
+its MCP tools. The app base64url-decodes only the JWT payload and reads numeric `exp`; it does not
+trust that unverified claim for authentication. Asta still verifies the signature. Here the claim
+only decides whether spending ten seconds on a refresh is worthwhile, and every malformed shape
+chooses the safe slow path.
+
+Three tests cover a week-valid stored token, the exact five-minute boundary, and missing or
+non-numeric expiry. A real before/after startup timing still needs the Windows machine with its
+signed-in Asta CLI; this headless sandbox cannot start its WSL distro or run the app.
+
+## 146. Left open: stopping a setup repair has two process boundaries (2026-08-09)
+
+§28's cancel remains open, deliberately. A repair on the target platform is usually a Linux
+process behind `wsl.exe`; installing WSL itself is an elevated process behind PowerShell and UAC.
+This repository already proved that killing `wsl.exe` does not reliably reap the Linux process it
+fronted (§26). A button that only drops the receiver or kills the Windows wrapper would say
+"cancelled" while `uv sync` or an installer continued changing the machine.
+
+The correct implementation needs a uniquely identified process group inside the distro and a
+separate, honest policy for an already-elevated install. That is larger than the three real-machine
+defects above and cannot be verified in this sandbox, so no cosmetic Stop button was added.
+
+The transcript virtualization and SVG glyph replacement remain open too. They were explicitly
+lower priority, and the former requires a before/after measurement in a real GPUI window. The app
+cannot be run here, and replacing a variable-height transcript without that measurement would
+repeat §70's mistake in a different type.

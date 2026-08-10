@@ -1,0 +1,26 @@
+{
+  "dependencies": ["."],
+  "python_version": "3.12",
+  "graphs": {
+    "agent": "./backend/agent.py:agent"
+  },
+  "http": {
+    "app": "./backend/routes/__init__.py:app",
+    "enable_custom_route_auth": true,
+    "cors": {
+      "allow_origins": [
+        "http://localhost:5173",
+        "https://dffybalxw0d04.cloudfront.net",
+        "https://smith.langchain.com"
+      ],
+      "allow_methods": ["*"],
+      "allow_headers": ["*"],
+      "max_age": 7200
+    }
+  },
+  "auth": {
+    "path": "./backend/auth.py:auth",
+    "disable_studio_auth": false
+  },
+  "env": ".env"
+}

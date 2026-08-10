@@ -51,6 +51,24 @@ pub struct Subagent {
     pub description: String,
 }
 
+impl Subagent {
+    /// Whether this specialist reaches Asta.
+    ///
+    /// **Read off the registry rather than from a list kept here.** Three of the shipped
+    /// specialists say so in their own descriptions — *"Conducts research using Asta tools"*,
+    /// *"using the Asta Theorizer pipeline"*, *"Run the Asta DataVoyager pipeline"* — and that
+    /// text arrives in `subagents.json`, written by the backend from the factory call that
+    /// actually built the coordinator.
+    ///
+    /// A hardcoded `["academic_researcher", "hypothesis_generator", "data_voyager"]` would be
+    /// the exact thing §55 built this file to avoid: a copy in the client that drifts the first
+    /// time upstream renames one, failing silently. Here the failure mode is a specialist whose
+    /// description stops mentioning Asta, which is visible in the file.
+    pub fn uses_asta(&self) -> bool {
+        self.description.to_ascii_lowercase().contains("asta")
+    }
+}
+
 /// The file the backend overlay writes its subagent list into.
 const REGISTRY: &str = "subagents.json";
 
@@ -109,36 +127,134 @@ pub(crate) fn parse_registry(text: &str) -> Vec<Subagent> {
         .unwrap_or_default()
 }
 
-/// Where one conversation's files live.
-pub fn thread_dir(thread_id: &str) -> PathBuf {
-    root().join(thread_id)
-}
-
-/// Every image in `dir`, oldest first.
+/// One path segment for a project name, or `None` for "no project".
 ///
-/// Sorted by modification time so a turn's figures appear in the order they were drawn,
-/// which for a plotting script is the order the analysis went in. Returns empty for a
-/// directory that does not exist yet — the common case, since the backend creates it on
-/// first write.
-pub fn images(dir: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut found: Vec<(std::time::SystemTime, PathBuf)> = entries
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            let extension = path.extension()?.to_str()?.to_ascii_lowercase();
-            if !IMAGE_EXTENSIONS.contains(&extension.as_str()) {
-                return None;
+/// **This must agree exactly with `workspace_project` in `overlay/minime_local/workspace.py`.**
+/// The backend writes a turn's outputs into the folder *it* computes; the app looks in the folder
+/// *this* computes. Disagree by one character and the researcher's figures are written somewhere
+/// the app will never show them — the §89 failure with a longer fuse. There is a test that runs
+/// both and compares them, because two implementations of one rule in two languages is exactly
+/// the shape this project keeps getting wrong (docs §105).
+pub fn project_folder(name: &str) -> Option<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let cleaned: String = name
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() || matches!(character, ' ' | '-' | '_') {
+                character
+            } else {
+                '_'
             }
-            let modified = entry.metadata().ok()?.modified().ok()?;
-            Some((modified, path))
         })
         .collect();
-    found.sort_by(|a, b| a.0.cmp(&b.0));
-    found.into_iter().map(|(_, path)| path).collect()
+    let trimmed = cleaned.trim_matches(|c| matches!(c, ' ' | '.' | '_'));
+    let clipped: String = trimmed.chars().take(96).collect();
+    (!clipped.is_empty()).then_some(clipped)
 }
+
+/// Where one conversation's files live, inside its project if it has one.
+pub fn thread_dir_in(project: Option<&str>, thread_id: &str) -> PathBuf {
+    match project.and_then(project_folder) {
+        Some(folder) => root().join(folder).join(thread_id),
+        None => root().join(thread_id),
+    }
+}
+
+/// Move a conversation's folder into a different project, or out of one.
+///
+/// **Moves rather than copies**, which is what a person expects of "move to project" and what
+/// keeps the app and Explorer telling the same story. Only safe while no turn is running — the
+/// backend holds this path open for the length of a turn — so the caller checks that first.
+///
+/// Absent source is not an error: a conversation that has produced nothing yet has no directory,
+/// and filing it should still work.
+pub fn move_thread(from: Option<&str>, to: Option<&str>, thread_id: &str) -> Result<()> {
+    let source = thread_dir_in(from, thread_id);
+    let destination = thread_dir_in(to, thread_id);
+    if source == destination || !source.is_dir() {
+        return Ok(());
+    }
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    // Refuse rather than merge: two directories for one conversation means the app has already
+    // lost track of where its files are, and silently folding them together would hide that.
+    if destination.exists() {
+        anyhow::bail!(
+            "{} already exists — move or remove it first",
+            destination.display()
+        );
+    }
+    std::fs::rename(&source, &destination)
+        .with_context(|| format!("moving {} to {}", source.display(), destination.display()))?;
+    // An empty project folder left behind reads as a project that still exists.
+    if let Some(parent) = source.parent() {
+        if parent != root() {
+            let _ = std::fs::remove_dir(parent);
+        }
+    }
+    Ok(())
+}
+
+/// Turn a report's title into a filename a person would recognise in a folder listing.
+///
+/// Runs of anything that is not a letter or digit become one underscore, and the case is kept —
+/// so *"EDA Report: Simulated Potato Field Trials"* becomes
+/// `EDA_Report_Simulated_Potato_Field_Trials.md`, which is what the agent itself proposed when
+/// asked where the file was. Matching that spelling matters: the answer in the transcript and the
+/// file on disk should be the same name.
+///
+/// Windows is the target, so this also has to survive `\ / : * ? " < > |` — a title with a colon
+/// in it is the common case, not the exotic one.
+pub fn report_filename(title: &str) -> String {
+    let mut name = String::new();
+    let mut pending = false;
+    for character in title.chars() {
+        if character.is_alphanumeric() {
+            if pending && !name.is_empty() {
+                name.push('_');
+            }
+            pending = false;
+            name.push(character);
+        } else {
+            pending = true;
+        }
+    }
+    if name.is_empty() {
+        name.push_str("Report");
+    }
+    // Long titles happen, and Windows' path limit is not generous.
+    let clipped: String = name.chars().take(96).collect();
+    format!("{}.md", clipped.trim_end_matches('_'))
+}
+
+/// Write a report beside the conversation's other outputs, and say where it went.
+///
+/// Skips the write when the file already holds exactly this text. A `values` snapshot arrives
+/// many times during a turn and carries every report each time, so without this the same file
+/// would be rewritten on every frame — and its modification time, which [`images`] sorts by and
+/// a researcher reads, would keep jumping to now.
+pub fn save_report(dir: &Path, title: &str, markdown: &str) -> Result<PathBuf> {
+    let path = dir.join(report_filename(title));
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        if existing == markdown {
+            return Ok(path);
+        }
+    }
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("creating {} for a report", dir.display()))?;
+    std::fs::write(&path, markdown).with_context(|| format!("writing {}", path.display()))?;
+    Ok(path)
+}
+
+// No `images`. It listed the figures in a directory, oldest first, and existed because the
+// transcript showed figures and nothing else. The transcript now shows every output a turn
+// produced, so its one caller reads `outputs` — which finds the same files, carries what it
+// already read about them, and does not need a second directory walk with a second sort rule.
 
 /// One file a conversation produced.
 #[derive(Clone, Debug, PartialEq)]
@@ -148,7 +264,33 @@ pub struct Output {
     /// What it is, in the researcher's terms — the grouping key in the panel.
     pub kind: Kind,
     pub bytes: u64,
+    /// When it was last written.
+    ///
+    /// Carried rather than discarded: [`outputs`] reads it to sort and used to throw it away, so
+    /// every caller that wanted chronological order — or wanted to know whether its cached
+    /// measurement of this file was still current — went back to the filesystem for a number
+    /// that had already been read.
+    pub modified: std::time::SystemTime,
 }
+
+/// A bounded view of everything a conversation wrote.
+///
+/// `truncated` is deliberately part of the result rather than a log line. The person looking at
+/// the Outputs panel is the one who needs to know that the folder contains more than the app is
+/// showing; silently stopping at a safety limit would recreate §117 with a larger threshold.
+pub struct OutputListing {
+    pub groups: Vec<(Kind, Vec<Output>)>,
+    pub truncated: bool,
+}
+
+/// Enough depth for the named output folders analysis tools normally create, without walking a
+/// virtualenv or a copied dataset tree forever. Four means files remain visible through
+/// `turn/analysis/tables/final/file.csv`; anything deeper is still reachable through Explorer.
+const MAX_OUTPUT_DEPTH: usize = 4;
+/// Bound directory entries as well as files: a tree of thousands of empty folders is just as
+/// capable of freezing a render-time scan as a tree of thousands of artifacts (plan §117).
+const MAX_OUTPUT_ENTRIES: usize = 2_048;
+const MAX_OUTPUT_FILES: usize = 512;
 
 /// The kinds of output worth telling apart.
 ///
@@ -164,14 +306,10 @@ pub enum Kind {
 }
 
 impl Kind {
-    pub fn label(self) -> &'static str {
-        match self {
-            Kind::Figure => "Figures",
-            Kind::Data => "Data",
-            Kind::Document => "Documents",
-            Kind::Other => "Other files",
-        }
-    }
+    // No `label`. The panel used to head each group with "Figures" / "Data" / "Documents", and
+    // the redesign replaced those headings with a glyph on each row — three words of chrome per
+    // group, in a 330px column, to say what the icon beside the filename already said. The kind
+    // still decides the *order* files appear in, which is the part that was doing work.
 
     fn of(path: &Path) -> Self {
         let extension = path
@@ -181,7 +319,10 @@ impl Kind {
             .to_ascii_lowercase();
         if IMAGE_EXTENSIONS.contains(&extension.as_str()) || extension == "svg" {
             Kind::Figure
-        } else if matches!(extension.as_str(), "csv" | "tsv" | "xlsx" | "json" | "parquet") {
+        } else if matches!(
+            extension.as_str(),
+            "csv" | "tsv" | "xlsx" | "json" | "parquet"
+        ) {
             Kind::Data
         } else if matches!(extension.as_str(), "md" | "txt" | "pdf" | "docx" | "html") {
             Kind::Document
@@ -197,48 +338,110 @@ impl Kind {
 /// plots are diffed off disk (§42): a file written by a script inside `execute` registers
 /// no artifact, and those are most of them.
 pub fn outputs(dir: &Path) -> Vec<(Kind, Vec<Output>)> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut found: Vec<(std::time::SystemTime, Output)> = entries
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            let metadata = entry.metadata().ok()?;
-            if !metadata.is_file() {
-                return None;
-            }
-            let name = path.file_name()?.to_str()?.to_string();
-            // Dotfiles are the agent's business, not the researcher's.
-            if name.starts_with('.') {
-                return None;
-            }
-            Some((
-                metadata.modified().ok()?,
-                Output {
-                    kind: Kind::of(&path),
-                    path,
-                    name,
-                    bytes: metadata.len(),
-                },
-            ))
-        })
-        .collect();
+    output_listing(dir).groups
+}
+
+/// The same grouped files as [`outputs`], plus whether its documented safety bounds hid any.
+///
+/// The ordinary callers only need the files. The Outputs panel uses this fuller answer so a
+/// bounded walk never pretends it was exhaustive (plan §117).
+pub fn output_listing(dir: &Path) -> OutputListing {
+    let mut found = Vec::new();
+    let mut entries_seen = 0;
+    let mut truncated = false;
+    collect_outputs(dir, dir, 0, &mut found, &mut entries_seen, &mut truncated);
+
     // Newest first: the file someone wants is nearly always the one just written.
-    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.sort_by(|a, b| {
+        b.modified
+            .cmp(&a.modified)
+            .then_with(|| a.name.cmp(&b.name))
+    });
 
     let mut groups: Vec<(Kind, Vec<Output>)> = Vec::new();
     for kind in [Kind::Figure, Kind::Data, Kind::Document, Kind::Other] {
         let items: Vec<Output> = found
             .iter()
-            .filter(|(_, output)| output.kind == kind)
-            .map(|(_, output)| output.clone())
+            .filter(|output| output.kind == kind)
+            .cloned()
             .collect();
         if !items.is_empty() {
             groups.push((kind, items));
         }
     }
-    groups
+    OutputListing { groups, truncated }
+}
+
+fn collect_outputs(
+    root: &Path,
+    dir: &Path,
+    depth: usize,
+    found: &mut Vec<Output>,
+    entries_seen: &mut usize,
+    truncated: &mut bool,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        if *entries_seen >= MAX_OUTPUT_ENTRIES || found.len() >= MAX_OUTPUT_FILES {
+            *truncated = true;
+            break;
+        }
+        *entries_seen += 1;
+
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        // A symlinked directory can lead outside the conversation or back to an ancestor. The
+        // panel is an index of files the turn wrote here, not a general filesystem crawler.
+        if file_type.is_symlink() {
+            continue;
+        }
+
+        let path = entry.path();
+        let Some(base_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        // Dotfiles and tool caches are the agent's business, not the researcher's. Apply the
+        // existing top-level rule at every depth now that §117 makes those depths visible.
+        if base_name.starts_with('.') || base_name == "__pycache__" {
+            continue;
+        }
+
+        if file_type.is_dir() {
+            if depth < MAX_OUTPUT_DEPTH {
+                collect_outputs(root, &path, depth + 1, found, entries_seen, truncated);
+            } else {
+                *truncated = true;
+            }
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let Some(relative) = path.strip_prefix(root).ok() else {
+            continue;
+        };
+        let Some(name) = relative.to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        found.push(Output {
+            kind: Kind::of(&path),
+            path,
+            name,
+            bytes: metadata.len(),
+            modified,
+        });
+    }
 }
 
 /// A size a person can read at a glance.
@@ -254,6 +457,339 @@ pub fn human_size(bytes: u64) -> String {
     }
 }
 
+/// What a file is, past its name and its size.
+///
+/// # Why only two kinds
+///
+/// The design asks each file row to carry "the real shape of the file" and gives three examples:
+/// `1,204 rows · 418 KB`, `1600 × 900 · 92 KB`, and `6 pages · 8 references`. The first two are
+/// derivable here and are; the third is not, and is therefore absent.
+///
+/// A PDF's page count lives in its page tree, and reading that means either a PDF parser — a
+/// dependency on a machine where `cargo build` is already the riskiest step a colleague performs
+/// (see this crate's `Cargo.toml`, which argues the point for `flate2` and `keyring`) — or one of
+/// the folklore heuristics: counting `/Type /Page`, which double-counts `/Pages` nodes and misses
+/// anything in an object stream, or grepping `/Count`, which finds the first of several. Both
+/// produce a plausible number that is sometimes wrong, shown in a panel a researcher is meant to
+/// trust. Reference counts are not in the file at all in any recoverable form.
+///
+/// So a PDF says its size, which is true, and nothing else.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shape {
+    /// A delimited table: data rows (the header is not one) and columns.
+    Table { rows: u64, columns: usize },
+    /// Pixel dimensions.
+    Image { width: u32, height: u32 },
+    /// Nothing beyond the size — either the kind carries no shape, or reading it failed.
+    Plain,
+}
+
+impl Shape {
+    /// The sub-line, with the size on the end. `Plain` is the size alone.
+    pub fn describe(self, bytes: u64) -> String {
+        let size = human_size(bytes);
+        match self {
+            Shape::Table { rows, columns } => {
+                format!("{} rows · {columns} cols · {size}", thousands(rows))
+            }
+            Shape::Image { width, height } => format!("{width} × {height} · {size}"),
+            Shape::Plain => size,
+        }
+    }
+}
+
+/// Past this, the shape is not worth the read.
+///
+/// A 400 MB export would be counted line by line on the thread that draws the window. The panel
+/// says the size instead, which is the honest answer to "how big is this" anyway.
+const SHAPE_BUDGET: u64 = 64 * 1024 * 1024;
+
+/// Measure a file, or [`Shape::Plain`] if it has no measurable shape or cannot be read.
+///
+/// Never an error: this decorates a row in a panel. A file mid-write, on a disconnected drive,
+/// or in an encoding we cannot read should cost that row its sub-line, not the panel.
+pub fn shape(path: &Path, bytes: u64) -> Shape {
+    if bytes > SHAPE_BUDGET {
+        return Shape::Plain;
+    }
+    let extension = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "csv" => table(path, b','),
+        "tsv" => table(path, b'\t'),
+        extension if IMAGE_EXTENSIONS.contains(&extension) => {
+            std::fs::read(path).map(|data| image_shape(&data)).unwrap_or(Shape::Plain)
+        }
+        _ => Shape::Plain,
+    }
+}
+
+/// Count the records and fields of a delimited file.
+///
+/// **Quote-aware**, which is not fussiness: a delimiter inside `"Cusco, Peru"` counted as a
+/// column boundary makes the column count wrong for exactly the files a researcher exports from
+/// a spreadsheet, and a newline inside a quoted field makes the row count wrong the same way.
+/// A number in this panel is read as a fact about the data.
+pub(crate) fn count_records(data: &[u8], delimiter: u8) -> Shape {
+    let mut rows: u64 = 0;
+    let mut columns = 0usize;
+    let mut fields = 1usize;
+    let mut quoted = false;
+    let mut started = false;
+    let mut index = 0usize;
+    while index < data.len() {
+        let byte = data[index];
+        if quoted {
+            // `""` inside a quoted field is an escaped quote, not the end of one.
+            if byte == b'"' {
+                if data.get(index + 1) == Some(&b'"') {
+                    index += 2;
+                    continue;
+                }
+                quoted = false;
+            }
+            started = true;
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'"' => {
+                quoted = true;
+                started = true;
+            }
+            b'\r' => {}
+            b'\n' => {
+                if started {
+                    // The first record is the header, so it is a column count, not a row.
+                    if columns == 0 {
+                        columns = fields;
+                    } else {
+                        rows += 1;
+                    }
+                }
+                fields = 1;
+                started = false;
+            }
+            byte if byte == delimiter => {
+                fields += 1;
+                started = true;
+            }
+            _ => started = true,
+        }
+        index += 1;
+    }
+    // A last line with no trailing newline is still a record.
+    if started {
+        if columns == 0 {
+            columns = fields;
+        } else {
+            rows += 1;
+        }
+    }
+    if columns == 0 {
+        return Shape::Plain;
+    }
+    Shape::Table { rows, columns }
+}
+
+fn table(path: &Path, delimiter: u8) -> Shape {
+    std::fs::read(path)
+        .map(|data| count_records(&data, delimiter))
+        .unwrap_or(Shape::Plain)
+}
+
+/// The delimiter a file's extension implies, for the two this app previews.
+fn delimiter_of(path: &Path) -> Option<u8> {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "csv" => Some(b','),
+        "tsv" => Some(b'\t'),
+        _ => None,
+    }
+}
+
+/// One record split into fields, honouring quotes.
+///
+/// The same rules as [`count_records`] — a delimiter inside quotes is a character, `""` is an
+/// escaped quote — because a preview whose columns disagreed with the column count printed above
+/// it would be two views of one file contradicting each other on screen.
+pub(crate) fn split_record(line: &str, delimiter: u8) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut field = String::new();
+    let mut quoted = false;
+    let mut characters = line.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '"' if quoted => {
+                if characters.peek() == Some(&'"') {
+                    characters.next();
+                    field.push('"');
+                } else {
+                    quoted = false;
+                }
+            }
+            '"' => quoted = true,
+            c if !quoted && c as u32 == delimiter as u32 => {
+                fields.push(std::mem::take(&mut field));
+            }
+            '\r' | '\n' if !quoted => {}
+            c => field.push(c),
+        }
+    }
+    fields.push(field);
+    fields
+}
+
+/// The first few rows of a delimited file — header first — for the card in the transcript.
+///
+/// `None` for anything that is not a table we can split. Bounded by `rows`, and the read is
+/// bounded too: [`head`] stops after that many lines rather than pulling a 400 MB export into
+/// memory to show three rows of it.
+///
+/// A quoted field containing a newline will be cut short here, because the read is line-based
+/// while [`count_records`] is byte-based. That costs a preview a cell; it does not affect the
+/// row and column counts, which are the numbers anyone acts on.
+pub fn table_preview(path: &Path, rows: usize) -> Option<Vec<Vec<String>>> {
+    let delimiter = delimiter_of(path)?;
+    let text = head(path, rows).ok()?;
+    let found: Vec<Vec<String>> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| split_record(line, delimiter))
+        .collect();
+    // A header on its own is not a preview of anything.
+    (found.len() > 1).then_some(found)
+}
+
+/// Pixel dimensions, straight out of the header.
+///
+/// Four formats, four headers, no decoder — the bytes that carry width and height sit within the
+/// first few dozen of each file and are documented in each specification. `img()` already decodes
+/// these to draw them; this only needs the numbers, and reaching for an image crate to get two
+/// integers would add a dependency tree to a build that has to succeed on a colleague's Windows
+/// machine with nothing installed.
+pub(crate) fn image_shape(data: &[u8]) -> Shape {
+    let be = |at: usize| -> Option<u32> {
+        let slice: [u8; 4] = data.get(at..at + 4)?.try_into().ok()?;
+        Some(u32::from_be_bytes(slice))
+    };
+    let le16 = |at: usize| -> Option<u32> {
+        let slice: [u8; 2] = data.get(at..at + 2)?.try_into().ok()?;
+        Some(u16::from_le_bytes(slice) as u32)
+    };
+
+    // PNG: an 8-byte signature, then the IHDR chunk whose first two fields are the dimensions.
+    if data.starts_with(b"\x89PNG\r\n\x1a\n") {
+        if let (Some(width), Some(height)) = (be(16), be(20)) {
+            return Shape::Image { width, height };
+        }
+    }
+    // GIF: the logical screen descriptor, little-endian, right after `GIF87a`/`GIF89a`.
+    if data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a") {
+        if let (Some(width), Some(height)) = (le16(6), le16(8)) {
+            return Shape::Image { width, height };
+        }
+    }
+    // WebP: a RIFF container whose VP8 flavour decides where the size lives.
+    if data.starts_with(b"RIFF") && data.get(8..12) == Some(b"WEBP") {
+        match data.get(12..16) {
+            // Lossy: a 3-byte start code, then 14-bit width and height.
+            Some(b"VP8 ") => {
+                if let (Some(width), Some(height)) = (le16(26), le16(28)) {
+                    return Shape::Image {
+                        width: width & 0x3fff,
+                        height: height & 0x3fff,
+                    };
+                }
+            }
+            // Lossless: 14-bit each, packed across four bytes, and stored one less than actual.
+            Some(b"VP8L") => {
+                if let Some(bits) = data.get(21..25) {
+                    let packed = u32::from_le_bytes([bits[0], bits[1], bits[2], bits[3]]);
+                    return Shape::Image {
+                        width: (packed & 0x3fff) + 1,
+                        height: ((packed >> 14) & 0x3fff) + 1,
+                    };
+                }
+            }
+            // Extended: 24-bit each, little-endian, also stored one less than actual.
+            Some(b"VP8X") => {
+                if let Some(bits) = data.get(24..30) {
+                    let width = u32::from_le_bytes([bits[0], bits[1], bits[2], 0]) + 1;
+                    let height = u32::from_le_bytes([bits[3], bits[4], bits[5], 0]) + 1;
+                    return Shape::Image { width, height };
+                }
+            }
+            _ => {}
+        }
+    }
+    // JPEG: no fixed offset. Walk the marker segments to the frame header, whose payload
+    // begins with precision, height, width.
+    if data.starts_with(b"\xff\xd8") {
+        let mut at = 2usize;
+        while at + 3 < data.len() {
+            if data[at] != 0xff {
+                at += 1;
+                continue;
+            }
+            let marker = data[at + 1];
+            // Padding and the standalone markers carry no length field to skip over.
+            if marker == 0xff {
+                at += 1;
+                continue;
+            }
+            if matches!(marker, 0xd8 | 0x01) || (0xd0..=0xd7).contains(&marker) {
+                at += 2;
+                continue;
+            }
+            let length = match data.get(at + 2..at + 4) {
+                Some(bytes) => u16::from_be_bytes([bytes[0], bytes[1]]) as usize,
+                None => break,
+            };
+            // Every SOFn *except* the four that are not frame headers: DHT, JPG, DAC, DNL.
+            let is_frame = (0xc0..=0xcf).contains(&marker)
+                && !matches!(marker, 0xc4 | 0xc8 | 0xcc);
+            if is_frame {
+                if let Some(bytes) = data.get(at + 5..at + 9) {
+                    return Shape::Image {
+                        width: u16::from_be_bytes([bytes[2], bytes[3]]) as u32,
+                        height: u16::from_be_bytes([bytes[0], bytes[1]]) as u32,
+                    };
+                }
+                break;
+            }
+            if length < 2 {
+                break;
+            }
+            at += 2 + length;
+        }
+    }
+    Shape::Plain
+}
+
+/// `1204` → `1,204`.
+///
+/// A four-digit row count is read as a four-digit number either way; a seven-digit one is not.
+pub fn thousands(value: u64) -> String {
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (seen, digit) in digits.chars().enumerate() {
+        if seen > 0 && (digits.len() - seen).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
 /// The first `lines` lines of a text file.
 ///
 /// Bounded on purpose. A dataset can be hundreds of megabytes, and a preview that reads
@@ -262,8 +798,8 @@ pub fn human_size(bytes: u64) -> String {
 pub fn head(path: &Path, lines: usize) -> Result<String> {
     use std::io::{BufRead, BufReader};
 
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("could not open {}", path.display()))?;
+    let file =
+        std::fs::File::open(path).with_context(|| format!("could not open {}", path.display()))?;
     let mut reader = BufReader::new(file);
     let mut text = String::new();
     let mut buffer = String::new();
@@ -275,7 +811,8 @@ pub fn head(path: &Path, lines: usize) -> Result<String> {
             Ok(_) => text.push_str(&buffer),
             Err(error) => {
                 if taken == 0 {
-                    return Err(error).with_context(|| format!("could not read {}", path.display()));
+                    return Err(error)
+                        .with_context(|| format!("could not read {}", path.display()));
                 }
                 break;
             }
@@ -321,35 +858,489 @@ pub fn open(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Open a URL in the researcher's browser.
+///
+/// **Separate from [`open`], which must not be handed one.** That function conjures a missing
+/// directory before launching the file manager — a deliberate fix from §50 — so calling it with
+/// `https://doi.org/…` would create a folder called `https:` in the working directory and then
+/// point Explorer at it. Same three platform launchers, none of the filesystem behaviour.
+///
+/// Only `http` and `https`. A citation is a line of text the *model* wrote, so it is untrusted
+/// input reaching a process launcher: `file://` would open anything on the disk, and on Windows
+/// `explorer.exe` will act on a UNC path or a shell verb given the chance. Anything else is
+/// refused rather than passed along.
+pub fn browse(url: &str) -> Result<()> {
+    let url = url.trim();
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        anyhow::bail!("{url:?} is not an http(s) URL");
+    }
+    let launcher = if cfg!(windows) {
+        "explorer.exe"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(launcher)
+        .arg(url)
+        .spawn()
+        .with_context(|| format!("could not open {url}"))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod project_tests {
+    use super::*;
+
+    /// The Rust and Python sanitisers must produce byte-identical names.
+    ///
+    /// **This is the test that matters most in this file.** The backend writes a turn's outputs
+    /// into the folder it computes from `configurable.__workspace_project__`; the app looks in the
+    /// folder *it* computes from the same string. One character of disagreement and a
+    /// researcher's figures land somewhere the app will never look — §89's failure, with a longer
+    /// fuse and no error anywhere.
+    ///
+    /// Two implementations of one rule in two languages is a shape this project has got wrong
+    /// before (§100: a scrollbar width in one file and a layout in another). It cannot be written
+    /// once here, so it is checked instead.
+    #[test]
+    fn the_rust_and_python_project_names_agree() {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: python3 is not on PATH");
+            return;
+        }
+        let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
+
+        let names = [
+            "Late blight",
+            "Late blight/2026",
+            "  ../../etc  ",
+            "",
+            "   ",
+            r#"Q1:"yield"<x>|v2"#,
+            "café ñandú",
+            "___",
+            "...",
+            "a.b.c",
+            &"A".repeat(200),
+            "trailing_",
+            "-leading",
+        ];
+
+        // The sanitiser lifted out of the module, so importing it does not pull in deepagents.
+        let source = std::fs::read_to_string(overlay.join("minime_local/workspace.py"))
+            .expect("the overlay is beside the crate");
+        let start = source
+            .find("def workspace_project()")
+            .expect("the function");
+        let end = source
+            .find("def workspace_thread(")
+            .expect("the next function");
+        let script = format!(
+            "import json,sys\nWORKSPACE_PROJECT_KEY='__workspace_project__'\n\
+             def _configurable(): return {{'__workspace_project__': sys.argv[1]}}\n{}\n\
+             print(json.dumps(workspace_project()))",
+            &source[start..end]
+        );
+
+        for name in names {
+            let out = std::process::Command::new("python3")
+                .arg("-c")
+                .arg(&script)
+                .arg(name)
+                .output()
+                .expect("running the python sanitiser");
+            assert!(
+                out.status.success(),
+                "python failed for {name:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let python: String = serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim())
+                .expect("json string");
+            let rust = project_folder(name).unwrap_or_default();
+            assert_eq!(rust, python, "disagreed on {name:?}");
+        }
+    }
+
+    #[test]
+    fn a_project_name_can_never_escape_the_workspace() {
+        // It becomes a path segment, and it is a thing a person types.
+        for hostile in ["../..", "/etc/passwd", r"..\..\Windows", "a/b"] {
+            let folder = project_folder(hostile).unwrap_or_default();
+            assert!(!folder.contains('/'), "{hostile:?} -> {folder:?}");
+            assert!(!folder.contains('\\'), "{hostile:?} -> {folder:?}");
+            assert!(!folder.starts_with('.'), "{hostile:?} -> {folder:?}");
+        }
+        // Nothing usable is nothing, not a folder called "_".
+        assert_eq!(project_folder("   "), None);
+        assert_eq!(project_folder("..."), None);
+        assert_eq!(project_folder(""), None);
+    }
+
+    #[test]
+    fn an_ungrouped_conversation_keeps_the_path_it_always_had() {
+        // Every conversation that predates projects stays exactly where it is — the answer to
+        // "what happens to my existing work" is "nothing" (docs §105).
+        assert_eq!(thread_dir_in(None, "t-1"), root().join("t-1"));
+        assert_eq!(thread_dir_in(Some("   "), "t-1"), root().join("t-1"));
+        assert_eq!(
+            thread_dir_in(Some("Late blight"), "t-1"),
+            root().join("Late blight").join("t-1")
+        );
+    }
+}
+
+#[cfg(test)]
+mod report_tests {
+    use super::*;
+
+    #[test]
+    fn a_title_becomes_the_filename_the_agent_itself_proposed() {
+        // The transcript said the report could be saved as
+        // `EDA_Report_Simulated_Potato_Field_Trials.md`. The file on disk should carry that same
+        // name, or the answer and the folder disagree about what happened (docs §89).
+        assert_eq!(
+            report_filename("EDA Report: Simulated Potato Field Trials"),
+            "EDA_Report_Simulated_Potato_Field_Trials.md"
+        );
+    }
+
+    #[test]
+    fn characters_windows_refuses_never_reach_the_path() {
+        // Windows is the target, and a colon in a report title is the common case. Every one of
+        // `\ / : * ? " < > |` has to be gone, not escaped.
+        let name = report_filename(r#"Q1/Q2: "yield" <draft> | v2*?"#);
+        assert!(
+            !name.contains(['\\', '/', ':', '*', '?', '"', '<', '>', '|']),
+            "{name}"
+        );
+        assert_eq!(name, "Q1_Q2_yield_draft_v2.md");
+    }
+
+    #[test]
+    fn a_title_of_nothing_usable_still_produces_a_file() {
+        assert_eq!(report_filename("***"), "Report.md");
+        assert_eq!(report_filename(""), "Report.md");
+    }
+
+    #[test]
+    fn rewriting_the_same_report_leaves_the_file_alone() {
+        // A `values` snapshot arrives many times per turn and carries every report each time.
+        // Rewriting on each one would keep resetting a timestamp a researcher reads — and that
+        // `images` sorts by.
+        let dir = std::env::temp_dir().join(format!("mini-me-report-{}", std::process::id()));
+        let first = save_report(&dir, "Trial Report", "# Yield\n").expect("first write");
+        let stamp = std::fs::metadata(&first).unwrap().modified().unwrap();
+        let again = save_report(&dir, "Trial Report", "# Yield\n").expect("second write");
+        assert_eq!(first, again);
+        assert_eq!(
+            std::fs::metadata(&again).unwrap().modified().unwrap(),
+            stamp
+        );
+        // Changed content does land.
+        save_report(&dir, "Trial Report", "# Yield\n\nRevised.\n").expect("third write");
+        assert!(std::fs::read_to_string(&first).unwrap().contains("Revised"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn only_images_are_collected_and_in_the_order_they_were_written() {
-        let dir = std::env::temp_dir().join(format!("minime-workspace-test-{}", std::process::id()));
+    fn the_registry_says_which_specialists_reach_asta() {
+        // The three real descriptions, verbatim from `backend/subagents.py` (2026-08-07). The
+        // list is read rather than copied, so this test is about the *rule* holding against the
+        // text upstream actually writes.
+        let registry = parse_registry(
+            &serde_json::json!({
+                "format": 1,
+                "subagents": [
+                    {"name": "academic_researcher",
+                     "description": "Conducts research using Asta tools (via MCP tools)."},
+                    {"name": "hypothesis_generator",
+                     "description": "Generate literature-grounded scientific theories and hypotheses for a research question using the Asta Theorizer pipeline."},
+                    {"name": "data_voyager",
+                     "description": "Run the Asta DataVoyager pipeline (`asta analyze-data`) to generate and test hypotheses."},
+                    {"name": "report_writer",
+                     "description": "Write a polished report from the findings and recommendations."},
+                    {"name": "dataverse_explorer",
+                     "description": "Searches and recommends datasets from CIP Dataverse."},
+                ]
+            })
+            .to_string(),
+        );
+        let asta: Vec<&str> = registry
+            .iter()
+            .filter(|subagent| subagent.uses_asta())
+            .map(|subagent| subagent.name.as_str())
+            .collect();
+        assert_eq!(
+            asta,
+            ["academic_researcher", "hypothesis_generator", "data_voyager"]
+        );
+        // The report writer produces the document the attribution goes *in*. Crediting Asta
+        // because that ran would restore the bug in a new place.
+        assert!(!registry[3].uses_asta());
+        assert!(!registry[4].uses_asta(), "CIP Dataverse is not Asta");
+
+        // An empty or unreadable registry credits nothing. A missing acknowledgement can be
+        // added; a false one has to be retracted.
+        assert!(parse_registry("{ not json").is_empty());
+    }
+
+    #[test]
+    fn a_delimiter_inside_quotes_is_not_a_column() {
+        // The case that makes a naive split wrong on precisely the files a researcher exports
+        // from a spreadsheet: a place name with a comma in it.
+        let csv = b"site,yield_t_ha,notes\n\"Cusco, Peru\",21.4,ok\n\"Puno, Peru\",18.9,ok\n";
+        assert_eq!(
+            count_records(csv, b','),
+            Shape::Table {
+                rows: 2,
+                columns: 3
+            }
+        );
+
+        // A newline inside a quoted field is not a record boundary either.
+        let wrapped = b"a,b\n\"line one\nline two\",2\n";
+        assert_eq!(
+            count_records(wrapped, b','),
+            Shape::Table {
+                rows: 1,
+                columns: 2
+            }
+        );
+
+        // `""` is an escaped quote, so the field does not end there and the rest of the line is
+        // still one field.
+        let escaped = b"a,b\n\"he said \"\"yes\"\", then left\",2\n";
+        assert_eq!(
+            count_records(escaped, b','),
+            Shape::Table {
+                rows: 1,
+                columns: 2
+            }
+        );
+
+        // No trailing newline still counts the last record.
+        assert_eq!(
+            count_records(b"a,b\n1,2", b','),
+            Shape::Table {
+                rows: 1,
+                columns: 2
+            }
+        );
+        // A header and nothing else is a table with no rows, not a table with one.
+        assert_eq!(
+            count_records(b"a,b,c\n", b','),
+            Shape::Table {
+                rows: 0,
+                columns: 3
+            }
+        );
+        // Blank lines between records are not records.
+        assert_eq!(
+            count_records(b"a,b\n1,2\n\n\n3,4\n", b','),
+            Shape::Table {
+                rows: 2,
+                columns: 2
+            }
+        );
+        assert_eq!(count_records(b"", b','), Shape::Plain);
+        // Tabs, for a .tsv, and a comma inside a field is then just a character.
+        assert_eq!(
+            count_records(b"a\tb\nCusco, Peru\t2\n", b'\t'),
+            Shape::Table {
+                rows: 1,
+                columns: 2
+            }
+        );
+    }
+
+    #[test]
+    fn a_preview_splits_the_same_way_the_count_does() {
+        // The two must agree: a preview showing four columns under a sub-line saying three is
+        // one file contradicting itself on screen.
+        let fields = split_record("\"Cusco, Peru\",21.4,\"he said \"\"yes\"\"\"", b',');
+        assert_eq!(fields, vec!["Cusco, Peru", "21.4", "he said \"yes\""]);
+        assert_eq!(split_record("a\tb\tc", b'\t'), vec!["a", "b", "c"]);
+        // A trailing delimiter is a real empty last field, not an absent one.
+        assert_eq!(split_record("a,b,", b','), vec!["a", "b", ""]);
+
+        let dir = std::env::temp_dir().join(format!("minime-preview-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a temp dir");
 
-        // A report and a dataset are outputs too, but they are not something the chat can
-        // render — only figures belong inline.
-        for name in ["informe.md", "papas.csv", "notes.txt"] {
-            std::fs::write(dir.join(name), b"x").expect("write");
-        }
-        for name in ["a_first.png", "b_second.JPG", "c_third.webp"] {
+        let csv = dir.join("yield.csv");
+        std::fs::write(
+            &csv,
+            "site,yield_t_ha\n\"Cusco, Peru\",21.4\nPuno,18.9\nJunin,20.1\n",
+        )
+        .expect("write");
+        let preview = table_preview(&csv, 3).expect("a table");
+        assert_eq!(preview[0], vec!["site", "yield_t_ha"]);
+        assert_eq!(preview[1], vec!["Cusco, Peru", "21.4"]);
+        assert_eq!(preview.len(), 3, "bounded by the row budget");
+        // The column count the preview shows and the one the sub-line states are the same.
+        assert_eq!(
+            count_records(&std::fs::read(&csv).expect("read"), b','),
+            Shape::Table {
+                rows: 3,
+                columns: 2
+            }
+        );
+
+        // A header with no data under it previews nothing rather than an empty table.
+        let bare = dir.join("empty.csv");
+        std::fs::write(&bare, "a,b,c\n").expect("write");
+        assert!(table_preview(&bare, 4).is_none());
+
+        // Not a delimited file at all.
+        let note = dir.join("informe.md");
+        std::fs::write(&note, "# Hola\n\nunas notas\n").expect("write");
+        assert!(table_preview(&note, 4).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_images_dimensions_come_out_of_its_header() {
+        // Real headers, byte for byte, rather than files written by an encoder we would then be
+        // testing instead of ours.
+
+        // PNG: signature, chunk length, "IHDR", then 1600 × 900.
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend_from_slice(&13u32.to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&1600u32.to_be_bytes());
+        png.extend_from_slice(&900u32.to_be_bytes());
+        assert_eq!(
+            image_shape(&png),
+            Shape::Image {
+                width: 1600,
+                height: 900
+            }
+        );
+
+        // GIF: little-endian, and the byte order is the thing worth pinning.
+        let mut gif = b"GIF89a".to_vec();
+        gif.extend_from_slice(&640u16.to_le_bytes());
+        gif.extend_from_slice(&480u16.to_le_bytes());
+        assert_eq!(
+            image_shape(&gif),
+            Shape::Image {
+                width: 640,
+                height: 480
+            }
+        );
+
+        // JPEG: a comment segment first, so the walk has to skip a length-carrying marker to
+        // reach the frame header — and the frame stores *height before width*.
+        let mut jpeg = b"\xff\xd8".to_vec();
+        jpeg.extend_from_slice(b"\xff\xfe"); // COM
+        jpeg.extend_from_slice(&6u16.to_be_bytes()); // length, including itself
+        jpeg.extend_from_slice(b"hola");
+        jpeg.extend_from_slice(b"\xff\xc0"); // SOF0
+        jpeg.extend_from_slice(&17u16.to_be_bytes());
+        jpeg.push(8); // precision
+        jpeg.extend_from_slice(&768u16.to_be_bytes()); // height
+        jpeg.extend_from_slice(&1024u16.to_be_bytes()); // width
+        assert_eq!(
+            image_shape(&jpeg),
+            Shape::Image {
+                width: 1024,
+                height: 768
+            }
+        );
+
+        // WebP lossless stores each dimension one less than it is.
+        let mut webp = b"RIFF\0\0\0\0WEBPVP8L".to_vec();
+        webp.extend_from_slice(&[0, 0, 0, 0, 0]); // chunk length + signature byte
+        let packed: u32 = (255) | (99 << 14);
+        webp.extend_from_slice(&packed.to_le_bytes());
+        assert_eq!(
+            image_shape(&webp),
+            Shape::Image {
+                width: 256,
+                height: 100
+            }
+        );
+
+        // Anything else, and anything truncated, says nothing rather than guessing.
+        assert_eq!(image_shape(b"not an image at all"), Shape::Plain);
+        assert_eq!(image_shape(&png[..12]), Shape::Plain);
+        assert_eq!(image_shape(b""), Shape::Plain);
+    }
+
+    #[test]
+    fn a_shape_reads_as_the_sub_line_the_panel_shows() {
+        assert_eq!(
+            Shape::Table {
+                rows: 1204,
+                columns: 11
+            }
+            .describe(428_032),
+            "1,204 rows · 11 cols · 418 KB"
+        );
+        assert_eq!(
+            Shape::Image {
+                width: 1600,
+                height: 900
+            }
+            .describe(94_208),
+            "1600 × 900 · 92 KB"
+        );
+        // A PDF says its size and stops: page and reference counts are not derivable here.
+        assert_eq!(Shape::Plain.describe(1_048_576), "1.0 MB");
+
+        assert_eq!(thousands(0), "0");
+        assert_eq!(thousands(999), "999");
+        assert_eq!(thousands(1_000), "1,000");
+        assert_eq!(thousands(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn every_output_carries_when_it_was_written() {
+        // What replaced `images`. The transcript shows a turn's files in the order they were
+        // written, across kinds — so the stamp has to survive `outputs`, and sorting on it has
+        // to give write order rather than the kind grouping the panel wants.
+        let dir =
+            std::env::temp_dir().join(format!("minime-workspace-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a temp dir");
+
+        // Deliberately alternating kinds: a figure, then data, then a figure again. Reversing
+        // what `outputs` returns would put both figures together and lose this order entirely.
+        for name in ["a_first.png", "b_second.csv", "c_third.webp", "d_last.md"] {
             std::fs::write(dir.join(name), b"x").expect("write");
             // Distinct mtimes, or the sort has nothing to order by.
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
 
-        let found: Vec<String> = images(&dir)
-            .iter()
-            .filter_map(|path| path.file_name()?.to_str().map(str::to_string))
+        let mut produced: Vec<Output> = outputs(&dir)
+            .into_iter()
+            .flat_map(|(_, items)| items)
             .collect();
-        assert_eq!(found, vec!["a_first.png", "b_second.JPG", "c_third.webp"]);
+        produced.sort_by_key(|output| output.modified);
+        let names: Vec<&str> = produced.iter().map(|output| output.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["a_first.png", "b_second.csv", "c_third.webp", "d_last.md"]
+        );
+
+        // The panel's own order is the other one: grouped by kind, newest first inside a group.
+        let grouped = outputs(&dir);
+        assert_eq!(grouped[0].0, Kind::Figure);
+        assert_eq!(grouped[0].1[0].name, "c_third.webp", "newest figure first");
 
         // A directory that does not exist is the normal state before the first write.
-        assert!(images(&dir.join("nothing-here")).is_empty());
+        assert!(outputs(&dir.join("nothing-here")).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -369,9 +1360,14 @@ mod tests {
         }
 
         let groups = outputs(&dir);
-        let labels: Vec<&str> = groups.iter().map(|(kind, _)| kind.label()).collect();
-        // Figures first: they are the outputs someone wants to *see*.
-        assert_eq!(labels, vec!["Figures", "Data", "Documents", "Other files"]);
+        let kinds: Vec<Kind> = groups.iter().map(|(kind, _)| *kind).collect();
+        // Figures first: they are the outputs someone wants to *see*. The panel no longer heads
+        // each group with a word, but it still lists them in this order, so the order is still
+        // the thing worth pinning.
+        assert_eq!(
+            kinds,
+            vec![Kind::Figure, Kind::Data, Kind::Document, Kind::Other]
+        );
 
         let names: Vec<&str> = groups
             .iter()
@@ -385,6 +1381,82 @@ mod tests {
         assert_eq!(human_size(512), "512 B");
         assert_eq!(human_size(2048), "2 KB");
         assert_eq!(human_size(5 * 1024 * 1024), "5.0 MB");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn outputs_inside_an_agents_named_folder_remain_visible() {
+        let dir =
+            std::env::temp_dir().join(format!("minime-nested-outputs-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("eda_outputs/tables")).expect("nested output folders");
+        std::fs::write(dir.join("eda_outputs/yield.png"), b"plot").expect("a nested plot");
+        std::fs::write(dir.join("eda_outputs/tables/summary.csv"), b"clone,yield")
+            .expect("a nested table");
+
+        let found: Vec<Output> = outputs(&dir)
+            .into_iter()
+            .flat_map(|(_, items)| items)
+            .collect();
+        let names: Vec<&str> = found.iter().map(|output| output.name.as_str()).collect();
+        assert!(
+            names.contains(&if cfg!(windows) {
+                "eda_outputs\\yield.png"
+            } else {
+                "eda_outputs/yield.png"
+            }),
+            "{names:?}"
+        );
+        assert!(
+            names.contains(&if cfg!(windows) {
+                "eda_outputs\\tables\\summary.csv"
+            } else {
+                "eda_outputs/tables/summary.csv"
+            }),
+            "{names:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hidden_caches_stay_hidden_at_every_output_depth() {
+        let dir =
+            std::env::temp_dir().join(format!("minime-hidden-output-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("eda_outputs/.ipynb_checkpoints"))
+            .expect("a notebook cache");
+        std::fs::create_dir_all(dir.join("eda_outputs/__pycache__")).expect("a Python cache");
+        std::fs::write(
+            dir.join("eda_outputs/.ipynb_checkpoints/draft.csv"),
+            b"hidden",
+        )
+        .expect("a cached notebook output");
+        std::fs::write(dir.join("eda_outputs/__pycache__/analysis.pyc"), b"hidden")
+            .expect("a cached Python output");
+        std::fs::write(dir.join("eda_outputs/report.md"), b"visible").expect("a visible report");
+
+        let names: Vec<String> = outputs(&dir)
+            .into_iter()
+            .flat_map(|(_, items)| items.into_iter().map(|output| output.name))
+            .collect();
+        assert_eq!(names.len(), 1, "{names:?}");
+        assert!(names[0].ends_with("report.md"), "{names:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_deeper_output_tree_says_when_the_bounded_view_stops() {
+        let dir =
+            std::env::temp_dir().join(format!("minime-bounded-output-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let too_deep = dir.join("one/two/three/four/five");
+        std::fs::create_dir_all(&too_deep).expect("a deep output tree");
+        std::fs::write(too_deep.join("buried.csv"), b"hidden by bound")
+            .expect("a deeply nested output");
+
+        let listing = output_listing(&dir);
+        assert!(listing.truncated);
+        assert!(listing.groups.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -441,7 +1513,13 @@ mod tests {
     fn junk_and_absence_both_give_nothing_rather_than_panicking() {
         // This file is written by another process while this one reads it. Every bad shape has
         // to be survivable, because the alternative is the window dying on a truncated write.
-        for text in ["", "not json", "{}", r#"{"format":1}"#, r#"{"format":1,"subagents":[]}"#] {
+        for text in [
+            "",
+            "not json",
+            "{}",
+            r#"{"format":1}"#,
+            r#"{"format":1,"subagents":[]}"#,
+        ] {
             assert!(parse_registry(text).is_empty(), "{text:?}");
         }
         // A nameless entry is not nameable, and a missing description is merely unhelpful.
@@ -461,7 +1539,7 @@ mod tests {
         unsafe { std::env::set_var(WORKSPACE_ENV, "/tmp/somewhere-else") };
         assert_eq!(root(), PathBuf::from("/tmp/somewhere-else"));
         assert_eq!(
-            thread_dir("abc-123"),
+            thread_dir_in(None, "abc-123"),
             PathBuf::from("/tmp/somewhere-else").join("abc-123")
         );
         match previous {

@@ -395,7 +395,11 @@ impl RenderOnce for Modal {
                     .flex_none()
                     .px_4()
                     .pt_4()
-                    .text_color(rgb(theme::accent()))
+                    // Faint, not accent. `SETTINGS` and `PROVENANCE` are labels for a surface
+                    // you are already looking at — there is nothing to click. The accent is
+                    // reserved for what can be acted on, and a heading wearing it is the
+                    // loudest thing on a modal whose actual buttons are at the bottom.
+                    .text_color(rgb(theme::text_faint()))
                     .text_xs()
                     .child(self.title),
             );
@@ -733,6 +737,12 @@ pub fn picker_popup(at: gpui::Point<gpui::Pixels>, panel: impl IntoElement) -> i
                 .flex()
                 .flex_col()
                 .w(gpui::px(320.))
+                // A declared width is not a promise on its own: a flex child's `min-width: auto`
+                // lets its intrinsic content override it, and one long unbreakable path inside
+                // the theme picker widened this panel to nearly 400px (docs §86). These two make
+                // the number mean what it says, whatever a future caller puts inside.
+                .min_w_0()
+                .overflow_hidden()
                 .gap_2()
                 .p_2()
                 .rounded_md()
