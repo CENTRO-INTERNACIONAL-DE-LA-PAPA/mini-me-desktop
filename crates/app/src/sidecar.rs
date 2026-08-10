@@ -519,15 +519,24 @@ impl Sidecar {
         rx
     }
 
-    /// Delete a conversation. The caller has already confirmed and removed the row.
-    pub fn delete_conversation(&self, thread_id: String) {
+    /// Delete a conversation, reporting whether the backend made the deletion durable.
+    ///
+    /// This used to be fire-and-forget while the caller removed the row immediately. A failed or
+    /// interrupted request therefore looked successful until the next launch restored the still-
+    /// existing thread — and its project heading with it (§154). The UI now waits for this answer
+    /// before claiming either one is gone.
+    pub fn delete_conversation(&self, thread_id: String) -> mpsc::UnboundedReceiver<Result<()>> {
+        let (tx, rx) = mpsc::unbounded();
         let base_url = self.base_url.clone();
         self.runtime.spawn(async move {
             let client = LangGraphClient::new(base_url);
-            if let Err(error) = client.delete_conversation(&thread_id).await {
+            let result = client.delete_conversation(&thread_id).await;
+            if let Err(error) = &result {
                 tracing::warn!(%error, "could not delete a conversation");
             }
+            let _ = tx.unbounded_send(result);
         });
+        rx
     }
 
     /// Name a conversation. Fire-and-forget: the sidebar already shows the new name.

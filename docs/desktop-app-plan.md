@@ -8786,3 +8786,55 @@ and then flattens it back into one list. The folder the agent chose is a stateme
 belongs together, and the panel is discarding it.
 
 *Ninth: the value needed was one the program already had.*
+
+
+## 154. A project existed in two places (2026-08-10)
+
+The report was two symptoms of one contradiction: *new conversations already start in a project*,
+and *a deleted project comes back after launch*.
+
+§106 says a project is exactly a name carried by at least one conversation — no project registry,
+because a second truth will drift. But §107 added `settings.project`, remembered the last project
+opened, restored it on startup, and deliberately inherited it for ordinary **New thread**. An empty
+project therefore still existed in settings after its last conversation left the sidebar, and the
+next launch put fresh work back under that name. The persistence was not hidden in the backend;
+it was a second client-side registry this plan had explicitly ruled out one section earlier.
+
+The related upstream report, `docs/upstream/mini-me/project-spine-is-not-per-project.md`, identifies
+a different boundary: the spine route is server/user-scoped rather than project-scoped. That can
+make project *content* look shared, but it does not create the sidebar heading or choose the
+workspace directory. Treating it as this resurrection would have changed the protected backend
+and left the actual `settings.toml` value untouched.
+
+There are now only two ways to choose a project:
+
+- Open a conversation already filed there.
+- Click the `+` beside that project heading to start a conversation there deliberately.
+
+Launch and ordinary **New thread** both choose the workspace root. The old `project` settings key
+is accepted and ignored when upgrading, then disappears on the next save. Root conversations are
+labelled **Ungrouped Conversations** in the sidebar and picker — still `None` in metadata and still
+directly under `Documents/Mini-Me`, so the friendly name does not become a third registry or a
+real folder that can collide with one the researcher creates.
+
+### Why deletion also had to change
+
+A project heading is derived from its conversations, so deleting the last one is deleting the
+project from the app. The row used to disappear and say *conversation deleted* **before** the
+HTTP delete answered. `Sidecar::delete_conversation` then ran fire-and-forget; if the request
+failed or the app closed first, the durable thread remained and the next listing correctly brought
+it — and its project — back. The UI had reported an operation that had not happened.
+
+Deletion now leaves the row in a **Deleting…** state and removes it only after a successful server
+answer. Failure or a dropped answer keeps the conversation visible and says it was not deleted.
+Deleting the open conversation also clears the sidecar's project, so the empty slate cannot inherit
+the project whose last durable member just went away. Files and empty project folders in Documents
+are deliberately not deleted: they are researcher-owned outputs, and §58's delete contract has
+always promised to leave them alone.
+
+Two sentence-named tests hold the upgrade and failure paths: an older remembered project is ignored
+and not written back, and every non-successful delete resolution keeps the row. The window still
+needs the Windows restart check; this headless environment can prove the state transitions and wire
+result, not watch the heading disappear and stay gone across two launches.
+
+*The eleventh value the program already had was `None`. Remembering more state was the defect.*

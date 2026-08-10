@@ -61,6 +61,13 @@ const CHECK_PROMPT: &str = "In one short paragraph, what is your role as the Min
 const ASTA_CITATION: &str = "AstaBench: Rigorous Benchmarking of AI Agents with a Scientific \
      Research Suite. arXiv:2510.21652 — https://arxiv.org/abs/2510.21652";
 
+/// The root workspace said as a useful place rather than as the absence of organisation.
+///
+/// `None` remains the metadata value and the files remain directly under `Documents/Mini-Me`;
+/// this is only the researcher-facing name requested in §154, so it cannot become a second
+/// project registry or collide with a real folder of the same name.
+const UNGROUPED_PROJECT_LABEL: &str = "Ungrouped Conversations";
+
 /// [`section_label`] for a heading only known at runtime.
 fn section_label_owned(text: String) -> impl IntoElement {
     div()
@@ -1503,6 +1510,27 @@ fn merge_spine(previous: Option<&Project>, incoming: Project) -> Project {
     merged
 }
 
+/// What the sidebar may do after asking the backend to delete a conversation.
+///
+/// Kept separate from the async UI so the dangerous rule is testable: absence of a successful
+/// answer means the durable thread may still exist, therefore its row must stay (§154).
+enum DeleteResolution {
+    Remove,
+    Keep(String),
+}
+
+fn resolve_delete(result: Option<anyhow::Result<()>>) -> DeleteResolution {
+    match result {
+        Some(Ok(())) => DeleteResolution::Remove,
+        Some(Err(error)) => {
+            DeleteResolution::Keep(format!("couldn't delete the conversation: {error:#}"))
+        }
+        None => DeleteResolution::Keep(
+            "couldn't confirm deletion — the conversation is still shown".to_string(),
+        ),
+    }
+}
+
 /// A single chat message in the transcript, plus the agent activity behind it.
 struct Message {
     role: &'static str,
@@ -1888,6 +1916,12 @@ struct Workbench {
     /// Two steps because there is no undo on the server: a conversation is somebody's
     /// work, and a stray click on a `✕` in a list is exactly how it would be lost.
     confirming_delete: Option<String>,
+    /// The conversation whose confirmed delete is awaiting the backend's answer.
+    ///
+    /// Optimistically removing the row made a failed or interrupted request look successful
+    /// until restart, when the durable conversation — and therefore its project — returned
+    /// (§154). Keep it visible as pending until the server has actually deleted it.
+    deleting_conversation: Option<String>,
     /// The field that edits it. One shared editor rather than one per row — only one
     /// name can be edited at a time, and a Composer per conversation would be an entity
     /// per row for a list that can run to hundreds.
@@ -2071,6 +2105,7 @@ impl Workbench {
             pending_title: None,
             renaming: None,
             confirming_delete: None,
+            deleting_conversation: None,
             rename_editor,
             approve_tasks: std::collections::HashSet::new(),
             restore_focus: false,
@@ -2102,12 +2137,12 @@ impl Workbench {
         // the thing actually standing in their way.
         workbench.run_preflight(cx);
 
-        // Pick up where the last session left off. Without this a cold start begins in "No
-        // project" however long the researcher has been working in one, and the first new
-        // conversation of the day lands outside it (docs §107).
-        workbench.sidecar.set_project(
-            Some(workbench.draft.project.clone()).filter(|name| !name.trim().is_empty()),
-        );
+        // A launch opens at the workspace root. The previous project used to be a second project
+        // registry in settings.toml, despite §106 defining a project solely by the conversations
+        // filed under it. That stale value resurrected an empty project and silently filed the
+        // morning's first conversation inside it (§154). Opening a saved conversation or using a
+        // project heading's `+` remains the explicit way to enter one.
+        workbench.sidecar.set_project(None);
         // Populate the spine if a backend is already listening. This does not
         // start one — see `Sidecar::fetch_project`.
         workbench.refresh_project(cx);
@@ -3470,9 +3505,6 @@ impl Workbench {
             .iter()
             .find(|conversation| conversation.thread_id == thread_id)
             .and_then(|conversation| conversation.project.clone());
-        // Remembered as well as adopted: "the project you are working in" is the one you last
-        // looked at, not only the one you last filed something into.
-        self.remember_project(filed.clone());
         self.sidecar.set_project(filed);
         self.project = None;
         let mut messages = self.sidecar.open_conversation(thread_id);
@@ -3526,21 +3558,50 @@ impl Workbench {
     /// Delete a conversation, after the row has asked.
     fn delete_conversation(&mut self, thread_id: String, cx: &mut Context<Self>) {
         self.confirming_delete = None;
-        self.conversations
-            .retain(|conversation| conversation.thread_id != thread_id);
-        // If it was the open one, leave an empty slate rather than a transcript whose
-        // thread no longer exists.
-        if self.sidecar.thread_id().as_deref() == Some(thread_id.as_str()) {
-            self.sidecar.reset_thread();
-            self.transcript.clear();
-            self.provenance = provenance::Record::default();
-            self.text_selection.update(|selection| selection.clear());
-            self.buckets.clear();
-            self.tasks.clear();
-            self.jobs.clear();
+        if self.deleting_conversation.is_some() {
+            return;
         }
-        self.sidecar.delete_conversation(thread_id);
-        self.say("conversation deleted", cx);
+        self.deleting_conversation = Some(thread_id.clone());
+        self.status = "deleting conversation…".into();
+        let mut deleted = self.sidecar.delete_conversation(thread_id.clone());
+        cx.spawn(async move |this, cx| {
+            let result = deleted.next().await;
+            let _ = this.update(cx, |workbench, cx| {
+                workbench.deleting_conversation = None;
+                match resolve_delete(result) {
+                    DeleteResolution::Remove => {
+                        workbench
+                            .conversations
+                            .retain(|conversation| conversation.thread_id != thread_id);
+                        // If it was the open one, leave a genuinely ungrouped empty slate rather
+                        // than a transcript and project whose thread no longer exists (§154).
+                        if workbench.sidecar.thread_id().as_deref() == Some(thread_id.as_str()) {
+                            workbench.sidecar.reset_thread();
+                            workbench.sidecar.set_project(None);
+                            workbench.transcript.clear();
+                            workbench.provenance = provenance::Record::default();
+                            workbench
+                                .text_selection
+                                .update(|selection| selection.clear());
+                            workbench.buckets.clear();
+                            workbench.tasks.clear();
+                            workbench.jobs.clear();
+                            workbench.project = None;
+                            workbench.refresh_project(cx);
+                        }
+                        workbench.say("conversation deleted", cx);
+                    }
+                    DeleteResolution::Keep(error) => {
+                        // Keep the row because the backend kept the conversation. Claiming
+                        // success here is the precise defect that only restart exposed.
+                        workbench.error = Some(error);
+                        workbench.status = "conversation was not deleted".into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -3858,8 +3919,9 @@ impl Workbench {
         //
         // A heading per project rather than an indent or a colour: the sidebar is scanned, and a
         // name is the only marker that survives being glanced at. The order is alphabetical with
-        // "No project" pinned to the bottom, so the list does not reshuffle as work moves between
-        // projects — a sidebar that reorders itself is one nobody builds a memory of (docs §106).
+        // ungrouped work pinned to the bottom, so the list does not reshuffle as work moves
+        // between projects — a sidebar that reorders itself is one nobody builds a memory of
+        // (docs §106, §154).
         let mut grouped: std::collections::BTreeMap<Option<String>, Vec<&protocol::Conversation>> =
             std::collections::BTreeMap::new();
         for conversation in &matched {
@@ -3882,7 +3944,9 @@ impl Workbench {
 
         for (project, conversations) in ordered {
             if show_headings {
-                let heading = project.clone().unwrap_or_else(|| "No project".to_string());
+                let heading = project
+                    .clone()
+                    .unwrap_or_else(|| UNGROUPED_PROJECT_LABEL.to_string());
                 let opening = project.clone();
                 let starting = project.clone();
                 list = list.child(
@@ -3968,6 +4032,32 @@ impl Workbench {
                             .border_1()
                             .border_color(rgb(theme::accent()))
                             .child(self.rename_editor.clone()),
+                    );
+                    continue;
+                }
+
+                // The row stays until the backend confirms deletion. Removing it optimistically
+                // is what made a failed request look successful until launch brought both the
+                // conversation and its derived project heading back (§154).
+                if self.deleting_conversation.as_deref() == Some(thread_id.as_str()) {
+                    list = list.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .w_full()
+                            .min_w_0()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .bg(rgb(theme::elevated()))
+                            .child(
+                                ui::Label::new("Deleting this conversation…")
+                                    .muted()
+                                    .size(ui::Size::Compact)
+                                    .ellipsis(),
+                            ),
                     );
                     continue;
                 }
@@ -4688,9 +4778,11 @@ impl Workbench {
             );
         }
 
-        list = list.child(picker_row("No project", current.is_none(), None).on_click(
-            cx.listener(|workbench, _event, _window, cx| workbench.file_in_project(None, cx)),
-        ));
+        list = list.child(
+            picker_row(UNGROUPED_PROJECT_LABEL, current.is_none(), None).on_click(
+                cx.listener(|workbench, _event, _window, cx| workbench.file_in_project(None, cx)),
+            ),
+        );
 
         for name in names {
             if !typed.is_empty() && crate::match_score(&typed, &name).is_none() {
@@ -4750,11 +4842,10 @@ impl Workbench {
             return;
         }
         self.sidecar.set_project(project.clone());
-        self.remember_project(project.clone());
         self.say(
             match &project {
                 Some(name) => format!("filed under {name}"),
-                None => "taken out of its project".to_string(),
+                None => "filed under Ungrouped Conversations".to_string(),
             },
             cx,
         );
@@ -4777,30 +4868,29 @@ impl Workbench {
             self.say("can't start a new thread mid-turn", cx);
             return;
         }
+        self.sidecar.reset_thread();
         self.sidecar.set_project(project.clone());
-        self.remember_project(project);
         self.project = None;
         self.refresh_project(cx);
-        self.run_command(Command::NewThread, cx);
-    }
-
-    /// Remember which project the researcher is working in, across restarts.
-    ///
-    /// Written to the settings file rather than held in memory, so the first new conversation of
-    /// a morning lands where yesterday's work is. Updated by *looking* at a conversation as well
-    /// as by filing one — §107's bug was that only filing counted, so opening something already
-    /// in a project and pressing New put you back outside it.
-    fn remember_project(&mut self, project: Option<String>) {
-        let name = project.unwrap_or_default();
-        if self.draft.project == name {
-            return;
-        }
-        self.draft.project = name.clone();
-        let mut saved = settings::Settings::load();
-        saved.project = name;
-        if let Err(error) = saved.save() {
-            tracing::warn!(%error, "could not remember the current project");
-        }
+        self.transcript.clear();
+        // A new conversation is a new enquiry. The one just left keeps its own record on disk,
+        // where reopening it will find it.
+        self.provenance = provenance::Record::default();
+        self.text_selection.update(|selection| selection.clear());
+        self.buckets.clear();
+        self.tasks.clear();
+        self.jobs.clear();
+        self.error = None;
+        // Blanket approval is scoped to the conversation, so it ends with it — together with
+        // every per-task grant, whose tasks belonged to that conversation too.
+        self.approve_conversation = false;
+        self.approve_tasks.clear();
+        self.refresh_conversations(cx);
+        self.status = match project {
+            Some(name) => format!("new conversation in {name}"),
+            None => "new conversation in Ungrouped Conversations".into(),
+        };
+        cx.notify();
     }
 
     /// A model per specialist, under the coordinator's.
@@ -8177,34 +8267,10 @@ impl Workbench {
                 .composer
                 .update(cx, |composer, cx| composer.submit_now(cx)),
             Command::NewThread => {
-                if self.streaming {
-                    self.status = "can't start a new thread mid-turn".into();
-                    return;
-                }
-                self.sidecar.reset_thread();
-                // **The project is deliberately left alone.** A new conversation continues in
-                // whichever project the last one was in, and `sidecar.project()` already holds
-                // it — set by opening a conversation, by filing one, or at startup from the
-                // remembered value. Consulting the *setting* here was wrong: it is only written
-                // when something is filed, so opening a conversation already in a project and
-                // pressing New put the researcher back in "No project" (docs §107).
-                self.transcript.clear();
-                // A new conversation is a new enquiry. The one just left keeps its own record on
-                // disk, where reopening it will find it.
-                self.provenance = provenance::Record::default();
-                self.text_selection.update(|selection| selection.clear());
-                self.buckets.clear();
-                self.error = None;
-                // Blanket approval is scoped to the conversation, so it ends with it —
-                // together with every per-task grant, whose tasks belonged to that
-                // conversation too. This is the line that makes the button's wording true.
-                self.approve_conversation = false;
-                self.approve_tasks.clear();
-                // The conversation just left should appear in the list.
-                self.refresh_conversations(cx);
-                // The spine is thread-independent — the mission survives, so say so
-                // rather than letting the panel look stale.
-                self.status = "new thread — the project spine is kept".into();
+                // Ordinary New always means the root workspace. Starting within a project has
+                // its own explicit `+` beside that heading; inheriting the open/remembered project
+                // made conversations start already filed and revived deleted headings (§154).
+                self.new_thread_in(None, cx);
             }
             Command::RefreshSpine => {
                 self.refresh_project(cx);
@@ -9750,6 +9816,22 @@ fn replay(path: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_delete_keeps_the_conversation_visible() {
+        assert!(matches!(
+            resolve_delete(Some(Err(anyhow::anyhow!("backend unavailable")))),
+            DeleteResolution::Keep(message) if message.contains("backend unavailable")
+        ));
+        assert!(matches!(
+            resolve_delete(None),
+            DeleteResolution::Keep(message) if message.contains("still shown")
+        ));
+        assert!(matches!(
+            resolve_delete(Some(Ok(()))),
+            DeleteResolution::Remove
+        ));
+    }
 
     #[test]
     fn csv_columns_get_distinct_colours_from_the_live_palette() {
