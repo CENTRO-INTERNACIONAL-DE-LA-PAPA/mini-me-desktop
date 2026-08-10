@@ -652,6 +652,123 @@ fn scrollbar(handle: &gpui::ScrollHandle) -> Option<impl IntoElement> {
     )
 }
 
+/// A horizontal scrollbar for a gallery rail.
+///
+/// GPUI scrolls an `overflow_x_scroll` element but draws no affordance for it. That made the
+/// requested sideways gallery (§152) look like a clipped row on a mouse-driven Windows desktop;
+/// the visible thumb is what says there is more work beyond the panel edge.
+fn horizontal_scrollbar(handle: &gpui::ScrollHandle) -> Option<impl IntoElement> {
+    let overflow = handle.max_offset().width;
+    let viewport = handle.bounds().size.width;
+    if overflow <= px(0.) || viewport <= px(0.) {
+        return None;
+    }
+    let content = viewport + overflow;
+    let thumb = (viewport * (viewport / content)).max(px(28.));
+    let travel = viewport - thumb;
+    let progress = (-handle.offset().x / overflow).clamp(0.0, 1.0);
+
+    Some(
+        div()
+            .absolute()
+            .bottom(px(2.))
+            .left(travel * progress)
+            .h(px(6.))
+            .w(thumb)
+            .rounded_full()
+            .bg(rgb(theme::border_strong())),
+    )
+}
+
+/// Outputs that share the directory the agent chose share one visual gallery.
+///
+/// §143 deliberately retained each relative path while making nested work visible. §152 found
+/// that rendering those paths as independent rows flattened the useful structure straight back
+/// out. Keep the full parent as the identity so two separate runs' `plots/` folders never merge.
+struct OutputFolderGroup<'a> {
+    folder: PathBuf,
+    outputs: Vec<&'a workspace::Output>,
+}
+
+fn output_folder_groups(outputs: &[workspace::Output]) -> Vec<OutputFolderGroup<'_>> {
+    let mut groups: Vec<OutputFolderGroup<'_>> = Vec::new();
+    for output in outputs {
+        let folder = std::path::Path::new(&output.name)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new(""))
+            .to_path_buf();
+        if let Some(group) = groups.iter_mut().find(|group| group.folder == folder) {
+            group.outputs.push(output);
+        } else {
+            groups.push(OutputFolderGroup {
+                folder,
+                outputs: vec![output],
+            });
+        }
+    }
+    groups
+}
+
+fn looks_like_thread_id(component: &str) -> bool {
+    component.len() == 36
+        && component
+            .chars()
+            .enumerate()
+            .all(|(at, character)| match at {
+                8 | 13 | 18 | 23 => character == '-',
+                _ => character.is_ascii_hexdigit(),
+            })
+}
+
+/// Name the folder the agent chose, not the generated background-thread directory above it.
+///
+/// The screenshot in §152 devoted its useful width to a 36-character UUID common to every row.
+/// That component is app bookkeeping; removing only a leading UUID leaves `eda/plots`, the
+/// researcher's information, while the unshortened path remains the grouping identity above.
+fn output_folder_label(folder: &std::path::Path) -> String {
+    let mut components: Vec<String> = folder
+        .components()
+        .filter_map(|component| component.as_os_str().to_str().map(str::to_owned))
+        .collect();
+    let removed_thread = components
+        .first()
+        .is_some_and(|component| looks_like_thread_id(component));
+    if removed_thread {
+        components.remove(0);
+    }
+    if components.is_empty() {
+        if removed_thread {
+            "Background task files".to_string()
+        } else {
+            "Conversation files".to_string()
+        }
+    } else {
+        components.join(" / ")
+    }
+}
+
+/// Keep the distinguishing tail when a filename itself is too long for a thumbnail.
+///
+/// `Label::ellipsis()` correctly protects layout (§59), but its trailing ellipsis preserves the
+/// shared prefix and removes the useful suffix in §152. Shortening the string from the leading
+/// edge before layout means the extension and differentiating part survive even in a 140px tile.
+fn distinguishing_tail(text: &str, max_chars: usize) -> String {
+    let count = text.chars().count();
+    if count <= max_chars || max_chars == 0 {
+        return text.to_string();
+    }
+    let keep = max_chars.saturating_sub(1);
+    format!("…{}", text.chars().skip(count - keep).collect::<String>())
+}
+
+fn output_filename(output: &workspace::Output) -> String {
+    let name = std::path::Path::new(&output.name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(&output.name);
+    distinguishing_tail(name, 36)
+}
+
 /// A one-line tooltip.
 ///
 /// GPUI wants a whole view for a tooltip, so this is the smallest one that renders text —
@@ -1840,6 +1957,12 @@ struct Workbench {
     /// be a wall of them.
     toasts: Vec<SharedString>,
     panel_scroll: gpui::ScrollHandle,
+    /// One horizontal position per output folder gallery.
+    ///
+    /// A single handle would make scrolling one folder move every other folder too. The full
+    /// folder path plus its surface owns the state, matching §152's rule that each agent-chosen
+    /// folder is one independent photo-like collection.
+    output_gallery_scrolls: std::cell::RefCell<HashMap<String, gpui::ScrollHandle>>,
     /// The palette on screen right now, which is not always the saved one: the picker
     /// applies as you point at it so a theme can be judged by looking at it.
     applied_theme: String,
@@ -2057,6 +2180,7 @@ impl Workbench {
             dragging: None,
             toasts: Vec::new(),
             panel_scroll: gpui::ScrollHandle::new(),
+            output_gallery_scrolls: std::cell::RefCell::new(HashMap::new()),
             applied_theme: stored.theme.clone(),
             sidebar_open: stored.sidebar_open,
             panel_open: stored.panel_open,
@@ -5941,6 +6065,221 @@ impl Workbench {
         }))
     }
 
+    fn output_gallery_scroll(&self, key: &str) -> gpui::ScrollHandle {
+        self.output_gallery_scrolls
+            .borrow_mut()
+            .entry(key.to_string())
+            .or_default()
+            .clone()
+    }
+
+    /// One fixed-size member of a folder gallery, opened through the existing preview modal.
+    ///
+    /// Fixed here means only the *thumbnail*, not the underlying artifact: §152's failure was
+    /// ten full-width figures claiming ten screens before the researcher chose one. The modal
+    /// still renders the selected file at its useful size, and `Open` there still reaches the
+    /// original application.
+    fn output_thumbnail(
+        &self,
+        id: String,
+        output: &workspace::Output,
+        width: f32,
+        image_height: f32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let shown = output.clone();
+        let (glyph, ink) = file_mark(&output.path);
+        let shape = self.shape_of(output);
+        let visual = match output.kind {
+            workspace::Kind::Figure => div().w_full().h(px(image_height)).child(
+                img(output.path.clone())
+                    .w_full()
+                    .h_full()
+                    .object_fit(gpui::ObjectFit::Contain),
+            ),
+            _ => div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_1()
+                .w_full()
+                .h(px(image_height))
+                .text_color(rgb(ink))
+                .text_size(px(22.))
+                .child(glyph)
+                .child(
+                    div()
+                        .text_color(rgb(theme::text_faint()))
+                        .text_size(px(11.))
+                        .child(shape.describe(output.bytes)),
+                ),
+        };
+
+        div()
+            .id(SharedString::from(id))
+            .flex()
+            .flex_col()
+            .flex_none()
+            .w(px(width))
+            .min_w(px(width))
+            .overflow_hidden()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(theme::border()))
+            .bg(rgb(if theme::is_light(&theme::current()) {
+                theme::elevated()
+            } else {
+                theme::surface()
+            }))
+            .hover(|style| style.border_color(rgb(theme::accent())).cursor_pointer())
+            .child(visual)
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .px_2()
+                    .py_1()
+                    .border_t_1()
+                    .border_color(rgb(theme::border()))
+                    .child(
+                        ui::Label::new(output_filename(output))
+                            .size(ui::Size::Compact)
+                            .ellipsis(),
+                    ),
+            )
+            .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                workbench.preview = Some(shown.clone());
+                cx.notify();
+            }))
+    }
+
+    /// A folder-labelled, sideways strip of artifacts on either output surface.
+    fn output_gallery(
+        &self,
+        scope: &str,
+        group: &OutputFolderGroup<'_>,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let folder = group.folder.to_string_lossy();
+        let key = format!("{scope}:{folder}");
+        let scroll = self.output_gallery_scroll(&key);
+        let label = distinguishing_tail(&output_folder_label(&group.folder), 44);
+        let count = group.outputs.len();
+        let (tile_width, image_height) = if compact { (140., 92.) } else { (190., 118.) };
+
+        let mut rail = div()
+            .id(SharedString::from(format!("output-gallery-rail-{key}")))
+            .flex()
+            .flex_row()
+            .gap_2()
+            .w_full()
+            .min_w_0()
+            // Reserve the visible thumb rather than painting it over a filename (§152).
+            .pb_3()
+            .overflow_x_scroll()
+            .track_scroll(&scroll);
+        for (at, output) in group.outputs.iter().enumerate() {
+            rail = rail.child(self.output_thumbnail(
+                format!("output-gallery-item-{key}-{at}"),
+                output,
+                tile_width,
+                image_height,
+                cx,
+            ));
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .w_full()
+            .min_w_0()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .w_full()
+                    .min_w_0()
+                    .child(
+                        ui::Label::new(label)
+                            .size(ui::Size::Compact)
+                            .ellipsis(),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(rgb(theme::text_faint()))
+                            .text_xs()
+                            .child(format!("{count} files · scroll sideways")),
+                    ),
+            )
+            .child(
+                div()
+                    .relative()
+                    .w_full()
+                    .min_w_0()
+                    .child(rail)
+                    .children(horizontal_scrollbar(&scroll)),
+            )
+    }
+
+    fn output_panel_row(
+        &self,
+        id: String,
+        output: &workspace::Output,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let shown = output.clone();
+        let (glyph, ink) = file_mark(&output.path);
+        div()
+            .id(SharedString::from(id))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .w_full()
+            .min_w_0()
+            .p_2()
+            .rounded_lg()
+            .bg(rgb(theme::elevated()))
+            .hover(|style| style.bg(rgb(theme::accent_soft())).cursor_pointer())
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(rgb(ink))
+                    .text_size(px(13.))
+                    .child(glyph),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_grow()
+                    .min_w_0()
+                    // The filename is the distinguishing tail. The parent folder has its own
+                    // gallery heading, so repeating its UUID here recreates §152 exactly.
+                    .child(
+                        ui::Label::new(output_filename(output))
+                            .size(ui::Size::Compact)
+                            .ellipsis(),
+                    )
+                    .child(
+                        div()
+                            .text_color(rgb(theme::text_faint()))
+                            .text_size(px(11.))
+                            .child(self.shape_of(output).describe(output.bytes)),
+                    ),
+            )
+            .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                workbench.preview = Some(shown.clone());
+                cx.notify();
+            }))
+    }
+
     /// The first rows of a table, measured at most once per version of the file.
     ///
     /// Cached beside the shape and for the same reason: this renders on every frame of a
@@ -6862,9 +7201,20 @@ impl Workbench {
                         .child("— you stopped this turn; the answer above is incomplete"),
                 );
             }
-            // Files last: the answer explains them, so it should be read first.
-            for (at, output) in message.outputs.iter().enumerate() {
-                block = block.child(self.output_card(index * 64 + at, output, cx));
+            // Files last: the answer explains them, so it should be read first. A productive
+            // folder is one sideways gallery rather than one full-width card per artifact — ten
+            // plots were ten screens before the reader chose any of them (§152).
+            for (at, group) in output_folder_groups(&message.outputs).iter().enumerate() {
+                if let [output] = group.outputs.as_slice() {
+                    block = block.child(self.output_card(index * 64 + at, output, cx));
+                } else {
+                    block = block.child(self.output_gallery(
+                        &format!("transcript-{index}-{at}"),
+                        group,
+                        false,
+                        cx,
+                    ));
+                }
             }
             // What to do with the answer, under the answer. All three exist already — the first
             // is a palette command, and a command nobody knows the name of is a feature nobody
@@ -9353,6 +9703,13 @@ impl Workbench {
             .map(|listing| listing.groups.as_slice())
             .unwrap_or_default();
         let count: usize = files.iter().map(|(_, items)| items.len()).sum();
+        // `output_listing` groups by file kind for ordering. The gallery's meaningful boundary
+        // is instead the directory the agent chose (§152), so restore one ordered sequence before
+        // grouping by parent. Cloning metadata only; no file is read here.
+        let ordered_outputs: Vec<workspace::Output> = files
+            .iter()
+            .flat_map(|(_, items)| items.iter().cloned())
+            .collect();
 
         let mut section = div()
             .flex()
@@ -9385,62 +9742,19 @@ impl Workbench {
             );
         }
 
-        for (_, items) in files {
-            for output in items {
-                let shown = output.clone();
-                let (glyph, ink) = file_mark(&output.path);
-                section = section.child(
-                    div()
-                        .id(SharedString::from(format!("file-{}", output.name)))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_2()
-                        .w_full()
-                        .min_w_0()
-                        .p_2()
-                        .rounded_lg()
-                        // A fill instead of a border: thirty bordered rows in a 330px column is
-                        // thirty horizontal lines, and the eye reads those as a table it is
-                        // supposed to compare across.
-                        .bg(rgb(theme::elevated()))
-                        .hover(|style| style.bg(rgb(theme::accent_soft())).cursor_pointer())
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_color(rgb(ink))
-                                .text_size(px(13.))
-                                .child(glyph),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .flex_grow()
-                                .min_w_0()
-                                .child(
-                                    ui::Label::new(output.name.clone())
-                                        .size(ui::Size::Compact)
-                                        .ellipsis(),
-                                )
-                                // The real shape of the file, not just how much of the disk it
-                                // takes: `1,204 rows · 11 cols` is what decides whether it is the
-                                // file you wanted. See `workspace::Shape` for why a PDF gets a
-                                // size and no page count.
-                                .child(
-                                    div()
-                                        .text_color(rgb(theme::text_faint()))
-                                        .text_size(px(11.))
-                                        .child(self.shape_of(output).describe(output.bytes)),
-                                ),
-                        )
-                        .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                            // In the window first. Leaving the app to look at a 4 KB CSV
-                            // is a context switch out of the work, and back is not free.
-                            workbench.preview = Some(shown.clone());
-                            cx.notify();
-                        })),
-                );
+        for (at, group) in output_folder_groups(&ordered_outputs).iter().enumerate() {
+            if let [output] = group.outputs.as_slice() {
+                section = section.child(self.output_panel_row(
+                    format!("panel-output-{}", output.name),
+                    output,
+                    cx,
+                ));
+            } else {
+                // One compact rail replaces N near-identical rows. It retains the folder heading,
+                // filename tail, kind/shape, and click-to-preview behavior while making a twelve-
+                // artifact run occupy one panel block instead of most of the panel (§152).
+                section =
+                    section.child(self.output_gallery(&format!("panel-{at}"), group, true, cx));
             }
         }
 
@@ -9750,6 +10064,54 @@ fn replay(path: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn outputs_in_the_same_agent_folder_become_one_gallery() {
+        let task = "019fe9f6-9126-7710-a806-35d5e09170a4";
+        let names = [
+            PathBuf::from(task).join("guinea_pig_eda_output/plots/health.png"),
+            PathBuf::from(task).join("guinea_pig_eda_output/plots/yield.png"),
+            PathBuf::from(task).join("guinea_pig_eda_output/tables/summary.csv"),
+        ];
+        let outputs: Vec<workspace::Output> = names
+            .into_iter()
+            .map(|name| workspace::Output {
+                path: name.clone(),
+                name: name.to_string_lossy().into_owned(),
+                kind: workspace::Kind::Other,
+                bytes: 1,
+                modified: std::time::SystemTime::UNIX_EPOCH,
+            })
+            .collect();
+
+        let groups = output_folder_groups(&outputs);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].outputs.len(), 2);
+        assert_eq!(groups[1].outputs.len(), 1);
+        assert_eq!(
+            output_folder_label(&groups[0].folder),
+            "guinea_pig_eda_output / plots"
+        );
+    }
+
+    #[test]
+    fn a_thumbnail_names_the_file_instead_of_its_shared_uuid_prefix() {
+        let relative = PathBuf::from("019fe9f6-9126-7710-a806-35d5e09170a4")
+            .join("guinea_pig_eda_output/plots/health_by_activity_box.png");
+        let output = workspace::Output {
+            path: relative.clone(),
+            name: relative.to_string_lossy().into_owned(),
+            kind: workspace::Kind::Figure,
+            bytes: 1,
+            modified: std::time::SystemTime::UNIX_EPOCH,
+        };
+
+        assert_eq!(output_filename(&output), "health_by_activity_box.png");
+        let long = distinguishing_tail("shared-prefix-but-the-useful-name-is-at-the-end.csv", 24);
+        assert!(long.starts_with('…'), "{long}");
+        assert!(long.ends_with("name-is-at-the-end.csv"), "{long}");
+        assert_eq!(long.chars().count(), 24);
+    }
 
     #[test]
     fn csv_columns_get_distinct_colours_from_the_live_palette() {

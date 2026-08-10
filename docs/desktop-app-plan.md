@@ -8786,3 +8786,40 @@ and then flattens it back into one list. The folder the agent chose is a stateme
 belongs together, and the panel is discarding it.
 
 *Ninth: the value needed was one the program already had.*
+
+
+## 153. The folder becomes the gallery (2026-08-10)
+
+§152 did not need an invented grouping model. The recursive output walk already retained the
+relative parent of every artifact; the two renderers were simply throwing that boundary away.
+They now group on the **full parent path**, so two different workers' `plots/` directories cannot
+silently merge, while the heading removes only a leading generated thread UUID and says the part
+the agent chose: `guinea_pig_eda_output / plots`.
+
+The interaction follows the platform's own collection pattern rather than copying WhatsApp's
+decoration. Microsoft's Windows guidance names interactive photo libraries as an ItemsView use
+case and puts scrolling inside the collection
+([Items view](https://learn.microsoft.com/en-us/windows/apps/develop/ui/controls/itemsview)). In
+GPUI that becomes one fixed-size thumbnail rail per folder, horizontal overflow, a visible
+horizontal thumb, and the existing preview modal on click. A folder with one artifact keeps its
+larger card; collapsing it would save no space and make an ordinary one-file answer worse.
+
+Both surfaces use the same grouping rule:
+
+- In the transcript, a productive folder is one rail instead of one full-width card per file.
+- In Outputs, the same folder is one compact rail instead of twelve near-identical rows.
+- A tile's primary label is the basename, never the shared relative path. If the basename itself
+  is too long, its **leading** edge is elided so the differentiating tail and extension survive.
+- Every rail owns its own `ScrollHandle`; moving one folder cannot move another. The bar is drawn
+  explicitly because GPUI's overflow scrolls but supplies no visual affordance, and a clipped row
+  on a mouse-driven Windows desktop does not communicate sideways content.
+
+The structural before/after is deterministic even in the headless build environment: the reported
+ten-plot turn built ten figure cards, each allowed up to 420px of image height; it now builds one
+folder block whose figures share a single 118px-high rail. The exact rendered pixels still need a
+Windows-eye check because this machine cannot open GPUI. Two sentence-named tests pin the folder
+boundary, UUID removal and distinguishing filename tail. The complete result is **241 passing
+tests**, with no new Clippy warning (the base branch's existing warnings remain).
+
+*Tenth: the value needed was one the program already had — and this time the implementation keeps
+it instead of flattening it twice.*
