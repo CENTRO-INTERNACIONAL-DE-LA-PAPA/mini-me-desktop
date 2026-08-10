@@ -52,13 +52,40 @@ def _split_spec(spec: str) -> tuple[str, str]:
     return provider, model_id
 
 
+#: Handed to a provider SDK when there is no real credential, so **construction** succeeds.
+#:
+#: This is never a key that could work, and it is never reachable on a path that calls a model:
+#: execution runs are gated by :func:`_require_model_keys`, which reads the key *record* rather
+#: than the constructed client, so a placeholder cannot open that door. What it buys is that
+#: building the graph is possible without credentials — which several routes require and none of
+#: them mention.
+_PLACEHOLDER_KEY = "no-api-key-configured"
+
+
 def build_chat_model(spec: str, key_record: dict[str, Any] | None):
     """Construct a chat model for ``spec`` using an optional key record.
 
-    ``key_record`` is ``{"api_key": ..., "base_url": ...}`` (or None). Note
-    ``init_chat_model`` constructs lazily — passing no key never raises here;
-    an unauthenticated call only fails when the model is actually invoked.
-    Execution-time requests are pre-checked by ``_require_model_keys``.
+    ``key_record`` is ``{"api_key": ..., "base_url": ...}`` (or None).
+
+    **A key is always passed, real or placeholder.** This docstring used to say the opposite —
+    *"init_chat_model constructs lazily — passing no key never raises here"* — and that is false
+    for at least OpenAI and Google, which validate credentials inside ``__init__``:
+
+    .. code-block:: text
+
+        langchain_openai/chat_models/base.py:1105, in validate_environment
+            self.root_async_client = openai.AsyncOpenAI(
+        openai.OpenAIError: The api_key client option must be set ...
+
+    The cost of that belief was paid on a desktop install that deliberately keeps provider keys
+    **out** of the backend's environment and sends them per request instead, so the agent's own
+    ``execute`` tool cannot read them. Every route that builds the graph *without* a run config
+    therefore had no key at all — and ``GET /threads/{id}/state`` is one of those. It returned 500
+    on every poll: background runs finished and their results could not be read back, conversations
+    would not open, and the coordinator reported *"completed, but it returned no result text"*,
+    which reads as work that never happened.
+
+    Three symptoms, one line in a docstring that nobody had reason to doubt.
     """
     provider, model_id = _split_spec(spec)
     pspec = PROVIDER_SPECS[provider]
@@ -67,8 +94,10 @@ def build_chat_model(spec: str, key_record: dict[str, Any] | None):
     base_url = record.get("base_url")
 
     kwargs: dict[str, Any] = {"max_retries": MODEL_MAX_RETRIES}
-    if api_key:
-        kwargs[pspec["key_kwarg"]] = api_key
+    # Always set, so construction never depends on a credential being present. `or` and not a
+    # falsy check on the record: an empty string is as unusable as a missing key and must take
+    # the placeholder too, or this reintroduces the failure for anyone who saved a blank field.
+    kwargs[pspec["key_kwarg"]] = api_key or _PLACEHOLDER_KEY
     if base_url:
         kwargs["base_url"] = base_url
 
