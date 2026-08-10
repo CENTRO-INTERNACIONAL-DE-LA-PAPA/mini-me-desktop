@@ -226,6 +226,64 @@ def _supplied_token() -> str | None:
     return None
 
 
+#: Appended to a failed command's output, so the model can see where it ran.
+_CWD_NOTE = "\n[cwd] {} — this command ran here; use paths relative to it."
+
+
+def _exit_and_output(result: Any) -> tuple[Any, str]:
+    """`(exit_code, output)` from either shape the sandbox protocol returns."""
+    if isinstance(result, dict):
+        return result.get("exit_code"), result.get("output") or ""
+    return getattr(result, "exit_code", None), getattr(result, "output", "") or ""
+
+
+def _say_where_it_ran(result: Any, work_dir: Any) -> None:
+    """Tell the model which directory a *failed* command ran in.
+
+    # Why
+
+    A background worker asked to plot a dataset it had just written ran this, and failed:
+
+        python -c "... pd.read_csv('/data/potato_late_blight.csv') ...
+                   plt.savefig('/plots/histograms.png')"
+
+    then retried with `/home/piero_linux/Mini-Me/...`, and failed again. Neither directory exists.
+    The workspace was `/mnt/c/Users/.../Documents/Mini-Me/<thread>`, commands already run **with
+    that as their working directory**, and `pd.read_csv('potato_late_blight.csv')` would have
+    worked on the first attempt.
+
+    The model was guessing, because nothing had ever told it. `aresolve` announces the path — to
+    the *desktop status line*. The one participant who needs it never sees it, and the failure it
+    gets back (`No such file or directory`) names the path it invented rather than the one it has.
+
+    So a run reported *"the plots and summary tables have been saved to files"* with one CSV on
+    disk. That claim is its own defect, but the cause underneath it is this: two honest attempts,
+    both blind.
+
+    # Only on failure
+
+    A working command must stay quiet. This text enters the model's context, and a line appended to
+    every `execute` is a line the model learns to skip — which is how the corpus-id diagnostic
+    stopped being read (§116/§132).
+
+    Never raises. A response shape we cannot append to is a lost hint; an exception here would take
+    `execute` down entirely, which is the trade this file already records making wrongly once.
+    """
+    try:
+        exit_code, output = _exit_and_output(result)
+        if exit_code in (None, 0):
+            return
+        note = _CWD_NOTE.format(work_dir)
+        if str(work_dir) in output:
+            return  # It already knows; do not repeat.
+        if isinstance(result, dict):
+            result["output"] = output + note
+        else:
+            object.__setattr__(result, "output", output + note)
+    except Exception:  # noqa: BLE001
+        logger.debug("minime_local: could not append the working directory to a failure")
+
+
 def _log_failure(command: str, result: Any) -> None:
     """Put a failed command and its output in the sidecar log.
 
@@ -499,6 +557,7 @@ class LocalWorkspaceBackend(LocalShellBackend):
             )
         result = self.execute(command, timeout=timeout)
         _log_failure(command, result)
+        _say_where_it_ran(result, self._work_dir)
         return result
 
     @property

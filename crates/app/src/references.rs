@@ -845,6 +845,82 @@ asyncio.run(main())
         );
     }
 
+    /// A failed command tells the model which directory it ran in.
+    ///
+    /// **Two blind attempts, on a real run.** A background worker wrote `potato_late_blight.csv`
+    /// into its workspace, then shelled out to plot it with
+    /// `pd.read_csv('/data/potato_late_blight.csv')` — exit 1 — and retried with
+    /// `/home/piero_linux/Mini-Me/...` — exit 1. Neither exists. Commands already run *with the
+    /// workspace as their working directory*, so the bare filename would have worked first time.
+    ///
+    /// The path was never a secret; `aresolve` announces it to the desktop status line. The one
+    /// participant who needed it could not see it, and the error it got back named the directory it
+    /// had invented rather than the one it had. The turn then reported that plots had been saved.
+    #[test]
+    fn a_failed_command_tells_the_model_where_it_ran() {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: python3 is not on PATH");
+            return;
+        }
+        let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
+        // The helpers are lifted out of the module verbatim rather than imported, because
+        // importing `minime_local.workspace` drags in deepagents and langgraph.
+        let script = format!(
+            r#"
+import logging, pathlib
+src = pathlib.Path({overlay:?} + "/minime_local/workspace.py").read_text()
+ns = {{"Any": object, "logger": logging.getLogger("t")}}
+exec(src[src.index("_CWD_NOTE ="):src.index("def _log_failure")], ns)
+say = ns["_say_where_it_ran"]
+
+class R:
+    def __init__(self, code, out): self.exit_code, self.output = code, out
+
+failed = R(1, "FileNotFoundError: '/data/x.csv'")
+say(failed, "/work/thread-1")
+assert "/work/thread-1" in failed.output, failed.output
+assert "relative" in failed.output, failed.output
+
+# A working command stays quiet: a line appended to every execute is a line the model
+# learns to skip, which is how the corpus-id diagnostic stopped being read.
+worked = R(0, "done")
+say(worked, "/work/thread-1")
+assert worked.output == "done", worked.output
+
+# Not repeated when the output already names the directory.
+knew = R(1, "cannot open /work/thread-1/x.csv")
+say(knew, "/work/thread-1")
+assert knew.output.count("/work/thread-1") == 1, knew.output
+
+# Both response shapes the sandbox protocol returns.
+mapping = {{"exit_code": 2, "output": "boom"}}
+say(mapping, "/work/thread-1")
+assert "/work/thread-1" in mapping["output"], mapping
+
+# A shape it cannot annotate costs a hint, never the command.
+say(None, "/work/thread-1")
+say(object(), "/work/thread-1")
+print("ok")
+"#,
+            overlay = overlay.to_string_lossy()
+        );
+        let out = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("python3 runs");
+        assert!(
+            out.status.success(),
+            "the overlay's cwd hint is wrong:
+{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
     #[test]
     fn a_corpus_link_is_recognised_and_never_treated_as_a_doi() {
         // The form `overlay/minime_local/sources.py` writes, and the one `_paper_ref` established
