@@ -117,7 +117,20 @@ else
   if SOURCE="$(find_source)"; then
     say "Copying Mini-Me from $SOURCE"
     echo "    (faster than downloading, and it needs no password)"
-    cp -r "$SOURCE" "$DIR"
+    # `cp -r SRC DEST` means two different things depending on whether DEST exists: it *becomes*
+    # SRC when it does not, and gains a `DEST/<basename SRC>` when it does. So a `$DIR` left
+    # behind non-empty by an interrupted run — or by anything else — turned the copy into
+    # `$DIR/mini-me/pyproject.toml`, and `uv sync` two steps later reported
+    # "No `pyproject.toml` found in current directory or any parent directory" while the copy
+    # above it said `ok`. Trailing `/.` copies the *contents*, which means one thing only.
+    mkdir -p "$DIR"
+    cp -r "$SOURCE/." "$DIR/"
+    # Said out loud, because the failure above was silent for exactly as long as it took to
+    # reach a step that needed a file: the copy reported success either way.
+    if [ ! -f "$DIR/pyproject.toml" ]; then
+      bad "the copy did not bring pyproject.toml — $SOURCE may be incomplete"
+      exit 1
+    fi
     # A copied .venv holds the *other* machine's compiled packages — Windows
     # Scripts/*.exe, or wheels built for a different Python. Unusable here.
     if [ -d "$DIR/.venv" ]; then

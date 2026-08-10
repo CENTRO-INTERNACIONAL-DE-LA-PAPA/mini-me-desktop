@@ -8257,6 +8257,31 @@ the two override disjoint hooks — `wrap_model_call` and `wrap_tool_call` — s
 around the other and the order is free. One day after §141, which was a comment asserting a
 contract the code did not have.
 
+### The copy that reported `ok` and had not
+
+The first real-machine run of §139's monorepo install failed two steps *after* the mistake:
+
+```
+==> Copying Mini-Me from /mnt/c/.../mini-me-desktop/mini-me
+    ok  copied to /home/piero_linux/.local/share/mini-me-desktop/backend
+==> Installing Python packages
+error: No `pyproject.toml` found in current directory or any parent directory
+```
+
+`cp -r SRC DEST` means two different things. When `DEST` does not exist it *becomes* a copy of
+`SRC`; when it does, it gains a `DEST/<basename SRC>`. `setup-wsl.sh` removes `$DIR` only when it
+is *empty*, so a directory left behind non-empty by anything at all turned the copy into
+`$DIR/mini-me/pyproject.toml` — and reported `ok`, because the copy had in fact succeeded.
+
+Trailing `/.` copies the contents and means one thing only. The same distinction bit
+`sync_source_command` while §139 was being written, caught there by a test; here it reached a
+researcher, because the setup script's only test is running it.
+
+**And the check that was missing is the cheap one**: the step now asserts `pyproject.toml` is where
+it will be needed, instead of leaving a wrong layout to be discovered by the first command that
+required a file. A diagnostic that reads the same on success and failure is §132's shape, and this
+is the fourth time it has appeared in this document.
+
 ## 143. Sixteen outputs that were one directory too deep (2026-08-09)
 
 §117's real case is fixed at the source: `workspace::outputs` now descends into an agent's named
