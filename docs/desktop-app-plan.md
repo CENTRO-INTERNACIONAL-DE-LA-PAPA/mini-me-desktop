@@ -91,9 +91,9 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   transition between two.
 
 **Next**
-- ⬜ **Outputs a turn wrote into a folder** (§117) — `outputs` and `images` read one level, so an
-  agent that organises its work into `./eda_outputs/` disappears from the panel entirely. Sixteen
-  files invisible on the first working background analysis.
+- ✅ **Outputs a turn wrote into a folder** (§117, §143) — the panel now descends through named
+  output folders with explicit depth/file bounds, keeps the relative path visible, skips tool
+  caches, and says when the bounded view omitted anything.
 - ✅ **The filter field** (§92, §97, §99) — measured rather than guessed: 0.0px in the popup
   against 204 and 533 elsewhere. One link in the chain stated no width; confirmed fixed on a real
   window.
@@ -7961,3 +7961,86 @@ them.
 
 *Measured first, on purpose. The last structural fix was built on four days of assuming the wrong
 cause; this one starts with a number.*
+
+## 143. Sixteen outputs that were one directory too deep (2026-08-09)
+
+§117's real case is fixed at the source: `workspace::outputs` now descends into an agent's named
+folders, so `eda_outputs/yield.png` and `eda_outputs/tables/summary.csv` reach both the Outputs
+panel and the transcript diff. The displayed name is the path relative to the conversation rather
+than only the basename. That preserves the useful folder name and keeps two `summary.csv` files in
+different analyses distinguishable.
+
+The walk is deliberately not general-purpose file indexing. It stops after four subdirectory
+levels, 2,048 directory entries or 512 files; skips dotted entries and `__pycache__` at every
+level; and never follows symlinks. When any bound bites, the panel says it is showing a bounded
+view and points to the folder for the rest. A silent cap would have reproduced the same defect at
+file 513.
+
+Three sentence-named tests pin the behaviour: nested output folders remain visible, hidden caches
+remain hidden below the top level, and a deeper tree reports truncation instead of pretending the
+scan was exhaustive.
+
+## 144. CRLF was not uncommitted work (2026-08-09)
+
+`setup-wsl.sh` copies an existing Windows checkout into the distro, including its Git index and
+working files. It does not copy Git for Windows' *global* `core.autocrlf=true`. WSL Git therefore
+saw the CRLF bytes the Windows checkout deliberately contained without the policy that normalised
+them for comparison and reported essentially every tracked file as modified.
+
+Provisioning now sets `core.autocrlf=input` in the copied checkout, on new installs and re-runs.
+That normalises CRLF when Git reads it, while future checkouts made inside WSL stay LF. Git caches
+the previous clean filter in its index, so the script runs `git add --renormalize -- .` once — but
+only when the ordinary diff is non-empty and `--ignore-cr-at-eol` proves every unstaged difference
+is the line ending. A genuine edit leaves the tree untouched. It does not run `reset --hard` or
+rewrite working files: `find_source` can copy a developer's checkout with genuine edits, and
+fixing line-ending interpretation does not authorize destroying those edits. One regression test
+pins the shipped script and absence of a hard reset; another
+creates an LF-indexed repository, replaces its working file with CRLF bytes, proves it is dirty
+under `core.autocrlf=false`, and proves the same bytes are clean under the installed `input`
+policy.
+
+The shell parser could not be run in this Windows sandbox because creating a WSL instance returns
+`E_ACCESSDENIED`; the Rust test that embeds the shipped script passes. The remaining proof belongs
+on the target machine: after Setup finishes, `git status --short` inside the provisioned checkout
+must print nothing.
+
+## 145. The token already had six days left (2026-08-09)
+
+§131 measured about ten of seventeen startup seconds in
+`asta auth print-token --raw --refresh`. The command forced a network refresh on every backend
+spawn even though a real Asta JWT says `exp - iat = 604800` — seven days.
+
+Startup now takes the cheapest valid answer in order:
+
+1. the `ASTA_TOKEN` already read from the OS keychain, with no subprocess;
+2. the CLI's cached `print-token --raw`, without `--refresh`;
+3. a fresh `print-token --raw --refresh`, only when the first two are absent, malformed or near
+   expiry.
+
+"Near" means five minutes. That margin is negligible against seven days and avoids beginning a
+turn with a credential that can expire while LangGraph imports the graph or the agent assembles
+its MCP tools. The app base64url-decodes only the JWT payload and reads numeric `exp`; it does not
+trust that unverified claim for authentication. Asta still verifies the signature. Here the claim
+only decides whether spending ten seconds on a refresh is worthwhile, and every malformed shape
+chooses the safe slow path.
+
+Three tests cover a week-valid stored token, the exact five-minute boundary, and missing or
+non-numeric expiry. A real before/after startup timing still needs the Windows machine with its
+signed-in Asta CLI; this headless sandbox cannot start its WSL distro or run the app.
+
+## 146. Left open: stopping a setup repair has two process boundaries (2026-08-09)
+
+§28's cancel remains open, deliberately. A repair on the target platform is usually a Linux
+process behind `wsl.exe`; installing WSL itself is an elevated process behind PowerShell and UAC.
+This repository already proved that killing `wsl.exe` does not reliably reap the Linux process it
+fronted (§26). A button that only drops the receiver or kills the Windows wrapper would say
+"cancelled" while `uv sync` or an installer continued changing the machine.
+
+The correct implementation needs a uniquely identified process group inside the distro and a
+separate, honest policy for an already-elevated install. That is larger than the three real-machine
+defects above and cannot be verified in this sandbox, so no cosmetic Stop button was added.
+
+The transcript virtualization and SVG glyph replacement remain open too. They were explicitly
+lower priority, and the former requires a before/after measurement in a real GPUI window. The app
+cannot be run here, and replacing a variable-height transcript without that measurement would
+repeat §70's mistake in a different type.
