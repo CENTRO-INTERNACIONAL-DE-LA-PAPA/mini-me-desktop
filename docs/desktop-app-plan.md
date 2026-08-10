@@ -130,10 +130,10 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
 - ⬜ **A paper with no DOI and no corpus id** is invisible to the "never reported" accounting
   (7 returned, 6 recorded, on 2026-08-09).
 - ✅ **`dataverse_explorer` searches, and reads what it found, before it can recommend** (§142,
-  Mini-Me PR #45). Two steps, because `SearchCIPDataverse` writes to a file and `read_search_results`
-  is what puts the metadata in front of the model. Its mandatory-filename paragraph is now set in
-  the call instead of asked for in capitals. **Awaiting a live run**: the persistent ids it returns
-  must resolve in CIP Dataverse.
+  Mini-Me PR #45). **Verified on a live run**: both gates fired, and all four persistent ids
+  resolved to real CIP datasets on late blight clone trials in Peru. The filename it was asked for
+  in capitals was wrong **9 times out of 9** and silently corrected each time — before this, every
+  search wrote to a different file and every read looked for one that did not exist.
 - ⬜ **Seven subagents still hold their invariants in prompts** (§140). Each carries a
   `response_format` and so each has the §133 exit. `hypothesis_generator` is next — it emits
   citations too, so it can reproduce the §138 bug somewhere nobody would think to look. The
@@ -8256,6 +8256,34 @@ it* and a hand-written stub cannot catch that by construction.
 the two override disjoint hooks — `wrap_model_call` and `wrap_tool_call` — so neither composes
 around the other and the order is free. One day after §141, which was a comment asserting a
 contract the code did not have.
+
+### Verified, and the filename result is the finding
+
+Both gates fired on the first live run, and all four persistent ids resolved to real CIP datasets
+— *Stability of resistance and yield of 15 advanced clones* (2016), two *Participatory Varietal
+Selection* datasets from La Libertad (2017), and *Phenotypic Stability for Tuber Yield and Late
+Blight Resistance in B3C3* (2018). On topic, and real.
+
+The filename log is the part worth keeping:
+
+```
+SearchCIPDataverse(output_filename='cip_late_blight_peru.json') -> 'dataverse_search.json'
+SearchCIPDataverse(output_filename='q1.json')  -> 'dataverse_search.json'
+SearchCIPDataverse(output_filename='pvs.json') -> 'dataverse_search.json'
+read_search_results(filename=None)             -> 'dataverse_search.json'
+```
+
+**Nine searches, nine different names, and no filename at all on every read.** The prompt said
+*"ALWAYS… Do not invent or vary this name"*, and compliance was zero out of twelve. Which means
+`dataverse_explorer` was not merely at risk of inventing datasets — **it was broken**: every search
+wrote to a file no read would look for, and the subagent narrated around the failure convincingly
+enough that nobody had noticed. A capital-letter rule was the only thing holding a two-tool
+handshake together, and it held it none of the time.
+
+*One id looked like a five-character truncation and was called a transcription loss here before the
+researcher pointed out the missing character was in their paste. The model got all four right. It
+is worth recording that the first instinct on seeing a bad identifier is now to blame the model,
+and that instinct was wrong.*
 
 ### The copy that reported `ok` and had not
 
