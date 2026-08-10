@@ -549,7 +549,9 @@ impl Sidecar {
         &self,
         title: String,
         markdown: String,
-        sources: Vec<String>,
+        // Whole, links included — the route builds the bibliography from `citation` *and* `link`,
+        // and reducing these to strings is what made the first download a 502 (§141).
+        sources: Vec<crate::protocol::Source>,
         // Whether an Asta-backed specialist actually ran — see `Workbench::used_asta`. Passed
         // through rather than derived here: this layer cannot see the provenance record, and
         // guessing from `sources` is the mistake being fixed.

@@ -3649,13 +3649,11 @@ impl Workbench {
         let mut rendered = self.sidecar.render_report(
             report.title.clone(),
             report.markdown.clone(),
-            // The backend's Typst template takes a list of citation strings, so the links stay
-            // on this side. Worth revisiting upstream — a rendered bibliography with resolvable
-            // DOIs is more use than one without.
-            self.sources
-                .iter()
-                .map(|source| source.citation.clone())
-                .collect(),
+            // Whole. This used to map each source down to its citation, under a comment claiming
+            // the template took a list of strings — it takes a list of objects, and the mismatch
+            // was a 502 on every report that had a source to cite (§141). The `link` it now
+            // carries is the one the backend supplied, so the bibliography's DOIs resolve.
+            self.sources.clone(),
             self.used_asta(),
             into,
         );

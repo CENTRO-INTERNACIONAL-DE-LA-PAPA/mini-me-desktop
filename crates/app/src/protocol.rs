@@ -1205,12 +1205,26 @@ impl LangGraphClient {
     /// a large dependency and a long tail of edge cases, and this one is already written, already
     /// installed in the backend's venv, and already the thing the web client uses — so a report
     /// rendered from the desktop app comes out identical to one rendered anywhere else.
+    ///
+    /// # Each source goes as an object, because that is what the route reads
+    ///
+    /// This sent a list of bare citation strings, on the belief — written into a comment in
+    /// `main.rs` — that *"the backend's Typst template takes a list of citation strings"*. It does
+    /// not. `_build_typst_wrapper` calls `source.get("citation")` on every entry, so the first
+    /// report a researcher tried to download came back `502 PDF render failed: 'str' object has no
+    /// attribute 'get'` (docs §141). Nothing had caught it because the loop it dies in does not
+    /// run when there are no sources, and until the literature path started working there usually
+    /// were none.
+    ///
+    /// Sending the object also sends the `link` — which [`Source`] has held all along, straight
+    /// from the backend, and which the old mapping dropped on the floor. The DOIs in a rendered
+    /// bibliography are now the ones Semantic Scholar returned rather than nothing at all.
     pub async fn render_report(
         &self,
         thread_id: &str,
         title: &str,
         markdown: &str,
-        sources: &[String],
+        sources: &[Source],
         used_asta: bool,
     ) -> Result<Vec<u8>> {
         let response = self
@@ -1220,29 +1234,7 @@ impl LangGraphClient {
                 self.base_url,
                 urlencode(thread_id)
             ))
-            .json(&json!({
-                "markdown": markdown,
-                "title": title,
-                "sources": sources,
-                // **Decided by the caller from the provenance record, not from this list.**
-                //
-                // The backend's own default is `len(sources) > 0`
-                // (`backend/routes/rendering.py:343`), and the footer it controls reads
-                // *"Academic literature search performed using Asta tools (Allen Institute for
-                // AI)"*. Those two do not match: `sources` is a list of citation objects the
-                // **model** produced, so a run where nothing was ever searched — where the model
-                // wrote five plausible references from memory — puts that sentence in the report
-                // and credits AI2 for work their tools did not do.
-                //
-                // That is not hypothetical. Five references from a real run were checked against
-                // Crossref: three DOIs resolved to different papers (one to a paper about
-                // lichens) and two did not exist at all. The footer would have claimed Asta for
-                // every one of them (docs §119).
-                //
-                // An attribution is a claim about provenance, so it should come from the
-                // provenance record. See `Workbench::used_asta`.
-                "used_asta": used_asta,
-            }))
+            .json(&render_request_body(title, markdown, sources, used_asta))
             .send()
             .await
             .context("asking the backend to render the report failed")?;
@@ -1732,6 +1724,51 @@ fn decode_values(data: &str) -> Option<Snapshot> {
         tasks,
         reports,
         sources,
+    })
+}
+
+/// The body of a `POST /render-report` request.
+///
+/// **Pure, so the wire shape can be pinned by a test.** The bug this replaced was a payload the
+/// route could not read, and no test could have caught it while the JSON was assembled inline in
+/// the middle of an HTTP call — the only way to see the shape was to make the call. It is the
+/// reason `paper_tools._build_search_command` upstream is a separate function too.
+fn render_request_body(
+    title: &str,
+    markdown: &str,
+    sources: &[Source],
+    used_asta: bool,
+) -> Value {
+    json!({
+        "markdown": markdown,
+        "title": title,
+        // Objects, not strings: `_build_typst_wrapper` reads `citation` and `link` off each entry.
+        // The link is sent even when empty, because the route distinguishes "no link" from a
+        // missing key by the same emptiness check either way, and an explicit field says which of
+        // the two this is.
+        "sources": sources
+            .iter()
+            .map(|source| json!({
+                "citation": source.citation,
+                "link": source.link.clone().unwrap_or_default(),
+            }))
+            .collect::<Vec<_>>(),
+        // **Decided by the caller from the provenance record, not from this list.**
+        //
+        // The backend's own default is `len(sources) > 0` (`backend/routes/rendering.py`), and the
+        // footer it controls reads *"Academic literature search performed using Asta tools (Allen
+        // Institute for AI)"*. Those two do not match: `sources` is a list of citation objects the
+        // **model** produced, so a run where nothing was ever searched — where the model wrote
+        // five plausible references from memory — puts that sentence in the report and credits AI2
+        // for work their tools did not do.
+        //
+        // That is not hypothetical. Five references from a real run were checked against Crossref:
+        // three DOIs resolved to different papers (one to a paper about lichens) and two did not
+        // exist at all. The footer would have claimed Asta for every one of them (docs §119).
+        //
+        // An attribution is a claim about provenance, so it should come from the provenance
+        // record. See `Workbench::used_asta`.
+        "used_asta": used_asta,
     })
 }
 
@@ -2954,6 +2991,46 @@ mod tests {
             "sources": [{"citation": "G.", "link": "https://doi.org/10.1/g", "url": "https://example.org/g"}]
         }));
         assert_eq!(both[0].link.as_deref(), Some("https://doi.org/10.1/g"));
+    }
+
+    #[test]
+    fn a_rendered_report_sends_each_source_the_way_the_route_reads_it() {
+        // `_build_typst_wrapper` does `source.get("citation")` on every entry
+        // (`mini-me/backend/routes/rendering.py`). Sending strings made the first report anybody
+        // downloaded come back `502 PDF render failed: 'str' object has no attribute 'get'`, and
+        // it went unnoticed because that loop does not run when the list is empty (docs §141).
+        let sources = vec![
+            Source {
+                citation: "Barrera, V. (2016). Pests and diseases affecting potato landraces."
+                    .into(),
+                link: Some("https://doi.org/10.1234/rlp".into()),
+            },
+            Source {
+                citation: "Ames, M. (2010). Blight in landraces.".into(),
+                link: None,
+            },
+        ];
+        let body = render_request_body("Late blight", "# Findings", &sources, true);
+
+        let entries = body["sources"].as_array().expect("sources is a list");
+        assert!(
+            entries.iter().all(|entry| entry.is_object()),
+            "a bare string here is the 502: {body}"
+        );
+        assert_eq!(entries[0]["citation"], json!(sources[0].citation));
+        // The link the backend supplied travels with it — `Source` has carried it all along and
+        // the old mapping to `Vec<String>` dropped it, so no rendered bibliography ever resolved.
+        assert_eq!(entries[0]["link"], json!("https://doi.org/10.1234/rlp"));
+        // A source with no link still renders; it just renders without one.
+        assert_eq!(entries[1]["link"], json!(""));
+
+        // Attribution stays the caller's call, not `len(sources) > 0`.
+        assert_eq!(body["used_asta"], json!(true));
+        assert_eq!(
+            render_request_body("t", "m", &sources, false)["used_asta"],
+            json!(false),
+            "a report whose citations came from memory must not credit Asta"
+        );
     }
 
     #[test]

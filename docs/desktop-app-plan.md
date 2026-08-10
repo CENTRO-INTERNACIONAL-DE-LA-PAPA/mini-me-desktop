@@ -118,6 +118,11 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   appended where the list leaves the backend.
 - ✅ **The backend log says which commit produced it** (§134) and its diagnostics distinguish
   success from failure (§132), which four nights of misdiagnosis said they had to.
+- ✅ **A report with citations downloads as a PDF** (§141). It had never been tried with a source
+  in the list: this app sent bare citation strings and the route reads `source.get("citation")`, so
+  the first attempt was a 502 on the whole PDF over the reference list alone. Fixed on both sides —
+  and sending the object sends the `link` the client had held and dropped since §91, so a rendered
+  bibliography now resolves.
 - ⬜ **Papers the model adds from memory are not marked.** Barrera et al. (2016) came back real
   and relevant from a journal Semantic Scholar indexes poorly — much of CIP's own literature
   looks like that. Those sit beside record-backed citations looking identical, and their links
@@ -8126,3 +8131,74 @@ filename rule is purely mechanical besides — a wrapper should set that argumen
 *The rule this project keeps arriving at: if it must be true, it cannot be asked for. What is worth
 adding is that the places to look are already marked, in capital letters, by whoever wrote the
 prompt.*
+
+## 141. The report the bibliography took down with it (2026-08-09)
+
+The literature path started working, so a researcher did the next obvious thing and pressed
+**download as PDF**:
+
+```
+the backend could not render the report (502 Bad Gateway):
+{"error":"PDF render failed: 'str' object has no attribute 'get'"}
+```
+
+`_build_typst_wrapper` reads each entry of `sources` as a mapping:
+
+```python
+citation_raw = (source.get("citation") or "").strip()
+```
+
+And this app sent a list of bare citation strings:
+
+```rust
+self.sources.iter().map(|source| source.citation.clone()).collect(),
+```
+
+under a comment stating, as fact, *"the backend's Typst template takes a list of citation
+strings."* It does not, and never did.
+
+### The comment was the whole bug
+
+Nobody wrote that line carelessly. §110 turned this route on — *"the rendering already existed and
+had never been called"* — and reading a Typst template that emits `- {citation}` per line, a list
+of citation strings is the obvious thing it wants. The `.get()` two lines above it decides
+otherwise, and the code was never run against a report that had a source, so the belief was never
+contradicted.
+
+This is the project's recurring shape at its purest: **a distinction that lived in a comment and
+not in the data.** Two clients read the same undocumented field two reasonable ways, and the field
+had no opinion. `render_report` validates that `sources` *is a list* and stops — the container's
+type is a contract, its contents are not.
+
+### Why it stayed hidden for a year
+
+```python
+for source in sources or []:
+```
+
+With no sources, the loop that dies never runs. Every report without citations rendered perfectly,
+which is nearly all of them until §133 made the searching reliable. **The feature that fixed the
+citations is what made this reachable** — the second time in this thread that getting something
+working exposed the thing behind it.
+
+### Fixed on both sides, deliberately
+
+**The app now sends the objects** (`protocol.rs::render_request_body`), which is not just the
+narrow fix. `Source` has carried `link` since §91 — the field whose own docstring explains that a
+model-written DOI is *"usually right, and wrong without warning"* while the real one sits one key
+away. The mapping to `Vec<String>` threw it away at the last step, so no rendered bibliography had
+ever had a resolvable link in it. **The §91/§115 shape again, in the one place it had survived: a
+value the program already had and never read.**
+
+Building the body is now a pure function beside `decode_sources` rather than JSON assembled inline
+inside an HTTP call, because the wire shape was untestable where it was — the only way to see it
+was to make the request. Same reasoning as upstream's `_build_search_command`, arrived at from the
+opposite direction.
+
+**The route now accepts either shape** (Mini-Me PR #44). Four lines, and the next client to guess
+differently gets a PDF instead of a stack trace. An entry it truly cannot read is dropped *with a
+warning*, because a bibliography quietly one entry short is `paper_tools.unreported`'s failure
+arriving through a different door.
+
+Verified with the exact payload that produced the 502: `PDF bytes: 35382 b'%PDF-'`. Nine Python
+tests, one Rust test that asserts every entry `is_object()` — 210 and 228 green.
