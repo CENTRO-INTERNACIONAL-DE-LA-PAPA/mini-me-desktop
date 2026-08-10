@@ -8795,6 +8795,13 @@ research toggle and the command palette's Enter hint now use four hand-authored 
 labels, hit targets, colours and surrounding layout are unchanged; this is an asset substitution,
 not another navigation redesign.
 
+The first literal set — gear, one speech card, paper under a magnifier — was technically clear and
+looked like every utility application. The approved set shares a **research atelier** language:
+Settings is a calibration instrument, Conversations is two distinct voices facing opposite ways,
+Research is an open field notebook with discovery outside its pages, and Enter is one curved ink
+stroke. Small solid points and the same rounded 1.55 stroke tie them together without adding detail
+that disappears at the 14px size where they actually render.
+
 GPUI resolves `svg().path(...)` only through an `AssetSource`. Reading an `assets/` path at runtime
 would work in a checkout and fail in the installed Windows executable, so the source maps four
 known paths to `include_bytes!` data compiled into the binary. Every stroke uses `currentColor`,
