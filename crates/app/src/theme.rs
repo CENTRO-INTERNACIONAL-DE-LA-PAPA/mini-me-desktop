@@ -305,6 +305,10 @@ pub fn contrast(a: u32, b: u32) -> f64 {
     (lighter + 0.05) / (darker + 0.05)
 }
 
+// These live-palette tests sit at the boundary they protect; the importer below is a
+// separate concern with its own fixtures. Keeping that narrative order is more useful
+// than moving the entire test module to satisfy a source-order preference (docs §118).
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use super::*;
