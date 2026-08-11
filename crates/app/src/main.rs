@@ -3864,7 +3864,7 @@ impl Workbench {
             })
             .collect();
         if !query.trim().is_empty() {
-            ranked.sort_by(|a, b| b.0.cmp(&a.0));
+            ranked.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
         }
         let matched: Vec<&protocol::Conversation> = ranked
             .into_iter()
@@ -4461,7 +4461,7 @@ impl Workbench {
             })
             .collect();
         if !query.trim().is_empty() {
-            matched.sort_by(|a, b| b.0.cmp(&a.0));
+            matched.sort_by_key(|(score, _, _)| std::cmp::Reverse(*score));
         }
 
         // Capped and scrollable: four built-ins fit, a hundred installed palettes do not,
@@ -7387,7 +7387,6 @@ impl Workbench {
             self.settings_open = false;
             self.restore_focus = true;
             cx.notify();
-            return;
         }
     }
 
@@ -9808,6 +9807,11 @@ fn replay(path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+// The behavior suite stays immediately after the UI implementation it exercises, while
+// the CLI-only launch helpers remain at the bottom of the executable. Moving this large
+// module past startup code would create merge churn without changing test visibility
+// (the source-order lesson recorded in docs §118).
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -10016,7 +10020,7 @@ mod tests {
     /// as chosen and Enter did nothing at all (docs §69).
     #[test]
     fn the_row_drawn_as_chosen_is_the_one_enter_runs() {
-        let commands = vec![Command::OpenSettings];
+        let commands = [Command::OpenSettings];
         for stale in [0usize, 1, 8, 999] {
             let clamped = stale.min(commands.len() - 1);
             assert_eq!(
@@ -10452,16 +10456,18 @@ mod tests {
         // agent lives inside WSL, so a prompt naming `C:\…` would send it looking for a
         // file that does not exist there — and the researcher would have no idea why.
         let _env = backend::env_lock::hold();
-        let mut config = backend::BackendConfig::default();
-        config.wsl = Some(backend::WslTarget {
-            distro: None,
-            dir: "~/Mini-Me".into(),
-        });
+        let config = backend::BackendConfig {
+            wsl: Some(backend::WslTarget {
+                distro: None,
+                dir: "~/Mini-Me".into(),
+            }),
+            ..Default::default()
+        };
         let translated =
             config.path_for_backend(std::path::Path::new(r"C:\Users\LENOVO\Documents\yield.csv"));
         assert_eq!(translated, "/mnt/c/Users/LENOVO/Documents/yield.csv");
 
-        let prompt = prompt_for_dropped(&[translated.clone()], &[false]);
+        let prompt = prompt_for_dropped(std::slice::from_ref(&translated), &[false]);
         assert!(prompt.contains(&translated), "{prompt}");
         assert!(!prompt.contains('\\'), "no Windows path survives: {prompt}");
 
