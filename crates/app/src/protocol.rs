@@ -1256,8 +1256,9 @@ impl LangGraphClient {
     ///
     /// **Irreversible, and the caller must have asked first.** This is why the sidebar
     /// makes it a two-step: a conversation is somebody's work, and there is no undo on the
-    /// server side (docs §58). Files the turn wrote are *not* touched — those live in the
-    /// researcher's own Documents and are not ours to remove.
+    /// server side (docs §58). This route knows nothing about the Windows workspace; the desktop
+    /// deletes those files only after this durable operation succeeds and after its centred modal
+    /// has named that consequence explicitly (docs §155).
     pub async fn delete_conversation(&self, thread_id: &str) -> Result<()> {
         self.http
             .delete(format!(

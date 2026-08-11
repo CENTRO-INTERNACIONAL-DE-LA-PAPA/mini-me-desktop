@@ -1510,25 +1510,93 @@ fn merge_spine(previous: Option<&Project>, incoming: Project) -> Project {
     merged
 }
 
-/// What the sidebar may do after asking the backend to delete a conversation.
+/// The unit a centred confirmation is about.
+///
+/// The project variant owns its complete conversation list at the moment it opens. Building it
+/// from the sidebar's *filtered* rows would make a search silently spare conversations that the
+/// modal just said were going away (§155).
+#[derive(Clone, Debug)]
+enum DeleteTarget {
+    Conversation(protocol::Conversation),
+    Project {
+        name: String,
+        conversations: Vec<protocol::Conversation>,
+    },
+}
+
+impl DeleteTarget {
+    fn thread_ids(&self) -> Vec<String> {
+        match self {
+            Self::Conversation(conversation) => vec![conversation.thread_id.clone()],
+            Self::Project { conversations, .. } => conversations
+                .iter()
+                .map(|conversation| conversation.thread_id.clone())
+                .collect(),
+        }
+    }
+
+    fn contains_thread(&self, thread_id: &str) -> bool {
+        match self {
+            Self::Conversation(conversation) => conversation.thread_id == thread_id,
+            Self::Project { conversations, .. } => conversations
+                .iter()
+                .any(|conversation| conversation.thread_id == thread_id),
+        }
+    }
+
+    fn files(&self) -> sidecar::DeleteFiles {
+        match self {
+            Self::Conversation(conversation) => sidecar::DeleteFiles::Conversation {
+                project: conversation.project.clone(),
+                thread_id: conversation.thread_id.clone(),
+            },
+            Self::Project { name, .. } => sidecar::DeleteFiles::Project { name: name.clone() },
+        }
+    }
+
+    fn noun(&self) -> &'static str {
+        match self {
+            Self::Conversation(_) => "conversation",
+            Self::Project { .. } => "project",
+        }
+    }
+}
+
+/// What the sidebar may do after asking the backend to delete confirmed work.
 ///
 /// Kept separate from the async UI so the dangerous rule is testable: absence of a successful
 /// answer means the durable thread may still exist, therefore its row must stay (§154).
 enum DeleteResolution {
-    Remove,
+    Remove { files_error: Option<String> },
     Keep(String),
 }
 
-fn resolve_delete(result: Option<anyhow::Result<()>>) -> DeleteResolution {
+fn resolve_delete(
+    noun: &str,
+    result: Option<anyhow::Result<sidecar::DeleteOutcome>>,
+) -> DeleteResolution {
     match result {
-        Some(Ok(())) => DeleteResolution::Remove,
+        Some(Ok(outcome)) => DeleteResolution::Remove {
+            files_error: outcome.files_error,
+        },
         Some(Err(error)) => {
-            DeleteResolution::Keep(format!("couldn't delete the conversation: {error:#}"))
+            DeleteResolution::Keep(format!("couldn't delete the {noun}: {error:#}"))
         }
-        None => DeleteResolution::Keep(
-            "couldn't confirm deletion — the conversation is still shown".to_string(),
-        ),
+        None => DeleteResolution::Keep(format!(
+            "couldn't confirm deletion — the {noun} is still shown"
+        )),
     }
+}
+
+/// Whether a project still exists after a deletion result has been applied.
+///
+/// §106 defines existence from conversation metadata, not from a remembered selection and not
+/// from a possibly locked folder. Keeping this tiny rule outside the callback makes the
+/// last-conversation boundary testable — the boundary that resurrected projects in §154.
+fn project_exists(conversations: &[protocol::Conversation], name: &str) -> bool {
+    conversations
+        .iter()
+        .any(|conversation| conversation.project.as_deref() == Some(name))
 }
 
 /// A single chat message in the transcript, plus the agent activity behind it.
@@ -1859,6 +1927,9 @@ struct Workbench {
     provenance_focus: gpui::FocusHandle,
     /// The About window's own focus, for the same reason (docs §71).
     about_focus: gpui::FocusHandle,
+    /// The delete warning's focus. It has buttons but no text field, so leaving focus on the
+    /// sidebar row it covers would make Escape depend on an element hidden behind the modal.
+    delete_focus: gpui::FocusHandle,
     /// Recent outcomes, newest last, each fading on its own timer.
     ///
     /// The status bar holds exactly one line, so an outcome worth reading — "copied 12 lines",
@@ -1911,17 +1982,18 @@ struct Workbench {
     pending_title: Option<String>,
     /// The thread whose name is being edited, if any.
     renaming: Option<String>,
-    /// The thread whose delete has been clicked once and not yet confirmed.
+    /// The conversation or project whose delete control opened the centred warning.
     ///
-    /// Two steps because there is no undo on the server: a conversation is somebody's
-    /// work, and a stray click on a `✕` in a list is exactly how it would be lost.
-    confirming_delete: Option<String>,
-    /// The conversation whose confirmed delete is awaiting the backend's answer.
+    /// This used to be an inline yes/no row. It could not say that saved files now go too, and a
+    /// project delete needs a count and a path; destructive scope belongs where it can be read
+    /// before acting (§155).
+    confirming_delete: Option<DeleteTarget>,
+    /// The confirmed target awaiting its backend and filesystem results.
     ///
     /// Optimistically removing the row made a failed or interrupted request look successful
     /// until restart, when the durable conversation — and therefore its project — returned
     /// (§154). Keep it visible as pending until the server has actually deleted it.
-    deleting_conversation: Option<String>,
+    deleting: Option<DeleteTarget>,
     /// The field that edits it. One shared editor rather than one per row — only one
     /// name can be edited at a time, and a Composer per conversation would be an entity
     /// per row for a list that can run to hundreds.
@@ -2086,6 +2158,7 @@ impl Workbench {
             settings_focus: cx.focus_handle(),
             provenance_focus: cx.focus_handle(),
             about_focus: cx.focus_handle(),
+            delete_focus: cx.focus_handle(),
             sidebar_width: 240.,
             panel_width: 320.,
             dragging: None,
@@ -2105,7 +2178,7 @@ impl Workbench {
             pending_title: None,
             renaming: None,
             confirming_delete: None,
-            deleting_conversation: None,
+            deleting: None,
             rename_editor,
             approve_tasks: std::collections::HashSet::new(),
             restore_focus: false,
@@ -3555,29 +3628,84 @@ impl Workbench {
         cx.notify();
     }
 
-    /// Delete a conversation, after the row has asked.
-    fn delete_conversation(&mut self, thread_id: String, cx: &mut Context<Self>) {
-        self.confirming_delete = None;
-        if self.deleting_conversation.is_some() {
+    /// Open the centred warning for a conversation or a whole project.
+    fn request_delete(
+        &mut self,
+        target: DeleteTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.deleting.is_some() {
             return;
         }
-        self.deleting_conversation = Some(thread_id.clone());
-        self.status = "deleting conversation…".into();
-        let mut deleted = self.sidecar.delete_conversation(thread_id.clone());
+        let current_is_targeted = self
+            .sidecar
+            .thread_id()
+            .is_some_and(|thread_id| target.contains_thread(&thread_id));
+        if self.streaming && current_is_targeted {
+            self.say(
+                format!(
+                    "can't delete this {} while its turn is running",
+                    target.noun()
+                ),
+                cx,
+            );
+            return;
+        }
+        if current_is_targeted && self.tasks.iter().any(|task| !task.is_finished()) {
+            // A background worker can still be writing beneath the conversation directory after
+            // the foreground turn ends. Deleting that tree underneath it would recreate the
+            // folder or lose the remainder of its work; wait for the task's terminal state.
+            self.say(
+                format!(
+                    "can't delete this {} while its background work is running",
+                    target.noun()
+                ),
+                cx,
+            );
+            return;
+        }
+        self.confirming_delete = Some(target);
+        window.focus(&self.delete_focus);
+        cx.notify();
+    }
+
+    /// Carry out exactly what the modal named: durable threads first, managed files second.
+    fn confirm_delete(&mut self, cx: &mut Context<Self>) {
+        let Some(target) = self.confirming_delete.take() else {
+            return;
+        };
+        if self.deleting.is_some() {
+            return;
+        }
+        let noun = target.noun();
+        self.status = format!("deleting {noun}…");
+        self.deleting = Some(target.clone());
+        let mut deleted = self
+            .sidecar
+            .delete_conversations(target.thread_ids(), target.files());
         cx.spawn(async move |this, cx| {
             let result = deleted.next().await;
             let _ = this.update(cx, |workbench, cx| {
-                workbench.deleting_conversation = None;
-                match resolve_delete(result) {
-                    DeleteResolution::Remove => {
+                workbench.deleting = None;
+                match resolve_delete(target.noun(), result) {
+                    DeleteResolution::Remove { files_error } => {
+                        let removed = target.thread_ids();
                         workbench
                             .conversations
-                            .retain(|conversation| conversation.thread_id != thread_id);
+                            .retain(|conversation| !removed.contains(&conversation.thread_id));
                         // If it was the open one, leave a genuinely ungrouped empty slate rather
                         // than a transcript and project whose thread no longer exists (§154).
-                        if workbench.sidecar.thread_id().as_deref() == Some(thread_id.as_str()) {
+                        let open_was_removed = workbench
+                            .sidecar
+                            .thread_id()
+                            .is_some_and(|thread_id| target.contains_thread(&thread_id));
+                        let active_project_was_removed = workbench
+                            .sidecar
+                            .project()
+                            .is_some_and(|name| !project_exists(&workbench.conversations, &name));
+                        if open_was_removed {
                             workbench.sidecar.reset_thread();
-                            workbench.sidecar.set_project(None);
                             workbench.transcript.clear();
                             workbench.provenance = provenance::Record::default();
                             workbench
@@ -3586,16 +3714,43 @@ impl Workbench {
                             workbench.buckets.clear();
                             workbench.tasks.clear();
                             workbench.jobs.clear();
+                        }
+                        if open_was_removed || active_project_was_removed {
+                            // Also covers an empty "new conversation here" slate whose thread has
+                            // not been created yet. Leaving only its project key alive would make
+                            // the next question recreate the project just deleted (§155).
+                            workbench.sidecar.set_project(None);
                             workbench.project = None;
                             workbench.refresh_project(cx);
                         }
-                        workbench.say("conversation deleted", cx);
+                        match files_error {
+                            None => workbench.say(format!("{} deleted", target.noun()), cx),
+                            Some(error) => {
+                                // The irreversible server half succeeded, so restoring the row
+                                // would be another lie. Keep the recoverable folder and say where
+                                // synchronization stopped instead (§155).
+                                workbench.error = Some(format!(
+                                    "The {} was deleted, but its saved folder remains: {error}",
+                                    target.noun()
+                                ));
+                                workbench.say(
+                                    format!(
+                                        "{} deleted; its saved folder could not be removed",
+                                        target.noun()
+                                    ),
+                                    cx,
+                                );
+                            }
+                        }
                     }
                     DeleteResolution::Keep(error) => {
                         // Keep the row because the backend kept the conversation. Claiming
-                        // success here is the precise defect that only restart exposed.
+                        // success here is the precise defect that only restart exposed. A project
+                        // batch can have succeeded partly before one request failed, so refresh
+                        // instead of assuming our captured list is still authoritative (§155).
                         workbench.error = Some(error);
-                        workbench.status = "conversation was not deleted".into();
+                        workbench.status = format!("{} was not fully deleted", target.noun());
+                        workbench.refresh_conversations(cx);
                     }
                 }
                 cx.notify();
@@ -3938,9 +4093,14 @@ impl Workbench {
             (_, None) => std::cmp::Ordering::Less,
             (Some(a), Some(b)) => a.cmp(b),
         });
-        // One project is not a grouping — the heading would be noise above every row a
-        // researcher owns. Headings appear once there is something to tell apart.
-        let show_headings = ordered.len() > 1;
+        // A named project always gets its heading now, even when it is the only group. The
+        // heading is no longer decoration: it owns New here, Open folder and Delete project, so
+        // hiding it would hide the only project-delete affordance (§155). Ungrouped work alone
+        // still needs no heading because it is not a project and has no project folder to delete.
+        let show_headings = ordered.len() > 1
+            || ordered
+                .iter()
+                .any(|(project, _conversations)| project.is_some());
 
         for (project, conversations) in ordered {
             if show_headings {
@@ -3949,6 +4109,19 @@ impl Workbench {
                     .unwrap_or_else(|| UNGROUPED_PROJECT_LABEL.to_string());
                 let opening = project.clone();
                 let starting = project.clone();
+                // All conversations in the project, not merely the rows that survived the
+                // sidebar search. A filter is a way to find work, never a deletion boundary.
+                let deleting_project = project.clone().map(|name| DeleteTarget::Project {
+                    conversations: self
+                        .conversations
+                        .iter()
+                        .filter(|conversation| {
+                            conversation.project.as_deref() == Some(name.as_str())
+                        })
+                        .cloned()
+                        .collect(),
+                    name,
+                });
                 list = list.child(
                     div()
                         .flex()
@@ -3983,6 +4156,41 @@ impl Workbench {
                                 })
                                 .child(section_label_owned(heading.to_uppercase())),
                         )
+                        .when_some(deleting_project, |header, target| {
+                            let id = match &target {
+                                DeleteTarget::Project { name, .. } => {
+                                    SharedString::from(format!("delete-project-{name}"))
+                                }
+                                DeleteTarget::Conversation(_) => unreachable!(),
+                            };
+                            header.child(
+                                div()
+                                    .id(id)
+                                    .flex_none()
+                                    .px_1()
+                                    .rounded_md()
+                                    .text_color(rgb(theme::text_faint()))
+                                    .text_xs()
+                                    .invisible()
+                                    .group_hover(
+                                        SharedString::from(format!("head-{heading}")),
+                                        |style| style.visible(),
+                                    )
+                                    .hover(|style| {
+                                        style.text_color(rgb(theme::error())).cursor_pointer()
+                                    })
+                                    .child("✕")
+                                    .tooltip(move |_window, cx| {
+                                        cx.new(|_| Hint {
+                                            text: "delete project and saved files".into(),
+                                        })
+                                        .into()
+                                    })
+                                    .on_click(cx.listener(move |workbench, _event, window, cx| {
+                                        workbench.request_delete(target.clone(), window, cx);
+                                    })),
+                            )
+                        })
                         // Asked for directly: starting work in a project should not mean
                         // starting it somewhere else and then filing it (docs §107). Revealed
                         // on hover, like the rename and delete controls on the rows below.
@@ -4039,7 +4247,11 @@ impl Workbench {
                 // The row stays until the backend confirms deletion. Removing it optimistically
                 // is what made a failed request look successful until launch brought both the
                 // conversation and its derived project heading back (§154).
-                if self.deleting_conversation.as_deref() == Some(thread_id.as_str()) {
+                if self
+                    .deleting
+                    .as_ref()
+                    .is_some_and(|target| target.contains_thread(&thread_id))
+                {
                     list = list.child(
                         div()
                             .flex()
@@ -4062,71 +4274,9 @@ impl Workbench {
                     continue;
                 }
 
-                // Asked once, then confirmed in place. Nothing about a row of names should be
-                // able to destroy work on one click.
-                if self.confirming_delete.as_deref() == Some(thread_id.as_str()) {
-                    let confirmed = thread_id.clone();
-                    list = list.child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_2()
-                            .w_full()
-                            .min_w_0()
-                            .px_2()
-                            .py_1()
-                            .rounded_md()
-                            .border_1()
-                            .border_color(rgb(theme::error()))
-                            .child(
-                                ui::Label::new("Delete this conversation?")
-                                    .muted()
-                                    .size(ui::Size::Compact)
-                                    .ellipsis(),
-                            )
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("del-yes-{thread_id}")))
-                                    .flex_none()
-                                    .px_2()
-                                    .rounded_md()
-                                    .text_color(rgb(theme::error()))
-                                    .text_xs()
-                                    .hover(|style| {
-                                        style.bg(rgb(theme::elevated())).cursor_pointer()
-                                    })
-                                    .child("delete")
-                                    .on_click(cx.listener(
-                                        move |workbench, _event, _window, cx| {
-                                            workbench.delete_conversation(confirmed.clone(), cx);
-                                        },
-                                    )),
-                            )
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("del-no-{thread_id}")))
-                                    .flex_none()
-                                    .px_2()
-                                    .rounded_md()
-                                    .text_color(rgb(theme::text_muted()))
-                                    .text_xs()
-                                    .hover(|style| {
-                                        style.bg(rgb(theme::elevated())).cursor_pointer()
-                                    })
-                                    .child("keep")
-                                    .on_click(cx.listener(|workbench, _event, _window, cx| {
-                                        workbench.confirming_delete = None;
-                                        cx.notify();
-                                    })),
-                            ),
-                    );
-                    continue;
-                }
-
                 let open = thread_id.clone();
                 let rename = thread_id.clone();
-                let remove = thread_id.clone();
+                let remove = DeleteTarget::Conversation((*conversation).clone());
                 list = list.child(
                     div()
                         .id(SharedString::from(format!("conv-{thread_id}")))
@@ -4193,9 +4343,8 @@ impl Workbench {
                                     style.text_color(rgb(theme::error())).cursor_pointer()
                                 })
                                 .child("✕")
-                                .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                                    workbench.confirming_delete = Some(remove.clone());
-                                    cx.notify();
+                                .on_click(cx.listener(move |workbench, _event, window, cx| {
+                                    workbench.request_delete(remove.clone(), window, cx);
                                 })),
                         )
                         .on_click(cx.listener(move |workbench, _event, _window, cx| {
@@ -5011,6 +5160,102 @@ impl Workbench {
             }
         }
         list.into_any_element()
+    }
+
+    /// The irreversible scope, in the centre of the window rather than squeezed into a row.
+    ///
+    /// Conversation deletion now includes its saved outputs, and project deletion includes every
+    /// conversation plus the complete project folder. The old inline "delete / keep" row had no
+    /// room to say either fact; confirmation without the consequence is only a second click
+    /// (§155).
+    fn delete_modal(&self, target: &DeleteTarget, cx: &mut Context<Self>) -> impl IntoElement {
+        let (title, body, action) = match target {
+            DeleteTarget::Conversation(conversation) => {
+                let path = workspace::thread_dir_in(
+                    conversation.project.as_deref(),
+                    &conversation.thread_id,
+                );
+                let body = div()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .min_w_0()
+                    .gap_3()
+                    .child(ui::Label::new(format!(
+                        "This permanently deletes “{}”, its chat history, and every saved file it produced.",
+                        conversation.title
+                    )))
+                    .child(
+                        ui::Label::new(format!("Saved folder:\n{}", path.display()))
+                            .muted()
+                            .size(ui::Size::Compact),
+                    )
+                    .into_any_element();
+                ("Delete conversation?", body, "Delete conversation")
+            }
+            DeleteTarget::Project {
+                name,
+                conversations,
+            } => {
+                let path = workspace::project_folder(name)
+                    .map(|folder| workspace::root().join(folder))
+                    .unwrap_or_else(workspace::root);
+                let count = conversations.len();
+                let body = div()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .min_w_0()
+                    .gap_3()
+                    .child(ui::Label::new(format!(
+                        "This permanently deletes project “{name}”, {count} conversation{}, and the entire project folder.",
+                        if count == 1 { "" } else { "s" }
+                    )))
+                    .child(
+                        ui::Label::new(
+                            "Files placed directly in the project folder are deleted too — not only files Mini-Me created.",
+                        )
+                        .colour(theme::warning()),
+                    )
+                    .child(
+                        ui::Label::new(format!("Project folder:\n{}", path.display()))
+                            .muted()
+                            .size(ui::Size::Compact),
+                    )
+                    .into_any_element();
+                ("Delete project?", body, "Delete project")
+            }
+        };
+
+        ui::Modal::new("delete-confirmation", title)
+            .width(560.)
+            .focus(&self.delete_focus)
+            .body(body)
+            .actions(
+                ui::actions()
+                    .child(div().flex_grow())
+                    .child(
+                        ui::Button::new("delete-cancel", "Cancel").on_click(cx.listener(
+                            |workbench, _event, _window, cx| {
+                                workbench.confirming_delete = None;
+                                workbench.restore_focus = true;
+                                cx.notify();
+                            },
+                        )),
+                    )
+                    .child(
+                        ui::Button::new("delete-confirm", action)
+                            .tone(ui::Tone::Danger)
+                            .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                workbench.confirm_delete(cx);
+                            })),
+                    ),
+            )
+            .footer(
+                ui::Label::new("There is no undo.")
+                    .colour(theme::error())
+                    .size(ui::Size::Compact),
+            )
     }
 
     /// What this thing is, what the specialists do, and who to credit.
@@ -7403,6 +7648,11 @@ impl Workbench {
             self.close_palette(window, cx);
             return;
         }
+        if self.confirming_delete.take().is_some() {
+            self.restore_focus = true;
+            cx.notify();
+            return;
+        }
         if self.preview.take().is_some() {
             cx.notify();
             return;
@@ -9703,10 +9953,16 @@ impl Render for Workbench {
             root
         };
 
-        // The preview floats over everything except the palette: it is a thing you open,
-        // look at, and dismiss, not a place you navigate to (docs §49).
+        // The preview floats over the workbench but under destructive confirmation and the
+        // palette: it is a thing you open, look at, and dismiss, not a place you navigate to
+        // (docs §49, §155).
         let root = match &self.preview {
             Some(output) => root.child(self.preview_modal(output.clone(), cx)),
+            None => root,
+        };
+
+        let root = match &self.confirming_delete {
+            Some(target) => root.child(self.delete_modal(target, cx)),
             None => root,
         };
 
@@ -9820,17 +10076,79 @@ mod tests {
     #[test]
     fn a_failed_delete_keeps_the_conversation_visible() {
         assert!(matches!(
-            resolve_delete(Some(Err(anyhow::anyhow!("backend unavailable")))),
+            resolve_delete(
+                "conversation",
+                Some(Err(anyhow::anyhow!("backend unavailable")))
+            ),
             DeleteResolution::Keep(message) if message.contains("backend unavailable")
         ));
         assert!(matches!(
-            resolve_delete(None),
+            resolve_delete("conversation", None),
             DeleteResolution::Keep(message) if message.contains("still shown")
         ));
         assert!(matches!(
-            resolve_delete(Some(Ok(()))),
-            DeleteResolution::Remove
+            resolve_delete(
+                "conversation",
+                Some(Ok(sidecar::DeleteOutcome { files_error: None }))
+            ),
+            DeleteResolution::Remove { files_error: None }
         ));
+    }
+
+    #[test]
+    fn a_file_cleanup_failure_does_not_resurrect_a_deleted_conversation() {
+        // HTTP succeeded, so the durable conversation is gone. A locked Explorer folder is a
+        // recoverable orphan to report, not grounds to put back a row that can no longer open.
+        assert!(matches!(
+            resolve_delete(
+                "conversation",
+                Some(Ok(sidecar::DeleteOutcome {
+                    files_error: Some("folder is open".into())
+                }))
+            ),
+            DeleteResolution::Remove {
+                files_error: Some(message)
+            } if message == "folder is open"
+        ));
+    }
+
+    #[test]
+    fn deleting_a_project_targets_every_conversation_not_only_a_filtered_row() {
+        let conversations = vec![
+            protocol::Conversation {
+                thread_id: "one".into(),
+                project: Some("Late blight".into()),
+                title: "Visible in search".into(),
+                updated_at: String::new(),
+            },
+            protocol::Conversation {
+                thread_id: "two".into(),
+                project: Some("Late blight".into()),
+                title: "Hidden by search".into(),
+                updated_at: String::new(),
+            },
+        ];
+        let target = DeleteTarget::Project {
+            name: "Late blight".into(),
+            conversations,
+        };
+        assert_eq!(target.thread_ids(), vec!["one", "two"]);
+        assert!(target.contains_thread("two"));
+    }
+
+    #[test]
+    fn deleting_a_projects_last_conversation_ends_the_active_project() {
+        let other = protocol::Conversation {
+            thread_id: "other".into(),
+            project: Some("Yield trials".into()),
+            title: "Other work".into(),
+            updated_at: String::new(),
+        };
+        assert!(project_exists(std::slice::from_ref(&other), "Yield trials"));
+        assert!(
+            !project_exists(std::slice::from_ref(&other), "Late blight"),
+            "an empty project cannot survive as an active selection"
+        );
     }
 
     #[test]

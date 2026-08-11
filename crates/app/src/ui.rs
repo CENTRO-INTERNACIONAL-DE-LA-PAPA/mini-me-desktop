@@ -56,11 +56,11 @@ pub enum Tone {
     /// Everything alongside it — Copy, Close, Settings. The common case, hence the default.
     #[default]
     Quiet,
-    // No `Danger`. The one destructive control in the app — "delete" in the conversation
-    // list's confirmation row — is a *borderless* chip inside an already-red row, so it is
-    // one of the rows this type deliberately does not cover. A tone with no caller is a
-    // design vocabulary invented ahead of the design; it goes in when a bordered destructive
-    // button exists.
+    /// An irreversible action whose scope has just been stated in a confirmation modal.
+    ///
+    /// Added only when deletion moved from a borderless inline chip to a real modal button:
+    /// before §155 there was no bordered destructive control for this vocabulary to describe.
+    Danger,
 }
 
 impl Tone {
@@ -68,6 +68,7 @@ impl Tone {
         match self {
             Tone::Accent => theme::accent(),
             Tone::Quiet => theme::border(),
+            Tone::Danger => theme::error(),
         }
     }
 
@@ -75,6 +76,7 @@ impl Tone {
         match self {
             Tone::Accent => theme::accent(),
             Tone::Quiet => theme::text_muted(),
+            Tone::Danger => theme::error(),
         }
     }
 }
@@ -763,7 +765,7 @@ mod tests {
         // The colour and the inertness come from one flag, so they cannot disagree — which
         // they could when each call site kept its own `busy` boolean and its own palette.
         theme::apply(&theme::MINI_ME_DARK);
-        for tone in [Tone::Accent, Tone::Quiet] {
+        for tone in [Tone::Accent, Tone::Quiet, Tone::Danger] {
             let live = Button::new("b", "Go").tone(tone);
             assert_eq!(live.tone.ink(), tone.ink());
             let dead = Button::new("b", "Go").tone(tone).disabled(true);
@@ -772,11 +774,16 @@ mod tests {
     }
 
     #[test]
-    fn the_two_tones_are_distinguishable() {
+    fn every_button_tone_is_distinguishable() {
         // A tone that resolved to the same colour as another would make the set decorative.
         theme::apply(&theme::MINI_ME_DARK);
-        assert_ne!(Tone::Accent.ink(), Tone::Quiet.ink());
-        assert_ne!(Tone::Accent.border(), Tone::Quiet.border());
+        let tones = [Tone::Accent, Tone::Quiet, Tone::Danger];
+        for (at, tone) in tones.iter().enumerate() {
+            for other in tones.iter().skip(at + 1) {
+                assert_ne!(tone.ink(), other.ink(), "{tone:?} and {other:?}");
+                assert_ne!(tone.border(), other.border(), "{tone:?} and {other:?}");
+            }
+        }
     }
 
     #[test]

@@ -74,7 +74,8 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
 
 **Felt friction**
 - ✅ **Multi-line composer** — Shift-Enter inserts a break, Enter still sends (§55).
-- ✅ **Escape closes things**, inside-out; **conversations can be deleted** in two steps;
+- ✅ **Escape closes things**, inside-out; **conversations and projects can be deleted** from a
+  centred warning that names the chat history and saved folders that will go (§58/§155);
   **theme and model are filterable lists**; **corners are rounded** (§58/§59).
 - ✅ **Text selection in the transcript** (§62) — drag across paragraphs, code blocks and table
   cells; `ctrl-c` copies, `ctrl-shift-a` takes everything, both also in the palette.
@@ -8838,3 +8839,76 @@ needs the Windows restart check; this headless environment can prove the state t
 result, not watch the heading disappear and stay gone across two launches.
 
 *The eleventh value the program already had was `None`. Remembering more state was the defect.*
+
+
+## 155. Deleting the label left the laboratory behind (2026-08-11)
+
+The Windows check of §154 found the other half immediately: the project stopped returning to the
+sidebar, but its conversation directories and every file in them remained under
+`Documents\Mini-Me`. The plan said that was deliberate in §58 and repeated it in §154 — files were
+the researcher's, therefore deletion must leave them alone. The researcher changed that contract
+after seeing it operate: *"We need to sync that."*
+
+That is the better rule now that §105 made projects real folders. A conversation in the sidebar and
+its directory in Explorer are two representations of the same work. Deleting one while preserving
+the other is not caution; it is an orphan that looks like the deletion failed. The confirmation is
+where caution belongs.
+
+### The warning moved to the centre because its scope grew
+
+The old confirmation replaced a sidebar row with *Delete this conversation? · delete · keep*. It
+could fit a noun and two verbs. It could not honestly say that the chat history **and every saved
+output** were going, show the exact directory, or explain that deleting a project also removes files
+placed directly in its folder. A second click without those consequences stated is not informed
+confirmation.
+
+Deletion now uses the existing centred `Modal`, with pinned Cancel and red Delete actions and an
+explicit *There is no undo*. A conversation warning names the conversation and its exact folder. A
+project warning names the project, counts every conversation, shows the project path, and says that
+the entire directory goes — including files Mini-Me did not create.
+
+### A project has a delete control of its own
+
+Named project headings now appear even when there is only one group. §106 hid a single heading as
+noise; it is no longer decoration once it owns **open folder**, **new conversation here**, and
+**delete project**. The delete control targets the complete project from `self.conversations`, never
+the rows surviving the sidebar search — filtering for one title must not turn "Delete project"
+into "delete the one conversation I can currently see". Ungrouped Conversations is still not a
+project and therefore has no project-delete control; its conversations can be deleted individually.
+
+### The two irreversible systems cannot be atomic
+
+LangGraph and NTFS cannot share a transaction. The order is therefore server first, filesystem
+second:
+
+1. Delete every durable thread and keep the rows in **Deleting…** state while that happens.
+2. Only after those requests succeed, recursively remove the confirmed conversation or project
+   folder on a blocking worker, never on GPUI's render thread or Tokio's reactor.
+   A currently open target cannot be deleted while its foreground turn or background work is still
+   writing there.
+3. If the server refuses, preserve the files and refresh the list; a project batch may have stopped
+   after earlier threads succeeded.
+4. If Windows has the folder open and cleanup fails, remove the now-nonexistent conversation from
+   the sidebar but report that its recoverable folder remains. Restoring a row whose server thread
+   is gone would be another lie.
+
+The destructive path validates the thread id as one path component before recursion. It refuses to
+descend through a project symlink or junction, and unlinks a target link rather than following it;
+one malformed server id or an Explorer shortcut must never widen one confirmation beyond the
+Mini-Me workspace. Deleting one conversation removes its nested output tree and then its project
+directory only when empty. Deleting a project removes the complete named directory.
+
+Four sentence-named filesystem tests pin the boundaries: nested files go with their conversation,
+a neighbouring conversation survives, the last conversation removes an empty project, a whole
+project deletion leaves its neighbour alone, and hostile thread ids cannot escape the workspace.
+UI tests keep a failed durable delete visible, keep a folder-cleanup failure from resurrecting a
+deleted thread, prove a project target contains conversations hidden by search, and end the active
+project when its final conversation disappears.
+
+This explicitly supersedes §58 and §154's decision to preserve output files. The warning makes the
+new deletion contract visible before the click rather than leaving the cost behind afterward.
+
+Headless verification on the Windows checkout: **248 tests pass**. `cargo clippy
+-p mini-me-desktop-app --all-targets` adds no warning; it still reports the branch's existing 15
+warnings in untouched call sites. The modal itself still needs the Windows-eye check — specifically
+its path wrapping and the two hover controls on a single-project heading.

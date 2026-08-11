@@ -56,6 +56,29 @@ pub enum FixEvent {
     Finished { ok: bool, note: String },
 }
 
+/// Which managed folder accompanies a confirmed server-side deletion.
+///
+/// Kept with the request so deleting the durable thread and deleting its files cannot drift into
+/// two unrelated click handlers. They still cannot be atomic across HTTP and a disk, so the
+/// server goes first: a rejected request preserves the files; a failed cleanup after success is
+/// returned as an orphan the researcher can recover manually (§155).
+#[derive(Clone, Debug)]
+pub enum DeleteFiles {
+    Conversation {
+        project: Option<String>,
+        thread_id: String,
+    },
+    Project {
+        name: String,
+    },
+}
+
+#[derive(Debug)]
+pub struct DeleteOutcome {
+    /// `Some` means the server records are gone but Windows could not remove the named folder.
+    pub files_error: Option<String>,
+}
+
 /// The conversation's thread id: created on first use, then reused.
 ///
 /// A plain `std::sync::Mutex` rather than a Tokio one because the guard is never
@@ -519,22 +542,43 @@ impl Sidecar {
         rx
     }
 
-    /// Delete a conversation, reporting whether the backend made the deletion durable.
+    /// Delete confirmed conversations, then remove the workspace folder that represented them.
     ///
     /// This used to be fire-and-forget while the caller removed the row immediately. A failed or
     /// interrupted request therefore looked successful until the next launch restored the still-
     /// existing thread — and its project heading with it (§154). The UI now waits for this answer
-    /// before claiming either one is gone.
-    pub fn delete_conversation(&self, thread_id: String) -> mpsc::UnboundedReceiver<Result<()>> {
+    /// before claiming either one is gone. Recursive filesystem work stays off both GPUI and
+    /// Tokio's reactor workers; either one may be carrying a live research turn.
+    pub fn delete_conversations(
+        &self,
+        thread_ids: Vec<String>,
+        files: DeleteFiles,
+    ) -> mpsc::UnboundedReceiver<Result<DeleteOutcome>> {
         let (tx, rx) = mpsc::unbounded();
         let base_url = self.base_url.clone();
         self.runtime.spawn(async move {
             let client = LangGraphClient::new(base_url);
-            let result = client.delete_conversation(&thread_id).await;
-            if let Err(error) = &result {
-                tracing::warn!(%error, "could not delete a conversation");
+            for thread_id in &thread_ids {
+                if let Err(error) = client.delete_conversation(thread_id).await {
+                    tracing::warn!(%error, %thread_id, "could not delete a conversation");
+                    let _ = tx.unbounded_send(Err(error));
+                    return;
+                }
             }
-            let _ = tx.unbounded_send(result);
+
+            let files_error = tokio::task::spawn_blocking(move || match files {
+                DeleteFiles::Conversation { project, thread_id } => {
+                    crate::workspace::delete_thread(project.as_deref(), &thread_id)
+                }
+                DeleteFiles::Project { name } => crate::workspace::delete_project(&name),
+            })
+            .await
+            .map_err(anyhow::Error::from)
+            .and_then(|result| result.map(|_| ()))
+            .err()
+            .map(|error| format!("{error:#}"));
+
+            let _ = tx.unbounded_send(Ok(DeleteOutcome { files_error }));
         });
         rx
     }
