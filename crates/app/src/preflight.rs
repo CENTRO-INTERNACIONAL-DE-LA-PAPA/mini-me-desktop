@@ -882,7 +882,6 @@ fn find_newline(bytes: &[u8], wide: bool) -> Option<usize> {
         bytes
             .windows(2)
             .position(|pair| pair == [0x0a, 0x00])
-            .map(|at| at)
     } else {
         bytes.iter().position(|byte| *byte == 0x0a)
     }

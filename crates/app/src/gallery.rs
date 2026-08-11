@@ -75,7 +75,7 @@ pub async fn search(client: &reqwest::Client, query: &str) -> Result<Vec<Listing
     let mut themes: Vec<Listing> = index.data.into_iter().filter(Listing::is_theme).collect();
     // Most-installed first. With a hundred results and no preview, this is the closest
     // thing to a recommendation that does not require us to have opinions.
-    themes.sort_by(|a, b| b.download_count.cmp(&a.download_count));
+    themes.sort_by_key(|theme| std::cmp::Reverse(theme.download_count));
     Ok(themes)
 }
 
