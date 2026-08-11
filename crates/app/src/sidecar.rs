@@ -784,11 +784,18 @@ impl Sidecar {
         let base_url = self.base_url.clone();
         let model = self.model.lock().expect("model mutex").clone();
         let project = self.project();
+        // A backend restart can erase its in-memory worker→conversation map while a task waits
+        // for approval. Send the owning conversation again on resume so files created after the
+        // decision cannot jump back to a sibling UUID folder (docs §159).
+        let workspace_thread = self.thread_id();
         self.runtime.spawn(async move {
             let client = LangGraphClient::new(base_url)
                 .with_model(model)
                 .with_project(project);
-            if let Err(error) = client.resume_background(&thread_id, &decisions).await {
+            if let Err(error) = client
+                .resume_background(&thread_id, workspace_thread.as_deref(), &decisions)
+                .await
+            {
                 tracing::error!(%thread_id, %error, "could not answer a background task");
             }
         });

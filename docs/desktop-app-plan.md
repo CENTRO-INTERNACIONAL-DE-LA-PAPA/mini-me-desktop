@@ -8855,3 +8855,47 @@ generate several plots, leave the app open, and confirm the thumbnails fill with
 
 *Eleventh: an affordance is a promise of behavior, and a cache key needs the version of the thing
 it remembers—even when the library only gives us its path.*
+
+
+## 159. The client knew the parent; the worker was asked to guess it (2026-08-11)
+
+A second live EDA exposed the same filing defect §150/§151 had made less likely, not impossible:
+
+```
+Documents/Mini-Me/019ff21e-a473-…/   the conversation
+Documents/Mini-Me/019ff231-2332-…/   its delegated worker, beside it
+```
+
+The worker completed and the answer rendered, but the conversation's Outputs panel contained only
+its own two bookkeeping files. The researcher deleted that reproduction before it could be read
+from disk; the exact UUIDs and timestamps remain in the screenshot, while both backend routes now
+correctly return 404 for the deleted threads. A following run landed correctly. That difference is
+the evidence: this is an intermittent ownership signal, not a deterministic path calculation.
+
+### The request already had the only authoritative value
+
+Every coordinator request is sent to `/threads/<conversation>/runs/stream`. The Rust client
+therefore knows the conversation id at the point it assembles the run config, but sent the model,
+keys and project without `__workspace_thread__`. The overlay then tried to reconstruct the missing
+owner inside `start_async_task` from, in order, an inherited pin and three LangGraph thread metadata
+locations. §150 already measured why that cannot be load-bearing: not every tool-call context has
+those metadata fields. When none does, a valid worker starts with its own UUID as the workspace
+root; no error occurs and every generated file is filed one directory sideways.
+
+The client now sends `configurable.__workspace_thread__ = <conversation>` on every fresh turn and
+foreground resume. The async launcher already gives an explicit pin priority and forwards it under
+its directory-only key, so the background thread still owns its checkpoints while its files are
+nested under the conversation. No protected overlay code needed to change.
+
+Background approval resumes carry the owner again. This closes a second version of the same race:
+the overlay remembers worker→conversation ownership in process memory, but a backend restart while
+a task waits clears that map. A decision made afterwards must not let the rest of the task resume in
+a sibling folder.
+
+A sentence-named request-shape test covers fresh runs, resumes and blank ids. The live Windows
+confirmation is deliberately exact: start a new conversation, ask it to delegate an EDA, and leave
+Explorer open at `Documents\Mini-Me`. The correct result is one new top-level conversation UUID and
+the worker UUID, if it creates one, **inside** it—never a second UUID beside it.
+
+*Twelfth: a value known at the boundary should cross the boundary explicitly, especially when its
+absence is a successful-looking failure.*
