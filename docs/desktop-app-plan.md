@@ -8786,3 +8786,93 @@ and then flattens it back into one list. The folder the agent chose is a stateme
 belongs together, and the panel is discarding it.
 
 *Ninth: the value needed was one the program already had.*
+
+
+## 160. Sixteen real files escaped to WSL `/tmp` (2026-08-11)
+
+This first looked like §150 again: Explorer showed two UUID folders under `Documents\Mini-Me`
+after one EDA. They were not duplicates. The backend store identified them as two independent
+conversations:
+
+```
+019ff236-183c-…  14:04  earlier penguin conversation
+019ff25d-f0ee-…  14:47  current Coffea arabica conversation
+```
+
+The current run used the ordinary synchronous `task` tool, had no `async_tasks`, and every one of
+its three run/resume requests stayed on `019ff25d-f0ee-…`. There was no background-worker UUID to
+pin. Its empty Outputs panel was a different failure.
+
+The coordinator explicitly asked `exploratory_data_analysis` to *"save outputs in the working
+directory using relative paths."* The subagent reported sixteen paths such as
+`tmp/coffee_eda/coffee_arabica_dummy_dataset.csv`, while the conversation's stored
+`artifacts.files` was empty and the directory contained only `memories/` and `provenance.json`.
+The files did exist, byte-for-byte, here:
+
+```
+/tmp/coffee_eda/
+├── coffee_arabica_dummy_dataset.csv       46,772 bytes
+├── eda_*.csv / top_correlations.csv         7 summary CSVs
+├── fig_*.png                                7 figures
+└── eda_notes.txt
+```
+
+All sixteen timestamps fall between 14:49:30 and 14:50:05, inside the measured tool run. This is
+not hallucinated output. It is successful work written to WSL's disposable global temp directory,
+where Explorer, `workspace::outputs`, artifact capture, conversation deletion and project moves
+cannot see it.
+
+### The two instructions disagree, and `execute` makes the dangerous one real
+
+The installed DeepAgents `EXECUTE_TOOL_DESCRIPTION` tells the model:
+
+> *"Try to maintain your current working directory throughout the session by using absolute paths
+> and avoiding usage of cd."*
+
+Its examples are `/foo/bar` and `/path/to/script.py`; it does not name this run's actual work
+directory. The task's request for relative paths therefore loses to a filesystem system prompt
+that says absolute paths are the convention, and `/tmp` is a plausible guess for an isolated
+sandbox.
+
+The enforcement gap is in `overlay/minime_local/workspace.py`, at
+`LocalWorkspaceBackend.aexecute`, not in the Rust Outputs walk and not in background pinning:
+
+- `LocalWorkspaceBackend` deliberately uses `virtual_mode=False`, so file operations and executed
+  Python share one real path namespace (§18).
+- `_reroute_write` safely re-roots absolute paths used through `write` and `upload_files`.
+- Shell/Python execution is different: `aexecute` runs with the conversation as `cwd`, but an
+  absolute `/tmp/...` remains an absolute host path. §18 records this as merely human-gated; the
+  approval gate controls whether a command runs, not where it writes.
+- Artifact capture scans the conversation work directory. An escaped file is correctly absent
+  from `artifacts.files`, which is why both the transcript gallery and Outputs stay empty.
+
+### Fix it at the execution boundary
+
+The durable invariant is: **a command may read an explicitly named external input, but every
+persistent output it creates belongs below `LocalWorkspaceBackend._work_dir`.** The local backend
+owner should implement and test that invariant around `aexecute`:
+
+1. Give the local-mode execute tool an instruction that names the real `aget_work_dir()` and says
+   persistent outputs must use that directory or paths relative to its `cwd`; `/tmp` is explicitly
+   ephemeral and outside the app.
+2. Add enforcement, not only prose. At minimum, refuse obvious persistent writes to `/tmp` and
+   return a tool error naming the current work directory so the model can retry correctly. The
+   complete version isolates execution so the workspace is the only writable persistent mount, or
+   bind-mounts the run's `<work_dir>/tmp` over `/tmp`. Do **not** try to understand arbitrary shell
+   syntax with a regex and call that containment.
+3. Add a cross-layer regression test that runs Python writing
+   `/tmp/minime-escape/result.csv` and proves either the command is refused or the bytes appear at
+   `<work_dir>/tmp/minime-escape/result.csv`, never in WSL's global `/tmp`; then prove artifact
+   capture returns that file.
+4. Keep external reads working. Researchers intentionally attach datasets outside the workspace
+   (§28), so making the whole filesystem unreadable would fix outputs by breaking inputs.
+
+Three tempting fixes do not close this bug: `TMPDIR=<work_dir>/tmp` does not affect a literal
+`/tmp/...`; `virtual_mode=True` does not constrain `execute` (§18); and copying paths mentioned in
+assistant prose would let untrusted text ask the desktop client to import arbitrary host files.
+
+Until enforcement ships, the current sixteen files can be preserved by copying
+`/tmp/coffee_eda/` into `Documents\Mini-Me\019ff25d-f0ee-…\coffee_eda\`. Copy, do not move: the
+diagnostic reproduction should remain intact until the backend fix is verified.
+
+*Thirteenth: a working directory is a default, not a boundary.*
