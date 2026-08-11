@@ -8823,3 +8823,35 @@ tests**, with no new Clippy warning (the base branch's existing warnings remain)
 
 *Tenth: the value needed was one the program already had — and this time the implementation keeps
 it instead of flattening it twice.*
+
+
+## 158. A scrollbar that only looked interactive, and an image cache that remembered too soon (2026-08-11)
+
+The first Windows pass on §153 found both failures immediately. The agent generated the figures,
+their cards appeared, and the pictures themselves stayed blank until the application restarted.
+The horizontal thumb was visible beneath them, but clicking and dragging it did nothing.
+
+These were two different stale-state mistakes:
+
+- The Outputs panel scans the filesystem whenever it paints, including while an `execute` process
+  still has a PNG open. GPUI's global image cache keys a local image by path and retains a decode
+  error just as it retains a decoded image. If the first read lands between create and close, every
+  later frame asks for the same path and receives the same cached failure. Restarting worked only
+  because it rebuilt that cache. A finished foreground turn or background task now schedules two
+  bounded follow-up passes across the Windows/WSL hand-off. Each pass re-collects late files,
+  evicts figure paths from GPUI's asset cache, and repaints. This is deliberately not a permanent
+  watcher: outputs are bounded completion events, and polling the researcher's Documents folder
+  forever would spend idle time fixing a race that only exists while a writer is finishing.
+- `horizontal_scrollbar` was a six-pixel painted `div`, not a control. It communicated the native
+  scrollbar contract without implementing it. The gallery now gives the bar a 12px mouse target,
+  maps the thumb's travel onto the `ScrollHandle`'s hidden width, preserves the point grabbed
+  inside the thumb, supports clicking the track, and ends the drag even when release is observed
+  away from the thumb. Each rail still owns its own handle, so §153's independent positions remain.
+
+The mapping is a pure function with a sentence-named regression test: the left edge produces zero
+offset, the midpoint reveals half the hidden width, and dragging beyond the right edge clamps at
+the last file. The image-cache correction still needs the same Windows-eye check that found it:
+generate several plots, leave the app open, and confirm the thumbnails fill without a restart.
+
+*Eleventh: an affordance is a promise of behavior, and a cache key needs the version of the thing
+it remembers—even when the library only gives us its path.*

@@ -652,12 +652,21 @@ fn scrollbar(handle: &gpui::ScrollHandle) -> Option<impl IntoElement> {
     )
 }
 
-/// A horizontal scrollbar for a gallery rail.
+/// The geometry shared by painting and dragging a gallery scrollbar.
 ///
-/// GPUI scrolls an `overflow_x_scroll` element but draws no affordance for it. That made the
-/// requested sideways gallery (§152) look like a clipped row on a mouse-driven Windows desktop;
-/// the visible thumb is what says there is more work beyond the panel edge.
-fn horizontal_scrollbar(handle: &gpui::ScrollHandle) -> Option<impl IntoElement> {
+/// It has to be one calculation. The first Windows pass found a painted thumb that could not be
+/// dragged at all; letting its hit-testing use a second set of numbers would be the same defect
+/// one layer later (docs §158).
+#[derive(Clone, Copy, Debug)]
+struct HorizontalScrollMetrics {
+    overflow: gpui::Pixels,
+    viewport: gpui::Pixels,
+    thumb: gpui::Pixels,
+    travel: gpui::Pixels,
+    progress: f32,
+}
+
+fn horizontal_scroll_metrics(handle: &gpui::ScrollHandle) -> Option<HorizontalScrollMetrics> {
     let overflow = handle.max_offset().width;
     let viewport = handle.bounds().size.width;
     if overflow <= px(0.) || viewport <= px(0.) {
@@ -667,17 +676,28 @@ fn horizontal_scrollbar(handle: &gpui::ScrollHandle) -> Option<impl IntoElement>
     let thumb = (viewport * (viewport / content)).max(px(28.));
     let travel = viewport - thumb;
     let progress = (-handle.offset().x / overflow).clamp(0.0, 1.0);
+    Some(HorizontalScrollMetrics {
+        overflow,
+        viewport,
+        thumb,
+        travel,
+        progress,
+    })
+}
 
-    Some(
-        div()
-            .absolute()
-            .bottom(px(2.))
-            .left(travel * progress)
-            .h(px(6.))
-            .w(thumb)
-            .rounded_full()
-            .bg(rgb(theme::border_strong())),
-    )
+/// Convert a dragged thumb position into GPUI's negative content offset.
+fn horizontal_drag_offset(
+    pointer_x: gpui::Pixels,
+    track_left: gpui::Pixels,
+    grab_x: gpui::Pixels,
+    travel: gpui::Pixels,
+    overflow: gpui::Pixels,
+) -> gpui::Pixels {
+    if travel <= px(0.) {
+        return px(0.);
+    }
+    let thumb_left = (pointer_x - track_left - grab_x).clamp(px(0.), travel);
+    -(overflow * (thumb_left / travel))
 }
 
 /// Outputs that share the directory the agent chose share one visual gallery.
@@ -688,6 +708,15 @@ fn horizontal_scrollbar(handle: &gpui::ScrollHandle) -> Option<impl IntoElement>
 struct OutputFolderGroup<'a> {
     folder: PathBuf,
     outputs: Vec<&'a workspace::Output>,
+}
+
+/// One mouse-held gallery thumb.
+struct GalleryScrollDrag {
+    handle: gpui::ScrollHandle,
+    track_left: gpui::Pixels,
+    grab_x: gpui::Pixels,
+    travel: gpui::Pixels,
+    overflow: gpui::Pixels,
 }
 
 fn output_folder_groups(outputs: &[workspace::Output]) -> Vec<OutputFolderGroup<'_>> {
@@ -1963,6 +1992,12 @@ struct Workbench {
     /// folder path plus its surface owns the state, matching §152's rule that each agent-chosen
     /// folder is one independent photo-like collection.
     output_gallery_scrolls: std::cell::RefCell<HashMap<String, gpui::ScrollHandle>>,
+    /// The gallery thumb currently held by the mouse, if any.
+    ///
+    /// Kept separately from pane resizing because both are drags but their units differ: pane
+    /// dividers follow window pixels directly, while a gallery thumb maps a short track onto a
+    /// wider hidden content range (docs §158).
+    gallery_scroll_drag: Option<GalleryScrollDrag>,
     /// The palette on screen right now, which is not always the saved one: the picker
     /// applies as you point at it so a theme can be judged by looking at it.
     applied_theme: String,
@@ -2181,6 +2216,7 @@ impl Workbench {
             toasts: Vec::new(),
             panel_scroll: gpui::ScrollHandle::new(),
             output_gallery_scrolls: std::cell::RefCell::new(HashMap::new()),
+            gallery_scroll_drag: None,
             applied_theme: stored.theme.clone(),
             sidebar_open: stored.sidebar_open,
             panel_open: stored.panel_open,
@@ -2355,6 +2391,7 @@ impl Workbench {
                             "a background task stopped".into()
                         };
                         workbench.collect_plots();
+                        workbench.settle_outputs(cx);
                         workbench.refresh_project(cx);
                     }
                     cx.notify();
@@ -3881,8 +3918,50 @@ impl Workbench {
         }
     }
 
+    /// Re-read files after a writer has reported completion and evict any image decode cached
+    /// while that writer still had the file open.
+    ///
+    /// The Outputs panel scans on every paint, which made a just-created PNG visible *before* it
+    /// was necessarily complete. GPUI correctly cached that first decode failure by path, but a
+    /// later paint asked for the same path and received the same failure forever; restarting the
+    /// application was the only thing that cleared it. Two bounded follow-up passes cover the
+    /// Windows/WSL filesystem hand-off without turning the whole workspace into a permanent
+    /// polling loop (docs §158).
+    fn settle_outputs(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            for delay in [250, 1_000] {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(delay))
+                    .await;
+                if this
+                    .update(cx, |workbench, cx| {
+                        workbench.collect_plots();
+                        let figures: Vec<std::path::PathBuf> = workbench
+                            .thread_workspace()
+                            .map(|dir| workspace::outputs(&dir))
+                            .unwrap_or_default()
+                            .into_iter()
+                            .flat_map(|(_, items)| items)
+                            .filter(|output| output.kind == workspace::Kind::Figure)
+                            .map(|output| output.path)
+                            .collect();
+                        for path in figures {
+                            gpui::ImageSource::from(path).remove_asset(cx);
+                        }
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     fn finish_turn(&mut self, cx: &mut Context<Self>) {
         self.collect_plots();
+        self.settle_outputs(cx);
         // Written here, and only here, for the same reason the title is: the thread id does not
         // exist until the turn has run, so there is no directory to write into before this point.
         // A turn stopped or failed still gets recorded — what was consulted before it stopped is
@@ -6073,6 +6152,77 @@ impl Workbench {
             .clone()
     }
 
+    /// A visible, clickable and draggable horizontal scrollbar for one gallery rail.
+    ///
+    /// The first version only painted the thumb. That was enough to imply an interaction and
+    /// then break it: a mouse-first Windows user naturally grabbed the bar shown on screen and
+    /// nothing happened. The whole 12px track is now a hit target; clicking outside the thumb
+    /// jumps toward that position and holding the mouse continues the drag (docs §158).
+    fn horizontal_scrollbar(
+        &self,
+        id: String,
+        handle: &gpui::ScrollHandle,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        let metrics = horizontal_scroll_metrics(handle)?;
+        let track_left = handle.bounds().origin.x;
+        let thumb_left = metrics.travel * metrics.progress;
+        let dragged = handle.clone();
+
+        Some(
+            div()
+                .id(SharedString::from(format!("gallery-scrollbar-{id}")))
+                .absolute()
+                .bottom(px(0.))
+                .left(px(0.))
+                .w(metrics.viewport)
+                .h(px(12.))
+                .hover(|style| style.cursor_pointer())
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(2.))
+                        .left(thumb_left)
+                        .h(px(8.))
+                        .w(metrics.thumb)
+                        .rounded_full()
+                        .bg(rgb(theme::border_strong())),
+                )
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(move |workbench, event: &gpui::MouseDownEvent, _window, cx| {
+                        let local_x =
+                            (event.position.x - track_left).clamp(px(0.), metrics.viewport);
+                        let grab_x = if local_x >= thumb_left
+                            && local_x <= thumb_left + metrics.thumb
+                        {
+                            local_x - thumb_left
+                        } else {
+                            metrics.thumb / 2.
+                        };
+                        let offset_x = horizontal_drag_offset(
+                            event.position.x,
+                            track_left,
+                            grab_x,
+                            metrics.travel,
+                            metrics.overflow,
+                        );
+                        let offset_y = dragged.offset().y;
+                        dragged.set_offset(gpui::point(offset_x, offset_y));
+                        workbench.gallery_scroll_drag = Some(GalleryScrollDrag {
+                            handle: dragged.clone(),
+                            track_left,
+                            grab_x,
+                            travel: metrics.travel,
+                            overflow: metrics.overflow,
+                        });
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                ),
+        )
+    }
+
     /// One fixed-size member of a folder gallery, opened through the existing preview modal.
     ///
     /// Fixed here means only the *thumbnail*, not the underlying artifact: §152's failure was
@@ -6223,7 +6373,7 @@ impl Workbench {
                     .w_full()
                     .min_w_0()
                     .child(rail)
-                    .children(horizontal_scrollbar(&scroll)),
+                    .children(self.horizontal_scrollbar(key, &scroll, cx)),
             )
     }
 
@@ -9890,6 +10040,28 @@ impl Render for Workbench {
             .on_action(cx.listener(Self::dismiss))
             .on_mouse_move(
                 cx.listener(|workbench, event: &gpui::MouseMoveEvent, window, cx| {
+                    if let Some(drag) = workbench.gallery_scroll_drag.as_ref() {
+                        // A release outside the narrow track may not deliver its mouse-up to the
+                        // thumb. The move event still tells us the button is no longer held, so
+                        // end the drag here as well instead of letting the next click move a rail
+                        // the researcher is no longer touching (docs §158).
+                        if !event.dragging() {
+                            workbench.gallery_scroll_drag = None;
+                            cx.notify();
+                            return;
+                        }
+                        let offset_x = horizontal_drag_offset(
+                            event.position.x,
+                            drag.track_left,
+                            drag.grab_x,
+                            drag.travel,
+                            drag.overflow,
+                        );
+                        let offset_y = drag.handle.offset().y;
+                        drag.handle.set_offset(gpui::point(offset_x, offset_y));
+                        cx.notify();
+                        return;
+                    }
                     let Some(edge) = workbench.dragging else {
                         return;
                     };
@@ -9912,7 +10084,9 @@ impl Render for Workbench {
             .on_mouse_up(
                 gpui::MouseButton::Left,
                 cx.listener(|workbench, _event: &gpui::MouseUpEvent, _window, cx| {
-                    if workbench.dragging.take().is_some() {
+                    if workbench.dragging.take().is_some()
+                        || workbench.gallery_scroll_drag.take().is_some()
+                    {
                         cx.notify();
                     }
                 }),
@@ -10115,6 +10289,20 @@ mod tests {
         assert!(long.starts_with('…'), "{long}");
         assert!(long.ends_with("name-is-at-the-end.csv"), "{long}");
         assert_eq!(long.chars().count(), 24);
+    }
+
+    #[test]
+    fn dragging_a_gallery_thumb_reaches_every_hidden_file() {
+        // A 200px thumb journey represents 800px of hidden content. The pointer keeps the
+        // same 20px grip inside the thumb, and positions beyond either end clamp instead of
+        // exposing blank space (docs §158).
+        let offset = |pointer| {
+            horizontal_drag_offset(px(pointer), px(100.), px(20.), px(200.), px(800.))
+        };
+        assert_eq!(offset(0.), px(0.));
+        assert_eq!(offset(120.), px(0.));
+        assert_eq!(offset(220.), px(-400.));
+        assert_eq!(offset(400.), px(-800.));
     }
 
     #[test]
