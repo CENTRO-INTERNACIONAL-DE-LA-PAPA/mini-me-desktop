@@ -61,6 +61,13 @@ const CHECK_PROMPT: &str = "In one short paragraph, what is your role as the Min
 const ASTA_CITATION: &str = "AstaBench: Rigorous Benchmarking of AI Agents with a Scientific \
      Research Suite. arXiv:2510.21652 — https://arxiv.org/abs/2510.21652";
 
+/// The root workspace said as a useful place rather than as the absence of organisation.
+///
+/// `None` remains the metadata value and the files remain directly under `Documents/Mini-Me`;
+/// this is only the researcher-facing name requested in §154, so it cannot become a second
+/// project registry or collide with a real folder of the same name.
+const UNGROUPED_PROJECT_LABEL: &str = "Ungrouped Conversations";
+
 /// [`section_label`] for a heading only known at runtime.
 fn section_label_owned(text: String) -> impl IntoElement {
     div()
@@ -1823,6 +1830,95 @@ fn merge_spine(previous: Option<&Project>, incoming: Project) -> Project {
     merged
 }
 
+/// The unit a centred confirmation is about.
+///
+/// The project variant owns its complete conversation list at the moment it opens. Building it
+/// from the sidebar's *filtered* rows would make a search silently spare conversations that the
+/// modal just said were going away (§155).
+#[derive(Clone, Debug)]
+enum DeleteTarget {
+    Conversation(protocol::Conversation),
+    Project {
+        name: String,
+        conversations: Vec<protocol::Conversation>,
+    },
+}
+
+impl DeleteTarget {
+    fn thread_ids(&self) -> Vec<String> {
+        match self {
+            Self::Conversation(conversation) => vec![conversation.thread_id.clone()],
+            Self::Project { conversations, .. } => conversations
+                .iter()
+                .map(|conversation| conversation.thread_id.clone())
+                .collect(),
+        }
+    }
+
+    fn contains_thread(&self, thread_id: &str) -> bool {
+        match self {
+            Self::Conversation(conversation) => conversation.thread_id == thread_id,
+            Self::Project { conversations, .. } => conversations
+                .iter()
+                .any(|conversation| conversation.thread_id == thread_id),
+        }
+    }
+
+    fn files(&self) -> sidecar::DeleteFiles {
+        match self {
+            Self::Conversation(conversation) => sidecar::DeleteFiles::Conversation {
+                project: conversation.project.clone(),
+                thread_id: conversation.thread_id.clone(),
+            },
+            Self::Project { name, .. } => sidecar::DeleteFiles::Project { name: name.clone() },
+        }
+    }
+
+    fn noun(&self) -> &'static str {
+        match self {
+            Self::Conversation(_) => "conversation",
+            Self::Project { .. } => "project",
+        }
+    }
+}
+
+/// What the sidebar may do after asking the backend to delete confirmed work.
+///
+/// Kept separate from the async UI so the dangerous rule is testable: absence of a successful
+/// answer means the durable thread may still exist, therefore its row must stay (§154).
+enum DeleteResolution {
+    Remove { files_error: Option<String> },
+    Keep(String),
+}
+
+fn resolve_delete(
+    noun: &str,
+    result: Option<anyhow::Result<sidecar::DeleteOutcome>>,
+) -> DeleteResolution {
+    match result {
+        Some(Ok(outcome)) => DeleteResolution::Remove {
+            files_error: outcome.files_error,
+        },
+        Some(Err(error)) => {
+            DeleteResolution::Keep(format!("couldn't delete the {noun}: {error:#}"))
+        }
+        None => DeleteResolution::Keep(format!(
+            "couldn't confirm deletion — the {noun} is still shown"
+        )),
+    }
+}
+
+/// Whether a project still exists after a deletion result has been applied.
+///
+/// §106 defines existence from conversation metadata, not from a remembered selection and not
+/// from a possibly locked folder. Keeping this tiny rule outside the callback makes the
+/// last-conversation boundary testable — the boundary that resurrected projects in §154.
+fn project_exists(conversations: &[protocol::Conversation], name: &str) -> bool {
+    conversations
+        .iter()
+        .any(|conversation| conversation.project.as_deref() == Some(name))
+}
+
 /// A single chat message in the transcript, plus the agent activity behind it.
 struct Message {
     role: &'static str,
@@ -2151,6 +2247,9 @@ struct Workbench {
     provenance_focus: gpui::FocusHandle,
     /// The About window's own focus, for the same reason (docs §71).
     about_focus: gpui::FocusHandle,
+    /// The delete warning's focus. It has buttons but no text field, so leaving focus on the
+    /// sidebar row it covers would make Escape depend on an element hidden behind the modal.
+    delete_focus: gpui::FocusHandle,
     /// Recent outcomes, newest last, each fading on its own timer.
     ///
     /// The status bar holds exactly one line, so an outcome worth reading — "copied 12 lines",
@@ -2215,11 +2314,18 @@ struct Workbench {
     pending_title: Option<String>,
     /// The thread whose name is being edited, if any.
     renaming: Option<String>,
-    /// The thread whose delete has been clicked once and not yet confirmed.
+    /// The conversation or project whose delete control opened the centred warning.
     ///
-    /// Two steps because there is no undo on the server: a conversation is somebody's
-    /// work, and a stray click on a `✕` in a list is exactly how it would be lost.
-    confirming_delete: Option<String>,
+    /// This used to be an inline yes/no row. It could not say that saved files now go too, and a
+    /// project delete needs a count and a path; destructive scope belongs where it can be read
+    /// before acting (§155).
+    confirming_delete: Option<DeleteTarget>,
+    /// The confirmed target awaiting its backend and filesystem results.
+    ///
+    /// Optimistically removing the row made a failed or interrupted request look successful
+    /// until restart, when the durable conversation — and therefore its project — returned
+    /// (§154). Keep it visible as pending until the server has actually deleted it.
+    deleting: Option<DeleteTarget>,
     /// The field that edits it. One shared editor rather than one per row — only one
     /// name can be edited at a time, and a Composer per conversation would be an entity
     /// per row for a list that can run to hundreds.
@@ -2384,6 +2490,7 @@ impl Workbench {
             settings_focus: cx.focus_handle(),
             provenance_focus: cx.focus_handle(),
             about_focus: cx.focus_handle(),
+            delete_focus: cx.focus_handle(),
             sidebar_width: 240.,
             panel_width: 320.,
             dragging: None,
@@ -2405,6 +2512,7 @@ impl Workbench {
             pending_title: None,
             renaming: None,
             confirming_delete: None,
+            deleting: None,
             rename_editor,
             approve_tasks: std::collections::HashSet::new(),
             restore_focus: false,
@@ -2436,12 +2544,12 @@ impl Workbench {
         // the thing actually standing in their way.
         workbench.run_preflight(cx);
 
-        // Pick up where the last session left off. Without this a cold start begins in "No
-        // project" however long the researcher has been working in one, and the first new
-        // conversation of the day lands outside it (docs §107).
-        workbench.sidecar.set_project(
-            Some(workbench.draft.project.clone()).filter(|name| !name.trim().is_empty()),
-        );
+        // A launch opens at the workspace root. The previous project used to be a second project
+        // registry in settings.toml, despite §106 defining a project solely by the conversations
+        // filed under it. That stale value resurrected an empty project and silently filed the
+        // morning's first conversation inside it (§154). Opening a saved conversation or using a
+        // project heading's `+` remains the explicit way to enter one.
+        workbench.sidecar.set_project(None);
         // Populate the spine if a backend is already listening. This does not
         // start one — see `Sidecar::fetch_project`.
         workbench.refresh_project(cx);
@@ -3848,9 +3956,6 @@ impl Workbench {
             .iter()
             .find(|conversation| conversation.thread_id == thread_id)
             .and_then(|conversation| conversation.project.clone());
-        // Remembered as well as adopted: "the project you are working in" is the one you last
-        // looked at, not only the one you last filed something into.
-        self.remember_project(filed.clone());
         self.sidecar.set_project(filed);
         self.project = None;
         // Kept before the id is handed to the sidecar: any worker in this conversation's state
@@ -3904,24 +4009,135 @@ impl Workbench {
         cx.notify();
     }
 
-    /// Delete a conversation, after the row has asked.
-    fn delete_conversation(&mut self, thread_id: String, cx: &mut Context<Self>) {
-        self.confirming_delete = None;
-        self.conversations
-            .retain(|conversation| conversation.thread_id != thread_id);
-        // If it was the open one, leave an empty slate rather than a transcript whose
-        // thread no longer exists.
-        if self.sidecar.thread_id().as_deref() == Some(thread_id.as_str()) {
-            self.sidecar.reset_thread();
-            self.transcript.clear();
-            self.provenance = provenance::Record::default();
-            self.text_selection.update(|selection| selection.clear());
-            self.buckets.clear();
-            self.tasks.clear();
-            self.jobs.clear();
+    /// Open the centred warning for a conversation or a whole project.
+    fn request_delete(
+        &mut self,
+        target: DeleteTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.deleting.is_some() {
+            return;
         }
-        self.sidecar.delete_conversation(thread_id);
-        self.say("conversation deleted", cx);
+        let current_is_targeted = self
+            .sidecar
+            .thread_id()
+            .is_some_and(|thread_id| target.contains_thread(&thread_id));
+        if self.streaming && current_is_targeted {
+            self.say(
+                format!(
+                    "can't delete this {} while its turn is running",
+                    target.noun()
+                ),
+                cx,
+            );
+            return;
+        }
+        if current_is_targeted && self.tasks.iter().any(|task| !task.is_finished()) {
+            // A background worker can still be writing beneath the conversation directory after
+            // the foreground turn ends. Deleting that tree underneath it would recreate the
+            // folder or lose the remainder of its work; wait for the task's terminal state.
+            self.say(
+                format!(
+                    "can't delete this {} while its background work is running",
+                    target.noun()
+                ),
+                cx,
+            );
+            return;
+        }
+        self.confirming_delete = Some(target);
+        window.focus(&self.delete_focus);
+        cx.notify();
+    }
+
+    /// Carry out exactly what the modal named: durable threads first, managed files second.
+    fn confirm_delete(&mut self, cx: &mut Context<Self>) {
+        let Some(target) = self.confirming_delete.take() else {
+            return;
+        };
+        if self.deleting.is_some() {
+            return;
+        }
+        let noun = target.noun();
+        self.status = format!("deleting {noun}…");
+        self.deleting = Some(target.clone());
+        let mut deleted = self
+            .sidecar
+            .delete_conversations(target.thread_ids(), target.files());
+        cx.spawn(async move |this, cx| {
+            let result = deleted.next().await;
+            let _ = this.update(cx, |workbench, cx| {
+                workbench.deleting = None;
+                match resolve_delete(target.noun(), result) {
+                    DeleteResolution::Remove { files_error } => {
+                        let removed = target.thread_ids();
+                        workbench
+                            .conversations
+                            .retain(|conversation| !removed.contains(&conversation.thread_id));
+                        // If it was the open one, leave a genuinely ungrouped empty slate rather
+                        // than a transcript and project whose thread no longer exists (§154).
+                        let open_was_removed = workbench
+                            .sidecar
+                            .thread_id()
+                            .is_some_and(|thread_id| target.contains_thread(&thread_id));
+                        let active_project_was_removed = workbench
+                            .sidecar
+                            .project()
+                            .is_some_and(|name| !project_exists(&workbench.conversations, &name));
+                        if open_was_removed {
+                            workbench.sidecar.reset_thread();
+                            workbench.transcript.clear();
+                            workbench.provenance = provenance::Record::default();
+                            workbench
+                                .text_selection
+                                .update(|selection| selection.clear());
+                            workbench.buckets.clear();
+                            workbench.tasks.clear();
+                            workbench.jobs.clear();
+                        }
+                        if open_was_removed || active_project_was_removed {
+                            // Also covers an empty "new conversation here" slate whose thread has
+                            // not been created yet. Leaving only its project key alive would make
+                            // the next question recreate the project just deleted (§155).
+                            workbench.sidecar.set_project(None);
+                            workbench.project = None;
+                            workbench.refresh_project(cx);
+                        }
+                        match files_error {
+                            None => workbench.say(format!("{} deleted", target.noun()), cx),
+                            Some(error) => {
+                                // The irreversible server half succeeded, so restoring the row
+                                // would be another lie. Keep the recoverable folder and say where
+                                // synchronization stopped instead (§155).
+                                workbench.error = Some(format!(
+                                    "The {} was deleted, but its saved folder remains: {error}",
+                                    target.noun()
+                                ));
+                                workbench.say(
+                                    format!(
+                                        "{} deleted; its saved folder could not be removed",
+                                        target.noun()
+                                    ),
+                                    cx,
+                                );
+                            }
+                        }
+                    }
+                    DeleteResolution::Keep(error) => {
+                        // Keep the row because the backend kept the conversation. Claiming
+                        // success here is the precise defect that only restart exposed. A project
+                        // batch can have succeeded partly before one request failed, so refresh
+                        // instead of assuming our captured list is still authoritative (§155).
+                        workbench.error = Some(error);
+                        workbench.status = format!("{} was not fully deleted", target.noun());
+                        workbench.refresh_conversations(cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -4281,8 +4497,9 @@ impl Workbench {
         //
         // A heading per project rather than an indent or a colour: the sidebar is scanned, and a
         // name is the only marker that survives being glanced at. The order is alphabetical with
-        // "No project" pinned to the bottom, so the list does not reshuffle as work moves between
-        // projects — a sidebar that reorders itself is one nobody builds a memory of (docs §106).
+        // ungrouped work pinned to the bottom, so the list does not reshuffle as work moves
+        // between projects — a sidebar that reorders itself is one nobody builds a memory of
+        // (docs §106, §154).
         let mut grouped: std::collections::BTreeMap<Option<String>, Vec<&protocol::Conversation>> =
             std::collections::BTreeMap::new();
         for conversation in &matched {
@@ -4299,15 +4516,35 @@ impl Workbench {
             (_, None) => std::cmp::Ordering::Less,
             (Some(a), Some(b)) => a.cmp(b),
         });
-        // One project is not a grouping — the heading would be noise above every row a
-        // researcher owns. Headings appear once there is something to tell apart.
-        let show_headings = ordered.len() > 1;
+        // A named project always gets its heading now, even when it is the only group. The
+        // heading is no longer decoration: it owns New here, Open folder and Delete project, so
+        // hiding it would hide the only project-delete affordance (§155). Ungrouped work alone
+        // still needs no heading because it is not a project and has no project folder to delete.
+        let show_headings = ordered.len() > 1
+            || ordered
+                .iter()
+                .any(|(project, _conversations)| project.is_some());
 
         for (project, conversations) in ordered {
             if show_headings {
-                let heading = project.clone().unwrap_or_else(|| "No project".to_string());
+                let heading = project
+                    .clone()
+                    .unwrap_or_else(|| UNGROUPED_PROJECT_LABEL.to_string());
                 let opening = project.clone();
                 let starting = project.clone();
+                // All conversations in the project, not merely the rows that survived the
+                // sidebar search. A filter is a way to find work, never a deletion boundary.
+                let deleting_project = project.clone().map(|name| DeleteTarget::Project {
+                    conversations: self
+                        .conversations
+                        .iter()
+                        .filter(|conversation| {
+                            conversation.project.as_deref() == Some(name.as_str())
+                        })
+                        .cloned()
+                        .collect(),
+                    name,
+                });
                 list = list.child(
                     div()
                         .flex()
@@ -4342,6 +4579,41 @@ impl Workbench {
                                 })
                                 .child(section_label_owned(heading.to_uppercase())),
                         )
+                        .when_some(deleting_project, |header, target| {
+                            let id = match &target {
+                                DeleteTarget::Project { name, .. } => {
+                                    SharedString::from(format!("delete-project-{name}"))
+                                }
+                                DeleteTarget::Conversation(_) => unreachable!(),
+                            };
+                            header.child(
+                                div()
+                                    .id(id)
+                                    .flex_none()
+                                    .px_1()
+                                    .rounded_md()
+                                    .text_color(rgb(theme::text_faint()))
+                                    .text_xs()
+                                    .invisible()
+                                    .group_hover(
+                                        SharedString::from(format!("head-{heading}")),
+                                        |style| style.visible(),
+                                    )
+                                    .hover(|style| {
+                                        style.text_color(rgb(theme::error())).cursor_pointer()
+                                    })
+                                    .child("✕")
+                                    .tooltip(move |_window, cx| {
+                                        cx.new(|_| Hint {
+                                            text: "delete project and saved files".into(),
+                                        })
+                                        .into()
+                                    })
+                                    .on_click(cx.listener(move |workbench, _event, window, cx| {
+                                        workbench.request_delete(target.clone(), window, cx);
+                                    })),
+                            )
+                        })
                         // Asked for directly: starting work in a project should not mean
                         // starting it somewhere else and then filing it (docs §107). Revealed
                         // on hover, like the rename and delete controls on the rows below.
@@ -4395,10 +4667,14 @@ impl Workbench {
                     continue;
                 }
 
-                // Asked once, then confirmed in place. Nothing about a row of names should be
-                // able to destroy work on one click.
-                if self.confirming_delete.as_deref() == Some(thread_id.as_str()) {
-                    let confirmed = thread_id.clone();
+                // The row stays until the backend confirms deletion. Removing it optimistically
+                // is what made a failed request look successful until launch brought both the
+                // conversation and its derived project heading back (§154).
+                if self
+                    .deleting
+                    .as_ref()
+                    .is_some_and(|target| target.contains_thread(&thread_id))
+                {
                     list = list.child(
                         div()
                             .flex()
@@ -4410,48 +4686,12 @@ impl Workbench {
                             .px_2()
                             .py_1()
                             .rounded_md()
-                            .border_1()
-                            .border_color(rgb(theme::error()))
+                            .bg(rgb(theme::elevated()))
                             .child(
-                                ui::Label::new("Delete this conversation?")
+                                ui::Label::new("Deleting this conversation…")
                                     .muted()
                                     .size(ui::Size::Compact)
                                     .ellipsis(),
-                            )
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("del-yes-{thread_id}")))
-                                    .flex_none()
-                                    .px_2()
-                                    .rounded_md()
-                                    .text_color(rgb(theme::error()))
-                                    .text_xs()
-                                    .hover(|style| {
-                                        style.bg(rgb(theme::elevated())).cursor_pointer()
-                                    })
-                                    .child("delete")
-                                    .on_click(cx.listener(
-                                        move |workbench, _event, _window, cx| {
-                                            workbench.delete_conversation(confirmed.clone(), cx);
-                                        },
-                                    )),
-                            )
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("del-no-{thread_id}")))
-                                    .flex_none()
-                                    .px_2()
-                                    .rounded_md()
-                                    .text_color(rgb(theme::text_muted()))
-                                    .text_xs()
-                                    .hover(|style| {
-                                        style.bg(rgb(theme::elevated())).cursor_pointer()
-                                    })
-                                    .child("keep")
-                                    .on_click(cx.listener(|workbench, _event, _window, cx| {
-                                        workbench.confirming_delete = None;
-                                        cx.notify();
-                                    })),
                             ),
                     );
                     continue;
@@ -4459,7 +4699,7 @@ impl Workbench {
 
                 let open = thread_id.clone();
                 let rename = thread_id.clone();
-                let remove = thread_id.clone();
+                let remove = DeleteTarget::Conversation((*conversation).clone());
                 list = list.child(
                     div()
                         .id(SharedString::from(format!("conv-{thread_id}")))
@@ -4526,9 +4766,8 @@ impl Workbench {
                                     style.text_color(rgb(theme::error())).cursor_pointer()
                                 })
                                 .child("✕")
-                                .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                                    workbench.confirming_delete = Some(remove.clone());
-                                    cx.notify();
+                                .on_click(cx.listener(move |workbench, _event, window, cx| {
+                                    workbench.request_delete(remove.clone(), window, cx);
                                 })),
                         )
                         .on_click(cx.listener(move |workbench, _event, _window, cx| {
@@ -5111,9 +5350,11 @@ impl Workbench {
             );
         }
 
-        list = list.child(picker_row("No project", current.is_none(), None).on_click(
-            cx.listener(|workbench, _event, _window, cx| workbench.file_in_project(None, cx)),
-        ));
+        list = list.child(
+            picker_row(UNGROUPED_PROJECT_LABEL, current.is_none(), None).on_click(
+                cx.listener(|workbench, _event, _window, cx| workbench.file_in_project(None, cx)),
+            ),
+        );
 
         for name in names {
             if !typed.is_empty() && crate::match_score(&typed, &name).is_none() {
@@ -5173,11 +5414,10 @@ impl Workbench {
             return;
         }
         self.sidecar.set_project(project.clone());
-        self.remember_project(project.clone());
         self.say(
             match &project {
                 Some(name) => format!("filed under {name}"),
-                None => "taken out of its project".to_string(),
+                None => "filed under Ungrouped Conversations".to_string(),
             },
             cx,
         );
@@ -5200,30 +5440,29 @@ impl Workbench {
             self.say("can't start a new thread mid-turn", cx);
             return;
         }
+        self.sidecar.reset_thread();
         self.sidecar.set_project(project.clone());
-        self.remember_project(project);
         self.project = None;
         self.refresh_project(cx);
-        self.run_command(Command::NewThread, cx);
-    }
-
-    /// Remember which project the researcher is working in, across restarts.
-    ///
-    /// Written to the settings file rather than held in memory, so the first new conversation of
-    /// a morning lands where yesterday's work is. Updated by *looking* at a conversation as well
-    /// as by filing one — §107's bug was that only filing counted, so opening something already
-    /// in a project and pressing New put you back outside it.
-    fn remember_project(&mut self, project: Option<String>) {
-        let name = project.unwrap_or_default();
-        if self.draft.project == name {
-            return;
-        }
-        self.draft.project = name.clone();
-        let mut saved = settings::Settings::load();
-        saved.project = name;
-        if let Err(error) = saved.save() {
-            tracing::warn!(%error, "could not remember the current project");
-        }
+        self.transcript.clear();
+        // A new conversation is a new enquiry. The one just left keeps its own record on disk,
+        // where reopening it will find it.
+        self.provenance = provenance::Record::default();
+        self.text_selection.update(|selection| selection.clear());
+        self.buckets.clear();
+        self.tasks.clear();
+        self.jobs.clear();
+        self.error = None;
+        // Blanket approval is scoped to the conversation, so it ends with it — together with
+        // every per-task grant, whose tasks belonged to that conversation too.
+        self.approve_conversation = false;
+        self.approve_tasks.clear();
+        self.refresh_conversations(cx);
+        self.status = match project {
+            Some(name) => format!("new conversation in {name}"),
+            None => "new conversation in Ungrouped Conversations".into(),
+        };
+        cx.notify();
     }
 
     /// A model per specialist, under the coordinator's.
@@ -5344,6 +5583,102 @@ impl Workbench {
             }
         }
         list.into_any_element()
+    }
+
+    /// The irreversible scope, in the centre of the window rather than squeezed into a row.
+    ///
+    /// Conversation deletion now includes its saved outputs, and project deletion includes every
+    /// conversation plus the complete project folder. The old inline "delete / keep" row had no
+    /// room to say either fact; confirmation without the consequence is only a second click
+    /// (§155).
+    fn delete_modal(&self, target: &DeleteTarget, cx: &mut Context<Self>) -> impl IntoElement {
+        let (title, body, action) = match target {
+            DeleteTarget::Conversation(conversation) => {
+                let path = workspace::thread_dir_in(
+                    conversation.project.as_deref(),
+                    &conversation.thread_id,
+                );
+                let body = div()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .min_w_0()
+                    .gap_3()
+                    .child(ui::Label::new(format!(
+                        "This permanently deletes “{}”, its chat history, and every saved file it produced.",
+                        conversation.title
+                    )))
+                    .child(
+                        ui::Label::new(format!("Saved folder:\n{}", path.display()))
+                            .muted()
+                            .size(ui::Size::Compact),
+                    )
+                    .into_any_element();
+                ("Delete conversation?", body, "Delete conversation")
+            }
+            DeleteTarget::Project {
+                name,
+                conversations,
+            } => {
+                let path = workspace::project_folder(name)
+                    .map(|folder| workspace::root().join(folder))
+                    .unwrap_or_else(workspace::root);
+                let count = conversations.len();
+                let body = div()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .min_w_0()
+                    .gap_3()
+                    .child(ui::Label::new(format!(
+                        "This permanently deletes project “{name}”, {count} conversation{}, and the entire project folder.",
+                        if count == 1 { "" } else { "s" }
+                    )))
+                    .child(
+                        ui::Label::new(
+                            "Files placed directly in the project folder are deleted too — not only files Mini-Me created.",
+                        )
+                        .colour(theme::warning()),
+                    )
+                    .child(
+                        ui::Label::new(format!("Project folder:\n{}", path.display()))
+                            .muted()
+                            .size(ui::Size::Compact),
+                    )
+                    .into_any_element();
+                ("Delete project?", body, "Delete project")
+            }
+        };
+
+        ui::Modal::new("delete-confirmation", title)
+            .width(560.)
+            .focus(&self.delete_focus)
+            .body(body)
+            .actions(
+                ui::actions()
+                    .child(div().flex_grow())
+                    .child(
+                        ui::Button::new("delete-cancel", "Cancel").on_click(cx.listener(
+                            |workbench, _event, _window, cx| {
+                                workbench.confirming_delete = None;
+                                workbench.restore_focus = true;
+                                cx.notify();
+                            },
+                        )),
+                    )
+                    .child(
+                        ui::Button::new("delete-confirm", action)
+                            .tone(ui::Tone::Danger)
+                            .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                workbench.confirm_delete(cx);
+                            })),
+                    ),
+            )
+            .footer(
+                ui::Label::new("There is no undo.")
+                    .colour(theme::error())
+                    .size(ui::Size::Compact),
+            )
     }
 
     /// What this thing is, what the specialists do, and who to credit.
@@ -8309,6 +8644,11 @@ impl Workbench {
             self.close_palette(window, cx);
             return;
         }
+        if self.confirming_delete.take().is_some() {
+            self.restore_focus = true;
+            cx.notify();
+            return;
+        }
         if self.preview.take().is_some() {
             cx.notify();
             return;
@@ -9172,42 +9512,15 @@ impl Workbench {
                 .composer
                 .update(cx, |composer, cx| composer.submit_now(cx)),
             Command::NewThread => {
-                if self.streaming {
-                    self.status = "can't start a new thread mid-turn".into();
-                    return;
-                }
-                self.sidecar.reset_thread();
-                // **The project is deliberately left alone.** A new conversation continues in
-                // whichever project the last one was in, and `sidecar.project()` already holds
-                // it — set by opening a conversation, by filing one, or at startup from the
-                // remembered value. Consulting the *setting* here was wrong: it is only written
-                // when something is filed, so opening a conversation already in a project and
-                // pressing New put the researcher back in "No project" (docs §107).
-                self.transcript.clear();
-                // A new conversation is a new enquiry. The one just left keeps its own record on
-                // disk, where reopening it will find it.
-                self.provenance = provenance::Record::default();
-                self.text_selection.update(|selection| selection.clear());
-                self.buckets.clear();
-                self.error = None;
-                // Blanket approval is scoped to the conversation, so it ends with it —
-                // together with every per-task grant, whose tasks belonged to that
-                // conversation too. This is the line that makes the button's wording true.
-                self.approve_conversation = false;
-                self.approve_tasks.clear();
-                // **And the tasks and jobs themselves**, which opening another conversation has
-                // always cleared and this path never did. The panel therefore kept showing the
-                // previous conversation's background work beside an empty transcript, and the
-                // grants just revoked applied to cards that stayed clickable. Nothing is stopped:
-                // both run on their own threads, and reopening the conversation re-arms the
-                // watchers from its state (docs §159).
-                self.tasks.clear();
-                self.jobs.clear();
-                // The conversation just left should appear in the list.
-                self.refresh_conversations(cx);
-                // The spine is thread-independent — the mission survives, so say so
-                // rather than letting the panel look stale.
-                self.status = "new thread — the project spine is kept".into();
+                // Ordinary New always means the root workspace. Starting within a project has
+                // its own explicit `+` beside that heading; inheriting the open/remembered project
+                // made conversations start already filed and revived deleted headings (§154).
+                //
+                // `new_thread_in` clears `tasks` and `jobs` as well, which is the §159 fix: this
+                // path used to leave the previous conversation's pending approvals on screen and
+                // clickable, and answering one then named the wrong conversation as the worker's
+                // owner. Both routes now clear the same state because there is only one route.
+                self.new_thread_in(None, cx);
             }
             Command::RefreshSpine => {
                 self.refresh_project(cx);
@@ -10655,8 +10968,9 @@ impl Render for Workbench {
             root
         };
 
-        // The preview floats over everything except the palette: it is a thing you open,
-        // look at, and dismiss, not a place you navigate to (docs §49).
+        // The preview floats over the workbench but under destructive confirmation and the
+        // palette: it is a thing you open, look at, and dismiss, not a place you navigate to
+        // (docs §49, §155).
         let root = match &self.preview {
             Some(preview) => root.child(self.preview_modal(
                 preview.current().clone(),
@@ -10664,6 +10978,11 @@ impl Render for Workbench {
                 preview.at,
                 cx,
             )),
+            None => root,
+        };
+
+        let root = match &self.confirming_delete {
+            Some(target) => root.child(self.delete_modal(target, cx)),
             None => root,
         };
 
@@ -10994,6 +11313,84 @@ mod tests {
             assert_eq!(thumb, px(narrow), "a {narrow}px rail");
             assert!(px(narrow) - thumb >= px(0.), "travel went negative at {narrow}");
         }
+    }
+
+    #[test]
+    fn a_failed_delete_keeps_the_conversation_visible() {
+        assert!(matches!(
+            resolve_delete(
+                "conversation",
+                Some(Err(anyhow::anyhow!("backend unavailable")))
+            ),
+            DeleteResolution::Keep(message) if message.contains("backend unavailable")
+        ));
+        assert!(matches!(
+            resolve_delete("conversation", None),
+            DeleteResolution::Keep(message) if message.contains("still shown")
+        ));
+        assert!(matches!(
+            resolve_delete(
+                "conversation",
+                Some(Ok(sidecar::DeleteOutcome { files_error: None }))
+            ),
+            DeleteResolution::Remove { files_error: None }
+        ));
+    }
+
+    #[test]
+    fn a_file_cleanup_failure_does_not_resurrect_a_deleted_conversation() {
+        // HTTP succeeded, so the durable conversation is gone. A locked Explorer folder is a
+        // recoverable orphan to report, not grounds to put back a row that can no longer open.
+        assert!(matches!(
+            resolve_delete(
+                "conversation",
+                Some(Ok(sidecar::DeleteOutcome {
+                    files_error: Some("folder is open".into())
+                }))
+            ),
+            DeleteResolution::Remove {
+                files_error: Some(message)
+            } if message == "folder is open"
+        ));
+    }
+
+    #[test]
+    fn deleting_a_project_targets_every_conversation_not_only_a_filtered_row() {
+        let conversations = vec![
+            protocol::Conversation {
+                thread_id: "one".into(),
+                project: Some("Late blight".into()),
+                title: "Visible in search".into(),
+                updated_at: String::new(),
+            },
+            protocol::Conversation {
+                thread_id: "two".into(),
+                project: Some("Late blight".into()),
+                title: "Hidden by search".into(),
+                updated_at: String::new(),
+            },
+        ];
+        let target = DeleteTarget::Project {
+            name: "Late blight".into(),
+            conversations,
+        };
+        assert_eq!(target.thread_ids(), vec!["one", "two"]);
+        assert!(target.contains_thread("two"));
+    }
+
+    #[test]
+    fn deleting_a_projects_last_conversation_ends_the_active_project() {
+        let other = protocol::Conversation {
+            thread_id: "other".into(),
+            project: Some("Yield trials".into()),
+            title: "Other work".into(),
+            updated_at: String::new(),
+        };
+        assert!(project_exists(std::slice::from_ref(&other), "Yield trials"));
+        assert!(
+            !project_exists(std::slice::from_ref(&other), "Late blight"),
+            "an empty project cannot survive as an active selection"
+        );
     }
 
     #[test]
