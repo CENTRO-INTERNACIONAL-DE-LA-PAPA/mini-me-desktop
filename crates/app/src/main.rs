@@ -666,14 +666,28 @@ struct HorizontalScrollMetrics {
     progress: f32,
 }
 
+/// How wide the thumb is for a rail showing `viewport` of `viewport + overflow` content.
+///
+/// Split out from the metrics only so it can be tested without a laid-out `ScrollHandle`; the
+/// metrics still compute it exactly once, which is the property the type above exists to hold.
+///
+/// Two bounds, and the second matters as much as the first. The 28px floor keeps a thumb
+/// grabbable on a long rail. The `viewport` ceiling keeps that floor from exceeding the track it
+/// sits in: without it a rail narrower than 28px yields a *negative* `travel`, so the thumb is
+/// painted to the left of its own track while `horizontal_drag_offset` refuses to move it — the
+/// "looked interactive, wasn't" shape of §158, one case further out.
+fn horizontal_thumb_width(viewport: gpui::Pixels, overflow: gpui::Pixels) -> gpui::Pixels {
+    let content = viewport + overflow;
+    (viewport * (viewport / content)).max(px(28.)).min(viewport)
+}
+
 fn horizontal_scroll_metrics(handle: &gpui::ScrollHandle) -> Option<HorizontalScrollMetrics> {
     let overflow = handle.max_offset().width;
     let viewport = handle.bounds().size.width;
     if overflow <= px(0.) || viewport <= px(0.) {
         return None;
     }
-    let content = viewport + overflow;
-    let thumb = (viewport * (viewport / content)).max(px(28.));
+    let thumb = horizontal_thumb_width(viewport, overflow);
     let travel = viewport - thumb;
     let progress = (-handle.offset().x / overflow).clamp(0.0, 1.0);
     Some(HorizontalScrollMetrics {
@@ -2339,13 +2353,26 @@ impl Workbench {
     }
 
     /// Start watching a background worker's thread, if it isn't already watched.
-    fn track_task(&mut self, task: protocol::AsyncTask, cx: &mut Context<Self>) {
+    ///
+    /// `owner` is the conversation whose snapshot carried this task. Passed in rather than looked
+    /// up, because the two call sites are the only places that know it for certain and the answer
+    /// has to survive the researcher moving on to another conversation (docs §159). Stamped
+    /// *before* the watcher is armed, so the poll — which mutates only status, pending, error and
+    /// activity — carries it for the task's whole life.
+    fn track_task(&mut self, owner: &str, mut task: protocol::AsyncTask, cx: &mut Context<Self>) {
+        task.owner = owner.to_string();
         if let Some(existing) = self.tasks.iter_mut().find(|t| t.task_id == task.task_id) {
             // The snapshot knows the status the coordinator last recorded; the *watcher*
             // knows whether it is stopped at the gate right now. Never let a stale
             // snapshot erase a pending approval the user is looking at.
             if existing.pending.is_none() && !existing.is_finished() {
                 existing.status = task.status;
+            }
+            // A task already being watched keeps the owner it was first seen with: re-stamping
+            // would reintroduce the drift this argument exists to prevent, on any later snapshot
+            // that arrives from somewhere else.
+            if existing.owner.is_empty() {
+                existing.owner = task.owner;
             }
             return;
         }
@@ -2428,8 +2455,23 @@ impl Workbench {
             })
             .collect();
         let thread_id = task.thread_id.clone();
+        // **The task's own owner, not the conversation on screen.** Answering an approval is the
+        // moment a background worker is told where to write, and it happens whenever the
+        // researcher gets to it — by then they may have pressed New thread or opened something
+        // else. Sending the open conversation put a worker's figures into a conversation that
+        // never asked for them (docs §159). Unknown stays unknown: `None` sends no key, and the
+        // backend falls back to the sibling folder it used before, which is at least visible.
+        let owner = task.owning_conversation().map(str::to_string);
+        if owner.is_none() {
+            tracing::warn!(
+                task = %task_id,
+                worker = %thread_id,
+                "answering a background task whose owning conversation was never recorded — \
+                 its files may land beside the conversation instead of inside it"
+            );
+        }
         task.status = "running".into();
-        self.sidecar.decide_task(thread_id, decisions);
+        self.sidecar.decide_task(thread_id, owner, decisions);
         self.status = if approve {
             "background task approved — running…"
         } else {
@@ -3503,6 +3545,11 @@ impl Workbench {
                 for job in snapshot.jobs {
                     self.track_job(job, cx);
                 }
+                // The conversation this stream belongs to, and so the owner of any worker it
+                // launched. Safe to read here and nowhere else: `apply` only runs mid-turn, and
+                // both `New thread` and opening another conversation refuse while streaming — so
+                // the open thread cannot have moved by the time this line runs.
+                let owner = self.sidecar.thread_id().unwrap_or_default();
                 for task in snapshot.tasks {
                     // Into the provenance record as well as the Jobs panel. A background worker
                     // runs on its own LangGraph thread, so none of its events reach this
@@ -3515,7 +3562,7 @@ impl Workbench {
                         &task.agent_name,
                         provenance::now_ms(),
                     );
-                    self.track_task(task, cx);
+                    self.track_task(&owner, task, cx);
                 }
             }
             TurnEvent::Done => {
@@ -3636,6 +3683,9 @@ impl Workbench {
         self.remember_project(filed.clone());
         self.sidecar.set_project(filed);
         self.project = None;
+        // Kept before the id is handed to the sidecar: any worker in this conversation's state
+        // belongs to *this* conversation, and that is the fact `decide_task` needs later.
+        let owner = thread_id.clone();
         let mut messages = self.sidecar.open_conversation(thread_id);
         cx.spawn(async move |this, cx| {
             if let Some((messages, snapshot)) = messages.next().await {
@@ -3671,7 +3721,7 @@ impl Workbench {
                             workbench.track_job(job, cx);
                         }
                         for task in snapshot.tasks {
-                            workbench.track_task(task, cx);
+                            workbench.track_task(&owner, task, cx);
                         }
                     }
                     workbench.status = "done".into();
@@ -8699,6 +8749,14 @@ impl Workbench {
                 // conversation too. This is the line that makes the button's wording true.
                 self.approve_conversation = false;
                 self.approve_tasks.clear();
+                // **And the tasks and jobs themselves**, which opening another conversation has
+                // always cleared and this path never did. The panel therefore kept showing the
+                // previous conversation's background work beside an empty transcript, and the
+                // grants just revoked applied to cards that stayed clickable. Nothing is stopped:
+                // both run on their own threads, and reopening the conversation re-arms the
+                // watchers from its state (docs §159).
+                self.tasks.clear();
+                self.jobs.clear();
                 // The conversation just left should appear in the list.
                 self.refresh_conversations(cx);
                 // The spine is thread-independent — the mission survives, so say so
@@ -10303,6 +10361,26 @@ mod tests {
         assert_eq!(offset(120.), px(0.));
         assert_eq!(offset(220.), px(-400.));
         assert_eq!(offset(400.), px(-800.));
+    }
+
+    #[test]
+    fn a_gallery_thumb_never_grows_wider_than_the_rail_it_sits_in() {
+        // A wide rail: the thumb is proportional, and there is room to drag it.
+        let wide = horizontal_thumb_width(px(400.), px(800.));
+        assert!(wide > px(28.) && wide < px(400.), "{wide:?}");
+
+        // A long rail: proportional would be a few pixels, so the 28px floor applies.
+        assert_eq!(horizontal_thumb_width(px(300.), px(9_000.)), px(28.));
+
+        // A rail narrower than that floor is the case the floor alone gets wrong. The thumb has
+        // to stop at the track width, because `travel = viewport - thumb` going negative paints
+        // it outside the track and leaves it undraggable — a control that reads as broken rather
+        // than as absent.
+        for narrow in [1., 10., 27.9] {
+            let thumb = horizontal_thumb_width(px(narrow), px(500.));
+            assert_eq!(thumb, px(narrow), "a {narrow}px rail");
+            assert!(px(narrow) - thumb >= px(0.), "travel went negative at {narrow}");
+        }
     }
 
     #[test]

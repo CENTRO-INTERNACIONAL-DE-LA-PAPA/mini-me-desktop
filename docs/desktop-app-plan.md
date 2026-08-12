@@ -8904,13 +8904,43 @@ the overlay remembers worker→conversation ownership in process memory, but a b
 a task waits clears that map. A decision made afterwards must not let the rest of the task resume in
 a sibling folder.
 
-A sentence-named request-shape test covers fresh runs, resumes and blank ids. The live Windows
-confirmation is deliberately exact: start a new conversation, ask it to delegate an EDA, and leave
-Explorer open at `Documents\Mini-Me`. The correct result is one new top-level conversation UUID and
-the worker UUID, if it creates one, **inside** it—never a second UUID beside it.
+### The resume asked the wrong object which conversation it was
+
+Caught in review, before the change shipped. The resume path read the owner from
+`Sidecar::thread_id()` — *the conversation open right now* — and those are not the same thing.
+`open_conversation` clears the task list, so switching conversations is safe; `Command::NewThread`
+never did, so a pending task from the previous conversation stayed on screen and stayed clickable
+while `thread_id()` moved on to a new thread. Approving it then named the new conversation as the
+worker's owner.
+
+With the backend still running this was invisible: `_PINNED_BY_THREAD` already held the true owner,
+first-sighting-wins kept it, and the disagreement was logged. With the backend restarted — the one
+case this whole change exists for — that map is empty and the new conversation wins. So the fix was
+inert exactly where it was safe and wrong exactly where it mattered, and its failure mode was
+*worse* than the one it replaced: a sibling UUID folder is visibly wrong, while files appearing
+inside an unrelated conversation's Outputs panel look like they belong there.
+
+The owner is now carried on `AsyncTask`, stamped by whichever call site ingested it — the streaming
+snapshot (safe to read the open thread there: `apply` only runs mid-turn, and both New thread and
+opening a conversation refuse while streaming) or `open_conversation`'s own parameter. A task
+already being watched keeps the owner it was first seen with. `owning_conversation()` puts the
+"blank is not a directory name" rule next to the field instead of at the call site, because an
+empty pin would write to the workspace *root* — strictly worse again. Unknown sends no key at all
+and lets the backend fall back to its own inference. `Command::NewThread` now clears `tasks` and
+`jobs`, which is the pre-existing bug this change had made load-bearing.
+
+Three sentence-named tests: blank and whitespace owners name no conversation, the payload decoder
+does not invent one, and the request shape covers fresh runs, resumes and blank ids.
+
+The live Windows confirmation is deliberately exact: start a new conversation, ask it to delegate an
+EDA, and leave Explorer open at `Documents\Mini-Me`. The correct result is one new top-level
+conversation UUID and the worker UUID, if it creates one, **inside** it—never a second UUID beside
+it. Then the harder half: with a task waiting for approval, press New thread. The pending card
+should disappear with the conversation it belonged to.
 
 *Twelfth: a value known at the boundary should cross the boundary explicitly, especially when its
-absence is a successful-looking failure.*
+absence is a successful-looking failure. And the corollary the review found — the boundary has to
+send the value that belongs to the **work**, not the one that belongs to the window.*
 ## 160. Sixteen real files escaped to WSL `/tmp` (2026-08-11)
 
 This first looked like §150 again: Explorer showed two UUID folders under `Documents\Mini-Me`

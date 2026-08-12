@@ -286,6 +286,18 @@ pub struct AsyncTask {
     /// The subagent or tool the worker is on right now, so "running" for ten minutes says
     /// something about *what* is running (docs §42).
     pub activity: Option<String>,
+    /// The conversation whose folder owns this worker's files.
+    ///
+    /// **Not decodable from the payload**, which is why it is filled by whoever ingests the
+    /// task rather than by `decode_async_tasks`: the `async_tasks` map records the worker's
+    /// own thread and nothing about its parent. The parent is a property of *where the
+    /// snapshot came from*, and only the caller that asked for that snapshot knows it.
+    ///
+    /// Carried on the task instead of read from "the conversation open right now" because
+    /// those are not the same thing: pressing New thread leaves a pending task on screen
+    /// while the open thread moves on, and answering it then named the wrong owner
+    /// (docs §159). Empty means unknown — see [`AsyncTask::owning_conversation`].
+    pub owner: String,
 }
 
 impl AsyncTask {
@@ -308,6 +320,18 @@ impl AsyncTask {
     /// Whether it is stopped, waiting on a decision.
     pub fn needs_approval(&self) -> bool {
         self.pending.is_some()
+    }
+
+    /// The conversation whose folder this worker's files belong in, or `None` when unknown.
+    ///
+    /// The rule lives here rather than at the call site because it is easy to get wrong in a
+    /// way nothing notices: blank must become `None`, never a directory name. A run pinned to
+    /// an empty path segment writes to the *workspace root* — beside every conversation instead
+    /// of inside one — which is the shape §150 spent a night on. `None` sends no key at all and
+    /// lets the backend fall back to its own inference.
+    pub fn owning_conversation(&self) -> Option<&str> {
+        let owner = self.owner.trim();
+        (!owner.is_empty()).then_some(owner)
     }
 }
 
@@ -667,6 +691,11 @@ fn decode_async_tasks(artifacts: &Value, root: &Value) -> Vec<AsyncTask> {
                 pending: None,
                 error: None,
                 activity: None,
+                // Deliberately blank. This function is a pure decoder of one payload, and the
+                // payload does not say which conversation the worker belongs to; guessing —
+                // `thread_id`, say — would name the worker as its own owner and defeat the
+                // nesting entirely. See the field's own note.
+                owner: String::new(),
             })
         })
         .collect();
@@ -3158,6 +3187,7 @@ mod tests {
             pending: None,
             error: None,
             activity: None,
+            owner: String::new(),
         };
         assert!(!waiting.is_finished(), "interrupted is not terminal");
         for status in ["success", "error", "timeout", "cancelled"] {
@@ -3175,6 +3205,68 @@ mod tests {
             };
             assert!(!going.is_finished(), "{status}");
         }
+    }
+
+    #[test]
+    fn a_worker_with_no_recorded_owner_names_no_conversation_at_all() {
+        // The half of §159 that is easy to get backwards. Naming the owner is what stops a
+        // background worker filing its figures beside the conversation instead of inside it —
+        // but an owner the app does not actually know must not be invented, and blank is not a
+        // directory name. Sending `""` would pin the run to the workspace *root*, which is
+        // strictly worse than the sibling folder the backend falls back to on its own.
+        let task = AsyncTask {
+            task_id: "t".into(),
+            thread_id: "worker-thread".into(),
+            agent_name: "background_worker".into(),
+            status: "interrupted".into(),
+            description: String::new(),
+            pending: None,
+            error: None,
+            activity: None,
+            owner: String::new(),
+        };
+        assert_eq!(task.owning_conversation(), None);
+        // Whitespace is absence too: it survives a round trip through JSON looking like a value.
+        let blank = AsyncTask {
+            owner: "   ".into(),
+            ..task.clone()
+        };
+        assert_eq!(blank.owning_conversation(), None);
+        let owned = AsyncTask {
+            owner: "conversation-1".into(),
+            ..task.clone()
+        };
+        assert_eq!(owned.owning_conversation(), Some("conversation-1"));
+    }
+
+    #[test]
+    fn decoding_a_snapshot_does_not_guess_which_conversation_owns_a_worker() {
+        // `async_tasks` records the worker's own thread and says nothing about its parent, so
+        // this decoder cannot know — and the ingesting caller can. Pinned here so a later reader
+        // does not "helpfully" default the field to `thread_id`.
+        let snapshot = decode_values(
+            &json!({
+                "artifacts": {
+                    "async_tasks": {
+                        "task-1": {
+                            "task_id": "task-1",
+                            "thread_id": "worker-thread",
+                            "agent_name": "background_worker",
+                            "status": "running"
+                        }
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("a snapshot with one task");
+        let task = snapshot.tasks.first().expect("the task");
+        assert_eq!(task.thread_id, "worker-thread");
+        assert_eq!(
+            task.owning_conversation(),
+            None,
+            "the payload carries no owner, so the decoder must not supply one"
+        );
     }
 
     #[test]
