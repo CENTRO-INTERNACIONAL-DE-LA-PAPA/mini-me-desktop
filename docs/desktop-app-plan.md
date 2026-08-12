@@ -108,6 +108,19 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   `<task>/guinea_pig_eda_output/plots/health_by_activity_box.png`. Its folder is created *inside*
   the conversation's, and the conversation it belongs to is remembered per thread because the run
   config is not visible at every construction site.
+- ⬜ **A file's own symbol, so the kind is readable at a glance.** Asked for directly: *"add to the
+  plan how we can put symbols of the files to know what is what. For example if its a python script
+  the symbol of python must appear. its the same for json, etc etc etc."* Today `file_mark`
+  (`main.rs`) returns one of four geometric glyphs — `▤` for anything tabular, `▩` for an image,
+  `▦` for a PDF, `▤` again for everything else — so a `.py`, a `.json`, a `.log` and a `.txt` are
+  all the same mark in the same colour. On a grid of tiles that is the only thing distinguishing
+  them besides the name. Wanted: a per-extension mark for the kinds a research run actually
+  produces — `.py`, `.ipynb`, `.json`, `.yaml`, `.md`, `.txt`, `.log`, `.html`, `.zip`, `.parquet`,
+  `.db` — recognisable as *that* language or format rather than as a generic file. Note the
+  constraint §12 already settled for the toolbar: a bundled SVG per kind is the honest route (PR #12
+  builds exactly that machinery for the core controls, so this should reuse it rather than invent a
+  second scheme), and a bare Unicode glyph is what we have because it needs no assets. Whichever
+  way, `file_mark` is the one place it lands, and its colour should keep following the theme.
 - ✅ **The Outputs panel does not survive a productive run** (§152 → §153 → §162). Twelve artifacts
   became twelve near-identical rows, each truncated to the 36 characters they *share*, and the
   transcript rendered every figure full width — ten plots, ten screens. Now: images in one group as
@@ -9188,3 +9201,53 @@ is something only running it can say.
 
 *Sixteenth: z-order is a fact about drawing. Reachability is a separate fact, and it has to be
 stated separately.*
+
+
+## 164. The strip was the wrong shape, and one renderer is enough (2026-08-12)
+
+§162 worked, and looking at it against the thing it was imitating showed two more:
+
+> *"For files we should do the same. Also I think the grouping occupies too much space in the
+> conversation (too wide). Check the screenshot from WhatsApp. Is less invasive and functions the
+> same."*
+
+### Fixed tiles, not fractions
+
+The image grid used `flex_1` tiles, so the block was as wide as whatever held it — in the transcript,
+the whole conversation. A folder of seven files claimed a band wider than the answer that produced
+it, which is the §152 complaint in a new direction: not ten screens tall, one screen wide.
+
+The phone gallery it is compared against is a *block* — about 415px, the same whatever the chat
+window is doing. So tiles are now a fixed width and there are two per row, which makes the grid
+exactly `2 × tile + gap` and no wider: 304px in the panel, 408px in the transcript. There is a test,
+because "too wide" is the complaint and a `flex_1` slipped back in would look correct in review.
+
+### One renderer for images and for files
+
+§153's sideways strip is gone. It had a heading, a `scroll sideways` hint, a visible scrollbar, and
+a full-width band per folder — furniture, for three CSVs. Files now use the same capped grid as
+images, so they get the `+N` tile and the modal with it, and the strip's scroll machinery lives on
+where it is actually wanted: the preview filmstrip, which is the surface §162 gave it.
+
+Two differences inside a tile, and they are the whole reason one renderer works. A figure shows the
+picture and **no filename** — the image identifies itself, the modal's header names it, and a caption
+under every thumbnail was half of what made the strip feel heavy. A data file shows a glyph, the
+name and the shape, because one CSV looks exactly like another.
+
+`Contain` rather than `Cover` for a tile's picture: a photo crops acceptably and a chart does not.
+Cropping the axes off a plot makes the thumbnail useless for the only job it has, which is choosing
+between seven of them.
+
+### §59, third time
+
+Every file tile in the panel rendered its name as a bare `…`. `Label::ellipsis` produces
+`flex_grow().min_w_0().truncate()`, `flex_grow` needs a flex parent to grow within, and GPUI's `div`
+defaults to `Display::Block` — so a tile's label row was a block container and the text collapsed to
+its ellipsis. The `ui` module documents this defect, names it §59, and says *"there is no way to ask
+for the broken combination"*; there is, and §153's tile found it.
+
+The names are now shortened in Rust, by character count from the tile width, and rendered as plain
+labels. No truncation machinery, so no layout to get wrong.
+
+*Seventeenth: a component that documents its own trap is not the same as a component that prevents
+it — and the trap was two layers away from where the note lives.*
