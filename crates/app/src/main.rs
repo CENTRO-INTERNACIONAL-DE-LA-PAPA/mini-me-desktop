@@ -8061,6 +8061,12 @@ impl Workbench {
         /// The dot's own size, and the gutter it is centred in.
         const DOT: f32 = 9.;
         const GUTTER: f32 = 12.;
+        /// How tall a stage's row is, which is the distance the connector has to span.
+        ///
+        /// Folded, the rail is the *whole* content — no labels, so the rows close up and the dots
+        /// read as one strung line rather than as marks scattered down a margin.
+        const ROW_OPEN: f32 = 46.;
+        const ROW_FOLDED: f32 = 26.;
 
         let stages = self.provenance.road();
         // The stage still producing output. Only meaningful while a turn is in flight: after it
@@ -8172,10 +8178,17 @@ impl Workbench {
             let mut row = div()
                 .flex()
                 .flex_row()
-                .items_start()
+                // **Stretch, not `items_start`.** The connector below the dot is `flex_grow`, and
+                // it can only grow inside a gutter that has a height to grow into. `items_start`
+                // aligns children to the top *and leaves them at their content height*, so the
+                // gutter stood 23px — a 9px dot plus the connector's 14px minimum — while the row
+                // beside it stood at 46px for a two-line label. The line stopped a third of the
+                // way down and every dot hung under a stub (§169).
                 .w_full()
                 .min_w_0()
-                .when(at < last, |row| row.min_h(px(46.)))
+                .when(at < last, |row| {
+                    row.min_h(px(if self.road_open { ROW_OPEN } else { ROW_FOLDED }))
+                })
                 .child(gutter);
 
             if self.road_open {

@@ -9714,5 +9714,24 @@ them into one strung line. The same numbers, named: `ROW_OPEN` and `ROW_FOLDED`.
 reading `◧ road` beside them. `road.svg` is the rail itself — a line, two filled dots and an open
 one — which is the same picture the strip draws, at 14px.
 
+### Shipped as a claim before it was shipped as a change
+
+§169 went in describing the fix above, and the fix was not in the commit. The script making the
+edit asserted on its third replacement, raised, and exited **before writing the file** — so the
+first two edits, the ones that mattered, were discarded. `cargo build` and 266 tests passed,
+because an unchanged file compiles perfectly. The icon in the same commit *did* land, which made
+the result look like a partial success rather than a no-op.
+
+Two things follow. A batch edit that fails partway must not leave the earlier work unwritten and
+the reader believing otherwise — write each change or none, and check the file afterwards rather
+than trusting the tool that reported success. And a green suite is not evidence a change landed:
+these tests never touched `road_strip`, so they were as green before the edit as after.
+
+The researcher found it the only way it could be found, by looking at the window: the dots were
+still hanging under stubs, in a build whose plan said they were not.
+
 *Twenty-first: a `flex_grow` child is a promise about a parent that has a size. `items_start` takes
 that size away, and the symptom appears two elements away from the line that caused it.*
+
+*Twenty-second, and the more expensive one: "the tests pass" answers a question about the code that
+is there. It says nothing about whether the code you wrote is the code that is there.*
