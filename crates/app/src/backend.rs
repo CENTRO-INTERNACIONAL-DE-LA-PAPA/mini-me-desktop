@@ -368,6 +368,11 @@ impl Default for BackendConfig {
 /// **forks** the real server as a grandchild, so killing our direct child leaves
 /// an orphaned server holding the port (observed in P6.2). Invoking the venv
 /// binary directly keeps it a single process we actually own.
+// These inputs cross separate launch boundaries (filesystem, WSL, execution policy,
+// approval, concurrency and ownership), and the call sites deliberately spell every
+// choice out. Bundling them would hide the security-relevant defaults just to satisfy
+// a numeric style limit (the explicit-boundary rule from docs §41 and §96).
+#[allow(clippy::too_many_arguments)]
 fn launch_command_for(
     project_dir: &Path,
     port: u16,
@@ -1987,11 +1992,13 @@ mod tests {
         let _env = env_lock::hold();
         // A check that runs on the wrong side of the WSL boundary is worse than no
         // check: it reports green for a machine that cannot launch anything.
-        let mut config = BackendConfig::default();
-        config.wsl = Some(WslTarget {
-            distro: Some("Ubuntu".into()),
-            dir: "~/Mini-Me".into(),
-        });
+        let mut config = BackendConfig {
+            wsl: Some(WslTarget {
+                distro: Some("Ubuntu".into()),
+                dir: "~/Mini-Me".into(),
+            }),
+            ..Default::default()
+        };
         assert_eq!(
             config.shell_argv("echo ok"),
             vec!["wsl.exe", "-d", "Ubuntu", "--", "bash", "-lc", "echo ok"],
@@ -2007,11 +2014,13 @@ mod tests {
     #[test]
     fn the_setup_script_is_named_the_way_the_backend_shell_sees_it() {
         let _env = env_lock::hold();
-        let mut config = BackendConfig::default();
-        config.wsl = Some(WslTarget {
-            distro: None,
-            dir: "~/Mini-Me".into(),
-        });
+        let config = BackendConfig {
+            wsl: Some(WslTarget {
+                distro: None,
+                dir: "~/Mini-Me".into(),
+            }),
+            ..Default::default()
+        };
         let command = config.setup_script();
         // The source now ships in this repository (`mini-me/`), so provisioning always has one
         // to copy from and the script never reaches GitHub for it. This assertion used to be
@@ -2127,9 +2136,11 @@ mod tests {
         std::fs::write(scratch.join("langgraph.json"), "{}").expect("write");
 
         std::env::set_var("MINIME_BUNDLED_BACKEND", &scratch);
-        let mut config = BackendConfig::default();
-        config.wsl = None;
-        config.project_dir = PathBuf::from("/opt/backend");
+        let config = BackendConfig {
+            wsl: None,
+            project_dir: PathBuf::from("/opt/backend"),
+            ..Default::default()
+        };
         let command = config.setup_script();
         assert!(command.starts_with("MINIME_BUNDLED_SOURCE="), "{command}");
         assert!(command.contains("setup-wsl.sh"), "{command}");
@@ -2278,8 +2289,10 @@ mod tests {
     #[test]
     fn a_redacted_config_carries_no_credentials() {
         let _env = env_lock::hold();
-        let mut config = BackendConfig::default();
-        config.secrets = vec![("ASTA_TOKEN".into(), "super-secret".into())];
+        let config = BackendConfig {
+            secrets: vec![("ASTA_TOKEN".into(), "super-secret".into())],
+            ..Default::default()
+        };
         let redacted = config.redacted();
         assert!(redacted.secrets.is_empty());
         // Everything else has to survive, or preflight would probe the wrong machine.
@@ -2786,4 +2799,3 @@ mod source_tests {
     }
 
 }
-

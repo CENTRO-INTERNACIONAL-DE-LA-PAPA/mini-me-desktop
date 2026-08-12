@@ -652,6 +652,166 @@ fn scrollbar(handle: &gpui::ScrollHandle) -> Option<impl IntoElement> {
     )
 }
 
+/// The geometry shared by painting and dragging a gallery scrollbar.
+///
+/// It has to be one calculation. The first Windows pass found a painted thumb that could not be
+/// dragged at all; letting its hit-testing use a second set of numbers would be the same defect
+/// one layer later (docs §158).
+#[derive(Clone, Copy, Debug)]
+struct HorizontalScrollMetrics {
+    overflow: gpui::Pixels,
+    viewport: gpui::Pixels,
+    thumb: gpui::Pixels,
+    travel: gpui::Pixels,
+    progress: f32,
+}
+
+/// How wide the thumb is for a rail showing `viewport` of `viewport + overflow` content.
+///
+/// Split out from the metrics only so it can be tested without a laid-out `ScrollHandle`; the
+/// metrics still compute it exactly once, which is the property the type above exists to hold.
+///
+/// Two bounds, and the second matters as much as the first. The 28px floor keeps a thumb
+/// grabbable on a long rail. The `viewport` ceiling keeps that floor from exceeding the track it
+/// sits in: without it a rail narrower than 28px yields a *negative* `travel`, so the thumb is
+/// painted to the left of its own track while `horizontal_drag_offset` refuses to move it — the
+/// "looked interactive, wasn't" shape of §158, one case further out.
+fn horizontal_thumb_width(viewport: gpui::Pixels, overflow: gpui::Pixels) -> gpui::Pixels {
+    let content = viewport + overflow;
+    (viewport * (viewport / content)).max(px(28.)).min(viewport)
+}
+
+fn horizontal_scroll_metrics(handle: &gpui::ScrollHandle) -> Option<HorizontalScrollMetrics> {
+    let overflow = handle.max_offset().width;
+    let viewport = handle.bounds().size.width;
+    if overflow <= px(0.) || viewport <= px(0.) {
+        return None;
+    }
+    let thumb = horizontal_thumb_width(viewport, overflow);
+    let travel = viewport - thumb;
+    let progress = (-handle.offset().x / overflow).clamp(0.0, 1.0);
+    Some(HorizontalScrollMetrics {
+        overflow,
+        viewport,
+        thumb,
+        travel,
+        progress,
+    })
+}
+
+/// Convert a dragged thumb position into GPUI's negative content offset.
+fn horizontal_drag_offset(
+    pointer_x: gpui::Pixels,
+    track_left: gpui::Pixels,
+    grab_x: gpui::Pixels,
+    travel: gpui::Pixels,
+    overflow: gpui::Pixels,
+) -> gpui::Pixels {
+    if travel <= px(0.) {
+        return px(0.);
+    }
+    let thumb_left = (pointer_x - track_left - grab_x).clamp(px(0.), travel);
+    -(overflow * (thumb_left / travel))
+}
+
+/// Outputs that share the directory the agent chose share one visual gallery.
+///
+/// §143 deliberately retained each relative path while making nested work visible. §152 found
+/// that rendering those paths as independent rows flattened the useful structure straight back
+/// out. Keep the full parent as the identity so two separate runs' `plots/` folders never merge.
+struct OutputFolderGroup<'a> {
+    folder: PathBuf,
+    outputs: Vec<&'a workspace::Output>,
+}
+
+/// One mouse-held gallery thumb.
+struct GalleryScrollDrag {
+    handle: gpui::ScrollHandle,
+    track_left: gpui::Pixels,
+    grab_x: gpui::Pixels,
+    travel: gpui::Pixels,
+    overflow: gpui::Pixels,
+}
+
+fn output_folder_groups(outputs: &[workspace::Output]) -> Vec<OutputFolderGroup<'_>> {
+    let mut groups: Vec<OutputFolderGroup<'_>> = Vec::new();
+    for output in outputs {
+        let folder = std::path::Path::new(&output.name)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new(""))
+            .to_path_buf();
+        if let Some(group) = groups.iter_mut().find(|group| group.folder == folder) {
+            group.outputs.push(output);
+        } else {
+            groups.push(OutputFolderGroup {
+                folder,
+                outputs: vec![output],
+            });
+        }
+    }
+    groups
+}
+
+fn looks_like_thread_id(component: &str) -> bool {
+    component.len() == 36
+        && component
+            .chars()
+            .enumerate()
+            .all(|(at, character)| match at {
+                8 | 13 | 18 | 23 => character == '-',
+                _ => character.is_ascii_hexdigit(),
+            })
+}
+
+/// Name the folder the agent chose, not the generated background-thread directory above it.
+///
+/// The screenshot in §152 devoted its useful width to a 36-character UUID common to every row.
+/// That component is app bookkeeping; removing only a leading UUID leaves `eda/plots`, the
+/// researcher's information, while the unshortened path remains the grouping identity above.
+fn output_folder_label(folder: &std::path::Path) -> String {
+    let mut components: Vec<String> = folder
+        .components()
+        .filter_map(|component| component.as_os_str().to_str().map(str::to_owned))
+        .collect();
+    let removed_thread = components
+        .first()
+        .is_some_and(|component| looks_like_thread_id(component));
+    if removed_thread {
+        components.remove(0);
+    }
+    if components.is_empty() {
+        if removed_thread {
+            "Background task files".to_string()
+        } else {
+            "Conversation files".to_string()
+        }
+    } else {
+        components.join(" / ")
+    }
+}
+
+/// Keep the distinguishing tail when a filename itself is too long for a thumbnail.
+///
+/// `Label::ellipsis()` correctly protects layout (§59), but its trailing ellipsis preserves the
+/// shared prefix and removes the useful suffix in §152. Shortening the string from the leading
+/// edge before layout means the extension and differentiating part survive even in a 140px tile.
+fn distinguishing_tail(text: &str, max_chars: usize) -> String {
+    let count = text.chars().count();
+    if count <= max_chars || max_chars == 0 {
+        return text.to_string();
+    }
+    let keep = max_chars.saturating_sub(1);
+    format!("…{}", text.chars().skip(count - keep).collect::<String>())
+}
+
+fn output_filename(output: &workspace::Output) -> String {
+    let name = std::path::Path::new(&output.name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(&output.name);
+    distinguishing_tail(name, 36)
+}
+
 /// A one-line tooltip.
 ///
 /// GPUI wants a whole view for a tooltip, so this is the smallest one that renders text —
@@ -1840,6 +2000,18 @@ struct Workbench {
     /// be a wall of them.
     toasts: Vec<SharedString>,
     panel_scroll: gpui::ScrollHandle,
+    /// One horizontal position per output folder gallery.
+    ///
+    /// A single handle would make scrolling one folder move every other folder too. The full
+    /// folder path plus its surface owns the state, matching §152's rule that each agent-chosen
+    /// folder is one independent photo-like collection.
+    output_gallery_scrolls: std::cell::RefCell<HashMap<String, gpui::ScrollHandle>>,
+    /// The gallery thumb currently held by the mouse, if any.
+    ///
+    /// Kept separately from pane resizing because both are drags but their units differ: pane
+    /// dividers follow window pixels directly, while a gallery thumb maps a short track onto a
+    /// wider hidden content range (docs §158).
+    gallery_scroll_drag: Option<GalleryScrollDrag>,
     /// The palette on screen right now, which is not always the saved one: the picker
     /// applies as you point at it so a theme can be judged by looking at it.
     applied_theme: String,
@@ -2057,6 +2229,8 @@ impl Workbench {
             dragging: None,
             toasts: Vec::new(),
             panel_scroll: gpui::ScrollHandle::new(),
+            output_gallery_scrolls: std::cell::RefCell::new(HashMap::new()),
+            gallery_scroll_drag: None,
             applied_theme: stored.theme.clone(),
             sidebar_open: stored.sidebar_open,
             panel_open: stored.panel_open,
@@ -2179,13 +2353,26 @@ impl Workbench {
     }
 
     /// Start watching a background worker's thread, if it isn't already watched.
-    fn track_task(&mut self, task: protocol::AsyncTask, cx: &mut Context<Self>) {
+    ///
+    /// `owner` is the conversation whose snapshot carried this task. Passed in rather than looked
+    /// up, because the two call sites are the only places that know it for certain and the answer
+    /// has to survive the researcher moving on to another conversation (docs §159). Stamped
+    /// *before* the watcher is armed, so the poll — which mutates only status, pending, error and
+    /// activity — carries it for the task's whole life.
+    fn track_task(&mut self, owner: &str, mut task: protocol::AsyncTask, cx: &mut Context<Self>) {
+        task.owner = owner.to_string();
         if let Some(existing) = self.tasks.iter_mut().find(|t| t.task_id == task.task_id) {
             // The snapshot knows the status the coordinator last recorded; the *watcher*
             // knows whether it is stopped at the gate right now. Never let a stale
             // snapshot erase a pending approval the user is looking at.
             if existing.pending.is_none() && !existing.is_finished() {
                 existing.status = task.status;
+            }
+            // A task already being watched keeps the owner it was first seen with: re-stamping
+            // would reintroduce the drift this argument exists to prevent, on any later snapshot
+            // that arrives from somewhere else.
+            if existing.owner.is_empty() {
+                existing.owner = task.owner;
             }
             return;
         }
@@ -2231,6 +2418,7 @@ impl Workbench {
                             "a background task stopped".into()
                         };
                         workbench.collect_plots();
+                        workbench.settle_outputs(cx);
                         workbench.refresh_project(cx);
                     }
                     cx.notify();
@@ -2267,8 +2455,23 @@ impl Workbench {
             })
             .collect();
         let thread_id = task.thread_id.clone();
+        // **The task's own owner, not the conversation on screen.** Answering an approval is the
+        // moment a background worker is told where to write, and it happens whenever the
+        // researcher gets to it — by then they may have pressed New thread or opened something
+        // else. Sending the open conversation put a worker's figures into a conversation that
+        // never asked for them (docs §159). Unknown stays unknown: `None` sends no key, and the
+        // backend falls back to the sibling folder it used before, which is at least visible.
+        let owner = task.owning_conversation().map(str::to_string);
+        if owner.is_none() {
+            tracing::warn!(
+                task = %task_id,
+                worker = %thread_id,
+                "answering a background task whose owning conversation was never recorded — \
+                 its files may land beside the conversation instead of inside it"
+            );
+        }
         task.status = "running".into();
-        self.sidecar.decide_task(thread_id, decisions);
+        self.sidecar.decide_task(thread_id, owner, decisions);
         self.status = if approve {
             "background task approved — running…"
         } else {
@@ -3342,6 +3545,11 @@ impl Workbench {
                 for job in snapshot.jobs {
                     self.track_job(job, cx);
                 }
+                // The conversation this stream belongs to, and so the owner of any worker it
+                // launched. Safe to read here and nowhere else: `apply` only runs mid-turn, and
+                // both `New thread` and opening another conversation refuse while streaming — so
+                // the open thread cannot have moved by the time this line runs.
+                let owner = self.sidecar.thread_id().unwrap_or_default();
                 for task in snapshot.tasks {
                     // Into the provenance record as well as the Jobs panel. A background worker
                     // runs on its own LangGraph thread, so none of its events reach this
@@ -3354,7 +3562,7 @@ impl Workbench {
                         &task.agent_name,
                         provenance::now_ms(),
                     );
-                    self.track_task(task, cx);
+                    self.track_task(&owner, task, cx);
                 }
             }
             TurnEvent::Done => {
@@ -3475,6 +3683,9 @@ impl Workbench {
         self.remember_project(filed.clone());
         self.sidecar.set_project(filed);
         self.project = None;
+        // Kept before the id is handed to the sidecar: any worker in this conversation's state
+        // belongs to *this* conversation, and that is the fact `decide_task` needs later.
+        let owner = thread_id.clone();
         let mut messages = self.sidecar.open_conversation(thread_id);
         cx.spawn(async move |this, cx| {
             if let Some((messages, snapshot)) = messages.next().await {
@@ -3510,7 +3721,7 @@ impl Workbench {
                             workbench.track_job(job, cx);
                         }
                         for task in snapshot.tasks {
-                            workbench.track_task(task, cx);
+                            workbench.track_task(&owner, task, cx);
                         }
                     }
                     workbench.status = "done".into();
@@ -3757,8 +3968,50 @@ impl Workbench {
         }
     }
 
+    /// Re-read files after a writer has reported completion and evict any image decode cached
+    /// while that writer still had the file open.
+    ///
+    /// The Outputs panel scans on every paint, which made a just-created PNG visible *before* it
+    /// was necessarily complete. GPUI correctly cached that first decode failure by path, but a
+    /// later paint asked for the same path and received the same failure forever; restarting the
+    /// application was the only thing that cleared it. Two bounded follow-up passes cover the
+    /// Windows/WSL filesystem hand-off without turning the whole workspace into a permanent
+    /// polling loop (docs §158).
+    fn settle_outputs(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            for delay in [250, 1_000] {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(delay))
+                    .await;
+                if this
+                    .update(cx, |workbench, cx| {
+                        workbench.collect_plots();
+                        let figures: Vec<std::path::PathBuf> = workbench
+                            .thread_workspace()
+                            .map(|dir| workspace::outputs(&dir))
+                            .unwrap_or_default()
+                            .into_iter()
+                            .flat_map(|(_, items)| items)
+                            .filter(|output| output.kind == workspace::Kind::Figure)
+                            .map(|output| output.path)
+                            .collect();
+                        for path in figures {
+                            gpui::ImageSource::from(path).remove_asset(cx);
+                        }
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     fn finish_turn(&mut self, cx: &mut Context<Self>) {
         self.collect_plots();
+        self.settle_outputs(cx);
         // Written here, and only here, for the same reason the title is: the thread id does not
         // exist until the turn has run, so there is no directory to write into before this point.
         // A turn stopped or failed still gets recorded — what was consulted before it stopped is
@@ -3819,7 +4072,7 @@ impl Workbench {
             })
             .collect();
         if !query.trim().is_empty() {
-            ranked.sort_by(|a, b| b.0.cmp(&a.0));
+            ranked.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
         }
         let matched: Vec<&protocol::Conversation> = ranked
             .into_iter()
@@ -4416,7 +4669,7 @@ impl Workbench {
             })
             .collect();
         if !query.trim().is_empty() {
-            matched.sort_by(|a, b| b.0.cmp(&a.0));
+            matched.sort_by_key(|(score, _, _)| std::cmp::Reverse(*score));
         }
 
         // Capped and scrollable: four built-ins fit, a hundred installed palettes do not,
@@ -5941,6 +6194,292 @@ impl Workbench {
         }))
     }
 
+    fn output_gallery_scroll(&self, key: &str) -> gpui::ScrollHandle {
+        self.output_gallery_scrolls
+            .borrow_mut()
+            .entry(key.to_string())
+            .or_default()
+            .clone()
+    }
+
+    /// A visible, clickable and draggable horizontal scrollbar for one gallery rail.
+    ///
+    /// The first version only painted the thumb. That was enough to imply an interaction and
+    /// then break it: a mouse-first Windows user naturally grabbed the bar shown on screen and
+    /// nothing happened. The whole 12px track is now a hit target; clicking outside the thumb
+    /// jumps toward that position and holding the mouse continues the drag (docs §158).
+    fn horizontal_scrollbar(
+        &self,
+        id: String,
+        handle: &gpui::ScrollHandle,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        let metrics = horizontal_scroll_metrics(handle)?;
+        let track_left = handle.bounds().origin.x;
+        let thumb_left = metrics.travel * metrics.progress;
+        let dragged = handle.clone();
+
+        Some(
+            div()
+                .id(SharedString::from(format!("gallery-scrollbar-{id}")))
+                .absolute()
+                .bottom(px(0.))
+                .left(px(0.))
+                .w(metrics.viewport)
+                .h(px(12.))
+                .hover(|style| style.cursor_pointer())
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(2.))
+                        .left(thumb_left)
+                        .h(px(8.))
+                        .w(metrics.thumb)
+                        .rounded_full()
+                        .bg(rgb(theme::border_strong())),
+                )
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(move |workbench, event: &gpui::MouseDownEvent, _window, cx| {
+                        let local_x =
+                            (event.position.x - track_left).clamp(px(0.), metrics.viewport);
+                        let grab_x = if local_x >= thumb_left
+                            && local_x <= thumb_left + metrics.thumb
+                        {
+                            local_x - thumb_left
+                        } else {
+                            metrics.thumb / 2.
+                        };
+                        let offset_x = horizontal_drag_offset(
+                            event.position.x,
+                            track_left,
+                            grab_x,
+                            metrics.travel,
+                            metrics.overflow,
+                        );
+                        let offset_y = dragged.offset().y;
+                        dragged.set_offset(gpui::point(offset_x, offset_y));
+                        workbench.gallery_scroll_drag = Some(GalleryScrollDrag {
+                            handle: dragged.clone(),
+                            track_left,
+                            grab_x,
+                            travel: metrics.travel,
+                            overflow: metrics.overflow,
+                        });
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                ),
+        )
+    }
+
+    /// One fixed-size member of a folder gallery, opened through the existing preview modal.
+    ///
+    /// Fixed here means only the *thumbnail*, not the underlying artifact: §152's failure was
+    /// ten full-width figures claiming ten screens before the researcher chose one. The modal
+    /// still renders the selected file at its useful size, and `Open` there still reaches the
+    /// original application.
+    fn output_thumbnail(
+        &self,
+        id: String,
+        output: &workspace::Output,
+        width: f32,
+        image_height: f32,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let shown = output.clone();
+        let (glyph, ink) = file_mark(&output.path);
+        let shape = self.shape_of(output);
+        let visual = match output.kind {
+            workspace::Kind::Figure => div().w_full().h(px(image_height)).child(
+                img(output.path.clone())
+                    .w_full()
+                    .h_full()
+                    .object_fit(gpui::ObjectFit::Contain),
+            ),
+            _ => div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_1()
+                .w_full()
+                .h(px(image_height))
+                .text_color(rgb(ink))
+                .text_size(px(22.))
+                .child(glyph)
+                .child(
+                    div()
+                        .text_color(rgb(theme::text_faint()))
+                        .text_size(px(11.))
+                        .child(shape.describe(output.bytes)),
+                ),
+        };
+
+        div()
+            .id(SharedString::from(id))
+            .flex()
+            .flex_col()
+            .flex_none()
+            .w(px(width))
+            .min_w(px(width))
+            .overflow_hidden()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(theme::border()))
+            .bg(rgb(if theme::is_light(&theme::current()) {
+                theme::elevated()
+            } else {
+                theme::surface()
+            }))
+            .hover(|style| style.border_color(rgb(theme::accent())).cursor_pointer())
+            .child(visual)
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .px_2()
+                    .py_1()
+                    .border_t_1()
+                    .border_color(rgb(theme::border()))
+                    .child(
+                        ui::Label::new(output_filename(output))
+                            .size(ui::Size::Compact)
+                            .ellipsis(),
+                    ),
+            )
+            .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                workbench.preview = Some(shown.clone());
+                cx.notify();
+            }))
+    }
+
+    /// A folder-labelled, sideways strip of artifacts on either output surface.
+    fn output_gallery(
+        &self,
+        scope: &str,
+        group: &OutputFolderGroup<'_>,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let folder = group.folder.to_string_lossy();
+        let key = format!("{scope}:{folder}");
+        let scroll = self.output_gallery_scroll(&key);
+        let label = distinguishing_tail(&output_folder_label(&group.folder), 44);
+        let count = group.outputs.len();
+        let (tile_width, image_height) = if compact { (140., 92.) } else { (190., 118.) };
+
+        let mut rail = div()
+            .id(SharedString::from(format!("output-gallery-rail-{key}")))
+            .flex()
+            .flex_row()
+            .gap_2()
+            .w_full()
+            .min_w_0()
+            // Reserve the visible thumb rather than painting it over a filename (§152).
+            .pb_3()
+            .overflow_x_scroll()
+            .track_scroll(&scroll);
+        for (at, output) in group.outputs.iter().enumerate() {
+            rail = rail.child(self.output_thumbnail(
+                format!("output-gallery-item-{key}-{at}"),
+                output,
+                tile_width,
+                image_height,
+                cx,
+            ));
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .w_full()
+            .min_w_0()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .w_full()
+                    .min_w_0()
+                    .child(
+                        ui::Label::new(label)
+                            .size(ui::Size::Compact)
+                            .ellipsis(),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(rgb(theme::text_faint()))
+                            .text_xs()
+                            .child(format!("{count} files · scroll sideways")),
+                    ),
+            )
+            .child(
+                div()
+                    .relative()
+                    .w_full()
+                    .min_w_0()
+                    .child(rail)
+                    .children(self.horizontal_scrollbar(key, &scroll, cx)),
+            )
+    }
+
+    fn output_panel_row(
+        &self,
+        id: String,
+        output: &workspace::Output,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let shown = output.clone();
+        let (glyph, ink) = file_mark(&output.path);
+        div()
+            .id(SharedString::from(id))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .w_full()
+            .min_w_0()
+            .p_2()
+            .rounded_lg()
+            .bg(rgb(theme::elevated()))
+            .hover(|style| style.bg(rgb(theme::accent_soft())).cursor_pointer())
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(rgb(ink))
+                    .text_size(px(13.))
+                    .child(glyph),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_grow()
+                    .min_w_0()
+                    // The filename is the distinguishing tail. The parent folder has its own
+                    // gallery heading, so repeating its UUID here recreates §152 exactly.
+                    .child(
+                        ui::Label::new(output_filename(output))
+                            .size(ui::Size::Compact)
+                            .ellipsis(),
+                    )
+                    .child(
+                        div()
+                            .text_color(rgb(theme::text_faint()))
+                            .text_size(px(11.))
+                            .child(self.shape_of(output).describe(output.bytes)),
+                    ),
+            )
+            .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                workbench.preview = Some(shown.clone());
+                cx.notify();
+            }))
+    }
+
     /// The first rows of a table, measured at most once per version of the file.
     ///
     /// Cached beside the shape and for the same reason: this renders on every frame of a
@@ -6862,9 +7401,20 @@ impl Workbench {
                         .child("— you stopped this turn; the answer above is incomplete"),
                 );
             }
-            // Files last: the answer explains them, so it should be read first.
-            for (at, output) in message.outputs.iter().enumerate() {
-                block = block.child(self.output_card(index * 64 + at, output, cx));
+            // Files last: the answer explains them, so it should be read first. A productive
+            // folder is one sideways gallery rather than one full-width card per artifact — ten
+            // plots were ten screens before the reader chose any of them (§152).
+            for (at, group) in output_folder_groups(&message.outputs).iter().enumerate() {
+                if let [output] = group.outputs.as_slice() {
+                    block = block.child(self.output_card(index * 64 + at, output, cx));
+                } else {
+                    block = block.child(self.output_gallery(
+                        &format!("transcript-{index}-{at}"),
+                        group,
+                        false,
+                        cx,
+                    ));
+                }
             }
             // What to do with the answer, under the answer. All three exist already — the first
             // is a palette command, and a command nobody knows the name of is a feature nobody
@@ -7342,7 +7892,6 @@ impl Workbench {
             self.settings_open = false;
             self.restore_focus = true;
             cx.notify();
-            return;
         }
     }
 
@@ -8200,6 +8749,14 @@ impl Workbench {
                 // conversation too. This is the line that makes the button's wording true.
                 self.approve_conversation = false;
                 self.approve_tasks.clear();
+                // **And the tasks and jobs themselves**, which opening another conversation has
+                // always cleared and this path never did. The panel therefore kept showing the
+                // previous conversation's background work beside an empty transcript, and the
+                // grants just revoked applied to cards that stayed clickable. Nothing is stopped:
+                // both run on their own threads, and reopening the conversation re-arms the
+                // watchers from its state (docs §159).
+                self.tasks.clear();
+                self.jobs.clear();
                 // The conversation just left should appear in the list.
                 self.refresh_conversations(cx);
                 // The spine is thread-independent — the mission survives, so say so
@@ -9353,6 +9910,13 @@ impl Workbench {
             .map(|listing| listing.groups.as_slice())
             .unwrap_or_default();
         let count: usize = files.iter().map(|(_, items)| items.len()).sum();
+        // `output_listing` groups by file kind for ordering. The gallery's meaningful boundary
+        // is instead the directory the agent chose (§152), so restore one ordered sequence before
+        // grouping by parent. Cloning metadata only; no file is read here.
+        let ordered_outputs: Vec<workspace::Output> = files
+            .iter()
+            .flat_map(|(_, items)| items.iter().cloned())
+            .collect();
 
         let mut section = div()
             .flex()
@@ -9385,62 +9949,19 @@ impl Workbench {
             );
         }
 
-        for (_, items) in files {
-            for output in items {
-                let shown = output.clone();
-                let (glyph, ink) = file_mark(&output.path);
-                section = section.child(
-                    div()
-                        .id(SharedString::from(format!("file-{}", output.name)))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_2()
-                        .w_full()
-                        .min_w_0()
-                        .p_2()
-                        .rounded_lg()
-                        // A fill instead of a border: thirty bordered rows in a 330px column is
-                        // thirty horizontal lines, and the eye reads those as a table it is
-                        // supposed to compare across.
-                        .bg(rgb(theme::elevated()))
-                        .hover(|style| style.bg(rgb(theme::accent_soft())).cursor_pointer())
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_color(rgb(ink))
-                                .text_size(px(13.))
-                                .child(glyph),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .flex_grow()
-                                .min_w_0()
-                                .child(
-                                    ui::Label::new(output.name.clone())
-                                        .size(ui::Size::Compact)
-                                        .ellipsis(),
-                                )
-                                // The real shape of the file, not just how much of the disk it
-                                // takes: `1,204 rows · 11 cols` is what decides whether it is the
-                                // file you wanted. See `workspace::Shape` for why a PDF gets a
-                                // size and no page count.
-                                .child(
-                                    div()
-                                        .text_color(rgb(theme::text_faint()))
-                                        .text_size(px(11.))
-                                        .child(self.shape_of(output).describe(output.bytes)),
-                                ),
-                        )
-                        .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                            // In the window first. Leaving the app to look at a 4 KB CSV
-                            // is a context switch out of the work, and back is not free.
-                            workbench.preview = Some(shown.clone());
-                            cx.notify();
-                        })),
-                );
+        for (at, group) in output_folder_groups(&ordered_outputs).iter().enumerate() {
+            if let [output] = group.outputs.as_slice() {
+                section = section.child(self.output_panel_row(
+                    format!("panel-output-{}", output.name),
+                    output,
+                    cx,
+                ));
+            } else {
+                // One compact rail replaces N near-identical rows. It retains the folder heading,
+                // filename tail, kind/shape, and click-to-preview behavior while making a twelve-
+                // artifact run occupy one panel block instead of most of the panel (§152).
+                section =
+                    section.child(self.output_gallery(&format!("panel-{at}"), group, true, cx));
             }
         }
 
@@ -9577,6 +10098,28 @@ impl Render for Workbench {
             .on_action(cx.listener(Self::dismiss))
             .on_mouse_move(
                 cx.listener(|workbench, event: &gpui::MouseMoveEvent, window, cx| {
+                    if let Some(drag) = workbench.gallery_scroll_drag.as_ref() {
+                        // A release outside the narrow track may not deliver its mouse-up to the
+                        // thumb. The move event still tells us the button is no longer held, so
+                        // end the drag here as well instead of letting the next click move a rail
+                        // the researcher is no longer touching (docs §158).
+                        if !event.dragging() {
+                            workbench.gallery_scroll_drag = None;
+                            cx.notify();
+                            return;
+                        }
+                        let offset_x = horizontal_drag_offset(
+                            event.position.x,
+                            drag.track_left,
+                            drag.grab_x,
+                            drag.travel,
+                            drag.overflow,
+                        );
+                        let offset_y = drag.handle.offset().y;
+                        drag.handle.set_offset(gpui::point(offset_x, offset_y));
+                        cx.notify();
+                        return;
+                    }
                     let Some(edge) = workbench.dragging else {
                         return;
                     };
@@ -9599,7 +10142,9 @@ impl Render for Workbench {
             .on_mouse_up(
                 gpui::MouseButton::Left,
                 cx.listener(|workbench, _event: &gpui::MouseUpEvent, _window, cx| {
-                    if workbench.dragging.take().is_some() {
+                    if workbench.dragging.take().is_some()
+                        || workbench.gallery_scroll_drag.take().is_some()
+                    {
                         cx.notify();
                     }
                 }),
@@ -9747,9 +10292,96 @@ fn replay(path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+// The behavior suite stays immediately after the UI implementation it exercises, while
+// the CLI-only launch helpers remain at the bottom of the executable. Moving this large
+// module past startup code would create merge churn without changing test visibility
+// (the source-order lesson recorded in docs §118).
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn outputs_in_the_same_agent_folder_become_one_gallery() {
+        let task = "019fe9f6-9126-7710-a806-35d5e09170a4";
+        let names = [
+            PathBuf::from(task).join("guinea_pig_eda_output/plots/health.png"),
+            PathBuf::from(task).join("guinea_pig_eda_output/plots/yield.png"),
+            PathBuf::from(task).join("guinea_pig_eda_output/tables/summary.csv"),
+        ];
+        let outputs: Vec<workspace::Output> = names
+            .into_iter()
+            .map(|name| workspace::Output {
+                path: name.clone(),
+                name: name.to_string_lossy().into_owned(),
+                kind: workspace::Kind::Other,
+                bytes: 1,
+                modified: std::time::SystemTime::UNIX_EPOCH,
+            })
+            .collect();
+
+        let groups = output_folder_groups(&outputs);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].outputs.len(), 2);
+        assert_eq!(groups[1].outputs.len(), 1);
+        assert_eq!(
+            output_folder_label(&groups[0].folder),
+            "guinea_pig_eda_output / plots"
+        );
+    }
+
+    #[test]
+    fn a_thumbnail_names_the_file_instead_of_its_shared_uuid_prefix() {
+        let relative = PathBuf::from("019fe9f6-9126-7710-a806-35d5e09170a4")
+            .join("guinea_pig_eda_output/plots/health_by_activity_box.png");
+        let output = workspace::Output {
+            path: relative.clone(),
+            name: relative.to_string_lossy().into_owned(),
+            kind: workspace::Kind::Figure,
+            bytes: 1,
+            modified: std::time::SystemTime::UNIX_EPOCH,
+        };
+
+        assert_eq!(output_filename(&output), "health_by_activity_box.png");
+        let long = distinguishing_tail("shared-prefix-but-the-useful-name-is-at-the-end.csv", 24);
+        assert!(long.starts_with('…'), "{long}");
+        assert!(long.ends_with("name-is-at-the-end.csv"), "{long}");
+        assert_eq!(long.chars().count(), 24);
+    }
+
+    #[test]
+    fn dragging_a_gallery_thumb_reaches_every_hidden_file() {
+        // A 200px thumb journey represents 800px of hidden content. The pointer keeps the
+        // same 20px grip inside the thumb, and positions beyond either end clamp instead of
+        // exposing blank space (docs §158).
+        let offset = |pointer| {
+            horizontal_drag_offset(px(pointer), px(100.), px(20.), px(200.), px(800.))
+        };
+        assert_eq!(offset(0.), px(0.));
+        assert_eq!(offset(120.), px(0.));
+        assert_eq!(offset(220.), px(-400.));
+        assert_eq!(offset(400.), px(-800.));
+    }
+
+    #[test]
+    fn a_gallery_thumb_never_grows_wider_than_the_rail_it_sits_in() {
+        // A wide rail: the thumb is proportional, and there is room to drag it.
+        let wide = horizontal_thumb_width(px(400.), px(800.));
+        assert!(wide > px(28.) && wide < px(400.), "{wide:?}");
+
+        // A long rail: proportional would be a few pixels, so the 28px floor applies.
+        assert_eq!(horizontal_thumb_width(px(300.), px(9_000.)), px(28.));
+
+        // A rail narrower than that floor is the case the floor alone gets wrong. The thumb has
+        // to stop at the track width, because `travel = viewport - thumb` going negative paints
+        // it outside the track and leaves it undraggable — a control that reads as broken rather
+        // than as absent.
+        for narrow in [1., 10., 27.9] {
+            let thumb = horizontal_thumb_width(px(narrow), px(500.));
+            assert_eq!(thumb, px(narrow), "a {narrow}px rail");
+            assert!(px(narrow) - thumb >= px(0.), "travel went negative at {narrow}");
+        }
+    }
 
     #[test]
     fn csv_columns_get_distinct_colours_from_the_live_palette() {
@@ -9942,7 +10574,7 @@ mod tests {
     /// as chosen and Enter did nothing at all (docs §69).
     #[test]
     fn the_row_drawn_as_chosen_is_the_one_enter_runs() {
-        let commands = vec![Command::OpenSettings];
+        let commands = [Command::OpenSettings];
         for stale in [0usize, 1, 8, 999] {
             let clamped = stale.min(commands.len() - 1);
             assert_eq!(
@@ -10378,16 +11010,18 @@ mod tests {
         // agent lives inside WSL, so a prompt naming `C:\…` would send it looking for a
         // file that does not exist there — and the researcher would have no idea why.
         let _env = backend::env_lock::hold();
-        let mut config = backend::BackendConfig::default();
-        config.wsl = Some(backend::WslTarget {
-            distro: None,
-            dir: "~/Mini-Me".into(),
-        });
+        let config = backend::BackendConfig {
+            wsl: Some(backend::WslTarget {
+                distro: None,
+                dir: "~/Mini-Me".into(),
+            }),
+            ..Default::default()
+        };
         let translated =
             config.path_for_backend(std::path::Path::new(r"C:\Users\LENOVO\Documents\yield.csv"));
         assert_eq!(translated, "/mnt/c/Users/LENOVO/Documents/yield.csv");
 
-        let prompt = prompt_for_dropped(&[translated.clone()], &[false]);
+        let prompt = prompt_for_dropped(std::slice::from_ref(&translated), &[false]);
         assert!(prompt.contains(&translated), "{prompt}");
         assert!(!prompt.contains('\\'), "no Windows path survives: {prompt}");
 

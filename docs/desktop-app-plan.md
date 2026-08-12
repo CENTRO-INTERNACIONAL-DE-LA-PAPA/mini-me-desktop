@@ -8800,6 +8800,147 @@ belongs together, and the panel is discarding it.
 *Ninth: the value needed was one the program already had.*
 
 
+## 153. The folder becomes the gallery (2026-08-10)
+
+§152 did not need an invented grouping model. The recursive output walk already retained the
+relative parent of every artifact; the two renderers were simply throwing that boundary away.
+They now group on the **full parent path**, so two different workers' `plots/` directories cannot
+silently merge, while the heading removes only a leading generated thread UUID and says the part
+the agent chose: `guinea_pig_eda_output / plots`.
+
+The interaction follows the platform's own collection pattern rather than copying WhatsApp's
+decoration. Microsoft's Windows guidance names interactive photo libraries as an ItemsView use
+case and puts scrolling inside the collection
+([Items view](https://learn.microsoft.com/en-us/windows/apps/develop/ui/controls/itemsview)). In
+GPUI that becomes one fixed-size thumbnail rail per folder, horizontal overflow, a visible
+horizontal thumb, and the existing preview modal on click. A folder with one artifact keeps its
+larger card; collapsing it would save no space and make an ordinary one-file answer worse.
+
+Both surfaces use the same grouping rule:
+
+- In the transcript, a productive folder is one rail instead of one full-width card per file.
+- In Outputs, the same folder is one compact rail instead of twelve near-identical rows.
+- A tile's primary label is the basename, never the shared relative path. If the basename itself
+  is too long, its **leading** edge is elided so the differentiating tail and extension survive.
+- Every rail owns its own `ScrollHandle`; moving one folder cannot move another. The bar is drawn
+  explicitly because GPUI's overflow scrolls but supplies no visual affordance, and a clipped row
+  on a mouse-driven Windows desktop does not communicate sideways content.
+
+The structural before/after is deterministic even in the headless build environment: the reported
+ten-plot turn built ten figure cards, each allowed up to 420px of image height; it now builds one
+folder block whose figures share a single 118px-high rail. The exact rendered pixels still need a
+Windows-eye check because this machine cannot open GPUI. Two sentence-named tests pin the folder
+boundary, UUID removal and distinguishing filename tail. The complete result is **241 passing
+tests**, with no new Clippy warning (the base branch's existing warnings remain).
+
+*Tenth: the value needed was one the program already had — and this time the implementation keeps
+it instead of flattening it twice.*
+
+
+## 158. A scrollbar that only looked interactive, and an image cache that remembered too soon (2026-08-11)
+
+The first Windows pass on §153 found both failures immediately. The agent generated the figures,
+their cards appeared, and the pictures themselves stayed blank until the application restarted.
+The horizontal thumb was visible beneath them, but clicking and dragging it did nothing.
+
+These were two different stale-state mistakes:
+
+- The Outputs panel scans the filesystem whenever it paints, including while an `execute` process
+  still has a PNG open. GPUI's global image cache keys a local image by path and retains a decode
+  error just as it retains a decoded image. If the first read lands between create and close, every
+  later frame asks for the same path and receives the same cached failure. Restarting worked only
+  because it rebuilt that cache. A finished foreground turn or background task now schedules two
+  bounded follow-up passes across the Windows/WSL hand-off. Each pass re-collects late files,
+  evicts figure paths from GPUI's asset cache, and repaints. This is deliberately not a permanent
+  watcher: outputs are bounded completion events, and polling the researcher's Documents folder
+  forever would spend idle time fixing a race that only exists while a writer is finishing.
+- `horizontal_scrollbar` was a six-pixel painted `div`, not a control. It communicated the native
+  scrollbar contract without implementing it. The gallery now gives the bar a 12px mouse target,
+  maps the thumb's travel onto the `ScrollHandle`'s hidden width, preserves the point grabbed
+  inside the thumb, supports clicking the track, and ends the drag even when release is observed
+  away from the thumb. Each rail still owns its own handle, so §153's independent positions remain.
+
+The mapping is a pure function with a sentence-named regression test: the left edge produces zero
+offset, the midpoint reveals half the hidden width, and dragging beyond the right edge clamps at
+the last file. The image-cache correction still needs the same Windows-eye check that found it:
+generate several plots, leave the app open, and confirm the thumbnails fill without a restart.
+
+*Eleventh: an affordance is a promise of behavior, and a cache key needs the version of the thing
+it remembers—even when the library only gives us its path.*
+
+
+## 159. The client knew the parent; the worker was asked to guess it (2026-08-11)
+
+A second live EDA exposed the same filing defect §150/§151 had made less likely, not impossible:
+
+```
+Documents/Mini-Me/019ff21e-a473-…/   the conversation
+Documents/Mini-Me/019ff231-2332-…/   its delegated worker, beside it
+```
+
+The worker completed and the answer rendered, but the conversation's Outputs panel contained only
+its own two bookkeeping files. The researcher deleted that reproduction before it could be read
+from disk; the exact UUIDs and timestamps remain in the screenshot, while both backend routes now
+correctly return 404 for the deleted threads. A following run landed correctly. That difference is
+the evidence: this is an intermittent ownership signal, not a deterministic path calculation.
+
+### The request already had the only authoritative value
+
+Every coordinator request is sent to `/threads/<conversation>/runs/stream`. The Rust client
+therefore knows the conversation id at the point it assembles the run config, but sent the model,
+keys and project without `__workspace_thread__`. The overlay then tried to reconstruct the missing
+owner inside `start_async_task` from, in order, an inherited pin and three LangGraph thread metadata
+locations. §150 already measured why that cannot be load-bearing: not every tool-call context has
+those metadata fields. When none does, a valid worker starts with its own UUID as the workspace
+root; no error occurs and every generated file is filed one directory sideways.
+
+The client now sends `configurable.__workspace_thread__ = <conversation>` on every fresh turn and
+foreground resume. The async launcher already gives an explicit pin priority and forwards it under
+its directory-only key, so the background thread still owns its checkpoints while its files are
+nested under the conversation. No protected overlay code needed to change.
+
+Background approval resumes carry the owner again. This closes a second version of the same race:
+the overlay remembers worker→conversation ownership in process memory, but a backend restart while
+a task waits clears that map. A decision made afterwards must not let the rest of the task resume in
+a sibling folder.
+
+### The resume asked the wrong object which conversation it was
+
+Caught in review, before the change shipped. The resume path read the owner from
+`Sidecar::thread_id()` — *the conversation open right now* — and those are not the same thing.
+`open_conversation` clears the task list, so switching conversations is safe; `Command::NewThread`
+never did, so a pending task from the previous conversation stayed on screen and stayed clickable
+while `thread_id()` moved on to a new thread. Approving it then named the new conversation as the
+worker's owner.
+
+With the backend still running this was invisible: `_PINNED_BY_THREAD` already held the true owner,
+first-sighting-wins kept it, and the disagreement was logged. With the backend restarted — the one
+case this whole change exists for — that map is empty and the new conversation wins. So the fix was
+inert exactly where it was safe and wrong exactly where it mattered, and its failure mode was
+*worse* than the one it replaced: a sibling UUID folder is visibly wrong, while files appearing
+inside an unrelated conversation's Outputs panel look like they belong there.
+
+The owner is now carried on `AsyncTask`, stamped by whichever call site ingested it — the streaming
+snapshot (safe to read the open thread there: `apply` only runs mid-turn, and both New thread and
+opening a conversation refuse while streaming) or `open_conversation`'s own parameter. A task
+already being watched keeps the owner it was first seen with. `owning_conversation()` puts the
+"blank is not a directory name" rule next to the field instead of at the call site, because an
+empty pin would write to the workspace *root* — strictly worse again. Unknown sends no key at all
+and lets the backend fall back to its own inference. `Command::NewThread` now clears `tasks` and
+`jobs`, which is the pre-existing bug this change had made load-bearing.
+
+Three sentence-named tests: blank and whitespace owners name no conversation, the payload decoder
+does not invent one, and the request shape covers fresh runs, resumes and blank ids.
+
+The live Windows confirmation is deliberately exact: start a new conversation, ask it to delegate an
+EDA, and leave Explorer open at `Documents\Mini-Me`. The correct result is one new top-level
+conversation UUID and the worker UUID, if it creates one, **inside** it—never a second UUID beside
+it. Then the harder half: with a task waiting for approval, press New thread. The pending card
+should disappear with the conversation it belonged to.
+
+*Twelfth: a value known at the boundary should cross the boundary explicitly, especially when its
+absence is a successful-looking failure. And the corollary the review found — the boundary has to
+send the value that belongs to the **work**, not the one that belongs to the window.*
 ## 160. Sixteen real files escaped to WSL `/tmp` (2026-08-11)
 
 This first looked like §150 again: Explorer showed two UUID folders under `Documents\Mini-Me`

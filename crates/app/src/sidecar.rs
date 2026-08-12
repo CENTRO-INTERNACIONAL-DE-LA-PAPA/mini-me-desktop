@@ -780,7 +780,18 @@ impl Sidecar {
     }
 
     /// Answer a background worker's approval request on its own thread.
-    pub fn decide_task(&self, thread_id: String, decisions: Vec<Decision>) {
+    ///
+    /// `owner` is the conversation whose folder the worker writes into — passed in by the
+    /// caller, and **never** read from `self.thread_id()` here. A backend restart can erase the
+    /// backend's in-memory worker→conversation map while a task waits for approval, which is why
+    /// the resume carries the owner at all; but the conversation *open* at approval time need not
+    /// be the one that launched the task, and naming it files the worker's output under an
+    /// unrelated conversation (docs §159).
+    ///
+    /// `None` means the caller does not know. It is sent as no key at all, so the backend falls
+    /// back to its own inference — at worst a visible sibling folder, which is the failure this
+    /// project already knows how to spot.
+    pub fn decide_task(&self, thread_id: String, owner: Option<String>, decisions: Vec<Decision>) {
         let base_url = self.base_url.clone();
         let model = self.model.lock().expect("model mutex").clone();
         let project = self.project();
@@ -788,7 +799,10 @@ impl Sidecar {
             let client = LangGraphClient::new(base_url)
                 .with_model(model)
                 .with_project(project);
-            if let Err(error) = client.resume_background(&thread_id, &decisions).await {
+            if let Err(error) = client
+                .resume_background(&thread_id, owner.as_deref(), &decisions)
+                .await
+            {
                 tracing::error!(%thread_id, %error, "could not answer a background task");
             }
         });
