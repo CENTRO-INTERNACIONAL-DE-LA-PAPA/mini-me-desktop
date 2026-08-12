@@ -73,6 +73,17 @@ pub enum DeleteFiles {
     },
 }
 
+/// A conversation listing, and whether the pre-tag scan ran to completion behind it.
+///
+/// `scanned` is what the caller persists. Reported separately from the list because the two
+/// answer different questions: the list is what to show, `scanned` is whether the migration is
+/// finished and must never run again (docs §166).
+#[derive(Debug)]
+pub struct Adopted {
+    pub conversations: Vec<Conversation>,
+    pub scanned: bool,
+}
+
 #[derive(Debug)]
 pub struct DeleteOutcome {
     /// `Some` means the server records are gone but Windows could not remove the named folder.
@@ -489,28 +500,44 @@ impl Sidecar {
     }
 
     /// The researcher's past conversations, newest first.
-    pub fn list_conversations(&self) -> mpsc::UnboundedReceiver<Vec<Conversation>> {
+    /// `adopt` runs §90's one-time migration of pre-tag conversations first.
+    ///
+    /// **The caller decides, and remembers.** It used to decide for itself by asking whether any
+    /// tagged conversation existed, which is empty both on the launch that needs the migration
+    /// and on the launch after a researcher deletes their last conversation — so deleting
+    /// everything re-tagged whatever threads were left, background workers included, and the
+    /// deleted rows came back (docs §166). Emptiness is a symptom; whether the migration has run
+    /// is a fact, and it belongs in the settings file.
+    pub fn list_conversations(&self, adopt: bool) -> mpsc::UnboundedReceiver<Adopted> {
         let (tx, rx) = mpsc::unbounded();
         let base_url = self.base_url.clone();
         self.runtime.spawn(async move {
             let client = LangGraphClient::new(base_url);
-            // Before the first listing, adopt anything that predates the tag. Cheap and
-            // self-cancelling — it returns at once as soon as one tagged thread exists — and
-            // it is the difference between a researcher's history being there and appearing
-            // to have been deleted by an update (docs §90).
-            match client.adopt_untagged_conversations().await {
-                Ok(0) => {}
-                Ok(adopted) => tracing::info!(adopted, "adopted conversations from before the tag"),
-                // `debug`, not `warn`. The first refresh fires while the backend is still
-                // starting, so this fails once on every launch — and a warning that appears every
-                // time is one nobody reads the day it means something. `list_conversations`
-                // beside it already reasoned exactly this way.
-                Err(error) => tracing::debug!(%error, "could not adopt older conversations yet"),
+            let mut scanned = false;
+            if adopt {
+                match client.adopt_untagged_conversations().await {
+                Ok(count) => {
+                    scanned = true;
+                    if count > 0 {
+                        tracing::info!(count, "adopted conversations from before the tag");
+                    }
+                }
+                    // `debug`, not `warn`. The first refresh fires while the backend is still
+                    // starting, so this fails once on every launch — and a warning that appears
+                    // every time is one nobody reads the day it means something. And `scanned`
+                    // stays false, so the marker is not written for a scan that never ran.
+                    Err(error) => {
+                        tracing::debug!(%error, "could not adopt older conversations yet")
+                    }
+                }
             }
             // 200 is far past what the sidebar can usefully show and still one request.
             match client.list_conversations(200).await {
                 Ok(conversations) => {
-                    let _ = tx.unbounded_send(conversations);
+                    let _ = tx.unbounded_send(Adopted {
+                        conversations,
+                        scanned,
+                    });
                 }
                 // Not an error the researcher needs: an empty sidebar says the same thing,
                 // and a backend that is still starting will answer the next refresh.

@@ -9381,3 +9381,108 @@ labels. No truncation machinery, so no layout to get wrong.
 
 *Seventeenth: a component that documents its own trap is not the same as a component that prevents
 it — and the trap was two layers away from where the note lives.*
+
+
+## 165. Four abbreviations you had to hover to find (2026-08-12)
+
+A screenshot of the sidebar beside a screenshot of another app's `⋮` menu, and the ask:
+
+> *"I think we need to improve the app control to create a new project and to create new
+> conversations. We can use the vertical 3 dots and when click we can show the options … There is a
+> New button so when click new a sub modal menu can say: New conversation and the other option New
+> project."*
+
+### Creating a project had no button at all
+
+A project is "a name some conversation is filed under" (§106), so the only route to a new one was
+the *file* picker: open a conversation, open the picker, type a name, and the conversation moves
+into the folder that naming it created. That is a real gesture and it works, but it is filing —
+there was nothing that meant **start** a project, and a researcher beginning a new line of enquiry
+starts before they have anything to file.
+
+`New` is now a menu with two rows. `New project…` opens the same picker in a mode where choosing a
+name calls `new_thread_in` instead of `file_in_project` — the same list, the same
+`New project “…”` first row, the same typing. Only what choosing *does* differs, so there is no
+second way to name a project and no second place for the rules to drift.
+
+### One target instead of four, and words instead of characters
+
+Each row carried `rename` and `✕`; each project heading carried `+` and `✕`. All four appeared only
+on hover, so the way to discover what a row could do was to point at it and decode two
+abbreviations — and `+` beside a heading is not self-evidently "start a conversation in this
+project". They are one always-visible `⋮` per row and per heading now, whose contents are
+sentences. `New conversation in Late blight` says which project even when the menu is floating over
+a list of them.
+
+Nothing new is reachable: every row calls a method the sidebar already had. That is `menu.rs`'s
+stated rule for the right-click menu — *"the menu is a second door onto the same room, not a second
+implementation"* — and it is why this is a rearrangement rather than a feature.
+
+### §163, one layer further in
+
+A conversation row opens that conversation on click; a project heading opens its folder in
+Explorer. The `⋮` sits inside both. Without `stop_propagation`, asking a row what it can do would
+*switch conversations* first, and asking a heading would launch a file manager. The same shape as
+§163's overlays, at a smaller scale, and reachable the same way: a control drawn on top of a
+clickable thing is not thereby the only thing that was clicked.
+
+`menu_card()` is now one function. Both menus need `occlude` and both need the left press swallowed;
+the right-click menu had learned both, and a second menu written beside it would have had to learn
+them again.
+
+*Eighteenth: an affordance nobody can find is not smaller than a missing one, it is worse — it
+looks like the feature exists.*
+## 166. The migration could not tell an empty list from a cleared one (2026-08-12)
+
+§154 and §155 shipped, the researcher deleted their test conversations, restarted, and the
+conversations were back. Explorer showed `Documents\Mini-Me` holding one file — `subagents.json` —
+so the *files* had gone. Only the rows returned.
+
+That is the reverse of §154's failure, which makes it a different bug wearing the same shirt: there
+the deletion never became durable, here it did and something put the rows back.
+
+### §90's rescue has no memory
+
+`adopt_untagged_conversations` exists because `dfea94a` began filtering the sidebar on a metadata
+tag, which hid every conversation created before it — *"the conversations doesn't load, like this
+was erased"* (§90). It searches untagged threads, keeps the ones with human messages, and tags
+them. Its own doc says **"Runs once, and only when there is nothing to lose."**
+
+It runs on **every** listing, and its guard is not "has it run" but "is the tagged list empty":
+
+```rust
+if !self.list_conversations(1).await?.is_empty() {
+    return Ok(0);
+}
+```
+
+Emptiness is true in two situations the guard cannot tell apart. One is the launch after a pull,
+where old history is hidden and the scan is exactly right. The other is **the researcher having
+just deleted everything** — and then the scan re-tags whatever threads are left. Background workers'
+threads are left, because a conversation's delete removes its own thread and not the ones it
+delegated to; the workers carry the task description as a human message, which is the very test
+adoption uses to recognise a conversation.
+
+So: delete your last conversation, and the next refresh promotes leftovers into the sidebar. The
+folders stay deleted, because that half worked. The rows come back.
+
+### A fact, not a symptom
+
+`adopted_untagged` is now a settings field, written once the scan completes — including when it
+adopts nothing, which is the ordinary case and precisely the installation that must stop scanning.
+The caller decides and the caller remembers; `list_conversations` takes `adopt` and reports back
+whether the scan ran, because "what to show" and "is the migration finished" are two questions and
+one return value was answering only the first.
+
+Read from the stored settings rather than from `self.draft`, for the reason `remember_panels`
+already gives: the draft is the Settings pane's editing buffer, and this decision has to be made
+from what survives to the next launch.
+
+The doc comment was not merely optimistic, it was **false** — "runs once" described a design nobody
+had built, and it sat directly above the loop that ran every time. Three sections this week have
+turned on a comment asserting something the code did not do (§148's docstring, §161's advice,
+§155's guard). The pattern is specific enough to name: when a comment claims a *frequency* or a
+*boundary*, that claim is testable, and if it is worth writing down it is worth a test.
+
+*Nineteenth: a one-time migration needs a record that it ran. Inferring it from the state it
+produces means it fires again the moment a person legitimately reproduces that state.*

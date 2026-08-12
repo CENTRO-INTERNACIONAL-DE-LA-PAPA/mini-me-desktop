@@ -147,6 +147,19 @@ pub struct Settings {
     /// every save is one nobody can diff.
     #[serde(default)]
     pub subagents: std::collections::BTreeMap<String, String>,
+    /// Whether §90's one-time adoption of pre-tag conversations has already run.
+    ///
+    /// **The migration had no "done" marker, only a symptom.** It ran whenever the tagged search
+    /// came back empty, and its doc called that self-cancelling — but "no conversations" is true
+    /// in two situations it cannot tell apart: a fresh pull where the tag is new and old history
+    /// is hidden, and *the researcher having just deleted everything*. In the second it re-tagged
+    /// every remaining thread with human messages, including the background workers' own, so
+    /// deleted test conversations came back on the next refresh (docs §166).
+    ///
+    /// Written once the scan completes, whatever it adopted — including zero, which is the
+    /// ordinary case on an installation that never had untagged threads.
+    #[serde(default)]
+    pub adopted_untagged: bool,
     /// Whether the conversation list on the left is showing.
     ///
     /// Someone who closed the conversation list to get the screen back did not mean "until I next
@@ -189,6 +202,7 @@ impl Default for Settings {
             async_subagents: false,
             theme: crate::theme::DEFAULT_NAME.to_string(),
             subagents: std::collections::BTreeMap::new(),
+            adopted_untagged: false,
             sidebar_open: true,
             panel_open: true,
             road_open: true,
@@ -524,6 +538,7 @@ mod tests {
             backend_dir: "~/Mini-Me".into(),
             async_subagents: true,
             theme: "Slate".into(),
+            adopted_untagged: false,
             subagents: [("report_writer".to_string(), "openai::gpt-5.4".to_string())]
                 .into_iter()
                 .collect(),
@@ -555,6 +570,37 @@ mod tests {
         // precisely so an existing settings.toml — every one written before this build — does not
         // open with all three panels shut.
         assert!(settings.sidebar_open && settings.panel_open && settings.road_open);
+    }
+
+    #[test]
+    fn the_pre_tag_scan_is_remembered_so_it_cannot_resurrect_deleted_work() {
+        // §90's migration guarded itself on "there are no tagged conversations", which is true
+        // both on the launch that needs it and on the launch after a researcher deletes their
+        // last conversation. In the second case it re-tagged whatever threads were left — the
+        // background workers' among them — and the deleted rows came back (§166).
+        let fresh = Settings::default();
+        assert!(
+            !fresh.adopted_untagged,
+            "a new installation still owes the one-time scan"
+        );
+
+        // An older settings file predates the field, and must still parse — it is exactly the
+        // installation whose history the migration was written to rescue.
+        let older: Settings = toml::from_str(
+            "provider = \"anthropic\"\nmodel_id = \"claude-sonnet-4-5\"",
+        )
+        .expect("a settings file from before this field");
+        assert!(!older.adopted_untagged);
+
+        // And once recorded it survives the round trip, which is the whole point: the fact has
+        // to outlive the process that learned it.
+        let done = Settings {
+            adopted_untagged: true,
+            ..older
+        };
+        let text = toml::to_string_pretty(&done).expect("serialise");
+        let read_back: Settings = toml::from_str(&text).expect("parse");
+        assert!(read_back.adopted_untagged);
     }
 
     #[test]
