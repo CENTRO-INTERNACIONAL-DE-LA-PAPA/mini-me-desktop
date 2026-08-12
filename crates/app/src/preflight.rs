@@ -1013,7 +1013,83 @@ fn tail_file(
     }
 }
 
-pub fn run_streaming(argv: &[String], mut emit: impl FnMut(String)) -> anyhow::Result<bool> {
+/// A running repair's process, for as long as stopping it can mean anything.
+///
+/// **The whole design is "hold the thing we already own".** §168 specified a `setsid` handshake:
+/// publish the Linux process-group id, then kill the group from a second `wsl.exe`. Measured on
+/// the target machine (§170), `setsid` makes `wsl.exe` exit *while the Linux tree keeps running* —
+/// so the elaborate protocol would have detached the repair from the one process the app can
+/// already reach. Killing the attached `wsl.exe` reaps every descendant. So this holds a pid and
+/// nothing else.
+///
+/// The pid cannot be recycled underneath us while it is armed: the waiter thread still holds the
+/// `Child`, so the process is unreaped — a zombie at worst on Unix, a live handle on Windows — and
+/// neither operating system hands the number to anyone else until that handle goes.
+#[derive(Clone, Default)]
+pub struct Cancel(std::sync::Arc<std::sync::Mutex<Option<u32>>>);
+
+impl Cancel {
+    fn arm(&self, pid: u32) {
+        *self.0.lock().expect("cancel mutex") = Some(pid);
+    }
+
+    /// Called once the child has been reaped, because after that the number means nothing.
+    fn disarm(&self) {
+        self.0.lock().expect("cancel mutex").take();
+    }
+
+    /// Whether there is a live process this could stop.
+    pub fn armed(&self) -> bool {
+        self.0.lock().expect("cancel mutex").is_some()
+    }
+
+    /// Ask the repair to stop. `false` means there was nothing left to stop.
+    ///
+    /// A repair that finished on its own between the click and this call is **stopped** — that is
+    /// §168's own rule, and the alternative is telling a researcher their machine is still
+    /// changing when it is not.
+    pub fn stop(&self) -> bool {
+        let Some(pid) = *self.0.lock().expect("cancel mutex") else {
+            return false;
+        };
+        kill_tree(pid)
+    }
+}
+
+/// Terminate a spawned process and whatever it started.
+#[cfg(windows)]
+fn kill_tree(pid: u32) -> bool {
+    // `/T` for the Windows children the wrapper started, `/F` because a console process given a
+    // polite request during `uv sync` will not take it. The measured result of killing the
+    // attached `wsl.exe` is that its Linux descendants go too (§170).
+    Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(not(windows))]
+fn kill_tree(pid: u32) -> bool {
+    // **The negative pid is a process group, and it is required here.** Signalling the child
+    // alone leaves its own children running *and holding the stdout pipe open*, so
+    // `run_streaming` blocks on EOF until the grandchild finishes on its own — a Stop that
+    // reports nothing for thirty seconds. A test caught this; reasoning had not.
+    //
+    // This is §26's complaint reproduced in miniature, and it is why the child is spawned into
+    // its own group below. Windows needs none of it: there the wrapper *is* `wsl.exe`, and
+    // killing it takes its descendants (§170).
+    // SAFETY: `pid` names a child this process spawned into its own group and has not reaped.
+    unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGTERM) == 0 }
+}
+
+pub fn run_streaming(
+    argv: &[String],
+    cancel: &Cancel,
+    mut emit: impl FnMut(String),
+) -> anyhow::Result<bool> {
     use anyhow::Context as _;
 
     let (program, rest) = argv.split_first().context("empty command")?;
@@ -1021,13 +1097,29 @@ pub fn run_streaming(argv: &[String], mut emit: impl FnMut(String)) -> anyhow::R
     // one's. After this, the file existing at all means this run wrote it.
     let elevated_log = elevated_log();
     let _ = std::fs::remove_file(&elevated_log);
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    command
         .args(rest)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    // Its own process group, so `kill_tree` can signal the whole thing. **Unix only, and that
+    // asymmetry is the measured result rather than an oversight**: on Windows the equivalent
+    // gesture is `setsid` inside WSL, which §170 found makes `wsl.exe` exit while the Linux tree
+    // keeps running — detaching the repair from the one process the app can reach.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+    }
+    let mut child = command
         .spawn()
         .with_context(|| format!("could not start {program}"))?;
+
+    // Armed before a single line is read, so a Stop pressed during the first second of a cold
+    // WSL start has something to act on. §168's race test asked exactly this of the control file
+    // it proposed; here the answer is structural — the pid exists the moment `spawn` returns.
+    cancel.arm(child.id());
 
     let (tx, rx) = std::sync::mpsc::channel::<String>();
     let mut readers = Vec::new();
@@ -1077,6 +1169,9 @@ pub fn run_streaming(argv: &[String], mut emit: impl FnMut(String)) -> anyhow::R
         .join()
         .map_err(|_| anyhow::anyhow!("the thread waiting on the fix panicked"))?
         .context("could not wait for the fix to finish")?;
+    // The child has been reaped, so the number is now free for the next process on the machine.
+    // Anything still holding this `Cancel` must stop being able to act on it.
+    cancel.disarm();
     Ok(status.success())
 }
 
@@ -1471,6 +1566,54 @@ mod encoding_tests {
     /// other over the same file.
     #[cfg(unix)]
     #[test]
+    fn stopping_a_repair_kills_it_and_stopping_a_finished_one_reports_nothing_to_do() {
+        // §146 declined a Stop button because nothing owned a killable process. This is that
+        // ownership, tested end to end: arm on spawn, kill the tree, disarm on reap.
+        let cancel = Cancel::default();
+        assert!(!cancel.armed(), "nothing to stop before anything runs");
+        assert!(!cancel.stop(), "stopping nothing reports nothing to stop");
+
+        let armed = cancel.clone();
+        let watcher = std::thread::spawn(move || {
+            // Wait for the child to exist, then stop it. A repair the researcher interrupts is
+            // one that was still printing, so this has to work mid-stream rather than only at a
+            // convenient boundary.
+            for _ in 0..200 {
+                if armed.armed() {
+                    return armed.stop();
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            false
+        });
+
+        let started = Instant::now();
+        let ok = run_streaming(
+            &[
+                "sh".into(),
+                "-c".into(),
+                // Long enough that finishing on its own would be the failure, not the pass.
+                "printf 'working\\n'; sleep 30; printf 'finished\\n'".into(),
+            ],
+            &cancel,
+            |_line| {},
+        )
+        .expect("the command ran");
+
+        assert!(watcher.join().expect("watcher"), "the kill was not delivered");
+        assert!(!ok, "a stopped repair did not succeed");
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "it ran to completion instead of being stopped"
+        );
+        // Reaped, so the number is free for the next process on the machine and must not be
+        // handed to anyone. This is the half that keeps a late click from killing a stranger.
+        assert!(!cancel.armed(), "the handle stayed armed after the child was reaped");
+        assert!(!cancel.stop());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn an_elevated_fix_log_is_followed_live_and_never_stale() {
         let log = elevated_log().display().to_string();
         std::fs::write(&log, b"left over from the last fix\n").expect("seed a stale log");
@@ -1488,6 +1631,7 @@ mod encoding_tests {
                      printf 'Instalando: WSL 2.7.11\\n' >> '{log}'"
                 ),
             ],
+            &Cancel::default(),
             |line| seen.push((line, started.elapsed())),
         )
         .expect("the command ran");

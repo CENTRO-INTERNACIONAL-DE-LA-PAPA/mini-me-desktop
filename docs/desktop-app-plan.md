@@ -87,7 +87,9 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   the one part nobody can see.
 - ✅ **Right-click menu** (§64) — confirmed: copy/select-all in the transcript, cut/copy/paste
   in the composer, rows greyed when they would do nothing, each showing its own binding.
-- ⬜ **Cancel a running setup fix** (§28 → §146 → §168 → **§170, measured**). §168 now specifies exactly what a
+- ✅ **Cancel a running setup fix** for ordinary repairs (§28 → §146 → §168 → §170 → §172).
+  Still open: **elevated installs**, which sit outside this app's token and need §168's second-UAC
+  policy and a disposable-VM test before Stop can honestly appear on them. §168 now specifies exactly what a
   truthful Stop requires: a published numeric PGID and `kill -- -PGID` for the ordinary WSL
   repair, a **second** UAC-approved `taskkill /T` for an elevated install, and five tests —
   four of which need the target Windows/WSL pair and one a disposable VM. Still deliberately
@@ -9825,3 +9827,49 @@ at all — §157's failure one layer along — and a count would only have repor
 changed.
 
 *Twenty-fourth: "use their icons" is a licence decision wearing the clothes of a shortcut.*
+
+
+## 172. Stop, built from what the measurement left standing (2026-08-12)
+
+§28 asked for it, §146 refused it, §168 specified the wrong mechanism and §170 measured that. What
+remains is small.
+
+`preflight::Cancel` holds a pid and nothing else. `run_streaming` arms it the moment `spawn`
+returns — before a line is read, so a Stop pressed during a cold WSL start has something to act on,
+which is the race §168 wanted a control file to solve — and disarms it once the child is reaped.
+While armed the waiter thread still holds the `Child`, so neither operating system can hand that
+number to anyone else; the late-click hazard is closed by construction rather than by a check.
+
+The button says **stopping**, not stopped. The only honest report of a stop is the command
+exiting, and that arrives as `FixEvent::Finished` on the same channel as any other ending. A repair
+that finished between the click and the call is *stopped*: `Cancel::stop` reports there was nothing
+to signal, and nothing left to stop is the outcome the button was pressed for.
+
+### The test found what the reasoning had not
+
+The first Unix implementation signalled the child alone. The test hung, and the assertion that
+fired was the one about elapsed time.
+
+`sh -c "…; sleep 30; …"` killed at the shell leaves `sleep` running **and holding the inherited
+stdout pipe open**, so `run_streaming` blocks on EOF until the grandchild finishes by itself — a
+Stop that reports nothing for thirty seconds. That is §26's complaint reproduced in miniature, and
+it is the thing §168 built its whole protocol around.
+
+So the child is spawned into its own process group on Unix and signalled with a negative pid.
+Windows keeps the attached wrapper, because there `wsl.exe` *is* the group leader in every sense
+that matters and §170 measured that killing it takes the Linux tree with it. The asymmetry is the
+measurement, not an oversight: the same gesture that fixes Unix — `setsid` — is what breaks
+Windows.
+
+Which means §168 was not wrong about mechanism so much as wrong about *where*. Process groups were
+the answer, on the platform nobody was worried about.
+
+### Still not done
+
+Elevated installs. `Start-Process -Verb RunAs` puts the child outside this app's token, so Stop
+cannot reach it and the button must not pretend otherwise — §168's second-UAC policy stands
+unimplemented and the disposable-VM test remains unrun. The button appears for ordinary repairs;
+an elevated one needs its own wording before it gets one.
+
+*Twenty-fifth: the measurement that overturns a design does not always overturn its mechanism. This
+one moved it to the other platform.*
