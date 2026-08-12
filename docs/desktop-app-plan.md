@@ -9486,3 +9486,53 @@ turned on a comment asserting something the code did not do (§148's docstring, 
 
 *Nineteenth: a one-time migration needs a record that it ran. Inferring it from the state it
 produces means it fires again the moment a person legitimately reproduces that state.*
+
+
+## 167. A project you named, and a sidebar that could not see it (2026-08-12)
+
+§165 gave `New` a menu whose second row is `New project…`. Naming one and pressing Enter left the
+sidebar saying *"Conversations you start will appear here."*
+
+> *"When I click to create new project, nothing appears in the conversations panel. This means we
+> should create the logic to have empty named projects."*
+
+Correct, and the gap was mine: §165 shipped the affordance and left the state it implies for later
+without saying so.
+
+### §106 was right about the registry and wrong about the evidence
+
+*"A project is exactly 'a name some conversation is filed under', so there is no separate registry
+to fall out of step with the sidebar."* The first half is the part worth keeping — a list of
+projects in the settings file is precisely what §154 deleted, because it survived the conversations
+it described and resurrected them. The second half made a project unable to exist before its first
+conversation, and `new_thread_in` does not create a thread; it decides where the *next* turn will
+write. Until that turn happens there is no thread, no metadata, and nothing for a sidebar reading
+conversations to show.
+
+§105 had already settled where the missing fact lives: a project **is** a directory under
+`Documents\Mini-Me`. Reading that directory is not a second registry, it is reading the thing
+itself — the same argument §106 makes, applied to the evidence §106 overlooked. `workspace::projects()`
+lists them and `create_project` makes one, so naming a project creates it and the sidebar shows it
+immediately, empty.
+
+### Telling a project from a conversation
+
+Both sit directly under the workspace root. The discriminator is the shape of the name: a thread is
+a UUID, a project is whatever a researcher typed. That predicate already existed — §152 wrote it to
+strip a leading UUID from an Outputs folder label — so it moved to `workspace` where both callers
+can reach it rather than being written a second time.
+
+Files are skipped, which is what keeps `subagents.json` out of the sidebar.
+
+### Two smaller things that fall out of it
+
+`create_project` returns the name the folder **actually** got, and that is what gets stored on the
+conversation. `project_folder` rewrites characters a path cannot hold, so keeping the typed text
+would file work under `Q1/Q2` while the directory is `Q1_Q2` — and a sidebar reading both sources
+would show one project twice, under two spellings.
+
+Empty projects are seeded only when the search box is empty. A filter is a way to find work; an
+empty project matches nothing, and leaving them in a filtered list would make searching look broken.
+
+*Twentieth: "derive it, don't store it" is a good rule that says nothing about **which** derivation.
+The state existed on disk the whole time; the sidebar was reading the wrong evidence for it.*
