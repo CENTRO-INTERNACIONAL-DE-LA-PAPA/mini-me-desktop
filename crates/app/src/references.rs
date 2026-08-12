@@ -1076,6 +1076,87 @@ print("ok")
         );
     }
 
+    /// `execute` is told to keep its output where the researcher can see it.
+    ///
+    /// **Sixteen real files went to WSL's global `/tmp`** — a 46 KB dataset, seven summary CSVs,
+    /// seven figures — and the Outputs panel was empty (§160). The coordinator had asked for
+    /// relative paths and lost to deepagents' own execute description, which says *"maintain your
+    /// current working directory … by using absolute paths"*. Sound advice in a container the
+    /// agent owns; here `virtual_mode=False` means an absolute path is the researcher's real
+    /// filesystem.
+    ///
+    /// This asserts the rewrite applies **and that it is honest when it cannot**: the replacement
+    /// targets an exact sentence, so an upstream rewording must be reported rather than silently
+    /// producing a description that still argues for absolute paths.
+    #[test]
+    fn execute_is_told_to_keep_its_output_in_the_workspace() {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: python3 is not on PATH");
+            return;
+        }
+        let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
+        let script = format!(
+            r#"
+import logging, sys, types
+sys.path.insert(0, {overlay:?})
+from minime_local import execute_rule
+
+logs = []
+execute_rule.log = type("L", (), {{"warning": lambda self, m, *a: logs.append(m % a if a else m)}})()
+
+# Upstream's text, with the sentence this exists to remove.
+upstream = types.SimpleNamespace(EXECUTE_TOOL_DESCRIPTION=(
+    "Executes a shell command.\n"
+    "  - When issuing multiple commands, use the ';' or '&&' operator\n"
+    "  - Try to maintain your current working directory throughout the session by using "
+    "absolute paths and avoiding usage of cd\n"))
+execute_rule.install(upstream)
+out = upstream.EXECUTE_TOOL_DESCRIPTION
+
+assert "using absolute paths and avoiding" not in out, "the advice that caused the escape survived"
+assert "already this conversation" in out, "nothing told it where it is"
+assert "/tmp" in out, "the rule must name the directory the model actually guessed"
+# Upstream's unrelated guidance is left exactly as written — this replaces one sentence, not
+# a document somebody else maintains.
+assert "the ';' or '&&' operator" in out
+# Reading elsewhere stays allowed: a researcher attaches datasets from anywhere (§28), and a
+# rule that forbade absolute reads would fix outputs by breaking inputs.
+assert "Reading an absolute path is fine" in out
+assert not any("no longer contains" in line for line in logs), logs
+
+# Upstream reworded: the rule still ships, and the log says the contradiction may be back.
+logs.clear()
+moved = types.SimpleNamespace(EXECUTE_TOOL_DESCRIPTION="Prefer fully-qualified paths at all times.")
+execute_rule.install(moved)
+assert "Where your output goes" in moved.EXECUTE_TOOL_DESCRIPTION
+assert any("no longer contains" in line for line in logs), logs
+
+# The constant is gone entirely: say so, change nothing, and never raise — an exception here
+# would cost the whole agent to prevent files landing in the wrong folder.
+logs.clear()
+execute_rule.install(types.SimpleNamespace())
+assert any("no EXECUTE_TOOL_DESCRIPTION" in line for line in logs), logs
+print("ok")
+"#,
+            overlay = overlay.to_string_lossy()
+        );
+        let out = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("python3 runs");
+        assert!(
+            out.status.success(),
+            "the execute rule is wrong:
+{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
     #[test]
     fn a_corpus_link_is_recognised_and_never_treated_as_a_doi() {
         // The form `overlay/minime_local/sources.py` writes, and the one `_paper_ref` established
