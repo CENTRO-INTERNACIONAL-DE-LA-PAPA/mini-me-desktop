@@ -16,6 +16,7 @@ use futures::channel::mpsc;
 use tokio::sync::Mutex;
 
 use crate::backend::{BackendConfig, BackendSupervisor, Started};
+use crate::preflight::Cancel;
 use crate::protocol::urlencode;
 use crate::references;
 use crate::protocol::{
@@ -924,12 +925,21 @@ impl Sidecar {
     /// `spawn_blocking` again, and for a much longer stay than the probes: provisioning
     /// clones a repository and syncs the scientific stack, so this task can live for
     /// minutes. It must not sit on a reactor worker that a turn also needs.
-    pub fn run_fix(&self, argv: Vec<String>) -> mpsc::UnboundedReceiver<FixEvent> {
+    /// Run a setup repair, and hand back the way to stop it alongside its output.
+    ///
+    /// **The handle has to come out with the receiver.** §146 declined to ship a Stop button
+    /// because nothing at this layer owned anything killable: dropping the receiver does not
+    /// cancel `spawn_blocking`, and aborting the Tokio task does not either. What is killable is
+    /// the process `run_streaming` spawns, so that is what escapes — see `preflight::Cancel`, and
+    /// §170 for why it is a pid and not the process-group handshake §168 designed.
+    pub fn run_fix(&self, argv: Vec<String>) -> (mpsc::UnboundedReceiver<FixEvent>, Cancel) {
         let (tx, rx) = mpsc::unbounded();
+        let cancel = Cancel::default();
+        let armed = cancel.clone();
         self.runtime.spawn(async move {
             let emit = tx.clone();
             let outcome = tokio::task::spawn_blocking(move || {
-                crate::preflight::run_streaming(&argv, |line| {
+                crate::preflight::run_streaming(&argv, &armed, |line| {
                     let _ = emit.unbounded_send(FixEvent::Line(line));
                 })
             })
@@ -960,7 +970,7 @@ impl Sidecar {
             };
             let _ = tx.unbounded_send(event);
         });
-        rx
+        (rx, cancel)
     }
 
     /// Headless check of the backend path — no GPUI, no window. Verifies the

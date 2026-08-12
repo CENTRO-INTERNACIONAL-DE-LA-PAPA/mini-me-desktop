@@ -2280,6 +2280,12 @@ struct RunningFix {
     check_id: &'static str,
     done: bool,
     ok: bool,
+    /// The way to stop it, for as long as there is a process to stop (docs §172).
+    cancel: preflight::Cancel,
+    /// Set once Stop has been pressed, so the pane can say *stopping* rather than claiming a
+    /// finish it has not seen. §168's rule: **stopped** is only true once the command has
+    /// actually exited, and that arrives as `FixEvent::Finished` like any other ending.
+    stopping: bool,
 }
 
 /// How much of a fix's output the pane keeps.
@@ -3650,6 +3656,36 @@ impl Workbench {
     ///
     /// Re-checks automatically when it finishes, so a successful install turns its own
     /// row green without the user having to work out that they should press Re-check.
+    /// Stop the repair that is running, if one is.
+    ///
+    /// **Says `stopping`, not `stopped`.** The only honest report of a stop is the command
+    /// actually exiting, which arrives as `FixEvent::Finished` on the same channel as any other
+    /// ending — so this asks, marks the pane, and waits to be told. §146 refused a Stop button
+    /// precisely because the version that flips a label without owning a process claims the
+    /// machine stopped changing when it has not.
+    ///
+    /// A repair that finished between the click and this call is **stopped**, not an error:
+    /// `Cancel::stop` reports there was nothing to signal, and there being nothing left to stop
+    /// is the outcome the button was pressed for.
+    fn stop_fix(&mut self, cx: &mut Context<Self>) {
+        let Some(fix) = self.running_fix.as_mut() else {
+            return;
+        };
+        if fix.done || fix.stopping {
+            return;
+        }
+        fix.stopping = true;
+        if fix.cancel.stop() {
+            fix.notes.push("— asked to stop; waiting for the command to exit".into());
+            self.status = "stopping the repair…".into();
+        } else {
+            // Nothing was armed: it had already exited and the Finished event is on its way.
+            fix.notes.push("— it had already finished".into());
+            self.status = "the repair had already finished".into();
+        }
+        cx.notify();
+    }
+
     fn start_fix(
         &mut self,
         label: String,
@@ -3661,6 +3697,7 @@ impl Workbench {
             return;
         }
         self.status = format!("running: {label}");
+        let (events, cancel) = self.sidecar.run_fix(argv);
         self.running_fix = Some(RunningFix {
             label,
             link: None,
@@ -3669,8 +3706,10 @@ impl Workbench {
             check_id,
             done: false,
             ok: false,
+            cancel: cancel.clone(),
+            stopping: false,
         });
-        let mut events = self.sidecar.run_fix(argv);
+        let mut events = events;
         cx.spawn(async move |this, cx| {
             while let Some(event) = events.next().await {
                 let update = this.update(cx, |workbench, cx| {
@@ -9711,12 +9750,50 @@ impl Workbench {
                 }))
                 .child(
                     div()
-                        .text_color(rgb(theme::text()))
-                        .text_sm()
-                        .child(if fix.done {
-                            format!("{} — {}", fix.label, if fix.ok { "done" } else { "failed" })
-                        } else {
-                            format!("{}…", fix.label)
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .w_full()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .flex_grow()
+                                .min_w_0()
+                                .text_color(rgb(theme::text()))
+                                .text_sm()
+                                .child(if fix.done {
+                                    format!(
+                                        "{} — {}",
+                                        fix.label,
+                                        if fix.ok { "done" } else { "failed" }
+                                    )
+                                } else if fix.stopping {
+                                    format!("{} — stopping…", fix.label)
+                                } else {
+                                    format!("{}…", fix.label)
+                                }),
+                        )
+                        // Beside the label rather than among the actions below: those are about
+                        // the repair's *output* — open the sign-in page, copy the command — and
+                        // this is about the repair. It exists at all because §170 measured that
+                        // the process this app spawned can be killed and takes its WSL tree with
+                        // it; §146 was right to refuse the version that could not (docs §172).
+                        .when(!fix.done, |header| {
+                            header.child(
+                                ui::Button::new("stop-fix", "Stop")
+                                    .tone(ui::Tone::Danger)
+                                    .size(ui::Size::Compact)
+                                    // Inert while there is nothing to act on: after Stop has
+                                    // been asked, and in the moment before `spawn` returns a
+                                    // pid. A live-looking button with no process behind it is
+                                    // the §146 failure in miniature.
+                                    .disabled(fix.stopping || !fix.cancel.armed())
+                                    .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                        workbench.stop_fix(cx);
+                                    })),
+                            )
                         }),
                 );
             // A sign-in page to open. Prominent, and above the log, because while this is
