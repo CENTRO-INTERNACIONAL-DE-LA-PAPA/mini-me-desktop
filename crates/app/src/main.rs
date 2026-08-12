@@ -999,16 +999,6 @@ fn output_folder_groups(outputs: &[workspace::Output]) -> Vec<OutputFolderGroup<
     groups
 }
 
-fn looks_like_thread_id(component: &str) -> bool {
-    component.len() == 36
-        && component
-            .chars()
-            .enumerate()
-            .all(|(at, character)| match at {
-                8 | 13 | 18 | 23 => character == '-',
-                _ => character.is_ascii_hexdigit(),
-            })
-}
 
 /// Name the folder the agent chose, not the generated background-thread directory above it.
 ///
@@ -1022,7 +1012,7 @@ fn output_folder_label(folder: &std::path::Path) -> String {
         .collect();
     let removed_thread = components
         .first()
-        .is_some_and(|component| looks_like_thread_id(component));
+        .is_some_and(|component| workspace::looks_like_thread_id(component));
     if removed_thread {
         components.remove(0);
     }
@@ -2311,6 +2301,11 @@ struct Workbench {
     text_selection: selection::Transcript,
     /// An open right-click menu, if any.
     context_menu: Option<menu::ContextMenu>,
+    /// Projects that have a folder, including ones nothing is filed under yet.
+    ///
+    /// Read alongside the conversation list rather than per frame: the sidebar renders on every
+    /// frame and this is a directory listing, which has no business on the render thread.
+    folder_projects: Vec<String>,
     /// An open sidebar `⋮` or `New` menu, and where its corner goes.
     sidebar_menu: Option<(SidebarMenu, gpui::Point<gpui::Pixels>)>,
     /// Which row of the `/name` picker is chosen. Reset on every keystroke.
@@ -2570,6 +2565,7 @@ impl Workbench {
             transcript_scroll: gpui::ScrollHandle::new(),
             text_selection: selection::Transcript::default(),
             context_menu: None,
+            folder_projects: Vec::new(),
             sidebar_menu: None,
             subagent_selected: 0,
             open_picker: None,
@@ -4125,6 +4121,9 @@ impl Workbench {
             if let Some(answer) = updates.next().await {
                 let _ = this.update(cx, |workbench, cx| {
                     workbench.conversations = answer.conversations;
+                    // Same moment, because the sidebar shows both and a project that exists only
+                    // as a folder has to appear beside the ones that have conversations (§167).
+                    workbench.folder_projects = workspace::projects();
                     // Only on a real answer. A failed fetch sends nothing, so the list keeps
                     // saying "loading" rather than claiming the researcher has none — a
                     // backend that is still booting will answer the next refresh.
@@ -4308,6 +4307,10 @@ impl Workbench {
                         workbench
                             .conversations
                             .retain(|conversation| !removed.contains(&conversation.thread_id));
+                        // The folder went with them, so the heading must too. Re-read rather
+                        // than removing by name: deleting a conversation can empty a project and
+                        // take its folder as well (§155), and that is the same fact (§167).
+                        workbench.folder_projects = workspace::projects();
                         // If it was the open one, leave a genuinely ungrouped empty slate rather
                         // than a transcript and project whose thread no longer exists (§154).
                         let open_was_removed = workbench
@@ -4735,6 +4738,17 @@ impl Workbench {
         // (docs §106, §154).
         let mut grouped: std::collections::BTreeMap<Option<String>, Vec<&protocol::Conversation>> =
             std::collections::BTreeMap::new();
+        // Seeded with every project that has a folder, so one nothing is filed under yet still
+        // gets a heading. Naming a project used to create the folder and show nothing at all —
+        // the sidebar could only see a project through a conversation (§167).
+        //
+        // Not while a search is running: a filter is a way to find work, and an empty project
+        // matches nothing, so leaving them in would make searching look broken.
+        if self.conversation_query.read(cx).text().trim().is_empty() {
+            for name in &self.folder_projects {
+                grouped.entry(Some(name.clone())).or_default();
+            }
+        }
         for conversation in &matched {
             grouped
                 .entry(conversation.project.clone())
@@ -5468,6 +5482,31 @@ impl Workbench {
         // what "New project" has to mean when there may be no open conversation to move.
         let choose = move |workbench: &mut Self, project: Option<String>, cx: &mut Context<Self>| {
             if starting_new {
+                // **The folder first, and it is what makes the project real.** `new_thread_in`
+                // only sets where the *next* turn will write, and until that turn happens there
+                // is no thread, no metadata and nothing for the sidebar to show — which is
+                // exactly what naming a project used to look like: nothing (§167). Creating the
+                // directory is creating the project, because §105 made them the same thing.
+                let mut project = project;
+                if let Some(name) = project.as_deref() {
+                    match workspace::create_project(name) {
+                        // **The name the folder actually got**, not the one that was typed.
+                        // `project_folder` rewrites characters a path cannot hold, so keeping
+                        // the raw text would file conversations under `Q1/Q2` while the
+                        // directory is `Q1_Q2` — and the sidebar, which reads both, would show
+                        // the one project twice under two spellings.
+                        Ok(folder) => {
+                            project = Some(folder);
+                            workbench.folder_projects = workspace::projects();
+                        }
+                        Err(error) => {
+                            workbench.error = Some(format!("{error:#}"));
+                            workbench.open_picker = None;
+                            cx.notify();
+                            return;
+                        }
+                    }
+                }
                 workbench.new_thread_in(project, cx);
             } else {
                 workbench.file_in_project(project, cx);
@@ -5476,10 +5515,13 @@ impl Workbench {
         };
         let typed = self.project_query.read(cx).text().trim().to_string();
         let current = self.sidecar.project();
+        // Both sources, for the same reason the sidebar uses both: a project with a folder and
+        // no conversations yet is a project you should be able to file into (§167).
         let mut names: Vec<String> = self
             .conversations
             .iter()
             .filter_map(|conversation| conversation.project.clone())
+            .chain(self.folder_projects.iter().cloned())
             .collect();
         names.sort();
         names.dedup();

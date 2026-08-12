@@ -155,6 +155,62 @@ pub fn project_folder(name: &str) -> Option<String> {
     (!clipped.is_empty()).then_some(clipped)
 }
 
+/// Whether a directory name is a generated thread id rather than something a person typed.
+///
+/// The one thing that tells a project folder from an ungrouped conversation's folder, because
+/// both sit directly under the workspace root. A thread id is a UUID and a project name is
+/// whatever a researcher called their work, so the shape is the discriminator — and it is the
+/// same predicate the Outputs panel uses to strip a leading UUID from a folder label (§152).
+pub fn looks_like_thread_id(component: &str) -> bool {
+    component.len() == 36
+        && component
+            .chars()
+            .enumerate()
+            .all(|(at, character)| match at {
+                8 | 13 | 18 | 23 => character == '-',
+                _ => character.is_ascii_hexdigit(),
+            })
+}
+
+/// Every project that has a folder, whether or not a conversation is filed under it yet.
+///
+/// **This is what makes an empty project possible**, and it is not a second registry — §105 made
+/// a project a real directory, so the directory *is* the project and reading it is reading the
+/// thing itself. §106's rule that a project is "a name some conversation is filed under" was
+/// right about not keeping a list in settings and wrong about the only evidence: naming a project
+/// created the folder and then showed nothing, because the sidebar could only see projects
+/// through conversations (§167).
+///
+/// Excludes generated thread folders and anything hidden. Files are skipped, which is what keeps
+/// `subagents.json` out of the sidebar.
+pub fn projects() -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(root()) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+        .filter(|name| !name.starts_with('.') && !looks_like_thread_id(name))
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Make a project's folder, so it exists before anything is filed into it.
+///
+/// Returns the sanitised name the folder actually carries — which is what the rest of the app
+/// must use, since `project_folder` may have rewritten characters a path cannot hold.
+pub fn create_project(name: &str) -> Result<String> {
+    let folder = project_folder(name)
+        .with_context(|| format!("{name:?} does not make a valid project folder"))?;
+    let path = root().join(&folder);
+    std::fs::create_dir_all(&path)
+        .with_context(|| format!("could not create {}", path.display()))?;
+    Ok(folder)
+}
+
 /// Where one conversation's files live, inside its project if it has one.
 pub fn thread_dir_in(project: Option<&str>, thread_id: &str) -> PathBuf {
     match project.and_then(project_folder) {
@@ -1099,6 +1155,64 @@ mod project_tests {
             thread_dir_in(Some("Late blight"), "t-1"),
             root().join("Late blight").join("t-1")
         );
+    }
+
+    #[test]
+    fn a_project_folder_is_told_apart_from_a_conversations_own() {
+        // Both sit directly under the workspace root, so the shape of the name is the only
+        // discriminator — and getting it wrong would list every ungrouped conversation as a
+        // project heading (§167).
+        assert!(looks_like_thread_id("019ff651-0cd7-71c1-9f17-5fc9250b10d1"));
+        assert!(looks_like_thread_id("019FF651-0CD7-71C1-9F17-5FC9250B10D1"));
+        // A name a researcher would type, however UUID-ish it looks.
+        assert!(!looks_like_thread_id("Late blight"));
+        assert!(!looks_like_thread_id("2026-08-12-trial"));
+        assert!(!looks_like_thread_id("019ff651-0cd7-71c1-9f17-5fc9250b10d"), "35 characters");
+        assert!(!looks_like_thread_id("019ff651_0cd7_71c1_9f17_5fc9250b10d1"), "wrong separator");
+        assert!(!looks_like_thread_id("019ff651-0cd7-71c1-9f17-5fc9250b10dZ"), "not hex");
+    }
+
+    #[test]
+    fn a_named_project_exists_as_a_folder_before_anything_is_filed_into_it() {
+        let base = std::env::temp_dir().join(format!(
+            "mini-me-empty-project-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&base).expect("workspace");
+        // `root()` reads an environment variable, and so does half of `backend`'s suite. The
+        // shared lock is what keeps two tests from redirecting the workspace out from under each
+        // other — a failure that would look like this feature not working.
+        let _env = crate::backend::env_lock::hold();
+        let previous = std::env::var_os(WORKSPACE_ENV);
+        // SAFETY: the lock above makes this the only thread touching the variable; restored below.
+        unsafe { std::env::set_var(WORKSPACE_ENV, &base) };
+
+        // Nothing yet.
+        assert!(projects().is_empty());
+
+        // Naming one creates the directory, and the directory is what the sidebar reads: this is
+        // the whole of §167. `create_project` reports the name the folder actually carries.
+        assert_eq!(create_project("Late blight").unwrap(), "Late blight");
+        assert_eq!(projects(), vec!["Late blight".to_string()]);
+
+        // A conversation's own folder sits beside it at the root and is not a project.
+        std::fs::create_dir_all(base.join("019ff651-0cd7-71c1-9f17-5fc9250b10d1")).expect("thread");
+        // Nor is a file, which is what keeps `subagents.json` out of the sidebar.
+        std::fs::write(base.join("subagents.json"), b"{}").expect("registry");
+        assert_eq!(projects(), vec!["Late blight".to_string()]);
+
+        // A name a path cannot hold is rewritten, and the rewritten one is what comes back — so
+        // the metadata and the folder cannot end up spelling the same project two ways.
+        let folder = create_project("Q1/Q2").unwrap();
+        assert_eq!(folder, "Q1_Q2");
+        assert!(projects().contains(&folder));
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var(WORKSPACE_ENV, value) },
+            None => unsafe { std::env::remove_var(WORKSPACE_ENV) },
+        }
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
