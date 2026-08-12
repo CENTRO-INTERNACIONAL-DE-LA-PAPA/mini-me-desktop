@@ -9381,3 +9381,54 @@ labels. No truncation machinery, so no layout to get wrong.
 
 *Seventeenth: a component that documents its own trap is not the same as a component that prevents
 it — and the trap was two layers away from where the note lives.*
+
+
+## 165. Four abbreviations you had to hover to find (2026-08-12)
+
+A screenshot of the sidebar beside a screenshot of another app's `⋮` menu, and the ask:
+
+> *"I think we need to improve the app control to create a new project and to create new
+> conversations. We can use the vertical 3 dots and when click we can show the options … There is a
+> New button so when click new a sub modal menu can say: New conversation and the other option New
+> project."*
+
+### Creating a project had no button at all
+
+A project is "a name some conversation is filed under" (§106), so the only route to a new one was
+the *file* picker: open a conversation, open the picker, type a name, and the conversation moves
+into the folder that naming it created. That is a real gesture and it works, but it is filing —
+there was nothing that meant **start** a project, and a researcher beginning a new line of enquiry
+starts before they have anything to file.
+
+`New` is now a menu with two rows. `New project…` opens the same picker in a mode where choosing a
+name calls `new_thread_in` instead of `file_in_project` — the same list, the same
+`New project “…”` first row, the same typing. Only what choosing *does* differs, so there is no
+second way to name a project and no second place for the rules to drift.
+
+### One target instead of four, and words instead of characters
+
+Each row carried `rename` and `✕`; each project heading carried `+` and `✕`. All four appeared only
+on hover, so the way to discover what a row could do was to point at it and decode two
+abbreviations — and `+` beside a heading is not self-evidently "start a conversation in this
+project". They are one always-visible `⋮` per row and per heading now, whose contents are
+sentences. `New conversation in Late blight` says which project even when the menu is floating over
+a list of them.
+
+Nothing new is reachable: every row calls a method the sidebar already had. That is `menu.rs`'s
+stated rule for the right-click menu — *"the menu is a second door onto the same room, not a second
+implementation"* — and it is why this is a rearrangement rather than a feature.
+
+### §163, one layer further in
+
+A conversation row opens that conversation on click; a project heading opens its folder in
+Explorer. The `⋮` sits inside both. Without `stop_propagation`, asking a row what it can do would
+*switch conversations* first, and asking a heading would launch a file manager. The same shape as
+§163's overlays, at a smaller scale, and reachable the same way: a control drawn on top of a
+clickable thing is not thereby the only thing that was clicked.
+
+`menu_card()` is now one function. Both menus need `occlude` and both need the left press swallowed;
+the right-click menu had learned both, and a second menu written beside it would have had to learn
+them again.
+
+*Eighteenth: an affordance nobody can find is not smaller than a missing one, it is worse — it
+looks like the feature exists.*
