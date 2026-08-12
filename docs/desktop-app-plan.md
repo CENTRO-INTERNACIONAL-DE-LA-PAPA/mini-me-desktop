@@ -133,6 +133,18 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   - the app reads a finished task's own folder and folds it into Outputs, so a worker that lands
     anywhere is still visible.
   The second is the one that cannot silently fail, and it is not built.
+- 🟡 **`execute` was told to prefer absolute paths, and sixteen files went to `/tmp`** (§160,
+  §161). deepagents' own execute description says *"maintain your current working directory … by
+  using absolute paths"* — sound inside a container the agent owns, and here `virtual_mode=False`
+  means an absolute path is the researcher's real filesystem. The description is rewritten at
+  import: the sentence is replaced, a rule naming the consequence is appended, and an upstream
+  rewording is reported rather than silently failing. **Advice, not containment.**
+  **Awaiting a live run.**
+- ⬜ **`execute` can still write anywhere.** The rewrite above changes what the model is *told*.
+  Real containment means the workspace is the only writable persistent mount — a bind-mount of
+  `<work_dir>/tmp` over `/tmp`, or an isolated execution namespace. Not attempted, and explicitly
+  not faked: pattern-matching a shell command for writes produces a containment claim that is
+  false in every case nobody thought of.
 - ⬜ **The turn says files were saved without checking.** Two failed attempts and the answer
   reported plots on disk; a later run listed ten filenames the panel could not show. The prompt
   says *"NEVER invent findings, numbers, or charts"* — the third capital-letter rule measured at
@@ -8876,3 +8888,46 @@ Until enforcement ships, the current sixteen files can be preserved by copying
 diagnostic reproduction should remain intact until the backend fix is verified.
 
 *Thirteenth: a working directory is a default, not a boundary.*
+
+
+## 161. Advice, where a boundary was wanted (2026-08-11)
+
+§160 found sixteen real files in WSL's global `/tmp` and located the cause precisely. Both of its
+load-bearing claims verify against the pinned package: `filesystem.py:422` carries *"Try to
+maintain your current working directory throughout the session by using absolute paths and
+avoiding usage of cd"* verbatim, and `_reroute_write` is called from `write` and `upload_files`
+and **nothing else**, so `aexecute` has never been re-rooted.
+
+The description is now rewritten before any middleware is built. The sentence is replaced, and a
+rule is appended that names the consequence in terms the model can act on — *"do not appear in the
+researcher's Outputs panel, are not kept when the conversation is filed or deleted, and are erased
+by the operating system"* — rather than the useless abstraction *"outside the workspace"*. Reading
+an absolute path stays allowed: a researcher attaches datasets from anywhere (§28), and a rule that
+forbade absolute reads would fix outputs by breaking inputs. Upstream's own guidance about `&&`
+versus `;` is left exactly as written; this replaces one sentence, not a document somebody else
+maintains.
+
+### What it is not
+
+**It is advice.** §160 proposes, as a fallback, refusing "obvious persistent writes to `/tmp`" —
+and in the same section warns *"do not try to understand arbitrary shell syntax with a regex and
+call that containment."* Both cannot stand. A command is an arbitrary program; pattern-matching it
+produces a claim that is false in every case nobody thought of, and **a false boundary is worse
+than a documented absence of one**, because the next reader stops looking.
+
+So the boundary stays open and stays recorded as open. Real containment is a bind-mount of
+`<work_dir>/tmp` over `/tmp`, or an execution namespace where the workspace is the only writable
+persistent mount. That is a larger change than a docstring and worth making; it is not worth
+pretending to have made.
+
+### Patched by name, and honest about it
+
+`create_deep_agent` takes no `custom_tool_descriptions`, and `FilesystemMiddleware` reads the
+module global when it builds the tool (`filesystem.py:1481`), so replacing that global before any
+middleware is constructed is the reachable point. Patching a third party by name is one of this
+project's recurring bug shapes, so the replacement targets an exact sentence and **logs either
+outcome**: if upstream rewords that line, the log says the advice it contradicts may have returned,
+instead of reporting success over a no-op. §132's rule, applied to our own patch.
+
+*Fourteenth, and §160's own sentence is the right one: a working directory is a default, not a
+boundary.*
