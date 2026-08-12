@@ -607,6 +607,86 @@ fn file_mark(path: &std::path::Path) -> (&'static str, u32) {
     }
 }
 
+/// A menu opened from a control in the sidebar rather than by right-clicking.
+///
+/// **Why a menu and not more inline chips.** Each row carried `rename` and `✕` revealed on hover,
+/// and each project heading carried `+` and `✕`. Four controls, all of them one or two characters
+/// wide, all of them appearing only when the pointer is already on top of them — so the way to
+/// find out what a row can do was to hover it and read two abbreviations. A `⋮` is one target in
+/// a fixed place whose contents are words, which is the shape every list of this kind uses.
+///
+/// The `New` variant is the same idea aimed the other way: one button whose menu says what the
+/// two kinds of new thing are, rather than a button that silently means only one of them.
+#[derive(Clone, Debug)]
+enum SidebarMenu {
+    New,
+    Conversation(protocol::Conversation),
+    Project {
+        name: String,
+        conversations: Vec<protocol::Conversation>,
+    },
+}
+
+/// One row of a sidebar menu: a label, and whether it is the destructive one.
+struct MenuRow {
+    id: &'static str,
+    label: String,
+    danger: bool,
+}
+
+impl SidebarMenu {
+    fn rows(&self) -> Vec<MenuRow> {
+        let row = |id, label: String| MenuRow {
+            id,
+            label,
+            danger: false,
+        };
+        let danger = |id, label: String| MenuRow {
+            id,
+            label,
+            danger: true,
+        };
+        match self {
+            Self::New => vec![
+                row("menu-new-conversation", "New conversation".into()),
+                // The ellipsis is a promise: this one asks for a name before anything happens.
+                row("menu-new-project", "New project…".into()),
+            ],
+            Self::Conversation(_) => vec![
+                row("menu-rename", "Rename".into()),
+                danger("menu-delete", "Delete".into()),
+            ],
+            Self::Project { name, .. } => vec![
+                row("menu-new-here", format!("New conversation in {name}")),
+                danger("menu-delete-project", "Delete project".into()),
+            ],
+        }
+    }
+}
+
+/// The card every popup menu is drawn on.
+///
+/// One definition because the discipline is easy to omit and invisible when it is: a menu must
+/// `occlude`, or a click on a row also lands on whatever the menu was drawn over (§163), and it
+/// must swallow the left press, or choosing an item starts a text selection in the transcript
+/// underneath. The right-click menu learned both the hard way; a second menu written from scratch
+/// beside it would have learned them again.
+fn menu_card() -> gpui::Div {
+    div()
+        .flex()
+        .flex_col()
+        .min_w(px(190.))
+        .py_1()
+        .rounded_md()
+        .bg(rgb(theme::elevated()))
+        .border_1()
+        .border_color(rgb(theme::border_strong()))
+        .occlude()
+        .on_mouse_down(gpui::MouseButton::Left, |_event, _window, cx| {
+            cx.stop_propagation();
+        })
+}
+
 /// One line of the activity trace: a tool call, or a delegation.
 fn step_line(label: &str) -> impl IntoElement {
     div()
@@ -1118,6 +1198,9 @@ enum Picker {
     Model,
     /// Which project the open conversation is filed under.
     Project,
+    /// Which project a *new* conversation should start in. Same list, same "New project “…”"
+    /// row; only what choosing does differs, so naming a project is one gesture either way.
+    NewProject,
     /// A model for one specialist, by its index in the registry.
     ///
     /// The index rather than the name because a `Picker` is `Copy` and lives in a field that is
@@ -2228,6 +2311,8 @@ struct Workbench {
     text_selection: selection::Transcript,
     /// An open right-click menu, if any.
     context_menu: Option<menu::ContextMenu>,
+    /// An open sidebar `⋮` or `New` menu, and where its corner goes.
+    sidebar_menu: Option<(SidebarMenu, gpui::Point<gpui::Pixels>)>,
     /// Which row of the `/name` picker is chosen. Reset on every keystroke.
     subagent_selected: usize,
     /// An open choice popup: which choice, and where its trigger was clicked.
@@ -2485,6 +2570,7 @@ impl Workbench {
             transcript_scroll: gpui::ScrollHandle::new(),
             text_selection: selection::Transcript::default(),
             context_menu: None,
+            sidebar_menu: None,
             subagent_selected: 0,
             open_picker: None,
             settings_focus: cx.focus_handle(),
@@ -3032,7 +3118,8 @@ impl Workbench {
                 .child(self.model_list(cx))
                 .into_any_element(),
             Picker::Subagent(index) => self.subagent_model_list(index, cx).into_any_element(),
-            Picker::Project => self.project_list(cx).into_any_element(),
+            Picker::Project => self.project_list(false, cx).into_any_element(),
+            Picker::NewProject => self.project_list(true, cx).into_any_element(),
         };
         Some(
             ui::picker_popup(
@@ -3145,25 +3232,7 @@ impl Workbench {
 
     fn context_menu(&self, open: menu::ContextMenu, cx: &mut Context<Self>) -> impl IntoElement {
         let target = open.target;
-        let mut panel = div()
-            .flex()
-            .flex_col()
-            .min_w(px(190.))
-            .py_1()
-            .rounded_md()
-            .bg(rgb(theme::elevated()))
-            .border_1()
-            .border_color(rgb(theme::border_strong()))
-            // **This menu already knew about §163 and fixed half of it.** Swallowing the *press*
-            // stopped a chosen item from also starting a selection in the transcript underneath,
-            // but a click is a press and a release, and the release still reached whatever was
-            // behind. `occlude` blocks the whole hitbox, which is the general form of what this
-            // line was reaching for; the press guard stays because it also protects the drag that
-            // a mouse-down on the transcript begins.
-            .occlude()
-            .on_mouse_down(gpui::MouseButton::Left, |_event, _window, cx| {
-                cx.stop_propagation();
-            });
+        let mut panel = menu_card();
 
         for &item in open.items() {
             let enabled = self.menu_item_enabled(item, target, cx);
@@ -3216,6 +3285,145 @@ impl Workbench {
                 },
             )),
         ))
+    }
+
+    /// The `⋮` and `New` menus, drawn where their control is.
+    fn sidebar_menu_element(
+        &self,
+        open: SidebarMenu,
+        at: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mut panel = menu_card();
+        for row in open.rows() {
+            let chosen = open.clone();
+            let id = row.id;
+            panel = panel.child(
+                div()
+                    .id(id)
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .w_full()
+                    .min_w_0()
+                    .px_3()
+                    .py_1()
+                    .text_sm()
+                    .text_color(rgb(if row.danger {
+                        theme::error()
+                    } else {
+                        theme::text()
+                    }))
+                    .hover(|style| style.bg(rgb(theme::accent_soft())).cursor_pointer())
+                    .child(row.label)
+                    .on_click(cx.listener(move |workbench, _event, window, cx| {
+                        workbench.sidebar_menu = None;
+                        workbench.run_sidebar_menu(&chosen, id, window, cx);
+                    })),
+            );
+        }
+
+        gpui::deferred(
+            gpui::anchored().position(at).snap_to_window().child(
+                panel.on_mouse_down_out(cx.listener(|workbench, _event: &gpui::MouseDownEvent, _window, cx| {
+                    workbench.sidebar_menu = None;
+                    cx.notify();
+                })),
+            ),
+        )
+    }
+
+    /// What each row does. **Nothing new lives here** — every arm calls a method the sidebar
+    /// already had, which is the rule `menu.rs` states for the right-click menu and the reason
+    /// this change is a rearrangement rather than a feature with its own behaviour.
+    fn run_sidebar_menu(
+        &mut self,
+        open: &SidebarMenu,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match (open, id) {
+            (SidebarMenu::New, "menu-new-conversation") => self.new_thread_in(None, cx),
+            (SidebarMenu::New, "menu-new-project") => {
+                // The project picker already knows how to name one that does not exist yet —
+                // typing offers `New project “…”` as its first row. `NewProject` only changes
+                // what choosing does: start a conversation there, rather than move the open one.
+                self.open_picker = Some((Picker::NewProject, gpui::point(px(24.), px(120.))));
+                self.project_query.update(cx, |query, cx| query.set_text("", cx));
+                cx.notify();
+            }
+            (SidebarMenu::Conversation(conversation), "menu-rename") => {
+                self.start_rename(conversation.thread_id.clone(), window, cx)
+            }
+            (SidebarMenu::Conversation(conversation), "menu-delete") => {
+                self.request_delete(DeleteTarget::Conversation(conversation.clone()), window, cx)
+            }
+            (SidebarMenu::Project { name, .. }, "menu-new-here") => {
+                self.new_thread_in(Some(name.clone()), cx)
+            }
+            (
+                SidebarMenu::Project {
+                    name,
+                    conversations,
+                },
+                "menu-delete-project",
+            ) => self.request_delete(
+                DeleteTarget::Project {
+                    name: name.clone(),
+                    conversations: conversations.clone(),
+                },
+                window,
+                cx,
+            ),
+            _ => {}
+        }
+    }
+
+    /// The `⋮` that opens one of those menus.
+    ///
+    /// Always drawn, never revealed on hover: the inline chips this replaces were invisible until
+    /// the pointer was already on the row, so the only way to learn what a row could do was to
+    /// point at it and decode two abbreviations.
+    fn sidebar_menu_button(
+        &self,
+        id: String,
+        menu: SidebarMenu,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .id(SharedString::from(id))
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .w(px(20.))
+            .rounded_md()
+            .text_color(rgb(theme::text_faint()))
+            .text_sm()
+            .hover(|style| {
+                style
+                    .bg(rgb(theme::accent_soft()))
+                    .text_color(rgb(theme::text()))
+                    .cursor_pointer()
+            })
+            .child("⋮")
+            .on_click(cx.listener(move |workbench, event: &gpui::ClickEvent, _window, cx| {
+                // **The row underneath must not also fire.** A conversation row opens that
+                // conversation on click and a project heading opens its folder in Explorer, so
+                // without this, asking a row what it can do would switch conversations, and
+                // asking a heading would launch a file manager (§163, one layer in).
+                cx.stop_propagation();
+                // Anchored to the pointer rather than to the button's bounds, which GPUI does not
+                // hand a click handler. Nudged down so the menu opens below the control it came
+                // from instead of on top of it.
+                let at = match event {
+                    gpui::ClickEvent::Mouse(click) => click.up.position,
+                    _ => gpui::point(px(120.), px(160.)),
+                };
+                workbench.sidebar_menu = Some((menu.clone(), gpui::point(at.x, at.y + px(6.))));
+                cx.notify();
+            }))
     }
 
     /// Copy the selected transcript text.
@@ -4556,20 +4764,6 @@ impl Workbench {
                     .clone()
                     .unwrap_or_else(|| UNGROUPED_PROJECT_LABEL.to_string());
                 let opening = project.clone();
-                let starting = project.clone();
-                // All conversations in the project, not merely the rows that survived the
-                // sidebar search. A filter is a way to find work, never a deletion boundary.
-                let deleting_project = project.clone().map(|name| DeleteTarget::Project {
-                    conversations: self
-                        .conversations
-                        .iter()
-                        .filter(|conversation| {
-                            conversation.project.as_deref() == Some(name.as_str())
-                        })
-                        .cloned()
-                        .collect(),
-                    name,
-                });
                 list = list.child(
                     div()
                         .flex()
@@ -4604,71 +4798,29 @@ impl Workbench {
                                 })
                                 .child(section_label_owned(heading.to_uppercase())),
                         )
-                        .when_some(deleting_project, |header, target| {
-                            let id = match &target {
-                                DeleteTarget::Project { name, .. } => {
-                                    SharedString::from(format!("delete-project-{name}"))
-                                }
-                                DeleteTarget::Conversation(_) => unreachable!(),
-                            };
-                            header.child(
-                                div()
-                                    .id(id)
-                                    .flex_none()
-                                    .px_1()
-                                    .rounded_md()
-                                    .text_color(rgb(theme::text_faint()))
-                                    .text_xs()
-                                    .invisible()
-                                    .group_hover(
-                                        SharedString::from(format!("head-{heading}")),
-                                        |style| style.visible(),
-                                    )
-                                    .hover(|style| {
-                                        style.text_color(rgb(theme::error())).cursor_pointer()
-                                    })
-                                    .child("✕")
-                                    .tooltip(move |_window, cx| {
-                                        cx.new(|_| Hint {
-                                            text: "delete project and saved files".into(),
+                        // One `⋮` where four hover-revealed characters used to be. Only a named
+                        // project gets one: "Ungrouped Conversations" is the workspace root, which
+                        // is not a project and cannot be deleted or started "in" (§165).
+                        .when_some(project.clone(), |header, name| {
+                            header.child(self.sidebar_menu_button(
+                                format!("head-menu-{name}"),
+                                SidebarMenu::Project {
+                                    // All conversations in the project, not merely the rows that
+                                    // survived the sidebar search. A filter is a way to find
+                                    // work, never a deletion boundary (§155).
+                                    conversations: self
+                                        .conversations
+                                        .iter()
+                                        .filter(|conversation| {
+                                            conversation.project.as_deref() == Some(name.as_str())
                                         })
-                                        .into()
-                                    })
-                                    .on_click(cx.listener(move |workbench, _event, window, cx| {
-                                        workbench.request_delete(target.clone(), window, cx);
-                                    })),
-                            )
-                        })
-                        // Asked for directly: starting work in a project should not mean
-                        // starting it somewhere else and then filing it (docs §107). Revealed
-                        // on hover, like the rename and delete controls on the rows below.
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("new-in-{heading}")))
-                                .flex_none()
-                                .px_1()
-                                .rounded_md()
-                                .text_color(rgb(theme::text_faint()))
-                                .text_xs()
-                                .invisible()
-                                .group_hover(
-                                    SharedString::from(format!("head-{heading}")),
-                                    |style| style.visible(),
-                                )
-                                .hover(|style| {
-                                    style.text_color(rgb(theme::accent())).cursor_pointer()
-                                })
-                                .child("+")
-                                .tooltip(move |_window, cx| {
-                                    cx.new(|_| Hint {
-                                        text: "new conversation here".into(),
-                                    })
-                                    .into()
-                                })
-                                .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                                    workbench.new_thread_in(starting.clone(), cx);
-                                })),
-                        ),
+                                        .cloned()
+                                        .collect(),
+                                    name,
+                                },
+                                cx,
+                            ))
+                        }),
                 );
             }
             for conversation in conversations {
@@ -4723,8 +4875,6 @@ impl Workbench {
                 }
 
                 let open = thread_id.clone();
-                let rename = thread_id.clone();
-                let remove = DeleteTarget::Conversation((*conversation).clone());
                 list = list.child(
                     div()
                         .id(SharedString::from(format!("conv-{thread_id}")))
@@ -4752,49 +4902,11 @@ impl Workbench {
                                 .size(ui::Size::Compact)
                                 .ellipsis(),
                         )
-                        .child(
-                            // Hidden until the row is hovered, so the list stays a list of
-                            // names rather than a wall of controls.
-                            div()
-                                .id(SharedString::from(format!("rename-{thread_id}")))
-                                .flex_none()
-                                .invisible()
-                                .group_hover(
-                                    SharedString::from(format!("conv-group-{thread_id}")),
-                                    |style| style.visible(),
-                                )
-                                .px_1()
-                                .text_color(rgb(theme::text_faint()))
-                                .text_xs()
-                                .hover(|style| {
-                                    style.text_color(rgb(theme::accent())).cursor_pointer()
-                                })
-                                .child("rename")
-                                .on_click(cx.listener(move |workbench, _event, window, cx| {
-                                    workbench.start_rename(rename.clone(), window, cx);
-                                })),
-                        )
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("delete-{thread_id}")))
-                                .flex_none()
-                                .invisible()
-                                .group_hover(
-                                    SharedString::from(format!("conv-group-{thread_id}")),
-                                    |style| style.visible(),
-                                )
-                                .px_1()
-                                .rounded_md()
-                                .text_color(rgb(theme::text_faint()))
-                                .text_xs()
-                                .hover(|style| {
-                                    style.text_color(rgb(theme::error())).cursor_pointer()
-                                })
-                                .child("✕")
-                                .on_click(cx.listener(move |workbench, _event, window, cx| {
-                                    workbench.request_delete(remove.clone(), window, cx);
-                                })),
-                        )
+                        .child(self.sidebar_menu_button(
+                            format!("row-menu-{thread_id}"),
+                            SidebarMenu::Conversation(conversation.clone()),
+                            cx,
+                        ))
                         .on_click(cx.listener(move |workbench, _event, _window, cx| {
                             workbench.open_conversation(open.clone(), cx);
                         })),
@@ -4861,9 +4973,21 @@ impl Workbench {
                                     .cursor_pointer()
                             })
                             .child("New")
-                            .on_click(cx.listener(|workbench, _event, _window, cx| {
-                                workbench.run_command(Command::NewThread, cx);
-                            })),
+                            // A menu, because there are two kinds of new thing and a button that
+                            // silently means only one of them leaves the other with no home at
+                            // all — creating a project meant opening a conversation first and
+                            // filing it afterwards (§165).
+                            .on_click(cx.listener(
+                                |workbench, event: &gpui::ClickEvent, _window, cx| {
+                                    let at = match event {
+                                        gpui::ClickEvent::Mouse(click) => click.up.position,
+                                        _ => gpui::point(px(120.), px(60.)),
+                                    };
+                                    workbench.sidebar_menu =
+                                        Some((SidebarMenu::New, gpui::point(at.x, at.y + px(8.))));
+                                    cx.notify();
+                                },
+                            )),
                     ),
             )
             .child(
@@ -5338,7 +5462,18 @@ impl Workbench {
     /// fall out of step with the sidebar (docs §106). Creating one is typing a name into the
     /// filter field and pressing the row that offers it — the same gesture as choosing an
     /// existing one, so there is no second mode to learn.
-    fn project_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn project_list(&self, starting_new: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        // The one difference between the two modes, named once. `file_in_project` moves the open
+        // conversation's folder; `new_thread_in` starts a fresh one and moves nothing — which is
+        // what "New project" has to mean when there may be no open conversation to move.
+        let choose = move |workbench: &mut Self, project: Option<String>, cx: &mut Context<Self>| {
+            if starting_new {
+                workbench.new_thread_in(project, cx);
+            } else {
+                workbench.file_in_project(project, cx);
+            }
+            workbench.open_picker = None;
+        };
         let typed = self.project_query.read(cx).text().trim().to_string();
         let current = self.sidecar.project();
         let mut names: Vec<String> = self
@@ -5370,14 +5505,14 @@ impl Workbench {
                     Some("creates the folder".into()),
                 )
                 .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                    workbench.file_in_project(Some(created.clone()), cx);
+                    choose(workbench, Some(created.clone()), cx);
                 })),
             );
         }
 
         list = list.child(
             picker_row(UNGROUPED_PROJECT_LABEL, current.is_none(), None).on_click(
-                cx.listener(|workbench, _event, _window, cx| workbench.file_in_project(None, cx)),
+                cx.listener(move |workbench, _event, _window, cx| choose(workbench, None, cx)),
             ),
         );
 
@@ -5393,7 +5528,7 @@ impl Workbench {
                     None,
                 )
                 .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                    workbench.file_in_project(Some(chosen.clone()), cx);
+                    choose(workbench, Some(chosen.clone()), cx);
                 })),
             );
         }
@@ -8658,6 +8793,10 @@ impl Workbench {
             cx.notify();
             return;
         }
+        if self.sidebar_menu.take().is_some() {
+            cx.notify();
+            return;
+        }
         if self.open_picker.take().is_some() {
             cx.notify();
             return;
@@ -11019,8 +11158,12 @@ impl Render for Workbench {
 
         let root = root.children(self.picker_popup(cx));
 
-        // Last, and `deferred` inside, so it paints over every pane it might open across
-        // instead of being clipped by the one it opened in.
+        // Both menus last, and `deferred` inside, so they paint over every pane they might open
+        // across instead of being clipped by the one they opened in.
+        let root = match &self.sidebar_menu {
+            Some((open, at)) => root.child(self.sidebar_menu_element(open.clone(), *at, cx)),
+            None => root,
+        };
         match &self.context_menu {
             Some(open) => root.child(self.context_menu(open.clone(), cx)),
             None => root,
@@ -11214,6 +11357,51 @@ mod tests {
             let (shown, hidden) = image_grid_shape(total);
             let visible = if hidden > 0 { shown - 1 } else { shown };
             assert_eq!(visible + hidden, total, "{total} images went unaccounted for");
+        }
+    }
+
+    #[test]
+    fn every_sidebar_menu_offers_what_its_control_is_about() {
+        let conversation = protocol::Conversation {
+            thread_id: "t-1".into(),
+            title: "Kiwi grading".into(),
+            project: Some("Late blight".into()),
+            updated_at: String::new(),
+        };
+        let labels = |menu: &SidebarMenu| -> Vec<String> {
+            menu.rows().into_iter().map(|row| row.label).collect()
+        };
+
+        // The `New` button names both kinds of new thing. Before this, creating a project meant
+        // opening a conversation first and filing it afterwards — a route with no button (§165).
+        assert_eq!(
+            labels(&SidebarMenu::New),
+            ["New conversation", "New project…"]
+        );
+
+        // A row offers exactly what its two hover chips did, as words.
+        assert_eq!(
+            labels(&SidebarMenu::Conversation(conversation.clone())),
+            ["Rename", "Delete"]
+        );
+
+        // A heading names the project it acts on, so a menu floating over the list still says
+        // which one it belongs to.
+        let project = SidebarMenu::Project {
+            name: "Late blight".into(),
+            conversations: vec![conversation],
+        };
+        assert_eq!(
+            labels(&project),
+            ["New conversation in Late blight", "Delete project"]
+        );
+
+        // Exactly one destructive row per menu, and never the first — the row a mis-aimed click
+        // lands on should not be the irreversible one.
+        for menu in [SidebarMenu::New, project] {
+            let rows = menu.rows();
+            assert!(!rows[0].danger, "the first row is destructive");
+            assert!(rows.iter().filter(|row| row.danger).count() <= 1);
         }
     }
 
