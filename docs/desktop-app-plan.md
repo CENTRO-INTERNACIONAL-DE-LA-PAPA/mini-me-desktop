@@ -9735,6 +9735,11 @@ The gutter is the row's only child when folded, and the row is `w_full`, so a 12
 x=0 of a 38px strip. `justify_center` when folded puts it down the middle, which is where the
 design the researcher supplied has it.
 
+The chevron above it had the same fault for a different reason and was missed on the first pass:
+the header is `justify_between`, which puts a **lone** child at the start, and folded the chevron
+is the only child. So the fold control sat against the left edge above a rail that had just been
+centred — which is more obviously wrong than either was alone. Same one-line fix.
+
 *Twenty-first: a `flex_grow` child is a promise about a parent that has a size. `items_start` takes
 that size away, and the symptom appears two elements away from the line that caused it.*
 

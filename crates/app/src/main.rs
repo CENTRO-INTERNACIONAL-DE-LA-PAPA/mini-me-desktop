@@ -8136,6 +8136,10 @@ impl Workbench {
                 .justify_between()
                 .w_full()
                 .flex_none()
+                // Folded, the chevron is the header's only child, and `justify_between` puts a
+                // lone child at the start — so it sat against the left edge above a rail that
+                // §169 had just centred. Same one-line fix as the stage rows below it.
+                .when(!self.road_open, |header| header.justify_center())
                 .when(self.road_open, |header| {
                     header.child(
                         div()
