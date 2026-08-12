@@ -570,7 +570,12 @@ fn collect_outputs(
         };
         // Dotfiles and tool caches are the agent's business, not the researcher's. Apply the
         // existing top-level rule at every depth now that §117 makes those depths visible.
-        if base_name.starts_with('.') || base_name == "__pycache__" {
+        //
+        // `memories/` joins them: it is where the agent keeps its own instructions between turns,
+        // and `memories\instructions.txt` showing up in a panel headed FILES invites a researcher
+        // to open, edit or delete a file that is not theirs and whose loss changes how the agent
+        // behaves (§173).
+        if base_name.starts_with('.') || base_name == "__pycache__" || base_name == "memories" {
             continue;
         }
 
@@ -1750,6 +1755,39 @@ mod tests {
         assert_eq!(names.len(), 1, "{names:?}");
         assert!(names[0].ends_with("report.md"), "{names:?}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_agents_own_memory_is_not_offered_as_the_researchers_output() {
+        let base = std::env::temp_dir().join(format!(
+            "mini-me-memories-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(base.join("memories")).expect("agent memory");
+        std::fs::write(base.join("memories/instructions.txt"), b"how to behave").expect("write");
+        std::fs::create_dir_all(base.join("outputs")).expect("outputs");
+        std::fs::write(base.join("outputs/summary.csv"), b"a,b\n1,2\n").expect("write");
+
+        let names: Vec<String> = outputs(&base)
+            .into_iter()
+            .flat_map(|(_kind, items)| items)
+            .map(|output| output.name)
+            .collect();
+
+        // A panel headed FILES invites a researcher to open, edit or delete what it lists, and
+        // `memories/instructions.txt` is the agent's own state — losing it changes how the agent
+        // behaves, and it was never theirs to manage (§173).
+        assert!(
+            !names.iter().any(|name| name.contains("instructions.txt")),
+            "{names:?}"
+        );
+        assert!(
+            names.iter().any(|name| name.ends_with("summary.csv")),
+            "real output still appears: {names:?}"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]

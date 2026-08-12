@@ -9909,3 +9909,46 @@ an elevated one needs its own wording before it gets one.
 
 *Twenty-fifth: the measurement that overturns a design does not always overturn its mechanism. This
 one moved it to the other platform.*
+
+
+## 173. Four complaints about chrome, and one about ownership (2026-08-12)
+
+A screenshot of a finished EDA and a short list. Three are the same kind of thing; the fourth is
+not.
+
+### The road was inside the conversation's card
+
+> *"The conversation panel (center panel) is colliding with the road."*
+
+The sidebar is a card. The research panel is a card. The road was a bordered strip **inside** the
+chat pane's card, so the two read as one panel with a notch cut out of the left of it, and folding
+the road left a 38px stub of a different background attached to the transcript. It is its own card
+now, a sibling of its neighbours in the root row, with the same `m_1 rounded_lg border`.
+
+That was §74's arrangement and it made sense when the road was decoration inside the conversation.
+It stopped making sense when the road gained a fold control, a full-graph button and its own
+identity.
+
+### A scrollbar is a control, and a control that is always drawn is furniture
+
+Both — the transcript's and the research panel's — sat permanently against the right edge, close
+enough that a long line of the answer ran under the transcript's. They are revealed on hover of the
+region they scroll, which keeps them findable exactly when someone reaches for one: the pointer is
+already there. `SCROLL_GROUP` names the region, and the two helpers that paint a thumb both watch
+it, so a third scrollbar cannot be added that forgets.
+
+§40 asked for a *visible* affordance because there had been none at all. Visible on approach still
+satisfies that; permanently painted was one reading too many.
+
+### `memories/` was never the researcher's
+
+The Outputs panel listed `memories\instructions.txt`, 436 B. That is where the agent keeps its own
+instructions between turns. A panel headed **FILES** invites a person to open, rename or delete
+what it lists — and deleting that one silently changes how the agent behaves afterwards, with
+nothing to connect the two events.
+
+It joins dotfiles and `__pycache__` in the skip list. The line those three share is not "hidden" or
+"cache", it is **not the researcher's to manage**, and the comment now says so.
+
+*Twenty-sixth: "show everything" is a defensible default for a file list right up to the moment the
+list contains something the reader can break.*

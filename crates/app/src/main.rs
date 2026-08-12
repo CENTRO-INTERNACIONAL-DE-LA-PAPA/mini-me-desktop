@@ -821,6 +821,15 @@ fn step_line(label: &str) -> impl IntoElement {
 /// which is how the theme rows ended up with a thumb sitting on their swatches (docs §100).
 pub const SCROLL_GUTTER: f32 = 12.;
 
+/// The group name a scrollbar watches, so the thumb appears only while the pointer is over the
+/// region it scrolls.
+///
+/// **A scrollbar is a control, and a control that is always drawn is furniture.** The transcript's
+/// sat permanently against the right edge, close enough to the text that a long line ran under it.
+/// Revealed on hover it is still findable — the pointer is already there when you reach for it —
+/// and gone the rest of the time (§173).
+const SCROLL_GROUP: &str = "scroll-region";
+
 fn scrollbar(handle: &gpui::ScrollHandle) -> Option<impl IntoElement> {
     let overflow = handle.max_offset().height;
     let viewport = handle.bounds().size.height;
@@ -836,6 +845,8 @@ fn scrollbar(handle: &gpui::ScrollHandle) -> Option<impl IntoElement> {
     Some(
         div()
             .absolute()
+            .invisible()
+            .group_hover(SCROLL_GROUP, |style| style.visible())
             .top(travel * progress)
             .right(px(2.))
             .w(px(6.))
@@ -1173,6 +1184,8 @@ fn list_scrollbar(state: &ListState) -> Option<impl IntoElement> {
     Some(
         div()
             .absolute()
+            .invisible()
+            .group_hover(SCROLL_GROUP, |style| style.visible())
             .top(travel * progress)
             .right(px(2.))
             .w(px(6.))
@@ -8222,8 +8235,11 @@ impl Workbench {
             .when(!self.road_open, |strip| strip.items_center().gap_2())
             // One step up from the pane's `background`, which is what makes it read as a rail
             // rather than as the transcript with something in the margin.
+            .m_1()
+            .rounded_lg()
+            .overflow_hidden()
             .bg(rgb(theme::surface()))
-            .border_r_1()
+            .border_1()
             .border_color(rgb(theme::border()));
 
         // Header: the name, and the chevron that folds it. Folded, the chevron is the whole
@@ -8707,6 +8723,9 @@ impl Workbench {
                     .flex_grow()
                     .min_w_0()
                     .overflow_hidden()
+                    // The region the thumb belongs to, so it appears when the pointer is over
+                    // the transcript and nowhere else.
+                    .group(SCROLL_GROUP)
                     .child(col)
                     .children(list_scrollbar(&list_state)),
             );
@@ -8732,11 +8751,6 @@ impl Workbench {
             .bg(rgb(theme::background()))
             .border_1()
             .border_color(rgb(theme::border()))
-            // Not before the first question. An empty road beside an empty transcript is a
-            // frame around nothing, and the empty state has its own things to say.
-            .when(!self.transcript.is_empty(), |pane| {
-                pane.child(self.road_strip(cx))
-            })
             .child(column)
     }
 
@@ -10638,6 +10652,7 @@ impl Workbench {
             .bg(rgb(theme::surface()))
             .border_1()
             .border_color(rgb(theme::border()))
+            .group(SCROLL_GROUP)
             .child(self.artifacts_contents(cx))
             .children(scrollbar(&self.panel_scroll))
     }
@@ -11395,6 +11410,16 @@ impl Render for Workbench {
             .when(self.sidebar_open, |body| {
                 body.child(self.rail(cx))
                     .child(self.divider(Divider::Sidebar, cx))
+            })
+            // **Its own card, not a strip inside the conversation's.** It lived inside the chat
+            // pane's border, so the two read as one panel with a notch cut out of it while the
+            // sidebar and the research panel each sat on their own — *"the conversation panel is
+            // colliding with the road"*. Same treatment as its neighbours now (§173).
+            //
+            // Not before the first question: an empty road beside an empty transcript is a frame
+            // around nothing, and the empty state has its own things to say.
+            .when(!self.transcript.is_empty(), |body| {
+                body.child(self.road_strip(cx))
             })
             .child(self.chat_pane(cx));
 
