@@ -69,10 +69,11 @@ const ASTA_CITATION: &str = "AstaBench: Rigorous Benchmarking of AI Agents with 
 /// this is only the researcher-facing name requested in §154, so it cannot become a second
 /// project registry or collide with a real folder of the same name.
 const UNGROUPED_PROJECT_LABEL: &str = "Ungrouped Conversations";
-const ICON_PATHS: [&str; 4] = [
+const ICON_PATHS: [&str; 5] = [
     "icons/settings.svg",
     "icons/conversations.svg",
     "icons/research.svg",
+    "icons/road.svg",
     "icons/enter.svg",
 ];
 
@@ -91,6 +92,7 @@ impl AssetSource for Assets {
                 Some(include_bytes!("../assets/icons/conversations.svg"))
             }
             "icons/research.svg" => Some(include_bytes!("../assets/icons/research.svg")),
+            "icons/road.svg" => Some(include_bytes!("../assets/icons/road.svg")),
             "icons/enter.svg" => Some(include_bytes!("../assets/icons/enter.svg")),
             _ => None,
         };
@@ -8197,6 +8199,10 @@ impl Workbench {
                         .flex_col()
                         .flex_grow()
                         .min_w_0()
+                        // Its own, now that the row stretches: the column fills the row height and
+                        // its two lines stack at the top, where the row's `items_start` used to
+                        // put them.
+                        .items_start()
                         .pl_2()
                         // Pulls the label's cap-height level with the dot beside it.
                         .mt(px(-3.))
@@ -10316,7 +10322,22 @@ impl Workbench {
                             .text_color(rgb(theme::accent_hover()))
                             .cursor_pointer()
                     })
-                    .child("◧ road")
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .child(app_icon(
+                                "icons/road.svg",
+                                if self.road_open {
+                                    theme::accent()
+                                } else {
+                                    theme::text_faint()
+                                },
+                            ))
+                            .child("road"),
+                    )
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
                         workbench.toggle_road(cx);
                     })),
@@ -11754,6 +11775,9 @@ mod tests {
         // makes a path declared in `ICON_PATHS` but never wired into `load` a test failure.
         let assets = Assets;
         assert_eq!(assets.list("icons/").unwrap().len(), ICON_PATHS.len());
+        // Five, because the road toggle was the one control §157 left wearing a glyph while the
+        // two beside it got icons — a status bar reading `◧ road` next to two drawings.
+        assert_eq!(ICON_PATHS.len(), 5);
         for path in ICON_PATHS {
             let bytes = assets.load(path).unwrap().expect("declared icon is loadable");
             let source = std::str::from_utf8(&bytes).expect("hand-authored SVG is UTF-8");

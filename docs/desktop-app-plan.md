@@ -9678,3 +9678,41 @@ disposable-VM test. No code or cosmetic Stop control is added in this task; the 
 blocked on those two target-platform proofs, not on an unknown design.
 
 *A button is not cancellation. The proof is that the grandchildren stopped.*
+
+
+## 169. A rail whose line stopped a third of the way down (2026-08-12)
+
+The road shipped with §74 and has looked wrong ever since without anyone naming it. Put beside the
+design it was drawn from, two faults:
+
+> *"We need to fix how we connect the dot for the road. And its awful when closed."*
+
+### `items_start` is why the line never arrived
+
+Each stage is a row: a fixed-width gutter holding the dot and, below it, a connector that continues
+to the next stage. The connector is `flex_grow` with a 14px minimum, which is the right shape — it
+should take whatever height the row turns out to be.
+
+The row was `items_start`. That aligns children to the top *and leaves them at their content
+height*, so the gutter stood 23px tall — a 9px dot plus the connector's minimum — while the row
+beside it stood at 46px for a two-line label. The connector had no height to grow into and stopped
+a third of the way down, so every dot hung unconnected under a stub.
+
+Removing `items_start` lets the gutter stretch to the row, and the connector then spans it. The
+label column takes `items_start` for itself, which is what it actually wanted; the row's copy was
+doing that job by accident and breaking the rail as a side effect.
+
+### Folded, the rail *is* the content
+
+At 38px there are no labels, but the rows still reserved 46px each — so the dots sat far apart with
+stubs between them, which is the "awful when closed" state. Folded rows are 26px now, which closes
+them into one strung line. The same numbers, named: `ROW_OPEN` and `ROW_FOLDED`.
+
+### And the third toggle finally has an icon
+
+§157 gave Settings, the conversation list and the research panel drawn icons and left the road
+reading `◧ road` beside them. `road.svg` is the rail itself — a line, two filled dots and an open
+one — which is the same picture the strip draws, at 14px.
+
+*Twenty-first: a `flex_grow` child is a promise about a parent that has a size. `items_start` takes
+that size away, and the symptom appears two elements away from the line that caused it.*
