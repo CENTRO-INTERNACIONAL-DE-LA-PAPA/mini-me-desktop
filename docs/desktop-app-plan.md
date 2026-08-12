@@ -8985,6 +8985,42 @@ Headless verification on the Windows checkout: **248 tests pass**. `cargo clippy
 -p mini-me-desktop-app --all-targets` adds no warning; it still reports the branch's existing 15
 warnings in untouched call sites. The modal itself still needs the Windows-eye check — specifically
 its path wrapping and the two hover controls on a single-project heading.
+## 156. A transcript row should not exist until the viewport needs it (2026-08-10)
+
+The transcript still did this on every render:
+
+```rust
+for message in self.transcript.iter() {
+    // build the entire GPUI element tree
+}
+```
+
+Markdown parsing was no longer in that loop — §70 already moved the expensive parse to the one
+message whose body changes — so claiming virtualization would make the app faster without measuring
+would repeat the plan's original mistake. The unit that can be measured honestly in a headless TTY
+is **row-construction calls per frame**. With 500 alternating 36px/180px rows in a 600px GPUI test
+window, the eager loop constructs **500 of 500**; `gpui::list` with 240px overdraw constructs **15 of
+500**. This is not a wall-clock claim. It proves the allocation/layout work was removed from the
+off-screen 97%, while acknowledging that cached Markdown parsing was probably the larger win.
+
+`uniform_list` is wrong here. It assigns every row the first row's height, while this transcript
+ranges from a one-line question to a report several pages long. The workbench now owns a
+`ListState`, renders with GPUI's variable-height `list`, and splices only the in-flight message or a
+trace whose disclosure changed. The live status line is another row. The visible scrollbar remains;
+`ListState` exposes different offset metrics from `ScrollHandle`, so it has a matching small helper
+instead of a second scroll container fighting the list.
+
+Virtualization exposed a less obvious dependency: §62's selection registry used paint order as
+document order, and Select All discovered its text from the spans painted that frame. That would
+make row identities shift during a scroll and would copy only the viewport. Selectable runs are now
+keyed by `(message, run)`, text from visited rows outlives their layout rectangles for drag-copy, and
+Select All builds a logical plain-text transcript from the already-cached message blocks. A test
+proves an unpainted Markdown message still copies the same rendered words, not Markdown punctuation.
+
+The headless tests establish variable heights, the 500-to-15 construction count, stable span order,
+and off-screen Select All. They cannot establish wheel feel or visual scroll anchoring on the target
+machine; that remains a short Windows app check after the branches are merged.
+
 ## 157. Four glyphs become four packaged icons (2026-08-10)
 
 The deferred §70 item was kept deliberately narrow. Settings, the conversations toggle, the

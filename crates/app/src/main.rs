@@ -36,7 +36,8 @@ use futures::StreamExt;
 use gpui::{
     actions, div, img, prelude::*, px, relative, rgb, size, svg, AnimationExt as _, App,
     Application, AssetSource, Bounds, ClipboardItem, Context, Entity, Focusable, FontStyle,
-    FontWeight, HighlightStyle, KeyBinding, SharedString, StyledText, Window, WindowBounds,
+    FontWeight, HighlightStyle, KeyBinding, ListAlignment, ListState, SharedString, StyledText,
+    Window, WindowBounds,
     WindowOptions,
 };
 
@@ -1154,6 +1155,33 @@ fn output_filename(output: &workspace::Output) -> String {
     distinguishing_tail(name, 36)
 }
 
+/// A visible scrollbar for GPUI's variable-height list.
+///
+/// `list` stores its offset in [`ListState`], not a `ScrollHandle`. This keeps §40's visible
+/// affordance without adding a second scroll container around the virtual list (docs §156).
+fn list_scrollbar(state: &ListState) -> Option<impl IntoElement> {
+    let overflow = state.max_offset_for_scrollbar().height;
+    let viewport = state.viewport_bounds().size.height;
+    if overflow <= px(0.) || viewport <= px(0.) {
+        return None;
+    }
+    let content = viewport + overflow;
+    let thumb = (viewport * (viewport / content)).max(px(28.));
+    let travel = viewport - thumb;
+    let progress = (-state.scroll_px_offset_for_scrollbar().y / overflow).clamp(0.0, 1.0);
+
+    Some(
+        div()
+            .absolute()
+            .top(travel * progress)
+            .right(px(2.))
+            .w(px(6.))
+            .h(thumb)
+            .rounded_full()
+            .bg(rgb(theme::border_strong())),
+    )
+}
+
 /// A one-line tooltip.
 ///
 /// GPUI wants a whole view for a tooltip, so this is the smallest one that renders text —
@@ -2182,6 +2210,32 @@ impl Message {
         // appears never to have been answered for no stated reason (docs §63).
         self.body.is_empty() && self.steps.is_empty() && self.agents.is_empty() && !self.stopped
     }
+
+    /// The rendered words Select All should copy when this row is off screen (docs §156).
+    fn selection_text(&self) -> String {
+        use markdown::Block;
+
+        if self.role == "you" {
+            return self.body.clone();
+        }
+        let mut runs = Vec::new();
+        for block in &self.blocks {
+            match block {
+                Block::Heading { inlines, .. }
+                | Block::Paragraph(inlines)
+                | Block::ListItem { inlines, .. }
+                | Block::Quote { inlines, .. } => runs.push(inlines.text.clone()),
+                Block::Code { text, .. } => runs.push(text.clone()),
+                Block::Table { header, rows } => {
+                    runs.extend(header.iter().map(|cell| cell.text.clone()));
+                    runs.extend(rows.iter().flat_map(|row| row.iter().map(|cell| cell.text.clone())));
+                }
+                // These have never registered selectable transcript text.
+                Block::Image { .. } | Block::Rule => {}
+            }
+        }
+        runs.join("\n")
+    }
 }
 
 /// Live trace of one subagent invocation.
@@ -2404,9 +2458,9 @@ struct Workbench {
     gallery_query: Entity<Composer>,
     gallery_results: Vec<gallery::Listing>,
     gallery_note: String,
-    /// Scroll positions we draw scrollbars from. GPUI keeps the offset itself; these let
-    /// us *read* it, which is what a visible bar needs.
-    transcript_scroll: gpui::ScrollHandle,
+    /// Measured variable-height rows and their scroll position. `uniform_list` would assign a
+    /// one-line question and a two-page answer the same height (docs §156).
+    transcript_list: ListState,
     /// Selected transcript text, and the span registry a drag hit-tests against.
     /// See [`selection`] — the registry is rebuilt every frame, the selection is not.
     text_selection: selection::Transcript,
@@ -2673,7 +2727,7 @@ impl Workbench {
             gallery_query,
             gallery_results: Vec::new(),
             gallery_note: String::new(),
-            transcript_scroll: gpui::ScrollHandle::new(),
+            transcript_list: ListState::new(0, ListAlignment::Top, px(240.)),
             text_selection: selection::Transcript::default(),
             context_menu: None,
             folder_projects: Vec::new(),
@@ -3575,7 +3629,9 @@ impl Workbench {
     }
 
     fn select_whole_transcript(&mut self, cx: &mut Context<Self>) {
-        self.text_selection.select_all();
+        let text = self.transcript.iter().map(Message::selection_text)
+            .filter(|message| !message.is_empty()).collect::<Vec<_>>().join("\n");
+        self.text_selection.select_all(text);
         // Only reports a count once there is something to count: on the very first frame the
         // registry is still empty, and "selected 0 messages" would be a lie about a feature
         // rather than a fact about the conversation.
@@ -3915,6 +3971,9 @@ impl Workbench {
                 // the reason is on screen rather than one click away.
                 message.steps_expanded = true;
             }
+        }
+        if let Some(last) = self.transcript.len().checked_sub(1) {
+            self.invalidate_transcript_message(last);
         }
         // Said differently in the two cases because they are different: one stopped the run,
         // the other only stopped us watching it.
@@ -4320,10 +4379,11 @@ impl Workbench {
         // Clear what belongs to the conversation being left. The spine is
         // thread-independent, so it stays — same rule as `New thread`.
         self.transcript.clear();
+        self.reset_transcript_list();
         // Read back from the thread being opened, below. Cleared first so a failure to load
         // shows the new conversation as having no record rather than the previous one's.
         self.provenance = provenance::Record::default();
-        self.text_selection.update(|selection| selection.clear());
+        self.text_selection.clear_document();
         self.buckets.clear();
         self.tasks.clear();
         self.jobs.clear();
@@ -4819,6 +4879,7 @@ impl Workbench {
         {
             self.transcript.pop();
         }
+        self.invalidate_all_transcript_messages();
         self.composer
             .update(cx, |composer, cx| composer.set_disabled(false, cx));
         // A turn can change the spine — the mission is derived from the first
@@ -8371,27 +8432,203 @@ impl Workbench {
         }
     }
 
+    /// Build one row only when GPUI's variable-height list asks for it (docs §156).
+    fn transcript_message(&self, index: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Some(message) = self.transcript.get(index) else {
+            return div().into_any_element();
+        };
+        self.text_selection.begin_message(index);
+        let asked = message.role == "you";
+        let has_activity = !message.steps.is_empty() || !message.agents.is_empty();
+        // An empty assistant body means we're still waiting on the first token — unless a trace
+        // is already showing what's going on, which says more. The placeholder is not part of
+        // the body, so it is not parsed and never reaches §70's Markdown cache.
+        let waiting = message.body.is_empty() && self.streaming && !has_activity;
+        let body = message.body.clone();
+        // Side carries the role, so no label does: questions ride right in a bubble and answers
+        // run full width as prose (§86). `pb_3` replaces the eager column's old inter-row gap;
+        // list rows are independent elements and cannot inherit spacing from one another.
+        let mut block = div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w_0()
+            .gap_1()
+            .pb_3()
+            .when(asked, |block| block.items_end());
+        // The summary stays above the trace and answer: it answers who did the work without
+        // requiring the researcher to expand anything.
+        if !asked && !message.agents.is_empty() {
+            block = block.child(self.answer_chips(index, message));
+        }
+        // The trace precedes the answer because that is the order the work happened in.
+        if has_activity {
+            block = block.child(self.activity_block(index, message, cx));
+        }
+        if waiting {
+            block = block.child(div().text_color(rgb(theme::text_muted())).child("…"));
+        }
+        if !body.is_empty() {
+            // The user's text is shown as typed. Assistant text uses the already-cached Markdown
+            // blocks; virtualization must not undo §70 by parsing again when a row remounts.
+            if asked {
+                block = block.child(
+                    div()
+                        .max_w(relative(0.78))
+                        .min_w_0()
+                        .px_3()
+                        .py_2()
+                        .rounded_lg()
+                        .bg(rgb(theme::surface()))
+                        .border_1()
+                        .border_color(rgb(theme::border()))
+                        .text_color(rgb(theme::text()))
+                        .child(selection::Selectable::new(
+                            &self.text_selection,
+                            body.clone(),
+                            StyledText::new(body),
+                        )),
+                );
+            } else {
+                let mut rendered = div().flex().flex_col().w_full().min_w_0().gap_2();
+                for parsed in &message.blocks {
+                    rendered = rendered.child(markdown_block(parsed, Some(&self.text_selection)));
+                }
+                block = block.child(rendered);
+            }
+        }
+        // Marked, not hidden. A truncated answer looks exactly like a finished one, and whether
+        // it was cut off decides whether the researcher can rely on it (§63).
+        if message.stopped {
+            block = block.child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .text_color(rgb(theme::warning()))
+                    .text_xs()
+                    .child("— you stopped this turn; the answer above is incomplete"),
+            );
+        }
+
+        // Files remain after the answer that explains them. Preserve §162–§164's two bounded
+        // galleries here: keeping PR #11's old per-file loop would compile and pass unit tests
+        // while silently turning seven plots back into seven full transcript cards.
+        let (images, others) = split_images(&message.outputs);
+        if !images.is_empty() {
+            block = block.child(self.output_grid(
+                &format!("transcript-{index}"),
+                format!(
+                    "{} image{}",
+                    images.len(),
+                    if images.len() == 1 { "" } else { "s" }
+                ),
+                &images,
+                false,
+                cx,
+            ));
+        }
+        for (at, group) in output_folder_groups(&others).iter().enumerate() {
+            if let [output] = group.outputs.as_slice() {
+                block = block.child(self.output_card(index * 64 + at, output, cx));
+            } else {
+                block = block.child(self.output_grid(
+                    &format!("transcript-{index}-{at}"),
+                    distinguishing_tail(&output_folder_label(&group.folder), 40),
+                    &group
+                        .outputs
+                        .iter()
+                        .map(|output| (*output).clone())
+                        .collect::<Vec<_>>(),
+                    false,
+                    cx,
+                ));
+            }
+        }
+
+        // Only the latest completed answer gets export actions. Repeating them under every row
+        // would make a long virtual transcript a wall of controls just as it did when eager.
+        if !asked
+            && !message.body.is_empty()
+            && index + 1 == self.transcript.len()
+            && !self.streaming
+        {
+            block = block.child(self.export_row(message, cx));
+        }
+        block.into_any_element()
+    }
+
+    fn live_turn_row(&self) -> gpui::AnyElement {
+        let elapsed = self.provenance.turns.last()
+            .map(|turn| provenance::now_ms().saturating_sub(turn.sent_at))
+            .filter(|elapsed| *elapsed >= 1_000)
+            .map(|elapsed| format!(" · {}", duration_label(elapsed))).unwrap_or_default();
+        div().flex().flex_row().items_center().w_full().min_w_0().gap_2().pb_3()
+            .text_color(rgb(theme::text_muted())).text_xs()
+            .child(format!("{}{elapsed}", self.status)).into_any_element()
+    }
+
+    fn sync_transcript_list(&self) {
+        let wanted = self.transcript.len() + usize::from(self.streaming);
+        let present = self.transcript_list.item_count();
+        if wanted > present {
+            self.transcript_list.splice(present..present, wanted - present);
+        } else if wanted < present {
+            self.transcript_list.splice(wanted..present, 0);
+        }
+        // GPUI requires a splice when a measured row changes height. Only the in-flight answer
+        // changes token by token, so finished rows stay cached (§156).
+        if self.streaming && !self.transcript.is_empty() {
+            let last = self.transcript.len() - 1;
+            self.transcript_list.splice(last..last + 1, 1);
+        }
+    }
+
+    fn invalidate_transcript_message(&self, index: usize) {
+        if index < self.transcript_list.item_count() {
+            self.transcript_list.splice(index..index + 1, 1);
+        }
+    }
+
+    fn reset_transcript_list(&self) {
+        self.transcript_list.reset(self.transcript.len());
+    }
+
+    fn invalidate_all_transcript_messages(&self) {
+        let count = self.transcript.len().min(self.transcript_list.item_count());
+        for index in 0..count {
+            self.transcript_list.splice(index..index + 1, 1);
+        }
+    }
+
     fn chat_pane(&self, cx: &mut Context<Self>) -> impl IntoElement {
         // `min_w_0` is what makes long assistant text *wrap* instead of running off
         // the right edge: a flex item defaults to min-width:auto, so its content
         // width becomes its floor and a long paragraph widens the pane instead of
         // flowing down.
-        // `id` + `overflow_y_scroll` is what lets a long transcript scroll; GPUI
-        // keeps the scroll offset keyed on that id across re-renders.
+        // `list` owns scrolling and cached row heights; the surrounding id belongs to pointer
+        // selection and inspection, not to a competing scroll container (§156).
         // Last frame's span rectangles go now, before this frame registers its own: the
         // transcript moves under a scroll, a resize and every streamed token, and a highlight
         // painted from stale bounds is a highlight over the wrong words.
         self.text_selection.begin_frame();
+        self.sync_transcript_list();
+        let view = cx.entity().clone();
+        let list_state = self.transcript_list.clone();
+        let rows = gpui::list(list_state.clone(), move |index, _window, cx| {
+            view.update(cx, |workbench, cx| {
+                if index < workbench.transcript.len() {
+                    workbench.transcript_message(index, cx)
+                } else {
+                    workbench.live_turn_row()
+                }
+            })
+        }).w_full().h_full().p_4();
         let mut col = div()
             .id("transcript")
             .flex()
             .flex_col()
             .flex_grow()
             .min_w_0()
-            .overflow_y_scroll()
-            .track_scroll(&self.transcript_scroll)
-            .p_4()
-            .gap_3()
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|workbench, event: &gpui::MouseDownEvent, _window, cx| {
@@ -8450,165 +8687,9 @@ impl Workbench {
 
         if self.transcript.is_empty() {
             col = col.child(self.empty_state(cx));
+        } else {
+            col = col.child(rows);
         }
-        for (index, message) in self.transcript.iter().enumerate() {
-            let asked = message.role == "you";
-            let has_activity = !message.steps.is_empty() || !message.agents.is_empty();
-            // An empty assistant body means we're still waiting on the first token —
-            // unless a trace is already showing what's going on, which says more.
-            // A placeholder while the first token is still coming, and *only* then — it is
-            // not part of the body, so it is not parsed and never reaches the cache.
-            let waiting = message.body.is_empty() && self.streaming && !has_activity;
-            let body = message.body.clone();
-            // **Side carries the role, so no label does.** Asked for by name after a side-by-side
-            // with a chat client: questions ride right in a bubble, answers run full width on the
-            // left as plain prose. The shape is doing the work a `you` / `mini-me` caption used to
-            // do, and two signals for one fact is one more than the eye needs (docs §86).
-            let mut block = div()
-                .flex()
-                .flex_col()
-                .w_full()
-                .min_w_0()
-                .gap_1()
-                .when(asked, |block| block.items_end());
-            // A one-line summary of the work, above the answer it produced. The collapsible
-            // trace stays underneath for anyone who wants the detail — this replaces nothing,
-            // it just means the common question ("who did this, and how long did it take")
-            // no longer requires expanding anything.
-            if !asked && !message.agents.is_empty() {
-                block = block.child(self.answer_chips(index, message));
-            }
-            // The trace goes *above* the answer, because that is the order it
-            // happened in and because the answer should be the last thing read.
-            if has_activity {
-                block = block.child(self.activity_block(index, message, cx));
-            }
-            if waiting {
-                block = block.child(div().text_color(rgb(theme::text_muted())).child("…"));
-            }
-            if !body.is_empty() {
-                // The user's own text is shown as typed — they wrote it, and reinterpreting
-                // their asterisks would be presumptuous. Assistant text is Markdown.
-                if asked {
-                    block = block.child(
-                        div()
-                            // Capped rather than full width: a bubble that reaches both edges is
-                            // not a bubble, and the ragged left edge is what makes a glance down
-                            // the transcript separate questions from answers.
-                            .max_w(relative(0.78))
-                            .min_w_0()
-                            .px_3()
-                            .py_2()
-                            .rounded_lg()
-                            .bg(rgb(theme::surface()))
-                            .border_1()
-                            .border_color(rgb(theme::border()))
-                            .text_color(rgb(theme::text()))
-                            // Shown as typed — they wrote it, and reinterpreting their asterisks
-                            // would be presumptuous (docs §14).
-                            .child(selection::Selectable::new(
-                                &self.text_selection,
-                                body.clone(),
-                                StyledText::new(body),
-                            )),
-                    );
-                } else {
-                    let mut rendered = div().flex().flex_col().w_full().min_w_0().gap_2();
-                    // Parsed when the text arrived, not now. See `Message::blocks`.
-                    for parsed in &message.blocks {
-                        rendered =
-                            rendered.child(markdown_block(parsed, Some(&self.text_selection)));
-                    }
-                    block = block.child(rendered);
-                }
-            }
-            // Marked, not hidden. A truncated answer looks exactly like a finished one, and
-            // whether it was cut off decides whether it can be relied on (docs §63).
-            if message.stopped {
-                block = block.child(
-                    div()
-                        .w_full()
-                        .min_w_0()
-                        .text_color(rgb(theme::warning()))
-                        .text_xs()
-                        .child("— you stopped this turn; the answer above is incomplete"),
-                );
-            }
-            // Files last: the answer explains them, so it should be read first. A productive
-            // folder is one sideways gallery rather than one full-width card per artifact — ten
-            // plots were ten screens before the reader chose any of them (§152).
-            let (images, others) = split_images(&message.outputs);
-            if !images.is_empty() {
-                block = block.child(self.output_grid(
-                    &format!("transcript-{index}"),
-                    format!(
-                        "{} image{}",
-                        images.len(),
-                        if images.len() == 1 { "" } else { "s" }
-                    ),
-                    &images,
-                    false,
-                    cx,
-                ));
-            }
-            for (at, group) in output_folder_groups(&others).iter().enumerate() {
-                if let [output] = group.outputs.as_slice() {
-                    block = block.child(self.output_card(index * 64 + at, output, cx));
-                } else {
-                    block = block.child(self.output_grid(
-                        &format!("transcript-{index}-{at}"),
-                        distinguishing_tail(&output_folder_label(&group.folder), 40),
-                        &group.outputs.iter().map(|o| (*o).clone()).collect::<Vec<_>>(),
-                        false,
-                        cx,
-                    ));
-                }
-            }
-            // What to do with the answer, under the answer. All three exist already — the first
-            // is a palette command, and a command nobody knows the name of is a feature nobody
-            // has. Only under the *last* completed one: three buttons after every answer in a
-            // twelve-turn conversation is a wall of chrome, and it is the latest answer a person
-            // exports.
-            if !asked
-                && !message.body.is_empty()
-                && index + 1 == self.transcript.len()
-                && !self.streaming
-            {
-                block = block.child(self.export_row(message, cx));
-            }
-            col = col.child(block);
-        }
-
-        // What the turn is doing, kept at the bottom of the transcript while it runs.
-        //
-        // The trace still sits above the answer it produced — that is the order it happened in and
-        // it stays with its own message. But during a two-minute delegation the trace scrolls up
-        // out of view behind the streaming answer, and the one question a person has while waiting
-        // is "is this still going". So the live line is pinned under the last message instead of
-        // being hunted for inside it.
-        if self.streaming {
-            let elapsed = self
-                .provenance
-                .turns
-                .last()
-                .map(|turn| provenance::now_ms().saturating_sub(turn.sent_at))
-                .filter(|elapsed| *elapsed >= 1_000)
-                .map(|elapsed| format!(" · {}", duration_label(elapsed)))
-                .unwrap_or_default();
-            col = col.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .w_full()
-                    .min_w_0()
-                    .gap_2()
-                    .text_color(rgb(theme::text_muted()))
-                    .text_xs()
-                    .child(format!("{}{elapsed}", self.status)),
-            );
-        }
-
         // Everything that is not the road: transcript, approval, picker, composer. Built as its
         // own column so the road can sit *beside* all of it rather than above the transcript
         // and below the composer.
@@ -8627,7 +8708,7 @@ impl Workbench {
                     .min_w_0()
                     .overflow_hidden()
                     .child(col)
-                    .children(scrollbar(&self.transcript_scroll)),
+                    .children(list_scrollbar(&list_state)),
             );
         // Above the composer, so the decision sits where the user's attention already
         // is and cannot be scrolled out of view.
@@ -10005,6 +10086,7 @@ impl Workbench {
                 trace.expanded = expanded;
             }
         }
+        self.invalidate_all_transcript_messages();
     }
 
     /// The palette overlay: a query field over a filtered command list.
@@ -10165,6 +10247,7 @@ impl Workbench {
                         if let Some(message) = workbench.transcript.get_mut(message_index) {
                             message.steps_expanded = !message.steps_expanded;
                         }
+                        workbench.invalidate_transcript_message(message_index);
                         cx.notify();
                     })),
             );
@@ -10216,6 +10299,7 @@ impl Workbench {
                                     trace.expanded = !trace.expanded;
                                 }
                             }
+                            workbench.invalidate_transcript_message(message_index);
                             cx.notify();
                         })),
                 );
@@ -11555,6 +11639,46 @@ fn replay(path: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn a_long_transcript_builds_only_rows_near_the_viewport(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        struct MeasuredList { state: ListState, built: Rc<Cell<usize>> }
+        impl Render for MeasuredList {
+            fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+                let built = self.built.clone();
+                gpui::list(self.state.clone(), move |index, _window, _cx| {
+                    built.set(built.get() + 1);
+                    // Variable by design: `uniform_list` is invalid for transcript rows (§156).
+                    div().h(px(if index % 7 == 0 { 180. } else { 36. })).into_any_element()
+                }).w_full().h_full()
+            }
+        }
+
+        let built = Rc::new(Cell::new(0));
+        let state = ListState::new(500, ListAlignment::Top, px(240.));
+        let cx = cx.add_empty_window();
+        cx.draw(gpui::point(px(0.), px(0.)), size(px(900.), px(600.)), |_, cx| {
+            cx.new(|_| MeasuredList { state, built: built.clone() })
+        });
+        // The removed eager loop constructed all 500. Count the same deterministic unit on both
+        // sides instead of noisy wall time from a headless debug build (docs §156).
+        println!("transcript row construction: eager 500, virtual {}", built.get());
+        assert!(built.get() < 100, "virtualization built {} rows", built.get());
+    }
+
+    #[test]
+    fn select_all_uses_rendered_words_for_an_unpainted_markdown_message() {
+        let message = Message::new(
+            "mini-me",
+            "# Result\n\nThe **measured** value is 42.\n\n```text\ncopy me\n```".into(),
+        );
+        assert_eq!(message.selection_text(), "Result\nThe measured value is 42.\ncopy me");
+    }
 
     #[test]
     fn outputs_in_the_same_agent_folder_become_one_gallery() {
