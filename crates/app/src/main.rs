@@ -3908,20 +3908,45 @@ impl Workbench {
     }
 
     fn refresh_conversations(&mut self, cx: &mut Context<Self>) {
-        let mut updates = self.sidecar.list_conversations();
+        // Read from disk rather than from `self.draft`, which is the Settings pane's editing
+        // buffer — the same argument `remember_panels` makes. The migration must be decided by
+        // what is *stored*, because that is what survives to the next launch.
+        let adopt = !settings::Settings::load().adopted_untagged;
+        let mut updates = self.sidecar.list_conversations(adopt);
         cx.spawn(async move |this, cx| {
-            if let Some(conversations) = updates.next().await {
+            if let Some(answer) = updates.next().await {
                 let _ = this.update(cx, |workbench, cx| {
-                    workbench.conversations = conversations;
+                    workbench.conversations = answer.conversations;
                     // Only on a real answer. A failed fetch sends nothing, so the list keeps
                     // saying "loading" rather than claiming the researcher has none — a
                     // backend that is still booting will answer the next refresh.
                     workbench.conversations_loaded = true;
+                    if answer.scanned {
+                        workbench.remember_adoption();
+                    }
                     cx.notify();
                 });
             }
         })
         .detach();
+    }
+
+    /// Record that §90's pre-tag scan has run, so it can never run again.
+    ///
+    /// Deliberately *not* conditional on having adopted anything: an installation with no
+    /// untagged threads is exactly the one that must stop scanning, and it is the one where
+    /// deleting every conversation used to bring the leftovers back (docs §166).
+    fn remember_adoption(&self) {
+        let mut stored = settings::Settings::load();
+        if stored.adopted_untagged {
+            return;
+        }
+        stored.adopted_untagged = true;
+        if let Err(error) = stored.save() {
+            // The scan did run; all that failed is remembering it. Worth a log because the
+            // consequence is a repeat scan, which is the defect this whole field exists for.
+            tracing::warn!(%error, "could not record that the pre-tag scan has run");
+        }
     }
 
     /// Reopen a past conversation: switch threads and rebuild the transcript.
