@@ -732,6 +732,41 @@ struct OutputFolderGroup<'a> {
 /// panel before anyone had chosen a figure to look at.
 const IMAGE_GRID_TILES: usize = 4;
 
+/// Tiles per row. Two, which with [`IMAGE_GRID_TILES`] makes the 2×2 the researcher pointed at.
+const GRID_COLUMNS: usize = 2;
+
+/// The gap between tiles, matching `gap_2`. Named because the heading is sized from it.
+const GRID_GAP: f32 = 8.;
+
+/// Tile width in the 330px Outputs panel, and in the transcript.
+///
+/// **Fixed, not a fraction.** A grid of `flex_1` tiles is as wide as whatever holds it, which in
+/// the transcript is the whole conversation — one folder of files claimed a band wider than the
+/// answer that produced it. Two fixed tiles make the block `2 × tile + gap` and no wider, which is
+/// how the phone gallery being imitated stays a block you flick past rather than a wall (§164).
+const GRID_TILE_COMPACT: f32 = 148.;
+const GRID_TILE_ROOMY: f32 = 200.;
+
+/// A tile's media area, as a fraction of its width.
+///
+/// Landscape rather than square: the figures are matplotlib plots, which are wider than tall, and
+/// a square tile showing a `Contain`ed plot is mostly empty box.
+const GRID_TILE_ASPECT: f32 = 0.7;
+
+/// The `+N` glyph, sized to the tile it sits on.
+fn media_scrim_size(tile: f32) -> f32 {
+    (tile / 4.).max(18.)
+}
+
+/// How many characters of a filename fit across a tile at `text_xs`.
+///
+/// Measured rather than truncated by the layout, for the reason [`Workbench::output_grid_tile`]
+/// gives: `Label::ellipsis` collapses to a bare `…` without a flex parent to grow within (§59).
+/// Roughly 6px per character at 12px type, less the tile's own padding.
+fn name_chars(tile: f32) -> usize {
+    (((tile - 16.) / 6.) as usize).max(8)
+}
+
 /// The height of the image area in the preview, and the modal's own size.
 ///
 /// Explicit rather than "as tall as the picture": the modal has a header above and a filmstrip
@@ -6616,220 +6651,50 @@ impl Workbench {
         )
     }
 
-    /// One fixed-size member of a gallery, opened through the preview modal.
+    /// A capped grid of outputs, with the last visible tile counting the rest.
     ///
-    /// Fixed here means only the *thumbnail*, not the underlying artifact: §152's failure was
-    /// ten full-width figures claiming ten screens before the researcher chose one. The modal
-    /// still renders the selected file at its useful size, and `Open` there still reaches the
-    /// original application.
+    /// **One renderer for images and for files**, because the researcher asked for the same
+    /// treatment on both and the difference is only what a tile draws inside itself. §153's
+    /// sideways strip is gone: it spanned the whole transcript, one folder of seven files claimed
+    /// a band of the conversation wider than the answer above it, and the phone gallery it was
+    /// being compared against is a compact block you flick past. Their words: *"the grouping
+    /// occupies too much space in the conversation (too wide) … less invasive and functions the
+    /// same."*
     ///
-    /// `set` and `at` are the group this tile belongs to and its place in it, so opening a tile
-    /// opens a *position* the arrows and filmstrip can move from — not a lone file the way it
-    /// used to. No `+N` scrim here: this is the strip, which shows every member, and the count
-    /// belongs to the capped grid ([`Self::output_image_tile`]).
-    fn output_thumbnail(
+    /// Fixed-width tiles rather than a fraction of the container, which is what makes it narrow:
+    /// two per row means the block is exactly `2 × tile + gap` and stops there, whatever the panel
+    /// or the window is doing.
+    fn output_grid(
         &self,
-        id: String,
-        set: &[workspace::Output],
-        at: usize,
-        width: f32,
-        image_height: f32,
+        scope: &str,
+        heading: String,
+        items: &[workspace::Output],
+        compact: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let output = &set[at];
-        let opening = set.to_vec();
-        let (glyph, ink) = file_mark(&output.path);
-        let shape = self.shape_of(output);
-        let visual = match output.kind {
-            workspace::Kind::Figure => div().w_full().h(px(image_height)).child(
-                img(output.path.clone())
-                    .w_full()
-                    .h_full()
-                    .object_fit(gpui::ObjectFit::Contain),
-            ),
-            _ => div()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap_1()
-                .w_full()
-                .h(px(image_height))
-                .text_color(rgb(ink))
-                .text_size(px(22.))
-                .child(glyph)
-                .child(
-                    div()
-                        .text_color(rgb(theme::text_faint()))
-                        .text_size(px(11.))
-                        .child(shape.describe(output.bytes)),
-                ),
+        let tile = if compact {
+            GRID_TILE_COMPACT
+        } else {
+            GRID_TILE_ROOMY
         };
+        let (shown, hidden) = image_grid_shape(items.len());
 
-        div()
-            .id(SharedString::from(id))
-            .flex()
-            .flex_col()
-            .flex_none()
-            .w(px(width))
-            .min_w(px(width))
-            .overflow_hidden()
-            .rounded_lg()
-            .border_1()
-            .border_color(rgb(theme::border()))
-            .bg(rgb(if theme::is_light(&theme::current()) {
-                theme::elevated()
-            } else {
-                theme::surface()
-            }))
-            .hover(|style| style.border_color(rgb(theme::accent())).cursor_pointer())
-            .child(visual)
-            .child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .px_2()
-                    .py_1()
-                    .border_t_1()
-                    .border_color(rgb(theme::border()))
-                    .child(
-                        ui::Label::new(output_filename(output))
-                            .size(ui::Size::Compact)
-                            .ellipsis(),
-                    ),
-            )
-            .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                workbench.preview = Preview::opening(opening.clone(), at);
-                cx.notify();
-            }))
-    }
-
-    /// A folder-labelled, sideways strip of artifacts on either output surface.
-    fn output_gallery(
-        &self,
-        scope: &str,
-        group: &OutputFolderGroup<'_>,
-        compact: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let folder = group.folder.to_string_lossy();
-        let key = format!("{scope}:{folder}");
-        let scroll = self.output_gallery_scroll(&key);
-        let label = distinguishing_tail(&output_folder_label(&group.folder), 44);
-        let count = group.outputs.len();
-        let (tile_width, image_height) = if compact { (140., 92.) } else { (190., 118.) };
-
-        let mut rail = div()
-            .id(SharedString::from(format!("output-gallery-rail-{key}")))
-            .flex()
-            .flex_row()
-            .gap_2()
-            .w_full()
-            .min_w_0()
-            // Reserve the visible thumb rather than painting it over a filename (§152).
-            .pb_3()
-            .overflow_x_scroll()
-            .track_scroll(&scroll);
-        // Owned once for the whole rail: every tile opens the same set, so the modal can step
-        // through the folder from wherever the researcher entered it.
-        let set: Vec<workspace::Output> = group.outputs.iter().map(|o| (*o).clone()).collect();
-        for at in 0..set.len() {
-            rail = rail.child(self.output_thumbnail(
-                format!("output-gallery-item-{key}-{at}"),
-                &set,
-                at,
-                tile_width,
-                image_height,
-                cx,
-            ));
-        }
-
-        div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .w_full()
-            .min_w_0()
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .w_full()
-                    .min_w_0()
-                    .child(
-                        ui::Label::new(label)
-                            .size(ui::Size::Compact)
-                            .ellipsis(),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_color(rgb(theme::text_faint()))
-                            .text_xs()
-                            .child(format!("{count} files · scroll sideways")),
-                    ),
-            )
-            .child(
-                div()
-                    .relative()
-                    .w_full()
-                    .min_w_0()
-                    .child(rail)
-                    .children(self.horizontal_scrollbar(key, &scroll, cx)),
-            )
-    }
-
-    /// Every image a turn produced, as a capped 2×2 grid.
-    ///
-    /// **The researcher's own reference was a phone's photo gallery**: four tiles, the last one
-    /// carrying `+5`, and the whole set behind one click. Two things follow from that which the
-    /// sideways strip did not give. The block is a *fixed* height whatever the run produced —
-    /// four figures and forty occupy the same two rows — and choosing between them happens in
-    /// the modal, at a size worth looking at, rather than in a 330px column.
-    ///
-    /// Images only, and separately from the rest (see [`split_images`]): the strip mixed a
-    /// summary CSV in among seven plots, and this is the surface you flick through looking for a
-    /// figure.
-    fn output_image_grid(
-        &self,
-        scope: &str,
-        images: &[workspace::Output],
-        compact: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let image_height = if compact { 92. } else { 132. };
-        // Two per row, sharing the width. `flex_1` rather than a computed pixel width so the
-        // grid follows the panel — which the researcher can drag — instead of assuming it.
-        let (shown, hidden) = image_grid_shape(images.len());
-
-        let mut grid = div().flex().flex_col().gap_2().w_full().min_w_0();
-        for row_start in (0..shown).step_by(2) {
-            let mut row = div().flex().flex_row().gap_2().w_full().min_w_0();
-            for at in row_start..(row_start + 2).min(shown) {
-                // The count rides on the *last visible* tile, and only when something is hidden
-                // behind it. Clicking it opens that image, not a folder listing — the remaining
-                // figures are then one arrow away, which is the whole point of the set.
+        let mut grid = div().flex().flex_col().gap_2().flex_none();
+        for row_start in (0..shown).step_by(GRID_COLUMNS) {
+            let mut row = div().flex().flex_row().gap_2().flex_none();
+            for at in row_start..(row_start + GRID_COLUMNS).min(shown) {
+                // The count rides on the *last visible* tile, and only when something is behind
+                // it. Clicking it opens that file; the rest are then one arrow away, which is
+                // what makes a capped grid honest rather than lossy.
                 let more = (hidden > 0 && at + 1 == shown).then_some(hidden);
-                row = row.child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(self.output_image_tile(
-                            format!("output-image-{scope}-{at}"),
-                            images,
-                            at,
-                            image_height,
-                            more,
-                            cx,
-                        )),
-                );
-            }
-            // An odd count leaves the last tile half-width rather than stretched to fill the
-            // row, which would make one figure look twice as important as its neighbours.
-            if row_start + 2 > shown {
-                row = row.child(div().flex_1().min_w_0());
+                row = row.child(self.output_grid_tile(
+                    format!("output-tile-{scope}-{at}"),
+                    items,
+                    at,
+                    tile,
+                    more,
+                    cx,
+                ));
             }
             grid = grid.child(row);
         }
@@ -6838,25 +6703,16 @@ impl Workbench {
             .flex()
             .flex_col()
             .gap_1()
-            .w_full()
-            .min_w_0()
+            .flex_none()
             .child(
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
+                    .justify_between()
                     .gap_2()
-                    .w_full()
-                    .min_w_0()
-                    .child(
-                        ui::Label::new(format!(
-                            "{} image{}",
-                            images.len(),
-                            if images.len() == 1 { "" } else { "s" }
-                        ))
-                        .size(ui::Size::Compact)
-                        .ellipsis(),
-                    )
+                    .w(px(tile * GRID_COLUMNS as f32 + GRID_GAP))
+                    .child(ui::Label::new(heading).size(ui::Size::Compact))
                     .child(
                         div()
                             .flex_none()
@@ -6872,28 +6728,119 @@ impl Workbench {
             .child(grid)
     }
 
-    /// One image in the grid: the picture, a filename, and an optional `+N` scrim.
+    /// One tile: a picture for a figure, a glyph and a name for anything else.
     ///
-    /// Width comes from the flex parent rather than a fixed pixel count, which is the one thing
-    /// [`Self::output_thumbnail`] cannot do — a strip needs `flex_none` tiles to be scrollable
-    /// sideways, and a grid needs them to share the row.
-    fn output_image_tile(
+    /// **No filename on an image tile.** The picture identifies itself, the modal's header names
+    /// it, and a caption under every thumbnail was half of what made the old strip feel like
+    /// furniture. A data file is the opposite case — one CSV looks exactly like another — so those
+    /// tiles carry the name and the shape, which is the only thing that tells them apart.
+    ///
+    /// The name is shortened **here**, in Rust, rather than by asking the layout to truncate it.
+    /// `Label::ellipsis` needs a flex parent to grow within (§59), and a tile is a column of
+    /// fixed width — get that wrong and every name renders as a bare `…`, which is exactly what
+    /// §153's tiles did in the panel.
+    fn output_grid_tile(
         &self,
         id: String,
         set: &[workspace::Output],
         at: usize,
-        image_height: f32,
+        tile: f32,
         more: Option<usize>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let output = &set[at];
         let opening = set.to_vec();
+        let media = tile * GRID_TILE_ASPECT;
+        let (glyph, ink) = file_mark(&output.path);
+        let shape = self.shape_of(output);
+        let is_image = output.kind == workspace::Kind::Figure;
+
+        let inside = if is_image {
+            div()
+                .relative()
+                .w_full()
+                .h(px(media))
+                .flex_none()
+                .child(
+                    img(output.path.clone())
+                        .w_full()
+                        .h_full()
+                        // `Contain`, not `Cover`: a photo crops acceptably and a chart does not.
+                        // Cropping the axes off a plot makes the thumbnail useless for choosing
+                        // between seven of them, which is the only job it has.
+                        .object_fit(gpui::ObjectFit::Contain),
+                )
+                .when_some(more, |media, more| {
+                    media.child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(gpui::rgba(0x000000a6))
+                            .text_color(rgb(SCRIM_INK))
+                            .text_size(px(media_scrim_size(tile)))
+                            .child(format!("+{more}")),
+                    )
+                })
+                .into_any_element()
+        } else {
+            div()
+                .relative()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_1()
+                .w_full()
+                .h(px(media))
+                .flex_none()
+                .px_2()
+                .child(
+                    div()
+                        .text_color(rgb(ink))
+                        .text_size(px(20.))
+                        .child(glyph),
+                )
+                .child(
+                    div()
+                        .text_color(rgb(theme::text()))
+                        .text_xs()
+                        .child(distinguishing_tail(
+                            &output_filename(output),
+                            name_chars(tile),
+                        )),
+                )
+                .child(
+                    div()
+                        .text_color(rgb(theme::text_faint()))
+                        .text_size(px(11.))
+                        .child(shape.describe(output.bytes)),
+                )
+                .when_some(more, |media, more| {
+                    media.child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(gpui::rgba(0x000000a6))
+                            .text_color(rgb(SCRIM_INK))
+                            .text_size(px(media_scrim_size(tile)))
+                            .child(format!("+{more}")),
+                    )
+                })
+                .into_any_element()
+        };
+
         div()
             .id(SharedString::from(id))
             .flex()
             .flex_col()
-            .w_full()
-            .min_w_0()
+            .flex_none()
+            .w(px(tile))
             .overflow_hidden()
             .rounded_lg()
             .border_1()
@@ -6904,46 +6851,7 @@ impl Workbench {
                 theme::surface()
             }))
             .hover(|style| style.border_color(rgb(theme::accent())).cursor_pointer())
-            .child(
-                div()
-                    .relative()
-                    .w_full()
-                    .h(px(image_height))
-                    .child(
-                        img(output.path.clone())
-                            .w_full()
-                            .h_full()
-                            .object_fit(gpui::ObjectFit::Cover),
-                    )
-                    .when_some(more, |tile, more| {
-                        tile.child(
-                            div()
-                                .absolute()
-                                .inset_0()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .bg(gpui::rgba(0x000000a6))
-                                .text_color(rgb(SCRIM_INK))
-                                .text_size(px(image_height / 3.))
-                                .child(format!("+{more}")),
-                        )
-                    }),
-            )
-            .child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .px_2()
-                    .py_1()
-                    .border_t_1()
-                    .border_color(rgb(theme::border()))
-                    .child(
-                        ui::Label::new(output_filename(output))
-                            .size(ui::Size::Compact)
-                            .ellipsis(),
-                    ),
-            )
+            .child(inside)
             .on_click(cx.listener(move |workbench, _event, _window, cx| {
                 workbench.preview = Preview::opening(opening.clone(), at);
                 cx.notify();
@@ -7929,8 +7837,13 @@ impl Workbench {
             // plots were ten screens before the reader chose any of them (§152).
             let (images, others) = split_images(&message.outputs);
             if !images.is_empty() {
-                block = block.child(self.output_image_grid(
+                block = block.child(self.output_grid(
                     &format!("transcript-{index}"),
+                    format!(
+                        "{} image{}",
+                        images.len(),
+                        if images.len() == 1 { "" } else { "s" }
+                    ),
                     &images,
                     false,
                     cx,
@@ -7940,9 +7853,10 @@ impl Workbench {
                 if let [output] = group.outputs.as_slice() {
                     block = block.child(self.output_card(index * 64 + at, output, cx));
                 } else {
-                    block = block.child(self.output_gallery(
+                    block = block.child(self.output_grid(
                         &format!("transcript-{index}-{at}"),
-                        group,
+                        distinguishing_tail(&output_folder_label(&group.folder), 40),
+                        &group.outputs.iter().map(|o| (*o).clone()).collect::<Vec<_>>(),
                         false,
                         cx,
                     ));
@@ -10490,23 +10404,37 @@ impl Workbench {
         // opened to *check* something, which is a deliberate act further down.
         let (images, others) = split_images(&ordered_outputs);
         if !images.is_empty() {
-            section = section.child(self.output_image_grid("panel", &images, true, cx));
+            section = section.child(self.output_grid(
+                "panel",
+                format!(
+                    "{} image{}",
+                    images.len(),
+                    if images.len() == 1 { "" } else { "s" }
+                ),
+                &images,
+                true,
+                cx,
+            ));
         }
         for (at, group) in output_folder_groups(&others).iter().enumerate() {
             if let [output] = group.outputs.as_slice() {
+                // A lone file stays a row: it has the whole width for its name and shape, and a
+                // grid of one is a tile with nothing to compare it to.
                 section = section.child(self.output_panel_row(
                     format!("panel-output-{}", output.name),
                     output,
                     cx,
                 ));
             } else {
-                // One compact rail replaces N near-identical rows. It retains the folder heading,
-                // filename tail, kind/shape, and click-to-preview behavior while making a twelve-
-                // artifact run occupy one panel block instead of most of the panel (§152). Still
-                // folder-grouped, because two runs' `results/` directories are still two things
-                // — the image grid above is the only surface where kind outranks folder.
-                section =
-                    section.child(self.output_gallery(&format!("panel-{at}"), group, true, cx));
+                // Still folder-grouped, because two runs' `results/` directories are still two
+                // things — the image grid above is the only surface where kind outranks folder.
+                section = section.child(self.output_grid(
+                    &format!("panel-{at}"),
+                    distinguishing_tail(&output_folder_label(&group.folder), 28),
+                    &group.outputs.iter().map(|o| (*o).clone()).collect::<Vec<_>>(),
+                    true,
+                    cx,
+                ));
             }
         }
 
@@ -10943,6 +10871,41 @@ mod tests {
             let visible = if hidden > 0 { shown - 1 } else { shown };
             assert_eq!(visible + hidden, total, "{total} images went unaccounted for");
         }
+    }
+
+    #[test]
+    fn a_grid_stays_a_block_rather_than_spanning_the_conversation() {
+        // The complaint this exists for: *"the grouping occupies too much space in the
+        // conversation (too wide)."* A grid of `flex_1` tiles is as wide as whatever holds it, so
+        // the width has to come from the tiles. Two fixed tiles plus one gap, and nothing about
+        // the window or the panel enters into it.
+        let width = |tile: f32| tile * GRID_COLUMNS as f32 + GRID_GAP;
+
+        // The panel is roughly 330px inside its padding, so the compact block has to fit that.
+        assert!(width(GRID_TILE_COMPACT) <= 320., "{}", width(GRID_TILE_COMPACT));
+        // And the transcript block is close to the phone gallery it imitates — about 415px in the
+        // screenshot the researcher sent — not the full width of the conversation.
+        let roomy = width(GRID_TILE_ROOMY);
+        assert!((400.0..=440.0).contains(&roomy), "{roomy}");
+
+        // Two columns, four tiles: the 2×2 that makes `+N` land on the bottom-right.
+        assert_eq!(IMAGE_GRID_TILES % GRID_COLUMNS, 0);
+        assert_eq!(IMAGE_GRID_TILES / GRID_COLUMNS, 2, "two rows, not three");
+
+        // A name is shortened to something that actually fits, and never to nothing — §59's bare
+        // `…` is what happens when the layout is asked to do this instead.
+        assert!(name_chars(GRID_TILE_COMPACT) >= 20, "{}", name_chars(GRID_TILE_COMPACT));
+        assert!(name_chars(GRID_TILE_ROOMY) > name_chars(GRID_TILE_COMPACT));
+        assert_eq!(name_chars(0.), 8, "a floor, so a name is never cut to nothing");
+        // The tail is what tells two summaries apart, and the result is exactly as long as the
+        // tile allows — 22 characters for a 148px one, ellipsis included.
+        let shortened = distinguishing_tail(
+            "kiwi_quality_summary_statistics.csv",
+            name_chars(GRID_TILE_COMPACT),
+        );
+        assert_eq!(shortened, "…ummary_statistics.csv");
+        assert_eq!(shortened.chars().count(), name_chars(GRID_TILE_COMPACT));
+        assert!(shortened.ends_with(".csv"), "the extension has to survive");
     }
 
     #[test]
