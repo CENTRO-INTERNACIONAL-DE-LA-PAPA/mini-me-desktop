@@ -830,6 +830,13 @@ pub const SCROLL_GUTTER: f32 = 12.;
 /// and gone the rest of the time (§173).
 const SCROLL_GROUP: &str = "scroll-region";
 
+/// How far the conversation sits from its own edge.
+///
+/// Matches the composer below it, which is `m_2` outside a `p_2` box — so the question a
+/// researcher types and the answer they read start on the same x. 16px was the list's padding
+/// before §174 found that half of it never applied.
+const TRANSCRIPT_INSET: f32 = 16.;
+
 fn scrollbar(handle: &gpui::ScrollHandle) -> Option<impl IntoElement> {
     let overflow = handle.max_offset().height;
     let viewport = handle.bounds().size.height;
@@ -8632,13 +8639,29 @@ impl Workbench {
         let list_state = self.transcript_list.clone();
         let rows = gpui::list(list_state.clone(), move |index, _window, cx| {
             view.update(cx, |workbench, cx| {
-                if index < workbench.transcript.len() {
+                let row = if index < workbench.transcript.len() {
                     workbench.transcript_message(index, cx)
                 } else {
                     workbench.live_turn_row()
-                }
+                };
+                // **The inset has to be on the row, not on the list.** GPUI's `list` applies only
+                // the *vertical* half of its padding: `prepaint_items` places each item at
+                // `bounds.origin + Point::new(px(0.), padding.top)`, so the horizontal half is
+                // computed and then never used. The eager scrolling div this replaced honoured
+                // all four sides, so §156 moved the transcript flush against its own border and
+                // nothing said so (§174).
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .px(px(TRANSCRIPT_INSET))
+                    .child(row)
+                    .into_any_element()
             })
-        }).w_full().h_full().p_4();
+        })
+        .w_full()
+        .h_full()
+        // Vertical only, which is all this ever applied.
+        .py_4();
         let mut col = div()
             .id("transcript")
             .flex()
