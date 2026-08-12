@@ -429,6 +429,13 @@ impl RenderOnce for Modal {
             .id(SharedString::from(format!("{}-backdrop", self.id)))
             .absolute()
             .inset_0()
+            // **Visible behind it, not reachable behind it.** GPUI hit-tests every element whose
+            // bounds contain the pointer, so an overlay that only *paints* over the workbench
+            // leaves it live: a click on Settings also pressed whatever sat under that spot.
+            // `occlude` blocks the mouse from everything behind this hitbox. Here rather than in
+            // each caller, because every modal in the app is built from this one type and the
+            // three that existed all had the defect (docs §163).
+            .occlude()
             .flex()
             .items_center()
             .justify_center()
