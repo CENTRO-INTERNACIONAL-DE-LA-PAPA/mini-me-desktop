@@ -9534,5 +9534,18 @@ would show one project twice, under two spellings.
 Empty projects are seeded only when the search box is empty. A filter is a way to find work; an
 empty project matches nothing, and leaving them in a filtered list would make searching look broken.
 
+### And then it read them at the wrong moment
+
+Reported on the next launch: the project was not there. The directory listing was written inside
+the *answer* to `list_conversations`, so a fact about this machine's disk was waiting on an HTTP
+reply — and the first refresh of a cold launch reliably fires before the backend is up, which
+`list_conversations` documents in its own comment two lines away. No reply, no headings, and an
+empty project simply absent on the launch after it was created.
+
+It is read before the request now, and again on the answer in case a turn created one meanwhile.
+The same shape as the bug above it, one layer down: the sidebar had the right evidence and asked
+the wrong thing for permission to look at it.
+
 *Twentieth: "derive it, don't store it" is a good rule that says nothing about **which** derivation.
-The state existed on disk the whole time; the sidebar was reading the wrong evidence for it.*
+The state existed on disk the whole time; the sidebar was reading the wrong evidence for it — and
+then, having found the right evidence, waited on something unrelated before reading it.*
