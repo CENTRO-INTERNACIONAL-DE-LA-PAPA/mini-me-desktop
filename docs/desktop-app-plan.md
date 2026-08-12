@@ -87,7 +87,7 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   the one part nobody can see.
 - ✅ **Right-click menu** (§64) — confirmed: copy/select-all in the transcript, cut/copy/paste
   in the composer, rows greyed when they would do nothing, each showing its own binding.
-- ⬜ **Cancel a running setup fix** (§28 → §146 → §168). §168 now specifies exactly what a
+- ⬜ **Cancel a running setup fix** (§28 → §146 → §168 → **§170, measured**). §168 now specifies exactly what a
   truthful Stop requires: a published numeric PGID and `kill -- -PGID` for the ordinary WSL
   repair, a **second** UAC-approved `taskkill /T` for an elevated install, and five tests —
   four of which need the target Windows/WSL pair and one a disposable VM. Still deliberately
@@ -9729,9 +9729,94 @@ these tests never touched `road_strip`, so they were as green before the edit as
 
 The researcher found it the only way it could be found, by looking at the window: the dots were
 still hanging under stubs, in a build whose plan said they were not.
+### Folded, it sat against the left edge
+
+The gutter is the row's only child when folded, and the row is `w_full`, so a 12px rail sat at
+x=0 of a 38px strip. `justify_center` when folded puts it down the middle, which is where the
+design the researcher supplied has it.
 
 *Twenty-first: a `flex_grow` child is a promise about a parent that has a size. `items_start` takes
 that size away, and the symptom appears two elements away from the line that caused it.*
 
 *Twenty-second, and the more expensive one: "the tests pass" answers a question about the code that
 is there. It says nothing about whether the code you wrote is the code that is there.*
+
+## 170. The handshake §168 specified would have caused the orphaning it prevents (2026-08-12)
+
+§168 was written by reading code and reasoning from §26. It was then **run**, on the target
+Windows/WSL pair, by the second agent. Two of its three claims held and the recommendation did not.
+
+Measured:
+
+- **Process-group cancellation works.** PGID `450` published, `kill -- -450` stopped the shell,
+  both children and their `sleep` processes; heartbeats `126 → 126`.
+- **The races behave as §168 assumed.** Read immediately, the control file is absent; a second
+  later it holds a complete `445\n` with no partial write seen. A repeat kill answers "No such
+  process", which a caller must read as *already stopped*. Blank and non-numeric values still have
+  to be rejected before the argv is built.
+- **Killing the attached `wsl.exe` reaps everything.** Wrapper PID `28084`; after `Stop-Process`
+  the wrapper exited and every Linux descendant went with it. Heartbeats `3 → 3`.
+
+And the finding that overturns the design:
+
+> *Launching through `setsid` caused `wsl.exe` to exit by itself while the Linux process tree
+> continued running.*
+
+`setsid` is what detaches the repair from the very Windows process the app already owns and can
+already kill. §168's protocol would therefore **create** the orphan it was designed to prevent —
+the app would hold a handle to a wrapper that had already exited, and a tree that no longer
+answered to it.
+
+### What §26 actually established
+
+§26 is why §168 reached for process groups at all: *killing `wsl.exe` does not reliably reap what
+it launched inside the distro*. On this machine, today, it does. Either the platform changed or §26
+described a detached case and the note generalised it. Nothing here settles which, and the honest
+record is that the claim was carried forward for months without a measurement.
+
+### The implementation this leaves
+
+Keep the ordinary repair attached to the `wsl.exe` the app spawned; hold that `Child`; make Stop
+terminate it and treat "already exited" as stopped. `preflight::run_streaming` currently moves the
+`Child` into a waiter thread with no handle escaping — that, not the shell protocol, is the change
+to make. The validated PGID mechanism stays documented as the fallback for a future repair that
+deliberately detaches.
+
+Elevated installs are untouched and still separate: §168's second-UAC policy stands, and the
+disposable-VM test was correctly not run on the researcher's machine.
+
+*Twenty-third: a specification derived from reading is a hypothesis. This one was careful, cited its
+evidence, and was wrong in the direction that would have hurt — the mechanism it added was the
+mechanism that broke the thing already working.*
+
+
+## 171. Twelve drawings, and not one logo (2026-08-12)
+
+The deferred item from §164, asked for plainly: *"if its a python script the symbol of python must
+appear. its the same for json, etc etc etc."* Every file tile drew one of four geometric glyphs, so
+a `.py`, a `.json`, a `.log` and a `.txt` were the same mark in the same colour, and the name did
+all the work.
+
+The suggestion was to take Zed's set. Two reasons not to. Zed is GPL-3.0 and its `assets/icons` are
+a mix of original and Lucide-derived work, so copying the directory means auditing provenance
+file by file and carrying attribution — against the rule this organisation sets about third-party
+material. And they would not match: the five icons §157 shipped share a 24px canvas, a 1.55 stroke
+and round caps, and a borrowed set beside them looks worse than the glyphs did.
+
+So they are hand-authored on the same canvas, and they are **format families rather than brand
+logos** — the second half deliberate. A recognisable Python or Docker mark is a trademark, and
+reproducing one inside a shipped product is a different question from drawing a file with angle
+brackets on it. `.py`, `.r`, `.jl`, `.sh`, `.sql` share one *code* icon and differ by nothing;
+what tells them apart is the filename, which is already on the tile. What the icon settles is the
+question a person actually has scanning a folder: is this a table, a picture, a script, a
+notebook, a config, a document, a log, an archive, a database.
+
+Twelve, sharing one page-with-a-folded-corner outline so a column of them lines up, with the
+distinguishing mark in the lower two-thirds.
+
+The test asserts the thing that can silently break: **every mark `file_mark` can return is a
+declared and loadable asset**. A new extension arm naming an icon nobody added would draw nothing
+at all — §157's failure one layer along — and a count would only have reported that the number
+changed.
+
+*Twenty-fourth: "use their icons" is a licence decision wearing the clothes of a shortcut.*

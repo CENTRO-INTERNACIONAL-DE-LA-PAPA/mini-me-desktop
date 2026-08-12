@@ -69,12 +69,24 @@ const ASTA_CITATION: &str = "AstaBench: Rigorous Benchmarking of AI Agents with 
 /// this is only the researcher-facing name requested in §154, so it cannot become a second
 /// project registry or collide with a real folder of the same name.
 const UNGROUPED_PROJECT_LABEL: &str = "Ungrouped Conversations";
-const ICON_PATHS: [&str; 5] = [
+const ICON_PATHS: [&str; 17] = [
     "icons/settings.svg",
     "icons/conversations.svg",
     "icons/research.svg",
     "icons/road.svg",
     "icons/enter.svg",
+    "icons/file-table.svg",
+    "icons/file-image.svg",
+    "icons/file-code.svg",
+    "icons/file-notebook.svg",
+    "icons/file-data.svg",
+    "icons/file-web.svg",
+    "icons/file-text.svg",
+    "icons/file-log.svg",
+    "icons/file-doc.svg",
+    "icons/file-archive.svg",
+    "icons/file-db.svg",
+    "icons/file-blank.svg",
 ];
 
 /// The four small UI icons, compiled into the executable rather than read beside it.
@@ -94,6 +106,18 @@ impl AssetSource for Assets {
             "icons/research.svg" => Some(include_bytes!("../assets/icons/research.svg")),
             "icons/road.svg" => Some(include_bytes!("../assets/icons/road.svg")),
             "icons/enter.svg" => Some(include_bytes!("../assets/icons/enter.svg")),
+            "icons/file-table.svg" => Some(include_bytes!("../assets/icons/file-table.svg")),
+            "icons/file-image.svg" => Some(include_bytes!("../assets/icons/file-image.svg")),
+            "icons/file-code.svg" => Some(include_bytes!("../assets/icons/file-code.svg")),
+            "icons/file-notebook.svg" => Some(include_bytes!("../assets/icons/file-notebook.svg")),
+            "icons/file-data.svg" => Some(include_bytes!("../assets/icons/file-data.svg")),
+            "icons/file-web.svg" => Some(include_bytes!("../assets/icons/file-web.svg")),
+            "icons/file-text.svg" => Some(include_bytes!("../assets/icons/file-text.svg")),
+            "icons/file-log.svg" => Some(include_bytes!("../assets/icons/file-log.svg")),
+            "icons/file-doc.svg" => Some(include_bytes!("../assets/icons/file-doc.svg")),
+            "icons/file-archive.svg" => Some(include_bytes!("../assets/icons/file-archive.svg")),
+            "icons/file-db.svg" => Some(include_bytes!("../assets/icons/file-db.svg")),
+            "icons/file-blank.svg" => Some(include_bytes!("../assets/icons/file-blank.svg")),
             _ => None,
         };
         Ok(bytes.map(Cow::Borrowed))
@@ -122,10 +146,15 @@ impl AssetSource for Assets {
 /// that reads the SVG file can tell — which is why this is a parameter the compiler demands
 /// rather than a rule written down.
 fn app_icon(path: &'static str, ink: u32) -> impl IntoElement {
+    app_icon_at(path, ink, 14.)
+}
+
+/// The same, at a size the caller chooses — a file tile wants more than 14px.
+fn app_icon_at(path: &'static str, ink: u32, size: f32) -> impl IntoElement {
     svg()
         .path(path)
-        .w(px(14.))
-        .h(px(14.))
+        .w(px(size))
+        .h(px(size))
         .flex_none()
         .text_color(rgb(ink))
 }
@@ -662,10 +691,24 @@ fn file_mark(path: &std::path::Path) -> (&'static str, u32) {
         .unwrap_or_default()
         .to_ascii_lowercase();
     match extension.as_str() {
-        "csv" | "tsv" | "xlsx" | "parquet" => ("▤", theme::success()),
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" => ("▩", theme::running()),
-        "pdf" => ("▦", theme::error()),
-        _ => ("▤", theme::warning()),
+        "csv" | "tsv" | "xlsx" | "xls" | "parquet" | "feather" => {
+            ("icons/file-table.svg", theme::success())
+        }
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" => {
+            ("icons/file-image.svg", theme::running())
+        }
+        "py" | "r" | "jl" | "sh" | "js" | "ts" | "rs" | "sql" => {
+            ("icons/file-code.svg", theme::accent())
+        }
+        "ipynb" => ("icons/file-notebook.svg", theme::accent()),
+        "json" | "yaml" | "yml" | "toml" | "xml" => ("icons/file-data.svg", theme::warning()),
+        "html" | "htm" => ("icons/file-web.svg", theme::warning()),
+        "md" | "txt" | "rst" => ("icons/file-text.svg", theme::text_muted()),
+        "log" | "out" | "err" => ("icons/file-log.svg", theme::text_faint()),
+        "pdf" | "docx" | "doc" | "typ" => ("icons/file-doc.svg", theme::error()),
+        "zip" | "gz" | "tar" | "tgz" | "7z" => ("icons/file-archive.svg", theme::text_muted()),
+        "db" | "sqlite" | "sqlite3" | "duckdb" => ("icons/file-db.svg", theme::success()),
+        _ => ("icons/file-blank.svg", theme::text_muted()),
     }
 }
 
@@ -6938,7 +6981,7 @@ impl Workbench {
                     // A non-image in the set still needs a tile, or the counter and the strip
                     // disagree about how many there are.
                     .when(!is_image, |tile| {
-                        tile.text_color(rgb(ink)).text_size(px(16.)).child(glyph)
+                        tile.child(app_icon_at(glyph, ink, 18.))
                     })
                     .on_click(cx.listener(move |workbench, _event, _window, cx| {
                         if let Some(preview) = workbench.preview.as_mut() {
@@ -7021,11 +7064,7 @@ impl Workbench {
             .border_b_1()
             .border_color(rgb(theme::border()))
             .child(
-                div()
-                    .flex_none()
-                    .text_color(rgb(ink))
-                    .text_size(px(13.))
-                    .child(glyph),
+                app_icon_at(glyph, ink, 15.),
             )
             .child(
                 ui::Label::new(output.name.clone())
@@ -7405,10 +7444,7 @@ impl Workbench {
                 .flex_none()
                 .px_2()
                 .child(
-                    div()
-                        .text_color(rgb(ink))
-                        .text_size(px(20.))
-                        .child(glyph),
+                    app_icon_at(glyph, ink, 24.),
                 )
                 .child(
                     div()
@@ -7486,11 +7522,7 @@ impl Workbench {
             .bg(rgb(theme::elevated()))
             .hover(|style| style.bg(rgb(theme::accent_soft())).cursor_pointer())
             .child(
-                div()
-                    .flex_none()
-                    .text_color(rgb(ink))
-                    .text_size(px(13.))
-                    .child(glyph),
+                app_icon_at(glyph, ink, 15.),
             )
             .child(
                 div()
@@ -8186,6 +8218,9 @@ impl Workbench {
                 // way down and every dot hung under a stub (§169).
                 .w_full()
                 .min_w_0()
+                // Folded, the gutter is the row's only child, so a full-width row left it against
+                // the edge. The rail is the whole strip at 38px and belongs down its middle.
+                .when(!self.road_open, |row| row.justify_center())
                 .when(at < last, |row| {
                     row.min_h(px(if self.road_open { ROW_OPEN } else { ROW_FOLDED }))
                 })
@@ -11788,9 +11823,19 @@ mod tests {
         // makes a path declared in `ICON_PATHS` but never wired into `load` a test failure.
         let assets = Assets;
         assert_eq!(assets.list("icons/").unwrap().len(), ICON_PATHS.len());
-        // Five, because the road toggle was the one control §157 left wearing a glyph while the
-        // two beside it got icons — a status bar reading `◧ road` next to two drawings.
-        assert_eq!(ICON_PATHS.len(), 5);
+
+        // **Every mark `file_mark` can return is a real, loadable asset.** This is the assertion
+        // worth having: the mapping is a `match` over extensions, and a new arm naming an icon
+        // nobody added would draw nothing at all — the §157 failure again, one layer along. A
+        // count would only have said the number changed.
+        for name in [
+            "a.csv", "b.png", "c.py", "d.ipynb", "e.json", "f.html", "g.md", "h.log", "i.pdf",
+            "j.zip", "k.sqlite", "l.unheard-of", "no-extension",
+        ] {
+            let (icon, _ink) = file_mark(std::path::Path::new(name));
+            assert!(ICON_PATHS.contains(&icon), "{name} draws undeclared {icon}");
+            assert!(assets.load(icon).unwrap().is_some(), "{icon} is not embedded");
+        }
         for path in ICON_PATHS {
             let bytes = assets.load(path).unwrap().expect("declared icon is loadable");
             let source = std::str::from_utf8(&bytes).expect("hand-authored SVG is UTF-8");
