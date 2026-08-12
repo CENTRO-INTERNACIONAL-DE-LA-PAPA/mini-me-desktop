@@ -9124,3 +9124,67 @@ navigation wants a focus handle on the modal and is its own change.
 
 *Fifteenth: when someone hands you the thing they want copied, copy the arithmetic too — `+4` is
 defensible in review and wrong beside the screenshot.*
+
+
+## 163. Painting over something is not being in front of it (2026-08-12)
+
+Three defects from the first real look at §162, and the third is the one worth the section.
+
+### The arrows closed the modal they were stepping through
+
+Click handlers fire on GPUI's **bubble** phase, innermost first, and every one on the path runs
+unless something stops it. The arrows sit inside the panel, the panel sits inside the backdrop, and
+the backdrop closes the preview on click. So a press on `›` stepped forward and then closed.
+
+`stop_propagation` on the panel, not on each control: the same path was already reachable from
+`open outside` and from every filmstrip tile, and one guard at the boundary covers the controls that
+do not exist yet. This was live for the header buttons before §162 and nobody had clicked one.
+
+### The picture was cut off at the top
+
+`img().max_w_full().object_fit(Contain)` bounds one dimension. The height resolved to the file's
+own, which for a tall plot exceeded what the flex row allowed, and `items_center` then clipped it
+symmetrically — the top of a stacked bar chart gone, dead space underneath, and `Contain` never
+getting the chance to letterbox because there was no box to contain it in.
+
+Both dimensions are now set, on a named constant, and the body has its own ceiling: a child with
+`overflow_y_scroll` needs a bounded height to scroll *within*, or the clipping simply moves
+somewhere else. The modal also went from 760px to 880px wide — 760 was chosen when this previewed
+CSV rows, and it is narrow for a figure with five rotated category names on the x axis.
+
+### Every overlay in the app was click-through
+
+The researcher's words, and they generalised it themselves before I did:
+
+> *"If I click something in a modal and in the background there is something clickable, the
+> interaction in the background happens. It means that if two buttons overlap, and I click the
+> button in front, both buttons activate."*
+
+GPUI hit-tests **every** element whose bounds contain the pointer. Painting later puts you on top
+visually and does nothing to the hitboxes underneath, so a dimmed backdrop was a picture of
+exclusivity rather than exclusivity. `occlude()` sets `HitboxBehavior::BlockMouse`, which is the
+thing that was missing — from the preview backdrop, the command palette, the toast stack, and
+`ui::Modal`, which is to say from Settings, About and Provenance at once.
+
+Fixed in `ui::Modal` rather than in its three callers, because all three had the same defect for the
+same reason and a fourth modal would have inherited it.
+
+The context menu is the tell that this was known and half-solved. It already carried:
+
+```rust
+// Swallow the press so the click that chooses an item does not also land on the
+// transcript underneath and start a fresh selection there.
+.on_mouse_down(gpui::MouseButton::Left, |_event, _window, cx| cx.stop_propagation());
+```
+
+A press guard, written against one observed symptom. A click is a press *and* a release, so the
+release still reached whatever was behind — and no other overlay got even that much. The press
+guard stays, because it also stops the drag a mouse-down on the transcript begins; `occlude` is the
+general form of what that line was reaching for.
+
+Not verified here: all three are GUI behaviour on a headless machine. The arithmetic has constants
+and the occlusion has a named API, but whether the picture now fits and whether the arrows now step
+is something only running it can say.
+
+*Sixteenth: z-order is a fact about drawing. Reachability is a separate fact, and it has to be
+stated separately.*

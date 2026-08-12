@@ -732,6 +732,29 @@ struct OutputFolderGroup<'a> {
 /// panel before anyone had chosen a figure to look at.
 const IMAGE_GRID_TILES: usize = 4;
 
+/// The height of the image area in the preview, and the modal's own size.
+///
+/// Explicit rather than "as tall as the picture": the modal has a header above and a filmstrip
+/// below, and an image sized from the file pushed both out of a bounded panel. 380 + the header +
+/// the strip sits inside [`PREVIEW_MAX_HEIGHT`] with room to spare, so the layout cannot depend on
+/// what the agent happened to plot.
+const PREVIEW_IMAGE_HEIGHT: f32 = 380.;
+
+/// The body's own ceiling, so it scrolls instead of growing the panel.
+///
+/// A flex child with `overflow_y_scroll` needs a bounded height to scroll *within*; unbounded, it
+/// resolves to its content and the clipping happens somewhere else — which is how a plot ended up
+/// cut at the top. 440 leaves the image box its 380 plus the 24 of padding around it, and a long
+/// CSV scrolls inside the same frame.
+const PREVIEW_BODY_HEIGHT: f32 = 440.;
+
+/// Wide enough to read a plot's axis labels. Was 760, which was chosen when the preview was a
+/// table of CSV rows and is narrow for a figure with five rotated category names on the x axis.
+const PREVIEW_WIDTH: f32 = 880.;
+
+/// Leaves the workbench visible at the edges — it is a modal, not a screen (docs §49).
+const PREVIEW_MAX_HEIGHT: f32 = 640.;
+
 /// How many tiles the grid draws, and how many images the last one stands in for.
 ///
 /// **The scrimmed tile counts among the hidden**, because it is covered: eight images in four
@@ -2806,6 +2829,11 @@ impl Workbench {
             stack = stack.child(
                 div()
                     .id(SharedString::from(format!("toast-{index}")))
+                    // A toast floats over the composer and the transcript, and dismissing one used
+                    // to press whatever it was covering as well (docs §163). Only the card
+                    // occludes, not the stack: the gaps between toasts are not the toast's, and
+                    // blocking them would put a dead strip across the window.
+                    .occlude()
                     .max_w(px(360.))
                     .px_3()
                     .py_2()
@@ -2983,8 +3011,13 @@ impl Workbench {
             .bg(rgb(theme::elevated()))
             .border_1()
             .border_color(rgb(theme::border_strong()))
-            // Swallow the press so the click that chooses an item does not also land on the
-            // transcript underneath and start a fresh selection there.
+            // **This menu already knew about §163 and fixed half of it.** Swallowing the *press*
+            // stopped a chosen item from also starting a selection in the transcript underneath,
+            // but a click is a press and a release, and the release still reached whatever was
+            // behind. `occlude` blocks the whole hitbox, which is the general form of what this
+            // line was reaching for; the press guard stays because it also protects the drag that
+            // a mouse-down on the transcript begins.
+            .occlude()
             .on_mouse_down(gpui::MouseButton::Left, |_event, _window, cx| {
                 cx.stop_propagation();
             });
@@ -5948,16 +5981,31 @@ impl Workbench {
             .w_full()
             .min_w_0()
             .flex_grow()
+            .max_h(px(PREVIEW_BODY_HEIGHT))
             .overflow_y_scroll()
             .p_3()
             .gap_2();
 
         match output.kind {
             workspace::Kind::Figure => {
+                // **A box with both dimensions set, and `Contain` inside it.** `max_w_full` alone
+                // left the height to the natural size of the file, so a tall plot resolved larger
+                // than the space the flex row gave it and was clipped at *both* ends — the top of
+                // a stacked bar chart cut off, with dead space underneath. `Contain` in a bounded
+                // box letterboxes instead, which is the one arrangement that cannot crop.
                 body = body.child(
-                    img(output.path.clone())
-                        .max_w_full()
-                        .object_fit(gpui::ObjectFit::Contain),
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .w_full()
+                        .h(px(PREVIEW_IMAGE_HEIGHT))
+                        .child(
+                            img(output.path.clone())
+                                .w_full()
+                                .h_full()
+                                .object_fit(gpui::ObjectFit::Contain),
+                        ),
                 );
             }
             _ => {
@@ -6045,6 +6093,12 @@ impl Workbench {
             .id("preview-backdrop")
             .absolute()
             .inset_0()
+            // **Painting over something is not the same as being in front of it.** Without this,
+            // the workbench under the dim stayed live: a click landed on the modal *and* on
+            // whatever happened to be beneath it, so opening a figure could also hit a button in
+            // the transcript. `occlude` blocks the mouse from everything behind this hitbox, which
+            // is what makes the dim mean what it looks like it means (docs §163).
+            .occlude()
             .flex()
             .items_center()
             .justify_center()
@@ -6060,11 +6114,16 @@ impl Workbench {
                     .id("preview")
                     .flex()
                     .flex_col()
-                    .w(px(760.))
-                    .max_h(px(620.))
+                    .w(px(PREVIEW_WIDTH))
+                    .max_h(px(PREVIEW_MAX_HEIGHT))
                     .bg(rgb(theme::overlay()))
                     .border_1()
                     .border_color(rgb(theme::border_strong()))
+                    // Clicks inside the panel are the panel's business. Click handlers fire on
+                    // the bubble phase — innermost first — so stopping here after a control has
+                    // run is what keeps the backdrop's close-on-click from firing too. Without
+                    // it every arrow press closed the modal it was trying to step through.
+                    .on_click(|_event, _window, cx| cx.stop_propagation())
                     .child(
                         div()
                             .flex()
@@ -9377,6 +9436,10 @@ impl Workbench {
         div()
             .absolute()
             .inset_0()
+            // Same reason as the preview backdrop: an overlay that does not occlude leaves the
+            // window under it clickable, so choosing a command could also press whatever the row
+            // happened to be drawn over (docs §163).
+            .occlude()
             .flex()
             .flex_col()
             .items_center()
