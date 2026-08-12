@@ -4116,13 +4116,21 @@ impl Workbench {
         // buffer — the same argument `remember_panels` makes. The migration must be decided by
         // what is *stored*, because that is what survives to the next launch.
         let adopt = !settings::Settings::load().adopted_untagged;
+        // **Read here, not in the answer.** Projects are directories on this machine and the
+        // backend has nothing to do with them, but hanging the read off a successful HTTP reply
+        // meant a cold launch — where the first refresh reliably fires before the server is up,
+        // as `list_conversations` itself documents — showed no project headings at all until some
+        // later refresh happened to succeed. An empty project would simply not be there on the
+        // launch after it was created (§167).
+        self.folder_projects = workspace::projects();
         let mut updates = self.sidecar.list_conversations(adopt);
         cx.spawn(async move |this, cx| {
             if let Some(answer) = updates.next().await {
                 let _ = this.update(cx, |workbench, cx| {
                     workbench.conversations = answer.conversations;
-                    // Same moment, because the sidebar shows both and a project that exists only
-                    // as a folder has to appear beside the ones that have conversations (§167).
+                    // Again on the answer, because a turn may have created a project folder
+                    // while this request was in flight. Cheap: one `read_dir` of a directory
+                    // holding a handful of entries.
                     workbench.folder_projects = workspace::projects();
                     // Only on a real answer. A failed fetch sends nothing, so the list keeps
                     // saying "loading" rather than claiming the researcher has none — a
