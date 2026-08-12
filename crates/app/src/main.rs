@@ -26,6 +26,7 @@ mod theme;
 mod ui;
 mod workspace;
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -33,9 +34,10 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use futures::StreamExt;
 use gpui::{
-    actions, div, img, prelude::*, px, relative, rgb, size, AnimationExt as _, App, Application,
-    Bounds, ClipboardItem, Context, Entity, Focusable, FontStyle, FontWeight, HighlightStyle,
-    KeyBinding, SharedString, StyledText, Window, WindowBounds, WindowOptions,
+    actions, div, img, prelude::*, px, relative, rgb, size, svg, AnimationExt as _, App,
+    Application, AssetSource, Bounds, ClipboardItem, Context, Entity, Focusable, FontStyle,
+    FontWeight, HighlightStyle, KeyBinding, SharedString, StyledText, Window, WindowBounds,
+    WindowOptions,
 };
 
 use composer::{Composer, ComposerEvent};
@@ -67,6 +69,64 @@ const ASTA_CITATION: &str = "AstaBench: Rigorous Benchmarking of AI Agents with 
 /// this is only the researcher-facing name requested in §154, so it cannot become a second
 /// project registry or collide with a real folder of the same name.
 const UNGROUPED_PROJECT_LABEL: &str = "Ungrouped Conversations";
+const ICON_PATHS: [&str; 4] = [
+    "icons/settings.svg",
+    "icons/conversations.svg",
+    "icons/research.svg",
+    "icons/enter.svg",
+];
+
+/// The four small UI icons, compiled into the executable rather than read beside it.
+///
+/// Windows installs do not preserve a source-tree-relative assets directory. GPUI still needs an
+/// [`AssetSource`] to resolve `svg().path(...)`, so embedding the hand-authored files makes the
+/// packaged and development builds follow the same path (docs §157).
+struct Assets;
+
+impl AssetSource for Assets {
+    fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
+        let bytes: Option<&'static [u8]> = match path {
+            "icons/settings.svg" => Some(include_bytes!("../assets/icons/settings.svg")),
+            "icons/conversations.svg" => {
+                Some(include_bytes!("../assets/icons/conversations.svg"))
+            }
+            "icons/research.svg" => Some(include_bytes!("../assets/icons/research.svg")),
+            "icons/enter.svg" => Some(include_bytes!("../assets/icons/enter.svg")),
+            _ => None,
+        };
+        Ok(bytes.map(Cow::Borrowed))
+    }
+
+    fn list(&self, path: &str) -> anyhow::Result<Vec<SharedString>> {
+        Ok(ICON_PATHS
+            .iter()
+            .filter(|asset| path.is_empty() || asset.starts_with(path))
+            .copied()
+            .map(SharedString::from)
+            .collect())
+    }
+}
+
+/// A theme-tinted 14px icon, matching the text it replaces without changing control geometry.
+///
+/// **`ink` is required, and that is the whole point.** GPUI paints an SVG by rasterising it to a
+/// mask and multiplying by `style.text.color` — and `Svg::paint` is literally
+/// `self.path.as_ref().zip(style.text.color)`, so a `None` there paints *nothing at all*. That
+/// colour is not inherited: `Interactivity::compute_style` starts from `Style::default()`, whose
+/// `text.color` is `None`, and refines it with the element's **own** styles. A parent's
+/// `.text_color(…)` never reaches the child (docs §157).
+///
+/// So the argument is not a convenience. Without it every icon here is invisible, and no test
+/// that reads the SVG file can tell — which is why this is a parameter the compiler demands
+/// rather than a rule written down.
+fn app_icon(path: &'static str, ink: u32) -> impl IntoElement {
+    svg()
+        .path(path)
+        .w(px(14.))
+        .h(px(14.))
+        .flex_none()
+        .text_color(rgb(ink))
+}
 
 /// [`section_label`] for a heading only known at runtime.
 fn section_label_owned(text: String) -> impl IntoElement {
@@ -4970,7 +5030,7 @@ impl Workbench {
                                     .text_color(rgb(theme::accent_hover()))
                                     .cursor_pointer()
                             })
-                            .child("◎")
+                            .child(app_icon("icons/settings.svg", theme::accent()))
                             .on_click(cx.listener(|workbench, _event, _window, cx| {
                                 workbench.run_command(Command::OpenSettings, cx);
                             })),
@@ -9917,11 +9977,17 @@ impl Workbench {
                         div()
                             .px_2()
                             .py_1()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
                             .border_t_1()
                             .border_color(rgb(theme::border()))
                             .text_color(rgb(theme::text_muted()))
                             .text_xs()
-                            .child("↑↓ select · ⏎ run · esc close"),
+                            .child("↑↓ select ·")
+                            .child(app_icon("icons/enter.svg", theme::text_muted()))
+                            .child("run · esc close"),
                     ),
             )
     }
@@ -10201,6 +10267,10 @@ impl Workbench {
             .child(
                 div()
                     .id("toggle-sidebar")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
                     .flex_none()
                     .text_color(rgb(if self.sidebar_open {
                         theme::accent()
@@ -10213,7 +10283,15 @@ impl Workbench {
                             .text_color(rgb(theme::accent_hover()))
                             .cursor_pointer()
                     })
-                    .child("▤ conversations")
+                    .child(app_icon(
+                        "icons/conversations.svg",
+                        if self.sidebar_open {
+                            theme::accent()
+                        } else {
+                            theme::text_faint()
+                        },
+                    ))
+                    .child("conversations")
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
                         workbench.sidebar_open = !workbench.sidebar_open;
                         workbench.remember_panels();
@@ -10246,6 +10324,10 @@ impl Workbench {
             .child(
                 div()
                     .id("toggle-panel")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
                     .flex_none()
                     .text_color(rgb(if self.panel_open {
                         theme::accent()
@@ -10258,7 +10340,15 @@ impl Workbench {
                             .text_color(rgb(theme::accent_hover()))
                             .cursor_pointer()
                     })
-                    .child("▥ research")
+                    .child(app_icon(
+                        "icons/research.svg",
+                        if self.panel_open {
+                            theme::accent()
+                        } else {
+                            theme::text_faint()
+                        },
+                    ))
+                    .child("research")
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
                         workbench.panel_open = !workbench.panel_open;
                         workbench.remember_panels();
@@ -11657,6 +11747,30 @@ mod tests {
     }
 
     #[test]
+    fn every_ui_icon_is_embedded_rather_than_read_from_beside_the_executable() {
+        // The half a test can actually settle: the bytes are *in* the binary, so a Windows
+        // install with no source-tree-relative assets directory resolves them exactly as
+        // `cargo run` does. `include_bytes!` makes a missing file a build failure, and this
+        // makes a path declared in `ICON_PATHS` but never wired into `load` a test failure.
+        let assets = Assets;
+        assert_eq!(assets.list("icons/").unwrap().len(), ICON_PATHS.len());
+        for path in ICON_PATHS {
+            let bytes = assets.load(path).unwrap().expect("declared icon is loadable");
+            let source = std::str::from_utf8(&bytes).expect("hand-authored SVG is UTF-8");
+            assert!(source.contains("viewBox=\"0 0 24 24\""), "{path} has no common canvas");
+        }
+        assert!(assets.load("icons/missing.svg").unwrap().is_none());
+
+        // **Not asserted: that they are tintable.** The original test read `currentColor` out of
+        // the file and called that tintable. GPUI never reads it — it rasterises the SVG and
+        // multiplies by `style.text.color`, so whether an icon appears is decided entirely by
+        // the element's own colour and not by anything in these bytes. That assertion passed
+        // just as happily when all four icons rendered nothing at all, which is the state this
+        // PR arrived in. What replaces it is `app_icon` taking `ink` as an argument, so the
+        // compiler refuses a call site that forgets (docs §157).
+    }
+
+    #[test]
     fn csv_columns_get_distinct_colours_from_the_live_palette() {
         assert!(is_delimited("papas.csv"));
         assert!(is_delimited("MODELO.TSV"), "case is not a format");
@@ -12594,7 +12708,7 @@ fn main() {
         return;
     }
 
-    Application::new().run(move |cx: &mut App| {
+    Application::new().with_assets(Assets).run(move |cx: &mut App| {
         // Without these the composer receives no editing keys at all — GPUI
         // dispatches actions, and nothing binds to them by default.
         cx.bind_keys(composer::key_bindings());

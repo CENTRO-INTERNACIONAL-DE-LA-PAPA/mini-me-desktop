@@ -8983,6 +8983,64 @@ Headless verification on the Windows checkout: **248 tests pass**. `cargo clippy
 -p mini-me-desktop-app --all-targets` adds no warning; it still reports the branch's existing 15
 warnings in untouched call sites. The modal itself still needs the Windows-eye check — specifically
 its path wrapping and the two hover controls on a single-project heading.
+## 157. Four glyphs become four packaged icons (2026-08-10)
+
+The deferred §70 item was kept deliberately narrow. Settings, the conversations toggle, the
+research toggle and the command palette's Enter hint now use four hand-authored 24×24 SVGs. Their
+labels, hit targets, colours and surrounding layout are unchanged; this is an asset substitution,
+not another navigation redesign.
+
+The first literal set — gear, one speech card, paper under a magnifier — was technically clear and
+looked like every utility application. The approved set shares a **research atelier** language:
+Settings is a calibration instrument, Conversations is two distinct voices facing opposite ways,
+Research is an open field notebook with discovery outside its pages, and Enter is one curved ink
+stroke. Small solid points and the same rounded 1.55 stroke tie them together without adding detail
+that disappears at the 14px size where they actually render.
+
+GPUI resolves `svg().path(...)` only through an `AssetSource`. Reading an `assets/` path at runtime
+would work in a checkout and fail in the installed Windows executable, so the source maps four
+known paths to `include_bytes!` data compiled into the binary. Every stroke uses `currentColor`,
+which lets the existing semantic text colour and hover state tint it. A test loads every declared
+path through the same source, checks the shared view box and tint token, and proves an unknown path
+returns absence instead of a misleading asset.
+
+The identical glyphs used as data/file-type marks and in the empty-state suggestions were not
+changed. They describe different concepts and replacing them would widen a four-control cleanup
+into an icon-system redesign — exactly the scope this deferred item said to avoid.
+
+### Caught in review: they rendered nothing
+
+`app_icon` was `svg().path(p).w(14).h(14).flex_none()` — no colour. GPUI paints an SVG by
+rasterising it to a mask and multiplying by the element's text colour, and `Svg::paint` is
+literally:
+
+```rust
+if let Some((path, color)) = self.path.as_ref().zip(style.text.color) { … }
+```
+
+`None` there paints nothing. And that colour is **not inherited**: `compute_style` starts from
+`Style::default()`, whose `text.color` is `None`, and refines it with the element's *own* styles —
+so the `.text_color(…)` each call site sets on the surrounding row never reached the icon inside
+it. All four were invisible.
+
+`ink` is a required argument now, so the compiler refuses a call site that forgets. That is the
+right instrument here, because the alternative is a rule written down, and this file already
+records what happens to rules written down (§59, three times).
+
+### The test could not have caught it
+
+It asserted the SVG source contains `currentColor` and called the icon *"tintable"*. GPUI never
+reads `currentColor`; usvg resolves it while rasterising and the result is a mask. So the
+assertion passed identically whether the icons rendered or not — the shape this project keeps
+finding, a diagnostic that prints the same for success and failure (§38, §148, §161, §166).
+
+It now claims only what it settles: the bytes are embedded, every declared path resolves, and an
+undeclared one does not. Whether an icon *appears* is a fact about the call site, and the type
+system holds that one.
+
+**Still unverified:** whether the four drawings read at 14px on both palettes. That needs eyes on
+a window and this build machine has none.
+The state existed on disk the whole time; the sidebar was reading the wrong evidence for it.*
 ## 158. A scrollbar that only looked interactive, and an image cache that remembered too soon (2026-08-11)
 
 The first Windows pass on §153 found both failures immediately. The agent generated the figures,
@@ -9554,7 +9612,6 @@ the wrong thing for permission to look at it.
 *Twentieth: "derive it, don't store it" is a good rule that says nothing about **which** derivation.
 The state existed on disk the whole time; the sidebar was reading the wrong evidence for it — and
 then, having found the right evidence, waited on something unrelated before reading it.*
-The state existed on disk the whole time; the sidebar was reading the wrong evidence for it.*
 ## 168. Setup Stop: the boundary is now concrete, and still not safe blind (2026-08-10)
 
 §146 left this open because a setup repair crosses two process boundaries. Reading the current
