@@ -147,19 +147,11 @@ pub struct Settings {
     /// every save is one nobody can diff.
     #[serde(default)]
     pub subagents: std::collections::BTreeMap<String, String>,
-    /// The project new conversations start in. Empty means none.
-    ///
-    /// Remembered rather than asked, because a researcher works through one line of enquiry over
-    /// days: choosing once and continuing is the shape of the work, and a dialog before every
-    /// question is not (docs §106).
-    #[serde(default)]
-    pub project: String,
     /// Whether the conversation list on the left is showing.
     ///
-    /// The three panel states are remembered for the same reason the project is: someone who
-    /// closed the conversation list to get the screen back did not mean "until I next launch".
-    /// They were `true` on every start until now, which made folding a panel a thing you had to
-    /// do again every morning.
+    /// Someone who closed the conversation list to get the screen back did not mean "until I next
+    /// launch". These were `true` on every start until persistence was added, which made folding
+    /// a panel a thing the researcher had to do again every morning.
     ///
     /// Safe to persist closed because all three toggles live in the status bar and are always
     /// present — a folded panel is never a one-way door.
@@ -197,7 +189,6 @@ impl Default for Settings {
             async_subagents: false,
             theme: crate::theme::DEFAULT_NAME.to_string(),
             subagents: std::collections::BTreeMap::new(),
-            project: String::new(),
             sidebar_open: true,
             panel_open: true,
             road_open: true,
@@ -533,7 +524,6 @@ mod tests {
             backend_dir: "~/Mini-Me".into(),
             async_subagents: true,
             theme: "Slate".into(),
-            project: "Late blight".into(),
             subagents: [("report_writer".to_string(), "openai::gpt-5.4".to_string())]
                 .into_iter()
                 .collect(),
@@ -565,6 +555,20 @@ mod tests {
         // precisely so an existing settings.toml — every one written before this build — does not
         // open with all three panels shut.
         assert!(settings.sidebar_open && settings.panel_open && settings.road_open);
+    }
+
+    #[test]
+    fn a_project_remembered_by_an_older_build_cannot_file_new_work() {
+        // §106 defines projects from conversation metadata. The removed `project` setting was a
+        // second registry: after the last conversation was deleted, this stale value restored its
+        // project on launch and put the next conversation inside it (§154). Serde deliberately
+        // accepts the old key for upgrade compatibility, but a save no longer writes it back.
+        let settings: Settings = toml::from_str(
+            "provider = \"anthropic\"\nmodel_id = \"claude-sonnet-4-5\"\nproject = \"Deleted work\"",
+        )
+        .expect("an older settings file");
+        let rewritten = toml::to_string_pretty(&settings).expect("serialise current settings");
+        assert!(!rewritten.contains("project ="), "{rewritten}");
     }
 
     #[test]
