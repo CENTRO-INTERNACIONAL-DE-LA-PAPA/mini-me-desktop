@@ -87,7 +87,12 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   the one part nobody can see.
 - ✅ **Right-click menu** (§64) — confirmed: copy/select-all in the transcript, cut/copy/paste
   in the composer, rows greyed when they would do nothing, each showing its own binding.
-- ⬜ **Cancel a running setup fix** (§28).
+- ⬜ **Cancel a running setup fix** (§28 → §146 → §168). §168 now specifies exactly what a
+  truthful Stop requires: a published numeric PGID and `kill -- -PGID` for the ordinary WSL
+  repair, a **second** UAC-approved `taskkill /T` for an elevated install, and five tests —
+  four of which need the target Windows/WSL pair and one a disposable VM. Still deliberately
+  unbuilt: a Stop button at the layer that owns only an event receiver would change the
+  screen and nothing else, which is the dishonest outcome §146 refused.
 - ✅ **Markdown gaps** (§65, §66) — verified on a real answer: blockquotes, nested lists whose
   depth comes from the indents actually seen (two- and four-space sources rendered identically,
   which was the point), images no longer showing their own punctuation. The one defect the
@@ -9549,3 +9554,70 @@ the wrong thing for permission to look at it.
 *Twentieth: "derive it, don't store it" is a good rule that says nothing about **which** derivation.
 The state existed on disk the whole time; the sidebar was reading the wrong evidence for it — and
 then, having found the right evidence, waited on something unrelated before reading it.*
+The state existed on disk the whole time; the sidebar was reading the wrong evidence for it.*
+## 168. Setup Stop: the boundary is now concrete, and still not safe blind (2026-08-10)
+
+§146 left this open because a setup repair crosses two process boundaries. Reading the current
+ownership makes the failure mode more precise:
+
+1. `Workbench::start_fix` owns only an `UnboundedReceiver<FixEvent>`.
+2. `Sidecar::run_fix` owns a Tokio task, which waits on `spawn_blocking`.
+3. `preflight::run_streaming` spawns the command, then moves the `Child` into a waiter thread.
+
+There is no cancellation handle at any layer. Dropping the receiver or aborting the Tokio task
+does not cancel `spawn_blocking`; its OS process and waiter continue. Adding a Stop button at the
+first layer would therefore change only the screen — the exact dishonest result §146 refused.
+
+### The ordinary WSL repair needs a Linux process-group handshake
+
+Every non-runtime fix on Windows is `wsl.exe … bash -lc <script>`. §26 already established that
+killing `wsl.exe` does not reliably reap what it launched inside the distro. The safe protocol is:
+
+1. Give each fix a random run id.
+2. Inside WSL, start the repair in a new session/process group and publish its **numeric PGID** to
+   a run-id-specific control file visible to the Windows app *before* the repair can do work.
+3. Stop launches a second `wsl.exe` call and passes that numeric value as a literal argument to
+   `kill -- -PGID`: TERM, a bounded wait, then KILL if the group still exists.
+4. The UI says **stopped** only after the original command exits and a group-existence probe says
+   no process remains. Until then it says **stopping**; a failed probe says it could not confirm.
+
+The numeric handoff matters on this machine. §147 found variables assigned inside `wsl bash -lc`
+arriving empty and deleting the checkout when interpolated into paths. A cancellation wrapper that
+kept `$pid` or `$pgid` in a generated shell command would place a dynamic value in the same failure
+class. Rust must read, validate and write the literal decimal PGID into the separate kill argv.
+
+### An elevated WSL install is a different operation
+
+`Install WSL` / `Install Ubuntu` runs through `Start-Process -Verb RunAs`. ShellExecute owns the
+elevation boundary; the unelevated app does not own a killable child tree. The elevated wrapper
+would have to publish its PID, and Stop would need a **second UAC-approved elevated** `taskkill /T`
+request. Refusing that second prompt means *not stopped*. Closing the visible elevated console may
+also be graceful rather than terminal during a Windows component install, so the app cannot infer
+success from the window disappearing.
+
+That policy needs a disposable Windows VM: force-killing `wsl --install` on a developer's real
+machine to see whether Windows servicing remains recoverable is not an acceptable test. The UI
+must say in advance that stopping an OS install asks for admin rights again and may still require a
+restart; it must never reuse the ordinary repair's one-click wording.
+
+### The tests that make implementation safe
+
+- **WSL tree test:** a wrapper starts a shell, child and grandchild in one new group; all three
+  append heartbeats. Cancel by the published PGID, wait, and prove every heartbeat stops and the
+  group-existence probe fails. Run this on the target Windows/WSL pair, not native Linux alone.
+- **Race test:** cancel before the PGID control file exists, while it is being written, and after
+  the process exits naturally. No empty/unvalidated value may ever reach `kill`.
+- **UAC refusal test:** refuse the second elevation prompt. The pane must remain *not confirmed
+  stopped*, retain the log, and allow another attempt.
+- **Disposable-VM servicing test:** cancel both `wsl --install` and distro installation, reboot,
+  and prove Setup can run the same repair to completion afterwards.
+- **Window-close test:** close the app during each kind of repair. The same cancellation policy
+  must run, or the app must explicitly leave the independently elevated install visible; silently
+  detaching is not a third policy.
+
+This environment cannot run the first test: `wsl.exe --status` returns Spanish
+`Acceso denegado`, `Wsl/EnumerateDistros/Service/E_ACCESSDENIED`. It also cannot safely perform the
+disposable-VM test. No code or cosmetic Stop control is added in this task; the implementation is
+blocked on those two target-platform proofs, not on an unknown design.
+
+*A button is not cancellation. The proof is that the grandchildren stopped.*
