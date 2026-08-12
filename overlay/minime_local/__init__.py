@@ -110,8 +110,15 @@ def _patch(module) -> None:
     if not local_execution_requested():
         return
     if module.__name__ == _AGENT_MODULE:
-        from minime_local import approval, async_agents, registry
+        from minime_local import approval, async_agents, execute_rule, registry
 
+        # First, and reached through the package rather than watched for its own import:
+        # `deepagents/__init__.py` has already pulled the middleware in by the time this hook
+        # fires, so a second meta-path target would never trigger. What matters is only that it
+        # runs before any `FilesystemMiddleware` is constructed — the description is read when
+        # the tool is built (`filesystem.py:1481`), and `backend/agent.py` builds its agent
+        # after this import completes.
+        _rewrite_execute_description(execute_rule)
         approval.install(module)
         # After approval, so the background worker inherits the same gate: its wrapper
         # calls whatever `create_deep_agent` is current, which is the gated one.
@@ -122,6 +129,29 @@ def _patch(module) -> None:
         registry.install(module)
         return
     _patch_sandbox(module)
+
+
+def _rewrite_execute_description(execute_rule) -> None:
+    """Tell `execute` to keep its output in the workspace, and never take the agent down for it.
+
+    Only under host execution, because the escape it prevents is one: with the remote sandbox an
+    absolute path is inside a container nobody else can see, and `/tmp` there is nobody's problem.
+
+    Wrapped in a `try` because an import failure here would cost the whole agent, and the failure
+    mode without this patch is *files in the wrong place* — bad, recoverable, and already
+    documented — while the failure mode with a raising hook is no backend at all (§18's rule about
+    what an overlay may risk).
+    """
+    try:
+        from deepagents.middleware import filesystem
+
+        execute_rule.install(filesystem)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "minime_local: could not rewrite the execute description (%s) — commands may write "
+            "outside the conversation's folder (docs §160)",
+            exc,
+        )
 
 
 def _patch_sandbox(module) -> None:

@@ -147,19 +147,24 @@ pub struct Settings {
     /// every save is one nobody can diff.
     #[serde(default)]
     pub subagents: std::collections::BTreeMap<String, String>,
-    /// The project new conversations start in. Empty means none.
+    /// Whether §90's one-time adoption of pre-tag conversations has already run.
     ///
-    /// Remembered rather than asked, because a researcher works through one line of enquiry over
-    /// days: choosing once and continuing is the shape of the work, and a dialog before every
-    /// question is not (docs §106).
+    /// **The migration had no "done" marker, only a symptom.** It ran whenever the tagged search
+    /// came back empty, and its doc called that self-cancelling — but "no conversations" is true
+    /// in two situations it cannot tell apart: a fresh pull where the tag is new and old history
+    /// is hidden, and *the researcher having just deleted everything*. In the second it re-tagged
+    /// every remaining thread with human messages, including the background workers' own, so
+    /// deleted test conversations came back on the next refresh (docs §166).
+    ///
+    /// Written once the scan completes, whatever it adopted — including zero, which is the
+    /// ordinary case on an installation that never had untagged threads.
     #[serde(default)]
-    pub project: String,
+    pub adopted_untagged: bool,
     /// Whether the conversation list on the left is showing.
     ///
-    /// The three panel states are remembered for the same reason the project is: someone who
-    /// closed the conversation list to get the screen back did not mean "until I next launch".
-    /// They were `true` on every start until now, which made folding a panel a thing you had to
-    /// do again every morning.
+    /// Someone who closed the conversation list to get the screen back did not mean "until I next
+    /// launch". These were `true` on every start until persistence was added, which made folding
+    /// a panel a thing the researcher had to do again every morning.
     ///
     /// Safe to persist closed because all three toggles live in the status bar and are always
     /// present — a folded panel is never a one-way door.
@@ -197,7 +202,7 @@ impl Default for Settings {
             async_subagents: false,
             theme: crate::theme::DEFAULT_NAME.to_string(),
             subagents: std::collections::BTreeMap::new(),
-            project: String::new(),
+            adopted_untagged: false,
             sidebar_open: true,
             panel_open: true,
             road_open: true,
@@ -533,7 +538,7 @@ mod tests {
             backend_dir: "~/Mini-Me".into(),
             async_subagents: true,
             theme: "Slate".into(),
-            project: "Late blight".into(),
+            adopted_untagged: false,
             subagents: [("report_writer".to_string(), "openai::gpt-5.4".to_string())]
                 .into_iter()
                 .collect(),
@@ -565,6 +570,51 @@ mod tests {
         // precisely so an existing settings.toml — every one written before this build — does not
         // open with all three panels shut.
         assert!(settings.sidebar_open && settings.panel_open && settings.road_open);
+    }
+
+    #[test]
+    fn the_pre_tag_scan_is_remembered_so_it_cannot_resurrect_deleted_work() {
+        // §90's migration guarded itself on "there are no tagged conversations", which is true
+        // both on the launch that needs it and on the launch after a researcher deletes their
+        // last conversation. In the second case it re-tagged whatever threads were left — the
+        // background workers' among them — and the deleted rows came back (§166).
+        let fresh = Settings::default();
+        assert!(
+            !fresh.adopted_untagged,
+            "a new installation still owes the one-time scan"
+        );
+
+        // An older settings file predates the field, and must still parse — it is exactly the
+        // installation whose history the migration was written to rescue.
+        let older: Settings = toml::from_str(
+            "provider = \"anthropic\"\nmodel_id = \"claude-sonnet-4-5\"",
+        )
+        .expect("a settings file from before this field");
+        assert!(!older.adopted_untagged);
+
+        // And once recorded it survives the round trip, which is the whole point: the fact has
+        // to outlive the process that learned it.
+        let done = Settings {
+            adopted_untagged: true,
+            ..older
+        };
+        let text = toml::to_string_pretty(&done).expect("serialise");
+        let read_back: Settings = toml::from_str(&text).expect("parse");
+        assert!(read_back.adopted_untagged);
+    }
+
+    #[test]
+    fn a_project_remembered_by_an_older_build_cannot_file_new_work() {
+        // §106 defines projects from conversation metadata. The removed `project` setting was a
+        // second registry: after the last conversation was deleted, this stale value restored its
+        // project on launch and put the next conversation inside it (§154). Serde deliberately
+        // accepts the old key for upgrade compatibility, but a save no longer writes it back.
+        let settings: Settings = toml::from_str(
+            "provider = \"anthropic\"\nmodel_id = \"claude-sonnet-4-5\"\nproject = \"Deleted work\"",
+        )
+        .expect("an older settings file");
+        let rewritten = toml::to_string_pretty(&settings).expect("serialise current settings");
+        assert!(!rewritten.contains("project ="), "{rewritten}");
     }
 
     #[test]
