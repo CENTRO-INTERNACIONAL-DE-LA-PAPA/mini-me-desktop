@@ -724,6 +724,108 @@ struct OutputFolderGroup<'a> {
     outputs: Vec<&'a workspace::Output>,
 }
 
+/// How many image tiles the panel shows before the last one becomes a count.
+///
+/// Four, and 2×2, because that is the arrangement the researcher pointed at: a phone's photo
+/// grid, where the fourth tile carries `+5` rather than the grid growing. §152's complaint was
+/// never that the thumbnails were too small — it was that a productive run claimed the whole
+/// panel before anyone had chosen a figure to look at.
+const IMAGE_GRID_TILES: usize = 4;
+
+/// How many tiles the grid draws, and how many images the last one stands in for.
+///
+/// **The scrimmed tile counts among the hidden**, because it is covered: eight images in four
+/// tiles reads `+5` — three pictures you can see, five you cannot — which is what the phone
+/// gallery the researcher pointed at shows for the same eight. `total - tiles` gives `+4` and
+/// looks perfectly reasonable in review; it is only wrong beside the thing it is imitating. One
+/// function so the grid and its test cannot hold two versions of the rule.
+fn image_grid_shape(total: usize) -> (usize, usize) {
+    let shown = total.min(IMAGE_GRID_TILES);
+    let hidden = if total > IMAGE_GRID_TILES {
+        total - (IMAGE_GRID_TILES - 1)
+    } else {
+        0
+    };
+    (shown, hidden)
+}
+
+/// Ink for text drawn on a dark scrim over a picture.
+///
+/// Deliberately **not** a theme role. The scrim beneath it is a fixed dark wash in both palettes,
+/// so a role that followed the theme would put near-black text on it in the light one. The colour
+/// belongs to the scrim, not to the page — the same reason the modal's own backdrop is a literal.
+const SCRIM_INK: u32 = 0xf5f5f5;
+
+/// A file open in the preview, and the set the researcher can step through from it.
+///
+/// **Why a set and not a file.** The preview held one `Output`, so it had nothing to go "next"
+/// to: choosing between eight figures meant closing the modal, finding the next thumbnail, and
+/// opening it again. Holding the group it was opened from is what makes the arrows, the counter
+/// and the filmstrip possible, and all three are the same fact rendered three ways.
+struct Preview {
+    /// Never empty — see [`Preview::opening`], which is the only way to build one.
+    items: Vec<workspace::Output>,
+    at: usize,
+}
+
+impl Preview {
+    /// Open `items` at `at`, or `None` when there is nothing to show.
+    ///
+    /// The emptiness check is here rather than at the call sites because `current()` indexes,
+    /// and an empty preview would be a panic reachable from a click on a folder whose files were
+    /// deleted between the scan and the click — which on this project's own evidence is not a
+    /// hypothetical (§159's reproduction was deleted mid-diagnosis).
+    fn opening(items: Vec<workspace::Output>, at: usize) -> Option<Self> {
+        (!items.is_empty()).then(|| {
+            let at = at.min(items.len() - 1);
+            Self { items, at }
+        })
+    }
+
+    /// One file, with nothing to step to. What a non-image row still opens.
+    fn single(output: workspace::Output) -> Option<Self> {
+        Self::opening(vec![output], 0)
+    }
+
+    fn current(&self) -> &workspace::Output {
+        // `at` is clamped on construction and only ever moved by `step`, which wraps.
+        &self.items[self.at]
+    }
+
+    /// Move `by` places, wrapping at both ends.
+    ///
+    /// Wrapping rather than stopping: the counter says which of how many, so there is no risk of
+    /// mistaking the end for a broken button, and a researcher comparing the first and last plot
+    /// of a series should not have to travel back through six.
+    fn step(&mut self, by: isize) {
+        let count = self.items.len() as isize;
+        if count <= 1 {
+            return;
+        }
+        let at = self.at as isize + by;
+        self.at = at.rem_euclid(count) as usize;
+    }
+}
+
+/// Images in one group, everything else in another, each keeping its listing order.
+///
+/// **The boundary the researcher asked for**, in their words: *"I want to group images and in
+/// another group other files."* §152's gallery grouped by the folder the agent chose, which was
+/// right about structure and wrong about kind — a folder holding seven plots and a summary CSV
+/// put the CSV in the middle of the strip, and the strip is the thing you flick through looking
+/// for a figure.
+///
+/// `Kind::Figure` is the test rather than the extension, so this cannot disagree with the
+/// thumbnail renderer about what an image is: both ask the same enum.
+fn split_images(
+    outputs: &[workspace::Output],
+) -> (Vec<workspace::Output>, Vec<workspace::Output>) {
+    outputs
+        .iter()
+        .cloned()
+        .partition(|output| output.kind == workspace::Kind::Figure)
+}
+
 /// One mouse-held gallery thumb.
 struct GalleryScrollDrag {
     handle: gpui::ScrollHandle,
@@ -2041,8 +2143,8 @@ struct Workbench {
         std::cell::RefCell<HashMap<PathBuf, (std::time::SystemTime, Option<Vec<Vec<String>>>)>>,
     /// What the sidebar's search box holds. Empty means "show everything".
     conversation_query: Entity<Composer>,
-    /// A file being previewed in the centre, if any.
-    preview: Option<workspace::Output>,
+    /// A file being previewed in the centre, if any — and the set it can be stepped through.
+    preview: Option<Preview>,
     /// The researcher's past conversations, newest first.
     conversations: Vec<protocol::Conversation>,
     /// How the app got hold of the backend it is talking to. `None` until it has one.
@@ -5826,7 +5928,19 @@ impl Workbench {
             )
     }
 
-    fn preview_modal(&self, output: workspace::Output, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The file open in the centre, with the set it belongs to along the bottom.
+    ///
+    /// `at` and `count` come from the [`Preview`] rather than being recomputed, so the arrows, the
+    /// `3 / 8` counter and the highlighted filmstrip tile can never disagree about which file is
+    /// showing — the §158 rule about one calculation, applied to three affordances that all mean
+    /// "this one".
+    fn preview_modal(
+        &self,
+        output: workspace::Output,
+        set: &[workspace::Output],
+        at: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let mut body = div()
             .id("preview-body")
             .flex()
@@ -5905,6 +6019,26 @@ impl Workbench {
                 }
             }
         }
+
+        // The body, flanked by the arrows, so a step is a click where the eye already is rather
+        // than a trip to a toolbar. Only when there is somewhere to go: a lone file gets no
+        // arrows at all, because a control that does nothing is worse than an absent one (§158).
+        let framed = if set.len() > 1 {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .w_full()
+                .min_w_0()
+                .flex_grow()
+                .overflow_hidden()
+                .child(self.preview_arrow("preview-prev", "‹", -1, cx))
+                .child(body)
+                .child(self.preview_arrow("preview-next", "›", 1, cx))
+                .into_any_element()
+        } else {
+            body.into_any_element()
+        };
 
         let opened = output.path.clone();
         div()
@@ -5988,13 +6122,163 @@ impl Workbench {
                                     })),
                             ),
                     )
-                    .child(body),
+                    .child(framed)
+                    .children(self.preview_filmstrip(set, at, cx)),
             )
             .on_click(cx.listener(|workbench, _event, _window, cx| {
                 // Clicking the dimmed backdrop closes it, the way every modal does.
                 workbench.preview = None;
                 cx.notify();
             }))
+    }
+
+    /// One step-through arrow beside the previewed file.
+    fn preview_arrow(
+        &self,
+        id: &'static str,
+        glyph: &'static str,
+        by: isize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .id(id)
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .w(px(34.))
+            .h(px(34.))
+            .mx_1()
+            .rounded_full()
+            .bg(rgb(theme::elevated()))
+            .border_1()
+            .border_color(rgb(theme::border()))
+            .text_color(rgb(theme::text()))
+            .text_size(px(19.))
+            .hover(|style| {
+                style
+                    .bg(rgb(theme::accent_soft()))
+                    .border_color(rgb(theme::accent()))
+                    .cursor_pointer()
+            })
+            .child(glyph)
+            .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                if let Some(preview) = workbench.preview.as_mut() {
+                    preview.step(by);
+                    cx.notify();
+                }
+            }))
+    }
+
+    /// The set along the bottom of the modal: a counter, then a sideways strip to choose from.
+    ///
+    /// **This is the half the researcher asked for by name** — *"we can click and scroll at the
+    /// bottom so the user can select which picture to see."* `None` for a lone file: a filmstrip
+    /// of one is a decoration that implies there is somewhere to go.
+    ///
+    /// Tile ids carry the file's own index, so GPUI keeps each element's identity as the selection
+    /// moves and the strip does not lose its scroll position on every step.
+    fn preview_filmstrip(
+        &self,
+        set: &[workspace::Output],
+        at: usize,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        if set.len() < 2 {
+            return None;
+        }
+        let key = "preview-filmstrip";
+        let scroll = self.output_gallery_scroll(key);
+
+        let mut strip = div()
+            .id(SharedString::from(format!("{key}-rail")))
+            .flex()
+            .flex_row()
+            .gap_1()
+            .w_full()
+            .min_w_0()
+            .pb_3()
+            .overflow_x_scroll()
+            .track_scroll(&scroll);
+        for (index, output) in set.iter().enumerate() {
+            let selected = index == at;
+            let is_image = output.kind == workspace::Kind::Figure;
+            let (glyph, ink) = file_mark(&output.path);
+            strip = strip.child(
+                div()
+                    .id(SharedString::from(format!("{key}-{index}")))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .w(px(64.))
+                    .h(px(48.))
+                    .overflow_hidden()
+                    .rounded_md()
+                    // The outline is the whole selection signal, so it is two pixels of accent
+                    // against one of border: a one-pixel difference in colour alone did not read
+                    // at thumbnail size on the Windows pass (§158's sibling complaint).
+                    .border_2()
+                    .border_color(rgb(if selected {
+                        theme::accent()
+                    } else {
+                        theme::border()
+                    }))
+                    .bg(rgb(theme::surface()))
+                    .hover(|style| style.border_color(rgb(theme::accent_hover())).cursor_pointer())
+                    .when(is_image, |tile| {
+                        tile.child(
+                            img(output.path.clone())
+                                .w_full()
+                                .h_full()
+                                .object_fit(gpui::ObjectFit::Cover),
+                        )
+                    })
+                    // A non-image in the set still needs a tile, or the counter and the strip
+                    // disagree about how many there are.
+                    .when(!is_image, |tile| {
+                        tile.text_color(rgb(ink)).text_size(px(16.)).child(glyph)
+                    })
+                    .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                        if let Some(preview) = workbench.preview.as_mut() {
+                            preview.at = index;
+                            cx.notify();
+                        }
+                    })),
+            );
+        }
+
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .flex_none()
+                .w_full()
+                .min_w_0()
+                .px_3()
+                .pt_2()
+                .border_t_1()
+                .border_color(rgb(theme::border()))
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_row()
+                        .justify_center()
+                        .text_color(rgb(theme::text_muted()))
+                        .text_xs()
+                        .child(format!("{} of {}", at + 1, set.len())),
+                )
+                .child(
+                    div()
+                        .relative()
+                        .w_full()
+                        .min_w_0()
+                        .child(strip)
+                        .children(self.horizontal_scrollbar(key.to_string(), &scroll, cx)),
+                ),
+        )
     }
 
     /// A file a turn produced, in the transcript, under the answer that produced it.
@@ -6189,7 +6473,7 @@ impl Workbench {
         }
 
         card.on_click(cx.listener(move |workbench, _event, _window, cx| {
-            workbench.preview = Some(previewed.clone());
+            workbench.preview = Preview::single(previewed.clone());
             cx.notify();
         }))
     }
@@ -6273,21 +6557,28 @@ impl Workbench {
         )
     }
 
-    /// One fixed-size member of a folder gallery, opened through the existing preview modal.
+    /// One fixed-size member of a gallery, opened through the preview modal.
     ///
     /// Fixed here means only the *thumbnail*, not the underlying artifact: §152's failure was
     /// ten full-width figures claiming ten screens before the researcher chose one. The modal
     /// still renders the selected file at its useful size, and `Open` there still reaches the
     /// original application.
+    ///
+    /// `set` and `at` are the group this tile belongs to and its place in it, so opening a tile
+    /// opens a *position* the arrows and filmstrip can move from — not a lone file the way it
+    /// used to. No `+N` scrim here: this is the strip, which shows every member, and the count
+    /// belongs to the capped grid ([`Self::output_image_tile`]).
     fn output_thumbnail(
         &self,
         id: String,
-        output: &workspace::Output,
+        set: &[workspace::Output],
+        at: usize,
         width: f32,
         image_height: f32,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let shown = output.clone();
+        let output = &set[at];
+        let opening = set.to_vec();
         let (glyph, ink) = file_mark(&output.path);
         let shape = self.shape_of(output);
         let visual = match output.kind {
@@ -6349,7 +6640,7 @@ impl Workbench {
                     ),
             )
             .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                workbench.preview = Some(shown.clone());
+                workbench.preview = Preview::opening(opening.clone(), at);
                 cx.notify();
             }))
     }
@@ -6380,10 +6671,14 @@ impl Workbench {
             .pb_3()
             .overflow_x_scroll()
             .track_scroll(&scroll);
-        for (at, output) in group.outputs.iter().enumerate() {
+        // Owned once for the whole rail: every tile opens the same set, so the modal can step
+        // through the folder from wherever the researcher entered it.
+        let set: Vec<workspace::Output> = group.outputs.iter().map(|o| (*o).clone()).collect();
+        for at in 0..set.len() {
             rail = rail.child(self.output_thumbnail(
                 format!("output-gallery-item-{key}-{at}"),
-                output,
+                &set,
+                at,
                 tile_width,
                 image_height,
                 cx,
@@ -6425,6 +6720,175 @@ impl Workbench {
                     .child(rail)
                     .children(self.horizontal_scrollbar(key, &scroll, cx)),
             )
+    }
+
+    /// Every image a turn produced, as a capped 2×2 grid.
+    ///
+    /// **The researcher's own reference was a phone's photo gallery**: four tiles, the last one
+    /// carrying `+5`, and the whole set behind one click. Two things follow from that which the
+    /// sideways strip did not give. The block is a *fixed* height whatever the run produced —
+    /// four figures and forty occupy the same two rows — and choosing between them happens in
+    /// the modal, at a size worth looking at, rather than in a 330px column.
+    ///
+    /// Images only, and separately from the rest (see [`split_images`]): the strip mixed a
+    /// summary CSV in among seven plots, and this is the surface you flick through looking for a
+    /// figure.
+    fn output_image_grid(
+        &self,
+        scope: &str,
+        images: &[workspace::Output],
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let image_height = if compact { 92. } else { 132. };
+        // Two per row, sharing the width. `flex_1` rather than a computed pixel width so the
+        // grid follows the panel — which the researcher can drag — instead of assuming it.
+        let (shown, hidden) = image_grid_shape(images.len());
+
+        let mut grid = div().flex().flex_col().gap_2().w_full().min_w_0();
+        for row_start in (0..shown).step_by(2) {
+            let mut row = div().flex().flex_row().gap_2().w_full().min_w_0();
+            for at in row_start..(row_start + 2).min(shown) {
+                // The count rides on the *last visible* tile, and only when something is hidden
+                // behind it. Clicking it opens that image, not a folder listing — the remaining
+                // figures are then one arrow away, which is the whole point of the set.
+                let more = (hidden > 0 && at + 1 == shown).then_some(hidden);
+                row = row.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(self.output_image_tile(
+                            format!("output-image-{scope}-{at}"),
+                            images,
+                            at,
+                            image_height,
+                            more,
+                            cx,
+                        )),
+                );
+            }
+            // An odd count leaves the last tile half-width rather than stretched to fill the
+            // row, which would make one figure look twice as important as its neighbours.
+            if row_start + 2 > shown {
+                row = row.child(div().flex_1().min_w_0());
+            }
+            grid = grid.child(row);
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .w_full()
+            .min_w_0()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .w_full()
+                    .min_w_0()
+                    .child(
+                        ui::Label::new(format!(
+                            "{} image{}",
+                            images.len(),
+                            if images.len() == 1 { "" } else { "s" }
+                        ))
+                        .size(ui::Size::Compact)
+                        .ellipsis(),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(rgb(theme::text_faint()))
+                            .text_xs()
+                            .child(if hidden > 0 {
+                                "click to open all".to_string()
+                            } else {
+                                "click to open".to_string()
+                            }),
+                    ),
+            )
+            .child(grid)
+    }
+
+    /// One image in the grid: the picture, a filename, and an optional `+N` scrim.
+    ///
+    /// Width comes from the flex parent rather than a fixed pixel count, which is the one thing
+    /// [`Self::output_thumbnail`] cannot do — a strip needs `flex_none` tiles to be scrollable
+    /// sideways, and a grid needs them to share the row.
+    fn output_image_tile(
+        &self,
+        id: String,
+        set: &[workspace::Output],
+        at: usize,
+        image_height: f32,
+        more: Option<usize>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let output = &set[at];
+        let opening = set.to_vec();
+        div()
+            .id(SharedString::from(id))
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w_0()
+            .overflow_hidden()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(theme::border()))
+            .bg(rgb(if theme::is_light(&theme::current()) {
+                theme::elevated()
+            } else {
+                theme::surface()
+            }))
+            .hover(|style| style.border_color(rgb(theme::accent())).cursor_pointer())
+            .child(
+                div()
+                    .relative()
+                    .w_full()
+                    .h(px(image_height))
+                    .child(
+                        img(output.path.clone())
+                            .w_full()
+                            .h_full()
+                            .object_fit(gpui::ObjectFit::Cover),
+                    )
+                    .when_some(more, |tile, more| {
+                        tile.child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .bg(gpui::rgba(0x000000a6))
+                                .text_color(rgb(SCRIM_INK))
+                                .text_size(px(image_height / 3.))
+                                .child(format!("+{more}")),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .px_2()
+                    .py_1()
+                    .border_t_1()
+                    .border_color(rgb(theme::border()))
+                    .child(
+                        ui::Label::new(output_filename(output))
+                            .size(ui::Size::Compact)
+                            .ellipsis(),
+                    ),
+            )
+            .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                workbench.preview = Preview::opening(opening.clone(), at);
+                cx.notify();
+            }))
     }
 
     fn output_panel_row(
@@ -6475,7 +6939,7 @@ impl Workbench {
                     ),
             )
             .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                workbench.preview = Some(shown.clone());
+                workbench.preview = Preview::single(shown.clone());
                 cx.notify();
             }))
     }
@@ -7404,7 +7868,16 @@ impl Workbench {
             // Files last: the answer explains them, so it should be read first. A productive
             // folder is one sideways gallery rather than one full-width card per artifact — ten
             // plots were ten screens before the reader chose any of them (§152).
-            for (at, group) in output_folder_groups(&message.outputs).iter().enumerate() {
+            let (images, others) = split_images(&message.outputs);
+            if !images.is_empty() {
+                block = block.child(self.output_image_grid(
+                    &format!("transcript-{index}"),
+                    &images,
+                    false,
+                    cx,
+                ));
+            }
+            for (at, group) in output_folder_groups(&others).iter().enumerate() {
                 if let [output] = group.outputs.as_slice() {
                     block = block.child(self.output_card(index * 64 + at, output, cx));
                 } else {
@@ -9949,7 +10422,14 @@ impl Workbench {
             );
         }
 
-        for (at, group) in output_folder_groups(&ordered_outputs).iter().enumerate() {
+        // Images first and together, then everything else — the two groups the researcher asked
+        // for. Images lead because they are what a person opens the panel to look at; a CSV is
+        // opened to *check* something, which is a deliberate act further down.
+        let (images, others) = split_images(&ordered_outputs);
+        if !images.is_empty() {
+            section = section.child(self.output_image_grid("panel", &images, true, cx));
+        }
+        for (at, group) in output_folder_groups(&others).iter().enumerate() {
             if let [output] = group.outputs.as_slice() {
                 section = section.child(self.output_panel_row(
                     format!("panel-output-{}", output.name),
@@ -9959,7 +10439,9 @@ impl Workbench {
             } else {
                 // One compact rail replaces N near-identical rows. It retains the folder heading,
                 // filename tail, kind/shape, and click-to-preview behavior while making a twelve-
-                // artifact run occupy one panel block instead of most of the panel (§152).
+                // artifact run occupy one panel block instead of most of the panel (§152). Still
+                // folder-grouped, because two runs' `results/` directories are still two things
+                // — the image grid above is the only surface where kind outranks folder.
                 section =
                     section.child(self.output_gallery(&format!("panel-{at}"), group, true, cx));
             }
@@ -10185,7 +10667,12 @@ impl Render for Workbench {
         // The preview floats over everything except the palette: it is a thing you open,
         // look at, and dismiss, not a place you navigate to (docs §49).
         let root = match &self.preview {
-            Some(output) => root.child(self.preview_modal(output.clone(), cx)),
+            Some(preview) => root.child(self.preview_modal(
+                preview.current().clone(),
+                &preview.items,
+                preview.at,
+                cx,
+            )),
             None => root,
         };
 
@@ -10328,6 +10815,106 @@ mod tests {
             output_folder_label(&groups[0].folder),
             "guinea_pig_eda_output / plots"
         );
+    }
+
+    /// `n` outputs, alternating image / not, named so a failure says which one moved.
+    fn sample_outputs(kinds: &[workspace::Kind]) -> Vec<workspace::Output> {
+        kinds
+            .iter()
+            .enumerate()
+            .map(|(at, kind)| {
+                let name = format!("file-{at}");
+                workspace::Output {
+                    path: PathBuf::from(&name),
+                    name,
+                    kind: *kind,
+                    bytes: 1,
+                    modified: std::time::SystemTime::UNIX_EPOCH,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn images_and_other_files_are_two_groups_that_keep_their_order() {
+        use workspace::Kind::{Data, Document, Figure};
+        // The researcher's own boundary: "I want to group images and in another group other
+        // files." A folder of seven plots and one summary CSV used to put the CSV in the middle
+        // of the strip you flick through looking for a figure.
+        let outputs = sample_outputs(&[Figure, Data, Figure, Document, Figure]);
+        let (images, others) = split_images(&outputs);
+        assert_eq!(
+            images.iter().map(|o| o.name.as_str()).collect::<Vec<_>>(),
+            ["file-0", "file-2", "file-4"]
+        );
+        assert_eq!(
+            others.iter().map(|o| o.name.as_str()).collect::<Vec<_>>(),
+            ["file-1", "file-3"],
+            "listing order has to survive the split, or the panel reshuffles"
+        );
+
+        // Neither group is invented: a run with no figures gets no image grid at all.
+        let (none, all) = split_images(&sample_outputs(&[Data, Document]));
+        assert!(none.is_empty());
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn the_last_visible_tile_counts_exactly_the_images_it_hides() {
+        // The `+N` arithmetic, which is off-by-one bait: with four tiles and eight images the
+        // fourth tile is *shown*, so it stands in for the other five — not four, and not six.
+        // WhatsApp's own grid is the reference the researcher pointed at, and it reads `+5`.
+        // (tiles drawn, images the last one stands in for)
+        assert_eq!(image_grid_shape(8), (4, 5), "eight images, four tiles");
+        assert_eq!(image_grid_shape(5), (4, 2));
+        // Exactly the cap, and under it: nothing is hidden, so no tile carries a count.
+        assert_eq!(image_grid_shape(4), (4, 0));
+        assert_eq!(image_grid_shape(3), (3, 0));
+        assert_eq!(image_grid_shape(1), (1, 0));
+        assert_eq!(image_grid_shape(0), (0, 0));
+
+        // Every image is either visible or counted, at every size. This is the property the
+        // off-by-one broke: with `total - tiles` the fourth picture was neither.
+        for total in 0..40usize {
+            let (shown, hidden) = image_grid_shape(total);
+            let visible = if hidden > 0 { shown - 1 } else { shown };
+            assert_eq!(visible + hidden, total, "{total} images went unaccounted for");
+        }
+    }
+
+    #[test]
+    fn stepping_through_a_preview_wraps_and_never_leaves_the_set() {
+        use workspace::Kind::Figure;
+        let outputs = sample_outputs(&[Figure, Figure, Figure]);
+        let mut preview = Preview::opening(outputs.clone(), 1).expect("three files");
+        assert_eq!(preview.current().name, "file-1");
+
+        preview.step(1);
+        assert_eq!(preview.current().name, "file-2");
+        // Past the end comes back to the start. The counter says which of how many, so wrapping
+        // cannot be mistaken for a dead button — and comparing the first plot of a series with
+        // the last should not mean travelling back through the middle.
+        preview.step(1);
+        assert_eq!(preview.current().name, "file-0");
+        preview.step(-1);
+        assert_eq!(preview.current().name, "file-2");
+
+        // An index beyond the set is clamped rather than panicking: a click can arrive after the
+        // files behind it were moved or deleted, which has happened on this project's own
+        // evidence (§159).
+        let clamped = Preview::opening(outputs, 99).expect("still three files");
+        assert_eq!(clamped.current().name, "file-2");
+
+        // Nothing to show is `None`, not an empty preview that panics on `current()`.
+        assert!(Preview::opening(Vec::new(), 0).is_none());
+
+        // A lone file has nowhere to step, and asking must not move it anywhere.
+        let mut single =
+            Preview::single(sample_outputs(&[Figure]).remove(0)).expect("one file");
+        single.step(1);
+        single.step(-1);
+        assert_eq!(single.current().name, "file-0");
+        assert_eq!(single.items.len(), 1);
     }
 
     #[test]

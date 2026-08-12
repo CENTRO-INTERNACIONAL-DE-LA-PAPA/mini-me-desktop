@@ -108,16 +108,14 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   `<task>/guinea_pig_eda_output/plots/health_by_activity_box.png`. Its folder is created *inside*
   the conversation's, and the conversation it belongs to is remembered per thread because the run
   config is not visible at every construction site.
-- ⬜ **The Outputs panel does not survive a productive run** (§152). One EDA produced twelve
-  artifacts and the panel became twelve near-identical rows, each truncated to
-  `019fe9f6-9126-7710-a806-35d5e09170a4\guin…` — **the 36 characters they share are shown and the
-  part that tells them apart is cut off.** The transcript renders every figure at full width, so
-  ten plots is ten screens of scrolling. Wanted, in the researcher's words: *"when we have too many
-  plots and tables, maybe do something like what's done with too many photos — group them, and only
-  when you click can you view it and scroll on the x axis."* A gallery: grouped by the folder the
-  agent chose, collapsed to a strip of thumbnails, opened on click, scrollable sideways. Note the
-  agent already organises its own work into `guinea_pig_eda_output/plots/` — that structure is a
-  grouping the panel is currently flattening rather than using.
+- ✅ **The Outputs panel does not survive a productive run** (§152 → §153 → §162). Twelve artifacts
+  became twelve near-identical rows, each truncated to the 36 characters they *share*, and the
+  transcript rendered every figure full width — ten plots, ten screens. Now: images in one group as
+  a capped 2×2 grid whose fourth tile reads `+N`, everything else folder-grouped below it, and one
+  click opens a modal with arrows, a `3 of 8` counter and a clickable filmstrip. Still open from
+  this thread: **keyboard navigation in the modal** — arrow keys need a focus handle on the modal,
+  because an unscoped binding would take the arrows away from the composer and a scoped one never
+  fires from there (the §58/§84 trap).
 - 🟡 **superseded** *(kept for the trail)* — **A background worker's output is visible in the app**
   (§151) — its folder is now created
   *inside* the conversation's rather than beside it, so `workspace::outputs` finds it by descending
@@ -9072,3 +9070,57 @@ instead of reporting success over a no-op. §132's rule, applied to our own patc
 
 *Fourteenth, and §160's own sentence is the right one: a working directory is a default, not a
 boundary.*
+
+
+## 162. Four tiles, and the fourth one counts the rest (2026-08-12)
+
+§153 gave every folder a sideways strip, which fixed the ten-screens problem and left two the
+researcher named as soon as they saw it on their own data:
+
+> *"I want to group images and in another group other files. So when the user clicks a modal
+> appears and we can click and scroll at the bottom so the user can select which picture to see."*
+
+Their reference was explicit, and a phone: a 2×2 photo grid whose fourth tile reads `+5`, opening
+into a viewer with arrows, `1 de 8`, and a filmstrip along the bottom with the current frame
+outlined.
+
+### Kind outranks folder on the surface you flick through
+
+§153 grouped by the directory the agent chose and was right about structure. It was wrong about
+kind: the run that prompted this wrote seven figures and a summary CSV into one folder, so the CSV
+sat in the middle of the strip you scan looking for a plot. `split_images` now puts figures in one
+group and everything else in another, images first, because a figure is what the panel is opened
+to *look at* while a CSV is opened to check something.
+
+Folder grouping is kept for the non-image group. Two runs' `results/` directories are still two
+things; the image grid is the one surface where kind wins.
+
+### The preview had nothing to go next to
+
+`preview: Option<workspace::Output>` held a file, so choosing among eight figures meant closing the
+modal, finding the next thumbnail and opening it again. It now holds a `Preview` — the set and a
+position in it — which is the single fact the arrows, the `3 of 8` counter and the highlighted
+filmstrip tile all render. §158's rule about one calculation, applied to three affordances that all
+mean *this one*.
+
+`Preview::opening` is the only constructor and returns `Option`, because `current()` indexes: a
+click can arrive after the files behind it were moved, and §159's own reproduction was deleted
+mid-diagnosis. Out-of-range clamps, empty is `None`, and stepping wraps — the counter says which of
+how many, so wrapping cannot be misread as a dead button, and comparing the first plot of a series
+with the last should not mean travelling back through the middle.
+
+### The `+N` was wrong and the test said so
+
+The first implementation counted `total - tiles`, which for eight images in four tiles reads `+4`.
+The phone reads `+5`. The scrimmed tile is *covered*, so it counts among the hidden: three pictures
+you can see, five you cannot. `image_grid_shape` is one function used by the grid and by its test —
+not two copies of the rule — and the test asserts the property the off-by-one broke, that at every
+size every image is either visible or counted. It failed on the first run and named the number.
+
+No arrow-key bindings, deliberately. Focus lives in the composer, an unscoped `left`/`right` would
+take the arrows away from typing, and a scoped binding never fires from there — the trap §58 and
+§84 already paid for twice. The modal is clickable and Escape already closes it; keyboard
+navigation wants a focus handle on the modal and is its own change.
+
+*Fifteenth: when someone hands you the thing they want copied, copy the arithmetic too — `+4` is
+defensible in review and wrong beside the screenshot.*
