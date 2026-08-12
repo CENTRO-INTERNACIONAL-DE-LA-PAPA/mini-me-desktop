@@ -286,6 +286,18 @@ pub struct AsyncTask {
     /// The subagent or tool the worker is on right now, so "running" for ten minutes says
     /// something about *what* is running (docs §42).
     pub activity: Option<String>,
+    /// The conversation whose folder owns this worker's files.
+    ///
+    /// **Not decodable from the payload**, which is why it is filled by whoever ingests the
+    /// task rather than by `decode_async_tasks`: the `async_tasks` map records the worker's
+    /// own thread and nothing about its parent. The parent is a property of *where the
+    /// snapshot came from*, and only the caller that asked for that snapshot knows it.
+    ///
+    /// Carried on the task instead of read from "the conversation open right now" because
+    /// those are not the same thing: pressing New thread leaves a pending task on screen
+    /// while the open thread moves on, and answering it then named the wrong owner
+    /// (docs §159). Empty means unknown — see [`AsyncTask::owning_conversation`].
+    pub owner: String,
 }
 
 impl AsyncTask {
@@ -309,6 +321,18 @@ impl AsyncTask {
     pub fn needs_approval(&self) -> bool {
         self.pending.is_some()
     }
+
+    /// The conversation whose folder this worker's files belong in, or `None` when unknown.
+    ///
+    /// The rule lives here rather than at the call site because it is easy to get wrong in a
+    /// way nothing notices: blank must become `None`, never a directory name. A run pinned to
+    /// an empty path segment writes to the *workspace root* — beside every conversation instead
+    /// of inside one — which is the shape §150 spent a night on. `None` sends no key at all and
+    /// lets the backend fall back to its own inference.
+    pub fn owning_conversation(&self) -> Option<&str> {
+        let owner = self.owner.trim();
+        (!owner.is_empty()).then_some(owner)
+    }
 }
 
 /// Metadata key marking a thread as a conversation the researcher started.
@@ -325,6 +349,14 @@ const CONVERSATION_TAG: &str = "minime_conversation";
 /// `overlay/minime_local/workspace.py`). The folder is where the files are; this is how the app
 /// knows which folder to look in — see docs §105 for why it is both and not either.
 const PROJECT_KEY: &str = "minime_project";
+
+/// Config key naming the conversation whose folder owns a run's files.
+///
+/// This must agree exactly with `WORKSPACE_THREAD_KEY` in
+/// `overlay/minime_local/workspace.py`. The client already knows the conversation id; making the
+/// backend rediscover it from LangGraph metadata was intermittent because that metadata is not
+/// present in every tool-call context (docs §159).
+const WORKSPACE_THREAD_KEY: &str = "__workspace_thread__";
 
 /// A stored thread that is not yet tagged, by id.
 ///
@@ -659,6 +691,11 @@ fn decode_async_tasks(artifacts: &Value, root: &Value) -> Vec<AsyncTask> {
                 pending: None,
                 error: None,
                 activity: None,
+                // Deliberately blank. This function is a pure decoder of one payload, and the
+                // payload does not say which conversation the worker belongs to; guessing —
+                // `thread_id`, say — would name the worker as its own owner and defeat the
+                // nesting entirely. See the field's own note.
+                owner: String::new(),
             })
         })
         .collect();
@@ -968,10 +1005,20 @@ impl LangGraphClient {
     /// Deliberately not streamed into the transcript: the background run's tokens are not
     /// the answer to anything the researcher asked in the chat, and mixing them into the
     /// conversation is how "what did I just read?" happens. The Jobs panel reports it.
-    pub async fn resume_background(&self, thread_id: &str, decisions: &[Decision]) -> Result<()> {
+    pub async fn resume_background(
+        &self,
+        thread_id: &str,
+        workspace_thread: Option<&str>,
+        decisions: &[Decision],
+    ) -> Result<()> {
         // The same body a foreground resume sends — one definition, so a change to the
         // decision shape cannot fix one path and leave the other broken.
-        let payload = resume_request_body(decisions, self.model.as_ref(), self.project.as_deref());
+        let payload = resume_request_body(
+            decisions,
+            self.model.as_ref(),
+            self.project.as_deref(),
+            workspace_thread,
+        );
         self.http
             .post(format!(
                 "{}/threads/{}/runs",
@@ -1256,8 +1303,9 @@ impl LangGraphClient {
     ///
     /// **Irreversible, and the caller must have asked first.** This is why the sidebar
     /// makes it a two-step: a conversation is somebody's work, and there is no undo on the
-    /// server side (docs §58). Files the turn wrote are *not* touched — those live in the
-    /// researcher's own Documents and are not ours to remove.
+    /// server side (docs §58). This route knows nothing about the Windows workspace; the desktop
+    /// deletes those files only after this durable operation succeeds and after its centred modal
+    /// has named that consequence explicitly (docs §155).
     pub async fn delete_conversation(&self, thread_id: &str) -> Result<()> {
         self.http
             .delete(format!(
@@ -1332,7 +1380,12 @@ impl LangGraphClient {
     ) -> Result<TurnOutcome> {
         self.stream(
             thread_id,
-            run_request_body(prompt, self.model.as_ref(), self.project.as_deref()),
+            run_request_body(
+                prompt,
+                self.model.as_ref(),
+                self.project.as_deref(),
+                Some(thread_id),
+            ),
             on_event,
         )
         .await
@@ -1347,7 +1400,12 @@ impl LangGraphClient {
     ) -> Result<TurnOutcome> {
         self.stream(
             thread_id,
-            resume_request_body(decisions, self.model.as_ref(), self.project.as_deref()),
+            resume_request_body(
+                decisions,
+                self.model.as_ref(),
+                self.project.as_deref(),
+                Some(thread_id),
+            ),
             on_event,
         )
         .await
@@ -1442,8 +1500,13 @@ impl LangGraphClient {
 /// Asking for `messages` instead selects the v1 path, which emits
 /// `messages/partial` + `messages/complete` with a different payload shape — and
 /// yields no tokens through this decoder.
-fn run_request_body(prompt: &str, model: Option<&ModelChoice>, project: Option<&str>) -> Value {
-    let mut body = stream_request_body(model, project);
+fn run_request_body(
+    prompt: &str,
+    model: Option<&ModelChoice>,
+    project: Option<&str>,
+    workspace_thread: Option<&str>,
+) -> Value {
+    let mut body = stream_request_body(model, project, workspace_thread);
     body["input"] = json!({ "messages": [ { "type": "human", "content": prompt } ] });
     body
 }
@@ -1457,6 +1520,7 @@ fn resume_request_body(
     decisions: &[Decision],
     model: Option<&ModelChoice>,
     project: Option<&str>,
+    workspace_thread: Option<&str>,
 ) -> Value {
     let decisions: Vec<Value> = decisions
         .iter()
@@ -1465,7 +1529,7 @@ fn resume_request_body(
             Decision::Reject { message } => json!({ "type": "reject", "message": message }),
         })
         .collect();
-    let mut body = stream_request_body(model, project);
+    let mut body = stream_request_body(model, project, workspace_thread);
     body["command"] = json!({ "resume": { "decisions": decisions } });
     body
 }
@@ -1485,7 +1549,11 @@ pub enum TurnOutcome {
 }
 
 /// The parts of the request body shared by a fresh run and a resume.
-fn stream_request_body(model: Option<&ModelChoice>, project: Option<&str>) -> Value {
+fn stream_request_body(
+    model: Option<&ModelChoice>,
+    project: Option<&str>,
+    workspace_thread: Option<&str>,
+) -> Value {
     json!({
         "assistant_id": "agent",
         "stream_mode": ["messages-tuple", "values", "custom"],
@@ -1494,12 +1562,16 @@ fn stream_request_body(model: Option<&ModelChoice>, project: Option<&str>) -> Va
         // the silent gap the activity trace exists to close. On a measured turn this
         // flag is the difference between 176 and 495 message events.
         "stream_subgraphs": true,
-        "config": config_for(model, project),
+        "config": config_for(model, project, workspace_thread),
     })
 }
 
 /// The `config` object: recursion limit, model routing, and the key.
-fn config_for(model: Option<&ModelChoice>, project: Option<&str>) -> Value {
+fn config_for(
+    model: Option<&ModelChoice>,
+    project: Option<&str>,
+    workspace_thread: Option<&str>,
+) -> Value {
     let mut configurable = json!({
         // Marks this as a real run rather than a read-only graph load, which is what the
         // backend's key check keys off.
@@ -1511,6 +1583,19 @@ fn config_for(model: Option<&ModelChoice>, project: Option<&str>) -> Value {
     // thing a person types (docs §105).
     if let Some(project) = project.map(str::trim).filter(|name| !name.is_empty()) {
         configurable["__workspace_project__"] = json!(project);
+    }
+
+    // **Name the owner instead of asking the backend to infer it.** A background tool is launched
+    // from the conversation's run, but LangGraph does not expose `metadata.thread_id` in every
+    // context where that tool executes. When it was absent, the worker used its own UUID as a
+    // top-level folder and a complete EDA appeared beside the conversation (docs §159). This key
+    // is deliberately separate from LangGraph's `thread_id`: it chooses a directory and cannot
+    // make the worker write checkpoints into the conversation's thread.
+    if let Some(thread_id) = workspace_thread
+        .map(str::trim)
+        .filter(|thread_id| !thread_id.is_empty())
+    {
+        configurable[WORKSPACE_THREAD_KEY] = json!(thread_id);
     }
 
     if let Some(model) = model {
@@ -2451,7 +2536,7 @@ mod tests {
         // tokens, because the server then emits `messages/partial` frames.
         // `values` rides alongside for the artifacts/spine snapshot — verified on a
         // live backend that asking for both still produces `event: messages`.
-        let body = run_request_body("hi", None, None);
+        let body = run_request_body("hi", None, None, None);
         assert_eq!(
             body["stream_mode"],
             json!(["messages-tuple", "values", "custom"])
@@ -2476,7 +2561,7 @@ mod tests {
             base_url: Some("https://openrouter.ai/api/v1".into()),
             ..Default::default()
         };
-        let body = run_request_body("hi", Some(&model), None);
+        let body = run_request_body("hi", Some(&model), None, None);
         let configurable = &body["config"]["configurable"];
         assert_eq!(
             configurable["model_config"]["default"],
@@ -2495,7 +2580,7 @@ mod tests {
 
         // A resume carries the same routing: the continuation must not silently switch
         // model or lose the key mid-turn.
-        let resumed = resume_request_body(&[Decision::Approve], Some(&model), None);
+        let resumed = resume_request_body(&[Decision::Approve], Some(&model), None, None);
         assert_eq!(
             resumed["config"]["configurable"]["__llm_keys"],
             configurable["__llm_keys"]
@@ -2534,7 +2619,7 @@ mod tests {
                 .into_iter()
                 .collect(),
         };
-        let body = run_request_body("hi", Some(&model), None);
+        let body = run_request_body("hi", Some(&model), None, None);
         let configurable = &body["config"]["configurable"];
 
         assert_eq!(
@@ -2561,8 +2646,8 @@ mod tests {
                 .into_iter()
                 .collect(),
         };
-        let keys =
-            &run_request_body("hi", Some(&model), None)["config"]["configurable"]["__llm_keys"];
+        let keys = &run_request_body("hi", Some(&model), None, None)["config"]["configurable"]
+            ["__llm_keys"];
         assert_eq!(keys["custom"]["api_key"], "sk-custom");
         assert_eq!(keys["custom"]["base_url"], "https://openrouter.ai/api/v1");
     }
@@ -2577,7 +2662,8 @@ mod tests {
             api_key: Some("sk".into()),
             ..Default::default()
         };
-        let configurable = &run_request_body("hi", Some(&model), None)["config"]["configurable"];
+        let configurable =
+            &run_request_body("hi", Some(&model), None, None)["config"]["configurable"];
         assert!(
             configurable["model_config"].get("subagents").is_none(),
             "{}",
@@ -2596,7 +2682,7 @@ mod tests {
             base_url: None,
             ..Default::default()
         };
-        let body = run_request_body("hi", Some(&model), None);
+        let body = run_request_body("hi", Some(&model), None, None);
         let configurable = &body["config"]["configurable"];
         assert_eq!(configurable["model_config"]["default"], "openai::gpt-5.4");
         assert!(configurable["model_config"]["storage_mode"].is_null());
@@ -2814,13 +2900,13 @@ mod tests {
         // The other half of §105's pair: the label tells the app where to look, this tells the
         // backend where to write. They are computed from the same string by two sanitisers that
         // `workspace.rs` has a test to keep byte-identical.
-        let body = run_request_body("hi", None, Some("Late blight"));
+        let body = run_request_body("hi", None, Some("Late blight"), None);
         assert_eq!(
             body["config"]["configurable"]["__workspace_project__"],
             "Late blight"
         );
         // No project, no key — an ungrouped conversation keeps the path it always had.
-        let plain = run_request_body("hi", None, None);
+        let plain = run_request_body("hi", None, None, None);
         assert!(
             plain["config"]["configurable"]
                 .get("__workspace_project__")
@@ -2829,10 +2915,40 @@ mod tests {
             plain["config"]["configurable"]
         );
         assert!(
-            run_request_body("hi", None, Some("   "))["config"]["configurable"]
+            run_request_body("hi", None, Some("   "), None)["config"]["configurable"]
                 .get("__workspace_project__")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn every_run_names_the_conversation_that_owns_its_files() {
+        // The UUID is already the request URL. Sending it again under a directory-only key is
+        // intentional: LangGraph's thread metadata is absent in some tool-call contexts, and an
+        // async worker launched there otherwise creates a sibling folder under the workspace
+        // root. This is the client-side fact that makes the backend's §151 nesting deterministic
+        // instead of dependent on context propagation (docs §159).
+        let fresh = run_request_body("hi", None, None, Some("conversation-1"));
+        assert_eq!(
+            fresh["config"]["configurable"][WORKSPACE_THREAD_KEY],
+            "conversation-1"
+        );
+
+        // Resumes carry the owner too. In particular, a background task may wait across a backend
+        // restart, which clears the backend's in-memory worker→conversation map; the decision
+        // request must restore the owner before the worker writes anything else.
+        let resumed = resume_request_body(&[Decision::Approve], None, None, Some("conversation-1"));
+        assert_eq!(
+            resumed["config"]["configurable"][WORKSPACE_THREAD_KEY],
+            "conversation-1"
+        );
+
+        // Blank is absence, never a directory name and never an instruction to pin a worker to
+        // an empty path segment.
+        let blank = run_request_body("hi", None, None, Some("   "));
+        assert!(blank["config"]["configurable"]
+            .get(WORKSPACE_THREAD_KEY)
+            .is_none());
     }
 
     #[test]
@@ -3072,6 +3188,7 @@ mod tests {
             pending: None,
             error: None,
             activity: None,
+            owner: String::new(),
         };
         assert!(!waiting.is_finished(), "interrupted is not terminal");
         for status in ["success", "error", "timeout", "cancelled"] {
@@ -3089,6 +3206,68 @@ mod tests {
             };
             assert!(!going.is_finished(), "{status}");
         }
+    }
+
+    #[test]
+    fn a_worker_with_no_recorded_owner_names_no_conversation_at_all() {
+        // The half of §159 that is easy to get backwards. Naming the owner is what stops a
+        // background worker filing its figures beside the conversation instead of inside it —
+        // but an owner the app does not actually know must not be invented, and blank is not a
+        // directory name. Sending `""` would pin the run to the workspace *root*, which is
+        // strictly worse than the sibling folder the backend falls back to on its own.
+        let task = AsyncTask {
+            task_id: "t".into(),
+            thread_id: "worker-thread".into(),
+            agent_name: "background_worker".into(),
+            status: "interrupted".into(),
+            description: String::new(),
+            pending: None,
+            error: None,
+            activity: None,
+            owner: String::new(),
+        };
+        assert_eq!(task.owning_conversation(), None);
+        // Whitespace is absence too: it survives a round trip through JSON looking like a value.
+        let blank = AsyncTask {
+            owner: "   ".into(),
+            ..task.clone()
+        };
+        assert_eq!(blank.owning_conversation(), None);
+        let owned = AsyncTask {
+            owner: "conversation-1".into(),
+            ..task.clone()
+        };
+        assert_eq!(owned.owning_conversation(), Some("conversation-1"));
+    }
+
+    #[test]
+    fn decoding_a_snapshot_does_not_guess_which_conversation_owns_a_worker() {
+        // `async_tasks` records the worker's own thread and says nothing about its parent, so
+        // this decoder cannot know — and the ingesting caller can. Pinned here so a later reader
+        // does not "helpfully" default the field to `thread_id`.
+        let snapshot = decode_values(
+            &json!({
+                "artifacts": {
+                    "async_tasks": {
+                        "task-1": {
+                            "task_id": "task-1",
+                            "thread_id": "worker-thread",
+                            "agent_name": "background_worker",
+                            "status": "running"
+                        }
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("a snapshot with one task");
+        let task = snapshot.tasks.first().expect("the task");
+        assert_eq!(task.thread_id, "worker-thread");
+        assert_eq!(
+            task.owning_conversation(),
+            None,
+            "the payload carries no owner, so the decoder must not supply one"
+        );
     }
 
     #[test]

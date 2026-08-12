@@ -74,7 +74,8 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
 
 **Felt friction**
 - ✅ **Multi-line composer** — Shift-Enter inserts a break, Enter still sends (§55).
-- ✅ **Escape closes things**, inside-out; **conversations can be deleted** in two steps;
+- ✅ **Escape closes things**, inside-out; **conversations and projects can be deleted** from a
+  centred warning that names the chat history and saved folders that will go (§58/§155);
   **theme and model are filterable lists**; **corners are rounded** (§58/§59).
 - ✅ **Text selection in the transcript** (§62) — drag across paragraphs, code blocks and table
   cells; `ctrl-c` copies, `ctrl-shift-a` takes everything, both also in the palette.
@@ -108,16 +109,27 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   `<task>/guinea_pig_eda_output/plots/health_by_activity_box.png`. Its folder is created *inside*
   the conversation's, and the conversation it belongs to is remembered per thread because the run
   config is not visible at every construction site.
-- ⬜ **The Outputs panel does not survive a productive run** (§152). One EDA produced twelve
-  artifacts and the panel became twelve near-identical rows, each truncated to
-  `019fe9f6-9126-7710-a806-35d5e09170a4\guin…` — **the 36 characters they share are shown and the
-  part that tells them apart is cut off.** The transcript renders every figure at full width, so
-  ten plots is ten screens of scrolling. Wanted, in the researcher's words: *"when we have too many
-  plots and tables, maybe do something like what's done with too many photos — group them, and only
-  when you click can you view it and scroll on the x axis."* A gallery: grouped by the folder the
-  agent chose, collapsed to a strip of thumbnails, opened on click, scrollable sideways. Note the
-  agent already organises its own work into `guinea_pig_eda_output/plots/` — that structure is a
-  grouping the panel is currently flattening rather than using.
+- ⬜ **A file's own symbol, so the kind is readable at a glance.** Asked for directly: *"add to the
+  plan how we can put symbols of the files to know what is what. For example if its a python script
+  the symbol of python must appear. its the same for json, etc etc etc."* Today `file_mark`
+  (`main.rs`) returns one of four geometric glyphs — `▤` for anything tabular, `▩` for an image,
+  `▦` for a PDF, `▤` again for everything else — so a `.py`, a `.json`, a `.log` and a `.txt` are
+  all the same mark in the same colour. On a grid of tiles that is the only thing distinguishing
+  them besides the name. Wanted: a per-extension mark for the kinds a research run actually
+  produces — `.py`, `.ipynb`, `.json`, `.yaml`, `.md`, `.txt`, `.log`, `.html`, `.zip`, `.parquet`,
+  `.db` — recognisable as *that* language or format rather than as a generic file. Note the
+  constraint §12 already settled for the toolbar: a bundled SVG per kind is the honest route (PR #12
+  builds exactly that machinery for the core controls, so this should reuse it rather than invent a
+  second scheme), and a bare Unicode glyph is what we have because it needs no assets. Whichever
+  way, `file_mark` is the one place it lands, and its colour should keep following the theme.
+- ✅ **The Outputs panel does not survive a productive run** (§152 → §153 → §162). Twelve artifacts
+  became twelve near-identical rows, each truncated to the 36 characters they *share*, and the
+  transcript rendered every figure full width — ten plots, ten screens. Now: images in one group as
+  a capped 2×2 grid whose fourth tile reads `+N`, everything else folder-grouped below it, and one
+  click opens a modal with arrows, a `3 of 8` counter and a clickable filmstrip. Still open from
+  this thread: **keyboard navigation in the modal** — arrow keys need a focus handle on the modal,
+  because an unscoped binding would take the arrows away from the composer and a scoped one never
+  fires from there (the §58/§84 trap).
 - 🟡 **superseded** *(kept for the trail)* — **A background worker's output is visible in the app**
   (§151) — its folder is now created
   *inside* the conversation's rather than beside it, so `workspace::outputs` finds it by descending
@@ -133,6 +145,18 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   - the app reads a finished task's own folder and folds it into Outputs, so a worker that lands
     anywhere is still visible.
   The second is the one that cannot silently fail, and it is not built.
+- 🟡 **`execute` was told to prefer absolute paths, and sixteen files went to `/tmp`** (§160,
+  §161). deepagents' own execute description says *"maintain your current working directory … by
+  using absolute paths"* — sound inside a container the agent owns, and here `virtual_mode=False`
+  means an absolute path is the researcher's real filesystem. The description is rewritten at
+  import: the sentence is replaced, a rule naming the consequence is appended, and an upstream
+  rewording is reported rather than silently failing. **Advice, not containment.**
+  **Awaiting a live run.**
+- ⬜ **`execute` can still write anywhere.** The rewrite above changes what the model is *told*.
+  Real containment means the workspace is the only writable persistent mount — a bind-mount of
+  `<work_dir>/tmp` over `/tmp`, or an isolated execution namespace. Not attempted, and explicitly
+  not faked: pattern-matching a shell command for writes produces a containment claim that is
+  false in every case nobody thought of.
 - ⬜ **The turn says files were saved without checking.** Two failed attempts and the answer
   reported plots on disk; a later run listed ten filenames the panel could not show. The prompt
   says *"NEVER invent findings, numbers, or charts"* — the third capital-letter rule measured at
@@ -8788,6 +8812,743 @@ belongs together, and the panel is discarding it.
 *Ninth: the value needed was one the program already had.*
 
 
+## 153. The folder becomes the gallery (2026-08-10)
+
+§152 did not need an invented grouping model. The recursive output walk already retained the
+relative parent of every artifact; the two renderers were simply throwing that boundary away.
+They now group on the **full parent path**, so two different workers' `plots/` directories cannot
+silently merge, while the heading removes only a leading generated thread UUID and says the part
+the agent chose: `guinea_pig_eda_output / plots`.
+
+The interaction follows the platform's own collection pattern rather than copying WhatsApp's
+decoration. Microsoft's Windows guidance names interactive photo libraries as an ItemsView use
+case and puts scrolling inside the collection
+([Items view](https://learn.microsoft.com/en-us/windows/apps/develop/ui/controls/itemsview)). In
+GPUI that becomes one fixed-size thumbnail rail per folder, horizontal overflow, a visible
+horizontal thumb, and the existing preview modal on click. A folder with one artifact keeps its
+larger card; collapsing it would save no space and make an ordinary one-file answer worse.
+
+Both surfaces use the same grouping rule:
+
+- In the transcript, a productive folder is one rail instead of one full-width card per file.
+- In Outputs, the same folder is one compact rail instead of twelve near-identical rows.
+- A tile's primary label is the basename, never the shared relative path. If the basename itself
+  is too long, its **leading** edge is elided so the differentiating tail and extension survive.
+- Every rail owns its own `ScrollHandle`; moving one folder cannot move another. The bar is drawn
+  explicitly because GPUI's overflow scrolls but supplies no visual affordance, and a clipped row
+  on a mouse-driven Windows desktop does not communicate sideways content.
+
+The structural before/after is deterministic even in the headless build environment: the reported
+ten-plot turn built ten figure cards, each allowed up to 420px of image height; it now builds one
+folder block whose figures share a single 118px-high rail. The exact rendered pixels still need a
+Windows-eye check because this machine cannot open GPUI. Two sentence-named tests pin the folder
+boundary, UUID removal and distinguishing filename tail. The complete result is **241 passing
+tests**, with no new Clippy warning (the base branch's existing warnings remain).
+
+*Tenth: the value needed was one the program already had — and this time the implementation keeps
+it instead of flattening it twice.*
+
+
+## 154. A project existed in two places (2026-08-10)
+
+The report was two symptoms of one contradiction: *new conversations already start in a project*,
+and *a deleted project comes back after launch*.
+
+§106 says a project is exactly a name carried by at least one conversation — no project registry,
+because a second truth will drift. But §107 added `settings.project`, remembered the last project
+opened, restored it on startup, and deliberately inherited it for ordinary **New thread**. An empty
+project therefore still existed in settings after its last conversation left the sidebar, and the
+next launch put fresh work back under that name. The persistence was not hidden in the backend;
+it was a second client-side registry this plan had explicitly ruled out one section earlier.
+
+The related upstream report, `docs/upstream/mini-me/project-spine-is-not-per-project.md`, identifies
+a different boundary: the spine route is server/user-scoped rather than project-scoped. That can
+make project *content* look shared, but it does not create the sidebar heading or choose the
+workspace directory. Treating it as this resurrection would have changed the protected backend
+and left the actual `settings.toml` value untouched.
+
+There are now only two ways to choose a project:
+
+- Open a conversation already filed there.
+- Click the `+` beside that project heading to start a conversation there deliberately.
+
+Launch and ordinary **New thread** both choose the workspace root. The old `project` settings key
+is accepted and ignored when upgrading, then disappears on the next save. Root conversations are
+labelled **Ungrouped Conversations** in the sidebar and picker — still `None` in metadata and still
+directly under `Documents/Mini-Me`, so the friendly name does not become a third registry or a
+real folder that can collide with one the researcher creates.
+
+### Why deletion also had to change
+
+A project heading is derived from its conversations, so deleting the last one is deleting the
+project from the app. The row used to disappear and say *conversation deleted* **before** the
+HTTP delete answered. `Sidecar::delete_conversation` then ran fire-and-forget; if the request
+failed or the app closed first, the durable thread remained and the next listing correctly brought
+it — and its project — back. The UI had reported an operation that had not happened.
+
+Deletion now leaves the row in a **Deleting…** state and removes it only after a successful server
+answer. Failure or a dropped answer keeps the conversation visible and says it was not deleted.
+Deleting the open conversation also clears the sidecar's project, so the empty slate cannot inherit
+the project whose last durable member just went away. Files and empty project folders in Documents
+are deliberately not deleted: they are researcher-owned outputs, and §58's delete contract has
+always promised to leave them alone.
+
+Two sentence-named tests hold the upgrade and failure paths: an older remembered project is ignored
+and not written back, and every non-successful delete resolution keeps the row. The window still
+needs the Windows restart check; this headless environment can prove the state transitions and wire
+result, not watch the heading disappear and stay gone across two launches.
+
+*The eleventh value the program already had was `None`. Remembering more state was the defect.*
+
+
+## 155. Deleting the label left the laboratory behind (2026-08-11)
+
+The Windows check of §154 found the other half immediately: the project stopped returning to the
+sidebar, but its conversation directories and every file in them remained under
+`Documents\Mini-Me`. The plan said that was deliberate in §58 and repeated it in §154 — files were
+the researcher's, therefore deletion must leave them alone. The researcher changed that contract
+after seeing it operate: *"We need to sync that."*
+
+That is the better rule now that §105 made projects real folders. A conversation in the sidebar and
+its directory in Explorer are two representations of the same work. Deleting one while preserving
+the other is not caution; it is an orphan that looks like the deletion failed. The confirmation is
+where caution belongs.
+
+### The warning moved to the centre because its scope grew
+
+The old confirmation replaced a sidebar row with *Delete this conversation? · delete · keep*. It
+could fit a noun and two verbs. It could not honestly say that the chat history **and every saved
+output** were going, show the exact directory, or explain that deleting a project also removes files
+placed directly in its folder. A second click without those consequences stated is not informed
+confirmation.
+
+Deletion now uses the existing centred `Modal`, with pinned Cancel and red Delete actions and an
+explicit *There is no undo*. A conversation warning names the conversation and its exact folder. A
+project warning names the project, counts every conversation, shows the project path, and says that
+the entire directory goes — including files Mini-Me did not create.
+
+### A project has a delete control of its own
+
+Named project headings now appear even when there is only one group. §106 hid a single heading as
+noise; it is no longer decoration once it owns **open folder**, **new conversation here**, and
+**delete project**. The delete control targets the complete project from `self.conversations`, never
+the rows surviving the sidebar search — filtering for one title must not turn "Delete project"
+into "delete the one conversation I can currently see". Ungrouped Conversations is still not a
+project and therefore has no project-delete control; its conversations can be deleted individually.
+
+### The two irreversible systems cannot be atomic
+
+LangGraph and NTFS cannot share a transaction. The order is therefore server first, filesystem
+second:
+
+1. Delete every durable thread and keep the rows in **Deleting…** state while that happens.
+2. Only after those requests succeed, recursively remove the confirmed conversation or project
+   folder on a blocking worker, never on GPUI's render thread or Tokio's reactor.
+   A currently open target cannot be deleted while its foreground turn or background work is still
+   writing there. **Only the open one**, and that is a real limit rather than an oversight: the
+   workbench holds `tasks` for the conversation on screen and clears them when another is opened,
+   so it cannot know that a conversation it is *not* showing has a worker still running. Delete
+   that one and its tree goes while the worker writes into it — the server thread is already gone,
+   so the worst case is a folder that reappears owning nothing, which is visible and recoverable
+   rather than silent. Closing it properly needs the backend to report a conversation's live
+   workers, which is the same missing fact §42 wants for "a run claims files it never wrote".
+3. If the server refuses, preserve the files and refresh the list; a project batch may have stopped
+   after earlier threads succeeded.
+4. If Windows has the folder open and cleanup fails, remove the now-nonexistent conversation from
+   the sidebar but report that its recoverable folder remains. Restoring a row whose server thread
+   is gone would be another lie.
+
+The destructive path validates the thread id as one path component before recursion. It refuses to
+descend through a project symlink or junction, and unlinks a target link rather than following it;
+one malformed server id or an Explorer shortcut must never widen one confirmation beyond the
+Mini-Me workspace. Deleting one conversation removes its nested output tree and then its project
+directory only when empty. Deleting a project removes the complete named directory.
+
+Four sentence-named filesystem tests pin the boundaries: nested files go with their conversation,
+a neighbouring conversation survives, the last conversation removes an empty project, a whole
+project deletion leaves its neighbour alone, and hostile thread ids cannot escape the workspace.
+UI tests keep a failed durable delete visible, keep a folder-cleanup failure from resurrecting a
+deleted thread, prove a project target contains conversations hidden by search, and end the active
+project when its final conversation disappears.
+
+This explicitly supersedes §58 and §154's decision to preserve output files. The warning makes the
+new deletion contract visible before the click rather than leaving the cost behind afterward.
+
+Headless verification on the Windows checkout: **248 tests pass**. `cargo clippy
+-p mini-me-desktop-app --all-targets` adds no warning; it still reports the branch's existing 15
+warnings in untouched call sites. The modal itself still needs the Windows-eye check — specifically
+its path wrapping and the two hover controls on a single-project heading.
+## 158. A scrollbar that only looked interactive, and an image cache that remembered too soon (2026-08-11)
+
+The first Windows pass on §153 found both failures immediately. The agent generated the figures,
+their cards appeared, and the pictures themselves stayed blank until the application restarted.
+The horizontal thumb was visible beneath them, but clicking and dragging it did nothing.
+
+These were two different stale-state mistakes:
+
+- The Outputs panel scans the filesystem whenever it paints, including while an `execute` process
+  still has a PNG open. GPUI's global image cache keys a local image by path and retains a decode
+  error just as it retains a decoded image. If the first read lands between create and close, every
+  later frame asks for the same path and receives the same cached failure. Restarting worked only
+  because it rebuilt that cache. A finished foreground turn or background task now schedules two
+  bounded follow-up passes across the Windows/WSL hand-off. Each pass re-collects late files,
+  evicts figure paths from GPUI's asset cache, and repaints. This is deliberately not a permanent
+  watcher: outputs are bounded completion events, and polling the researcher's Documents folder
+  forever would spend idle time fixing a race that only exists while a writer is finishing.
+- `horizontal_scrollbar` was a six-pixel painted `div`, not a control. It communicated the native
+  scrollbar contract without implementing it. The gallery now gives the bar a 12px mouse target,
+  maps the thumb's travel onto the `ScrollHandle`'s hidden width, preserves the point grabbed
+  inside the thumb, supports clicking the track, and ends the drag even when release is observed
+  away from the thumb. Each rail still owns its own handle, so §153's independent positions remain.
+
+The mapping is a pure function with a sentence-named regression test: the left edge produces zero
+offset, the midpoint reveals half the hidden width, and dragging beyond the right edge clamps at
+the last file. The image-cache correction still needs the same Windows-eye check that found it:
+generate several plots, leave the app open, and confirm the thumbnails fill without a restart.
+
+*Eleventh: an affordance is a promise of behavior, and a cache key needs the version of the thing
+it remembers—even when the library only gives us its path.*
+
+
+## 159. The client knew the parent; the worker was asked to guess it (2026-08-11)
+
+A second live EDA exposed the same filing defect §150/§151 had made less likely, not impossible:
+
+```
+Documents/Mini-Me/019ff21e-a473-…/   the conversation
+Documents/Mini-Me/019ff231-2332-…/   its delegated worker, beside it
+```
+
+The worker completed and the answer rendered, but the conversation's Outputs panel contained only
+its own two bookkeeping files. The researcher deleted that reproduction before it could be read
+from disk; the exact UUIDs and timestamps remain in the screenshot, while both backend routes now
+correctly return 404 for the deleted threads. A following run landed correctly. That difference is
+the evidence: this is an intermittent ownership signal, not a deterministic path calculation.
+
+### The request already had the only authoritative value
+
+Every coordinator request is sent to `/threads/<conversation>/runs/stream`. The Rust client
+therefore knows the conversation id at the point it assembles the run config, but sent the model,
+keys and project without `__workspace_thread__`. The overlay then tried to reconstruct the missing
+owner inside `start_async_task` from, in order, an inherited pin and three LangGraph thread metadata
+locations. §150 already measured why that cannot be load-bearing: not every tool-call context has
+those metadata fields. When none does, a valid worker starts with its own UUID as the workspace
+root; no error occurs and every generated file is filed one directory sideways.
+
+The client now sends `configurable.__workspace_thread__ = <conversation>` on every fresh turn and
+foreground resume. The async launcher already gives an explicit pin priority and forwards it under
+its directory-only key, so the background thread still owns its checkpoints while its files are
+nested under the conversation. No protected overlay code needed to change.
+
+Background approval resumes carry the owner again. This closes a second version of the same race:
+the overlay remembers worker→conversation ownership in process memory, but a backend restart while
+a task waits clears that map. A decision made afterwards must not let the rest of the task resume in
+a sibling folder.
+
+### The resume asked the wrong object which conversation it was
+
+Caught in review, before the change shipped. The resume path read the owner from
+`Sidecar::thread_id()` — *the conversation open right now* — and those are not the same thing.
+`open_conversation` clears the task list, so switching conversations is safe; `Command::NewThread`
+never did, so a pending task from the previous conversation stayed on screen and stayed clickable
+while `thread_id()` moved on to a new thread. Approving it then named the new conversation as the
+worker's owner.
+
+With the backend still running this was invisible: `_PINNED_BY_THREAD` already held the true owner,
+first-sighting-wins kept it, and the disagreement was logged. With the backend restarted — the one
+case this whole change exists for — that map is empty and the new conversation wins. So the fix was
+inert exactly where it was safe and wrong exactly where it mattered, and its failure mode was
+*worse* than the one it replaced: a sibling UUID folder is visibly wrong, while files appearing
+inside an unrelated conversation's Outputs panel look like they belong there.
+
+The owner is now carried on `AsyncTask`, stamped by whichever call site ingested it — the streaming
+snapshot (safe to read the open thread there: `apply` only runs mid-turn, and both New thread and
+opening a conversation refuse while streaming) or `open_conversation`'s own parameter. A task
+already being watched keeps the owner it was first seen with. `owning_conversation()` puts the
+"blank is not a directory name" rule next to the field instead of at the call site, because an
+empty pin would write to the workspace *root* — strictly worse again. Unknown sends no key at all
+and lets the backend fall back to its own inference. `Command::NewThread` now clears `tasks` and
+`jobs`, which is the pre-existing bug this change had made load-bearing.
+
+Three sentence-named tests: blank and whitespace owners name no conversation, the payload decoder
+does not invent one, and the request shape covers fresh runs, resumes and blank ids.
+
+The live Windows confirmation is deliberately exact: start a new conversation, ask it to delegate an
+EDA, and leave Explorer open at `Documents\Mini-Me`. The correct result is one new top-level
+conversation UUID and the worker UUID, if it creates one, **inside** it—never a second UUID beside
+it. Then the harder half: with a task waiting for approval, press New thread. The pending card
+should disappear with the conversation it belonged to.
+
+*Twelfth: a value known at the boundary should cross the boundary explicitly, especially when its
+absence is a successful-looking failure. And the corollary the review found — the boundary has to
+send the value that belongs to the **work**, not the one that belongs to the window.*
+## 160. Sixteen real files escaped to WSL `/tmp` (2026-08-11)
+
+This first looked like §150 again: Explorer showed two UUID folders under `Documents\Mini-Me`
+after one EDA. They were not duplicates. The backend store identified them as two independent
+conversations:
+
+```
+019ff236-183c-…  14:04  earlier penguin conversation
+019ff25d-f0ee-…  14:47  current Coffea arabica conversation
+```
+
+The current run used the ordinary synchronous `task` tool, had no `async_tasks`, and every one of
+its three run/resume requests stayed on `019ff25d-f0ee-…`. There was no background-worker UUID to
+pin. Its empty Outputs panel was a different failure.
+
+The coordinator explicitly asked `exploratory_data_analysis` to *"save outputs in the working
+directory using relative paths."* The subagent reported sixteen paths such as
+`tmp/coffee_eda/coffee_arabica_dummy_dataset.csv`, while the conversation's stored
+`artifacts.files` was empty and the directory contained only `memories/` and `provenance.json`.
+The files did exist, byte-for-byte, here:
+
+```
+/tmp/coffee_eda/
+├── coffee_arabica_dummy_dataset.csv       46,772 bytes
+├── eda_*.csv / top_correlations.csv         7 summary CSVs
+├── fig_*.png                                7 figures
+└── eda_notes.txt
+```
+
+All sixteen timestamps fall between 14:49:30 and 14:50:05, inside the measured tool run. This is
+not hallucinated output. It is successful work written to WSL's disposable global temp directory,
+where Explorer, `workspace::outputs`, artifact capture, conversation deletion and project moves
+cannot see it.
+
+### The two instructions disagree, and `execute` makes the dangerous one real
+
+The installed DeepAgents `EXECUTE_TOOL_DESCRIPTION` tells the model:
+
+> *"Try to maintain your current working directory throughout the session by using absolute paths
+> and avoiding usage of cd."*
+
+Its examples are `/foo/bar` and `/path/to/script.py`; it does not name this run's actual work
+directory. The task's request for relative paths therefore loses to a filesystem system prompt
+that says absolute paths are the convention, and `/tmp` is a plausible guess for an isolated
+sandbox.
+
+The enforcement gap is in `overlay/minime_local/workspace.py`, at
+`LocalWorkspaceBackend.aexecute`, not in the Rust Outputs walk and not in background pinning:
+
+- `LocalWorkspaceBackend` deliberately uses `virtual_mode=False`, so file operations and executed
+  Python share one real path namespace (§18).
+- `_reroute_write` safely re-roots absolute paths used through `write` and `upload_files`.
+- Shell/Python execution is different: `aexecute` runs with the conversation as `cwd`, but an
+  absolute `/tmp/...` remains an absolute host path. §18 records this as merely human-gated; the
+  approval gate controls whether a command runs, not where it writes.
+- Artifact capture scans the conversation work directory. An escaped file is correctly absent
+  from `artifacts.files`, which is why both the transcript gallery and Outputs stay empty.
+
+### Fix it at the execution boundary
+
+The durable invariant is: **a command may read an explicitly named external input, but every
+persistent output it creates belongs below `LocalWorkspaceBackend._work_dir`.** The local backend
+owner should implement and test that invariant around `aexecute`:
+
+1. Give the local-mode execute tool an instruction that names the real `aget_work_dir()` and says
+   persistent outputs must use that directory or paths relative to its `cwd`; `/tmp` is explicitly
+   ephemeral and outside the app.
+2. Add enforcement, not only prose. At minimum, refuse obvious persistent writes to `/tmp` and
+   return a tool error naming the current work directory so the model can retry correctly. The
+   complete version isolates execution so the workspace is the only writable persistent mount, or
+   bind-mounts the run's `<work_dir>/tmp` over `/tmp`. Do **not** try to understand arbitrary shell
+   syntax with a regex and call that containment.
+3. Add a cross-layer regression test that runs Python writing
+   `/tmp/minime-escape/result.csv` and proves either the command is refused or the bytes appear at
+   `<work_dir>/tmp/minime-escape/result.csv`, never in WSL's global `/tmp`; then prove artifact
+   capture returns that file.
+4. Keep external reads working. Researchers intentionally attach datasets outside the workspace
+   (§28), so making the whole filesystem unreadable would fix outputs by breaking inputs.
+
+Three tempting fixes do not close this bug: `TMPDIR=<work_dir>/tmp` does not affect a literal
+`/tmp/...`; `virtual_mode=True` does not constrain `execute` (§18); and copying paths mentioned in
+assistant prose would let untrusted text ask the desktop client to import arbitrary host files.
+
+Until enforcement ships, the current sixteen files can be preserved by copying
+`/tmp/coffee_eda/` into `Documents\Mini-Me\019ff25d-f0ee-…\coffee_eda\`. Copy, do not move: the
+diagnostic reproduction should remain intact until the backend fix is verified.
+
+*Thirteenth: a working directory is a default, not a boundary.*
+
+
+## 161. Advice, where a boundary was wanted (2026-08-11)
+
+§160 found sixteen real files in WSL's global `/tmp` and located the cause precisely. Both of its
+load-bearing claims verify against the pinned package: `filesystem.py:422` carries *"Try to
+maintain your current working directory throughout the session by using absolute paths and
+avoiding usage of cd"* verbatim, and `_reroute_write` is called from `write` and `upload_files`
+and **nothing else**, so `aexecute` has never been re-rooted.
+
+The description is now rewritten before any middleware is built. The sentence is replaced, and a
+rule is appended that names the consequence in terms the model can act on — *"do not appear in the
+researcher's Outputs panel, are not kept when the conversation is filed or deleted, and are erased
+by the operating system"* — rather than the useless abstraction *"outside the workspace"*. Reading
+an absolute path stays allowed: a researcher attaches datasets from anywhere (§28), and a rule that
+forbade absolute reads would fix outputs by breaking inputs. Upstream's own guidance about `&&`
+versus `;` is left exactly as written; this replaces one sentence, not a document somebody else
+maintains.
+
+### What it is not
+
+**It is advice.** §160 proposes, as a fallback, refusing "obvious persistent writes to `/tmp`" —
+and in the same section warns *"do not try to understand arbitrary shell syntax with a regex and
+call that containment."* Both cannot stand. A command is an arbitrary program; pattern-matching it
+produces a claim that is false in every case nobody thought of, and **a false boundary is worse
+than a documented absence of one**, because the next reader stops looking.
+
+So the boundary stays open and stays recorded as open. Real containment is a bind-mount of
+`<work_dir>/tmp` over `/tmp`, or an execution namespace where the workspace is the only writable
+persistent mount. That is a larger change than a docstring and worth making; it is not worth
+pretending to have made.
+
+### Patched by name, and honest about it
+
+`create_deep_agent` takes no `custom_tool_descriptions`, and `FilesystemMiddleware` reads the
+module global when it builds the tool (`filesystem.py:1481`), so replacing that global before any
+middleware is constructed is the reachable point. Patching a third party by name is one of this
+project's recurring bug shapes, so the replacement targets an exact sentence and **logs either
+outcome**: if upstream rewords that line, the log says the advice it contradicts may have returned,
+instead of reporting success over a no-op. §132's rule, applied to our own patch.
+
+*Fourteenth, and §160's own sentence is the right one: a working directory is a default, not a
+boundary.*
+
+
+## 162. Four tiles, and the fourth one counts the rest (2026-08-12)
+
+§153 gave every folder a sideways strip, which fixed the ten-screens problem and left two the
+researcher named as soon as they saw it on their own data:
+
+> *"I want to group images and in another group other files. So when the user clicks a modal
+> appears and we can click and scroll at the bottom so the user can select which picture to see."*
+
+Their reference was explicit, and a phone: a 2×2 photo grid whose fourth tile reads `+5`, opening
+into a viewer with arrows, `1 de 8`, and a filmstrip along the bottom with the current frame
+outlined.
+
+### Kind outranks folder on the surface you flick through
+
+§153 grouped by the directory the agent chose and was right about structure. It was wrong about
+kind: the run that prompted this wrote seven figures and a summary CSV into one folder, so the CSV
+sat in the middle of the strip you scan looking for a plot. `split_images` now puts figures in one
+group and everything else in another, images first, because a figure is what the panel is opened
+to *look at* while a CSV is opened to check something.
+
+Folder grouping is kept for the non-image group. Two runs' `results/` directories are still two
+things; the image grid is the one surface where kind wins.
+
+### The preview had nothing to go next to
+
+`preview: Option<workspace::Output>` held a file, so choosing among eight figures meant closing the
+modal, finding the next thumbnail and opening it again. It now holds a `Preview` — the set and a
+position in it — which is the single fact the arrows, the `3 of 8` counter and the highlighted
+filmstrip tile all render. §158's rule about one calculation, applied to three affordances that all
+mean *this one*.
+
+`Preview::opening` is the only constructor and returns `Option`, because `current()` indexes: a
+click can arrive after the files behind it were moved, and §159's own reproduction was deleted
+mid-diagnosis. Out-of-range clamps, empty is `None`, and stepping wraps — the counter says which of
+how many, so wrapping cannot be misread as a dead button, and comparing the first plot of a series
+with the last should not mean travelling back through the middle.
+
+### The `+N` was wrong and the test said so
+
+The first implementation counted `total - tiles`, which for eight images in four tiles reads `+4`.
+The phone reads `+5`. The scrimmed tile is *covered*, so it counts among the hidden: three pictures
+you can see, five you cannot. `image_grid_shape` is one function used by the grid and by its test —
+not two copies of the rule — and the test asserts the property the off-by-one broke, that at every
+size every image is either visible or counted. It failed on the first run and named the number.
+
+No arrow-key bindings, deliberately. Focus lives in the composer, an unscoped `left`/`right` would
+take the arrows away from typing, and a scoped binding never fires from there — the trap §58 and
+§84 already paid for twice. The modal is clickable and Escape already closes it; keyboard
+navigation wants a focus handle on the modal and is its own change.
+
+*Fifteenth: when someone hands you the thing they want copied, copy the arithmetic too — `+4` is
+defensible in review and wrong beside the screenshot.*
+
+
+## 163. Painting over something is not being in front of it (2026-08-12)
+
+Three defects from the first real look at §162, and the third is the one worth the section.
+
+### The arrows closed the modal they were stepping through
+
+Click handlers fire on GPUI's **bubble** phase, innermost first, and every one on the path runs
+unless something stops it. The arrows sit inside the panel, the panel sits inside the backdrop, and
+the backdrop closes the preview on click. So a press on `›` stepped forward and then closed.
+
+`stop_propagation` on the panel, not on each control: the same path was already reachable from
+`open outside` and from every filmstrip tile, and one guard at the boundary covers the controls that
+do not exist yet. This was live for the header buttons before §162 and nobody had clicked one.
+
+### The picture was cut off at the top
+
+`img().max_w_full().object_fit(Contain)` bounds one dimension. The height resolved to the file's
+own, which for a tall plot exceeded what the flex row allowed, and `items_center` then clipped it
+symmetrically — the top of a stacked bar chart gone, dead space underneath, and `Contain` never
+getting the chance to letterbox because there was no box to contain it in.
+
+Both dimensions are now set, on a named constant, and the body has its own ceiling: a child with
+`overflow_y_scroll` needs a bounded height to scroll *within*, or the clipping simply moves
+somewhere else. The modal also went from 760px to 880px wide — 760 was chosen when this previewed
+CSV rows, and it is narrow for a figure with five rotated category names on the x axis.
+
+### Every overlay in the app was click-through
+
+The researcher's words, and they generalised it themselves before I did:
+
+> *"If I click something in a modal and in the background there is something clickable, the
+> interaction in the background happens. It means that if two buttons overlap, and I click the
+> button in front, both buttons activate."*
+
+GPUI hit-tests **every** element whose bounds contain the pointer. Painting later puts you on top
+visually and does nothing to the hitboxes underneath, so a dimmed backdrop was a picture of
+exclusivity rather than exclusivity. `occlude()` sets `HitboxBehavior::BlockMouse`, which is the
+thing that was missing — from the preview backdrop, the command palette, the toast stack, and
+`ui::Modal`, which is to say from Settings, About and Provenance at once.
+
+Fixed in `ui::Modal` rather than in its three callers, because all three had the same defect for the
+same reason and a fourth modal would have inherited it.
+
+The context menu is the tell that this was known and half-solved. It already carried:
+
+```rust
+// Swallow the press so the click that chooses an item does not also land on the
+// transcript underneath and start a fresh selection there.
+.on_mouse_down(gpui::MouseButton::Left, |_event, _window, cx| cx.stop_propagation());
+```
+
+A press guard, written against one observed symptom. A click is a press *and* a release, so the
+release still reached whatever was behind — and no other overlay got even that much. The press
+guard stays, because it also stops the drag a mouse-down on the transcript begins; `occlude` is the
+general form of what that line was reaching for.
+
+Not verified here: all three are GUI behaviour on a headless machine. The arithmetic has constants
+and the occlusion has a named API, but whether the picture now fits and whether the arrows now step
+is something only running it can say.
+
+*Sixteenth: z-order is a fact about drawing. Reachability is a separate fact, and it has to be
+stated separately.*
+
+
+## 164. The strip was the wrong shape, and one renderer is enough (2026-08-12)
+
+§162 worked, and looking at it against the thing it was imitating showed two more:
+
+> *"For files we should do the same. Also I think the grouping occupies too much space in the
+> conversation (too wide). Check the screenshot from WhatsApp. Is less invasive and functions the
+> same."*
+
+### Fixed tiles, not fractions
+
+The image grid used `flex_1` tiles, so the block was as wide as whatever held it — in the transcript,
+the whole conversation. A folder of seven files claimed a band wider than the answer that produced
+it, which is the §152 complaint in a new direction: not ten screens tall, one screen wide.
+
+The phone gallery it is compared against is a *block* — about 415px, the same whatever the chat
+window is doing. So tiles are now a fixed width and there are two per row, which makes the grid
+exactly `2 × tile + gap` and no wider: 304px in the panel, 408px in the transcript. There is a test,
+because "too wide" is the complaint and a `flex_1` slipped back in would look correct in review.
+
+### One renderer for images and for files
+
+§153's sideways strip is gone. It had a heading, a `scroll sideways` hint, a visible scrollbar, and
+a full-width band per folder — furniture, for three CSVs. Files now use the same capped grid as
+images, so they get the `+N` tile and the modal with it, and the strip's scroll machinery lives on
+where it is actually wanted: the preview filmstrip, which is the surface §162 gave it.
+
+Two differences inside a tile, and they are the whole reason one renderer works. A figure shows the
+picture and **no filename** — the image identifies itself, the modal's header names it, and a caption
+under every thumbnail was half of what made the strip feel heavy. A data file shows a glyph, the
+name and the shape, because one CSV looks exactly like another.
+
+`Contain` rather than `Cover` for a tile's picture: a photo crops acceptably and a chart does not.
+Cropping the axes off a plot makes the thumbnail useless for the only job it has, which is choosing
+between seven of them.
+
+### §59, third time
+
+Every file tile in the panel rendered its name as a bare `…`. `Label::ellipsis` produces
+`flex_grow().min_w_0().truncate()`, `flex_grow` needs a flex parent to grow within, and GPUI's `div`
+defaults to `Display::Block` — so a tile's label row was a block container and the text collapsed to
+its ellipsis. The `ui` module documents this defect, names it §59, and says *"there is no way to ask
+for the broken combination"*; there is, and §153's tile found it.
+
+The names are now shortened in Rust, by character count from the tile width, and rendered as plain
+labels. No truncation machinery, so no layout to get wrong.
+
+*Seventeenth: a component that documents its own trap is not the same as a component that prevents
+it — and the trap was two layers away from where the note lives.*
+
+
+## 165. Four abbreviations you had to hover to find (2026-08-12)
+
+A screenshot of the sidebar beside a screenshot of another app's `⋮` menu, and the ask:
+
+> *"I think we need to improve the app control to create a new project and to create new
+> conversations. We can use the vertical 3 dots and when click we can show the options … There is a
+> New button so when click new a sub modal menu can say: New conversation and the other option New
+> project."*
+
+### Creating a project had no button at all
+
+A project is "a name some conversation is filed under" (§106), so the only route to a new one was
+the *file* picker: open a conversation, open the picker, type a name, and the conversation moves
+into the folder that naming it created. That is a real gesture and it works, but it is filing —
+there was nothing that meant **start** a project, and a researcher beginning a new line of enquiry
+starts before they have anything to file.
+
+`New` is now a menu with two rows. `New project…` opens the same picker in a mode where choosing a
+name calls `new_thread_in` instead of `file_in_project` — the same list, the same
+`New project “…”` first row, the same typing. Only what choosing *does* differs, so there is no
+second way to name a project and no second place for the rules to drift.
+
+### One target instead of four, and words instead of characters
+
+Each row carried `rename` and `✕`; each project heading carried `+` and `✕`. All four appeared only
+on hover, so the way to discover what a row could do was to point at it and decode two
+abbreviations — and `+` beside a heading is not self-evidently "start a conversation in this
+project". They are one always-visible `⋮` per row and per heading now, whose contents are
+sentences. `New conversation in Late blight` says which project even when the menu is floating over
+a list of them.
+
+Nothing new is reachable: every row calls a method the sidebar already had. That is `menu.rs`'s
+stated rule for the right-click menu — *"the menu is a second door onto the same room, not a second
+implementation"* — and it is why this is a rearrangement rather than a feature.
+
+### §163, one layer further in
+
+A conversation row opens that conversation on click; a project heading opens its folder in
+Explorer. The `⋮` sits inside both. Without `stop_propagation`, asking a row what it can do would
+*switch conversations* first, and asking a heading would launch a file manager. The same shape as
+§163's overlays, at a smaller scale, and reachable the same way: a control drawn on top of a
+clickable thing is not thereby the only thing that was clicked.
+
+`menu_card()` is now one function. Both menus need `occlude` and both need the left press swallowed;
+the right-click menu had learned both, and a second menu written beside it would have had to learn
+them again.
+
+*Eighteenth: an affordance nobody can find is not smaller than a missing one, it is worse — it
+looks like the feature exists.*
+## 166. The migration could not tell an empty list from a cleared one (2026-08-12)
+
+§154 and §155 shipped, the researcher deleted their test conversations, restarted, and the
+conversations were back. Explorer showed `Documents\Mini-Me` holding one file — `subagents.json` —
+so the *files* had gone. Only the rows returned.
+
+That is the reverse of §154's failure, which makes it a different bug wearing the same shirt: there
+the deletion never became durable, here it did and something put the rows back.
+
+### §90's rescue has no memory
+
+`adopt_untagged_conversations` exists because `dfea94a` began filtering the sidebar on a metadata
+tag, which hid every conversation created before it — *"the conversations doesn't load, like this
+was erased"* (§90). It searches untagged threads, keeps the ones with human messages, and tags
+them. Its own doc says **"Runs once, and only when there is nothing to lose."**
+
+It runs on **every** listing, and its guard is not "has it run" but "is the tagged list empty":
+
+```rust
+if !self.list_conversations(1).await?.is_empty() {
+    return Ok(0);
+}
+```
+
+Emptiness is true in two situations the guard cannot tell apart. One is the launch after a pull,
+where old history is hidden and the scan is exactly right. The other is **the researcher having
+just deleted everything** — and then the scan re-tags whatever threads are left. Background workers'
+threads are left, because a conversation's delete removes its own thread and not the ones it
+delegated to; the workers carry the task description as a human message, which is the very test
+adoption uses to recognise a conversation.
+
+So: delete your last conversation, and the next refresh promotes leftovers into the sidebar. The
+folders stay deleted, because that half worked. The rows come back.
+
+### A fact, not a symptom
+
+`adopted_untagged` is now a settings field, written once the scan completes — including when it
+adopts nothing, which is the ordinary case and precisely the installation that must stop scanning.
+The caller decides and the caller remembers; `list_conversations` takes `adopt` and reports back
+whether the scan ran, because "what to show" and "is the migration finished" are two questions and
+one return value was answering only the first.
+
+Read from the stored settings rather than from `self.draft`, for the reason `remember_panels`
+already gives: the draft is the Settings pane's editing buffer, and this decision has to be made
+from what survives to the next launch.
+
+The doc comment was not merely optimistic, it was **false** — "runs once" described a design nobody
+had built, and it sat directly above the loop that ran every time. Three sections this week have
+turned on a comment asserting something the code did not do (§148's docstring, §161's advice,
+§155's guard). The pattern is specific enough to name: when a comment claims a *frequency* or a
+*boundary*, that claim is testable, and if it is worth writing down it is worth a test.
+
+*Nineteenth: a one-time migration needs a record that it ran. Inferring it from the state it
+produces means it fires again the moment a person legitimately reproduces that state.*
+
+
+## 167. A project you named, and a sidebar that could not see it (2026-08-12)
+
+§165 gave `New` a menu whose second row is `New project…`. Naming one and pressing Enter left the
+sidebar saying *"Conversations you start will appear here."*
+
+> *"When I click to create new project, nothing appears in the conversations panel. This means we
+> should create the logic to have empty named projects."*
+
+Correct, and the gap was mine: §165 shipped the affordance and left the state it implies for later
+without saying so.
+
+### §106 was right about the registry and wrong about the evidence
+
+*"A project is exactly 'a name some conversation is filed under', so there is no separate registry
+to fall out of step with the sidebar."* The first half is the part worth keeping — a list of
+projects in the settings file is precisely what §154 deleted, because it survived the conversations
+it described and resurrected them. The second half made a project unable to exist before its first
+conversation, and `new_thread_in` does not create a thread; it decides where the *next* turn will
+write. Until that turn happens there is no thread, no metadata, and nothing for a sidebar reading
+conversations to show.
+
+§105 had already settled where the missing fact lives: a project **is** a directory under
+`Documents\Mini-Me`. Reading that directory is not a second registry, it is reading the thing
+itself — the same argument §106 makes, applied to the evidence §106 overlooked. `workspace::projects()`
+lists them and `create_project` makes one, so naming a project creates it and the sidebar shows it
+immediately, empty.
+
+### Telling a project from a conversation
+
+Both sit directly under the workspace root. The discriminator is the shape of the name: a thread is
+a UUID, a project is whatever a researcher typed. That predicate already existed — §152 wrote it to
+strip a leading UUID from an Outputs folder label — so it moved to `workspace` where both callers
+can reach it rather than being written a second time.
+
+Files are skipped, which is what keeps `subagents.json` out of the sidebar.
+
+### Two smaller things that fall out of it
+
+`create_project` returns the name the folder **actually** got, and that is what gets stored on the
+conversation. `project_folder` rewrites characters a path cannot hold, so keeping the typed text
+would file work under `Q1/Q2` while the directory is `Q1_Q2` — and a sidebar reading both sources
+would show one project twice, under two spellings.
+
+Empty projects are seeded only when the search box is empty. A filter is a way to find work; an
+empty project matches nothing, and leaving them in a filtered list would make searching look broken.
+
+### And then it read them at the wrong moment
+
+Reported on the next launch: the project was not there. The directory listing was written inside
+the *answer* to `list_conversations`, so a fact about this machine's disk was waiting on an HTTP
+reply — and the first refresh of a cold launch reliably fires before the backend is up, which
+`list_conversations` documents in its own comment two lines away. No reply, no headings, and an
+empty project simply absent on the launch after it was created.
+
+It is read before the request now, and again on the answer in case a turn created one meanwhile.
+The same shape as the bug above it, one layer down: the sidebar had the right evidence and asked
+the wrong thing for permission to look at it.
+
+*Twentieth: "derive it, don't store it" is a good rule that says nothing about **which** derivation.
+The state existed on disk the whole time; the sidebar was reading the wrong evidence for it — and
+then, having found the right evidence, waited on something unrelated before reading it.*
 ## 157. Four glyphs become four packaged icons (2026-08-10)
 
 The deferred §70 item was kept deliberately narrow. Settings, the conversations toggle, the
@@ -8812,3 +9573,36 @@ returns absence instead of a misleading asset.
 The identical glyphs used as data/file-type marks and in the empty-state suggestions were not
 changed. They describe different concepts and replacing them would widen a four-control cleanup
 into an icon-system redesign — exactly the scope this deferred item said to avoid.
+
+### Caught in review: they rendered nothing
+
+`app_icon` was `svg().path(p).w(14).h(14).flex_none()` — no colour. GPUI paints an SVG by
+rasterising it to a mask and multiplying by the element's text colour, and `Svg::paint` is
+literally:
+
+```rust
+if let Some((path, color)) = self.path.as_ref().zip(style.text.color) { … }
+```
+
+`None` there paints nothing. And that colour is **not inherited**: `compute_style` starts from
+`Style::default()`, whose `text.color` is `None`, and refines it with the element's *own* styles —
+so the `.text_color(…)` each call site sets on the surrounding row never reached the icon inside
+it. All four were invisible.
+
+`ink` is a required argument now, so the compiler refuses a call site that forgets. That is the
+right instrument here, because the alternative is a rule written down, and this file already
+records what happens to rules written down (§59, three times).
+
+### The test could not have caught it
+
+It asserted the SVG source contains `currentColor` and called the icon *"tintable"*. GPUI never
+reads `currentColor`; usvg resolves it while rasterising and the result is a mask. So the
+assertion passed identically whether the icons rendered or not — the shape this project keeps
+finding, a diagnostic that prints the same for success and failure (§38, §148, §161, §166).
+
+It now claims only what it settles: the bytes are embedded, every declared path resolves, and an
+undeclared one does not. Whether an icon *appears* is a fact about the call site, and the type
+system holds that one.
+
+**Still unverified:** whether the four drawings read at 14px on both palettes. That needs eyes on
+a window and this build machine has none.

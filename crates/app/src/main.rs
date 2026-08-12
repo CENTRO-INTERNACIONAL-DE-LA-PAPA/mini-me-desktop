@@ -63,6 +63,12 @@ const CHECK_PROMPT: &str = "In one short paragraph, what is your role as the Min
 const ASTA_CITATION: &str = "AstaBench: Rigorous Benchmarking of AI Agents with a Scientific \
      Research Suite. arXiv:2510.21652 — https://arxiv.org/abs/2510.21652";
 
+/// The root workspace said as a useful place rather than as the absence of organisation.
+///
+/// `None` remains the metadata value and the files remain directly under `Documents/Mini-Me`;
+/// this is only the researcher-facing name requested in §154, so it cannot become a second
+/// project registry or collide with a real folder of the same name.
+const UNGROUPED_PROJECT_LABEL: &str = "Ungrouped Conversations";
 const ICON_PATHS: [&str; 4] = [
     "icons/settings.svg",
     "icons/conversations.svg",
@@ -102,8 +108,24 @@ impl AssetSource for Assets {
 }
 
 /// A theme-tinted 14px icon, matching the text it replaces without changing control geometry.
-fn app_icon(path: &'static str) -> impl IntoElement {
-    svg().path(path).w(px(14.)).h(px(14.)).flex_none()
+///
+/// **`ink` is required, and that is the whole point.** GPUI paints an SVG by rasterising it to a
+/// mask and multiplying by `style.text.color` — and `Svg::paint` is literally
+/// `self.path.as_ref().zip(style.text.color)`, so a `None` there paints *nothing at all*. That
+/// colour is not inherited: `Interactivity::compute_style` starts from `Style::default()`, whose
+/// `text.color` is `None`, and refines it with the element's **own** styles. A parent's
+/// `.text_color(…)` never reaches the child (docs §157).
+///
+/// So the argument is not a convenience. Without it every icon here is invisible, and no test
+/// that reads the SVG file can tell — which is why this is a parameter the compiler demands
+/// rather than a rule written down.
+fn app_icon(path: &'static str, ink: u32) -> impl IntoElement {
+    svg()
+        .path(path)
+        .w(px(14.))
+        .h(px(14.))
+        .flex_none()
+        .text_color(rgb(ink))
 }
 
 /// [`section_label`] for a heading only known at runtime.
@@ -645,6 +667,86 @@ fn file_mark(path: &std::path::Path) -> (&'static str, u32) {
     }
 }
 
+/// A menu opened from a control in the sidebar rather than by right-clicking.
+///
+/// **Why a menu and not more inline chips.** Each row carried `rename` and `✕` revealed on hover,
+/// and each project heading carried `+` and `✕`. Four controls, all of them one or two characters
+/// wide, all of them appearing only when the pointer is already on top of them — so the way to
+/// find out what a row can do was to hover it and read two abbreviations. A `⋮` is one target in
+/// a fixed place whose contents are words, which is the shape every list of this kind uses.
+///
+/// The `New` variant is the same idea aimed the other way: one button whose menu says what the
+/// two kinds of new thing are, rather than a button that silently means only one of them.
+#[derive(Clone, Debug)]
+enum SidebarMenu {
+    New,
+    Conversation(protocol::Conversation),
+    Project {
+        name: String,
+        conversations: Vec<protocol::Conversation>,
+    },
+}
+
+/// One row of a sidebar menu: a label, and whether it is the destructive one.
+struct MenuRow {
+    id: &'static str,
+    label: String,
+    danger: bool,
+}
+
+impl SidebarMenu {
+    fn rows(&self) -> Vec<MenuRow> {
+        let row = |id, label: String| MenuRow {
+            id,
+            label,
+            danger: false,
+        };
+        let danger = |id, label: String| MenuRow {
+            id,
+            label,
+            danger: true,
+        };
+        match self {
+            Self::New => vec![
+                row("menu-new-conversation", "New conversation".into()),
+                // The ellipsis is a promise: this one asks for a name before anything happens.
+                row("menu-new-project", "New project…".into()),
+            ],
+            Self::Conversation(_) => vec![
+                row("menu-rename", "Rename".into()),
+                danger("menu-delete", "Delete".into()),
+            ],
+            Self::Project { name, .. } => vec![
+                row("menu-new-here", format!("New conversation in {name}")),
+                danger("menu-delete-project", "Delete project".into()),
+            ],
+        }
+    }
+}
+
+/// The card every popup menu is drawn on.
+///
+/// One definition because the discipline is easy to omit and invisible when it is: a menu must
+/// `occlude`, or a click on a row also lands on whatever the menu was drawn over (§163), and it
+/// must swallow the left press, or choosing an item starts a text selection in the transcript
+/// underneath. The right-click menu learned both the hard way; a second menu written from scratch
+/// beside it would have learned them again.
+fn menu_card() -> gpui::Div {
+    div()
+        .flex()
+        .flex_col()
+        .min_w(px(190.))
+        .py_1()
+        .rounded_md()
+        .bg(rgb(theme::elevated()))
+        .border_1()
+        .border_color(rgb(theme::border_strong()))
+        .occlude()
+        .on_mouse_down(gpui::MouseButton::Left, |_event, _window, cx| {
+            cx.stop_propagation();
+        })
+}
+
 /// One line of the activity trace: a tool call, or a delegation.
 fn step_line(label: &str) -> impl IntoElement {
     div()
@@ -695,6 +797,316 @@ fn scrollbar(handle: &gpui::ScrollHandle) -> Option<impl IntoElement> {
             .rounded_full()
             .bg(rgb(theme::border_strong())),
     )
+}
+
+/// The geometry shared by painting and dragging a gallery scrollbar.
+///
+/// It has to be one calculation. The first Windows pass found a painted thumb that could not be
+/// dragged at all; letting its hit-testing use a second set of numbers would be the same defect
+/// one layer later (docs §158).
+#[derive(Clone, Copy, Debug)]
+struct HorizontalScrollMetrics {
+    overflow: gpui::Pixels,
+    viewport: gpui::Pixels,
+    thumb: gpui::Pixels,
+    travel: gpui::Pixels,
+    progress: f32,
+}
+
+/// How wide the thumb is for a rail showing `viewport` of `viewport + overflow` content.
+///
+/// Split out from the metrics only so it can be tested without a laid-out `ScrollHandle`; the
+/// metrics still compute it exactly once, which is the property the type above exists to hold.
+///
+/// Two bounds, and the second matters as much as the first. The 28px floor keeps a thumb
+/// grabbable on a long rail. The `viewport` ceiling keeps that floor from exceeding the track it
+/// sits in: without it a rail narrower than 28px yields a *negative* `travel`, so the thumb is
+/// painted to the left of its own track while `horizontal_drag_offset` refuses to move it — the
+/// "looked interactive, wasn't" shape of §158, one case further out.
+fn horizontal_thumb_width(viewport: gpui::Pixels, overflow: gpui::Pixels) -> gpui::Pixels {
+    let content = viewport + overflow;
+    (viewport * (viewport / content)).max(px(28.)).min(viewport)
+}
+
+fn horizontal_scroll_metrics(handle: &gpui::ScrollHandle) -> Option<HorizontalScrollMetrics> {
+    let overflow = handle.max_offset().width;
+    let viewport = handle.bounds().size.width;
+    if overflow <= px(0.) || viewport <= px(0.) {
+        return None;
+    }
+    let thumb = horizontal_thumb_width(viewport, overflow);
+    let travel = viewport - thumb;
+    let progress = (-handle.offset().x / overflow).clamp(0.0, 1.0);
+    Some(HorizontalScrollMetrics {
+        overflow,
+        viewport,
+        thumb,
+        travel,
+        progress,
+    })
+}
+
+/// Convert a dragged thumb position into GPUI's negative content offset.
+fn horizontal_drag_offset(
+    pointer_x: gpui::Pixels,
+    track_left: gpui::Pixels,
+    grab_x: gpui::Pixels,
+    travel: gpui::Pixels,
+    overflow: gpui::Pixels,
+) -> gpui::Pixels {
+    if travel <= px(0.) {
+        return px(0.);
+    }
+    let thumb_left = (pointer_x - track_left - grab_x).clamp(px(0.), travel);
+    -(overflow * (thumb_left / travel))
+}
+
+/// Outputs that share the directory the agent chose share one visual gallery.
+///
+/// §143 deliberately retained each relative path while making nested work visible. §152 found
+/// that rendering those paths as independent rows flattened the useful structure straight back
+/// out. Keep the full parent as the identity so two separate runs' `plots/` folders never merge.
+struct OutputFolderGroup<'a> {
+    folder: PathBuf,
+    outputs: Vec<&'a workspace::Output>,
+}
+
+/// How many image tiles the panel shows before the last one becomes a count.
+///
+/// Four, and 2×2, because that is the arrangement the researcher pointed at: a phone's photo
+/// grid, where the fourth tile carries `+5` rather than the grid growing. §152's complaint was
+/// never that the thumbnails were too small — it was that a productive run claimed the whole
+/// panel before anyone had chosen a figure to look at.
+const IMAGE_GRID_TILES: usize = 4;
+
+/// Tiles per row. Two, which with [`IMAGE_GRID_TILES`] makes the 2×2 the researcher pointed at.
+const GRID_COLUMNS: usize = 2;
+
+/// The gap between tiles, matching `gap_2`. Named because the heading is sized from it.
+const GRID_GAP: f32 = 8.;
+
+/// Tile width in the 330px Outputs panel, and in the transcript.
+///
+/// **Fixed, not a fraction.** A grid of `flex_1` tiles is as wide as whatever holds it, which in
+/// the transcript is the whole conversation — one folder of files claimed a band wider than the
+/// answer that produced it. Two fixed tiles make the block `2 × tile + gap` and no wider, which is
+/// how the phone gallery being imitated stays a block you flick past rather than a wall (§164).
+const GRID_TILE_COMPACT: f32 = 148.;
+const GRID_TILE_ROOMY: f32 = 200.;
+
+/// A tile's media area, as a fraction of its width.
+///
+/// Landscape rather than square: the figures are matplotlib plots, which are wider than tall, and
+/// a square tile showing a `Contain`ed plot is mostly empty box.
+const GRID_TILE_ASPECT: f32 = 0.7;
+
+/// The `+N` glyph, sized to the tile it sits on.
+fn media_scrim_size(tile: f32) -> f32 {
+    (tile / 4.).max(18.)
+}
+
+/// How many characters of a filename fit across a tile at `text_xs`.
+///
+/// Measured rather than truncated by the layout, for the reason [`Workbench::output_grid_tile`]
+/// gives: `Label::ellipsis` collapses to a bare `…` without a flex parent to grow within (§59).
+/// Roughly 6px per character at 12px type, less the tile's own padding.
+fn name_chars(tile: f32) -> usize {
+    (((tile - 16.) / 6.) as usize).max(8)
+}
+
+/// The height of the image area in the preview, and the modal's own size.
+///
+/// Explicit rather than "as tall as the picture": the modal has a header above and a filmstrip
+/// below, and an image sized from the file pushed both out of a bounded panel. 380 + the header +
+/// the strip sits inside [`PREVIEW_MAX_HEIGHT`] with room to spare, so the layout cannot depend on
+/// what the agent happened to plot.
+const PREVIEW_IMAGE_HEIGHT: f32 = 380.;
+
+/// The body's own ceiling, so it scrolls instead of growing the panel.
+///
+/// A flex child with `overflow_y_scroll` needs a bounded height to scroll *within*; unbounded, it
+/// resolves to its content and the clipping happens somewhere else — which is how a plot ended up
+/// cut at the top. 440 leaves the image box its 380 plus the 24 of padding around it, and a long
+/// CSV scrolls inside the same frame.
+const PREVIEW_BODY_HEIGHT: f32 = 440.;
+
+/// Wide enough to read a plot's axis labels. Was 760, which was chosen when the preview was a
+/// table of CSV rows and is narrow for a figure with five rotated category names on the x axis.
+const PREVIEW_WIDTH: f32 = 880.;
+
+/// Leaves the workbench visible at the edges — it is a modal, not a screen (docs §49).
+const PREVIEW_MAX_HEIGHT: f32 = 640.;
+
+/// How many tiles the grid draws, and how many images the last one stands in for.
+///
+/// **The scrimmed tile counts among the hidden**, because it is covered: eight images in four
+/// tiles reads `+5` — three pictures you can see, five you cannot — which is what the phone
+/// gallery the researcher pointed at shows for the same eight. `total - tiles` gives `+4` and
+/// looks perfectly reasonable in review; it is only wrong beside the thing it is imitating. One
+/// function so the grid and its test cannot hold two versions of the rule.
+fn image_grid_shape(total: usize) -> (usize, usize) {
+    let shown = total.min(IMAGE_GRID_TILES);
+    let hidden = if total > IMAGE_GRID_TILES {
+        total - (IMAGE_GRID_TILES - 1)
+    } else {
+        0
+    };
+    (shown, hidden)
+}
+
+/// Ink for text drawn on a dark scrim over a picture.
+///
+/// Deliberately **not** a theme role. The scrim beneath it is a fixed dark wash in both palettes,
+/// so a role that followed the theme would put near-black text on it in the light one. The colour
+/// belongs to the scrim, not to the page — the same reason the modal's own backdrop is a literal.
+const SCRIM_INK: u32 = 0xf5f5f5;
+
+/// A file open in the preview, and the set the researcher can step through from it.
+///
+/// **Why a set and not a file.** The preview held one `Output`, so it had nothing to go "next"
+/// to: choosing between eight figures meant closing the modal, finding the next thumbnail, and
+/// opening it again. Holding the group it was opened from is what makes the arrows, the counter
+/// and the filmstrip possible, and all three are the same fact rendered three ways.
+struct Preview {
+    /// Never empty — see [`Preview::opening`], which is the only way to build one.
+    items: Vec<workspace::Output>,
+    at: usize,
+}
+
+impl Preview {
+    /// Open `items` at `at`, or `None` when there is nothing to show.
+    ///
+    /// The emptiness check is here rather than at the call sites because `current()` indexes,
+    /// and an empty preview would be a panic reachable from a click on a folder whose files were
+    /// deleted between the scan and the click — which on this project's own evidence is not a
+    /// hypothetical (§159's reproduction was deleted mid-diagnosis).
+    fn opening(items: Vec<workspace::Output>, at: usize) -> Option<Self> {
+        (!items.is_empty()).then(|| {
+            let at = at.min(items.len() - 1);
+            Self { items, at }
+        })
+    }
+
+    /// One file, with nothing to step to. What a non-image row still opens.
+    fn single(output: workspace::Output) -> Option<Self> {
+        Self::opening(vec![output], 0)
+    }
+
+    fn current(&self) -> &workspace::Output {
+        // `at` is clamped on construction and only ever moved by `step`, which wraps.
+        &self.items[self.at]
+    }
+
+    /// Move `by` places, wrapping at both ends.
+    ///
+    /// Wrapping rather than stopping: the counter says which of how many, so there is no risk of
+    /// mistaking the end for a broken button, and a researcher comparing the first and last plot
+    /// of a series should not have to travel back through six.
+    fn step(&mut self, by: isize) {
+        let count = self.items.len() as isize;
+        if count <= 1 {
+            return;
+        }
+        let at = self.at as isize + by;
+        self.at = at.rem_euclid(count) as usize;
+    }
+}
+
+/// Images in one group, everything else in another, each keeping its listing order.
+///
+/// **The boundary the researcher asked for**, in their words: *"I want to group images and in
+/// another group other files."* §152's gallery grouped by the folder the agent chose, which was
+/// right about structure and wrong about kind — a folder holding seven plots and a summary CSV
+/// put the CSV in the middle of the strip, and the strip is the thing you flick through looking
+/// for a figure.
+///
+/// `Kind::Figure` is the test rather than the extension, so this cannot disagree with the
+/// thumbnail renderer about what an image is: both ask the same enum.
+fn split_images(
+    outputs: &[workspace::Output],
+) -> (Vec<workspace::Output>, Vec<workspace::Output>) {
+    outputs
+        .iter()
+        .cloned()
+        .partition(|output| output.kind == workspace::Kind::Figure)
+}
+
+/// One mouse-held gallery thumb.
+struct GalleryScrollDrag {
+    handle: gpui::ScrollHandle,
+    track_left: gpui::Pixels,
+    grab_x: gpui::Pixels,
+    travel: gpui::Pixels,
+    overflow: gpui::Pixels,
+}
+
+fn output_folder_groups(outputs: &[workspace::Output]) -> Vec<OutputFolderGroup<'_>> {
+    let mut groups: Vec<OutputFolderGroup<'_>> = Vec::new();
+    for output in outputs {
+        let folder = std::path::Path::new(&output.name)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new(""))
+            .to_path_buf();
+        if let Some(group) = groups.iter_mut().find(|group| group.folder == folder) {
+            group.outputs.push(output);
+        } else {
+            groups.push(OutputFolderGroup {
+                folder,
+                outputs: vec![output],
+            });
+        }
+    }
+    groups
+}
+
+
+/// Name the folder the agent chose, not the generated background-thread directory above it.
+///
+/// The screenshot in §152 devoted its useful width to a 36-character UUID common to every row.
+/// That component is app bookkeeping; removing only a leading UUID leaves `eda/plots`, the
+/// researcher's information, while the unshortened path remains the grouping identity above.
+fn output_folder_label(folder: &std::path::Path) -> String {
+    let mut components: Vec<String> = folder
+        .components()
+        .filter_map(|component| component.as_os_str().to_str().map(str::to_owned))
+        .collect();
+    let removed_thread = components
+        .first()
+        .is_some_and(|component| workspace::looks_like_thread_id(component));
+    if removed_thread {
+        components.remove(0);
+    }
+    if components.is_empty() {
+        if removed_thread {
+            "Background task files".to_string()
+        } else {
+            "Conversation files".to_string()
+        }
+    } else {
+        components.join(" / ")
+    }
+}
+
+/// Keep the distinguishing tail when a filename itself is too long for a thumbnail.
+///
+/// `Label::ellipsis()` correctly protects layout (§59), but its trailing ellipsis preserves the
+/// shared prefix and removes the useful suffix in §152. Shortening the string from the leading
+/// edge before layout means the extension and differentiating part survive even in a 140px tile.
+fn distinguishing_tail(text: &str, max_chars: usize) -> String {
+    let count = text.chars().count();
+    if count <= max_chars || max_chars == 0 {
+        return text.to_string();
+    }
+    let keep = max_chars.saturating_sub(1);
+    format!("…{}", text.chars().skip(count - keep).collect::<String>())
+}
+
+fn output_filename(output: &workspace::Output) -> String {
+    let name = std::path::Path::new(&output.name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(&output.name);
+    distinguishing_tail(name, 36)
 }
 
 /// A one-line tooltip.
@@ -836,6 +1248,9 @@ enum Picker {
     Model,
     /// Which project the open conversation is filed under.
     Project,
+    /// Which project a *new* conversation should start in. Same list, same "New project “…”"
+    /// row; only what choosing does differs, so naming a project is one gesture either way.
+    NewProject,
     /// A model for one specialist, by its index in the registry.
     ///
     /// The index rather than the name because a `Picker` is `Copy` and lives in a field that is
@@ -1548,6 +1963,95 @@ fn merge_spine(previous: Option<&Project>, incoming: Project) -> Project {
     merged
 }
 
+/// The unit a centred confirmation is about.
+///
+/// The project variant owns its complete conversation list at the moment it opens. Building it
+/// from the sidebar's *filtered* rows would make a search silently spare conversations that the
+/// modal just said were going away (§155).
+#[derive(Clone, Debug)]
+enum DeleteTarget {
+    Conversation(protocol::Conversation),
+    Project {
+        name: String,
+        conversations: Vec<protocol::Conversation>,
+    },
+}
+
+impl DeleteTarget {
+    fn thread_ids(&self) -> Vec<String> {
+        match self {
+            Self::Conversation(conversation) => vec![conversation.thread_id.clone()],
+            Self::Project { conversations, .. } => conversations
+                .iter()
+                .map(|conversation| conversation.thread_id.clone())
+                .collect(),
+        }
+    }
+
+    fn contains_thread(&self, thread_id: &str) -> bool {
+        match self {
+            Self::Conversation(conversation) => conversation.thread_id == thread_id,
+            Self::Project { conversations, .. } => conversations
+                .iter()
+                .any(|conversation| conversation.thread_id == thread_id),
+        }
+    }
+
+    fn files(&self) -> sidecar::DeleteFiles {
+        match self {
+            Self::Conversation(conversation) => sidecar::DeleteFiles::Conversation {
+                project: conversation.project.clone(),
+                thread_id: conversation.thread_id.clone(),
+            },
+            Self::Project { name, .. } => sidecar::DeleteFiles::Project { name: name.clone() },
+        }
+    }
+
+    fn noun(&self) -> &'static str {
+        match self {
+            Self::Conversation(_) => "conversation",
+            Self::Project { .. } => "project",
+        }
+    }
+}
+
+/// What the sidebar may do after asking the backend to delete confirmed work.
+///
+/// Kept separate from the async UI so the dangerous rule is testable: absence of a successful
+/// answer means the durable thread may still exist, therefore its row must stay (§154).
+enum DeleteResolution {
+    Remove { files_error: Option<String> },
+    Keep(String),
+}
+
+fn resolve_delete(
+    noun: &str,
+    result: Option<anyhow::Result<sidecar::DeleteOutcome>>,
+) -> DeleteResolution {
+    match result {
+        Some(Ok(outcome)) => DeleteResolution::Remove {
+            files_error: outcome.files_error,
+        },
+        Some(Err(error)) => {
+            DeleteResolution::Keep(format!("couldn't delete the {noun}: {error:#}"))
+        }
+        None => DeleteResolution::Keep(format!(
+            "couldn't confirm deletion — the {noun} is still shown"
+        )),
+    }
+}
+
+/// Whether a project still exists after a deletion result has been applied.
+///
+/// §106 defines existence from conversation metadata, not from a remembered selection and not
+/// from a possibly locked folder. Keeping this tiny rule outside the callback makes the
+/// last-conversation boundary testable — the boundary that resurrected projects in §154.
+fn project_exists(conversations: &[protocol::Conversation], name: &str) -> bool {
+    conversations
+        .iter()
+        .any(|conversation| conversation.project.as_deref() == Some(name))
+}
+
 /// A single chat message in the transcript, plus the agent activity behind it.
 struct Message {
     role: &'static str,
@@ -1857,6 +2361,13 @@ struct Workbench {
     text_selection: selection::Transcript,
     /// An open right-click menu, if any.
     context_menu: Option<menu::ContextMenu>,
+    /// Projects that have a folder, including ones nothing is filed under yet.
+    ///
+    /// Read alongside the conversation list rather than per frame: the sidebar renders on every
+    /// frame and this is a directory listing, which has no business on the render thread.
+    folder_projects: Vec<String>,
+    /// An open sidebar `⋮` or `New` menu, and where its corner goes.
+    sidebar_menu: Option<(SidebarMenu, gpui::Point<gpui::Pixels>)>,
     /// Which row of the `/name` picker is chosen. Reset on every keystroke.
     subagent_selected: usize,
     /// An open choice popup: which choice, and where its trigger was clicked.
@@ -1876,6 +2387,9 @@ struct Workbench {
     provenance_focus: gpui::FocusHandle,
     /// The About window's own focus, for the same reason (docs §71).
     about_focus: gpui::FocusHandle,
+    /// The delete warning's focus. It has buttons but no text field, so leaving focus on the
+    /// sidebar row it covers would make Escape depend on an element hidden behind the modal.
+    delete_focus: gpui::FocusHandle,
     /// Recent outcomes, newest last, each fading on its own timer.
     ///
     /// The status bar holds exactly one line, so an outcome worth reading — "copied 12 lines",
@@ -1885,6 +2399,18 @@ struct Workbench {
     /// be a wall of them.
     toasts: Vec<SharedString>,
     panel_scroll: gpui::ScrollHandle,
+    /// One horizontal position per output folder gallery.
+    ///
+    /// A single handle would make scrolling one folder move every other folder too. The full
+    /// folder path plus its surface owns the state, matching §152's rule that each agent-chosen
+    /// folder is one independent photo-like collection.
+    output_gallery_scrolls: std::cell::RefCell<HashMap<String, gpui::ScrollHandle>>,
+    /// The gallery thumb currently held by the mouse, if any.
+    ///
+    /// Kept separately from pane resizing because both are drags but their units differ: pane
+    /// dividers follow window pixels directly, while a gallery thumb maps a short track onto a
+    /// wider hidden content range (docs §158).
+    gallery_scroll_drag: Option<GalleryScrollDrag>,
     /// The palette on screen right now, which is not always the saved one: the picker
     /// applies as you point at it so a theme can be judged by looking at it.
     applied_theme: String,
@@ -1914,8 +2440,8 @@ struct Workbench {
         std::cell::RefCell<HashMap<PathBuf, (std::time::SystemTime, Option<Vec<Vec<String>>>)>>,
     /// What the sidebar's search box holds. Empty means "show everything".
     conversation_query: Entity<Composer>,
-    /// A file being previewed in the centre, if any.
-    preview: Option<workspace::Output>,
+    /// A file being previewed in the centre, if any — and the set it can be stepped through.
+    preview: Option<Preview>,
     /// The researcher's past conversations, newest first.
     conversations: Vec<protocol::Conversation>,
     /// How the app got hold of the backend it is talking to. `None` until it has one.
@@ -1928,11 +2454,18 @@ struct Workbench {
     pending_title: Option<String>,
     /// The thread whose name is being edited, if any.
     renaming: Option<String>,
-    /// The thread whose delete has been clicked once and not yet confirmed.
+    /// The conversation or project whose delete control opened the centred warning.
     ///
-    /// Two steps because there is no undo on the server: a conversation is somebody's
-    /// work, and a stray click on a `✕` in a list is exactly how it would be lost.
-    confirming_delete: Option<String>,
+    /// This used to be an inline yes/no row. It could not say that saved files now go too, and a
+    /// project delete needs a count and a path; destructive scope belongs where it can be read
+    /// before acting (§155).
+    confirming_delete: Option<DeleteTarget>,
+    /// The confirmed target awaiting its backend and filesystem results.
+    ///
+    /// Optimistically removing the row made a failed or interrupted request look successful
+    /// until restart, when the durable conversation — and therefore its project — returned
+    /// (§154). Keep it visible as pending until the server has actually deleted it.
+    deleting: Option<DeleteTarget>,
     /// The field that edits it. One shared editor rather than one per row — only one
     /// name can be edited at a time, and a Composer per conversation would be an entity
     /// per row for a list that can run to hundreds.
@@ -2092,16 +2625,21 @@ impl Workbench {
             transcript_scroll: gpui::ScrollHandle::new(),
             text_selection: selection::Transcript::default(),
             context_menu: None,
+            folder_projects: Vec::new(),
+            sidebar_menu: None,
             subagent_selected: 0,
             open_picker: None,
             settings_focus: cx.focus_handle(),
             provenance_focus: cx.focus_handle(),
             about_focus: cx.focus_handle(),
+            delete_focus: cx.focus_handle(),
             sidebar_width: 240.,
             panel_width: 320.,
             dragging: None,
             toasts: Vec::new(),
             panel_scroll: gpui::ScrollHandle::new(),
+            output_gallery_scrolls: std::cell::RefCell::new(HashMap::new()),
+            gallery_scroll_drag: None,
             applied_theme: stored.theme.clone(),
             sidebar_open: stored.sidebar_open,
             panel_open: stored.panel_open,
@@ -2116,6 +2654,7 @@ impl Workbench {
             pending_title: None,
             renaming: None,
             confirming_delete: None,
+            deleting: None,
             rename_editor,
             approve_tasks: std::collections::HashSet::new(),
             restore_focus: false,
@@ -2147,12 +2686,12 @@ impl Workbench {
         // the thing actually standing in their way.
         workbench.run_preflight(cx);
 
-        // Pick up where the last session left off. Without this a cold start begins in "No
-        // project" however long the researcher has been working in one, and the first new
-        // conversation of the day lands outside it (docs §107).
-        workbench.sidecar.set_project(
-            Some(workbench.draft.project.clone()).filter(|name| !name.trim().is_empty()),
-        );
+        // A launch opens at the workspace root. The previous project used to be a second project
+        // registry in settings.toml, despite §106 defining a project solely by the conversations
+        // filed under it. That stale value resurrected an empty project and silently filed the
+        // morning's first conversation inside it (§154). Opening a saved conversation or using a
+        // project heading's `+` remains the explicit way to enter one.
+        workbench.sidecar.set_project(None);
         // Populate the spine if a backend is already listening. This does not
         // start one — see `Sidecar::fetch_project`.
         workbench.refresh_project(cx);
@@ -2224,13 +2763,26 @@ impl Workbench {
     }
 
     /// Start watching a background worker's thread, if it isn't already watched.
-    fn track_task(&mut self, task: protocol::AsyncTask, cx: &mut Context<Self>) {
+    ///
+    /// `owner` is the conversation whose snapshot carried this task. Passed in rather than looked
+    /// up, because the two call sites are the only places that know it for certain and the answer
+    /// has to survive the researcher moving on to another conversation (docs §159). Stamped
+    /// *before* the watcher is armed, so the poll — which mutates only status, pending, error and
+    /// activity — carries it for the task's whole life.
+    fn track_task(&mut self, owner: &str, mut task: protocol::AsyncTask, cx: &mut Context<Self>) {
+        task.owner = owner.to_string();
         if let Some(existing) = self.tasks.iter_mut().find(|t| t.task_id == task.task_id) {
             // The snapshot knows the status the coordinator last recorded; the *watcher*
             // knows whether it is stopped at the gate right now. Never let a stale
             // snapshot erase a pending approval the user is looking at.
             if existing.pending.is_none() && !existing.is_finished() {
                 existing.status = task.status;
+            }
+            // A task already being watched keeps the owner it was first seen with: re-stamping
+            // would reintroduce the drift this argument exists to prevent, on any later snapshot
+            // that arrives from somewhere else.
+            if existing.owner.is_empty() {
+                existing.owner = task.owner;
             }
             return;
         }
@@ -2276,6 +2828,7 @@ impl Workbench {
                             "a background task stopped".into()
                         };
                         workbench.collect_plots();
+                        workbench.settle_outputs(cx);
                         workbench.refresh_project(cx);
                     }
                     cx.notify();
@@ -2312,8 +2865,23 @@ impl Workbench {
             })
             .collect();
         let thread_id = task.thread_id.clone();
+        // **The task's own owner, not the conversation on screen.** Answering an approval is the
+        // moment a background worker is told where to write, and it happens whenever the
+        // researcher gets to it — by then they may have pressed New thread or opened something
+        // else. Sending the open conversation put a worker's figures into a conversation that
+        // never asked for them (docs §159). Unknown stays unknown: `None` sends no key, and the
+        // backend falls back to the sibling folder it used before, which is at least visible.
+        let owner = task.owning_conversation().map(str::to_string);
+        if owner.is_none() {
+            tracing::warn!(
+                task = %task_id,
+                worker = %thread_id,
+                "answering a background task whose owning conversation was never recorded — \
+                 its files may land beside the conversation instead of inside it"
+            );
+        }
         task.status = "running".into();
-        self.sidecar.decide_task(thread_id, decisions);
+        self.sidecar.decide_task(thread_id, owner, decisions);
         self.status = if approve {
             "background task approved — running…"
         } else {
@@ -2546,6 +3114,11 @@ impl Workbench {
             stack = stack.child(
                 div()
                     .id(SharedString::from(format!("toast-{index}")))
+                    // A toast floats over the composer and the transcript, and dismissing one used
+                    // to press whatever it was covering as well (docs §163). Only the card
+                    // occludes, not the stack: the gaps between toasts are not the toast's, and
+                    // blocking them would put a dead strip across the window.
+                    .occlude()
                     .max_w(px(360.))
                     .px_3()
                     .py_2()
@@ -2601,7 +3174,8 @@ impl Workbench {
                 .child(self.model_list(cx))
                 .into_any_element(),
             Picker::Subagent(index) => self.subagent_model_list(index, cx).into_any_element(),
-            Picker::Project => self.project_list(cx).into_any_element(),
+            Picker::Project => self.project_list(false, cx).into_any_element(),
+            Picker::NewProject => self.project_list(true, cx).into_any_element(),
         };
         Some(
             ui::picker_popup(
@@ -2714,20 +3288,7 @@ impl Workbench {
 
     fn context_menu(&self, open: menu::ContextMenu, cx: &mut Context<Self>) -> impl IntoElement {
         let target = open.target;
-        let mut panel = div()
-            .flex()
-            .flex_col()
-            .min_w(px(190.))
-            .py_1()
-            .rounded_md()
-            .bg(rgb(theme::elevated()))
-            .border_1()
-            .border_color(rgb(theme::border_strong()))
-            // Swallow the press so the click that chooses an item does not also land on the
-            // transcript underneath and start a fresh selection there.
-            .on_mouse_down(gpui::MouseButton::Left, |_event, _window, cx| {
-                cx.stop_propagation();
-            });
+        let mut panel = menu_card();
 
         for &item in open.items() {
             let enabled = self.menu_item_enabled(item, target, cx);
@@ -2780,6 +3341,145 @@ impl Workbench {
                 },
             )),
         ))
+    }
+
+    /// The `⋮` and `New` menus, drawn where their control is.
+    fn sidebar_menu_element(
+        &self,
+        open: SidebarMenu,
+        at: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mut panel = menu_card();
+        for row in open.rows() {
+            let chosen = open.clone();
+            let id = row.id;
+            panel = panel.child(
+                div()
+                    .id(id)
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .w_full()
+                    .min_w_0()
+                    .px_3()
+                    .py_1()
+                    .text_sm()
+                    .text_color(rgb(if row.danger {
+                        theme::error()
+                    } else {
+                        theme::text()
+                    }))
+                    .hover(|style| style.bg(rgb(theme::accent_soft())).cursor_pointer())
+                    .child(row.label)
+                    .on_click(cx.listener(move |workbench, _event, window, cx| {
+                        workbench.sidebar_menu = None;
+                        workbench.run_sidebar_menu(&chosen, id, window, cx);
+                    })),
+            );
+        }
+
+        gpui::deferred(
+            gpui::anchored().position(at).snap_to_window().child(
+                panel.on_mouse_down_out(cx.listener(|workbench, _event: &gpui::MouseDownEvent, _window, cx| {
+                    workbench.sidebar_menu = None;
+                    cx.notify();
+                })),
+            ),
+        )
+    }
+
+    /// What each row does. **Nothing new lives here** — every arm calls a method the sidebar
+    /// already had, which is the rule `menu.rs` states for the right-click menu and the reason
+    /// this change is a rearrangement rather than a feature with its own behaviour.
+    fn run_sidebar_menu(
+        &mut self,
+        open: &SidebarMenu,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match (open, id) {
+            (SidebarMenu::New, "menu-new-conversation") => self.new_thread_in(None, cx),
+            (SidebarMenu::New, "menu-new-project") => {
+                // The project picker already knows how to name one that does not exist yet —
+                // typing offers `New project “…”` as its first row. `NewProject` only changes
+                // what choosing does: start a conversation there, rather than move the open one.
+                self.open_picker = Some((Picker::NewProject, gpui::point(px(24.), px(120.))));
+                self.project_query.update(cx, |query, cx| query.set_text("", cx));
+                cx.notify();
+            }
+            (SidebarMenu::Conversation(conversation), "menu-rename") => {
+                self.start_rename(conversation.thread_id.clone(), window, cx)
+            }
+            (SidebarMenu::Conversation(conversation), "menu-delete") => {
+                self.request_delete(DeleteTarget::Conversation(conversation.clone()), window, cx)
+            }
+            (SidebarMenu::Project { name, .. }, "menu-new-here") => {
+                self.new_thread_in(Some(name.clone()), cx)
+            }
+            (
+                SidebarMenu::Project {
+                    name,
+                    conversations,
+                },
+                "menu-delete-project",
+            ) => self.request_delete(
+                DeleteTarget::Project {
+                    name: name.clone(),
+                    conversations: conversations.clone(),
+                },
+                window,
+                cx,
+            ),
+            _ => {}
+        }
+    }
+
+    /// The `⋮` that opens one of those menus.
+    ///
+    /// Always drawn, never revealed on hover: the inline chips this replaces were invisible until
+    /// the pointer was already on the row, so the only way to learn what a row could do was to
+    /// point at it and decode two abbreviations.
+    fn sidebar_menu_button(
+        &self,
+        id: String,
+        menu: SidebarMenu,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .id(SharedString::from(id))
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .w(px(20.))
+            .rounded_md()
+            .text_color(rgb(theme::text_faint()))
+            .text_sm()
+            .hover(|style| {
+                style
+                    .bg(rgb(theme::accent_soft()))
+                    .text_color(rgb(theme::text()))
+                    .cursor_pointer()
+            })
+            .child("⋮")
+            .on_click(cx.listener(move |workbench, event: &gpui::ClickEvent, _window, cx| {
+                // **The row underneath must not also fire.** A conversation row opens that
+                // conversation on click and a project heading opens its folder in Explorer, so
+                // without this, asking a row what it can do would switch conversations, and
+                // asking a heading would launch a file manager (§163, one layer in).
+                cx.stop_propagation();
+                // Anchored to the pointer rather than to the button's bounds, which GPUI does not
+                // hand a click handler. Nudged down so the menu opens below the control it came
+                // from instead of on top of it.
+                let at = match event {
+                    gpui::ClickEvent::Mouse(click) => click.up.position,
+                    _ => gpui::point(px(120.), px(160.)),
+                };
+                workbench.sidebar_menu = Some((menu.clone(), gpui::point(at.x, at.y + px(6.))));
+                cx.notify();
+            }))
     }
 
     /// Copy the selected transcript text.
@@ -3387,6 +4087,11 @@ impl Workbench {
                 for job in snapshot.jobs {
                     self.track_job(job, cx);
                 }
+                // The conversation this stream belongs to, and so the owner of any worker it
+                // launched. Safe to read here and nowhere else: `apply` only runs mid-turn, and
+                // both `New thread` and opening another conversation refuse while streaming — so
+                // the open thread cannot have moved by the time this line runs.
+                let owner = self.sidecar.thread_id().unwrap_or_default();
                 for task in snapshot.tasks {
                     // Into the provenance record as well as the Jobs panel. A background worker
                     // runs on its own LangGraph thread, so none of its events reach this
@@ -3399,7 +4104,7 @@ impl Workbench {
                         &task.agent_name,
                         provenance::now_ms(),
                     );
-                    self.track_task(task, cx);
+                    self.track_task(&owner, task, cx);
                 }
             }
             TurnEvent::Done => {
@@ -3467,20 +4172,56 @@ impl Workbench {
     }
 
     fn refresh_conversations(&mut self, cx: &mut Context<Self>) {
-        let mut updates = self.sidecar.list_conversations();
+        // Read from disk rather than from `self.draft`, which is the Settings pane's editing
+        // buffer — the same argument `remember_panels` makes. The migration must be decided by
+        // what is *stored*, because that is what survives to the next launch.
+        let adopt = !settings::Settings::load().adopted_untagged;
+        // **Read here, not in the answer.** Projects are directories on this machine and the
+        // backend has nothing to do with them, but hanging the read off a successful HTTP reply
+        // meant a cold launch — where the first refresh reliably fires before the server is up,
+        // as `list_conversations` itself documents — showed no project headings at all until some
+        // later refresh happened to succeed. An empty project would simply not be there on the
+        // launch after it was created (§167).
+        self.folder_projects = workspace::projects();
+        let mut updates = self.sidecar.list_conversations(adopt);
         cx.spawn(async move |this, cx| {
-            if let Some(conversations) = updates.next().await {
+            if let Some(answer) = updates.next().await {
                 let _ = this.update(cx, |workbench, cx| {
-                    workbench.conversations = conversations;
+                    workbench.conversations = answer.conversations;
+                    // Again on the answer, because a turn may have created a project folder
+                    // while this request was in flight. Cheap: one `read_dir` of a directory
+                    // holding a handful of entries.
+                    workbench.folder_projects = workspace::projects();
                     // Only on a real answer. A failed fetch sends nothing, so the list keeps
                     // saying "loading" rather than claiming the researcher has none — a
                     // backend that is still booting will answer the next refresh.
                     workbench.conversations_loaded = true;
+                    if answer.scanned {
+                        workbench.remember_adoption();
+                    }
                     cx.notify();
                 });
             }
         })
         .detach();
+    }
+
+    /// Record that §90's pre-tag scan has run, so it can never run again.
+    ///
+    /// Deliberately *not* conditional on having adopted anything: an installation with no
+    /// untagged threads is exactly the one that must stop scanning, and it is the one where
+    /// deleting every conversation used to bring the leftovers back (docs §166).
+    fn remember_adoption(&self) {
+        let mut stored = settings::Settings::load();
+        if stored.adopted_untagged {
+            return;
+        }
+        stored.adopted_untagged = true;
+        if let Err(error) = stored.save() {
+            // The scan did run; all that failed is remembering it. Worth a log because the
+            // consequence is a repeat scan, which is the defect this whole field exists for.
+            tracing::warn!(%error, "could not record that the pre-tag scan has run");
+        }
     }
 
     /// Reopen a past conversation: switch threads and rebuild the transcript.
@@ -3515,11 +4256,11 @@ impl Workbench {
             .iter()
             .find(|conversation| conversation.thread_id == thread_id)
             .and_then(|conversation| conversation.project.clone());
-        // Remembered as well as adopted: "the project you are working in" is the one you last
-        // looked at, not only the one you last filed something into.
-        self.remember_project(filed.clone());
         self.sidecar.set_project(filed);
         self.project = None;
+        // Kept before the id is handed to the sidecar: any worker in this conversation's state
+        // belongs to *this* conversation, and that is the fact `decide_task` needs later.
+        let owner = thread_id.clone();
         let mut messages = self.sidecar.open_conversation(thread_id);
         cx.spawn(async move |this, cx| {
             if let Some((messages, snapshot)) = messages.next().await {
@@ -3555,7 +4296,7 @@ impl Workbench {
                             workbench.track_job(job, cx);
                         }
                         for task in snapshot.tasks {
-                            workbench.track_task(task, cx);
+                            workbench.track_task(&owner, task, cx);
                         }
                     }
                     workbench.status = "done".into();
@@ -3568,24 +4309,139 @@ impl Workbench {
         cx.notify();
     }
 
-    /// Delete a conversation, after the row has asked.
-    fn delete_conversation(&mut self, thread_id: String, cx: &mut Context<Self>) {
-        self.confirming_delete = None;
-        self.conversations
-            .retain(|conversation| conversation.thread_id != thread_id);
-        // If it was the open one, leave an empty slate rather than a transcript whose
-        // thread no longer exists.
-        if self.sidecar.thread_id().as_deref() == Some(thread_id.as_str()) {
-            self.sidecar.reset_thread();
-            self.transcript.clear();
-            self.provenance = provenance::Record::default();
-            self.text_selection.update(|selection| selection.clear());
-            self.buckets.clear();
-            self.tasks.clear();
-            self.jobs.clear();
+    /// Open the centred warning for a conversation or a whole project.
+    fn request_delete(
+        &mut self,
+        target: DeleteTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.deleting.is_some() {
+            return;
         }
-        self.sidecar.delete_conversation(thread_id);
-        self.say("conversation deleted", cx);
+        let current_is_targeted = self
+            .sidecar
+            .thread_id()
+            .is_some_and(|thread_id| target.contains_thread(&thread_id));
+        if self.streaming && current_is_targeted {
+            self.say(
+                format!(
+                    "can't delete this {} while its turn is running",
+                    target.noun()
+                ),
+                cx,
+            );
+            return;
+        }
+        if current_is_targeted && self.tasks.iter().any(|task| !task.is_finished()) {
+            // A background worker can still be writing beneath the conversation directory after
+            // the foreground turn ends. Deleting that tree underneath it would recreate the
+            // folder or lose the remainder of its work; wait for the task's terminal state.
+            self.say(
+                format!(
+                    "can't delete this {} while its background work is running",
+                    target.noun()
+                ),
+                cx,
+            );
+            return;
+        }
+        self.confirming_delete = Some(target);
+        window.focus(&self.delete_focus);
+        cx.notify();
+    }
+
+    /// Carry out exactly what the modal named: durable threads first, managed files second.
+    fn confirm_delete(&mut self, cx: &mut Context<Self>) {
+        let Some(target) = self.confirming_delete.take() else {
+            return;
+        };
+        if self.deleting.is_some() {
+            return;
+        }
+        let noun = target.noun();
+        self.status = format!("deleting {noun}…");
+        self.deleting = Some(target.clone());
+        let mut deleted = self
+            .sidecar
+            .delete_conversations(target.thread_ids(), target.files());
+        cx.spawn(async move |this, cx| {
+            let result = deleted.next().await;
+            let _ = this.update(cx, |workbench, cx| {
+                workbench.deleting = None;
+                match resolve_delete(target.noun(), result) {
+                    DeleteResolution::Remove { files_error } => {
+                        let removed = target.thread_ids();
+                        workbench
+                            .conversations
+                            .retain(|conversation| !removed.contains(&conversation.thread_id));
+                        // The folder went with them, so the heading must too. Re-read rather
+                        // than removing by name: deleting a conversation can empty a project and
+                        // take its folder as well (§155), and that is the same fact (§167).
+                        workbench.folder_projects = workspace::projects();
+                        // If it was the open one, leave a genuinely ungrouped empty slate rather
+                        // than a transcript and project whose thread no longer exists (§154).
+                        let open_was_removed = workbench
+                            .sidecar
+                            .thread_id()
+                            .is_some_and(|thread_id| target.contains_thread(&thread_id));
+                        let active_project_was_removed = workbench
+                            .sidecar
+                            .project()
+                            .is_some_and(|name| !project_exists(&workbench.conversations, &name));
+                        if open_was_removed {
+                            workbench.sidecar.reset_thread();
+                            workbench.transcript.clear();
+                            workbench.provenance = provenance::Record::default();
+                            workbench
+                                .text_selection
+                                .update(|selection| selection.clear());
+                            workbench.buckets.clear();
+                            workbench.tasks.clear();
+                            workbench.jobs.clear();
+                        }
+                        if open_was_removed || active_project_was_removed {
+                            // Also covers an empty "new conversation here" slate whose thread has
+                            // not been created yet. Leaving only its project key alive would make
+                            // the next question recreate the project just deleted (§155).
+                            workbench.sidecar.set_project(None);
+                            workbench.project = None;
+                            workbench.refresh_project(cx);
+                        }
+                        match files_error {
+                            None => workbench.say(format!("{} deleted", target.noun()), cx),
+                            Some(error) => {
+                                // The irreversible server half succeeded, so restoring the row
+                                // would be another lie. Keep the recoverable folder and say where
+                                // synchronization stopped instead (§155).
+                                workbench.error = Some(format!(
+                                    "The {} was deleted, but its saved folder remains: {error}",
+                                    target.noun()
+                                ));
+                                workbench.say(
+                                    format!(
+                                        "{} deleted; its saved folder could not be removed",
+                                        target.noun()
+                                    ),
+                                    cx,
+                                );
+                            }
+                        }
+                    }
+                    DeleteResolution::Keep(error) => {
+                        // Keep the row because the backend kept the conversation. Claiming
+                        // success here is the precise defect that only restart exposed. A project
+                        // batch can have succeeded partly before one request failed, so refresh
+                        // instead of assuming our captured list is still authoritative (§155).
+                        workbench.error = Some(error);
+                        workbench.status = format!("{} was not fully deleted", target.noun());
+                        workbench.refresh_conversations(cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -3802,8 +4658,50 @@ impl Workbench {
         }
     }
 
+    /// Re-read files after a writer has reported completion and evict any image decode cached
+    /// while that writer still had the file open.
+    ///
+    /// The Outputs panel scans on every paint, which made a just-created PNG visible *before* it
+    /// was necessarily complete. GPUI correctly cached that first decode failure by path, but a
+    /// later paint asked for the same path and received the same failure forever; restarting the
+    /// application was the only thing that cleared it. Two bounded follow-up passes cover the
+    /// Windows/WSL filesystem hand-off without turning the whole workspace into a permanent
+    /// polling loop (docs §158).
+    fn settle_outputs(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            for delay in [250, 1_000] {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(delay))
+                    .await;
+                if this
+                    .update(cx, |workbench, cx| {
+                        workbench.collect_plots();
+                        let figures: Vec<std::path::PathBuf> = workbench
+                            .thread_workspace()
+                            .map(|dir| workspace::outputs(&dir))
+                            .unwrap_or_default()
+                            .into_iter()
+                            .flat_map(|(_, items)| items)
+                            .filter(|output| output.kind == workspace::Kind::Figure)
+                            .map(|output| output.path)
+                            .collect();
+                        for path in figures {
+                            gpui::ImageSource::from(path).remove_asset(cx);
+                        }
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     fn finish_turn(&mut self, cx: &mut Context<Self>) {
         self.collect_plots();
+        self.settle_outputs(cx);
         // Written here, and only here, for the same reason the title is: the thread id does not
         // exist until the turn has run, so there is no directory to write into before this point.
         // A turn stopped or failed still gets recorded — what was consulted before it stopped is
@@ -3903,10 +4801,22 @@ impl Workbench {
         //
         // A heading per project rather than an indent or a colour: the sidebar is scanned, and a
         // name is the only marker that survives being glanced at. The order is alphabetical with
-        // "No project" pinned to the bottom, so the list does not reshuffle as work moves between
-        // projects — a sidebar that reorders itself is one nobody builds a memory of (docs §106).
+        // ungrouped work pinned to the bottom, so the list does not reshuffle as work moves
+        // between projects — a sidebar that reorders itself is one nobody builds a memory of
+        // (docs §106, §154).
         let mut grouped: std::collections::BTreeMap<Option<String>, Vec<&protocol::Conversation>> =
             std::collections::BTreeMap::new();
+        // Seeded with every project that has a folder, so one nothing is filed under yet still
+        // gets a heading. Naming a project used to create the folder and show nothing at all —
+        // the sidebar could only see a project through a conversation (§167).
+        //
+        // Not while a search is running: a filter is a way to find work, and an empty project
+        // matches nothing, so leaving them in would make searching look broken.
+        if self.conversation_query.read(cx).text().trim().is_empty() {
+            for name in &self.folder_projects {
+                grouped.entry(Some(name.clone())).or_default();
+            }
+        }
         for conversation in &matched {
             grouped
                 .entry(conversation.project.clone())
@@ -3921,15 +4831,21 @@ impl Workbench {
             (_, None) => std::cmp::Ordering::Less,
             (Some(a), Some(b)) => a.cmp(b),
         });
-        // One project is not a grouping — the heading would be noise above every row a
-        // researcher owns. Headings appear once there is something to tell apart.
-        let show_headings = ordered.len() > 1;
+        // A named project always gets its heading now, even when it is the only group. The
+        // heading is no longer decoration: it owns New here, Open folder and Delete project, so
+        // hiding it would hide the only project-delete affordance (§155). Ungrouped work alone
+        // still needs no heading because it is not a project and has no project folder to delete.
+        let show_headings = ordered.len() > 1
+            || ordered
+                .iter()
+                .any(|(project, _conversations)| project.is_some());
 
         for (project, conversations) in ordered {
             if show_headings {
-                let heading = project.clone().unwrap_or_else(|| "No project".to_string());
+                let heading = project
+                    .clone()
+                    .unwrap_or_else(|| UNGROUPED_PROJECT_LABEL.to_string());
                 let opening = project.clone();
-                let starting = project.clone();
                 list = list.child(
                     div()
                         .flex()
@@ -3964,36 +4880,29 @@ impl Workbench {
                                 })
                                 .child(section_label_owned(heading.to_uppercase())),
                         )
-                        // Asked for directly: starting work in a project should not mean
-                        // starting it somewhere else and then filing it (docs §107). Revealed
-                        // on hover, like the rename and delete controls on the rows below.
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("new-in-{heading}")))
-                                .flex_none()
-                                .px_1()
-                                .rounded_md()
-                                .text_color(rgb(theme::text_faint()))
-                                .text_xs()
-                                .invisible()
-                                .group_hover(
-                                    SharedString::from(format!("head-{heading}")),
-                                    |style| style.visible(),
-                                )
-                                .hover(|style| {
-                                    style.text_color(rgb(theme::accent())).cursor_pointer()
-                                })
-                                .child("+")
-                                .tooltip(move |_window, cx| {
-                                    cx.new(|_| Hint {
-                                        text: "new conversation here".into(),
-                                    })
-                                    .into()
-                                })
-                                .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                                    workbench.new_thread_in(starting.clone(), cx);
-                                })),
-                        ),
+                        // One `⋮` where four hover-revealed characters used to be. Only a named
+                        // project gets one: "Ungrouped Conversations" is the workspace root, which
+                        // is not a project and cannot be deleted or started "in" (§165).
+                        .when_some(project.clone(), |header, name| {
+                            header.child(self.sidebar_menu_button(
+                                format!("head-menu-{name}"),
+                                SidebarMenu::Project {
+                                    // All conversations in the project, not merely the rows that
+                                    // survived the sidebar search. A filter is a way to find
+                                    // work, never a deletion boundary (§155).
+                                    conversations: self
+                                        .conversations
+                                        .iter()
+                                        .filter(|conversation| {
+                                            conversation.project.as_deref() == Some(name.as_str())
+                                        })
+                                        .cloned()
+                                        .collect(),
+                                    name,
+                                },
+                                cx,
+                            ))
+                        }),
                 );
             }
             for conversation in conversations {
@@ -4017,10 +4926,14 @@ impl Workbench {
                     continue;
                 }
 
-                // Asked once, then confirmed in place. Nothing about a row of names should be
-                // able to destroy work on one click.
-                if self.confirming_delete.as_deref() == Some(thread_id.as_str()) {
-                    let confirmed = thread_id.clone();
+                // The row stays until the backend confirms deletion. Removing it optimistically
+                // is what made a failed request look successful until launch brought both the
+                // conversation and its derived project heading back (§154).
+                if self
+                    .deleting
+                    .as_ref()
+                    .is_some_and(|target| target.contains_thread(&thread_id))
+                {
                     list = list.child(
                         div()
                             .flex()
@@ -4032,56 +4945,18 @@ impl Workbench {
                             .px_2()
                             .py_1()
                             .rounded_md()
-                            .border_1()
-                            .border_color(rgb(theme::error()))
+                            .bg(rgb(theme::elevated()))
                             .child(
-                                ui::Label::new("Delete this conversation?")
+                                ui::Label::new("Deleting this conversation…")
                                     .muted()
                                     .size(ui::Size::Compact)
                                     .ellipsis(),
-                            )
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("del-yes-{thread_id}")))
-                                    .flex_none()
-                                    .px_2()
-                                    .rounded_md()
-                                    .text_color(rgb(theme::error()))
-                                    .text_xs()
-                                    .hover(|style| {
-                                        style.bg(rgb(theme::elevated())).cursor_pointer()
-                                    })
-                                    .child("delete")
-                                    .on_click(cx.listener(
-                                        move |workbench, _event, _window, cx| {
-                                            workbench.delete_conversation(confirmed.clone(), cx);
-                                        },
-                                    )),
-                            )
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("del-no-{thread_id}")))
-                                    .flex_none()
-                                    .px_2()
-                                    .rounded_md()
-                                    .text_color(rgb(theme::text_muted()))
-                                    .text_xs()
-                                    .hover(|style| {
-                                        style.bg(rgb(theme::elevated())).cursor_pointer()
-                                    })
-                                    .child("keep")
-                                    .on_click(cx.listener(|workbench, _event, _window, cx| {
-                                        workbench.confirming_delete = None;
-                                        cx.notify();
-                                    })),
                             ),
                     );
                     continue;
                 }
 
                 let open = thread_id.clone();
-                let rename = thread_id.clone();
-                let remove = thread_id.clone();
                 list = list.child(
                     div()
                         .id(SharedString::from(format!("conv-{thread_id}")))
@@ -4109,50 +4984,11 @@ impl Workbench {
                                 .size(ui::Size::Compact)
                                 .ellipsis(),
                         )
-                        .child(
-                            // Hidden until the row is hovered, so the list stays a list of
-                            // names rather than a wall of controls.
-                            div()
-                                .id(SharedString::from(format!("rename-{thread_id}")))
-                                .flex_none()
-                                .invisible()
-                                .group_hover(
-                                    SharedString::from(format!("conv-group-{thread_id}")),
-                                    |style| style.visible(),
-                                )
-                                .px_1()
-                                .text_color(rgb(theme::text_faint()))
-                                .text_xs()
-                                .hover(|style| {
-                                    style.text_color(rgb(theme::accent())).cursor_pointer()
-                                })
-                                .child("rename")
-                                .on_click(cx.listener(move |workbench, _event, window, cx| {
-                                    workbench.start_rename(rename.clone(), window, cx);
-                                })),
-                        )
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("delete-{thread_id}")))
-                                .flex_none()
-                                .invisible()
-                                .group_hover(
-                                    SharedString::from(format!("conv-group-{thread_id}")),
-                                    |style| style.visible(),
-                                )
-                                .px_1()
-                                .rounded_md()
-                                .text_color(rgb(theme::text_faint()))
-                                .text_xs()
-                                .hover(|style| {
-                                    style.text_color(rgb(theme::error())).cursor_pointer()
-                                })
-                                .child("✕")
-                                .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                                    workbench.confirming_delete = Some(remove.clone());
-                                    cx.notify();
-                                })),
-                        )
+                        .child(self.sidebar_menu_button(
+                            format!("row-menu-{thread_id}"),
+                            SidebarMenu::Conversation(conversation.clone()),
+                            cx,
+                        ))
                         .on_click(cx.listener(move |workbench, _event, _window, cx| {
                             workbench.open_conversation(open.clone(), cx);
                         })),
@@ -4194,7 +5030,7 @@ impl Workbench {
                                     .text_color(rgb(theme::accent_hover()))
                                     .cursor_pointer()
                             })
-                            .child(app_icon("icons/settings.svg"))
+                            .child(app_icon("icons/settings.svg", theme::accent()))
                             .on_click(cx.listener(|workbench, _event, _window, cx| {
                                 workbench.run_command(Command::OpenSettings, cx);
                             })),
@@ -4219,9 +5055,21 @@ impl Workbench {
                                     .cursor_pointer()
                             })
                             .child("New")
-                            .on_click(cx.listener(|workbench, _event, _window, cx| {
-                                workbench.run_command(Command::NewThread, cx);
-                            })),
+                            // A menu, because there are two kinds of new thing and a button that
+                            // silently means only one of them leaves the other with no home at
+                            // all — creating a project meant opening a conversation first and
+                            // filing it afterwards (§165).
+                            .on_click(cx.listener(
+                                |workbench, event: &gpui::ClickEvent, _window, cx| {
+                                    let at = match event {
+                                        gpui::ClickEvent::Mouse(click) => click.up.position,
+                                        _ => gpui::point(px(120.), px(60.)),
+                                    };
+                                    workbench.sidebar_menu =
+                                        Some((SidebarMenu::New, gpui::point(at.x, at.y + px(8.))));
+                                    cx.notify();
+                                },
+                            )),
                     ),
             )
             .child(
@@ -4696,13 +5544,52 @@ impl Workbench {
     /// fall out of step with the sidebar (docs §106). Creating one is typing a name into the
     /// filter field and pressing the row that offers it — the same gesture as choosing an
     /// existing one, so there is no second mode to learn.
-    fn project_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn project_list(&self, starting_new: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        // The one difference between the two modes, named once. `file_in_project` moves the open
+        // conversation's folder; `new_thread_in` starts a fresh one and moves nothing — which is
+        // what "New project" has to mean when there may be no open conversation to move.
+        let choose = move |workbench: &mut Self, project: Option<String>, cx: &mut Context<Self>| {
+            if starting_new {
+                // **The folder first, and it is what makes the project real.** `new_thread_in`
+                // only sets where the *next* turn will write, and until that turn happens there
+                // is no thread, no metadata and nothing for the sidebar to show — which is
+                // exactly what naming a project used to look like: nothing (§167). Creating the
+                // directory is creating the project, because §105 made them the same thing.
+                let mut project = project;
+                if let Some(name) = project.as_deref() {
+                    match workspace::create_project(name) {
+                        // **The name the folder actually got**, not the one that was typed.
+                        // `project_folder` rewrites characters a path cannot hold, so keeping
+                        // the raw text would file conversations under `Q1/Q2` while the
+                        // directory is `Q1_Q2` — and the sidebar, which reads both, would show
+                        // the one project twice under two spellings.
+                        Ok(folder) => {
+                            project = Some(folder);
+                            workbench.folder_projects = workspace::projects();
+                        }
+                        Err(error) => {
+                            workbench.error = Some(format!("{error:#}"));
+                            workbench.open_picker = None;
+                            cx.notify();
+                            return;
+                        }
+                    }
+                }
+                workbench.new_thread_in(project, cx);
+            } else {
+                workbench.file_in_project(project, cx);
+            }
+            workbench.open_picker = None;
+        };
         let typed = self.project_query.read(cx).text().trim().to_string();
         let current = self.sidecar.project();
+        // Both sources, for the same reason the sidebar uses both: a project with a folder and
+        // no conversations yet is a project you should be able to file into (§167).
         let mut names: Vec<String> = self
             .conversations
             .iter()
             .filter_map(|conversation| conversation.project.clone())
+            .chain(self.folder_projects.iter().cloned())
             .collect();
         names.sort();
         names.dedup();
@@ -4728,14 +5615,16 @@ impl Workbench {
                     Some("creates the folder".into()),
                 )
                 .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                    workbench.file_in_project(Some(created.clone()), cx);
+                    choose(workbench, Some(created.clone()), cx);
                 })),
             );
         }
 
-        list = list.child(picker_row("No project", current.is_none(), None).on_click(
-            cx.listener(|workbench, _event, _window, cx| workbench.file_in_project(None, cx)),
-        ));
+        list = list.child(
+            picker_row(UNGROUPED_PROJECT_LABEL, current.is_none(), None).on_click(
+                cx.listener(move |workbench, _event, _window, cx| choose(workbench, None, cx)),
+            ),
+        );
 
         for name in names {
             if !typed.is_empty() && crate::match_score(&typed, &name).is_none() {
@@ -4749,7 +5638,7 @@ impl Workbench {
                     None,
                 )
                 .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                    workbench.file_in_project(Some(chosen.clone()), cx);
+                    choose(workbench, Some(chosen.clone()), cx);
                 })),
             );
         }
@@ -4795,11 +5684,10 @@ impl Workbench {
             return;
         }
         self.sidecar.set_project(project.clone());
-        self.remember_project(project.clone());
         self.say(
             match &project {
                 Some(name) => format!("filed under {name}"),
-                None => "taken out of its project".to_string(),
+                None => "filed under Ungrouped Conversations".to_string(),
             },
             cx,
         );
@@ -4822,30 +5710,29 @@ impl Workbench {
             self.say("can't start a new thread mid-turn", cx);
             return;
         }
+        self.sidecar.reset_thread();
         self.sidecar.set_project(project.clone());
-        self.remember_project(project);
         self.project = None;
         self.refresh_project(cx);
-        self.run_command(Command::NewThread, cx);
-    }
-
-    /// Remember which project the researcher is working in, across restarts.
-    ///
-    /// Written to the settings file rather than held in memory, so the first new conversation of
-    /// a morning lands where yesterday's work is. Updated by *looking* at a conversation as well
-    /// as by filing one — §107's bug was that only filing counted, so opening something already
-    /// in a project and pressing New put you back outside it.
-    fn remember_project(&mut self, project: Option<String>) {
-        let name = project.unwrap_or_default();
-        if self.draft.project == name {
-            return;
-        }
-        self.draft.project = name.clone();
-        let mut saved = settings::Settings::load();
-        saved.project = name;
-        if let Err(error) = saved.save() {
-            tracing::warn!(%error, "could not remember the current project");
-        }
+        self.transcript.clear();
+        // A new conversation is a new enquiry. The one just left keeps its own record on disk,
+        // where reopening it will find it.
+        self.provenance = provenance::Record::default();
+        self.text_selection.update(|selection| selection.clear());
+        self.buckets.clear();
+        self.tasks.clear();
+        self.jobs.clear();
+        self.error = None;
+        // Blanket approval is scoped to the conversation, so it ends with it — together with
+        // every per-task grant, whose tasks belonged to that conversation too.
+        self.approve_conversation = false;
+        self.approve_tasks.clear();
+        self.refresh_conversations(cx);
+        self.status = match project {
+            Some(name) => format!("new conversation in {name}"),
+            None => "new conversation in Ungrouped Conversations".into(),
+        };
+        cx.notify();
     }
 
     /// A model per specialist, under the coordinator's.
@@ -4966,6 +5853,102 @@ impl Workbench {
             }
         }
         list.into_any_element()
+    }
+
+    /// The irreversible scope, in the centre of the window rather than squeezed into a row.
+    ///
+    /// Conversation deletion now includes its saved outputs, and project deletion includes every
+    /// conversation plus the complete project folder. The old inline "delete / keep" row had no
+    /// room to say either fact; confirmation without the consequence is only a second click
+    /// (§155).
+    fn delete_modal(&self, target: &DeleteTarget, cx: &mut Context<Self>) -> impl IntoElement {
+        let (title, body, action) = match target {
+            DeleteTarget::Conversation(conversation) => {
+                let path = workspace::thread_dir_in(
+                    conversation.project.as_deref(),
+                    &conversation.thread_id,
+                );
+                let body = div()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .min_w_0()
+                    .gap_3()
+                    .child(ui::Label::new(format!(
+                        "This permanently deletes “{}”, its chat history, and every saved file it produced.",
+                        conversation.title
+                    )))
+                    .child(
+                        ui::Label::new(format!("Saved folder:\n{}", path.display()))
+                            .muted()
+                            .size(ui::Size::Compact),
+                    )
+                    .into_any_element();
+                ("Delete conversation?", body, "Delete conversation")
+            }
+            DeleteTarget::Project {
+                name,
+                conversations,
+            } => {
+                let path = workspace::project_folder(name)
+                    .map(|folder| workspace::root().join(folder))
+                    .unwrap_or_else(workspace::root);
+                let count = conversations.len();
+                let body = div()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .min_w_0()
+                    .gap_3()
+                    .child(ui::Label::new(format!(
+                        "This permanently deletes project “{name}”, {count} conversation{}, and the entire project folder.",
+                        if count == 1 { "" } else { "s" }
+                    )))
+                    .child(
+                        ui::Label::new(
+                            "Files placed directly in the project folder are deleted too — not only files Mini-Me created.",
+                        )
+                        .colour(theme::warning()),
+                    )
+                    .child(
+                        ui::Label::new(format!("Project folder:\n{}", path.display()))
+                            .muted()
+                            .size(ui::Size::Compact),
+                    )
+                    .into_any_element();
+                ("Delete project?", body, "Delete project")
+            }
+        };
+
+        ui::Modal::new("delete-confirmation", title)
+            .width(560.)
+            .focus(&self.delete_focus)
+            .body(body)
+            .actions(
+                ui::actions()
+                    .child(div().flex_grow())
+                    .child(
+                        ui::Button::new("delete-cancel", "Cancel").on_click(cx.listener(
+                            |workbench, _event, _window, cx| {
+                                workbench.confirming_delete = None;
+                                workbench.restore_focus = true;
+                                cx.notify();
+                            },
+                        )),
+                    )
+                    .child(
+                        ui::Button::new("delete-confirm", action)
+                            .tone(ui::Tone::Danger)
+                            .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                workbench.confirm_delete(cx);
+                            })),
+                    ),
+            )
+            .footer(
+                ui::Label::new("There is no undo.")
+                    .colour(theme::error())
+                    .size(ui::Size::Compact),
+            )
     }
 
     /// What this thing is, what the specialists do, and who to credit.
@@ -5618,7 +6601,19 @@ impl Workbench {
             )
     }
 
-    fn preview_modal(&self, output: workspace::Output, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The file open in the centre, with the set it belongs to along the bottom.
+    ///
+    /// `at` and `count` come from the [`Preview`] rather than being recomputed, so the arrows, the
+    /// `3 / 8` counter and the highlighted filmstrip tile can never disagree about which file is
+    /// showing — the §158 rule about one calculation, applied to three affordances that all mean
+    /// "this one".
+    fn preview_modal(
+        &self,
+        output: workspace::Output,
+        set: &[workspace::Output],
+        at: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let mut body = div()
             .id("preview-body")
             .flex()
@@ -5626,16 +6621,31 @@ impl Workbench {
             .w_full()
             .min_w_0()
             .flex_grow()
+            .max_h(px(PREVIEW_BODY_HEIGHT))
             .overflow_y_scroll()
             .p_3()
             .gap_2();
 
         match output.kind {
             workspace::Kind::Figure => {
+                // **A box with both dimensions set, and `Contain` inside it.** `max_w_full` alone
+                // left the height to the natural size of the file, so a tall plot resolved larger
+                // than the space the flex row gave it and was clipped at *both* ends — the top of
+                // a stacked bar chart cut off, with dead space underneath. `Contain` in a bounded
+                // box letterboxes instead, which is the one arrangement that cannot crop.
                 body = body.child(
-                    img(output.path.clone())
-                        .max_w_full()
-                        .object_fit(gpui::ObjectFit::Contain),
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .w_full()
+                        .h(px(PREVIEW_IMAGE_HEIGHT))
+                        .child(
+                            img(output.path.clone())
+                                .w_full()
+                                .h_full()
+                                .object_fit(gpui::ObjectFit::Contain),
+                        ),
                 );
             }
             _ => {
@@ -5698,11 +6708,37 @@ impl Workbench {
             }
         }
 
+        // The body, flanked by the arrows, so a step is a click where the eye already is rather
+        // than a trip to a toolbar. Only when there is somewhere to go: a lone file gets no
+        // arrows at all, because a control that does nothing is worse than an absent one (§158).
+        let framed = if set.len() > 1 {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .w_full()
+                .min_w_0()
+                .flex_grow()
+                .overflow_hidden()
+                .child(self.preview_arrow("preview-prev", "‹", -1, cx))
+                .child(body)
+                .child(self.preview_arrow("preview-next", "›", 1, cx))
+                .into_any_element()
+        } else {
+            body.into_any_element()
+        };
+
         let opened = output.path.clone();
         div()
             .id("preview-backdrop")
             .absolute()
             .inset_0()
+            // **Painting over something is not the same as being in front of it.** Without this,
+            // the workbench under the dim stayed live: a click landed on the modal *and* on
+            // whatever happened to be beneath it, so opening a figure could also hit a button in
+            // the transcript. `occlude` blocks the mouse from everything behind this hitbox, which
+            // is what makes the dim mean what it looks like it means (docs §163).
+            .occlude()
             .flex()
             .items_center()
             .justify_center()
@@ -5718,11 +6754,16 @@ impl Workbench {
                     .id("preview")
                     .flex()
                     .flex_col()
-                    .w(px(760.))
-                    .max_h(px(620.))
+                    .w(px(PREVIEW_WIDTH))
+                    .max_h(px(PREVIEW_MAX_HEIGHT))
                     .bg(rgb(theme::overlay()))
                     .border_1()
                     .border_color(rgb(theme::border_strong()))
+                    // Clicks inside the panel are the panel's business. Click handlers fire on
+                    // the bubble phase — innermost first — so stopping here after a control has
+                    // run is what keeps the backdrop's close-on-click from firing too. Without
+                    // it every arrow press closed the modal it was trying to step through.
+                    .on_click(|_event, _window, cx| cx.stop_propagation())
                     .child(
                         div()
                             .flex()
@@ -5780,13 +6821,163 @@ impl Workbench {
                                     })),
                             ),
                     )
-                    .child(body),
+                    .child(framed)
+                    .children(self.preview_filmstrip(set, at, cx)),
             )
             .on_click(cx.listener(|workbench, _event, _window, cx| {
                 // Clicking the dimmed backdrop closes it, the way every modal does.
                 workbench.preview = None;
                 cx.notify();
             }))
+    }
+
+    /// One step-through arrow beside the previewed file.
+    fn preview_arrow(
+        &self,
+        id: &'static str,
+        glyph: &'static str,
+        by: isize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .id(id)
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .w(px(34.))
+            .h(px(34.))
+            .mx_1()
+            .rounded_full()
+            .bg(rgb(theme::elevated()))
+            .border_1()
+            .border_color(rgb(theme::border()))
+            .text_color(rgb(theme::text()))
+            .text_size(px(19.))
+            .hover(|style| {
+                style
+                    .bg(rgb(theme::accent_soft()))
+                    .border_color(rgb(theme::accent()))
+                    .cursor_pointer()
+            })
+            .child(glyph)
+            .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                if let Some(preview) = workbench.preview.as_mut() {
+                    preview.step(by);
+                    cx.notify();
+                }
+            }))
+    }
+
+    /// The set along the bottom of the modal: a counter, then a sideways strip to choose from.
+    ///
+    /// **This is the half the researcher asked for by name** — *"we can click and scroll at the
+    /// bottom so the user can select which picture to see."* `None` for a lone file: a filmstrip
+    /// of one is a decoration that implies there is somewhere to go.
+    ///
+    /// Tile ids carry the file's own index, so GPUI keeps each element's identity as the selection
+    /// moves and the strip does not lose its scroll position on every step.
+    fn preview_filmstrip(
+        &self,
+        set: &[workspace::Output],
+        at: usize,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        if set.len() < 2 {
+            return None;
+        }
+        let key = "preview-filmstrip";
+        let scroll = self.output_gallery_scroll(key);
+
+        let mut strip = div()
+            .id(SharedString::from(format!("{key}-rail")))
+            .flex()
+            .flex_row()
+            .gap_1()
+            .w_full()
+            .min_w_0()
+            .pb_3()
+            .overflow_x_scroll()
+            .track_scroll(&scroll);
+        for (index, output) in set.iter().enumerate() {
+            let selected = index == at;
+            let is_image = output.kind == workspace::Kind::Figure;
+            let (glyph, ink) = file_mark(&output.path);
+            strip = strip.child(
+                div()
+                    .id(SharedString::from(format!("{key}-{index}")))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .w(px(64.))
+                    .h(px(48.))
+                    .overflow_hidden()
+                    .rounded_md()
+                    // The outline is the whole selection signal, so it is two pixels of accent
+                    // against one of border: a one-pixel difference in colour alone did not read
+                    // at thumbnail size on the Windows pass (§158's sibling complaint).
+                    .border_2()
+                    .border_color(rgb(if selected {
+                        theme::accent()
+                    } else {
+                        theme::border()
+                    }))
+                    .bg(rgb(theme::surface()))
+                    .hover(|style| style.border_color(rgb(theme::accent_hover())).cursor_pointer())
+                    .when(is_image, |tile| {
+                        tile.child(
+                            img(output.path.clone())
+                                .w_full()
+                                .h_full()
+                                .object_fit(gpui::ObjectFit::Cover),
+                        )
+                    })
+                    // A non-image in the set still needs a tile, or the counter and the strip
+                    // disagree about how many there are.
+                    .when(!is_image, |tile| {
+                        tile.text_color(rgb(ink)).text_size(px(16.)).child(glyph)
+                    })
+                    .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                        if let Some(preview) = workbench.preview.as_mut() {
+                            preview.at = index;
+                            cx.notify();
+                        }
+                    })),
+            );
+        }
+
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .flex_none()
+                .w_full()
+                .min_w_0()
+                .px_3()
+                .pt_2()
+                .border_t_1()
+                .border_color(rgb(theme::border()))
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_row()
+                        .justify_center()
+                        .text_color(rgb(theme::text_muted()))
+                        .text_xs()
+                        .child(format!("{} of {}", at + 1, set.len())),
+                )
+                .child(
+                    div()
+                        .relative()
+                        .w_full()
+                        .min_w_0()
+                        .child(strip)
+                        .children(self.horizontal_scrollbar(key.to_string(), &scroll, cx)),
+                ),
+        )
     }
 
     /// A file a turn produced, in the transcript, under the answer that produced it.
@@ -5981,9 +7172,348 @@ impl Workbench {
         }
 
         card.on_click(cx.listener(move |workbench, _event, _window, cx| {
-            workbench.preview = Some(previewed.clone());
+            workbench.preview = Preview::single(previewed.clone());
             cx.notify();
         }))
+    }
+
+    fn output_gallery_scroll(&self, key: &str) -> gpui::ScrollHandle {
+        self.output_gallery_scrolls
+            .borrow_mut()
+            .entry(key.to_string())
+            .or_default()
+            .clone()
+    }
+
+    /// A visible, clickable and draggable horizontal scrollbar for one gallery rail.
+    ///
+    /// The first version only painted the thumb. That was enough to imply an interaction and
+    /// then break it: a mouse-first Windows user naturally grabbed the bar shown on screen and
+    /// nothing happened. The whole 12px track is now a hit target; clicking outside the thumb
+    /// jumps toward that position and holding the mouse continues the drag (docs §158).
+    fn horizontal_scrollbar(
+        &self,
+        id: String,
+        handle: &gpui::ScrollHandle,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        let metrics = horizontal_scroll_metrics(handle)?;
+        let track_left = handle.bounds().origin.x;
+        let thumb_left = metrics.travel * metrics.progress;
+        let dragged = handle.clone();
+
+        Some(
+            div()
+                .id(SharedString::from(format!("gallery-scrollbar-{id}")))
+                .absolute()
+                .bottom(px(0.))
+                .left(px(0.))
+                .w(metrics.viewport)
+                .h(px(12.))
+                .hover(|style| style.cursor_pointer())
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(2.))
+                        .left(thumb_left)
+                        .h(px(8.))
+                        .w(metrics.thumb)
+                        .rounded_full()
+                        .bg(rgb(theme::border_strong())),
+                )
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(move |workbench, event: &gpui::MouseDownEvent, _window, cx| {
+                        let local_x =
+                            (event.position.x - track_left).clamp(px(0.), metrics.viewport);
+                        let grab_x = if local_x >= thumb_left
+                            && local_x <= thumb_left + metrics.thumb
+                        {
+                            local_x - thumb_left
+                        } else {
+                            metrics.thumb / 2.
+                        };
+                        let offset_x = horizontal_drag_offset(
+                            event.position.x,
+                            track_left,
+                            grab_x,
+                            metrics.travel,
+                            metrics.overflow,
+                        );
+                        let offset_y = dragged.offset().y;
+                        dragged.set_offset(gpui::point(offset_x, offset_y));
+                        workbench.gallery_scroll_drag = Some(GalleryScrollDrag {
+                            handle: dragged.clone(),
+                            track_left,
+                            grab_x,
+                            travel: metrics.travel,
+                            overflow: metrics.overflow,
+                        });
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                ),
+        )
+    }
+
+    /// A capped grid of outputs, with the last visible tile counting the rest.
+    ///
+    /// **One renderer for images and for files**, because the researcher asked for the same
+    /// treatment on both and the difference is only what a tile draws inside itself. §153's
+    /// sideways strip is gone: it spanned the whole transcript, one folder of seven files claimed
+    /// a band of the conversation wider than the answer above it, and the phone gallery it was
+    /// being compared against is a compact block you flick past. Their words: *"the grouping
+    /// occupies too much space in the conversation (too wide) … less invasive and functions the
+    /// same."*
+    ///
+    /// Fixed-width tiles rather than a fraction of the container, which is what makes it narrow:
+    /// two per row means the block is exactly `2 × tile + gap` and stops there, whatever the panel
+    /// or the window is doing.
+    fn output_grid(
+        &self,
+        scope: &str,
+        heading: String,
+        items: &[workspace::Output],
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let tile = if compact {
+            GRID_TILE_COMPACT
+        } else {
+            GRID_TILE_ROOMY
+        };
+        let (shown, hidden) = image_grid_shape(items.len());
+
+        let mut grid = div().flex().flex_col().gap_2().flex_none();
+        for row_start in (0..shown).step_by(GRID_COLUMNS) {
+            let mut row = div().flex().flex_row().gap_2().flex_none();
+            for at in row_start..(row_start + GRID_COLUMNS).min(shown) {
+                // The count rides on the *last visible* tile, and only when something is behind
+                // it. Clicking it opens that file; the rest are then one arrow away, which is
+                // what makes a capped grid honest rather than lossy.
+                let more = (hidden > 0 && at + 1 == shown).then_some(hidden);
+                row = row.child(self.output_grid_tile(
+                    format!("output-tile-{scope}-{at}"),
+                    items,
+                    at,
+                    tile,
+                    more,
+                    cx,
+                ));
+            }
+            grid = grid.child(row);
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .flex_none()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .w(px(tile * GRID_COLUMNS as f32 + GRID_GAP))
+                    .child(ui::Label::new(heading).size(ui::Size::Compact))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(rgb(theme::text_faint()))
+                            .text_xs()
+                            .child(if hidden > 0 {
+                                "click to open all".to_string()
+                            } else {
+                                "click to open".to_string()
+                            }),
+                    ),
+            )
+            .child(grid)
+    }
+
+    /// One tile: a picture for a figure, a glyph and a name for anything else.
+    ///
+    /// **No filename on an image tile.** The picture identifies itself, the modal's header names
+    /// it, and a caption under every thumbnail was half of what made the old strip feel like
+    /// furniture. A data file is the opposite case — one CSV looks exactly like another — so those
+    /// tiles carry the name and the shape, which is the only thing that tells them apart.
+    ///
+    /// The name is shortened **here**, in Rust, rather than by asking the layout to truncate it.
+    /// `Label::ellipsis` needs a flex parent to grow within (§59), and a tile is a column of
+    /// fixed width — get that wrong and every name renders as a bare `…`, which is exactly what
+    /// §153's tiles did in the panel.
+    fn output_grid_tile(
+        &self,
+        id: String,
+        set: &[workspace::Output],
+        at: usize,
+        tile: f32,
+        more: Option<usize>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let output = &set[at];
+        let opening = set.to_vec();
+        let media = tile * GRID_TILE_ASPECT;
+        let (glyph, ink) = file_mark(&output.path);
+        let shape = self.shape_of(output);
+        let is_image = output.kind == workspace::Kind::Figure;
+
+        let inside = if is_image {
+            div()
+                .relative()
+                .w_full()
+                .h(px(media))
+                .flex_none()
+                .child(
+                    img(output.path.clone())
+                        .w_full()
+                        .h_full()
+                        // `Contain`, not `Cover`: a photo crops acceptably and a chart does not.
+                        // Cropping the axes off a plot makes the thumbnail useless for choosing
+                        // between seven of them, which is the only job it has.
+                        .object_fit(gpui::ObjectFit::Contain),
+                )
+                .when_some(more, |media, more| {
+                    media.child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(gpui::rgba(0x000000a6))
+                            .text_color(rgb(SCRIM_INK))
+                            .text_size(px(media_scrim_size(tile)))
+                            .child(format!("+{more}")),
+                    )
+                })
+                .into_any_element()
+        } else {
+            div()
+                .relative()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_1()
+                .w_full()
+                .h(px(media))
+                .flex_none()
+                .px_2()
+                .child(
+                    div()
+                        .text_color(rgb(ink))
+                        .text_size(px(20.))
+                        .child(glyph),
+                )
+                .child(
+                    div()
+                        .text_color(rgb(theme::text()))
+                        .text_xs()
+                        .child(distinguishing_tail(
+                            &output_filename(output),
+                            name_chars(tile),
+                        )),
+                )
+                .child(
+                    div()
+                        .text_color(rgb(theme::text_faint()))
+                        .text_size(px(11.))
+                        .child(shape.describe(output.bytes)),
+                )
+                .when_some(more, |media, more| {
+                    media.child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(gpui::rgba(0x000000a6))
+                            .text_color(rgb(SCRIM_INK))
+                            .text_size(px(media_scrim_size(tile)))
+                            .child(format!("+{more}")),
+                    )
+                })
+                .into_any_element()
+        };
+
+        div()
+            .id(SharedString::from(id))
+            .flex()
+            .flex_col()
+            .flex_none()
+            .w(px(tile))
+            .overflow_hidden()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(theme::border()))
+            .bg(rgb(if theme::is_light(&theme::current()) {
+                theme::elevated()
+            } else {
+                theme::surface()
+            }))
+            .hover(|style| style.border_color(rgb(theme::accent())).cursor_pointer())
+            .child(inside)
+            .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                workbench.preview = Preview::opening(opening.clone(), at);
+                cx.notify();
+            }))
+    }
+
+    fn output_panel_row(
+        &self,
+        id: String,
+        output: &workspace::Output,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let shown = output.clone();
+        let (glyph, ink) = file_mark(&output.path);
+        div()
+            .id(SharedString::from(id))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .w_full()
+            .min_w_0()
+            .p_2()
+            .rounded_lg()
+            .bg(rgb(theme::elevated()))
+            .hover(|style| style.bg(rgb(theme::accent_soft())).cursor_pointer())
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(rgb(ink))
+                    .text_size(px(13.))
+                    .child(glyph),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_grow()
+                    .min_w_0()
+                    // The filename is the distinguishing tail. The parent folder has its own
+                    // gallery heading, so repeating its UUID here recreates §152 exactly.
+                    .child(
+                        ui::Label::new(output_filename(output))
+                            .size(ui::Size::Compact)
+                            .ellipsis(),
+                    )
+                    .child(
+                        div()
+                            .text_color(rgb(theme::text_faint()))
+                            .text_size(px(11.))
+                            .child(self.shape_of(output).describe(output.bytes)),
+                    ),
+            )
+            .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                workbench.preview = Preview::single(shown.clone());
+                cx.notify();
+            }))
     }
 
     /// The first rows of a table, measured at most once per version of the file.
@@ -6907,9 +8437,35 @@ impl Workbench {
                         .child("— you stopped this turn; the answer above is incomplete"),
                 );
             }
-            // Files last: the answer explains them, so it should be read first.
-            for (at, output) in message.outputs.iter().enumerate() {
-                block = block.child(self.output_card(index * 64 + at, output, cx));
+            // Files last: the answer explains them, so it should be read first. A productive
+            // folder is one sideways gallery rather than one full-width card per artifact — ten
+            // plots were ten screens before the reader chose any of them (§152).
+            let (images, others) = split_images(&message.outputs);
+            if !images.is_empty() {
+                block = block.child(self.output_grid(
+                    &format!("transcript-{index}"),
+                    format!(
+                        "{} image{}",
+                        images.len(),
+                        if images.len() == 1 { "" } else { "s" }
+                    ),
+                    &images,
+                    false,
+                    cx,
+                ));
+            }
+            for (at, group) in output_folder_groups(&others).iter().enumerate() {
+                if let [output] = group.outputs.as_slice() {
+                    block = block.child(self.output_card(index * 64 + at, output, cx));
+                } else {
+                    block = block.child(self.output_grid(
+                        &format!("transcript-{index}-{at}"),
+                        distinguishing_tail(&output_folder_label(&group.folder), 40),
+                        &group.outputs.iter().map(|o| (*o).clone()).collect::<Vec<_>>(),
+                        false,
+                        cx,
+                    ));
+                }
             }
             // What to do with the answer, under the answer. All three exist already — the first
             // is a palette command, and a command nobody knows the name of is a feature nobody
@@ -7347,6 +8903,10 @@ impl Workbench {
             cx.notify();
             return;
         }
+        if self.sidebar_menu.take().is_some() {
+            cx.notify();
+            return;
+        }
         if self.open_picker.take().is_some() {
             cx.notify();
             return;
@@ -7356,6 +8916,11 @@ impl Workbench {
         // promised "esc close" the whole time (docs §84).
         if self.palette_open {
             self.close_palette(window, cx);
+            return;
+        }
+        if self.confirming_delete.take().is_some() {
+            self.restore_focus = true;
+            cx.notify();
             return;
         }
         if self.preview.take().is_some() {
@@ -8221,34 +9786,15 @@ impl Workbench {
                 .composer
                 .update(cx, |composer, cx| composer.submit_now(cx)),
             Command::NewThread => {
-                if self.streaming {
-                    self.status = "can't start a new thread mid-turn".into();
-                    return;
-                }
-                self.sidecar.reset_thread();
-                // **The project is deliberately left alone.** A new conversation continues in
-                // whichever project the last one was in, and `sidecar.project()` already holds
-                // it — set by opening a conversation, by filing one, or at startup from the
-                // remembered value. Consulting the *setting* here was wrong: it is only written
-                // when something is filed, so opening a conversation already in a project and
-                // pressing New put the researcher back in "No project" (docs §107).
-                self.transcript.clear();
-                // A new conversation is a new enquiry. The one just left keeps its own record on
-                // disk, where reopening it will find it.
-                self.provenance = provenance::Record::default();
-                self.text_selection.update(|selection| selection.clear());
-                self.buckets.clear();
-                self.error = None;
-                // Blanket approval is scoped to the conversation, so it ends with it —
-                // together with every per-task grant, whose tasks belonged to that
-                // conversation too. This is the line that makes the button's wording true.
-                self.approve_conversation = false;
-                self.approve_tasks.clear();
-                // The conversation just left should appear in the list.
-                self.refresh_conversations(cx);
-                // The spine is thread-independent — the mission survives, so say so
-                // rather than letting the panel look stale.
-                self.status = "new thread — the project spine is kept".into();
+                // Ordinary New always means the root workspace. Starting within a project has
+                // its own explicit `+` beside that heading; inheriting the open/remembered project
+                // made conversations start already filed and revived deleted headings (§154).
+                //
+                // `new_thread_in` clears `tasks` and `jobs` as well, which is the §159 fix: this
+                // path used to leave the previous conversation's pending approvals on screen and
+                // clickable, and answering one then named the wrong conversation as the worker's
+                // owner. Both routes now clear the same state because there is only one route.
+                self.new_thread_in(None, cx);
             }
             Command::RefreshSpine => {
                 self.refresh_project(cx);
@@ -8391,6 +9937,10 @@ impl Workbench {
         div()
             .absolute()
             .inset_0()
+            // Same reason as the preview backdrop: an overlay that does not occlude leaves the
+            // window under it clickable, so choosing a command could also press whatever the row
+            // happened to be drawn over (docs §163).
+            .occlude()
             .flex()
             .flex_col()
             .items_center()
@@ -8436,7 +9986,7 @@ impl Workbench {
                             .text_color(rgb(theme::text_muted()))
                             .text_xs()
                             .child("↑↓ select ·")
-                            .child(app_icon("icons/enter.svg"))
+                            .child(app_icon("icons/enter.svg", theme::text_muted()))
                             .child("run · esc close"),
                     ),
             )
@@ -8733,7 +10283,14 @@ impl Workbench {
                             .text_color(rgb(theme::accent_hover()))
                             .cursor_pointer()
                     })
-                    .child(app_icon("icons/conversations.svg"))
+                    .child(app_icon(
+                        "icons/conversations.svg",
+                        if self.sidebar_open {
+                            theme::accent()
+                        } else {
+                            theme::text_faint()
+                        },
+                    ))
                     .child("conversations")
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
                         workbench.sidebar_open = !workbench.sidebar_open;
@@ -8783,7 +10340,14 @@ impl Workbench {
                             .text_color(rgb(theme::accent_hover()))
                             .cursor_pointer()
                     })
-                    .child(app_icon("icons/research.svg"))
+                    .child(app_icon(
+                        "icons/research.svg",
+                        if self.panel_open {
+                            theme::accent()
+                        } else {
+                            theme::text_faint()
+                        },
+                    ))
                     .child("research")
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
                         workbench.panel_open = !workbench.panel_open;
@@ -9413,6 +10977,13 @@ impl Workbench {
             .map(|listing| listing.groups.as_slice())
             .unwrap_or_default();
         let count: usize = files.iter().map(|(_, items)| items.len()).sum();
+        // `output_listing` groups by file kind for ordering. The gallery's meaningful boundary
+        // is instead the directory the agent chose (§152), so restore one ordered sequence before
+        // grouping by parent. Cloning metadata only; no file is read here.
+        let ordered_outputs: Vec<workspace::Output> = files
+            .iter()
+            .flat_map(|(_, items)| items.iter().cloned())
+            .collect();
 
         let mut section = div()
             .flex()
@@ -9445,62 +11016,42 @@ impl Workbench {
             );
         }
 
-        for (_, items) in files {
-            for output in items {
-                let shown = output.clone();
-                let (glyph, ink) = file_mark(&output.path);
-                section = section.child(
-                    div()
-                        .id(SharedString::from(format!("file-{}", output.name)))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_2()
-                        .w_full()
-                        .min_w_0()
-                        .p_2()
-                        .rounded_lg()
-                        // A fill instead of a border: thirty bordered rows in a 330px column is
-                        // thirty horizontal lines, and the eye reads those as a table it is
-                        // supposed to compare across.
-                        .bg(rgb(theme::elevated()))
-                        .hover(|style| style.bg(rgb(theme::accent_soft())).cursor_pointer())
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_color(rgb(ink))
-                                .text_size(px(13.))
-                                .child(glyph),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .flex_grow()
-                                .min_w_0()
-                                .child(
-                                    ui::Label::new(output.name.clone())
-                                        .size(ui::Size::Compact)
-                                        .ellipsis(),
-                                )
-                                // The real shape of the file, not just how much of the disk it
-                                // takes: `1,204 rows · 11 cols` is what decides whether it is the
-                                // file you wanted. See `workspace::Shape` for why a PDF gets a
-                                // size and no page count.
-                                .child(
-                                    div()
-                                        .text_color(rgb(theme::text_faint()))
-                                        .text_size(px(11.))
-                                        .child(self.shape_of(output).describe(output.bytes)),
-                                ),
-                        )
-                        .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                            // In the window first. Leaving the app to look at a 4 KB CSV
-                            // is a context switch out of the work, and back is not free.
-                            workbench.preview = Some(shown.clone());
-                            cx.notify();
-                        })),
-                );
+        // Images first and together, then everything else — the two groups the researcher asked
+        // for. Images lead because they are what a person opens the panel to look at; a CSV is
+        // opened to *check* something, which is a deliberate act further down.
+        let (images, others) = split_images(&ordered_outputs);
+        if !images.is_empty() {
+            section = section.child(self.output_grid(
+                "panel",
+                format!(
+                    "{} image{}",
+                    images.len(),
+                    if images.len() == 1 { "" } else { "s" }
+                ),
+                &images,
+                true,
+                cx,
+            ));
+        }
+        for (at, group) in output_folder_groups(&others).iter().enumerate() {
+            if let [output] = group.outputs.as_slice() {
+                // A lone file stays a row: it has the whole width for its name and shape, and a
+                // grid of one is a tile with nothing to compare it to.
+                section = section.child(self.output_panel_row(
+                    format!("panel-output-{}", output.name),
+                    output,
+                    cx,
+                ));
+            } else {
+                // Still folder-grouped, because two runs' `results/` directories are still two
+                // things — the image grid above is the only surface where kind outranks folder.
+                section = section.child(self.output_grid(
+                    &format!("panel-{at}"),
+                    distinguishing_tail(&output_folder_label(&group.folder), 28),
+                    &group.outputs.iter().map(|o| (*o).clone()).collect::<Vec<_>>(),
+                    true,
+                    cx,
+                ));
             }
         }
 
@@ -9637,6 +11188,28 @@ impl Render for Workbench {
             .on_action(cx.listener(Self::dismiss))
             .on_mouse_move(
                 cx.listener(|workbench, event: &gpui::MouseMoveEvent, window, cx| {
+                    if let Some(drag) = workbench.gallery_scroll_drag.as_ref() {
+                        // A release outside the narrow track may not deliver its mouse-up to the
+                        // thumb. The move event still tells us the button is no longer held, so
+                        // end the drag here as well instead of letting the next click move a rail
+                        // the researcher is no longer touching (docs §158).
+                        if !event.dragging() {
+                            workbench.gallery_scroll_drag = None;
+                            cx.notify();
+                            return;
+                        }
+                        let offset_x = horizontal_drag_offset(
+                            event.position.x,
+                            drag.track_left,
+                            drag.grab_x,
+                            drag.travel,
+                            drag.overflow,
+                        );
+                        let offset_y = drag.handle.offset().y;
+                        drag.handle.set_offset(gpui::point(offset_x, offset_y));
+                        cx.notify();
+                        return;
+                    }
                     let Some(edge) = workbench.dragging else {
                         return;
                     };
@@ -9659,7 +11232,9 @@ impl Render for Workbench {
             .on_mouse_up(
                 gpui::MouseButton::Left,
                 cx.listener(|workbench, _event: &gpui::MouseUpEvent, _window, cx| {
-                    if workbench.dragging.take().is_some() {
+                    if workbench.dragging.take().is_some()
+                        || workbench.gallery_scroll_drag.take().is_some()
+                    {
                         cx.notify();
                     }
                 }),
@@ -9697,10 +11272,21 @@ impl Render for Workbench {
             root
         };
 
-        // The preview floats over everything except the palette: it is a thing you open,
-        // look at, and dismiss, not a place you navigate to (docs §49).
+        // The preview floats over the workbench but under destructive confirmation and the
+        // palette: it is a thing you open, look at, and dismiss, not a place you navigate to
+        // (docs §49, §155).
         let root = match &self.preview {
-            Some(output) => root.child(self.preview_modal(output.clone(), cx)),
+            Some(preview) => root.child(self.preview_modal(
+                preview.current().clone(),
+                &preview.items,
+                preview.at,
+                cx,
+            )),
+            None => root,
+        };
+
+        let root = match &self.confirming_delete {
+            Some(target) => root.child(self.delete_modal(target, cx)),
             None => root,
         };
 
@@ -9712,8 +11298,12 @@ impl Render for Workbench {
 
         let root = root.children(self.picker_popup(cx));
 
-        // Last, and `deferred` inside, so it paints over every pane it might open across
-        // instead of being clipped by the one it opened in.
+        // Both menus last, and `deferred` inside, so they paint over every pane they might open
+        // across instead of being clipped by the one they opened in.
+        let root = match &self.sidebar_menu {
+            Some((open, at)) => root.child(self.sidebar_menu_element(open.clone(), *at, cx)),
+            None => root,
+        };
         match &self.context_menu {
             Some(open) => root.child(self.context_menu(open.clone(), cx)),
             None => root,
@@ -9817,16 +11407,367 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_ui_icon_is_embedded_and_tintable_in_a_packaged_build() {
+    fn outputs_in_the_same_agent_folder_become_one_gallery() {
+        let task = "019fe9f6-9126-7710-a806-35d5e09170a4";
+        let names = [
+            PathBuf::from(task).join("guinea_pig_eda_output/plots/health.png"),
+            PathBuf::from(task).join("guinea_pig_eda_output/plots/yield.png"),
+            PathBuf::from(task).join("guinea_pig_eda_output/tables/summary.csv"),
+        ];
+        let outputs: Vec<workspace::Output> = names
+            .into_iter()
+            .map(|name| workspace::Output {
+                path: name.clone(),
+                name: name.to_string_lossy().into_owned(),
+                kind: workspace::Kind::Other,
+                bytes: 1,
+                modified: std::time::SystemTime::UNIX_EPOCH,
+            })
+            .collect();
+
+        let groups = output_folder_groups(&outputs);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].outputs.len(), 2);
+        assert_eq!(groups[1].outputs.len(), 1);
+        assert_eq!(
+            output_folder_label(&groups[0].folder),
+            "guinea_pig_eda_output / plots"
+        );
+    }
+
+    /// `n` outputs, alternating image / not, named so a failure says which one moved.
+    fn sample_outputs(kinds: &[workspace::Kind]) -> Vec<workspace::Output> {
+        kinds
+            .iter()
+            .enumerate()
+            .map(|(at, kind)| {
+                let name = format!("file-{at}");
+                workspace::Output {
+                    path: PathBuf::from(&name),
+                    name,
+                    kind: *kind,
+                    bytes: 1,
+                    modified: std::time::SystemTime::UNIX_EPOCH,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn images_and_other_files_are_two_groups_that_keep_their_order() {
+        use workspace::Kind::{Data, Document, Figure};
+        // The researcher's own boundary: "I want to group images and in another group other
+        // files." A folder of seven plots and one summary CSV used to put the CSV in the middle
+        // of the strip you flick through looking for a figure.
+        let outputs = sample_outputs(&[Figure, Data, Figure, Document, Figure]);
+        let (images, others) = split_images(&outputs);
+        assert_eq!(
+            images.iter().map(|o| o.name.as_str()).collect::<Vec<_>>(),
+            ["file-0", "file-2", "file-4"]
+        );
+        assert_eq!(
+            others.iter().map(|o| o.name.as_str()).collect::<Vec<_>>(),
+            ["file-1", "file-3"],
+            "listing order has to survive the split, or the panel reshuffles"
+        );
+
+        // Neither group is invented: a run with no figures gets no image grid at all.
+        let (none, all) = split_images(&sample_outputs(&[Data, Document]));
+        assert!(none.is_empty());
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn the_last_visible_tile_counts_exactly_the_images_it_hides() {
+        // The `+N` arithmetic, which is off-by-one bait: with four tiles and eight images the
+        // fourth tile is *shown*, so it stands in for the other five — not four, and not six.
+        // WhatsApp's own grid is the reference the researcher pointed at, and it reads `+5`.
+        // (tiles drawn, images the last one stands in for)
+        assert_eq!(image_grid_shape(8), (4, 5), "eight images, four tiles");
+        assert_eq!(image_grid_shape(5), (4, 2));
+        // Exactly the cap, and under it: nothing is hidden, so no tile carries a count.
+        assert_eq!(image_grid_shape(4), (4, 0));
+        assert_eq!(image_grid_shape(3), (3, 0));
+        assert_eq!(image_grid_shape(1), (1, 0));
+        assert_eq!(image_grid_shape(0), (0, 0));
+
+        // Every image is either visible or counted, at every size. This is the property the
+        // off-by-one broke: with `total - tiles` the fourth picture was neither.
+        for total in 0..40usize {
+            let (shown, hidden) = image_grid_shape(total);
+            let visible = if hidden > 0 { shown - 1 } else { shown };
+            assert_eq!(visible + hidden, total, "{total} images went unaccounted for");
+        }
+    }
+
+    #[test]
+    fn every_sidebar_menu_offers_what_its_control_is_about() {
+        let conversation = protocol::Conversation {
+            thread_id: "t-1".into(),
+            title: "Kiwi grading".into(),
+            project: Some("Late blight".into()),
+            updated_at: String::new(),
+        };
+        let labels = |menu: &SidebarMenu| -> Vec<String> {
+            menu.rows().into_iter().map(|row| row.label).collect()
+        };
+
+        // The `New` button names both kinds of new thing. Before this, creating a project meant
+        // opening a conversation first and filing it afterwards — a route with no button (§165).
+        assert_eq!(
+            labels(&SidebarMenu::New),
+            ["New conversation", "New project…"]
+        );
+
+        // A row offers exactly what its two hover chips did, as words.
+        assert_eq!(
+            labels(&SidebarMenu::Conversation(conversation.clone())),
+            ["Rename", "Delete"]
+        );
+
+        // A heading names the project it acts on, so a menu floating over the list still says
+        // which one it belongs to.
+        let project = SidebarMenu::Project {
+            name: "Late blight".into(),
+            conversations: vec![conversation],
+        };
+        assert_eq!(
+            labels(&project),
+            ["New conversation in Late blight", "Delete project"]
+        );
+
+        // Exactly one destructive row per menu, and never the first — the row a mis-aimed click
+        // lands on should not be the irreversible one.
+        for menu in [SidebarMenu::New, project] {
+            let rows = menu.rows();
+            assert!(!rows[0].danger, "the first row is destructive");
+            assert!(rows.iter().filter(|row| row.danger).count() <= 1);
+        }
+    }
+
+    #[test]
+    fn a_grid_stays_a_block_rather_than_spanning_the_conversation() {
+        // The complaint this exists for: *"the grouping occupies too much space in the
+        // conversation (too wide)."* A grid of `flex_1` tiles is as wide as whatever holds it, so
+        // the width has to come from the tiles. Two fixed tiles plus one gap, and nothing about
+        // the window or the panel enters into it.
+        let width = |tile: f32| tile * GRID_COLUMNS as f32 + GRID_GAP;
+
+        // The panel is roughly 330px inside its padding, so the compact block has to fit that.
+        assert!(width(GRID_TILE_COMPACT) <= 320., "{}", width(GRID_TILE_COMPACT));
+        // And the transcript block is close to the phone gallery it imitates — about 415px in the
+        // screenshot the researcher sent — not the full width of the conversation.
+        let roomy = width(GRID_TILE_ROOMY);
+        assert!((400.0..=440.0).contains(&roomy), "{roomy}");
+
+        // Two columns, four tiles: the 2×2 that makes `+N` land on the bottom-right.
+        assert_eq!(IMAGE_GRID_TILES % GRID_COLUMNS, 0);
+        assert_eq!(IMAGE_GRID_TILES / GRID_COLUMNS, 2, "two rows, not three");
+
+        // A name is shortened to something that actually fits, and never to nothing — §59's bare
+        // `…` is what happens when the layout is asked to do this instead.
+        assert!(name_chars(GRID_TILE_COMPACT) >= 20, "{}", name_chars(GRID_TILE_COMPACT));
+        assert!(name_chars(GRID_TILE_ROOMY) > name_chars(GRID_TILE_COMPACT));
+        assert_eq!(name_chars(0.), 8, "a floor, so a name is never cut to nothing");
+        // The tail is what tells two summaries apart, and the result is exactly as long as the
+        // tile allows — 22 characters for a 148px one, ellipsis included.
+        let shortened = distinguishing_tail(
+            "kiwi_quality_summary_statistics.csv",
+            name_chars(GRID_TILE_COMPACT),
+        );
+        assert_eq!(shortened, "…ummary_statistics.csv");
+        assert_eq!(shortened.chars().count(), name_chars(GRID_TILE_COMPACT));
+        assert!(shortened.ends_with(".csv"), "the extension has to survive");
+    }
+
+    #[test]
+    fn stepping_through_a_preview_wraps_and_never_leaves_the_set() {
+        use workspace::Kind::Figure;
+        let outputs = sample_outputs(&[Figure, Figure, Figure]);
+        let mut preview = Preview::opening(outputs.clone(), 1).expect("three files");
+        assert_eq!(preview.current().name, "file-1");
+
+        preview.step(1);
+        assert_eq!(preview.current().name, "file-2");
+        // Past the end comes back to the start. The counter says which of how many, so wrapping
+        // cannot be mistaken for a dead button — and comparing the first plot of a series with
+        // the last should not mean travelling back through the middle.
+        preview.step(1);
+        assert_eq!(preview.current().name, "file-0");
+        preview.step(-1);
+        assert_eq!(preview.current().name, "file-2");
+
+        // An index beyond the set is clamped rather than panicking: a click can arrive after the
+        // files behind it were moved or deleted, which has happened on this project's own
+        // evidence (§159).
+        let clamped = Preview::opening(outputs, 99).expect("still three files");
+        assert_eq!(clamped.current().name, "file-2");
+
+        // Nothing to show is `None`, not an empty preview that panics on `current()`.
+        assert!(Preview::opening(Vec::new(), 0).is_none());
+
+        // A lone file has nowhere to step, and asking must not move it anywhere.
+        let mut single =
+            Preview::single(sample_outputs(&[Figure]).remove(0)).expect("one file");
+        single.step(1);
+        single.step(-1);
+        assert_eq!(single.current().name, "file-0");
+        assert_eq!(single.items.len(), 1);
+    }
+
+    #[test]
+    fn a_thumbnail_names_the_file_instead_of_its_shared_uuid_prefix() {
+        let relative = PathBuf::from("019fe9f6-9126-7710-a806-35d5e09170a4")
+            .join("guinea_pig_eda_output/plots/health_by_activity_box.png");
+        let output = workspace::Output {
+            path: relative.clone(),
+            name: relative.to_string_lossy().into_owned(),
+            kind: workspace::Kind::Figure,
+            bytes: 1,
+            modified: std::time::SystemTime::UNIX_EPOCH,
+        };
+
+        assert_eq!(output_filename(&output), "health_by_activity_box.png");
+        let long = distinguishing_tail("shared-prefix-but-the-useful-name-is-at-the-end.csv", 24);
+        assert!(long.starts_with('…'), "{long}");
+        assert!(long.ends_with("name-is-at-the-end.csv"), "{long}");
+        assert_eq!(long.chars().count(), 24);
+    }
+
+    #[test]
+    fn dragging_a_gallery_thumb_reaches_every_hidden_file() {
+        // A 200px thumb journey represents 800px of hidden content. The pointer keeps the
+        // same 20px grip inside the thumb, and positions beyond either end clamp instead of
+        // exposing blank space (docs §158).
+        let offset = |pointer| {
+            horizontal_drag_offset(px(pointer), px(100.), px(20.), px(200.), px(800.))
+        };
+        assert_eq!(offset(0.), px(0.));
+        assert_eq!(offset(120.), px(0.));
+        assert_eq!(offset(220.), px(-400.));
+        assert_eq!(offset(400.), px(-800.));
+    }
+
+    #[test]
+    fn a_gallery_thumb_never_grows_wider_than_the_rail_it_sits_in() {
+        // A wide rail: the thumb is proportional, and there is room to drag it.
+        let wide = horizontal_thumb_width(px(400.), px(800.));
+        assert!(wide > px(28.) && wide < px(400.), "{wide:?}");
+
+        // A long rail: proportional would be a few pixels, so the 28px floor applies.
+        assert_eq!(horizontal_thumb_width(px(300.), px(9_000.)), px(28.));
+
+        // A rail narrower than that floor is the case the floor alone gets wrong. The thumb has
+        // to stop at the track width, because `travel = viewport - thumb` going negative paints
+        // it outside the track and leaves it undraggable — a control that reads as broken rather
+        // than as absent.
+        for narrow in [1., 10., 27.9] {
+            let thumb = horizontal_thumb_width(px(narrow), px(500.));
+            assert_eq!(thumb, px(narrow), "a {narrow}px rail");
+            assert!(px(narrow) - thumb >= px(0.), "travel went negative at {narrow}");
+        }
+    }
+
+    #[test]
+    fn a_failed_delete_keeps_the_conversation_visible() {
+        assert!(matches!(
+            resolve_delete(
+                "conversation",
+                Some(Err(anyhow::anyhow!("backend unavailable")))
+            ),
+            DeleteResolution::Keep(message) if message.contains("backend unavailable")
+        ));
+        assert!(matches!(
+            resolve_delete("conversation", None),
+            DeleteResolution::Keep(message) if message.contains("still shown")
+        ));
+        assert!(matches!(
+            resolve_delete(
+                "conversation",
+                Some(Ok(sidecar::DeleteOutcome { files_error: None }))
+            ),
+            DeleteResolution::Remove { files_error: None }
+        ));
+    }
+
+    #[test]
+    fn a_file_cleanup_failure_does_not_resurrect_a_deleted_conversation() {
+        // HTTP succeeded, so the durable conversation is gone. A locked Explorer folder is a
+        // recoverable orphan to report, not grounds to put back a row that can no longer open.
+        assert!(matches!(
+            resolve_delete(
+                "conversation",
+                Some(Ok(sidecar::DeleteOutcome {
+                    files_error: Some("folder is open".into())
+                }))
+            ),
+            DeleteResolution::Remove {
+                files_error: Some(message)
+            } if message == "folder is open"
+        ));
+    }
+
+    #[test]
+    fn deleting_a_project_targets_every_conversation_not_only_a_filtered_row() {
+        let conversations = vec![
+            protocol::Conversation {
+                thread_id: "one".into(),
+                project: Some("Late blight".into()),
+                title: "Visible in search".into(),
+                updated_at: String::new(),
+            },
+            protocol::Conversation {
+                thread_id: "two".into(),
+                project: Some("Late blight".into()),
+                title: "Hidden by search".into(),
+                updated_at: String::new(),
+            },
+        ];
+        let target = DeleteTarget::Project {
+            name: "Late blight".into(),
+            conversations,
+        };
+        assert_eq!(target.thread_ids(), vec!["one", "two"]);
+        assert!(target.contains_thread("two"));
+    }
+
+    #[test]
+    fn deleting_a_projects_last_conversation_ends_the_active_project() {
+        let other = protocol::Conversation {
+            thread_id: "other".into(),
+            project: Some("Yield trials".into()),
+            title: "Other work".into(),
+            updated_at: String::new(),
+        };
+        assert!(project_exists(std::slice::from_ref(&other), "Yield trials"));
+        assert!(
+            !project_exists(std::slice::from_ref(&other), "Late blight"),
+            "an empty project cannot survive as an active selection"
+        );
+    }
+
+    #[test]
+    fn every_ui_icon_is_embedded_rather_than_read_from_beside_the_executable() {
+        // The half a test can actually settle: the bytes are *in* the binary, so a Windows
+        // install with no source-tree-relative assets directory resolves them exactly as
+        // `cargo run` does. `include_bytes!` makes a missing file a build failure, and this
+        // makes a path declared in `ICON_PATHS` but never wired into `load` a test failure.
         let assets = Assets;
         assert_eq!(assets.list("icons/").unwrap().len(), ICON_PATHS.len());
         for path in ICON_PATHS {
             let bytes = assets.load(path).unwrap().expect("declared icon is loadable");
             let source = std::str::from_utf8(&bytes).expect("hand-authored SVG is UTF-8");
-            assert!(source.contains("currentColor"), "{path} cannot follow the theme");
             assert!(source.contains("viewBox=\"0 0 24 24\""), "{path} has no common canvas");
         }
         assert!(assets.load("icons/missing.svg").unwrap().is_none());
+
+        // **Not asserted: that they are tintable.** The original test read `currentColor` out of
+        // the file and called that tintable. GPUI never reads it — it rasterises the SVG and
+        // multiplies by `style.text.color`, so whether an icon appears is decided entirely by
+        // the element's own colour and not by anything in these bytes. That assertion passed
+        // just as happily when all four icons rendered nothing at all, which is the state this
+        // PR arrived in. What replaces it is `app_icon` taking `ink` as an argument, so the
+        // compiler refuses a call site that forgets (docs §157).
     }
 
     #[test]
