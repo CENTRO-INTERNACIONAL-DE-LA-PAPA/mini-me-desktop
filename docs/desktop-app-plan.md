@@ -10091,3 +10091,45 @@ belong in the protected Python backend and remain the next performance work.
 
 *Twenty-eighth: readiness is not one fact. A socket can answer, history can be listed, and the agent
 can still be fifteen seconds away from usable.*
+
+
+## 177. The app had a spinner and never showed it when it mattered (2026-08-13)
+
+> *"The delay at loading the conversations doesn't show any animation that says loading."*
+
+There **is** a moving mark. It has been in the status bar since §51, four braille frames on a
+repeating animation, and the comment beside it says exactly why:
+
+> *"a still window during that reads as a hang, which is the single most common reason someone
+> kills an app that was working fine."*
+
+It is shown `when(self.streaming || self.running_fix.is_some())`. So it appears while a turn
+streams — when the transcript is already filling with tokens and nobody could mistake the app for
+stuck — and stays hidden through the two longest silences in the product: the fifteen seconds of
+graph construction at launch (§176), and the pause while a conversation loads. The right reasoning,
+attached to the wrong condition.
+
+### One question instead of two booleans at a call site
+
+`is_waiting()` gathers all five: a streaming turn, a running setup fix, the graph warming, a
+conversation opening, and the conversation list not yet loaded. The status bar asks that rather
+than naming states, so the next wait somebody adds is covered by adding it to one predicate instead
+of being forgotten in a `when`.
+
+Two of those needed a flag. `opening` and `warming` exist because the app knew about both only as
+*prose* — `"opening…"`, `"loading research tools…"` — and prose cannot be asked a question. That is
+§79's rule again: matching on a message to discover a fact is how the two get out of step.
+
+### And a second one, where the researcher is looking
+
+The status bar is at the bottom of the window; the wait being complained about is in the sidebar at
+the top left, under a heading that already said `Loading your conversations…` and said it
+motionlessly. There is a mark beside it now, muted rather than accent — this reports a state, and
+in this app the accent means *act on me*.
+
+`ui::Spinner` is a component for the reason every other one in that module is: the version that
+existed was fifteen lines inline at one call site, so the second place that needed it got a
+sentence instead.
+
+*Twenty-ninth: a feature that exists and is wired to the wrong condition is harder to find than one
+that was never built, because the code review that would catch it sees the feature and stops.*
