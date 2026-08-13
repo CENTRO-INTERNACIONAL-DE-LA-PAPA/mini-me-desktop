@@ -2012,6 +2012,44 @@ fn compose_with_dropped(typed: &str, paths: &[String]) -> String {
     format!("{typed}\n\n{paths}")
 }
 
+/// What a per-specialist model row has to say about the provider it would actually run on.
+///
+/// **A flat list of five providers' models, and only one thing told them apart.** The row used to
+/// be annotated *only* when the provider had no key — on the argument that a missing key is the
+/// thing a researcher has to act on before the choice can work. True, and it optimised for *can
+/// this run* while the question that mattered was *whose account pays*.
+///
+/// Here is what that cost. With the coordinator on `custom` (which is how OpenRouter is reached),
+/// the same dropdown offers:
+///
+/// - `gpt-4.1` — the `openai` provider. OpenAI direct, billed to an OpenAI account.
+/// - `openai/gpt-4o-mini` — the `custom` provider. OpenRouter, billed to an OpenRouter account.
+///
+/// A slash. That was the entire visible difference. A researcher with credits on OpenRouter set
+/// `academic_researcher` to `gpt-4.1`, saw no warning *because they did have an OpenAI key*, and
+/// the next literature search — which delegates to exactly that specialist — died several minutes
+/// in on an exhausted account they had not chosen to use (docs §187).
+///
+/// So every row that leaves the coordinator's provider now says so, keyed or not. `None` only for
+/// the provider already running the conversation, where there is nothing to warn about and a note
+/// on every row would be noise.
+fn specialist_note(
+    model_provider: &settings::Provider,
+    coordinator: &str,
+    has_key: bool,
+) -> Option<String> {
+    if model_provider.id == coordinator {
+        return None;
+    }
+    Some(if has_key {
+        // The consequence, not the mechanism: "a different provider" is a fact about
+        // configuration, "billed separately" is a fact about money.
+        format!("{} — billed separately", model_provider.label)
+    } else {
+        format!("{} — no key stored", model_provider.label)
+    })
+}
+
 /// What a recorded theme name should become once a palette file has been removed.
 ///
 /// `None` when the name still resolves — either it was a built-in all along, or the deleted file
@@ -6426,11 +6464,11 @@ impl Workbench {
             for model in provider.models {
                 let spec = format!("{}::{}", provider.id, model);
                 let selected = chosen.as_deref() == Some(spec.as_str());
-                // Named only when it would be a *second* provider to key, since that is the
-                // thing a researcher has to act on before the choice can work.
-                let missing = provider.id != self.draft.provider
-                    && settings::secret(&format!("llm:{}", provider.id)).is_none();
-                let note = missing.then(|| format!("{} — no key stored", provider.label));
+                let note = specialist_note(
+                    &provider,
+                    &self.draft.provider,
+                    settings::secret(&format!("llm:{}", provider.id)).is_some(),
+                );
                 let picked = name.clone();
                 let value = spec.clone();
                 list = list.child(
@@ -13602,6 +13640,33 @@ mod tests {
                 .any(|(name, _)| name.eq_ignore_ascii_case(&replacement)),
             "{replacement} is not a theme that exists"
         );
+    }
+
+    #[test]
+    fn a_specialist_pointed_at_another_provider_says_whose_account_pays() {
+        let openai = settings::provider("openai").expect("a shipped provider");
+        let custom = settings::provider("custom").expect("a shipped provider");
+
+        // The exact row that cost an afternoon: coordinator on `custom` (which is how OpenRouter
+        // is reached), specialist offered `gpt-4.1` from the `openai` list, and a key stored for
+        // OpenAI — so the old rule said nothing at all, and the turn ran on the wrong account.
+        let note = specialist_note(openai, "custom", true).expect("annotated");
+        assert!(note.contains("OpenAI"), "{note}");
+        assert!(note.contains("billed separately"), "{note}");
+
+        // Still said when there is no key, and the two messages are different: one is a thing to
+        // fix before it works, the other is a thing to know before it costs.
+        let unkeyed = specialist_note(openai, "custom", false).expect("annotated");
+        assert!(unkeyed.contains("no key stored"), "{unkeyed}");
+        assert_ne!(note, unkeyed);
+
+        // The provider already running the conversation needs no note — its models are billed
+        // exactly where every other turn is, and a line on every row is noise.
+        assert_eq!(specialist_note(custom, "custom", true), None);
+        assert_eq!(specialist_note(openai, "openai", true), None);
+        // Including when that provider has no key: the coordinator's own missing key is
+        // §186's problem, refused at the turn, and repeating it on twenty rows helps nobody.
+        assert_eq!(specialist_note(custom, "custom", false), None);
     }
 
     #[test]
