@@ -252,6 +252,37 @@ impl Settings {
         problems
     }
 
+    /// Why a turn would not reach the provider that was chosen — as opposed to failing at it.
+    ///
+    /// **The distinction is which failures are silent.** A wrong model id fails loudly, from the
+    /// provider you picked, in a sentence naming the model; there is nothing to protect anybody
+    /// from. These two do not fail at all: with no key, `run_request_body` omits `__llm_keys`
+    /// entirely — and `base_url` lives *inside* that block — so the backend builds a bare
+    /// OpenAI client, picks up whatever `OPENAI_API_KEY` the distro holds, and bills an account
+    /// nobody selected. The researcher's first news of it was an out-of-credits page for a
+    /// service they were not using (docs §186).
+    ///
+    /// Typed here rather than matched on prose at the call site, so rewording a message cannot
+    /// quietly stop a turn from being blocked.
+    pub fn misdirects_a_turn(&self, has_key: bool) -> Option<String> {
+        let spec = provider(&self.provider)?;
+        if !has_key {
+            return Some(format!(
+                "No API key stored for {} — a turn would run on whichever provider the backend \
+                 falls back to",
+                spec.label
+            ));
+        }
+        if spec.needs_base_url && self.base_url.trim().is_empty() {
+            return Some(format!(
+                "{} needs its base URL — without one the request has no address and falls back \
+                 to OpenAI's",
+                spec.label
+            ));
+        }
+        None
+    }
+
     pub fn load() -> Self {
         let path = settings_path();
         let Ok(text) = std::fs::read_to_string(&path) else {
@@ -732,6 +763,61 @@ mod tests {
         };
         assert_eq!(settings.model_spec(), "anthropic::claude-sonnet-4-5");
         assert_eq!(settings.key_name(), "llm:anthropic");
+    }
+
+    #[test]
+    fn a_turn_is_blocked_only_by_the_failures_that_would_be_silent() {
+        // §186: with no key, `run_request_body` omits `__llm_keys` — and `base_url` is inside
+        // that block — so the backend builds a bare OpenAI client, uses whatever
+        // `OPENAI_API_KEY` the distro holds, and bills an account nobody chose. That is what has
+        // to be refused; it cannot be left as a warning, because there is nothing to warn *in*.
+        let ready = Settings::default();
+        assert_eq!(ready.misdirects_a_turn(true), None, "nothing wrong here");
+
+        let no_key = ready.misdirects_a_turn(false).expect("blocked");
+        assert!(no_key.contains("No API key stored"), "{no_key}");
+        // The message has to say what would otherwise happen, or "no key" reads as a formality.
+        assert!(no_key.contains("falls back"), "{no_key}");
+
+        // OpenRouter is reached through `custom`, and its endpoint is what makes it OpenRouter
+        // rather than OpenAI. A key without a URL is the shape that lost an afternoon.
+        let openrouter = Settings {
+            provider: "custom".into(),
+            model_id: "openai/gpt-4o-mini".into(),
+            base_url: String::new(),
+            ..Default::default()
+        };
+        let missing_url = openrouter.misdirects_a_turn(true).expect("blocked");
+        assert!(missing_url.contains("base URL"), "{missing_url}");
+        let with_url = Settings {
+            base_url: "https://openrouter.ai/api/v1".into(),
+            ..openrouter.clone()
+        };
+        assert_eq!(with_url.misdirects_a_turn(true), None);
+
+        // A missing key outranks a missing URL: it is the one that decides whether *any*
+        // endpoint is sent, and reporting the second first would have somebody fill in a URL
+        // that still goes nowhere.
+        let neither = openrouter.misdirects_a_turn(false).expect("blocked");
+        assert!(neither.contains("No API key stored"), "{neither}");
+
+        // **A wrong model id is not blocked**, deliberately. It fails loudly, at the provider
+        // that was chosen, in a sentence naming the model — there is nothing silent to protect
+        // anybody from, and refusing here would stop somebody trying a model released this week.
+        let unlisted = Settings {
+            model_id: "claude-opus-9".into(),
+            ..Default::default()
+        };
+        assert_eq!(unlisted.misdirects_a_turn(true), None);
+
+        // An unknown provider cannot be reasoned about, so it is not this function's to refuse;
+        // `problems()` already reports it and the pane shows it.
+        let nonsense = Settings {
+            provider: "not-a-provider".into(),
+            ..Default::default()
+        };
+        assert_eq!(nonsense.misdirects_a_turn(false), None);
+        assert!(!nonsense.problems(false).is_empty(), "still reported");
     }
 
     #[test]
