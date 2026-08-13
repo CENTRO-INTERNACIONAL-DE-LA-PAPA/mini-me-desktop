@@ -1965,55 +1965,41 @@ fn markdown_block(
 /// Advisory content is different from state: a payload without suggestions means "no new
 /// advice", not "the advice is withdrawn". Everything else — mission, completed, pending —
 /// is authoritative and replaces.
-/// Turn dropped files into a prompt the researcher can edit before sending.
+/// Put file paths into the composer, and write nothing else.
 ///
 /// **Loaded into the composer, never sent.** Dropping a file is a clumsy gesture — it
 /// happens by accident — and the same rule already governs the suggestion cards: the app
 /// prepares the question, the person asks it (docs §12).
 ///
-/// Directories are named as directories, because "analyse this folder of readings" is a
-/// real request and the agent can list it itself.
-fn prompt_for_dropped(paths: &[String], directories: &[bool]) -> String {
-    match paths {
-        [] => String::new(),
-        [one] => {
-            if directories.first().copied().unwrap_or(false) {
-                format!("Have a look at the files in {one} and tell me what is there.")
-            } else {
-                format!("Analyse the data in {one}. Start by describing what it contains.")
-            }
-        }
-        many => format!(
-            "Analyse these files together:\n{}",
-            many.iter()
-                .map(|path| format!("- {path}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        ),
-    }
-}
-
-/// Add files to a question that is already being written, or write one if it is not.
+/// **And it prepares only the part it knows.** §28 filled the composer with a whole
+/// question — *"Analyse the data in …. Start by describing what it contains."* — which is a
+/// guess about the research, made by the only participant who has not seen the data. Asked
+/// to remove it: *"let's avoid that so the user can have flexibility in his query"* (§180).
+/// The path is the one thing here the app knows and the researcher would rather not type;
+/// what to do with it is theirs.
 ///
-/// **Their words survive.** §28 called `set_text` unconditionally, so the sequence a person
-/// actually performs — decide what to ask, type it, go and fetch the file — destroyed the
-/// question at the last step. Nothing announced it either: the composer simply held different
-/// text than the one they had written.
+/// So the paths go in and the caret ends after them, wherever they are:
 ///
-/// When there is text, the paths go on their own lines underneath and nothing else is
-/// invented. A prepared sentence appended to somebody's question would read as two questions,
-/// the second one contradicting the first about what to do with the file.
-fn compose_with_dropped(typed: &str, paths: &[String], directories: &[bool]) -> String {
+/// - Nothing typed yet — the paths first, then a blank line to carry on writing under.
+/// - Something typed — the paths underneath it, after a blank line, leaving every word alone.
+///
+/// Directories need no special case now that no sentence is written about them. The agent
+/// can list one itself, and "analyse this folder of readings" is the researcher's sentence
+/// to write.
+fn compose_with_dropped(typed: &str, paths: &[String]) -> String {
     let typed = typed.trim_end();
-    if typed.is_empty() {
-        return prompt_for_dropped(paths, directories);
-    }
     if paths.is_empty() {
         return typed.to_string();
     }
+    let paths = paths.join("\n");
+    if typed.is_empty() {
+        // The trailing blank line is where they type. Without it the caret sits flush
+        // against the path and the first character typed joins onto the filename.
+        return format!("{paths}\n\n");
+    }
     // One blank line, then the paths on consecutive lines: they read as an attachment to
     // the question rather than as the end of its last sentence.
-    format!("{typed}\n\n{}", paths.join("\n"))
+    format!("{typed}\n\n{paths}")
 }
 
 /// A dropped path as a person would name it: the filename, or the whole path if it has none.
@@ -3198,19 +3184,24 @@ impl Workbench {
             .iter()
             .map(|path| self.sidecar.path_for_backend(path))
             .collect();
-        let directories: Vec<bool> = usable.iter().map(|path| path.is_dir()).collect();
 
         // **Never overwrites what they typed.** `set_text` was unconditional, so a question
         // written first and a file dropped second lost the question — and dropping is exactly
         // the gesture people reach for *after* deciding what to ask (§179).
         let typed = self.composer.read(cx).text().to_string();
-        let prompt = compose_with_dropped(&typed, &translated, &directories);
+        let prompt = compose_with_dropped(&typed, &translated);
         self.composer
             .update(cx, |composer, cx| composer.set_text(prompt, cx));
         self.restore_focus = true;
+        // Says what to do next, because the composer no longer does. With the prepared
+        // question gone (§180) there is a path sitting in the field and nothing asking
+        // anything, and one line is cheaper than leaving a researcher to infer it.
         self.status = match usable.len() {
-            1 => format!("added {} — press Enter to ask", file_label(usable[0])),
-            n => format!("added {n} files — press Enter to ask"),
+            1 => format!(
+                "added {} — say what you want done with it",
+                file_label(usable[0])
+            ),
+            n => format!("added {n} files — say what you want done with them"),
         };
         // Assigned rather than only set, so a second add clears the first one's warning. A
         // stale "left out yield.csv" beside a composer that no longer mentions it is worse
@@ -13145,9 +13136,9 @@ mod tests {
     }
 
     #[test]
-    fn a_dropped_file_becomes_a_question_the_backend_can_act_on() {
+    fn a_dropped_file_reaches_the_composer_spelled_the_way_the_agent_opens_it() {
         // The path has to be spelled the way the *agent* would open it. On Windows the
-        // agent lives inside WSL, so a prompt naming `C:\…` would send it looking for a
+        // agent lives inside WSL, so a composer naming `C:\…` would send it looking for a
         // file that does not exist there — and the researcher would have no idea why.
         let _env = backend::env_lock::hold();
         let config = backend::BackendConfig {
@@ -13161,60 +13152,57 @@ mod tests {
             config.path_for_backend(std::path::Path::new(r"C:\Users\LENOVO\Documents\yield.csv"));
         assert_eq!(translated, "/mnt/c/Users/LENOVO/Documents/yield.csv");
 
-        let prompt = prompt_for_dropped(std::slice::from_ref(&translated), &[false]);
-        assert!(prompt.contains(&translated), "{prompt}");
-        assert!(!prompt.contains('\\'), "no Windows path survives: {prompt}");
+        let prepared = compose_with_dropped("", std::slice::from_ref(&translated));
+        assert!(prepared.contains(&translated), "{prepared}");
+        assert!(!prepared.contains('\\'), "no Windows path survives: {prepared}");
 
-        // A directory is a different request from a file.
-        let folder = prompt_for_dropped(&["/mnt/c/readings".into()], &[true]);
-        assert!(folder.contains("files in"), "{folder}");
-
-        // Several files are one question about all of them, not several questions.
-        let many = prompt_for_dropped(
-            &["/mnt/c/a.csv".into(), "/mnt/c/b.csv".into()],
-            &[false, false],
-        );
-        assert!(
-            many.contains("/mnt/c/a.csv") && many.contains("/mnt/c/b.csv"),
-            "{many}"
-        );
-        assert_eq!(many.matches("- ").count(), 2, "{many}");
-
-        assert!(prompt_for_dropped(&[], &[]).is_empty());
+        assert!(compose_with_dropped("", &[]).is_empty());
     }
 
     #[test]
-    fn adding_a_file_never_overwrites_the_question_already_typed() {
+    fn adding_a_file_writes_the_path_and_never_a_question() {
+        // §28 filled the composer with "Analyse the data in …. Start by describing what it
+        // contains." — a guess about the research, written by the participant who has not
+        // seen the data. Asked to stop: *"let's avoid that so the user can have flexibility
+        // in his query."* The path is the part the app knows; the question is theirs.
+        let alone = compose_with_dropped("", &["/mnt/c/yield.csv".into()]);
+        assert_eq!(alone, "/mnt/c/yield.csv\n\n");
+        assert!(
+            !alone.to_ascii_lowercase().contains("analyse"),
+            "no question is invented: {alone}"
+        );
+        // The trailing blank line is load-bearing. `set_text` leaves the caret at the end,
+        // so without it the first character typed joins onto the filename.
+        assert!(alone.ends_with("\n\n"), "somewhere to type: {alone:?}");
+
         // The sequence a person actually performs: decide what to ask, type it, *then* go
         // and fetch the file. §28 called `set_text` unconditionally, so the last step threw
         // away the first — silently, because the composer just held different text.
         let typed = "How does yield vary with altitude?";
-        let both = compose_with_dropped(typed, &["/mnt/c/yield.csv".into()], &[false]);
-        assert!(both.starts_with(typed), "their words come first: {both}");
-        assert!(both.contains("/mnt/c/yield.csv"), "{both}");
-        // And nothing is invented on top of them: a prepared sentence appended to somebody's
-        // question reads as a second question arguing with the first.
-        assert!(!both.contains("Start by describing"), "{both}");
+        let both = compose_with_dropped(typed, &["/mnt/c/yield.csv".into()]);
+        assert_eq!(both, format!("{typed}\n\n/mnt/c/yield.csv"));
 
         // Several land on their own lines under one blank line, not one blank line each.
-        let many = compose_with_dropped(
-            typed,
-            &["/mnt/c/a.csv".into(), "/mnt/c/b.csv".into()],
-            &[false, false],
-        );
+        let many = compose_with_dropped(typed, &["/mnt/c/a.csv".into(), "/mnt/c/b.csv".into()]);
         assert_eq!(many, format!("{typed}\n\n/mnt/c/a.csv\n/mnt/c/b.csv"));
 
-        // An empty composer still gets the prepared question — that is the whole point of
-        // dropping a file onto a blank conversation.
-        let alone = compose_with_dropped("   \n ", &["/mnt/c/yield.csv".into()], &[false]);
+        // Whitespace-only counts as empty — a stray Enter in a fresh composer must not make
+        // the path look like an answer to something.
         assert_eq!(
-            alone,
-            prompt_for_dropped(&["/mnt/c/yield.csv".into()], &[false])
+            compose_with_dropped("   \n ", &["/mnt/c/yield.csv".into()]),
+            "/mnt/c/yield.csv\n\n"
         );
 
-        // Trailing whitespace from a stray Enter must not become a blank line of its own.
-        let padded = compose_with_dropped("Look at this:\n\n", &["/mnt/c/a.csv".into()], &[false]);
+        // And trailing whitespace after real text must not become a blank line of its own.
+        let padded = compose_with_dropped("Look at this:\n\n", &["/mnt/c/a.csv".into()]);
         assert_eq!(padded, "Look at this:\n\n/mnt/c/a.csv");
+
+        // A folder is not a special case any more: with no sentence to write about it, it
+        // is a path like any other and what to do with it is the researcher's to say.
+        assert_eq!(
+            compose_with_dropped("", &["/mnt/c/readings".into()]),
+            "/mnt/c/readings\n\n"
+        );
     }
 
     #[test]
