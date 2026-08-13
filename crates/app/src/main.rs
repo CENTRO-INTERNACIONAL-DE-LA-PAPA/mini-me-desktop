@@ -192,7 +192,7 @@ fn picker_row(
         .py_1()
         .rounded_md()
         .when(selected, |row| row.bg(rgb(theme::accent_soft())))
-        .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
+        .hover(|style| style.bg(rgb(theme::hover_over(theme::elevated()))).cursor_pointer())
         .child(
             ui::Label::new(label)
                 .colour(if selected {
@@ -5422,7 +5422,7 @@ impl Workbench {
                         .when(selected, |row| row.bg(rgb(theme::accent_soft())))
                         // Every row reacts to the pointer. A list that does not respond to
                         // the cursor does not read as a list of *buttons*.
-                        .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
+                        .hover(|style| style.bg(rgb(theme::hover_over(theme::elevated()))).cursor_pointer())
                         .child(
                             ui::Label::new(conversation.title.clone())
                                 .colour(if selected {
@@ -5671,7 +5671,7 @@ impl Workbench {
                         theme::text_muted()
                     }))
                     .text_xs()
-                    .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
+                    .hover(|style| style.bg(rgb(theme::hover_over(theme::elevated()))).cursor_pointer())
                     .child(spec.label)
                     .on_click(cx.listener(move |workbench, _event, _window, cx| {
                         workbench.draft.provider = spec.id.to_string();
@@ -5726,7 +5726,7 @@ impl Workbench {
                     // Background only, no border: a border on the selected row alone made
                     // it taller than its neighbours, so the list jumped as you moved down.
                     .when(selected, |row| row.bg(rgb(theme::accent_soft())))
-                    .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
+                    .hover(|style| style.bg(rgb(theme::hover_over(theme::elevated()))).cursor_pointer())
                     .child(
                         // The label truncates, not the row. `truncate` on the flex item
                         // itself gave it zero intrinsic width, so every model rendered as
@@ -5923,7 +5923,7 @@ impl Workbench {
                         theme::border()
                     }))
                     .when(selected, |row| row.bg(rgb(theme::accent_soft())))
-                    .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
+                    .hover(|style| style.bg(rgb(theme::hover_over(theme::elevated()))).cursor_pointer())
                     // The live preview: pointing at a theme applies it to the whole
                     // window, and leaving puts back whatever was chosen. GPUI does have a
                     // hover *event* — `InteractiveElement::on_hover` — so this needed no
@@ -6009,7 +6009,7 @@ impl Workbench {
                     .rounded_md()
                     .border_1()
                     .border_color(rgb(theme::border()))
-                    .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
+                    .hover(|style| style.bg(rgb(theme::hover_over(theme::elevated()))).cursor_pointer())
                     .child(
                         div()
                             .flex()
@@ -8450,7 +8450,7 @@ impl Workbench {
                             .border_color(rgb(theme::accent()))
                     })
                     .when(!leading, |row| row.border_color(rgb(theme::border())))
-                    .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
+                    .hover(|style| style.bg(rgb(theme::hover_over(theme::elevated()))).cursor_pointer())
                     .child(
                         div()
                             .flex_none()
@@ -10893,7 +10893,7 @@ impl Workbench {
                         })
                         .into()
                     })
-                    .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
+                    .hover(|style| style.bg(rgb(theme::hover_over(theme::elevated()))).cursor_pointer())
                     .child(app_icon_at("icons/attach.svg", theme::text_muted(), 17.))
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
                         workbench.choose_files(cx);

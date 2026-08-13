@@ -10556,3 +10556,90 @@ the higher bar; neither gets discarded because it was inconvenient.
 *Thirty-sixth: a test suite encodes which questions you thought to ask. Eight palettes passed
 every assertion in this file while one of them was unreadable in the way a reader actually
 noticed — because nothing had asked "is this comfortable", only "is this legible".*
+
+## 184. Three pigments, three jobs (2026-08-13)
+
+> *"When I hover on buttons my eye cannot distinguish the hovering and the background."*
+>
+> *"Maintain the pale orange for the conversations and the hovering must be the magenta potato.
+> That theme must be named violet native potato, so we can create a third theme where we
+> interchange the violet and magenta."*
+
+### The hover was not faint, it was absent
+
+`picker_row` hovered to `elevated`. `menu_card` — the card those rows are drawn inside — **is**
+`elevated`. Same for the rail. So in those places the hover fill was not a small change, it was
+**the same colour**, in every theme since this file was written, and no amount of squinting was
+going to find it.
+
+Where the two did differ it borrowed the elevation ladder, and an elevation ladder is built to be
+subtle. The light potato's steps are **0.012 apart in OKLCH lightness**, about a third of what an
+eye can find on a large flat area. Two different jobs had been sharing one set of colours: *this
+panel is above that one* and *the pointer is here* need different amounts, and only one of them
+should be quiet.
+
+### The researcher's fix is better than the one being written
+
+Mid-change, the instruction above arrived, and it resolved an objection already half-written into
+the code. A hover tinted with the accent was rejected because **orange already means chosen** —
+eight rows paint `accent_soft` when selected — so a hover wearing orange would claim a row was
+picked when the pointer was only passing over it. The neutral lightness step being written
+instead was the second-best answer to that problem.
+
+Giving hover **its own pigment** dissolves it. Three CIP colours, three jobs:
+
+| | |
+|---|---|
+| 2607 C violet | what you can act on |
+| Process Magenta `#E6007E` | where the pointer is |
+| 1505 C orange, 12% | the row you chose |
+
+It is also more visible than the neutral step, because hue and lightness both move.
+
+And it makes the palette's name mean something, which is why the pair was renamed and a second
+pair added on the researcher's own construction — *"a third theme where we interchange the violet
+and magenta"*. **Violet Native Potato** and **Magenta Native Potato**, each light and dark, named
+by their accent, identical in every other value. The magenta accent is solved to the same Lc 76
+on `surface` as the violet it replaces, so it is exactly as readable and no more.
+
+### A rename is a silent theme change
+
+`apply_theme` resolves a name and falls back to the default when it finds none — right for a
+palette somebody deleted, exactly wrong for one that was renamed. Left alone, a researcher
+reading on *Papa Nativa Light* would have opened the app next morning in the dark default, with
+nothing said and nothing they did to cause it. `canonical_name` maps the retired names forward on
+read, so the picker's tick, the dropdown's label and the palette actually painted cannot
+disagree, and the new name is written back on the next save.
+
+### Where the promise stops, and why it is written down
+
+A hover fill is a **surface** for the length of the hover, and the AA sweep never saw it — so the
+first version of the check found `text_faint` at 4.33 on the light potato's own hover. Fixed by
+darkening that ink and the fill together, and both new palettes now clear 4.5 on every hover fill
+as well as every surface.
+
+Then the derived fallback was measured across the six older palettes, and there is **no fraction
+that works**:
+
+| | smallest lift that is visible | largest lift keeping inks at AA |
+|---|---|---|
+| Bench | 0.055 | 0.010 |
+| Bench Night | 0.040 | 0.025 |
+| Mini-Me Dark | 0.050 | 0.040 |
+| Slate | 0.050 | 0.025 |
+| Paper | 0.055 | 0.115 |
+| High Contrast | 0.070 | 0.190 |
+
+Four of them carry inks so close to the 4.5 floor that **every step large enough to see drops one
+under AA**. So those six keep `elevated` and a weak hover rather than gaining an unreadable one,
+`hover_over` promises nothing it cannot keep, and the test asserts only over the palettes that
+name a fill — with a count, so a filter that quietly matched nothing could not make it vacuous.
+Verified by pointing a potato hover back at `elevated` and watching it fail with *"changes it by
+1.000"*.
+
+- ⬜ **Four older palettes cannot show a hover** — Bench, Bench Night, Mini-Me Dark and Slate.
+  Fixing them means retuning their inks for headroom, which is their own job and a bigger one.
+
+*Thirty-seventh: two jobs sharing one colour is not a saving, it is a coincidence waiting to be
+noticed. Elevation and hover were the same value here for as long as the file has existed, and
+the day one theme made the ladder subtle, the other job simply stopped happening.*

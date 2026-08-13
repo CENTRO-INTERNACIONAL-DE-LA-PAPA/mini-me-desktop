@@ -41,6 +41,14 @@ pub struct Theme {
     pub overlay: u32,
     /// The selected row's fill.
     pub accent_soft: u32,
+    /// The fill a row takes while the pointer is on it — see [`hover_over`].
+    ///
+    /// **Zero means "work one out"**, and that is not a placeholder for a real colour: black is
+    /// not a usable hover fill on any palette (on High Contrast it *is* the page), so no theme
+    /// would ever want it, and a sentinel keeps every existing theme file loading unchanged.
+    /// `serde(default)` is what lets a Zed family imported before this field existed keep working.
+    #[serde(default)]
+    pub hover: u32,
 
     /// Primary reading colour.
     pub text: u32,
@@ -68,18 +76,20 @@ pub struct Theme {
 
 /// The themes that ship with the app.
 ///
-/// Eight, chosen to cover real situations rather than to fill a gallery: the native-potato
-/// pair, the bench pair, the original pair, one for anybody who does not want a warm palette,
-/// and one for anybody who finds the others too low-contrast.
+/// Ten: two native-potato pairs (violet-accented and magenta-accented, each light and dark),
+/// the bench pair, the original pair, one for anybody who does not want a warm palette, and one
+/// for anybody who finds the others too low-contrast.
 ///
 /// **First is the default**, and that is not a comment — [`DEFAULT`] and [`DEFAULT_NAME`] read
 /// this array rather than restating it, so the palette a fresh install opens on is decided in
 /// exactly one place. It used to be decided in three (the `live_theme!` defaults,
 /// `Settings::default`, and `apply_theme`'s fallback), which is the shape this project keeps
 /// getting wrong: several facts that have to agree, with more than one of them saying so.
-pub const THEMES: [(&str, Theme); 8] = [
-    ("Papa Nativa", PAPA_NATIVA),
-    ("Papa Nativa Light", PAPA_NATIVA_LIGHT),
+pub const THEMES: [(&str, Theme); 10] = [
+    ("Violet Native Potato", VIOLET_POTATO),
+    ("Violet Native Potato Light", VIOLET_POTATO_LIGHT),
+    ("Magenta Native Potato", MAGENTA_POTATO),
+    ("Magenta Native Potato Light", MAGENTA_POTATO_LIGHT),
     ("Bench", BENCH),
     ("Bench Night", BENCH_NIGHT),
     ("Mini-Me Dark", MINI_ME_DARK),
@@ -94,52 +104,48 @@ pub const DEFAULT: Theme = THEMES[0].1;
 /// Its name, as `settings.toml` writes it.
 pub const DEFAULT_NAME: &str = THEMES[0].0;
 
-/// A reading palette on CIP's colours: one aubergine hue for the room, four for the signals.
+/// Violet to act on, magenta under the pointer, CIP orange on the row you chose.
 ///
-/// **This is not an editor theme, and §183 is the correction.** Reported as *"it seems these
-/// themes are for coders — our users are scientists that read, analyze"*, which is a description
-/// of the whole genre this palette had been borrowing from: dark ground, saturated accents,
-/// syntax-colour habits. A scientist reading a two-page answer wants a room that holds still.
+/// **A reading palette, not an editor one (§183).** Every value is solved rather than picked:
+/// body text at APCA **Lc 90**, the level named as preferred for columns of body text; a ground
+/// at OKLCH L 0.20 because pure black makes light text bloom; signals at **equal OKLCH chroma
+/// 0.09** against print originals of 0.15–0.24, because saturated colour vibrates on dark and
+/// equal chroma is what stops one status shouting over another; and four even lightness steps
+/// for the surface ladder, even in a space where even means even *to the eye*.
 ///
-/// Every value below was solved rather than picked, against published guidance (docs §183):
+/// **Three CIP pigments, three jobs (§184).** 2607 C violet is what you can act on. Process
+/// Magenta `#E6007E` is where the pointer is. 1505 C orange, at 12% over the surface, is the row
+/// you chose. Named by its accent, which is why there is a magenta twin with the first two
+/// swapped — the researcher's own construction: *"a third theme where we interchange the violet
+/// and magenta."*
 ///
-/// - **Body text sits at APCA Lc 90**, the level APCA names as *preferred for columns of body
-///   text*. Not higher: the first cut ran at 15.3:1 WCAG, near the maximum available, and
-///   maximum contrast is what makes light text bloom into a dark ground.
-/// - **No pure black.** The ground is OKLCH L 0.20, in the region every dark-mode guide settles
-///   on; reading speed measurably drops on pure-black themes.
-/// - **Saturated colour is what vibrates on dark**, so the signals carry OKLCH chroma **0.09**
-///   against print originals of 0.15–0.24. Equal chroma across all four, which in a perceptual
-///   space means equal visual weight — no single status shouts over the others.
-/// - **The surface ladder is four even OKLCH lightness steps** (0.20 → 0.32) at chroma 0.018 on
-///   one hue. Even in OKLCH means even to the eye, which is the entire reason for using it.
+/// The room is the accent's own hue at near-zero chroma, so what separates a panel from a link is
+/// **chroma alone** — 0.018 against 0.09. The four signals are 369 C green, 137 C amber, 1795 C
+/// red and Process Cyan, each within 1° of the printed colour: only lightness and chroma moved,
+/// because those are what a screen forces and hue is what makes a colour recognisable.
 ///
-/// **The hue is CIP's, throughout.** The room and the accent are both 2607 C purple's hue
-/// (308°); what separates a panel from a link is *chroma alone* — 0.018 against 0.09. The four
-/// signals are 369 C green, 137 C amber, 1795 C red and Process Cyan, each within 1° of the
-/// printed colour. Only lightness and chroma moved, because those are the two a screen forces
-/// and hue is what makes a colour recognisable.
-///
-/// `accent_soft` is CIP orange at 12% over `surface`, pre-composited to an opaque colour. GPUI's
-/// theme roles are solid `u32` fills and the Zed importer deliberately drops alpha, so storing a
-/// translucent orange would render differently depending on which of four surfaces happened to
-/// sit behind it. The composite gives the requested soft orange one predictable appearance (§181).
-pub const PAPA_NATIVA: Theme = Theme {
+/// `accent_soft` is pre-composited rather than stored with alpha. GPUI's roles are solid `u32`
+/// fills and the Zed importer drops alpha, so a translucent orange would render differently
+/// depending which of four surfaces sat behind it (§181).
+pub const VIOLET_POTATO: Theme = Theme {
     background: 0x18141c,
     surface: 0x221d26,
     elevated: 0x2b2730,
     overlay: 0x35303a,
     accent_soft: 0x3a2722,
+    // Process Magenta, dark and quiet: a step of 0.075 in OKLCH lightness off `elevated`, which
+    // clears the visible floor against every surface a hovering row can sit on.
+    hover: 0x572d3b,
     // Lc 90 / 76 / 66 against the page: three roles a reader can tell apart without any of them
-    // being a colour. The previous pair measured 76 and 66 and rendered five hex digits apart.
+    // being a colour. The pair before these measured 76 and 66 and rendered five hex digits apart.
     text: 0xe7e4eb,
     text_muted: 0xd1ccd6,
     text_faint: 0xc0bbc6,
     border: 0x3c3444,
     border_strong: 0x594d64,
-    // 2607 C's hue at reading weight. The transcript draws filenames and column names in this,
-    // so it is body text and is held to the body-text floor: Lc 76 on `surface`. Its predecessor
-    // was Lc 47 — under the floor for *incidental* text — while WCAG called it a healthy 6.1:1.
+    // 2607 C's hue at reading weight. The transcript draws filenames and column names in this, so
+    // it is body text and is held to the body-text floor: Lc 76 on `surface`. Its predecessor was
+    // Lc 47 — under the floor for *incidental* text — while WCAG called it a healthy 6.1:1.
     accent: 0xe2c3ff,
     accent_hover: 0xf3d3ff,
     success: 0xb1d396,
@@ -151,46 +157,62 @@ pub const PAPA_NATIVA: Theme = Theme {
 /// The same room with the lights on — for the bench, the greenhouse window and the projector.
 ///
 /// **The counterpart §181 said to build.** Making a dark theme the default reversed a decision
-/// that was never about colour identity — *"it is read next to a bench, a greenhouse window and
-/// a projector, and those are the rooms a dark UI actually fails in"* — and the answer recorded
-/// there was to ship Papa Nativa's own light half rather than send anybody back to teal.
+/// that was never about colour identity — *"it is read next to a bench, a greenhouse window and a
+/// projector, and those are the rooms a dark UI actually fails in"* — and the answer recorded
+/// there was to ship this palette's own light half rather than send anybody back to teal.
 ///
-/// Built to the same targets as its dark half and on the same CIP hues, so the two are one
-/// identity under two lights rather than two themes. Three things differ, and each is forced:
+/// Same targets and same CIP hues as the dark half, so the two are one identity under two lights.
+/// Three things differ, and each is forced: the page is **not pure white** (L 0.955, since a
+/// full-brightness page is the light-mode equivalent of a pure-black one); surface chroma drops
+/// to a third, because the same tint reads far stronger against paper; and signal chroma rises to
+/// 0.11, because a light ground needs more of it to say the same thing and can carry it without
+/// vibrating.
 ///
-/// - **The page is not pure white.** `background` is OKLCH L 0.955; a full-brightness white page
-///   is the light-mode equivalent of a pure-black one, and off-white is the standing advice for
-///   long reading.
-/// - **Surface chroma drops to 0.006**, a third of the dark half's. The same tint reads far
-///   stronger against paper than against near-black.
-/// - **Signal chroma rises to 0.11**, because a light ground needs more of it to say the same
-///   thing — and can carry it without vibrating.
-///
-/// `text_faint` is the one value APCA did not settle alone. At the Lc it wanted, it measured 4.4
-/// against the orange-tinted row — under the WCAG floor this repo enforces. It is darker than
+/// `text_faint` is the one value APCA did not settle alone: at the Lc it wanted it measured 4.4
+/// against the orange-tinted row, under the WCAG floor this repo enforces. It ships darker than
 /// APCA asks so that both scales pass, which is the honest resolution when two measures disagree.
-pub const PAPA_NATIVA_LIGHT: Theme = Theme {
+pub const VIOLET_POTATO_LIGHT: Theme = Theme {
     background: 0xf1eff3,
     surface: 0xf7f5f9,
     elevated: 0xfbf9fd,
     overlay: 0xfefcff,
-    // CIP orange at 12% over `surface` — the tint a selected row gets, and the only place the
-    // logo orange appears. On paper this is the *darkest* surface, so it is what every ink here
-    // had to be checked against.
+    // On paper this is the *darkest* surface, so it is what every ink here had to be checked
+    // against — not the background.
     accent_soft: 0xf6e5db,
+    hover: 0xffd7e4,
     text: 0x333135,
     text_muted: 0x545158,
-    text_faint: 0x68646c,
+    text_faint: 0x625d66,
     border: 0xe4e0e7,
     border_strong: 0xc4bfc8,
-    // 2607 C `#56217A` almost exactly — on paper the printed purple needs no rescuing, only a
-    // little lightness so it reads as ink rather than as a block of colour.
     accent: 0x6a4688,
     accent_hover: 0x512d6d,
     success: 0x456920,
     warning: 0x7d5800,
     error: 0x964738,
     running: 0x006492,
+};
+
+/// [`VIOLET_POTATO`] with its two pigments swapped: magenta to act on, violet under the pointer.
+///
+/// *"So we can create a third theme where we interchange the violet and magenta."* Everything
+/// else is identical — same ground, same ink ladder, same four signals, same orange on the row
+/// you chose — because the two colours being traded are the only difference worth having. The
+/// magenta accent is solved to the same Lc 76 on `surface` as the violet one it replaces, so it
+/// is exactly as readable and no more.
+pub const MAGENTA_POTATO: Theme = Theme {
+    hover: 0x463256,
+    accent: 0xffbdd4,
+    accent_hover: 0xffd1e9,
+    ..VIOLET_POTATO
+};
+
+/// [`VIOLET_POTATO_LIGHT`] with the same swap.
+pub const MAGENTA_POTATO_LIGHT: Theme = Theme {
+    hover: 0xeedcff,
+    accent: 0x883b58,
+    accent_hover: 0x6b213f,
+    ..VIOLET_POTATO_LIGHT
 };
 
 /// Neutral paper and one deep teal. For bright rooms and shared screens.
@@ -208,6 +230,7 @@ pub const BENCH: Theme = Theme {
     surface: 0xf6f5f1,
     elevated: 0xfcfcfa,
     overlay: 0xffffff,
+    hover: 0,
     accent_soft: 0xddede7,
     text: 0x2f343a,
     text_muted: 0x5e656b,
@@ -233,6 +256,7 @@ pub const BENCH_NIGHT: Theme = Theme {
     surface: 0x2a2e33,
     elevated: 0x333840,
     overlay: 0x383e46,
+    hover: 0,
     accent_soft: 0x284840,
     text: 0xe3e5e2,
     text_muted: 0xaeb3b0,
@@ -257,6 +281,7 @@ pub const MINI_ME_DARK: Theme = Theme {
     surface: 0x1c1c21,
     elevated: 0x232329,
     overlay: 0x2a2a31,
+    hover: 0,
     accent_soft: 0x3a2419,
     text: 0xececf0,
     text_muted: 0xb0b0ba,
@@ -277,6 +302,7 @@ pub const SLATE: Theme = Theme {
     surface: 0x1a1e24,
     elevated: 0x222731,
     overlay: 0x2a303b,
+    hover: 0,
     accent_soft: 0x1c3048,
     text: 0xe6eaf0,
     text_muted: 0xacb4c0,
@@ -300,6 +326,7 @@ pub const PAPER: Theme = Theme {
     surface: 0xf7f5f1,
     elevated: 0xfbfaf8,
     overlay: 0xffffff,
+    hover: 0,
     accent_soft: 0xf7ddcd,
     text: 0x24242a,
     text_muted: 0x55555f,
@@ -320,6 +347,7 @@ pub const HIGH_CONTRAST: Theme = Theme {
     surface: 0x0b0b0d,
     elevated: 0x17171b,
     overlay: 0x1f1f25,
+    hover: 0,
     accent_soft: 0x442a12,
     text: 0xffffff,
     text_muted: 0xd8d8de,
@@ -333,6 +361,79 @@ pub const HIGH_CONTRAST: Theme = Theme {
     error: 0xff7d80,
     running: 0x8cc2ff,
 };
+
+/// Palettes that were renamed, and what they are called now.
+///
+/// **A rename is a silent theme change without this.** `apply_theme` resolves a name and falls
+/// back to [`DEFAULT`] when it finds none, which is the right behaviour for a palette somebody
+/// deleted and exactly the wrong one here: a researcher reading on *Papa Nativa Light* would have
+/// opened the app the next morning in the dark default, with nothing said and nothing they did to
+/// cause it. §184 renamed the pair once the second pigment arrived and the old name stopped
+/// describing which of them you had.
+///
+/// Applied on read, so the whole app sees the new name — the picker's tick, the dropdown's label
+/// and the palette actually painted cannot disagree — and written back on the next save.
+const RENAMED: [(&str, &str); 2] = [
+    ("Papa Nativa", "Violet Native Potato"),
+    ("Papa Nativa Light", "Violet Native Potato Light"),
+];
+
+/// The name a stored palette goes by now, which for almost every name is itself.
+pub fn canonical_name(stored: &str) -> &str {
+    RENAMED
+        .iter()
+        .find(|(was, _)| was.eq_ignore_ascii_case(stored))
+        .map_or(stored, |(_, now)| now)
+}
+
+/// The smallest [`contrast`] between two large flat fills that is a step rather than a suspicion.
+/// About 0.035 in OKLCH lightness at either end of the range.
+const HOVER_FLOOR: f64 = 1.12;
+
+/// The fill a row takes while the pointer is on it, over whichever surface it covers.
+///
+/// **The old answer was a coincidence, and often not even that.** Rows hovered to `elevated`
+/// while sitting inside containers painted `elevated` — `menu_card` and the rail both do — so in
+/// those places the hover was not faint, it was *the same colour*, in every theme since this file
+/// was written. Elsewhere it borrowed the elevation ladder, which is built to be subtle: the
+/// light potato's steps are 0.012 apart in OKLCH lightness, a third of what an eye can find.
+/// Reported as *"when I hover on buttons my eye cannot distinguish the hovering and the
+/// background"* (docs §184).
+///
+/// **A theme may name its own hover fill, and the potato palettes do.** Asked for directly:
+/// *"maintain the pale orange for the conversations, and the hovering must be the magenta
+/// potato."* That resolves what would otherwise be a collision — orange already means **chosen**
+/// here, with eight rows painting `accent_soft` when selected, so a hover wearing orange would
+/// claim a row was picked when the pointer was only passing over it. Two pigments, two jobs:
+/// **selection keeps the orange, hover takes the other potato.** It is also the more visible
+/// answer, since hue and lightness both move rather than lightness alone.
+///
+/// A named fill still has to *be* visible against the row it covers, and Zed themes name
+/// `element.hover` while frequently picking something a hair off their own panel. So the name is
+/// checked, not trusted, and anything too close falls through.
+///
+/// **Where no theme names one, this returns `elevated` — the old behaviour, deliberately.** A
+/// derived step was tried and abandoned on measurement: Bench, Bench Night, Mini-Me Dark and
+/// Slate carry inks so near the 4.5 floor that *every* lift large enough to see drops one of
+/// them under AA. There is no fraction that satisfies both, so those six palettes keep a hover
+/// that is weak rather than gaining one that is unreadable. Fixing them means retuning their
+/// inks, which is a separate job and is recorded as one (§184).
+pub fn hover_over(base: u32) -> u32 {
+    let named = hover();
+    if named != 0 && contrast(named, base) >= HOVER_FLOOR {
+        return named;
+    }
+    elevated()
+}
+
+/// Whether a palette states a hover fill of its own, and so gets [`hover_over`]'s guarantee.
+///
+/// Split out because the guarantee is only honest for these, and a test that quietly swept the
+/// rest in would be asserting something this file does not do.
+#[cfg(test)]
+fn names_its_own_hover(theme: &Theme) -> bool {
+    theme.hover != 0
+}
 
 /// Whether a theme is light, so anything computing a shade knows which way is "darker".
 pub fn is_light(theme: &Theme) -> bool {
@@ -438,6 +539,7 @@ live_theme! {
     elevated     => elevated,     ELEVATED_SLOT;
     overlay      => overlay,      OVERLAY_SLOT;
     accent_soft  => accent_soft,  ACCENT_SOFT_SLOT;
+    hover        => hover,        HOVER_SLOT;
     text         => text,         TEXT_SLOT;
     text_muted   => text_muted,   TEXT_MUTED_SLOT;
     text_faint   => text_faint,   TEXT_FAINT_SLOT;
@@ -488,6 +590,81 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_hover_is_visible_over_every_surface_it_can_cover() {
+        // §184: rows hovered to `elevated` while sitting *inside* containers painted `elevated`
+        // — `menu_card` and the rail both do — so the hover was not faint, it was the same
+        // colour, in every theme since this file was written. Where it did differ it borrowed
+        // the elevation ladder, which is built to be subtle: the light potato's steps are 0.012
+        // apart in OKLCH lightness, a third of what an eye can find.
+        // Only the palettes that name a hover fill, because that is the only place the promise
+        // is kept. Bench, Bench Night, Mini-Me Dark and Slate carry inks so near the 4.5 floor
+        // that every step large enough to see drops one of them under AA — measured, not
+        // assumed — so they keep `elevated` and a weak hover rather than an unreadable one.
+        // Sweeping them in here would assert something `hover_over` does not do.
+        let mut checked = 0;
+        for (name, theme) in THEMES.iter().filter(|(_, t)| names_its_own_hover(t)) {
+            apply(theme);
+            checked += 1;
+            for (surface, surface_name) in [
+                (theme.background, "background"),
+                (theme.surface, "surface"),
+                (theme.elevated, "elevated"),
+                (theme.overlay, "overlay"),
+            ] {
+                let fill = hover_over(surface);
+                let step = contrast(fill, surface);
+                assert!(
+                    step >= HOVER_FLOOR,
+                    "{name}: hovering a row on {surface_name} changes it by {step:.3}, which is \
+                     not a change anybody can see"
+                );
+                // And whatever it changes to, the row is still readable — a hover fill is a
+                // surface for the length of the hover, and the AA sweep never sees it.
+                for (ink, ink_name) in [
+                    (theme.text, "text"),
+                    (theme.text_muted, "text_muted"),
+                    (theme.text_faint, "text_faint"),
+                ] {
+                    let ratio = contrast(ink, fill);
+                    assert!(
+                        ratio >= 4.5,
+                        "{name}: {ink_name} on the hover fill over {surface_name} is {ratio:.2}:1"
+                    );
+                }
+            }
+        }
+        // A filter that quietly matched nothing would make every assertion above vacuous.
+        assert_eq!(checked, 4, "the four potato palettes name their own hover fill");
+        apply(&DEFAULT);
+    }
+
+    #[test]
+    fn a_renamed_palette_does_not_silently_become_the_default() {
+        // Without this the rename in §184 would have moved a researcher reading on the light
+        // palette into the dark default overnight: `apply_theme` finds no such name and falls
+        // back, which is right for a deleted theme and wrong for a renamed one.
+        assert_eq!(canonical_name("Papa Nativa"), "Violet Native Potato");
+        assert_eq!(
+            canonical_name("Papa Nativa Light"),
+            "Violet Native Potato Light"
+        );
+        // Matched the way every other theme lookup matches, or a name saved in another case
+        // walks straight past the migration.
+        assert_eq!(canonical_name("papa nativa"), "Violet Native Potato");
+        // Anything else is left exactly as it was, including a palette of the user's own.
+        assert_eq!(canonical_name("Bench"), "Bench");
+        assert_eq!(canonical_name("Catppuccin Mocha"), "Catppuccin Mocha");
+        // And every destination has to be a palette that exists, or this trades a name that
+        // resolves to nothing for another one.
+        for (_, now) in RENAMED {
+            assert!(
+                THEMES.iter().any(|(name, _)| *name == now),
+                "{now} is not a theme that ships"
+            );
+        }
+    }
+
+    #[test]
     fn apca_agrees_with_its_own_published_reference_values() {
         // If this drifts, every threshold below is measuring something else. The published
         // extremes for APCA 0.1.9 are the cheapest possible check on the constants.
@@ -524,8 +701,10 @@ mod tests {
         // which is the same defect and a bigger change than this one. Recorded rather than
         // silently exempted (docs §183).
         for (name, theme) in [
-            ("Papa Nativa", PAPA_NATIVA),
-            ("Papa Nativa Light", PAPA_NATIVA_LIGHT),
+            ("Violet Native Potato", VIOLET_POTATO),
+            ("Violet Native Potato Light", VIOLET_POTATO_LIGHT),
+            ("Magenta Native Potato", MAGENTA_POTATO),
+            ("Magenta Native Potato Light", MAGENTA_POTATO_LIGHT),
         ] {
             let reading = lc(theme.accent, theme.surface);
             assert!(
@@ -699,8 +878,8 @@ mod tests {
             apply(&theme);
             assert_eq!(current(), theme, "{name} did not survive a round trip");
         }
-        assert_eq!(DEFAULT, PAPA_NATIVA);
-        assert_eq!(DEFAULT_NAME, "Papa Nativa");
+        assert_eq!(DEFAULT, VIOLET_POTATO);
+        assert_eq!(DEFAULT_NAME, "Violet Native Potato");
         // What a fresh install writes must name a theme that exists, or it silently falls back.
         assert!(
             THEMES.iter().any(|(name, _)| *name == DEFAULT_NAME),
@@ -770,6 +949,9 @@ pub fn from_zed_family(json: &serde_json::Value) -> Vec<(String, Theme)> {
                         background,
                     ),
                     accent_soft: pick("element.selected", base.accent_soft),
+                    // Zed names this one directly. Absent, it stays 0 — which `hover_over`
+                    // reads as "work one out", not as black.
+                    hover: pick("element.hover", 0),
                     text: pick("text", base.text),
                     text_muted: pick("text.muted", base.text_muted),
                     text_faint: pick("text.placeholder", pick("text.muted", base.text_faint)),

@@ -257,8 +257,11 @@ impl Settings {
         let Ok(text) = std::fs::read_to_string(&path) else {
             return Self::default();
         };
-        match toml::from_str(&text) {
-            Ok(settings) => settings,
+        match toml::from_str::<Self>(&text) {
+            Ok(mut settings) => {
+                settings.theme = crate::theme::canonical_name(&settings.theme).to_string();
+                settings
+            }
             // A corrupt file must not stop the app from opening — the panel is how the
             // user would fix it.
             Err(error) => {
