@@ -69,12 +69,13 @@ const ASTA_CITATION: &str = "AstaBench: Rigorous Benchmarking of AI Agents with 
 /// this is only the researcher-facing name requested in §154, so it cannot become a second
 /// project registry or collide with a real folder of the same name.
 const UNGROUPED_PROJECT_LABEL: &str = "Ungrouped Conversations";
-const ICON_PATHS: [&str; 17] = [
+const ICON_PATHS: [&str; 18] = [
     "icons/settings.svg",
     "icons/conversations.svg",
     "icons/research.svg",
     "icons/road.svg",
     "icons/enter.svg",
+    "icons/attach.svg",
     "icons/file-table.svg",
     "icons/file-image.svg",
     "icons/file-code.svg",
@@ -106,6 +107,7 @@ impl AssetSource for Assets {
             "icons/research.svg" => Some(include_bytes!("../assets/icons/research.svg")),
             "icons/road.svg" => Some(include_bytes!("../assets/icons/road.svg")),
             "icons/enter.svg" => Some(include_bytes!("../assets/icons/enter.svg")),
+            "icons/attach.svg" => Some(include_bytes!("../assets/icons/attach.svg")),
             "icons/file-table.svg" => Some(include_bytes!("../assets/icons/file-table.svg")),
             "icons/file-image.svg" => Some(include_bytes!("../assets/icons/file-image.svg")),
             "icons/file-code.svg" => Some(include_bytes!("../assets/icons/file-code.svg")),
@@ -1991,6 +1993,36 @@ fn prompt_for_dropped(paths: &[String], directories: &[bool]) -> String {
     }
 }
 
+/// Add files to a question that is already being written, or write one if it is not.
+///
+/// **Their words survive.** §28 called `set_text` unconditionally, so the sequence a person
+/// actually performs — decide what to ask, type it, go and fetch the file — destroyed the
+/// question at the last step. Nothing announced it either: the composer simply held different
+/// text than the one they had written.
+///
+/// When there is text, the paths go on their own lines underneath and nothing else is
+/// invented. A prepared sentence appended to somebody's question would read as two questions,
+/// the second one contradicting the first about what to do with the file.
+fn compose_with_dropped(typed: &str, paths: &[String], directories: &[bool]) -> String {
+    let typed = typed.trim_end();
+    if typed.is_empty() {
+        return prompt_for_dropped(paths, directories);
+    }
+    if paths.is_empty() {
+        return typed.to_string();
+    }
+    // One blank line, then the paths on consecutive lines: they read as an attachment to
+    // the question rather than as the end of its last sentence.
+    format!("{typed}\n\n{}", paths.join("\n"))
+}
+
+/// A dropped path as a person would name it: the filename, or the whole path if it has none.
+fn file_label(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned())
+}
+
 /// The first URL in a line of text.
 ///
 /// Stops at whitespace and trims the punctuation a sentence tends to leave attached, so
@@ -3079,12 +3111,57 @@ impl Workbench {
         cx.notify();
     }
 
-    /// A file was dropped on the window.
+    /// Open the platform's file chooser, and add whatever comes back.
+    ///
+    /// **The affordance dragging never had.** §28 accepted a drop anywhere on the window and
+    /// then said so in one line of the empty state — which vanishes the moment a conversation
+    /// has anything in it, leaving the feature invisible for the whole rest of the session.
+    /// Dragging is also the harder gesture on the platform this app is for: it needs Explorer
+    /// and a *not*-maximised window side by side, which is not how anyone works.
+    ///
+    /// Files only. `can_select_mixed_files_and_dirs` is `false` on Windows — the
+    /// `FOS_PICKFOLDERS` flag toggles the dialog between the two rather than widening it — so
+    /// asking for both would silently give a folder picker to someone looking for a CSV.
+    /// Dragging still accepts a folder, which is the gesture that suits one anyway.
+    fn choose_files(&mut self, cx: &mut Context<Self>) {
+        if self.streaming {
+            self.status = "finish this turn before adding files".into();
+            cx.notify();
+            return;
+        }
+        let chosen = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: None,
+        });
+        cx.spawn(async move |this, cx| {
+            // Three outcomes worth telling apart: paths, a cancel, and a picker that would
+            // not open. Only the last is a problem, and it is the one a silent `_ => {}`
+            // would turn into a button that does nothing.
+            match chosen.await {
+                Ok(Ok(Some(paths))) => {
+                    let _ = this.update(cx, |workbench, cx| workbench.add_files(&paths, cx));
+                }
+                Ok(Ok(None)) => {}
+                Ok(Err(error)) => {
+                    let _ = this.update(cx, |workbench, cx| {
+                        workbench.error = Some(format!("could not open the file chooser: {error}"));
+                        cx.notify();
+                    });
+                }
+                Err(_) => {}
+            }
+        })
+        .detach();
+    }
+
+    /// Put files into the question being written — dropped on the window, or chosen.
     ///
     /// The one thing the web app cannot do: the researcher's data is already on this
     /// machine, and this is the whole distance between "here is my CSV" and an analysis —
     /// no upload, no copy, no bucket.
-    fn files_dropped(&mut self, paths: &[std::path::PathBuf], cx: &mut Context<Self>) {
+    fn add_files(&mut self, paths: &[std::path::PathBuf], cx: &mut Context<Self>) {
         if paths.is_empty() {
             return;
         }
@@ -3093,28 +3170,53 @@ impl Workbench {
             cx.notify();
             return;
         }
+        // Checked before anything is written into the composer, because the alternative is a
+        // turn that runs for a minute and then reports a missing file. A share the agent
+        // cannot reach is worth one sentence now rather than a puzzle later (§179).
+        let (usable, unreachable): (Vec<_>, Vec<_>) = paths
+            .iter()
+            .partition(|path| self.sidecar.can_open(path.as_path()));
+        // Named, never counted: "1 of 3 added" leaves the researcher hunting for which one,
+        // and which one is the only actionable part of the sentence.
+        let skipped = unreachable
+            .iter()
+            .map(|path| file_label(path))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if usable.is_empty() {
+            self.error = Some(format!(
+                "{skipped} is on a network share the agent cannot open — copy it to this \
+                 computer first"
+            ));
+            cx.notify();
+            return;
+        }
+
         // Translated to the backend's view of the filesystem — on Windows the agent runs
         // inside WSL, where `C:\…` is `/mnt/c/…`.
-        let translated: Vec<String> = paths
+        let translated: Vec<String> = usable
             .iter()
             .map(|path| self.sidecar.path_for_backend(path))
             .collect();
-        let directories: Vec<bool> = paths.iter().map(|path| path.is_dir()).collect();
+        let directories: Vec<bool> = usable.iter().map(|path| path.is_dir()).collect();
 
-        let prompt = prompt_for_dropped(&translated, &directories);
+        // **Never overwrites what they typed.** `set_text` was unconditional, so a question
+        // written first and a file dropped second lost the question — and dropping is exactly
+        // the gesture people reach for *after* deciding what to ask (§179).
+        let typed = self.composer.read(cx).text().to_string();
+        let prompt = compose_with_dropped(&typed, &translated, &directories);
         self.composer
             .update(cx, |composer, cx| composer.set_text(prompt, cx));
         self.restore_focus = true;
-        self.status = match paths.len() {
-            1 => format!(
-                "added {} — edit the question and press Enter",
-                paths[0]
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| translated[0].clone())
-            ),
-            n => format!("added {n} files — edit the question and press Enter"),
+        self.status = match usable.len() {
+            1 => format!("added {} — press Enter to ask", file_label(usable[0])),
+            n => format!("added {n} files — press Enter to ask"),
         };
+        // Assigned rather than only set, so a second add clears the first one's warning. A
+        // stale "left out yield.csv" beside a composer that no longer mentions it is worse
+        // than the older, already-seen error this replaces.
+        self.error = (!unreachable.is_empty())
+            .then(|| format!("left out {skipped} — on a network share the agent cannot open"));
         cx.notify();
     }
 
@@ -8109,7 +8211,8 @@ impl Workbench {
                             .text_size(px(14.))
                             .line_height(px(21.))
                             .child(
-                                "Ask below, or drop a file on this window. Everything a turn \
+                                "Ask below, or add one of your own data files with the clip — \
+                                 dropping it on this window works too. Everything a turn \
                                  produces is saved into your Documents folder.",
                             ),
                     ),
@@ -10647,11 +10750,47 @@ impl Workbench {
             // focus is a child entity, not this box.
             .track_focus(&self.composer.focus_handle(cx))
             .in_focus(|style| style.border_color(rgb(theme::accent())))
+            // **Feedback for a gesture that had none.** A file dragged over the window changed
+            // nothing on screen, so there was no way to tell the app would take it until you
+            // let go. Lit here rather than over the whole window because this is where the
+            // file lands: it becomes part of the question, and the drop does not send it.
+            //
+            // A style refinement rather than a flag on `Workbench`, deliberately. gpui clears
+            // `active_drag` on `FileDropEvent::Exited` but dispatches that event to no element,
+            // so a flag set on enter would have no way to learn the drag left the window and
+            // would stay lit until the next drop.
+            .drag_over::<gpui::ExternalPaths>(|style, _paths, _window, _cx| {
+                style
+                    .bg(rgb(theme::accent_soft()))
+                    .border_color(rgb(theme::accent()))
+            })
             .on_mouse_down(
                 gpui::MouseButton::Right,
                 cx.listener(|workbench, event: &gpui::MouseDownEvent, _window, cx| {
                     workbench.open_context_menu(event.position, menu::Target::Composer, cx);
                 }),
+            )
+            .child(
+                div()
+                    .id("attach-file")
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(30.))
+                    .h(px(30.))
+                    .rounded_full()
+                    .tooltip(|_window, cx| {
+                        cx.new(|_| Hint {
+                            text: "add a file from this computer".into(),
+                        })
+                        .into()
+                    })
+                    .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
+                    .child(app_icon_at("icons/attach.svg", theme::text_muted(), 17.))
+                    .on_click(cx.listener(|workbench, _event, _window, cx| {
+                        workbench.choose_files(cx);
+                    })),
             )
             .child(self.composer.clone())
             .child(
@@ -11751,7 +11890,7 @@ impl Render for Workbench {
             // their eyes on the file, not on a target.
             .on_drop(
                 cx.listener(|workbench, paths: &gpui::ExternalPaths, _window, cx| {
-                    workbench.files_dropped(paths.paths(), cx);
+                    workbench.add_files(paths.paths(), cx);
                 }),
             )
             .child(body)
@@ -13042,6 +13181,67 @@ mod tests {
         assert_eq!(many.matches("- ").count(), 2, "{many}");
 
         assert!(prompt_for_dropped(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn adding_a_file_never_overwrites_the_question_already_typed() {
+        // The sequence a person actually performs: decide what to ask, type it, *then* go
+        // and fetch the file. §28 called `set_text` unconditionally, so the last step threw
+        // away the first — silently, because the composer just held different text.
+        let typed = "How does yield vary with altitude?";
+        let both = compose_with_dropped(typed, &["/mnt/c/yield.csv".into()], &[false]);
+        assert!(both.starts_with(typed), "their words come first: {both}");
+        assert!(both.contains("/mnt/c/yield.csv"), "{both}");
+        // And nothing is invented on top of them: a prepared sentence appended to somebody's
+        // question reads as a second question arguing with the first.
+        assert!(!both.contains("Start by describing"), "{both}");
+
+        // Several land on their own lines under one blank line, not one blank line each.
+        let many = compose_with_dropped(
+            typed,
+            &["/mnt/c/a.csv".into(), "/mnt/c/b.csv".into()],
+            &[false, false],
+        );
+        assert_eq!(many, format!("{typed}\n\n/mnt/c/a.csv\n/mnt/c/b.csv"));
+
+        // An empty composer still gets the prepared question — that is the whole point of
+        // dropping a file onto a blank conversation.
+        let alone = compose_with_dropped("   \n ", &["/mnt/c/yield.csv".into()], &[false]);
+        assert_eq!(
+            alone,
+            prompt_for_dropped(&["/mnt/c/yield.csv".into()], &[false])
+        );
+
+        // Trailing whitespace from a stray Enter must not become a blank line of its own.
+        let padded = compose_with_dropped("Look at this:\n\n", &["/mnt/c/a.csv".into()], &[false]);
+        assert_eq!(padded, "Look at this:\n\n/mnt/c/a.csv");
+    }
+
+    #[test]
+    fn a_file_on_a_network_share_is_refused_before_the_turn_rather_than_during_it() {
+        // `wsl_path` has no drive letter to work with here, so it passes the path through
+        // and the agent receives `//nas/shared/yield.csv` — which exists in no Linux
+        // filesystem. Left alone, that surfaces a minute into a turn as `FileNotFoundError`,
+        // naming neither the share nor the reason.
+        let _env = backend::env_lock::hold();
+        let wsl = backend::BackendConfig {
+            wsl: Some(backend::WslTarget {
+                distro: None,
+                dir: "~/Mini-Me".into(),
+            }),
+            ..Default::default()
+        };
+        let share = std::path::Path::new(r"\\nas\shared\yield.csv");
+        assert!(!wsl.can_open(share));
+        assert!(wsl.can_open(std::path::Path::new(r"C:\Users\LENOVO\yield.csv")));
+        // A mapped drive letter is fine: WSL mounts those under /mnt like any other.
+        assert!(wsl.can_open(std::path::Path::new(r"Z:\shared\yield.csv")));
+
+        // Only WSL can fail this. A backend on this host opens exactly the path the
+        // researcher's own file manager handed us, network share or not.
+        let host = backend::BackendConfig::default();
+        assert!(host.can_open(share));
+        assert!(host.can_open(std::path::Path::new("/home/p/yield.csv")));
     }
 
     #[test]

@@ -174,6 +174,11 @@ impl Sidecar {
         self.config.path_for_backend(path)
     }
 
+    /// Whether the backend could open this path at all — see [`crate::backend::wsl_can_open`].
+    pub fn can_open(&self, path: &std::path::Path) -> bool {
+        self.config.can_open(path)
+    }
+
     pub fn execution(&self) -> &'static str {
         self.execution
     }

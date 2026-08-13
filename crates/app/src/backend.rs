@@ -211,6 +211,22 @@ pub(crate) fn wsl_path(path: &Path) -> String {
     }
 }
 
+/// Whether [`wsl_path`] produces a path the distro could actually open.
+///
+/// The one shape that survives translation looking perfectly fine and fails anyway is a
+/// Windows UNC path. `\\nas\shared\yield.csv` has no drive letter, so `wsl_path` falls
+/// through to its pass-through arm and hands the agent `//nas/shared/yield.csv` — a path
+/// that exists in no Linux filesystem. The turn then fails minutes later with
+/// `FileNotFoundError`, naming neither the share nor the reason, and the researcher has no
+/// way to guess that the network drive was the problem.
+///
+/// Said at the moment of the drop instead, it is a sentence they can act on: copy it to the
+/// machine first. Mapping the share inside the distro is the other fix and is not one to
+/// suggest to someone who does not code.
+pub(crate) fn wsl_can_open(path: &Path) -> bool {
+    !path.to_string_lossy().replace('\\', "/").starts_with("//")
+}
+
 /// How the client reaches the backend. Defaults to a locally spawned sidecar.
 #[derive(Clone, Debug)]
 pub struct BackendConfig {
@@ -1107,6 +1123,16 @@ impl BackendConfig {
         } else {
             path.to_string_lossy().into_owned()
         }
+    }
+
+    /// Whether the backend could open this path at all, once spelled its way.
+    ///
+    /// Asked before a dropped file becomes part of a question, because the alternative is a
+    /// turn that runs for a minute and then reports a missing file (see [`wsl_can_open`]).
+    /// Only WSL can fail this: a backend on this host reads the path the researcher's own
+    /// file manager gave us.
+    pub fn can_open(&self, path: &Path) -> bool {
+        self.wsl.is_none() || wsl_can_open(path)
     }
 
     /// A copy with the credentials stripped.
