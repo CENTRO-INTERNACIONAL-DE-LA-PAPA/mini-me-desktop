@@ -282,9 +282,12 @@ impl RenderOnce for Label {
             Size::Compact | Size::Chip => text.text_xs(),
         };
         if self.ellipsis {
-            // `flex_grow` is what gives it a width to truncate *to*. Without it this is the
-            // §59 bug.
-            text.flex_grow().truncate().child(self.text)
+            // **`w_full` *and* `flex_grow`.** `flex_grow` alone gives a width only in a *row*;
+            // in a column it grows the height and the width stays at content — which is how
+            // every model name in the specialist picker rendered as a bare "…" even after
+            // `items_start` was removed. `w_full` supplies the width in both, and `flex_grow`
+            // still does §59's job where the parent is a row (docs §192).
+            text.w_full().flex_grow().truncate().child(self.text)
         } else {
             text.w_full().child(self.text)
         }
