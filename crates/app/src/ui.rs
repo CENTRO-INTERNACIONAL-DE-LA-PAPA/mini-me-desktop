@@ -217,6 +217,12 @@ impl RenderOnce for Button {
 pub struct Label {
     text: SharedString,
     colour: u32,
+    /// When false the label paints no colour of its own and takes the parent's.
+    ///
+    /// **Necessary for any state a parent expresses**, hover most of all: a colour written onto
+    /// the element wins over a parent's refinement, so a label that names its own can never
+    /// change with the row it sits in (docs §189).
+    owns_colour: bool,
     size: Size,
     ellipsis: bool,
 }
@@ -226,13 +232,21 @@ impl Label {
         Self {
             text: text.into(),
             colour: theme::text(),
+            owns_colour: true,
             size: Size::Regular,
             ellipsis: false,
         }
     }
 
+    /// Take whatever colour the parent is painting, so the parent can change it per state.
+    pub fn inherit(mut self) -> Self {
+        self.owns_colour = false;
+        self
+    }
+
     pub fn colour(mut self, colour: u32) -> Self {
         self.colour = colour;
+        self.owns_colour = true;
         self
     }
 
@@ -255,7 +269,14 @@ impl Label {
 
 impl RenderOnce for Label {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let text = div().min_w_0().text_color(rgb(self.colour));
+        let text = div().min_w_0();
+        // No `text_color` at all when inheriting — setting one, even the parent's current value,
+        // would pin it and defeat the point.
+        let text = if self.owns_colour {
+            text.text_color(rgb(self.colour))
+        } else {
+            text
+        };
         let text = match self.size {
             Size::Regular => text.text_sm(),
             Size::Compact | Size::Chip => text.text_xs(),
