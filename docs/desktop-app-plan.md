@@ -67,9 +67,9 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   was re-parsed sixty times a second. Cached beside the body now. The list's own entry said
   `uniform_list`, which was **wrong**: it lays every element out at the height of the first, and
   these are a one-line question next to a two-page report.
-- ⬜ **Virtualize the transcript** with `list` + `ListState` — the honest version of the above,
+- ✅ **Virtualize the transcript** with `list` + `ListState` (§156) — the honest version of the above,
   wanted only once a conversation is long enough to feel it.
-- ⬜ **SVG icons** instead of `◎ ▤ ▥ ⏎` — deferred (§70): needs an `AssetSource` and
+- ✅ **SVG icons** instead of `◎ ▤ ▥ ⏎` (§157, §171) — was deferred (§70) because it needs an `AssetSource` and
   hand-authored assets, to replace glyphs that render correctly, for no functional gain.
 
 **Felt friction**
@@ -116,7 +116,7 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   `<task>/guinea_pig_eda_output/plots/health_by_activity_box.png`. Its folder is created *inside*
   the conversation's, and the conversation it belongs to is remembered per thread because the run
   config is not visible at every construction site.
-- ⬜ **A file's own symbol, so the kind is readable at a glance.** Asked for directly: *"add to the
+- ✅ **A file's own symbol, so the kind is readable at a glance** (§171). Asked for directly: *"add to the
   plan how we can put symbols of the files to know what is what. For example if its a python script
   the symbol of python must appear. its the same for json, etc etc etc."* Today `file_mark`
   (`main.rs`) returns one of four geometric glyphs — `▤` for anything tabular, `▩` for an image,
@@ -164,16 +164,15 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   `<work_dir>/tmp` over `/tmp`, or an isolated execution namespace. Not attempted, and explicitly
   not faked: pattern-matching a shell command for writes produces a containment claim that is
   false in every case nobody thought of.
-- ⬜ **The turn says files were saved without checking.** Two failed attempts and the answer
-  reported plots on disk; a later run listed ten filenames the panel could not show. The prompt
-  says *"NEVER invent findings, numbers, or charts"* — the third capital-letter rule measured at
-  zero compliance. Structural version: the workspace diff already exists (§42 finds figures that
-  way), so a claim about files can be checked against it and corrected instead of relayed.
-- ⬜ **Conversations start already inside a project, and a deleted project comes back on the next
-  launch.** *"the conversations start already in a project and thats bad. Also I delete the project
-  and when start up they appear again."* Related to
-  `docs/upstream/mini-me/project-spine-is-not-per-project.md`; the resurrection after deletion is
-  new and is the worse half — a delete that does not delete.
+- ✅ **The turn says files were saved without checking** (§175). An answer's filenames are now
+  compared against the conversation's folder as outputs settle, and what is missing is said under
+  the answer. Still a *report*, not a verdict: a file can be absent because the command failed,
+  because it landed outside the workspace (§160), or because the answer invented it, and the app
+  cannot tell those apart.
+- ✅ **Conversations start already inside a project, and a deleted project comes back**
+  (§154, §155, §166). Ordinary New starts at the workspace root; deletion waits for the backend
+  and takes the folder with it; and §90's pre-tag migration no longer re-tags leftovers the moment
+  the list is empty, which is what actually resurrected them.
 - ⬜ **`start_async_task` accepts only `background_worker`**, by design (§114), while `/subagent`
   lists ten specialist names. Every researcher will reach for `exploratory_data_analysis` first, as
   this one did twice. Either the tool description says so, or it routes.
@@ -9952,3 +9951,53 @@ It joins dotfiles and `__pycache__` in the skip list. The line those three share
 
 *Twenty-sixth: "show everything" is a defensible default for a file list right up to the moment the
 list contains something the reader can break.*
+
+
+## 175. The claim was never checked against the folder (2026-08-12)
+
+The oldest red item, and the one that mattered most: an answer would list ten filenames and the
+Outputs panel would show none of them. Twice, a turn reported plots saved after the command that
+would have written them had failed. The system prompt already says *"NEVER invent findings,
+numbers, or charts"* — the third capital-letter rule this project has measured at zero compliance,
+which is what a rule with nothing behind it is worth.
+
+The app had the answer the whole time. `collect_plots` walks the conversation's folder at the end
+of every turn to find files no message has claimed yet; the same walk says what the folder holds.
+Nothing compared it to what the answer said.
+
+### Reading a name out of prose without inventing one
+
+`named_files` is the whole risk. A false positive puts a correction under a sentence that was fine,
+and a warning that cries wolf is one nobody reads on the day it is right. So:
+
+- The extension must be one a research run actually **writes**. `CLAIMABLE` is deliberately
+  narrower than `file_mark`'s list — no `.sh`, `.js`, `.rs`, because an answer is likelier to
+  mention one in passing than to have produced it.
+- The stem must contain a letter and be at least two characters. `0.96` fails on the extension;
+  `figure 4.png` fails here, while `fig4.png` passes.
+- Punctuation is trimmed, backticks and asterisks are separators, and a path is reduced to its
+  basename — the question is whether the file exists, not whether the model recited its directory.
+
+Tested against the real answer that prompted this and against seven lines of prose that look like
+filenames and are not, including `annual_income vs monthly_spend = 0.96` and a `doi.org` URL.
+
+### Two things it deliberately does not do
+
+**It does not accuse.** A named file can be absent because the command failed, because it landed
+outside the workspace (§160), or because the answer invented it. The app cannot tell those apart,
+so it reports the check — *"named above but not in this conversation's folder"* — and no verdict.
+
+**It does not fix the answer.** Editing the model's text would make the transcript disagree with
+what was actually said, which is a different lie and a worse one.
+
+### Why it self-corrects
+
+Recomputed over every assistant message each time outputs settle, not fixed when the turn ends. A
+background worker can still be writing, so a name missing at second one and present at second three
+was never a false claim — and flagging it would be its own kind of dishonesty. The workspace only
+grows, so the note disappears on its own when the file arrives. Names the *researcher* introduced
+are excluded outright: dropped files are read where they lie (§13), and an input on the desktop was
+never supposed to be in the folder.
+
+*Twenty-eighth: the prompt had the rule and the app had the evidence, and for four months neither
+one knew about the other.*
