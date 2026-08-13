@@ -2690,6 +2690,8 @@ struct Workbench {
     /// project delete needs a count and a path; destructive scope belongs where it can be read
     /// before acting (§155).
     confirming_delete: Option<DeleteTarget>,
+    /// A provider the researcher has clicked but not yet confirmed — see [`Workbench::provider_modal`].
+    confirming_provider: Option<&'static settings::Provider>,
     /// The confirmed target awaiting its backend and filesystem results.
     ///
     /// Optimistically removing the row made a failed or interrupted request look successful
@@ -2886,6 +2888,7 @@ impl Workbench {
             pending_title: None,
             renaming: None,
             confirming_delete: None,
+            confirming_provider: None,
             deleting: None,
             rename_editor,
             approve_tasks: std::collections::HashSet::new(),
@@ -4054,6 +4057,19 @@ impl Workbench {
         self.start_turn_as(prompt, subagent::Dispatch::default(), cx);
     }
 
+    /// The one thing stopping a turn from reaching the provider that was actually chosen.
+    ///
+    /// Read from the **saved** settings rather than from `self.draft`, because the draft is what
+    /// somebody is halfway through editing and the request is built from what was saved. Only
+    /// the two failures that silently redirect a turn — a missing key and a custom provider with
+    /// no endpoint — because a wrong *model id* fails loudly, from the provider you picked, in a
+    /// sentence that names the model.
+    fn provider_blocker(&self) -> Option<String> {
+        let stored = settings::Settings::load();
+        let has_key = settings::secret(&stored.key_name()).is_some();
+        stored.misdirects_a_turn(has_key)
+    }
+
     /// Start a turn, choosing how a `/name` command should reach its specialist.
     fn start_turn_as(
         &mut self,
@@ -4062,6 +4078,21 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) {
         if self.streaming || prompt.trim().is_empty() {
+            return;
+        }
+        // **Refuse rather than fall through to somebody else's account.** `problems()` has always
+        // been computed and, in `main`'s own words, *"warned, not fatal"* — logged at launch and
+        // shown in the pane. A turn ran regardless, and the consequence was not a clear failure:
+        // with no key for the chosen provider, `run_request_body` omits `__llm_keys` **entirely**,
+        // and `base_url` lives inside that block. The backend then builds a bare OpenAI client,
+        // picks up whatever `OPENAI_API_KEY` the distro happens to hold, and bills a provider
+        // nobody selected. Reported as *"this is weird, I set OpenRouter and I have credits"* —
+        // with an out-of-credits page for OpenAI (docs §186).
+        if let Some(problem) = self.provider_blocker() {
+            self.error = Some(format!("{problem} — Settings › Model"));
+            self.settings_section = Section::Model;
+            self.settings_open = true;
+            cx.notify();
             return;
         }
         // `/name …` names a specialist. Resolved *before* anything is sent, because the failure
@@ -5684,10 +5715,15 @@ impl Workbench {
                     .hover(|style| style.bg(rgb(theme::hover_over(theme::elevated()))).cursor_pointer())
                     .child(spec.label)
                     .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                        workbench.draft.provider = spec.id.to_string();
-                        // Suggest a model that exists for the provider just chosen, rather
-                        // than leaving one that does not.
-                        workbench.set_field(Field::ModelId, spec.suggested_model, cx);
+                        // **Staged, not applied.** Picking a pill used to change the provider and
+                        // the model id on the spot, silently, and the only thing that told you
+                        // which account a turn would bill was which pill happened to be lit.
+                        // Asked for after a turn ran against the wrong one: *"a modal that
+                        // confirms the user when he sets the providers"* (docs §186).
+                        if spec.id == workbench.draft.provider {
+                            return;
+                        }
+                        workbench.confirming_provider = Some(spec);
                         cx.notify();
                     })),
             );
@@ -6420,6 +6456,110 @@ impl Workbench {
     /// conversation plus the complete project folder. The old inline "delete / keep" row had no
     /// room to say either fact; confirmation without the consequence is only a second click
     /// (§155).
+    /// Confirm a provider change, and say what it will actually mean.
+    ///
+    /// **Which provider is selected decides which account gets billed**, and until §186 the only
+    /// thing that said so was which pill was lit. That was enough to lose an afternoon: a turn ran
+    /// against a provider the researcher had not chosen, and the first news of it was an
+    /// out-of-credits page belonging to somebody else's API — *"this is weird, I set OpenRouter
+    /// and I have credits."*
+    ///
+    /// So the modal states the three facts a person needs before pressing anything, and it reads
+    /// them **from the keychain and the settings**, not from what the panel happens to show:
+    ///
+    /// 1. Whether a key is stored **for the provider being moved to**. Keys are filed per
+    ///    provider (`llm:<id>`), so one pasted while another pill was selected belongs to that
+    ///    one and is invisible here — which is exactly how the key goes missing.
+    /// 2. That a custom endpoint needs its base URL, since without it the request has no address
+    ///    and the backend falls back to OpenAI's.
+    /// 3. Which model id it is about to be set to, because changing the provider changes that
+    ///    too, and doing it silently is how a valid id turns into one that does not exist.
+    fn provider_modal(
+        &self,
+        spec: &'static settings::Provider,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let leaving = settings::provider(&self.draft.provider).map_or("none", |from| from.label);
+        let has_key = settings::secret(&format!("llm:{}", spec.id)).is_some();
+        let needs_url = spec.needs_base_url && self.draft.base_url.trim().is_empty();
+
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .min_w_0()
+            .gap_3()
+            .child(ui::Label::new(format!(
+                "Turns will run on {} instead of {leaving}, and be billed to that account.",
+                spec.label
+            )));
+
+        // The two that stop a turn, said here rather than discovered several minutes into one.
+        if !has_key {
+            body = body.child(
+                ui::Label::new(format!(
+                    "No API key is stored for {}. Keys are kept per provider, so one added for \
+                     another provider does not count — paste it below after confirming, or this \
+                     one cannot run a turn.",
+                    spec.label
+                ))
+                .colour(theme::warning()),
+            );
+        }
+        if needs_url {
+            body = body.child(
+                ui::Label::new(
+                    "This provider needs its base URL — for OpenRouter that is \
+                     https://openrouter.ai/api/v1. Without it the request has no address to go to.",
+                )
+                .colour(theme::warning()),
+            );
+        }
+        if has_key && !needs_url {
+            body = body.child(
+                ui::Label::new(format!("A key for {} is already stored.", spec.label))
+                    .colour(theme::success()),
+            );
+        }
+
+        body = body.child(
+            ui::Label::new(format!("The model will be set to {}.", spec.suggested_model))
+                .muted()
+                .size(ui::Size::Compact),
+        );
+
+        ui::Modal::new("provider-confirmation", format!("Switch to {}?", spec.label))
+            .width(560.)
+            .focus(&self.delete_focus)
+            .body(body)
+            .actions(
+                ui::actions()
+                    .child(div().flex_grow())
+                    .child(ui::Button::new("provider-cancel", "Cancel").on_click(cx.listener(
+                        |workbench, _event, _window, cx| {
+                            workbench.confirming_provider = None;
+                            cx.notify();
+                        },
+                    )))
+                    .child(
+                        ui::Button::new("provider-confirm", "Switch provider")
+                            .tone(ui::Tone::Accent)
+                            .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                                workbench.confirming_provider = None;
+                                workbench.draft.provider = spec.id.to_string();
+                                // A model that exists for the provider just chosen, rather than
+                                // leaving one that does not.
+                                workbench.set_field(Field::ModelId, spec.suggested_model, cx);
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .footer(
+                ui::Label::new("Nothing is billed until you save and ask a question.")
+                    .muted()
+                    .size(ui::Size::Compact),
+            )
+    }
+
     fn delete_modal(&self, target: &DeleteTarget, cx: &mut Context<Self>) -> impl IntoElement {
         let (title, body, action) = match target {
             DeleteTarget::Conversation(conversation) => {
@@ -9600,6 +9740,12 @@ impl Workbench {
             cx.notify();
             return;
         }
+        if self.confirming_provider.take().is_some() {
+            // Escape leaves the provider as it was: this modal exists precisely so the change
+            // needs a deliberate press, and dismissing is not one.
+            cx.notify();
+            return;
+        }
         if self.preview.take().is_some() {
             cx.notify();
             return;
@@ -12091,6 +12237,13 @@ impl Render for Workbench {
 
         let root = match &self.confirming_delete {
             Some(target) => root.child(self.delete_modal(target, cx)),
+            None => root,
+        };
+
+        // Above Settings, and that is not cosmetic: the pill that raises it lives *inside* the
+        // Settings pane, which mounts later and would otherwise draw straight over it.
+        let root = match self.confirming_provider {
+            Some(spec) => root.child(self.provider_modal(spec, cx)),
             None => root,
         };
 
