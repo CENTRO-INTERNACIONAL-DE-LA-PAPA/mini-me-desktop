@@ -94,90 +94,103 @@ pub const DEFAULT: Theme = THEMES[0].1;
 /// Its name, as `settings.toml` writes it.
 pub const DEFAULT_NAME: &str = THEMES[0].0;
 
-/// Aubergine surfaces, near-neutral ink, and CIP's own palette on the things that signal.
+/// A reading palette on CIP's colours: one aubergine hue for the room, four for the signals.
 ///
-/// CIP's primary orange (`#EE7203`) and brown (`#5D2E00`) belong together in the logo, but
-/// filling a research interface with both makes every panel feel loud and earthy. Native potato
-/// diversity gives the centre a truer and broader colour language: CIP describes flesh and skin
-/// ranging through yellow, pink, red, purple, blue and black. Purple therefore carries the one
-/// saturated role — interaction — while the ink carries long reading.
+/// **This is not an editor theme, and §183 is the correction.** Reported as *"it seems these
+/// themes are for coders — our users are scientists that read, analyze"*, which is a description
+/// of the whole genre this palette had been borrowing from: dark ground, saturated accents,
+/// syntax-colour habits. A scientist reading a two-page answer wants a room that holds still.
 ///
-/// **The ink is near-neutral, and §182 is why.** It shipped as cream `#f2ebdd`, which measures
-/// hue 40° at 45% saturation — not an off-white but a *colour*, and one sitting 130° across the
-/// wheel from a hue-270° ground. Reported as *"the letters and the background compete"*, which is
-/// exactly what opposed chroma at high luminance contrast does. Two numbers changed it: the ink
-/// moved into the background's own hue family (283°, under 10% saturation), and the contrast came
-/// down from 15.3:1 to 12.8:1 — still far above AAA, without the glare of near-maximum ink on a
-/// near-black ground. Hue lives in the surfaces and the accents; text is not where a palette
-/// should be expressed.
+/// Every value below was solved rather than picked, against published guidance (docs §183):
 ///
-/// **The signals are CIP's, unmodified where they clear AA.** `success` is 369 C `#76B82A`,
-/// `warning` is 137 C `#FBBA00`, `running` is Process Cyan `#009FE3` — measured on this ground at
-/// 6.98, 9.78 and 5.70:1, so they ship exactly as the brand guide prints them. Only two needed
-/// moving, and only in lightness and saturation: `error` from 1795 C and `accent` from Process
-/// Magenta, both of which are print colours too dark and too saturated to sit on a dark screen.
-/// Their hues are within 1° of the source.
+/// - **Body text sits at APCA Lc 90**, the level APCA names as *preferred for columns of body
+///   text*. Not higher: the first cut ran at 15.3:1 WCAG, near the maximum available, and
+///   maximum contrast is what makes light text bloom into a dark ground.
+/// - **No pure black.** The ground is OKLCH L 0.20, in the region every dark-mode guide settles
+///   on; reading speed measurably drops on pure-black themes.
+/// - **Saturated colour is what vibrates on dark**, so the signals carry OKLCH chroma **0.09**
+///   against print originals of 0.15–0.24. Equal chroma across all four, which in a perceptual
+///   space means equal visual weight — no single status shouts over the others.
+/// - **The surface ladder is four even OKLCH lightness steps** (0.20 → 0.32) at chroma 0.018 on
+///   one hue. Even in OKLCH means even to the eye, which is the entire reason for using it.
+///
+/// **The hue is CIP's, throughout.** The room and the accent are both 2607 C purple's hue
+/// (308°); what separates a panel from a link is *chroma alone* — 0.018 against 0.09. The four
+/// signals are 369 C green, 137 C amber, 1795 C red and Process Cyan, each within 1° of the
+/// printed colour. Only lightness and chroma moved, because those are the two a screen forces
+/// and hue is what makes a colour recognisable.
 ///
 /// `accent_soft` is CIP orange at 12% over `surface`, pre-composited to an opaque colour. GPUI's
 /// theme roles are solid `u32` fills and the Zed importer deliberately drops alpha, so storing a
 /// translucent orange would render differently depending on which of four surfaces happened to
-/// sit behind it. The composite gives the requested soft orange one predictable appearance and
-/// keeps every ink above the 4.5:1 floor (docs §181).
+/// sit behind it. The composite gives the requested soft orange one predictable appearance (§181).
 pub const PAPA_NATIVA: Theme = Theme {
     background: 0x18141c,
-    surface: 0x211a26,
-    elevated: 0x2b2231,
-    overlay: 0x352a3c,
-    accent_soft: 0x3a2522,
-    text: 0xdcd7de,
-    text_muted: 0xb0a8b5,
-    text_faint: 0xa79eab,
-    border: 0x3f3246,
-    border_strong: 0x5a4663,
-    // Process Magenta at screen weight: the print colour is 100% saturation at 45% lightness,
-    // which on a dark ground is either unreadable or neon depending which way you move it.
-    accent: 0xe873b4,
-    accent_hover: 0xf294c8,
-    success: 0x76b82a,
-    warning: 0xfbba00,
-    error: 0xef7461,
-    running: 0x009fe3,
+    surface: 0x221d26,
+    elevated: 0x2b2730,
+    overlay: 0x35303a,
+    accent_soft: 0x3a2722,
+    // Lc 90 / 76 / 66 against the page: three roles a reader can tell apart without any of them
+    // being a colour. The previous pair measured 76 and 66 and rendered five hex digits apart.
+    text: 0xe7e4eb,
+    text_muted: 0xd1ccd6,
+    text_faint: 0xc0bbc6,
+    border: 0x3c3444,
+    border_strong: 0x594d64,
+    // 2607 C's hue at reading weight. The transcript draws filenames and column names in this,
+    // so it is body text and is held to the body-text floor: Lc 76 on `surface`. Its predecessor
+    // was Lc 47 — under the floor for *incidental* text — while WCAG called it a healthy 6.1:1.
+    accent: 0xe2c3ff,
+    accent_hover: 0xf3d3ff,
+    success: 0xb1d396,
+    warning: 0xe6c485,
+    error: 0xffb7a7,
+    running: 0x8ed0fb,
 };
 
-/// The same palette for a room with the lights on: pale aubergine paper, CIP purple to act on.
+/// The same room with the lights on — for the bench, the greenhouse window and the projector.
 ///
 /// **The counterpart §181 said to build.** Making a dark theme the default reversed a decision
 /// that was never about colour identity — *"it is read next to a bench, a greenhouse window and
 /// a projector, and those are the rooms a dark UI actually fails in"* — and the answer recorded
-/// there was to ship Papa Nativa's own light half rather than send anybody back to teal. This is
-/// it, on the same hue family (270–280°) so the two read as one identity seen under two lights.
+/// there was to ship Papa Nativa's own light half rather than send anybody back to teal.
 ///
-/// The light ground lets CIP's darker colours through untouched, and they are the ones the brand
-/// guide leads with: `accent` is 2607 C `#56217A` at 10.5:1, `success` is 364 C `#34752D` at
-/// 5.33:1. `warning` and `running` are 152 C and Process Cyan darkened — an amber and a cyan
-/// bright enough to print cannot also carry 4.5:1 against paper — with their hues held to within
-/// 3°. `error` is 192 C pulled down far enough to keep its margin on white as well as on paper.
+/// Built to the same targets as its dark half and on the same CIP hues, so the two are one
+/// identity under two lights rather than two themes. Three things differ, and each is forced:
+///
+/// - **The page is not pure white.** `background` is OKLCH L 0.955; a full-brightness white page
+///   is the light-mode equivalent of a pure-black one, and off-white is the standing advice for
+///   long reading.
+/// - **Surface chroma drops to 0.006**, a third of the dark half's. The same tint reads far
+///   stronger against paper than against near-black.
+/// - **Signal chroma rises to 0.11**, because a light ground needs more of it to say the same
+///   thing — and can carry it without vibrating.
+///
+/// `text_faint` is the one value APCA did not settle alone. At the Lc it wanted, it measured 4.4
+/// against the orange-tinted row — under the WCAG floor this repo enforces. It is darker than
+/// APCA asks so that both scales pass, which is the honest resolution when two measures disagree.
 pub const PAPA_NATIVA_LIGHT: Theme = Theme {
-    background: 0xf1edf3,
-    surface: 0xf8f5fa,
-    elevated: 0xfcfafd,
-    overlay: 0xffffff,
-    // CIP orange at 12% over `surface`, the same composite as the dark half — the tint a
-    // selected row gets, and the only place the logo orange appears.
-    accent_soft: 0xf7e5dc,
-    text: 0x2b2431,
-    text_muted: 0x5c5265,
-    // Lighter than `text_muted`, which is the right direction here: on paper, faint means
-    // closer to the page. Still 5.9:1 on the palest surface it is ever drawn against.
-    text_faint: 0x695e72,
-    border: 0xe2dce6,
-    border_strong: 0xc9c0cf,
-    accent: 0x56217a,
-    accent_hover: 0x3f1859,
-    success: 0x34752d,
-    warning: 0x855700,
-    error: 0xbc0230,
-    running: 0x00648f,
+    background: 0xf1eff3,
+    surface: 0xf7f5f9,
+    elevated: 0xfbf9fd,
+    overlay: 0xfefcff,
+    // CIP orange at 12% over `surface` — the tint a selected row gets, and the only place the
+    // logo orange appears. On paper this is the *darkest* surface, so it is what every ink here
+    // had to be checked against.
+    accent_soft: 0xf6e5db,
+    text: 0x333135,
+    text_muted: 0x545158,
+    text_faint: 0x68646c,
+    border: 0xe4e0e7,
+    border_strong: 0xc4bfc8,
+    // 2607 C `#56217A` almost exactly — on paper the printed purple needs no rescuing, only a
+    // little lightness so it reads as ink rather than as a block of colour.
+    accent: 0x6a4688,
+    accent_hover: 0x512d6d,
+    success: 0x456920,
+    warning: 0x7d5800,
+    error: 0x964738,
+    running: 0x006492,
 };
 
 /// Neutral paper and one deep teal. For bright rooms and shared screens.
@@ -326,6 +339,75 @@ pub fn is_light(theme: &Theme) -> bool {
     luminance(theme.background) > 0.5
 }
 
+/// Perceptual lightness contrast, APCA 0.1.9 — the measure [`contrast`] cannot replace.
+///
+/// **Why a second measure exists here.** WCAG 2's ratio is a fixed formula applied to both
+/// polarities, and APCA's own documentation is blunt about the consequence: it *"far overstates
+/// contrast for dark colors to the point that 4.5:1 can be functionally unreadable"*, and
+/// *"cannot be used for guidance designing dark mode"*. Reading performance differs between dark
+/// text on light and light text on dark at the same ratio, so APCA models the two separately.
+/// This app is a reading tool with a dark default; measuring it with the wrong instrument is how
+/// §182 shipped an accent at Lc 47 — under even the floor for incidental text — while WCAG
+/// reported a comfortable 6.1:1 (docs §183).
+///
+/// The scale is roughly 0–106 for dark-on-light and 0 to −108 for light-on-dark; the sign is the
+/// polarity. [`lc`] takes the magnitude, which is what thresholds are quoted against:
+///
+/// | Lc | for |
+/// |----|-----|
+/// | 90 | preferred for columns of body text |
+/// | 75 | minimum for columns of body text |
+/// | 60 | minimum for content text that is not body text |
+/// | 45 | minimum for headlines |
+/// | 30 | absolute minimum for placeholder and disabled text |
+///
+/// `contrast` stays because WCAG 2 is what accessibility policy is written against, and because
+/// the two disagree in *both* directions — the light half of Papa Nativa needed its faintest ink
+/// pushed past what APCA alone asked in order to clear WCAG's 4.5 on the tinted row.
+///
+/// Gated to tests because that is honestly where it is used: nothing renders differently for it,
+/// it exists so a palette cannot ship unreadable. The gate comes off the first time something at
+/// runtime needs to ask.
+#[cfg(test)]
+pub fn apca(text: u32, background: u32) -> f64 {
+    fn y(colour: u32) -> f64 {
+        let channel = |shift: u32| {
+            (((colour >> shift) & 0xff) as f64 / 255.).powf(2.4)
+        };
+        0.2126729 * channel(16) + 0.7151522 * channel(8) + 0.0721750 * channel(0)
+    }
+    // Soft black clamp: near-black surfaces flatten perceptually, and without this the algorithm
+    // reports contrast that is not there.
+    fn clamp(value: f64) -> f64 {
+        if value > 0.022 {
+            value
+        } else {
+            value + (0.022 - value).powf(1.414)
+        }
+    }
+
+    let (text_y, background_y) = (clamp(y(text)), clamp(y(background)));
+    if (background_y - text_y).abs() < 0.0005 {
+        return 0.;
+    }
+    let raw = if background_y > text_y {
+        // Dark text on a light ground.
+        let sapc = (background_y.powf(0.56) - text_y.powf(0.57)) * 1.14;
+        if sapc < 0.1 { 0. } else { sapc - 0.027 }
+    } else {
+        // Light text on a dark ground — different exponents, which is the whole point.
+        let sapc = (background_y.powf(0.65) - text_y.powf(0.62)) * 1.14;
+        if sapc > -0.1 { 0. } else { sapc + 0.027 }
+    };
+    raw * 100.
+}
+
+/// [`apca`] without the polarity sign, for comparing against a threshold.
+#[cfg(test)]
+pub fn lc(text: u32, background: u32) -> f64 {
+    apca(text, background).abs()
+}
+
 macro_rules! live_theme {
     ($($field:ident => $getter:ident, $slot:ident;)*) => {
         $(
@@ -404,6 +486,55 @@ pub fn contrast(a: u32, b: u32) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apca_agrees_with_its_own_published_reference_values() {
+        // If this drifts, every threshold below is measuring something else. The published
+        // extremes for APCA 0.1.9 are the cheapest possible check on the constants.
+        assert!((apca(0xffffff, 0x000000) + 107.88).abs() < 0.05);
+        assert!((apca(0x000000, 0xffffff) - 106.04).abs() < 0.05);
+        // Polarity is the sign, and it is the whole reason this exists beside `contrast`.
+        assert!(apca(0xffffff, 0x000000) < 0., "light on dark is negative");
+        assert!(apca(0x000000, 0xffffff) > 0., "dark on light is positive");
+        // Identical colours are no contrast rather than a divide-by-something.
+        assert_eq!(apca(0x808080, 0x808080), 0.);
+    }
+
+    #[test]
+    fn text_meant_for_reading_clears_the_apca_body_text_floor() {
+        // APCA's levels: Lc 90 preferred for columns of body text, **Lc 75 the minimum**, Lc 60
+        // for content text that is not body text. §183 measures against these because WCAG 2
+        // "cannot be used for guidance designing dark mode" — its ratio far overstates contrast
+        // for dark colours, which is how an accent at Lc 47 shipped reporting 6.1:1.
+        for (name, theme) in THEMES {
+            let body = lc(theme.text, theme.background);
+            assert!(
+                body >= 85.,
+                "{name}: body text is Lc {body:.0}, under the level APCA prefers for columns \
+                 of body text"
+            );
+        }
+
+        // The accent is held to the *body-text* floor rather than the incidental-text one, and
+        // only for these two, deliberately. The transcript renders filenames and column names in
+        // `accent` — `hola_eda_correlation.csv`, `annual_income` — so in this app that colour is
+        // something a researcher reads by the paragraph, not a button label glanced at.
+        //
+        // Not asserted for the six older palettes: Mini-Me Dark measures Lc 48 and Slate Lc 51,
+        // which is the same defect and a bigger change than this one. Recorded rather than
+        // silently exempted (docs §183).
+        for (name, theme) in [
+            ("Papa Nativa", PAPA_NATIVA),
+            ("Papa Nativa Light", PAPA_NATIVA_LIGHT),
+        ] {
+            let reading = lc(theme.accent, theme.surface);
+            assert!(
+                reading >= 75.,
+                "{name}: accent is Lc {reading:.0} on surface, under the body-text minimum — \
+                 and this app sets filenames in it"
+            );
+        }
+    }
 
     #[test]
     fn the_ink_a_whole_answer_is_set_in_stays_near_grey() {
