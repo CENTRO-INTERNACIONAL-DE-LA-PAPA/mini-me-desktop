@@ -5570,6 +5570,42 @@ impl Workbench {
         cx.notify();
     }
 
+    /// Remove the JSON file behind an installed palette and keep the live theme valid.
+    ///
+    /// One Zed file can carry a whole family, so the picker removes the file rather than
+    /// pretending one palette inside it is independently installed. If the file supplied the
+    /// current palette, a built-in with the same name is revealed and reapplied; if no such name
+    /// remains, both the draft and the trigger move to the default. Leaving the deleted name in
+    /// either place would make Settings display a choice the next launch cannot load (docs §181).
+    fn uninstall_theme(&mut self, path: PathBuf, name: String, cx: &mut Context<Self>) {
+        let removed = settings::available_theme_entries()
+            .iter()
+            .filter(|entry| entry.source.as_deref() == Some(path.as_path()))
+            .count();
+
+        match settings::uninstall_theme_file(&path) {
+            Ok(()) => {
+                let current_still_exists = settings::available_themes()
+                    .iter()
+                    .any(|(candidate, _)| candidate.eq_ignore_ascii_case(&self.applied_theme));
+                if !current_still_exists {
+                    self.applied_theme = theme::DEFAULT_NAME.to_string();
+                    self.draft.theme = theme::DEFAULT_NAME.to_string();
+                }
+                // Also matters when the removed file overrode a built-in: the name remains, but
+                // its palette has changed back to the bundled one and the next frame must too.
+                settings::apply_theme(&self.draft);
+                self.gallery_note = if removed > 1 {
+                    format!("removed {removed} palettes from the installed family")
+                } else {
+                    format!("removed {name}")
+                };
+            }
+            Err(error) => self.gallery_note = format!("could not remove {name}: {error:#}"),
+        }
+        cx.notify();
+    }
+
     /// The five providers, as pills rather than a cycle button.
     ///
     /// Five fit on one row, so there is no reason to make someone click through them —
@@ -5735,14 +5771,14 @@ impl Workbench {
     fn theme_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
         // The same fuzzy scorer as everywhere else, so `mocha` finds Catppuccin Mocha.
         let query = self.theme_filter.read(cx).text().to_string();
-        let mut matched: Vec<(i32, String, theme::Theme)> = settings::available_themes()
+        let mut matched: Vec<(i32, settings::ThemeEntry)> = settings::available_theme_entries()
             .into_iter()
-            .filter_map(|(name, palette)| {
-                match_score(&query, &name).map(|score| (score, name, palette))
+            .filter_map(|entry| {
+                match_score(&query, &entry.name).map(|score| (score, entry))
             })
             .collect();
         if !query.trim().is_empty() {
-            matched.sort_by_key(|(score, _, _)| std::cmp::Reverse(*score));
+            matched.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
         }
 
         // Capped and scrollable: four built-ins fit, a hundred installed palettes do not,
@@ -5761,7 +5797,12 @@ impl Workbench {
             .overflow_y_scroll()
             .track_scroll(&self.theme_scroll);
 
-        for (_, name, palette) in matched {
+        for (_, entry) in matched {
+            let settings::ThemeEntry {
+                name,
+                palette,
+                source,
+            } = entry;
             let selected = name.eq_ignore_ascii_case(&self.applied_theme);
             let chosen = name.clone();
             let previewed = name.clone();
@@ -5786,6 +5827,48 @@ impl Workbench {
                         .border_color(rgb(palette.border)),
                 );
             }
+
+            let remove_name = name.clone();
+            let actions = div()
+                .flex()
+                .flex_row()
+                .flex_none()
+                .items_center()
+                .gap_2()
+                .child(swatch)
+                .when_some(source, |actions, path| {
+                    actions.child(
+                        div()
+                            .id(SharedString::from(format!("remove-theme-hint-{remove_name}")))
+                            .tooltip(|_window, cx| {
+                                cx.new(|_| Hint {
+                                    text: "remove this installed file and every palette in it"
+                                        .into(),
+                                })
+                                .into()
+                            })
+                            .child(
+                                ui::Button::new(
+                                    SharedString::from(format!("remove-theme-{remove_name}")),
+                                    "remove",
+                                )
+                                .size(ui::Size::Compact)
+                                .on_click(cx.listener(
+                                    move |workbench, _event, _window, cx| {
+                                        // The theme row itself selects and closes the picker.
+                                        // Removing is a second action nested inside that row, so
+                                        // it must not also select the file it just deleted.
+                                        cx.stop_propagation();
+                                        workbench.uninstall_theme(
+                                            path.clone(),
+                                            remove_name.clone(),
+                                            cx,
+                                        );
+                                    },
+                                )),
+                            ),
+                    )
+                });
 
             list = list.child(
                 div()
@@ -5836,7 +5919,7 @@ impl Workbench {
                             })
                             .ellipsis(),
                     )
-                    .child(swatch)
+                    .child(actions)
                     .on_click(cx.listener(move |workbench, _event, _window, cx| {
                         workbench.draft.theme = chosen.clone();
                         workbench.applied_theme = chosen.clone();
@@ -13227,7 +13310,13 @@ mod tests {
 
         // Only WSL can fail this. A backend on this host opens exactly the path the
         // researcher's own file manager handed us, network share or not.
-        let host = backend::BackendConfig::default();
+        // Windows deliberately defaults the Python backend to WSL, so `Default` is not a host
+        // fixture on the platform this test is meant to protect. Name the boundary explicitly;
+        // otherwise the assertion depends on which OS runs the suite (§179).
+        let host = backend::BackendConfig {
+            wsl: None,
+            ..Default::default()
+        };
         assert!(host.can_open(share));
         assert!(host.can_open(std::path::Path::new("/home/p/yield.csv")));
     }

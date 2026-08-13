@@ -12,9 +12,9 @@
 //! the *run request* (`configurable.__llm_keys`, see `protocol.rs`), so nobody has to
 //! hand-edit a `.env` inside a WSL distro to get started (docs §20).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, Result};
+use anyhow::{bail, Context as _, Result};
 use serde::{Deserialize, Serialize};
 
 /// The keychain service every secret is filed under.
@@ -291,14 +291,32 @@ pub fn themes_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("themes"))
 }
 
+/// One palette in the picker, including the file that can remove it when it did not ship here.
+///
+/// The source is attached to the parsed palette rather than inferred later from its name. A Zed
+/// family file may contain several differently named palettes, and a file may replace a built-in;
+/// names alone cannot answer which one piece of user-owned data must be removed (docs §181).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ThemeEntry {
+    pub name: String,
+    pub palette: crate::theme::Theme,
+    /// `None` is a built-in and cannot be uninstalled. `Some` is the exact JSON file read.
+    pub source: Option<PathBuf>,
+}
+
 /// Every palette the researcher can choose: the built-ins, then any of their own.
 ///
 /// A file whose name matches a built-in replaces it, which is how someone tweaks the
-/// default rather than being stuck with it.
-pub fn available_themes() -> Vec<(String, crate::theme::Theme)> {
-    let mut themes: Vec<(String, crate::theme::Theme)> = crate::theme::THEMES
+/// default rather than being stuck with it. The replacing entry keeps the file as its source, so
+/// removing it reveals the built-in again instead of making an overridden theme permanent.
+pub fn available_theme_entries() -> Vec<ThemeEntry> {
+    let mut themes: Vec<ThemeEntry> = crate::theme::THEMES
         .iter()
-        .map(|(name, theme)| (name.to_string(), *theme))
+        .map(|(name, theme)| ThemeEntry {
+            name: name.to_string(),
+            palette: *theme,
+            source: None,
+        })
         .collect();
     let Ok(entries) = std::fs::read_dir(themes_dir()) else {
         return themes;
@@ -342,16 +360,47 @@ pub fn available_themes() -> Vec<(String, crate::theme::Theme)> {
         for (found_name, theme) in found {
             match themes
                 .iter_mut()
-                .find(|(existing, _)| existing.eq_ignore_ascii_case(&found_name))
+                .find(|existing| existing.name.eq_ignore_ascii_case(&found_name))
             {
                 // A file naming a built-in replaces it: how someone tweaks the default
                 // rather than ending up with two entries a letter apart.
-                Some(slot) => slot.1 = theme,
-                None => themes.push((found_name, theme)),
+                Some(slot) => {
+                    slot.palette = theme;
+                    slot.source = Some(path.clone());
+                }
+                None => themes.push(ThemeEntry {
+                    name: found_name,
+                    palette: theme,
+                    source: Some(path.clone()),
+                }),
             }
         }
     }
     themes
+}
+
+/// The old tuple shape for callers that only need to apply or compare palettes.
+pub fn available_themes() -> Vec<(String, crate::theme::Theme)> {
+    available_theme_entries()
+        .into_iter()
+        .map(|entry| (entry.name, entry.palette))
+        .collect()
+}
+
+/// Remove one theme file the picker actually discovered.
+///
+/// A UI callback handing a filesystem path to deletion is still a deletion boundary. Restricting
+/// it to one immediate `.json` child of `themes/` means a stale or malformed event cannot turn
+/// "remove this palette" into removal of an arbitrary settings or research file. One Zed file can
+/// contain a family, so removing it intentionally removes every palette sourced from that file.
+pub fn uninstall_theme_file(path: &Path) -> Result<()> {
+    let dir = themes_dir();
+    if path.parent() != Some(dir.as_path())
+        || path.extension().and_then(|extension| extension.to_str()) != Some("json")
+    {
+        bail!("only an installed theme file can be removed");
+    }
+    std::fs::remove_file(path).with_context(|| format!("could not remove {}", path.display()))
 }
 
 /// Apply the configured palette. Falls back to the default rather than failing.
@@ -521,6 +570,60 @@ mod tests {
         // Named as `DEFAULT`, not as whichever palette that currently is: this test is about
         // *falling back*, and it should not have to be edited every time the default moves.
         assert_eq!(crate::theme::current(), crate::theme::DEFAULT);
+
+        unsafe { std::env::remove_var("MINIME_SETTINGS") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn uninstalling_one_zed_file_removes_its_whole_family_and_nothing_beside_it() {
+        let _env = crate::backend::env_lock::hold();
+        let dir = std::env::temp_dir().join(format!(
+            "minime-theme-uninstall-test-{}",
+            std::process::id()
+        ));
+        let themes = dir.join("themes");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&themes).expect("a themes directory");
+        // SAFETY: the lock above serialises every test that touches the environment.
+        unsafe { std::env::set_var("MINIME_SETTINGS", dir.join("settings.toml")) };
+
+        let family = themes.join("andean.json");
+        std::fs::write(
+            &family,
+            serde_json::json!({
+                "themes": [
+                    {"name": "Oca Purple", "appearance": "dark", "style": {"accent": "#d991c8ff"}},
+                    {"name": "Mashua Gold", "appearance": "light", "style": {"accent": "#8a5d04ff"}}
+                ]
+            })
+            .to_string(),
+        )
+        .expect("write a Zed family");
+
+        let installed: Vec<_> = available_theme_entries()
+            .into_iter()
+            .filter(|entry| entry.source.as_deref() == Some(family.as_path()))
+            .map(|entry| entry.name)
+            .collect();
+        assert_eq!(installed, ["Oca Purple", "Mashua Gold"]);
+
+        let beside = dir.join("keep.json");
+        std::fs::write(&beside, "research, not a theme").expect("write the neighbour");
+        assert!(
+            uninstall_theme_file(&beside).is_err(),
+            "a path outside themes/ must never reach remove_file"
+        );
+        assert!(beside.exists(), "the rejected neighbour was removed");
+
+        uninstall_theme_file(&family).expect("uninstall the family");
+        assert!(!family.exists());
+        let names: Vec<_> = available_themes()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert!(!names.iter().any(|name| name == "Oca Purple"));
+        assert!(!names.iter().any(|name| name == "Mashua Gold"));
 
         unsafe { std::env::remove_var("MINIME_SETTINGS") };
         let _ = std::fs::remove_dir_all(&dir);
