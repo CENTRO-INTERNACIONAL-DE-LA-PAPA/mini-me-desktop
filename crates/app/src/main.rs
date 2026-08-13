@@ -4371,16 +4371,41 @@ impl Workbench {
         let mut ready = self.sidecar.warm_up();
         cx.spawn(async move |this, cx| {
             let status = ready.next().await;
-            let _ = this.update(cx, |workbench, cx| {
-                if let Some(status) = status {
-                    workbench.status = status.label().into();
-                    // Remembered, not just announced. Whether this app started the backend
-                    // decides whether the backend is running this app's overlay, and the
-                    // status line is gone by the time that matters (docs §80).
-                    workbench.backend_start = Some(status);
-                }
+            let Some(status) = status else {
+                return;
+            };
+            // Populate names as soon as the server can answer. Graph construction is unrelated to
+            // `/threads/search`; making the list wait for it would fix the first-click pause by
+            // creating the same pause in the sidebar instead (docs §176).
+            let graph = this.update(cx, |workbench, cx| {
+                workbench.status = "loading research tools…".into();
+                // Remembered, not just announced. Whether this app started the backend decides
+                // whether it is running this app's overlay, and the status line is gone by the
+                // time that matters (docs §80).
+                workbench.backend_start = Some(status);
                 workbench.refresh_conversations(cx);
                 workbench.refresh_project(cx);
+                cx.notify();
+                workbench.sidecar.warm_graph()
+            });
+            let Ok(mut graph) = graph else {
+                return;
+            };
+            let outcome = graph.next().await;
+            let _ = this.update(cx, |workbench, cx| {
+                match outcome {
+                    Some(Ok(())) => workbench.status = status.label().into(),
+                    Some(Err(error)) => {
+                        // Startup remains usable: a dependency may be temporarily unreachable,
+                        // and the first real turn will surface its contextual error. What must not
+                        // happen is the status bar claiming the graph is ready, or waiting forever.
+                        tracing::warn!(%error, "agent graph did not finish warming at startup");
+                        workbench.status = "backend started; research tools are not ready".into();
+                    }
+                    None => {
+                        workbench.status = "backend started; research tools are not ready".into();
+                    }
+                }
                 cx.notify();
             });
         })
