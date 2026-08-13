@@ -68,16 +68,17 @@ pub struct Theme {
 
 /// The themes that ship with the app.
 ///
-/// Six, chosen to cover real situations rather than to fill a gallery: the default and its
-/// after-dark twin, the original pair, one for anybody who does not want orange, and one for
-/// anybody who finds the others too low-contrast.
+/// Seven, chosen to cover real situations rather than to fill a gallery: a native-potato
+/// default, the bench pair, the original pair, one for anybody who does not want a warm
+/// palette, and one for anybody who finds the others too low-contrast.
 ///
 /// **First is the default**, and that is not a comment — [`DEFAULT`] and [`DEFAULT_NAME`] read
 /// this array rather than restating it, so the palette a fresh install opens on is decided in
 /// exactly one place. It used to be decided in three (the `live_theme!` defaults,
 /// `Settings::default`, and `apply_theme`'s fallback), which is the shape this project keeps
 /// getting wrong: several facts that have to agree, with more than one of them saying so.
-pub const THEMES: [(&str, Theme); 6] = [
+pub const THEMES: [(&str, Theme); 7] = [
+    ("Papa Nativa", PAPA_NATIVA),
     ("Bench", BENCH),
     ("Bench Night", BENCH_NIGHT),
     ("Mini-Me Dark", MINI_ME_DARK),
@@ -92,12 +93,48 @@ pub const DEFAULT: Theme = THEMES[0].1;
 /// Its name, as `settings.toml` writes it.
 pub const DEFAULT_NAME: &str = THEMES[0].0;
 
-/// Neutral paper and one deep teal. The default: bright rooms, shared screens.
+/// Aubergine, cream and the pink-purple of pigmented Andean potatoes.
 ///
-/// A light default is a deliberate reversal. The app opened on charcoal because editors do, and
-/// this is not an editor — it is read next to a bench, a greenhouse window and a projector, and
-/// those are the rooms a dark UI actually fails in. The teal is held to the things you can act
-/// on; nothing else in the window is saturated.
+/// CIP's primary orange (`#EE7203`) and brown (`#5D2E00`) belong together in the logo, but
+/// filling a research interface with both makes every panel feel loud and earthy. Native potato
+/// diversity gives the centre a truer and broader colour language: CIP describes flesh and skin
+/// ranging through yellow, pink, red, purple, blue and black. Purple therefore carries the one
+/// saturated role — interaction — while cream carries long reading.
+///
+/// `accent_soft` is CIP orange at 12% over `surface`, pre-composited to an opaque colour. GPUI's
+/// theme roles are solid `u32` fills and the Zed importer deliberately drops alpha, so storing a
+/// translucent orange would render differently depending on which of four surfaces happened to
+/// sit behind it. The composite gives the requested soft orange one predictable appearance and
+/// keeps every ink above the 4.5:1 floor (docs §181).
+pub const PAPA_NATIVA: Theme = Theme {
+    background: 0x18141c,
+    surface: 0x211a26,
+    elevated: 0x2b2231,
+    overlay: 0x352a3c,
+    accent_soft: 0x3a2522,
+    text: 0xf2ebdd,
+    text_muted: 0xc6bac6,
+    text_faint: 0xafa2b1,
+    border: 0x3f3246,
+    border_strong: 0x5a4663,
+    accent: 0xd991c8,
+    accent_hover: 0xe7a6d8,
+    success: 0x92c77b,
+    warning: 0xe6b45f,
+    error: 0xf08a86,
+    running: 0x8ec5ea,
+};
+
+/// Neutral paper and one deep teal. For bright rooms and shared screens.
+///
+/// This was the default until §181, on an argument that is *not* about colour identity and so
+/// was not answered by the one that replaced it: the app opened on charcoal because editors do,
+/// and this is not an editor — it is read next to a bench, a greenhouse window and a projector,
+/// and those are the rooms a dark UI actually fails in. Papa Nativa is the better palette and a
+/// dark one; if a fresh install in a greenhouse turns out to be the case that matters, the fix
+/// is to ship Papa Nativa's own light counterpart, not to move the default back to teal.
+///
+/// The teal is held to the things you can act on; nothing else in the window is saturated.
 pub const BENCH: Theme = Theme {
     background: 0xedebe6,
     surface: 0xf6f5f1,
@@ -435,8 +472,8 @@ mod tests {
             apply(&theme);
             assert_eq!(current(), theme, "{name} did not survive a round trip");
         }
-        assert_eq!(DEFAULT, BENCH);
-        assert_eq!(DEFAULT_NAME, "Bench");
+        assert_eq!(DEFAULT, PAPA_NATIVA);
+        assert_eq!(DEFAULT_NAME, "Papa Nativa");
         // What a fresh install writes must name a theme that exists, or it silently falls back.
         assert!(
             THEMES.iter().any(|(name, _)| *name == DEFAULT_NAME),

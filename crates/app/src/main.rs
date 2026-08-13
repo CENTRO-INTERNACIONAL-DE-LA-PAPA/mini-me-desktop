@@ -2002,6 +2002,22 @@ fn compose_with_dropped(typed: &str, paths: &[String]) -> String {
     format!("{typed}\n\n{paths}")
 }
 
+/// What a recorded theme name should become once a palette file has been removed.
+///
+/// `None` when the name still resolves — either it was a built-in all along, or the deleted file
+/// was only *overriding* one and the bundled palette underneath has taken its place. `Some` names
+/// the default, the one palette guaranteed to exist.
+///
+/// A function rather than a line inside the handler because it has to be asked twice, of two
+/// strings that are not the same: the palette on screen, and the one `settings.toml` records.
+/// Those drift apart the moment somebody previews a theme, and only the second one survives Esc.
+fn theme_after_removal(name: &str, survivors: &[(String, theme::Theme)]) -> Option<String> {
+    let survives = survivors
+        .iter()
+        .any(|(candidate, _)| candidate.eq_ignore_ascii_case(name));
+    (!survives).then(|| theme::DEFAULT_NAME.to_string())
+}
+
 /// A dropped path as a person would name it: the filename, or the whole path if it has none.
 fn file_label(path: &std::path::Path) -> String {
     path.file_name()
@@ -5570,6 +5586,59 @@ impl Workbench {
         cx.notify();
     }
 
+    /// Remove the JSON file behind an installed palette and keep the live theme valid.
+    ///
+    /// One Zed file can carry a whole family, so the picker removes the file rather than
+    /// pretending one palette inside it is independently installed. If the file supplied the
+    /// current palette, a built-in with the same name is revealed and reapplied; if no such name
+    /// remains, both the draft and the trigger move to the default. Leaving the deleted name in
+    /// either place would make Settings display a choice the next launch cannot load (docs §181).
+    fn uninstall_theme(&mut self, path: PathBuf, name: String, cx: &mut Context<Self>) {
+        let removed = settings::available_theme_entries()
+            .iter()
+            .filter(|entry| entry.source.as_deref() == Some(path.as_path()))
+            .count();
+
+        match settings::uninstall_theme_file(&path) {
+            Ok(()) => {
+                let survivors = settings::available_themes();
+                if theme_after_removal(&self.applied_theme, &survivors).is_some() {
+                    self.applied_theme = theme::DEFAULT_NAME.to_string();
+                    self.draft.theme = theme::DEFAULT_NAME.to_string();
+                }
+                // Also matters when the removed file overrode a built-in: the name remains, but
+                // its palette has changed back to the bundled one and the next frame must too.
+                settings::apply_theme(&self.draft);
+
+                // **And `settings.toml` too, now rather than on Save.** Everything else in this
+                // pane is a draft, and dismissing it reloads the file on the stated grounds that
+                // *"an unsaved palette was a look, not a change"*. Deleting a file is not a look.
+                // Leaving the removed name on disk meant Esc restored a palette whose JSON was
+                // gone: the dropdown read `Catppuccin Mocha` over a window painted in the
+                // default, and no restart cleared it.
+                //
+                // Checked against the stored name rather than the live one — they differ the
+                // moment somebody previews a theme before removing another — and written through
+                // a fresh load rather than by saving `self.draft`, which may be holding model or
+                // key edits they have not chosen to keep.
+                let mut stored = settings::Settings::load();
+                if let Some(replacement) = theme_after_removal(&stored.theme, &survivors) {
+                    stored.theme = replacement;
+                    if let Err(error) = stored.save() {
+                        tracing::warn!(%error, "could not write the removed theme out of settings");
+                    }
+                }
+                self.gallery_note = if removed > 1 {
+                    format!("removed {removed} palettes from the installed family")
+                } else {
+                    format!("removed {name}")
+                };
+            }
+            Err(error) => self.gallery_note = format!("could not remove {name}: {error:#}"),
+        }
+        cx.notify();
+    }
+
     /// The five providers, as pills rather than a cycle button.
     ///
     /// Five fit on one row, so there is no reason to make someone click through them —
@@ -5735,14 +5804,14 @@ impl Workbench {
     fn theme_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
         // The same fuzzy scorer as everywhere else, so `mocha` finds Catppuccin Mocha.
         let query = self.theme_filter.read(cx).text().to_string();
-        let mut matched: Vec<(i32, String, theme::Theme)> = settings::available_themes()
+        let mut matched: Vec<(i32, settings::ThemeEntry)> = settings::available_theme_entries()
             .into_iter()
-            .filter_map(|(name, palette)| {
-                match_score(&query, &name).map(|score| (score, name, palette))
+            .filter_map(|entry| {
+                match_score(&query, &entry.name).map(|score| (score, entry))
             })
             .collect();
         if !query.trim().is_empty() {
-            matched.sort_by_key(|(score, _, _)| std::cmp::Reverse(*score));
+            matched.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
         }
 
         // Capped and scrollable: four built-ins fit, a hundred installed palettes do not,
@@ -5761,7 +5830,12 @@ impl Workbench {
             .overflow_y_scroll()
             .track_scroll(&self.theme_scroll);
 
-        for (_, name, palette) in matched {
+        for (_, entry) in matched {
+            let settings::ThemeEntry {
+                name,
+                palette,
+                source,
+            } = entry;
             let selected = name.eq_ignore_ascii_case(&self.applied_theme);
             let chosen = name.clone();
             let previewed = name.clone();
@@ -5786,6 +5860,48 @@ impl Workbench {
                         .border_color(rgb(palette.border)),
                 );
             }
+
+            let remove_name = name.clone();
+            let actions = div()
+                .flex()
+                .flex_row()
+                .flex_none()
+                .items_center()
+                .gap_2()
+                .child(swatch)
+                .when_some(source, |actions, path| {
+                    actions.child(
+                        div()
+                            .id(SharedString::from(format!("remove-theme-hint-{remove_name}")))
+                            .tooltip(|_window, cx| {
+                                cx.new(|_| Hint {
+                                    text: "remove this installed file and every palette in it"
+                                        .into(),
+                                })
+                                .into()
+                            })
+                            .child(
+                                ui::Button::new(
+                                    SharedString::from(format!("remove-theme-{remove_name}")),
+                                    "remove",
+                                )
+                                .size(ui::Size::Compact)
+                                .on_click(cx.listener(
+                                    move |workbench, _event, _window, cx| {
+                                        // The theme row itself selects and closes the picker.
+                                        // Removing is a second action nested inside that row, so
+                                        // it must not also select the file it just deleted.
+                                        cx.stop_propagation();
+                                        workbench.uninstall_theme(
+                                            path.clone(),
+                                            remove_name.clone(),
+                                            cx,
+                                        );
+                                    },
+                                )),
+                            ),
+                    )
+                });
 
             list = list.child(
                 div()
@@ -5836,7 +5952,7 @@ impl Workbench {
                             })
                             .ellipsis(),
                     )
-                    .child(swatch)
+                    .child(actions)
                     .on_click(cx.listener(move |workbench, _event, _window, cx| {
                         workbench.draft.theme = chosen.clone();
                         workbench.applied_theme = chosen.clone();
@@ -13206,6 +13322,42 @@ mod tests {
     }
 
     #[test]
+    fn removing_a_theme_rewrites_the_name_that_survives_pressing_escape() {
+        // The failure this guards: remove the palette you are using, press Esc, and the
+        // dismiss path reloads `settings.toml` on the stated grounds that "an unsaved palette
+        // was a look, not a change". Deleting a file is not a look — so the dropdown came back
+        // reading a theme whose JSON was gone, over a window painted in the default, and no
+        // restart cleared it.
+        let survivors: Vec<(String, theme::Theme)> = theme::THEMES
+            .iter()
+            .map(|(name, palette)| ((*name).to_string(), *palette))
+            .collect();
+
+        // A name the removal took with it has to be rewritten, wherever it was recorded.
+        assert_eq!(
+            theme_after_removal("Catppuccin Mocha", &survivors).as_deref(),
+            Some(theme::DEFAULT_NAME)
+        );
+
+        // A built-in is never rewritten — including when the deleted file was only *overriding*
+        // one, which is the case where the name survives and the palette underneath changes.
+        assert_eq!(theme_after_removal(theme::DEFAULT_NAME, &survivors), None);
+        assert_eq!(theme_after_removal("Bench", &survivors), None);
+        // Matched the way the picker matches, or a theme saved in another case is rewritten
+        // out from under someone who never removed it.
+        assert_eq!(theme_after_removal("bench", &survivors), None);
+
+        // The replacement must itself be loadable, or this trades one dead name for another.
+        let replacement = theme_after_removal("gone", &survivors).expect("a replacement");
+        assert!(
+            survivors
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case(&replacement)),
+            "{replacement} is not a theme that exists"
+        );
+    }
+
+    #[test]
     fn a_file_on_a_network_share_is_refused_before_the_turn_rather_than_during_it() {
         // `wsl_path` has no drive letter to work with here, so it passes the path through
         // and the agent receives `//nas/shared/yield.csv` — which exists in no Linux
@@ -13227,7 +13379,13 @@ mod tests {
 
         // Only WSL can fail this. A backend on this host opens exactly the path the
         // researcher's own file manager handed us, network share or not.
-        let host = backend::BackendConfig::default();
+        // Windows deliberately defaults the Python backend to WSL, so `Default` is not a host
+        // fixture on the platform this test is meant to protect. Name the boundary explicitly;
+        // otherwise the assertion depends on which OS runs the suite (§179).
+        let host = backend::BackendConfig {
+            wsl: None,
+            ..Default::default()
+        };
         assert!(host.can_open(share));
         assert!(host.can_open(std::path::Path::new("/home/p/yield.csv")));
     }

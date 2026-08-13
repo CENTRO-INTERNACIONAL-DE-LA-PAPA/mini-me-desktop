@@ -10274,3 +10274,127 @@ call that fed it went with it — a syscall per dropped file, spent on prose.
 *Thirty-second: a prefilled field is a guess with the confidence of a decision. Prefill what
 cannot be got wrong — a path, a name, a number the app measured — and leave the sentence with an
 opinion in it to the person who has one.*
+
+## 181. A potato centre has more colours than its logo (2026-08-13)
+
+> *"Usually they use orange and brown but these colours are painful to see together. Because we
+> are the potato center, potatoes have a variety of beautiful colours when we talk about native
+> potatoes."*
+
+The sources agree with both halves of that observation. CIP's official branding guide names
+**`#EE7203` orange and `#5D2E00` brown** as the primary pair, then gives green, red, purple,
+magenta, yellow and cyan as its secondary publication palette. CIP's own native-potato material
+is broader and more specific to the institution's subject: more than 4,000 Andean varieties,
+with flesh and skins running through white, yellow, pink, red, purple, blue and black
+([brand guide](https://cipotato.org/site/logo/pdf/BrandingGuidelines.PDF),
+[native varieties](https://cipotato.org/potato/native-potato-varieties/),
+[potato nutrition](https://cipotato.org/potato/potatonutrition/)). The logo pair is therefore a
+rule for the logo, not an obligation to make the whole workbench orange-on-brown.
+
+Zed's [Theme Builder](https://zed.dev/theme-builder) made the other boundary explicit. It does
+not offer one global colour replacement: it separates eleven surface roles, six borders, six
+text roles, editor/navigation/element states and the status colours, with values able to link to
+one another. This app has fewer roles, but the same semantic split. A good palette here therefore
+needs a quiet surface ladder first and crop colours assigned to jobs; distributing saturated
+potato colours evenly across the window would be a poster, not a reading tool.
+
+### Papa Nativa
+
+The new built-in and fresh-install default is **Papa Nativa**:
+
+- aubergine-black surfaces, rising from `#18141C` to `#352A3C`, take the dark-purple and black
+  end of native-potato diversity without tinting every line of text;
+- cream text carries long reports; muted mauves keep timestamps and labels in the same family;
+- pink-purple is reserved for interactive controls, preserving the rule from §49/§118 that an
+  accent means *you can act here* rather than *this heading is important*;
+- green, gold, coral and highland blue remain separate success, warning, error and running
+  signals. They are the small places where the crop's variety is useful rather than noisy;
+- CIP orange survives only in `accent_soft`, as **12% orange over the surface**. `Theme` stores
+  opaque `u32` fills and the Zed importer deliberately drops alpha, so the blend is
+  pre-composited as `#3A2522`. It looks like low-alpha orange on every panel instead of changing
+  with whatever happens to be behind it.
+
+The existing six themes stay available; a saved preference also stays saved. Papa Nativa becomes
+the default only where no preference exists, because changing someone's chosen palette during an
+upgrade would turn a design improvement into a settings bug. The existing contrast and elevation
+tests run over the seventh palette unchanged: every ink/surface pair clears WCAG AA and every
+surface step still rises in luminance.
+
+### Installing without removing was only half a gallery
+
+The gallery wrote Zed JSON files into `themes/` and then forgot where each displayed palette came
+from. That was enough to install but not to uninstall, and a palette name could not recover the
+answer: one Zed file may contain a family of several names, while one file may also override a
+built-in.
+
+`ThemeEntry` now carries the exact source file alongside the name and palette. Built-ins have no
+source and no **remove** control. A palette read from disk does; removing it removes that one JSON
+file and therefore every palette the family contains. The tooltip states that scope before the
+click. If the file overrode a built-in, the bundled palette underneath is immediately reapplied.
+If it supplied a name that no longer exists, the live choice and Settings draft both fall back to
+Papa Nativa — no dead name is left to fail silently at the next launch.
+
+Deletion accepts only an immediate `.json` child of the app's own `themes/` directory. That check
+is repeated at the filesystem boundary even though the UI obtained the path from the loader: a
+stale callback should not be able to turn *remove this theme* into removal of settings or research
+data. `uninstalling_one_zed_file_removes_its_whole_family_and_nothing_beside_it` proves both sides
+with a two-palette family and a neighbouring file.
+
+### What the Windows validation found
+
+The first full run was 276/277: the UNC-drop test constructed its supposed host backend with
+`BackendConfig::default()`, which deliberately selects WSL on Windows. The assertion passed on
+Linux and failed on the target platform because its fixture changed meaning with the OS. The test
+now sets `wsl: None` explicitly; application behaviour is unchanged. The second run is **277/277**
+and `cargo clippy -p mini-me-desktop-app --all-targets` is clean.
+
+The remaining check is visual and belongs on the real window: open **Settings → Theme**, choose
+**Papa Nativa**, and inspect a long answer, a selected conversation, an approval card and a
+running specialist. The correct result is cream text on purple-black panels, pink-purple only on
+actions, and orange visible as a quiet selected-row tint — never orange text on a brown panel.
+Install any Zed theme, reopen the theme list, press **remove**, and confirm every palette from that
+installed family disappears immediately while Papa Nativa and the other built-ins cannot be
+removed.
+
+*Thirty-third: brand fidelity is not counting how many times a logo colour appears. It is keeping
+the logo exact, then using the institution's real subject matter to give the product a colour
+language suited to the work.*
+
+### §181 addendum — removing a theme is not a draft (2026-08-13, review)
+
+Two corrections found reviewing the branch before merge. The palette itself needed none: the
+contrast and elevation tests enumerate every ink against every surface, and Papa Nativa clears
+them, so *"cream stays readable on aubergine"* is machine-checked rather than asserted.
+
+**The removal did not survive Esc.** `uninstall_theme` fixed `applied_theme` and `draft.theme`
+and stopped there, and everything else in that pane is deliberately a draft — the dismiss path
+reloads `settings.toml` because *"an unsaved palette was a look, not a change"*. Deleting a file
+is not a look. So: remove the theme you are using, press Escape, and the app restored the name of
+a palette whose JSON no longer existed. `apply_theme` fell back to the default, so the window was
+painted correctly while the dropdown read `Catppuccin Mocha` — and because the name was still on
+disk, no restart cleared it. §181 claimed the opposite in prose (*"no dead name is left to fail
+silently at the next launch"*), which is the exact shape this document keeps recording: the
+sentence was true of the two places the code touched and false of the third.
+
+The stored name is now rewritten at the moment of removal, through a fresh `Settings::load()`
+rather than by saving the draft — the draft may be holding model or key edits nobody chose to
+keep. It is asked separately from the live choice because those two strings drift apart as soon
+as somebody previews a theme, and `theme_after_removal` exists so the rule can be tested against
+both.
+
+**A comment outlived its decision.** `BENCH` still opened *"Neutral paper and one deep teal. The
+default"*, and it is no longer the default. Worth more than the one-word fix, though, is what the
+paragraph under it said and this change did not answer:
+
+> *A light default is a deliberate reversal. The app opened on charcoal because editors do, and
+> this is not an editor — it is read next to a bench, a greenhouse window and a projector, and
+> those are the rooms a dark UI actually fails in.*
+
+That argument is about **rooms**, and §181's is about **colour identity**; the second does not
+refute the first, it changes the subject. Papa Nativa is the better palette on the merits and it
+is dark, so a fresh install now opens dark in a building full of greenhouses. Recorded rather than
+reverted, because the answer if it bites is a light Papa Nativa, not a return to teal — and only
+fresh installs are affected, so nobody's saved choice moves.
+
+*Thirty-fourth: when a decision is replaced, check what the old one argued, not just what it did.
+An argument about the room is not answered by an argument about the palette.*
