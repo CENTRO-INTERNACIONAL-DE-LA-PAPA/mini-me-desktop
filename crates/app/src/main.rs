@@ -8045,6 +8045,34 @@ impl Workbench {
     /// **Nothing here runs anything.** Every starting move loads the composer and stops, which is
     /// the rule the project suggestions already follow and is org policy besides: the human
     /// decides what is asked.
+    /// What the centre says while a conversation is being fetched.
+    ///
+    /// In the middle, because that is where the answer is about to be and where the researcher is
+    /// already looking — the status bar reports it too, at the bottom of the window, which is the
+    /// right place for a second copy and the wrong place for the only one.
+    ///
+    /// Deliberately plain: a mark and a word. A skeleton of grey bars would have to guess how many
+    /// messages are coming and how tall each is, and guessing wrong makes the real transcript jump
+    /// when it arrives.
+    fn opening_state(&self) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .w_full()
+            .flex_grow()
+            .min_h_0()
+            .child(ui::Spinner::new("opening-conversation").colour(theme::text_muted()))
+            .child(
+                div()
+                    .text_color(rgb(theme::text_muted()))
+                    .text_sm()
+                    .child("Opening this conversation…"),
+            )
+    }
+
     fn empty_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
         /// Three, because a row of them has to stay readable in a narrow pane, and because a
         /// list of recent work long enough to scroll is the sidebar's job.
@@ -8932,7 +8960,13 @@ impl Workbench {
                 }),
             );
 
-        if self.transcript.is_empty() {
+        if self.opening {
+            // **Not the empty state.** `open_conversation` clears the transcript before the fetch
+            // lands, so for the width of that request the centre said *"What are you working
+            // on?"* over a conversation that was already chosen — an invitation to start
+            // something, offered because the app had nothing else to draw (§178).
+            col = col.child(self.opening_state());
+        } else if self.transcript.is_empty() {
             col = col.child(self.empty_state(cx));
         } else {
             col = col.child(rows);
