@@ -216,12 +216,17 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   the first attempt was a 502 on the whole PDF over the reference list alone. Fixed on both sides —
   and sending the object sends the `link` the client had held and dropped since §91, so a rendered
   bibliography now resolves.
-- ⬜ **Papers the model adds from memory are not marked.** Barrera et al. (2016) came back real
-  and relevant from a journal Semantic Scholar indexes poorly — much of CIP's own literature
-  looks like that. Those sit beside record-backed citations looking identical, and their links
-  are still the model's guess.
+- ✅ **Papers the model adds from memory are marked** (§185). Barrera et al. (2016) came back
+  real and relevant from a journal Semantic Scholar indexes poorly — much of CIP's own literature
+  looks like that — and sat beside record-backed citations looking identical, because the panel
+  reported *errors* and silence meant both "nothing wrong" and "nothing checked". `Origin` is now
+  a separate question from `Verdict`: the header counts what is unverified, the row says which,
+  and an exported `.bib` carries the same note into Zotero. **Awaiting a live run.**
 - ⬜ **A paper with no DOI and no corpus id** is invisible to the "never reported" accounting
-  (7 returned, 6 recorded, on 2026-08-09).
+  (7 returned, 6 recorded, on 2026-08-09). Backend, not client: `_papers()` in
+  `overlay/minime_local/sources.py` is keyed on the identifiers such a paper does not have, so it
+  is missing from the set the count is taken against. §185 makes the *client* say what is
+  unverified; this is the other half, and it is a log line rather than a screen.
 - ✅ **`dataverse_explorer` searches, and reads what it found, before it can recommend** (§142,
   Mini-Me PR #45). **Verified on a live run**: both gates fired, and all four persistent ids
   resolved to real CIP datasets on late blight clone trials in Peru. The filename it was asked for
@@ -10643,3 +10648,63 @@ Verified by pointing a potato hover back at `elevated` and watching it fail with
 *Thirty-seventh: two jobs sharing one colour is not a saving, it is a coincidence waiting to be
 noticed. Elevation and hover were the same value here for as long as the file has existed, and
 the day one theme made the ladder subtle, the other job simply stopped happening.*
+
+## 185. Silence was carrying two meanings (2026-08-13)
+
+The sources panel had a rule, and it was a good one: **only say something when something is
+wrong.** A line under every reference confirming it checked out is fourteen lines of reassurance
+nobody reads, and it buries the two that matter.
+
+The rule answers *is this broken*. The trouble is what silence then meant. Three different facts
+rendered identically:
+
+- this came out of a search, and nothing in the link was composed;
+- the model wrote a DOI down and Crossref agrees it names this paper;
+- **the model wrote this from memory and nothing has confirmed it.**
+
+The third is not an error. Barrera et al. (2016) came back real, relevant, and from a journal
+Semantic Scholar indexes poorly — which describes a great deal of CIP's own literature. It is a
+citation a **subject-matter expert has to settle**, and a researcher could not tell which ones
+those were, because they looked exactly like the verified ones.
+
+That is the thing org policy asks for, in its own words: *validate AI-generated content with
+subject matter experts*, and *disclose when generative AI has been used in your work*. Neither is
+possible if the app will not say which references it stands behind.
+
+### Origin is a different question from Verdict
+
+`references::origin(verdict, matched_in_registry)` answers **where did this come from**, and it
+needs both arguments because neither settles it alone — a citation whose own DOI named the wrong
+paper is registry-backed once Crossref finds the right one and unconfirmed when it does not, and
+the `Verdict` is `Mismatch` in both cases.
+
+Four answers, named for **what was done** rather than for what is true, which is the rule the
+rest of that module already follows. `Unconfirmed` does not mean invented; most of these are real
+papers, and saying otherwise with the app's authority is the §(references) mistake — *"does not
+appear to describe a real paper"* about a correctly cited monograph.
+
+`Pending` is the fourth and it is load-bearing. Reporting a reference as unchecked while its
+lookup is in flight is precisely the bug that told a correctly cited Magurran 1988 it matched
+nothing, mid-request. But a check that **failed** is not pending — nothing is coming back, and a
+row stuck on *"checking…"* reads as verified to anybody who looks away and returns.
+
+### Three places, one function
+
+The header counts (`SOURCES · 14 · 3 UNVERIFIED`), the row says which, and the exported `.bib`
+carries `annote = {unverified: this reference came from the model, not from a search}`. All three
+read `source_origins()`, because three re-derivations of "unverified" from two maps is three
+chances to drift apart, and a header that disagreed with its own rows would be worse than either.
+
+The export matters most. The panel can be re-read; a `.bib` in somebody's Zotero is on its own,
+and it is the copy that ends up in a manuscript.
+
+### What this also closed
+
+Every arm of the row's `match` answers *is this broken*, so falling through to `_ => None` meant
+"nothing wrong" — and `(NoIdentifier, None)`, `(Unregistered, None)` and a source with no verdict
+at all once resolution had stopped all landed there. Silence by omission rather than by decision.
+Asking a second question with an answer in every case is what closes those, rather than adding
+three more arms and waiting for the fourth.
+
+*Thirty-eighth: when a display speaks only on failure, absence of a message is doing real work —
+and it will quietly acquire every meaning nobody assigned it.*

@@ -238,7 +238,7 @@ fn section_label(text: &'static str) -> impl IntoElement {
 /// entry is verbatim, and nothing is attributed to anyone the agent did not name. A researcher
 /// fills in the fields their journal wants, which they were going to check anyway (org policy:
 /// *validate AI-generated content with subject matter experts*).
-fn bibliography(sources: &[protocol::Source]) -> String {
+fn bibliography(sources: &[protocol::Source], origins: &[references::Origin]) -> String {
     let mut out = String::new();
     for (at, source) in sources.iter().enumerate() {
         let citation = source.citation.trim();
@@ -255,10 +255,20 @@ fn bibliography(sources: &[protocol::Source]) -> String {
         // A disagreement travels with the entry rather than being resolved here. A reference
         // manager shows `annote`, and someone importing forty references should not have to come
         // back to this window to find out which two were doubtful.
-        if let Some(written) = disputed_link(source) {
-            out.push_str(&format!(
+        //
+        // **And which ones nothing checked.** This is the copy that leaves the app — into Zotero,
+        // into a manuscript, into a colleague's inbox — so it is the one place the distinction
+        // most needs to survive. The panel can be re-read; an exported `.bib` is on its own, and
+        // the note has to travel with the entry it belongs to (docs §185).
+        match (disputed_link(source), origins.get(at)) {
+            (Some(written), _) => out.push_str(&format!(
                 "  annote = {{unverified: the citation text gives {written}}},\n"
-            ));
+            )),
+            (None, Some(origin)) if origin.needs_a_human() => out.push_str(
+                "  annote = {unverified: this reference came from the model, not from a search — \
+                 confirm it before citing},\n",
+            ),
+            (None, _) => {}
         }
         out.push_str("}\n\n");
     }
@@ -8185,7 +8195,7 @@ impl Workbench {
             .rev()
             .find(|earlier| earlier.role == "you")
             .map(|earlier| earlier.body.clone());
-        let bibtex = bibliography(&self.sources);
+        let bibtex = bibliography(&self.sources, &self.source_origins());
         let answer = message.body.clone();
 
         div()
@@ -11522,6 +11532,32 @@ impl Workbench {
     /// `Plant Pathology · 2021 · CIP Dataverse` would mean parsing prose into fields and being
     /// confidently wrong about some of them — a bibliography that quietly mis-attributes is worse
     /// than one that is merely plain.
+    /// Where each source came from, positionally — one entry per `self.sources`.
+    ///
+    /// **One function, three readers.** The header's count, the note under a row and the `annote`
+    /// in an exported `.bib` all have to mean the same thing by "unverified", and three
+    /// re-derivations of that from two maps is three chances to drift. Positional so the export
+    /// can zip it against the same slice it is already walking.
+    fn source_origins(&self) -> Vec<references::Origin> {
+        self.sources
+            .iter()
+            .map(|source| {
+                references::origin(
+                    self.checked.get(&source.citation),
+                    self.repaired.get(&source.citation).map(Option::is_some),
+                )
+            })
+            .collect()
+    }
+
+    /// How many references nothing has confirmed — the number a subject-matter expert owns.
+    fn unverified_sources(&self) -> usize {
+        self.source_origins()
+            .into_iter()
+            .filter(|origin| origin.needs_a_human())
+            .count()
+    }
+
     fn sources_section(&self) -> impl IntoElement {
         let mut section = div()
             .flex()
@@ -11532,10 +11568,15 @@ impl Workbench {
                     .pt_2()
                     .border_t_1()
                     .border_color(rgb(theme::border()))
-                    .child(section_label_owned(format!(
-                        "SOURCES · {}",
-                        self.sources.len()
-                    )))
+                    .child(section_label_owned(match self.unverified_sources() {
+                        // **Counted where the eye lands, not only marked row by row.** Silence
+                        // under a reference means "nothing wrong with this one", and until §185
+                        // it also meant "nothing checked this one" — so a researcher scanning
+                        // fourteen citations had no way to know how many needed them. The header
+                        // says how many, and the rows say which (docs §185).
+                        0 => format!("SOURCES · {}", self.sources.len()),
+                        n => format!("SOURCES · {} · {n} UNVERIFIED", self.sources.len()),
+                    }))
             });
 
         // A quiet line while the registry is being asked, and nothing at all once it is done.
@@ -11674,6 +11715,17 @@ impl Workbench {
                 )),
                 _ => None,
             };
+            // **The holes the match above leaves.** Every arm answers *is this broken*, and
+            // falling through means "nothing wrong" — which was also what a reference nothing had
+            // checked looked like. `(NoIdentifier, None)` and `(Unregistered, None)` land here,
+            // and so does a source with no verdict at all once resolution has stopped. Saying
+            // where it came from is a different question, and one that has an answer in every
+            // case (docs §185).
+            let note = note.or_else(|| {
+                references::origin(verdict, looked_up.map(Option::is_some))
+                    .note()
+                    .map(|text| (theme::warning(), text.to_string()))
+            });
             if let Some((ink, text)) = note {
                 body = body.child(
                     div()
@@ -13207,15 +13259,20 @@ mod tests {
 
     #[test]
     fn bibtex_is_importable_and_invents_nothing() {
-        let entries = bibliography(&[
-            cited(
-                "Smith, J. et al. (2021). Late blight resistance. Plant Pathology 70(4). \
-                 https://doi.org/10.1111/ppa.13400",
-                None,
-            ),
-            cited("CIP Dataverse: Andean potato trials, 2019", None),
-            cited("   ", None),
-        ]);
+        // Every source verified, so the only annotations below are the ones the entries earn.
+        let verified = [references::Origin::Search; 3];
+        let entries = bibliography(
+            &[
+                cited(
+                    "Smith, J. et al. (2021). Late blight resistance. Plant Pathology 70(4). \
+                     https://doi.org/10.1111/ppa.13400",
+                    None,
+                ),
+                cited("CIP Dataverse: Andean potato trials, 2019", None),
+                cited("   ", None),
+            ],
+            &verified,
+        );
 
         // Two entries, not three: a blank source is not a reference.
         assert_eq!(entries.matches("@misc{").count(), 2);
@@ -13234,21 +13291,58 @@ mod tests {
 
         // BibTeX's own syntax cannot come out of a citation and truncate the file. A stray
         // brace ends an entry early and takes every entry after it.
-        let hostile = bibliography(&[cited("A title with {braces} and a \\command", None)]);
+        let hostile = bibliography(
+            &[cited("A title with {braces} and a \\command", None)],
+            &verified,
+        );
         assert_eq!(hostile.matches('{').count(), hostile.matches('}').count());
         assert!(!hostile.contains("{braces}"));
         assert!(hostile.contains("\\\\command"));
 
         // A doubtful reference carries its doubt into the reference manager. Somebody importing
         // forty of these should not have to come back here to find out which two to check.
-        let doubtful = bibliography(&[cited(
-            "Hijmans & Spooner (2001). https://doi.org/10.2307/3558457",
-            Some("https://doi.org/10.2307/3558433"),
-        )]);
+        let doubtful = bibliography(
+            &[cited(
+                "Hijmans & Spooner (2001). https://doi.org/10.2307/3558457",
+                Some("https://doi.org/10.2307/3558433"),
+            )],
+            &verified,
+        );
         assert!(doubtful.contains("url = {https://doi.org/10.2307/3558433}"));
         assert!(doubtful.contains("annote = {unverified:"), "{doubtful}");
 
-        assert!(bibliography(&[]).is_empty(), "nothing to copy is empty");
+        assert!(bibliography(&[], &[]).is_empty(), "nothing to copy is empty");
+
+        // **An unverified reference says so in the file that leaves the app.** The panel can be
+        // re-read; a `.bib` in somebody's Zotero is on its own, and it is the copy that ends up
+        // in a manuscript (docs §185).
+        let recalled = bibliography(
+            &[cited("Barrera et al. (2016). Andean tuber diversity.", None)],
+            &[references::Origin::Unconfirmed],
+        );
+        assert!(recalled.contains("annote = {unverified:"), "{recalled}");
+        assert!(recalled.contains("not from a search"), "{recalled}");
+
+        // A reference that came out of a search carries no such note — the whole value of the
+        // mark is that it appears on the ones that need a person.
+        let searched = bibliography(
+            &[cited("Barrera et al. (2016). Andean tuber diversity.", None)],
+            &[references::Origin::Search],
+        );
+        assert!(!searched.contains("annote ="), "{searched}");
+
+        // An origin list shorter than the sources must not annotate the wrong entry, or say
+        // nothing about one it has no answer for. `get` returning `None` means "no claim".
+        let ragged = bibliography(
+            &[
+                cited("First, unverified.", None),
+                cited("Second, no origin recorded.", None),
+            ],
+            &[references::Origin::Unconfirmed],
+        );
+        assert_eq!(ragged.matches("annote =").count(), 1, "{ragged}");
+        let second = ragged.split("@misc{minime2,").nth(1).expect("the entry");
+        assert!(!second.contains("annote ="), "{second}");
     }
 
     #[test]
