@@ -116,6 +116,16 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   `<task>/guinea_pig_eda_output/plots/health_by_activity_box.png`. Its folder is created *inside*
   the conversation's, and the conversation it belongs to is remembered per thread because the run
   config is not visible at every construction site.
+- ⬜ **A loading state worth looking at.** Asked for after §177 and §178 put an honest one in
+  place: *"maybe we can create a cool animation later for loading states."* What exists now is four
+  braille frames and a sentence — correct, legible, and plainly a placeholder. The waits it covers
+  are real and long: fifteen seconds of graph construction at launch (§176), a conversation
+  opening, a turn that has not started streaming. Worth noting what the plain version already gets
+  right, so a prettier one does not lose it: it never guesses how long the wait will be, it says
+  *which* wait it is, and it appears in the place the result will appear. A skeleton of grey bars
+  is the obvious upgrade and is the one to be careful with — it has to guess how many messages are
+  coming and how tall each is, and guessing wrong makes the real transcript jump when it lands.
+
 - ✅ **A file's own symbol, so the kind is readable at a glance** (§171). Asked for directly: *"add to the
   plan how we can put symbols of the files to know what is what. For example if its a python script
   the symbol of python must appear. its the same for json, etc etc etc."* Today `file_mark`
@@ -10133,3 +10143,29 @@ sentence instead.
 
 *Twenty-ninth: a feature that exists and is wired to the wrong condition is harder to find than one
 that was never built, because the code review that would catch it sees the feature and stops.*
+
+
+## 178. An invitation to start, over a conversation already chosen (2026-08-13)
+
+> *"When I click a conversation and it is opening, I would like to see it at the middle panel
+> rather than at the bottom left."*
+
+`open_conversation` clears the transcript before its fetch lands, so for the width of that request
+`self.transcript.is_empty()` is true and the centre drew the empty state — *"What are you working
+on?"*, with three suggestions for starting something. Offered over a conversation the researcher
+had just chosen, because the app had nothing else to draw there.
+
+§177 put the honest report in the status bar, which is the right place for a *second* copy and the
+wrong place for the only one: the bottom-left corner is the furthest point in the window from the
+row that was clicked and from the space the answer is about to fill.
+
+The centre now says which wait it is, in the place the result will appear.
+
+Deliberately plain — a mark and a sentence. The obvious upgrade is a skeleton of grey bars, and
+that is the one to be careful with: it has to guess how many messages are coming and how tall each
+is, and a wrong guess makes the real transcript jump when it arrives. Recorded as an open item
+rather than improvised here, because "cool" and "does not lie about what is coming" are two
+requirements and only one of them is free.
+
+*Thirtieth: an empty state is an answer to "there is nothing here", not to "I do not have it yet".
+The app had one string for both, so it gave the confident answer to the uncertain question.*
