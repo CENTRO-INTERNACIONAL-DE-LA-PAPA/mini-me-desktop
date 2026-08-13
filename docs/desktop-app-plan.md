@@ -10359,3 +10359,42 @@ removed.
 *Thirty-third: brand fidelity is not counting how many times a logo colour appears. It is keeping
 the logo exact, then using the institution's real subject matter to give the product a colour
 language suited to the work.*
+
+### §181 addendum — removing a theme is not a draft (2026-08-13, review)
+
+Two corrections found reviewing the branch before merge. The palette itself needed none: the
+contrast and elevation tests enumerate every ink against every surface, and Papa Nativa clears
+them, so *"cream stays readable on aubergine"* is machine-checked rather than asserted.
+
+**The removal did not survive Esc.** `uninstall_theme` fixed `applied_theme` and `draft.theme`
+and stopped there, and everything else in that pane is deliberately a draft — the dismiss path
+reloads `settings.toml` because *"an unsaved palette was a look, not a change"*. Deleting a file
+is not a look. So: remove the theme you are using, press Escape, and the app restored the name of
+a palette whose JSON no longer existed. `apply_theme` fell back to the default, so the window was
+painted correctly while the dropdown read `Catppuccin Mocha` — and because the name was still on
+disk, no restart cleared it. §181 claimed the opposite in prose (*"no dead name is left to fail
+silently at the next launch"*), which is the exact shape this document keeps recording: the
+sentence was true of the two places the code touched and false of the third.
+
+The stored name is now rewritten at the moment of removal, through a fresh `Settings::load()`
+rather than by saving the draft — the draft may be holding model or key edits nobody chose to
+keep. It is asked separately from the live choice because those two strings drift apart as soon
+as somebody previews a theme, and `theme_after_removal` exists so the rule can be tested against
+both.
+
+**A comment outlived its decision.** `BENCH` still opened *"Neutral paper and one deep teal. The
+default"*, and it is no longer the default. Worth more than the one-word fix, though, is what the
+paragraph under it said and this change did not answer:
+
+> *A light default is a deliberate reversal. The app opened on charcoal because editors do, and
+> this is not an editor — it is read next to a bench, a greenhouse window and a projector, and
+> those are the rooms a dark UI actually fails in.*
+
+That argument is about **rooms**, and §181's is about **colour identity**; the second does not
+refute the first, it changes the subject. Papa Nativa is the better palette on the merits and it
+is dark, so a fresh install now opens dark in a building full of greenhouses. Recorded rather than
+reverted, because the answer if it bites is a light Papa Nativa, not a return to teal — and only
+fresh installs are affected, so nobody's saved choice moves.
+
+*Thirty-fourth: when a decision is replaced, check what the old one argued, not just what it did.
+An argument about the room is not answered by an argument about the palette.*

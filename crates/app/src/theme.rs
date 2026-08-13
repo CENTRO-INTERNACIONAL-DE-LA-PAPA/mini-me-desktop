@@ -125,12 +125,16 @@ pub const PAPA_NATIVA: Theme = Theme {
     running: 0x8ec5ea,
 };
 
-/// Neutral paper and one deep teal. The default: bright rooms, shared screens.
+/// Neutral paper and one deep teal. For bright rooms and shared screens.
 ///
-/// A light default is a deliberate reversal. The app opened on charcoal because editors do, and
-/// this is not an editor — it is read next to a bench, a greenhouse window and a projector, and
-/// those are the rooms a dark UI actually fails in. The teal is held to the things you can act
-/// on; nothing else in the window is saturated.
+/// This was the default until §181, on an argument that is *not* about colour identity and so
+/// was not answered by the one that replaced it: the app opened on charcoal because editors do,
+/// and this is not an editor — it is read next to a bench, a greenhouse window and a projector,
+/// and those are the rooms a dark UI actually fails in. Papa Nativa is the better palette and a
+/// dark one; if a fresh install in a greenhouse turns out to be the case that matters, the fix
+/// is to ship Papa Nativa's own light counterpart, not to move the default back to teal.
+///
+/// The teal is held to the things you can act on; nothing else in the window is saturated.
 pub const BENCH: Theme = Theme {
     background: 0xedebe6,
     surface: 0xf6f5f1,

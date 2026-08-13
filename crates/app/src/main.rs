@@ -2002,6 +2002,22 @@ fn compose_with_dropped(typed: &str, paths: &[String]) -> String {
     format!("{typed}\n\n{paths}")
 }
 
+/// What a recorded theme name should become once a palette file has been removed.
+///
+/// `None` when the name still resolves — either it was a built-in all along, or the deleted file
+/// was only *overriding* one and the bundled palette underneath has taken its place. `Some` names
+/// the default, the one palette guaranteed to exist.
+///
+/// A function rather than a line inside the handler because it has to be asked twice, of two
+/// strings that are not the same: the palette on screen, and the one `settings.toml` records.
+/// Those drift apart the moment somebody previews a theme, and only the second one survives Esc.
+fn theme_after_removal(name: &str, survivors: &[(String, theme::Theme)]) -> Option<String> {
+    let survives = survivors
+        .iter()
+        .any(|(candidate, _)| candidate.eq_ignore_ascii_case(name));
+    (!survives).then(|| theme::DEFAULT_NAME.to_string())
+}
+
 /// A dropped path as a person would name it: the filename, or the whole path if it has none.
 fn file_label(path: &std::path::Path) -> String {
     path.file_name()
@@ -5585,16 +5601,33 @@ impl Workbench {
 
         match settings::uninstall_theme_file(&path) {
             Ok(()) => {
-                let current_still_exists = settings::available_themes()
-                    .iter()
-                    .any(|(candidate, _)| candidate.eq_ignore_ascii_case(&self.applied_theme));
-                if !current_still_exists {
+                let survivors = settings::available_themes();
+                if theme_after_removal(&self.applied_theme, &survivors).is_some() {
                     self.applied_theme = theme::DEFAULT_NAME.to_string();
                     self.draft.theme = theme::DEFAULT_NAME.to_string();
                 }
                 // Also matters when the removed file overrode a built-in: the name remains, but
                 // its palette has changed back to the bundled one and the next frame must too.
                 settings::apply_theme(&self.draft);
+
+                // **And `settings.toml` too, now rather than on Save.** Everything else in this
+                // pane is a draft, and dismissing it reloads the file on the stated grounds that
+                // *"an unsaved palette was a look, not a change"*. Deleting a file is not a look.
+                // Leaving the removed name on disk meant Esc restored a palette whose JSON was
+                // gone: the dropdown read `Catppuccin Mocha` over a window painted in the
+                // default, and no restart cleared it.
+                //
+                // Checked against the stored name rather than the live one — they differ the
+                // moment somebody previews a theme before removing another — and written through
+                // a fresh load rather than by saving `self.draft`, which may be holding model or
+                // key edits they have not chosen to keep.
+                let mut stored = settings::Settings::load();
+                if let Some(replacement) = theme_after_removal(&stored.theme, &survivors) {
+                    stored.theme = replacement;
+                    if let Err(error) = stored.save() {
+                        tracing::warn!(%error, "could not write the removed theme out of settings");
+                    }
+                }
                 self.gallery_note = if removed > 1 {
                     format!("removed {removed} palettes from the installed family")
                 } else {
@@ -13285,6 +13318,42 @@ mod tests {
         assert_eq!(
             compose_with_dropped("", &["/mnt/c/readings".into()]),
             "/mnt/c/readings\n\n"
+        );
+    }
+
+    #[test]
+    fn removing_a_theme_rewrites_the_name_that_survives_pressing_escape() {
+        // The failure this guards: remove the palette you are using, press Esc, and the
+        // dismiss path reloads `settings.toml` on the stated grounds that "an unsaved palette
+        // was a look, not a change". Deleting a file is not a look — so the dropdown came back
+        // reading a theme whose JSON was gone, over a window painted in the default, and no
+        // restart cleared it.
+        let survivors: Vec<(String, theme::Theme)> = theme::THEMES
+            .iter()
+            .map(|(name, palette)| ((*name).to_string(), *palette))
+            .collect();
+
+        // A name the removal took with it has to be rewritten, wherever it was recorded.
+        assert_eq!(
+            theme_after_removal("Catppuccin Mocha", &survivors).as_deref(),
+            Some(theme::DEFAULT_NAME)
+        );
+
+        // A built-in is never rewritten — including when the deleted file was only *overriding*
+        // one, which is the case where the name survives and the palette underneath changes.
+        assert_eq!(theme_after_removal(theme::DEFAULT_NAME, &survivors), None);
+        assert_eq!(theme_after_removal("Bench", &survivors), None);
+        // Matched the way the picker matches, or a theme saved in another case is rewritten
+        // out from under someone who never removed it.
+        assert_eq!(theme_after_removal("bench", &survivors), None);
+
+        // The replacement must itself be loadable, or this trades one dead name for another.
+        let replacement = theme_after_removal("gone", &survivors).expect("a replacement");
+        assert!(
+            survivors
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case(&replacement)),
+            "{replacement} is not a theme that exists"
         );
     }
 
