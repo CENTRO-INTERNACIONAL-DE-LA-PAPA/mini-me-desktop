@@ -68,17 +68,18 @@ pub struct Theme {
 
 /// The themes that ship with the app.
 ///
-/// Seven, chosen to cover real situations rather than to fill a gallery: a native-potato
-/// default, the bench pair, the original pair, one for anybody who does not want a warm
-/// palette, and one for anybody who finds the others too low-contrast.
+/// Eight, chosen to cover real situations rather than to fill a gallery: the native-potato
+/// pair, the bench pair, the original pair, one for anybody who does not want a warm palette,
+/// and one for anybody who finds the others too low-contrast.
 ///
 /// **First is the default**, and that is not a comment — [`DEFAULT`] and [`DEFAULT_NAME`] read
 /// this array rather than restating it, so the palette a fresh install opens on is decided in
 /// exactly one place. It used to be decided in three (the `live_theme!` defaults,
 /// `Settings::default`, and `apply_theme`'s fallback), which is the shape this project keeps
 /// getting wrong: several facts that have to agree, with more than one of them saying so.
-pub const THEMES: [(&str, Theme); 7] = [
+pub const THEMES: [(&str, Theme); 8] = [
     ("Papa Nativa", PAPA_NATIVA),
+    ("Papa Nativa Light", PAPA_NATIVA_LIGHT),
     ("Bench", BENCH),
     ("Bench Night", BENCH_NIGHT),
     ("Mini-Me Dark", MINI_ME_DARK),
@@ -93,13 +94,29 @@ pub const DEFAULT: Theme = THEMES[0].1;
 /// Its name, as `settings.toml` writes it.
 pub const DEFAULT_NAME: &str = THEMES[0].0;
 
-/// Aubergine, cream and the pink-purple of pigmented Andean potatoes.
+/// Aubergine surfaces, near-neutral ink, and CIP's own palette on the things that signal.
 ///
 /// CIP's primary orange (`#EE7203`) and brown (`#5D2E00`) belong together in the logo, but
 /// filling a research interface with both makes every panel feel loud and earthy. Native potato
 /// diversity gives the centre a truer and broader colour language: CIP describes flesh and skin
 /// ranging through yellow, pink, red, purple, blue and black. Purple therefore carries the one
-/// saturated role — interaction — while cream carries long reading.
+/// saturated role — interaction — while the ink carries long reading.
+///
+/// **The ink is near-neutral, and §182 is why.** It shipped as cream `#f2ebdd`, which measures
+/// hue 40° at 45% saturation — not an off-white but a *colour*, and one sitting 130° across the
+/// wheel from a hue-270° ground. Reported as *"the letters and the background compete"*, which is
+/// exactly what opposed chroma at high luminance contrast does. Two numbers changed it: the ink
+/// moved into the background's own hue family (283°, under 10% saturation), and the contrast came
+/// down from 15.3:1 to 12.8:1 — still far above AAA, without the glare of near-maximum ink on a
+/// near-black ground. Hue lives in the surfaces and the accents; text is not where a palette
+/// should be expressed.
+///
+/// **The signals are CIP's, unmodified where they clear AA.** `success` is 369 C `#76B82A`,
+/// `warning` is 137 C `#FBBA00`, `running` is Process Cyan `#009FE3` — measured on this ground at
+/// 6.98, 9.78 and 5.70:1, so they ship exactly as the brand guide prints them. Only two needed
+/// moving, and only in lightness and saturation: `error` from 1795 C and `accent` from Process
+/// Magenta, both of which are print colours too dark and too saturated to sit on a dark screen.
+/// Their hues are within 1° of the source.
 ///
 /// `accent_soft` is CIP orange at 12% over `surface`, pre-composited to an opaque colour. GPUI's
 /// theme roles are solid `u32` fills and the Zed importer deliberately drops alpha, so storing a
@@ -112,17 +129,55 @@ pub const PAPA_NATIVA: Theme = Theme {
     elevated: 0x2b2231,
     overlay: 0x352a3c,
     accent_soft: 0x3a2522,
-    text: 0xf2ebdd,
-    text_muted: 0xc6bac6,
-    text_faint: 0xafa2b1,
+    text: 0xdcd7de,
+    text_muted: 0xb0a8b5,
+    text_faint: 0xa79eab,
     border: 0x3f3246,
     border_strong: 0x5a4663,
-    accent: 0xd991c8,
-    accent_hover: 0xe7a6d8,
-    success: 0x92c77b,
-    warning: 0xe6b45f,
-    error: 0xf08a86,
-    running: 0x8ec5ea,
+    // Process Magenta at screen weight: the print colour is 100% saturation at 45% lightness,
+    // which on a dark ground is either unreadable or neon depending which way you move it.
+    accent: 0xe873b4,
+    accent_hover: 0xf294c8,
+    success: 0x76b82a,
+    warning: 0xfbba00,
+    error: 0xef7461,
+    running: 0x009fe3,
+};
+
+/// The same palette for a room with the lights on: pale aubergine paper, CIP purple to act on.
+///
+/// **The counterpart §181 said to build.** Making a dark theme the default reversed a decision
+/// that was never about colour identity — *"it is read next to a bench, a greenhouse window and
+/// a projector, and those are the rooms a dark UI actually fails in"* — and the answer recorded
+/// there was to ship Papa Nativa's own light half rather than send anybody back to teal. This is
+/// it, on the same hue family (270–280°) so the two read as one identity seen under two lights.
+///
+/// The light ground lets CIP's darker colours through untouched, and they are the ones the brand
+/// guide leads with: `accent` is 2607 C `#56217A` at 10.5:1, `success` is 364 C `#34752D` at
+/// 5.33:1. `warning` and `running` are 152 C and Process Cyan darkened — an amber and a cyan
+/// bright enough to print cannot also carry 4.5:1 against paper — with their hues held to within
+/// 3°. `error` is 192 C pulled down far enough to keep its margin on white as well as on paper.
+pub const PAPA_NATIVA_LIGHT: Theme = Theme {
+    background: 0xf1edf3,
+    surface: 0xf8f5fa,
+    elevated: 0xfcfafd,
+    overlay: 0xffffff,
+    // CIP orange at 12% over `surface`, the same composite as the dark half — the tint a
+    // selected row gets, and the only place the logo orange appears.
+    accent_soft: 0xf7e5dc,
+    text: 0x2b2431,
+    text_muted: 0x5c5265,
+    // Lighter than `text_muted`, which is the right direction here: on paper, faint means
+    // closer to the page. Still 5.9:1 on the palest surface it is ever drawn against.
+    text_faint: 0x695e72,
+    border: 0xe2dce6,
+    border_strong: 0xc9c0cf,
+    accent: 0x56217a,
+    accent_hover: 0x3f1859,
+    success: 0x34752d,
+    warning: 0x855700,
+    error: 0xbc0230,
+    running: 0x00648f,
 };
 
 /// Neutral paper and one deep teal. For bright rooms and shared screens.
@@ -349,6 +404,47 @@ pub fn contrast(a: u32, b: u32) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_ink_a_whole_answer_is_set_in_stays_near_grey() {
+        /// How far a colour is from grey: the gap between its strongest and weakest channel.
+        ///
+        /// Chroma in the most literal sense, and deliberately **not** HSL saturation. That
+        /// measure explodes near white — it called the old cream `#f2ebdd` 45% saturated when
+        /// its channels span 21 of 255 — so a threshold written against it would have to be
+        /// different for light and dark themes to mean the same thing. The raw span does not.
+        fn channel_spread(colour: u32) -> u32 {
+            let (r, g, b) = (
+                (colour >> 16) & 0xff,
+                (colour >> 8) & 0xff,
+                colour & 0xff,
+            );
+            r.max(g).max(b) - r.min(g).min(b)
+        }
+
+        // §182: Papa Nativa shipped its body text as cream, 21 apart, over a ground with a
+        // violet cast — two hues on opposite sides of the wheel at 15:1 luminance contrast.
+        // Reported as *"the letters and the background compete"*, which is what opposed chroma
+        // does. Nothing else caught it: cream passes AA comfortably, and contrast is the only
+        // thing the other tests measure.
+        //
+        // 16 is chosen against the shipped set, not picked round: the highest body text among
+        // these eight is 13, and the cream that caused the report was 21.
+        for (name, theme) in THEMES {
+            let spread = channel_spread(theme.text);
+            assert!(
+                spread <= 16,
+                "{name}: body text #{:06x} spans {spread} between channels — that is a colour, \
+                 not an ink, and it will fight whatever ground it is set on",
+                theme.text
+            );
+        }
+
+        // Only `text`. `text_muted` and `text_faint` are timestamps, labels and counts — small,
+        // sparse, and a tint there is part of how they read as a lesser role rather than as
+        // dimmer body copy. Slate's faint ink spans 23 and is right to.
+        assert!(channel_spread(SLATE.text_faint) > 16);
+    }
 
     #[test]
     fn every_shipped_theme_is_readable() {
