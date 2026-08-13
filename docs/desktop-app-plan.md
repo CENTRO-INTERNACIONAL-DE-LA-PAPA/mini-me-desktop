@@ -10187,10 +10187,9 @@ first step at the last one. Silently: the composer simply held different text th
 had written, with nothing to say it had been replaced.
 
 The composer now keeps what is there and puts the paths underneath it, after one blank line. It
-adds no prose of its own in that case, because a prepared sentence appended to somebody's
-question reads as a second question arguing with the first about what to do with the file. The
-prepared sentence still appears when the composer is empty, which is the case §28 was written
-for and the one where it is genuinely useful.
+adds no prose of its own, because a prepared sentence appended to somebody's question reads as a
+second question arguing with the first about what to do with the file. *(This first kept the
+prepared sentence for the empty composer. §180 removed that too, on sight.)*
 
 ### It was invisible
 
@@ -10234,3 +10233,44 @@ has three defects waiting behind that gesture.
 
 *Thirty-first: "built" and "used once" are different claims, and a plan that records the first
 in the tense of the second will keep its defects for as long as nobody tries it.*
+
+## 180. The app was writing the research question (2026-08-13)
+
+> *"When we attach a file I see a prefilled text. Let's avoid that so the user can have
+> flexibility in his query."*
+
+§28 filled the composer with a whole question — *"Analyse the data in
+`/mnt/c/…/yield.csv`. Start by describing what it contains."* — and §179 kept it for the case
+where nothing had been typed yet, on the argument that it was the case §28 was written for and
+the one where a prepared sentence is genuinely useful.
+
+Seen once, that argument does not survive. **The prepared question is a guess about the
+research, written by the only participant who has not seen the data.** "Start by describing what
+it contains" is a reasonable opening for a stranger's CSV and quite wrong for a scientist who
+knows exactly what is in theirs and wants the second question, not the first. The cost of
+guessing is not that the sentence is unhelpful — it is that it has to be *deleted* before the
+real question can be typed, which is work the app created.
+
+What is left is the part the app actually knows: **where the file is**. That is genuinely worth
+having, because `/mnt/c/Users/…/2024_yield_trials_huancayo.csv` is not something anyone should
+retype, and getting the WSL spelling right is the one piece of this a researcher could not do
+themselves.
+
+So the composer gets the path and nothing else:
+
+- **Nothing typed yet** — the path, then a blank line to write under. The blank line is
+  load-bearing: `set_text` leaves the caret at the end, and without it the first character typed
+  joins onto the filename.
+- **Something typed** — the path underneath it, after a blank line, every word left alone.
+
+The status bar takes over the job the prefilled sentence was doing badly — *"added yield.csv —
+say what you want done with it"* — where it costs nothing and deletes nothing.
+
+Two things fell out. `prompt_for_dropped` is gone entirely, and with it the directory special
+case: *"Have a look at the files in …"* existed only to write a sentence, and with no sentence to
+write a folder is a path like any other. The `directories: &[bool]` parameter and the `is_dir()`
+call that fed it went with it — a syscall per dropped file, spent on prose.
+
+*Thirty-second: a prefilled field is a guess with the confidence of a decision. Prefill what
+cannot be got wrong — a path, a name, a number the app measured — and leave the sentence with an
+opinion in it to the person who has one.*
