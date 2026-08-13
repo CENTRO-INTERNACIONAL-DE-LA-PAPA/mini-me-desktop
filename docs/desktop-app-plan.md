@@ -18,7 +18,7 @@ sidecar** that the client spawns and supervises.
 | **P6.3.5** — visuals pass, starting with **markdown rendering** | ✅ **verified on Windows** — emphasis, inline code, links, headings, lists and fenced code render; accented Spanish came through intact. Tables deferred by agreement. §16/§23 |
 | **Native-Windows probe** | ✅ **answered** — `cmd.exe` is ruled out by upstream's *own* tool code (POSIX pipes, `mkdir -p`, `shlex.quote`), so WSL2 stays the v1 runtime and the installer's job is guided provisioning. Native-plus-Git-Bash is a documented half-day experiment. §21 |
 | **P6.4a** — settings panel + keychain secrets | ✅ **built** — a turn runs with no provider key in the backend's `.env`; keys come from the OS keychain and ride in the run request, and `ctrl-,` opens a Settings pane (provider, model, keys, execution). **Never rendered — needs a look on Windows.** §20/§22/§22b |
-| **P6.4b** — native affordances + shipping | ✅ **ships** — `bundle-backend.sh` → `--release` → `package.sh` gives a 21 MB folder; **the packaged build ran a real turn on Windows**. **Job Object verified 2026-08-01** — after closing the app, `wsl -- pgrep -af "langgraph dev"` prints nothing. Resources resolve beside the executable, and **drop a file on the window** turns it into a question. Remaining: click-to-update, cancel a running fix. §24/§25/§26/§28 |
+| **P6.4b** — native affordances + shipping | ✅ **ships** — `bundle-backend.sh` → `--release` → `package.sh` gives a 21 MB folder; **the packaged build ran a real turn on Windows**. **Job Object verified 2026-08-01** — after closing the app, `wsl -- pgrep -af "langgraph dev"` prints nothing. Resources resolve beside the executable, and **a file dropped on the window — or added with the composer's clip — becomes part of the question**, with a path the agent can open and a refusal for one it cannot. Remaining: click-to-update, and **actually dragging a file onto a real window**, which nobody has done. §24/§25/§26/§28/§179 |
 | **P6.5** — background work + Jobs panel | ✅ **done, end to end (2026-08-01)** — background work had in fact never run until §39: our graph factory took no `config` and raised `TypeError` at construction. Now a worker generates data, **stops at the approval gate on its own thread**, and the answer reaches it. Failures report the real exception, and the panel shows which subagent is running. §29–§31/§36–§42 |
 | **P6.6** — outputs the researcher can see | ✅ **done** — files land in `Documents\Mini-Me\<thread>`, figures render in the chat, and OUTPUTS opens the folder. §42 |
 | **P6.7** — the UI itself | ✅ **done, verified on Windows** — a role-based palette with four built-ins **and Zed's whole theme gallery** installable in-app; conversation sidebar with fuzzy search and rename; collapsible panels; a file preview modal; visible scrollbars; rainbow CSV; a three-state send button; rounded panels and a window-wide status bar. §43/§47–§53 |
@@ -231,8 +231,10 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   `response_format` and so each has the §133 exit. `hypothesis_generator` is next — it emits
   citations too, so it can reproduce the §138 bug somewhere nobody would think to look. The
   mechanism is a base class now (`middleware/tool_gate.py`), so each costs a `steps` tuple.
-- ⬜ **~10s of every startup** is an Asta token minted fresh with no validity check
-  (`backend.rs`, §131).
+- ✅ **~10s of every startup** was an Asta token minted fresh with no validity check
+  (`backend.rs`, §131). `mint_asta_token` now tries the keychain, then the CLI's own cache,
+  and checks `exp` before paying for a network mint — so the seconds are spent once a week
+  rather than once a launch. **Awaiting a stopwatch**, which is the only thing that settles it.
 - ⬜ **`setup-wsl.sh` leaves a checkout with every file modified** from line endings, which breaks
   any git operation on it.
 - ⬜ **Publish `v0.1.0`** — tagged and built; the draft needs a decision about who may have it.
@@ -10169,3 +10171,66 @@ requirements and only one of them is free.
 
 *Thirtieth: an empty state is an answer to "there is nothing here", not to "I do not have it yet".
 The app had one string for both, so it gave the confident answer to the uncertain question.*
+
+## 179. The feature nobody could find, and the question it ate (2026-08-13)
+
+§28 built "local file → analysis" — the MVP's *one thing the web app cannot do* — and then
+closed with a line that stayed true for twelve days: **"never dropped anything."** Reading it
+before verifying it found two defects that a live drop would have shown in about four seconds,
+and one that it would not have shown at all.
+
+### It overwrote the question
+
+`files_dropped` called `composer.set_text(prompt)` unconditionally. So the sequence a person
+actually performs — decide what to ask, type it, *then* go and fetch the file — destroyed the
+first step at the last one. Silently: the composer simply held different text than the one they
+had written, with nothing to say it had been replaced.
+
+The composer now keeps what is there and puts the paths underneath it, after one blank line. It
+adds no prose of its own in that case, because a prepared sentence appended to somebody's
+question reads as a second question arguing with the first about what to do with the file. The
+prepared sentence still appears when the composer is empty, which is the case §28 was written
+for and the one where it is genuinely useful.
+
+### It was invisible
+
+Dropping was announced in one line of the **empty state** — a screen that vanishes the moment a
+conversation has anything in it. From the second turn onwards, nothing in the window said the
+app took files at all.
+
+And dragging is the harder gesture on the platform this app is for. It needs Explorer and a
+*not*-maximised window arranged side by side, which is not how anybody works; a researcher who
+has just found their CSV is looking at a full-screen file manager. So the composer now carries a
+clip, left of the field, opening the platform's own chooser. Files only — Windows'
+`can_select_mixed_files_and_dirs` is `false` because `FOS_PICKFOLDERS` *toggles* the dialog
+rather than widening it, so asking for both would hand a folder picker to someone looking for a
+spreadsheet. Dragging still accepts a folder, which is the gesture that suits one.
+
+Dragging also now shows that it will be accepted: the composer lights up while a file is over
+the window. It is styled through gpui's `drag_over` rather than a flag on `Workbench`, and that
+is not a preference — `FileDropEvent::Exited` clears `active_drag` but is dispatched to no
+element, so a flag set on enter has no way to learn the drag left and would stay lit until the
+next drop.
+
+### The one a live drop would not have caught
+
+`wsl_path` translates `C:\…` to `/mnt/c/…` by reading the drive letter. A **UNC path** has none,
+so it falls through to the pass-through arm and the agent receives `//nas/shared/yield.csv` — a
+path that exists in no Linux filesystem. The turn then fails a minute later with
+`FileNotFoundError`, naming neither the share nor the reason.
+
+This would not have shown up in a test drop from the Desktop, and it is not a rare shape here: a
+CGIAR centre keeps data on network shares. `can_open` is now asked **before** anything reaches
+the composer, and the refusal names the file and the fix a non-programmer can act on — copy it
+to this computer first. Mapping the share inside the distro is the other fix and is not one to
+suggest to someone who does not code. Files that *are* reachable still go in; the ones left out
+are named rather than counted, because "3 of 4 added" leaves them hunting for which.
+
+### What is still unverified
+
+The same thing as before, and it is the user's step: no file has been dragged onto a real
+window, and no chooser has been opened on Windows. What has changed is that the code no longer
+has three defects waiting behind that gesture.
+
+*Thirty-first: "built" and "used once" are different claims, and a plan that records the first
+in the tense of the second will keep its defects for as long as nobody tries it.*
