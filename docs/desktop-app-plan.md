@@ -10708,3 +10708,71 @@ three more arms and waiting for the fourth.
 
 *Thirty-eighth: when a display speaks only on failure, absence of a message is doing real work —
 and it will quietly acquire every meaning nobody assigned it.*
+
+## 186. A turn billed to a provider nobody chose (2026-08-13)
+
+> *"This is weird, I set OpenRouter and I have credits."*
+
+A turn failed with **"An internal error occurred"** and a pointer to the sidecar log. The log had
+the real answer, and it was not the one the message implied:
+
+```
+openai.RateLimitError: 429 — 'You have no credits remaining. Add credits to continue
+using the API at https://platform.openai.com/settings/organization/billing/'
+```
+
+**OpenAI.** The researcher had selected OpenRouter and had credits there. The request went
+somewhere they had not chosen, and the first news of it was somebody else's billing page.
+
+### How a request reaches the wrong provider
+
+OpenRouter is not a pill of its own — it is reached through `custom` plus a base URL, which is
+the documented design and is fine. What is not fine is the path when something is missing:
+
+1. `model_choice` reads the key from the keychain under `llm:<provider>`. Keys are filed **per
+   provider**, so one pasted while another pill was selected belongs to that one.
+2. With no key, `run_request_body` omits the whole `__llm_keys` block — **and `base_url` lives
+   inside it.** So the request carries neither a credential nor an endpoint.
+3. The backend builds a bare OpenAI client, which falls back to whatever `OPENAI_API_KEY` the
+   distro holds, and posts to `api.openai.com`.
+
+Every step is locally reasonable. Together they turn a missing key into *a turn against a
+different company's account*, several minutes later, reported as an internal error.
+
+### It was already known, and deliberately not acted on
+
+`problems()` has computed exactly this since §20 — *"No API key stored for X."* — and `main`
+says what it did with it, in its own comment: **"Warned, not fatal: the app still opens, which is
+where the user fixes it."**
+
+That reasoning holds for *opening the app*, and does not survive being extended to running a
+turn. There is no warning to read in a failure with no message. `misdirects_a_turn` now refuses
+the turn and opens Settings › Model on the sentence that explains it.
+
+**Only the two failures that are silent.** A wrong model id is not blocked: it fails loudly, at
+the provider that was chosen, in a sentence naming the model — and refusing it would stop
+somebody trying a model released this week, which §58 already decided against.
+
+### Choosing a provider now takes a decision
+
+> *"Also a modal that confirms the user when he sets the providers, and when he wants to change
+> the providers there must appear a modal that the user must confirm."*
+
+Which provider is selected decides **which account is billed**, and the only thing that said so
+was which pill was lit — one click, no confirmation, no statement of consequence. The pill now
+stages the change and a modal states the three facts a person needs, read from the keychain and
+the settings rather than from what the panel happens to show:
+
+- whether a key exists **for the provider being moved to**, said plainly *because keys are filed
+  per provider* — which is precisely how this one went missing;
+- that a custom endpoint needs its base URL, and what OpenRouter's is;
+- which model id it is about to be set to, since changing the provider changes that too.
+
+It mounts **above** the Settings pane and is dismissed **before** it, neither of which is
+cosmetic: the pill that raises it lives inside that pane, so a confirmation drawn underneath
+would be invisible, and an Escape that closed the pane first would leave the confirmation
+orphaned over the workbench.
+
+*Thirty-ninth: "warned, not fatal" is a judgement about one moment, and it does not travel. The
+warning was written for a launch that could still be fixed, and then covered a turn where there
+was nothing to read it in.*
