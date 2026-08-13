@@ -116,6 +116,19 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   `<task>/guinea_pig_eda_output/plots/health_by_activity_box.png`. Its folder is created *inside*
   the conversation's, and the conversation it belongs to is remembered per thread because the run
   config is not visible at every construction site.
+- 🟡 **A key per provider, for specialists on other providers.** Asked: *"what happens if I have
+  an API from OpenAI, Google, Anthropic — do I have the ability to select the models for the
+  subagents using independent API keys?"* **Half of it already works.** `ModelChoice.extra_keys`
+  gathers one key per *other* provider any specialist was pointed at, reading `llm:<provider>`
+  from the keychain, and `run_request_body` sends them all — the backend derives the same set
+  from the specs (`models.py:117-122`), so a specialist on Anthropic while the coordinator is on
+  OpenRouter is a supported shape today.
+  **What is missing is the way to store the second key.** The Settings pane writes the key field
+  to `llm:<currently selected provider>`, so filing an Anthropic key means selecting Anthropic,
+  pasting, saving, and switching back — which nobody would guess, and §186's modal now interrupts
+  each of those switches. A key list that shows every provider at once, with "stored"/"not set"
+  per row, is the fix; the request path underneath needs nothing.
+
 - ⬜ **A finished background task should be a button, not a sentence to retype.** Asked for
   directly: *"when a background task has a success, we should see a modal button that the user
   can press and that serves as a check status, so the user doesn't type it every time in the
@@ -10950,3 +10963,32 @@ disagree, which is what a state *is*.
 
 *Forty-second: ask what a colour is *for* before measuring it. Text on a fill and a fill under
 text are different questions with different floors, and I answered the wrong one first.*
+
+## 190. Three constraints, and only two of them fit (2026-08-13)
+
+> *"To the vivid boxes put an alpha around 0.7."*
+
+Measured, that asks for three things at once against a near-white page: **saturated**, **70% over
+the surface**, and **an ink that can be read on the result**. Any two hold. All three do not.
+
+At 0.7 the §189 fills composite to white-at-3.03 and dark-ink-at-4.25 — back in the same valley
+`#ed028c` was in, one step along. Solving for a base whose composite carries the *page's* ink
+collapses straight back to the pale tints the request was trying to leave. So the base moves down
+instead, and the composite carries **white**: `#bc4b8d` and `#a64bd2`, chroma 0.19 and 0.24 on the
+base. Softer than §189, still four times a tint.
+
+### And a regression, shipped by me
+
+§188 stacked `picker_row` into a column so a note could not eat the model name. It also set
+`items_start`, which sets the cross axis to **content width** — and `Label::ellipsis` works by
+growing to fill a width and then truncating to it. With nothing to fill, every row truncated to a
+bare `…`, and the specialist picker became a list of ellipses: *"I can't select models for the
+subagents."*
+
+That is §59 exactly, one axis over, and §184 hit the same rule from the other side (*"`items_start`
+leaves children at content height, so a `flex_grow` child has nothing to grow into"*). Three times
+now. The rule, stated so it can be looked up: **`items_start` and `flex_grow` are opposites, on
+whichever axis they meet.** One says *be your content*, the other says *be your container*.
+
+*Forty-third: a fix that stacks a row changes which axis every child was relying on, and the child
+relying on it was two files away.*

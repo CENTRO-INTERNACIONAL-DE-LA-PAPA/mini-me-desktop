@@ -189,7 +189,10 @@ fn picker_row(
         // name"*. Stacking gives the id the full width it needs, which matters more now that a
         // gateway's ids look like `meta-llama/llama-3.3-70b-instruct` (docs §188).
         .flex_col()
-        .items_start()
+        // **No `items_start`.** It sets the cross axis to content width, and `Label::ellipsis`
+        // grows to fill a width it then truncates to — so with content width there was nothing to
+        // fill and every row rendered as a bare "…", reported as *"I can't select models for the
+        // subagents"*. Stretch is the default and is what a full-width row wants (§59, §190).
         .gap_0p5()
         .w_full()
         .min_w_0()

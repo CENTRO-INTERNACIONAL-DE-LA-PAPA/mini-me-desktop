@@ -179,7 +179,7 @@ pub const VIOLET_POTATO_LIGHT: Theme = Theme {
     // On paper this is the *darkest* surface, so it is what every ink here had to be checked
     // against — not the background.
     accent_soft: 0xf6e5db,
-    hover: 0xd23482,
+    hover: 0xbc4b8d,
     text: 0x333135,
     text_muted: 0x545158,
     text_faint: 0x625d66,
@@ -209,7 +209,7 @@ pub const MAGENTA_POTATO: Theme = Theme {
 
 /// [`VIOLET_POTATO_LIGHT`] with the same swap.
 pub const MAGENTA_POTATO_LIGHT: Theme = Theme {
-    hover: 0xa63deb,
+    hover: 0xa64bd2,
     accent: 0x883b58,
     accent_hover: 0x6b213f,
     ..VIOLET_POTATO_LIGHT
@@ -674,8 +674,9 @@ mod tests {
         assert!(contrast(0x333135, 0xed028c) < 4.5, "too dark for dark ink");
         assert!(contrast(0xffffff, 0xed028c) < 4.5, "and too light for white");
 
-        // The ones that do ship carry white.
-        for fill in [0xd23482_u32, 0xa63deb] {
+        // The ones that do ship carry white. These are the 70%-alpha composites the researcher
+        // asked for — softer than full saturation, and still four times the chroma of a tint.
+        for fill in [0xbc4b8d_u32, 0xa64bd2] {
             apply(&VIOLET_POTATO_LIGHT);
             let ink = ink_on(fill);
             assert!(
