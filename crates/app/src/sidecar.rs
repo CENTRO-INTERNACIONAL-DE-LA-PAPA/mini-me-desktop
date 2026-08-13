@@ -434,6 +434,49 @@ impl Sidecar {
         rx
     }
 
+    /// Ask one provider what models it offers, and cache the answer.
+    ///
+    /// Returns how many came back. The key is read on the **main thread** by the caller and
+    /// passed in, for the same reason every other secret is: the Linux keychain client panics
+    /// when called from a Tokio worker (docs §22).
+    pub fn refresh_models(
+        &self,
+        provider: String,
+        url: String,
+        auth: crate::catalogue::Auth,
+        api_key: Option<String>,
+        now_ms: u64,
+    ) -> mpsc::UnboundedReceiver<Result<(String, usize), String>> {
+        let (tx, rx) = mpsc::unbounded();
+        self.runtime.spawn(async move {
+            let client = reqwest::Client::new();
+            let outcome =
+                crate::catalogue::fetch(&client, &url, auth, api_key.as_deref()).await;
+            let result = match outcome {
+                Ok(models) => {
+                    let count = models.len();
+                    // Read, amend, write: other providers' listings live in the same file and a
+                    // whole-map overwrite would drop whichever was fetched most recently.
+                    let mut catalogue = crate::catalogue::load();
+                    catalogue.insert(
+                        provider.clone(),
+                        crate::catalogue::Listing {
+                            models,
+                            fetched_ms: now_ms,
+                        },
+                    );
+                    match crate::catalogue::save(&catalogue) {
+                        Ok(()) => Ok((provider, count)),
+                        Err(error) => Err(format!("{error:#}")),
+                    }
+                }
+                Err(error) => Err(format!("{error:#}")),
+            };
+            let _ = tx.unbounded_send(result);
+        });
+        rx
+    }
+
     /// Install one theme extension into the researcher's `themes/` directory.
     pub fn install_theme(
         &self,
