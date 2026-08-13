@@ -9953,6 +9953,32 @@ It joins dotfiles and `__pycache__` in the skip list. The line those three share
 list contains something the reader can break.*
 
 
+## 174. Half a padding, silently (2026-08-12)
+
+> *"The conversation is too close to the left end. That's a visual problem."*
+
+§156 replaced the eager scrolling `div` with `gpui::list`, and carried its `.p_4()` across. On a
+`div` that is sixteen pixels on four sides. On a `list` it is sixteen pixels on **two**:
+
+```rust
+// gpui-0.2.2/src/elements/list.rs:812
+let mut item_origin = bounds.origin + Point::new(px(0.), padding.top);
+```
+
+The horizontal half is computed from the style two lines earlier and then never used. So the
+transcript moved flush against its own border, and the change that did it looks like a
+straight port.
+
+Nothing could have caught this. It compiles, every test passes, and the property is "sixteen
+pixels of nothing on the left" — visible in a screenshot and in no other artefact. It arrived with
+§156 and was reported after §173 moved the road out of the pane, which is what removed the
+accidental inset that had been hiding it.
+
+The inset is on the row now, where a `div` honours it, and named: `TRANSCRIPT_INSET`, matching the
+composer below so a question and its answer start on the same x.
+
+*Twenty-seventh: a property that a container silently drops is worse than one it rejects. `p_4`
+should not compile on an element that means `py_4`.*
 ## 175. The claim was never checked against the folder (2026-08-12)
 
 The oldest red item, and the one that mattered most: an answer would list ten filenames and the
