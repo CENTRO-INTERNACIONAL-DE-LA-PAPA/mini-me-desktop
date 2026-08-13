@@ -713,6 +713,55 @@ fn file_mark(path: &std::path::Path) -> (&'static str, u32) {
     }
 }
 
+/// Extensions a research run actually writes, for [`named_files`].
+///
+/// **Deliberately narrower than `file_mark`'s.** That one maps whatever exists on disk to an icon
+/// and can afford a catch-all; this one decides whether a word in an *answer* is a claim about a
+/// file, and a wrong yes puts a correction under a sentence that was fine. So `.sh`, `.js` and
+/// `.rs` are absent: an answer is far likelier to mention one in passing than to have written it.
+const CLAIMABLE: [&str; 20] = [
+    "png", "jpg", "jpeg", "gif", "webp", "svg", "pdf", "csv", "tsv", "xlsx", "parquet", "json",
+    "txt", "md", "html", "typ", "zip", "db", "sqlite", "ipynb",
+];
+
+/// Filenames an answer names, in the order it names them.
+///
+/// The turn tells the researcher what it produced, and until now nothing compared that to the
+/// folder. Two failed attempts reported plots on disk that were not there, and a later answer
+/// listed ten filenames the panel could not show (§42). The prompt already says *"NEVER invent
+/// findings, numbers, or charts"* — measured at zero compliance, which is what a rule with no
+/// check is worth.
+///
+/// Basenames only: an answer may write `outputs/plots/a.png` for a file the workspace holds at a
+/// different depth, and the question is whether the file exists, not whether the model recited its
+/// path correctly.
+fn named_files(text: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for token in text.split(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | '[' | ']' | '`' | '"' | '\'' | ',' | ';' | '<' | '>' | '|' | '*')) {
+        // Trailing sentence punctuation is not part of a name; a leading bullet is not either.
+        let token = token.trim_matches(|c: char| matches!(c, '.' | ':' | '!' | '?' | '·' | '-' | '#'));
+        let Some(name) = token.rsplit(['/', '\\']).next() else {
+            continue;
+        };
+        let Some((stem, extension)) = name.rsplit_once('.') else {
+            continue;
+        };
+        if !CLAIMABLE.contains(&extension.to_ascii_lowercase().as_str()) {
+            continue;
+        }
+        // A stem has to look like a name. `0.96` fails on the extension already; this catches
+        // the rest of the numeric and single-character noise.
+        if stem.len() < 2 || !stem.chars().any(|c| c.is_ascii_alphabetic()) {
+            continue;
+        }
+        let name = name.to_string();
+        if !found.contains(&name) {
+            found.push(name);
+        }
+    }
+    found
+}
+
 /// A menu opened from a control in the sidebar rather than by right-clicking.
 ///
 /// **Why a menu and not more inline chips.** Each row carried `rename` and `✕` revealed on hover,
@@ -2153,6 +2202,12 @@ struct Message {
     steps: Vec<String>,
     /// One group per subagent invocation.
     agents: Vec<AgentTrace>,
+    /// Files this answer named that the conversation's folder does not hold.
+    ///
+    /// Recomputed as outputs settle rather than fixed when the turn ends, because a background
+    /// worker can still be writing — a name that is missing at second one and present at second
+    /// three was never a false claim, and flagging it would be its own kind of lie (§175).
+    unverified: Vec<String>,
     /// Whether the coordinator's own steps are showing.
     ///
     /// Open while the turn runs, because during a two-minute wait the steps *are* the only
@@ -2201,6 +2256,7 @@ impl Message {
             steps_expanded: true,
             stopped: false,
             outputs: Vec::new(),
+            unverified: Vec::new(),
         }
     }
 
@@ -4320,7 +4376,7 @@ impl Workbench {
             };
             // Populate names as soon as the server can answer. Graph construction is unrelated to
             // `/threads/search`; making the list wait for it would fix the first-click pause by
-            // creating the same pause in the sidebar instead (docs §175).
+            // creating the same pause in the sidebar instead (docs §176).
             let graph = this.update(cx, |workbench, cx| {
                 workbench.status = "loading research tools…".into();
                 // Remembered, not just announced. Whether this app started the backend decides
@@ -4856,6 +4912,68 @@ impl Workbench {
     /// application was the only thing that cleared it. Two bounded follow-up passes cover the
     /// Windows/WSL filesystem hand-off without turning the whole workspace into a permanent
     /// polling loop (docs §158).
+    /// Compare what each answer *said* it wrote against what the folder holds.
+    ///
+    /// **The claim was never checked against the data.** An answer would list ten filenames and
+    /// the Outputs panel would show none of them; twice a turn reported plots saved after the
+    /// command that would have written them failed (§42). The prompt forbids inventing charts,
+    /// which is a rule with nothing behind it — this is the something.
+    ///
+    /// Recomputed over **every** assistant message, not just the last, and re-run as outputs
+    /// settle. The workspace only grows, so a name that was missing when the turn ended and is
+    /// present two seconds later stops being flagged on its own. That self-correction is the
+    /// reason this is cheap to be wrong about in one direction and not the other.
+    ///
+    /// Matched on basename: an answer may write `outputs/plots/a.png` for a file the workspace
+    /// holds at another depth, and the question is whether the file exists — not whether the
+    /// model recited its path correctly.
+    fn check_file_claims(&mut self) -> bool {
+        let present: std::collections::HashSet<String> = self
+            .thread_workspace()
+            .map(|dir| workspace::outputs(&dir))
+            .unwrap_or_default()
+            .into_iter()
+            .flat_map(|(_kind, items)| items)
+            .filter_map(|output| {
+                std::path::Path::new(&output.name)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.to_ascii_lowercase())
+            })
+            .collect();
+
+        // **A name the researcher introduced is not a claim the agent made.** Dropped files are
+        // read where they lie rather than copied in (§13), so an answer discussing `kiwi.csv`
+        // from the desktop would otherwise be flagged for not holding a file that was never
+        // supposed to be here.
+        let from_researcher: std::collections::HashSet<String> = self
+            .transcript
+            .iter()
+            .filter(|message| message.role == "you")
+            .flat_map(|message| named_files(&message.body))
+            .map(|name| name.to_ascii_lowercase())
+            .collect();
+
+        let mut changed = false;
+        for index in 0..self.transcript.len() {
+            if self.transcript[index].role == "you" {
+                continue;
+            }
+            let missing: Vec<String> = named_files(&self.transcript[index].body)
+                .into_iter()
+                .filter(|name| {
+                    let name = name.to_ascii_lowercase();
+                    !present.contains(&name) && !from_researcher.contains(&name)
+                })
+                .collect();
+            if self.transcript[index].unverified != missing {
+                self.transcript[index].unverified = missing;
+                changed = true;
+            }
+        }
+        changed
+    }
+
     fn settle_outputs(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             for delay in [250, 1_000] {
@@ -4865,6 +4983,11 @@ impl Workbench {
                 if this
                     .update(cx, |workbench, cx| {
                         workbench.collect_plots();
+                        if workbench.check_file_claims() {
+                            // The note changes a row's height, and a virtualized list caches
+                            // heights until told otherwise (§156).
+                            workbench.invalidate_all_transcript_messages();
+                        }
                         let figures: Vec<std::path::PathBuf> = workbench
                             .thread_workspace()
                             .map(|dir| workspace::outputs(&dir))
@@ -4890,6 +5013,7 @@ impl Workbench {
 
     fn finish_turn(&mut self, cx: &mut Context<Self>) {
         self.collect_plots();
+        self.check_file_claims();
         self.settle_outputs(cx);
         // Written here, and only here, for the same reason the title is: the thread id does not
         // exist until the turn has run, so there is no directory to write into before this point.
@@ -8557,6 +8681,24 @@ impl Workbench {
                     .child("— you stopped this turn; the answer above is incomplete"),
             );
         }
+        // **Named above, not in the folder.** Stated as the fact it is rather than as an
+        // accusation: a file can be missing because the command failed, because it was written
+        // somewhere outside the conversation (§160), or because the answer recited a name it
+        // never wrote. All three are worth knowing and the app cannot tell them apart, so it
+        // reports the check and not a verdict (§175).
+        if !message.unverified.is_empty() {
+            let named = message.unverified.join(", ");
+            block = block.child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .text_color(rgb(theme::warning()))
+                    .text_xs()
+                    .child(format!(
+                        "— named above but not in this conversation's folder: {named}"
+                    )),
+            );
+        }
 
         // Files remain after the answer that explains them. Preserve §162–§164's two bounded
         // galleries here: keeping PR #11's old per-file loop would compile and pass unit tests
@@ -11890,6 +12032,61 @@ mod tests {
             assert!(!rows[0].danger, "the first row is destructive");
             assert!(rows.iter().filter(|row| row.danger).count() <= 1);
         }
+    }
+
+    #[test]
+    fn an_answer_naming_files_is_read_without_inventing_claims() {
+        // The real answer from the run that prompted this, trimmed. Every one of these is a
+        // claim the panel could not show (§42).
+        let answer = "EDA completed with the exploratory subagent.\n\nArtifacts:\n\
+            · hola_dummy_dataset.csv\n· hola_eda_numeric_summary.csv\n\
+            · outputs/plots/hola_eda_overview.png\n· `hola_eda_findings.txt`\n";
+        assert_eq!(
+            named_files(answer),
+            [
+                "hola_dummy_dataset.csv",
+                "hola_eda_numeric_summary.csv",
+                // The path is stripped: what matters is whether the file exists, not whether the
+                // model recited the directory correctly.
+                "hola_eda_overview.png",
+                "hola_eda_findings.txt",
+            ]
+        );
+    }
+
+    #[test]
+    fn prose_that_merely_looks_like_a_filename_is_not_a_claim() {
+        // **A false positive is worse than the bug.** It puts a correction under a sentence that
+        // was fine, and a warning that cries wolf is one nobody reads the day it is right.
+        for innocent in [
+            "Strongest numeric relationship: annual_income vs monthly_spend = 0.96",
+            "Conversion is rare: 3.1%, so the dataset is imbalanced",
+            "See https://doi.org/10.21223/P3/MO4PSJ for the dataset",
+            "Missingness in annual_income (7.81%), income_band (7.81%)",
+            "I ran it with uv, then re-ran setup-wsl.sh and main.rs compiled",
+            "e.g. the third column",
+            "version 2.7.11",
+        ] {
+            assert!(
+                named_files(innocent).is_empty(),
+                "invented a claim in: {innocent}"
+            );
+        }
+
+        // A number with a real extension is still not a name — `4.png` could be a file, but a
+        // stem of one character in running prose is noise far more often than it is an artifact.
+        assert!(named_files("figure 4.png").is_empty());
+        assert_eq!(named_files("fig4.png"), ["fig4.png"]);
+    }
+
+    #[test]
+    fn a_file_named_twice_is_reported_once_and_punctuation_is_not_part_of_its_name() {
+        assert_eq!(
+            named_files("I wrote summary.csv. Then I updated summary.csv!"),
+            ["summary.csv"]
+        );
+        assert_eq!(named_files("saved to (results.png),"), ["results.png"]);
+        assert_eq!(named_files("**plot.png**"), ["plot.png"]);
     }
 
     #[test]

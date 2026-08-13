@@ -860,7 +860,7 @@ impl LangGraphClient {
     /// It does **not** mean the graph is loaded. Measured on 2026-08-12: `/ok` answered, then the
     /// first read-only `GET /threads/{id}/state` spent 14,982 ms constructing the graph and opening
     /// its MCP clients. Keeping the boundary honest matters because startup uses this answer to
-    /// decide whether the researcher may safely open saved work (docs §175).
+    /// decide whether the researcher may safely open saved work (docs §176).
     pub async fn is_healthy(&self) -> bool {
         match self.http.get(format!("{}/ok", self.base_url)).send().await {
             Ok(resp) => resp.status().is_success(),
@@ -875,7 +875,7 @@ impl LangGraphClient {
     /// A fixed internal assistant followed by its schemas route is the smallest read-only graph
     /// access that did trigger the factory in a live probe. The assistant is deliberately retained:
     /// one stable internal row is safer than create/delete races between two app windows, and it is
-    /// not a conversation or a second source of conversation metadata (docs §154, §175).
+    /// not a conversation or a second source of conversation metadata (docs §154, §176).
     pub async fn warm_graph(&self) -> Result<()> {
         self.http
             .post(format!("{}/assistants", self.base_url))

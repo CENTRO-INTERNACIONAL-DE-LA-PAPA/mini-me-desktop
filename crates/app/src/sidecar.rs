@@ -478,7 +478,7 @@ impl Sidecar {
     /// Kept separate from [`Self::warm_up`] so the UI can populate conversation names as soon as
     /// the HTTP server is ready, then keep the honest "loading research tools" status until the
     /// expensive factory finishes. Folding this into backend readiness would turn the measured
-    /// 15-second graph load into a new 15-second sidebar delay (docs §175).
+    /// 15-second graph load into a new 15-second sidebar delay (docs §176).
     pub fn warm_graph(&self) -> mpsc::UnboundedReceiver<Result<()>> {
         let (tx, rx) = mpsc::unbounded();
         let base_url = self.base_url.clone();
