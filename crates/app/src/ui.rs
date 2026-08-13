@@ -546,7 +546,7 @@ impl RenderOnce for NavEntry {
                 theme::text_muted()
             }))
             .when(self.selected, |row| row.bg(rgb(theme::elevated())))
-            .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
+            .hover(|style| style.bg(rgb(theme::hover_over(theme::elevated()))).cursor_pointer())
             .child(self.label);
         match self.on_click {
             Some(handler) => row.on_click(move |event, window, cx| handler(event, window, cx)),
