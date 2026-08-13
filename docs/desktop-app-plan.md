@@ -10469,3 +10469,90 @@ palette is exactly what §181's addendum objected to.
 
 *Thirty-fifth: a passing contrast test says the text can be read, not that it is comfortable to
 read. 15:1 and 4.4:1 fail in opposite directions and only one of them has an assertion.*
+
+## 183. Measuring a reading tool with an editor's instrument (2026-08-13)
+
+> *"I still don't like these. Light is better, but remember: the users are not coders. It seems
+> these themes are for coders. Our users are scientists that read, analyze. So look on the web
+> for colour theory and how to select colours so the human eye doesn't feel overwhelmed."*
+
+The first half of that is a genre diagnosis and it is correct. Every palette here had been
+borrowing from code editors — dark ground, saturated accents, syntax-colour habits — and an
+editor is a tool for scanning short lines of structured symbols. A scientist reading a two-page
+answer needs the opposite: a room that holds still. The second half turned out to be the more
+useful instruction, because the published guidance disagrees with what this repo had been
+measuring.
+
+### WCAG 2 is the wrong instrument for a dark theme
+
+APCA's own documentation is blunt: WCAG 2 *"far overstates contrast for dark colors to the point
+that 4.5:1 can be functionally unreadable"*, and *"cannot be used for guidance designing dark
+mode"* — because reading performance differs between polarities at the same ratio, and one fixed
+formula cannot model both.
+
+Measuring the shipped palette in APCA found what the eye had already reported:
+
+| | APCA | WCAG 2 |
+|---|---|---|
+| body text on background | Lc 82 | 12.8:1 |
+| **accent on surface** | **Lc 47** | **6.1:1** |
+
+APCA's levels are Lc 90 preferred for columns of body text, **Lc 75 the minimum**, Lc 60 the
+minimum for content text that is not body text. The accent was at **Lc 47 — under the floor for
+incidental text** — while WCAG called it a healthy 6.1:1 and every test passed. And this app
+draws filenames and column names in the accent, so in the transcript that colour is not a button
+label glanced at; it is text a researcher reads by the paragraph. Under-contrasted *and*
+over-saturated at once: chroma 0.162 against surfaces at 0.025.
+
+That is the whole of *"overwhelmed"*, in two numbers.
+
+### What the sources actually say
+
+- **No pure black, and no maximum contrast.** Pure black grounds cause halation — light text
+  blooming into the ground — worst for the roughly half of readers with astigmatism, and reading
+  speed drops measurably against a tuned dark grey. `#121212` is the commonly cited floor.
+- **Desaturate on dark.** Saturated colours produce optical vibration against dark grounds. This
+  is exactly the pink in the screenshot.
+- **Off-white, not white, for long reading on light.**
+- **OKLCH for the arithmetic.** Perceptually uniform, so an even lightness ladder *looks* even and
+  equal chroma across a set means equal visual weight. This is why the old signals could all pass
+  their tests and still fight each other: nothing had ever asked them to weigh the same.
+
+### Both palettes are now solved, not chosen
+
+Every value comes from a target rather than a judgement:
+
+- **Body text at Lc 90** in both halves — the level named as preferred for columns of body text.
+  Deliberately *not* higher: the very first cut ran at 15.3:1, near the maximum available, and
+  maximum contrast is what makes text bloom.
+- **Three ink roles at Lc 90 / 76 / 66** (dark) and 90 / 78 / 70 (light). The previous pair
+  collapsed — `text_muted` and `text_faint` came out five hex digits apart and were the same
+  colour to a reader.
+- **Signals at equal OKLCH chroma** — 0.09 on dark, 0.11 on light — against print originals of
+  0.15–0.24. Equal chroma is what stops any one status shouting.
+- **Surfaces on four even OKLCH lightness steps** at chroma 0.018 (dark) and 0.006 (light); the
+  same tint reads far stronger against paper than against near-black.
+- **One CIP hue for the room and the accent.** Both are 2607 C purple's 308°, and what separates
+  a panel from a link is *chroma alone* — 0.018 against 0.09. The four signals are 369 C, 137 C,
+  1795 C and Process Cyan, each within 1° of the printed colour.
+
+Two rules are now pinned. `apca_agrees_with_its_own_published_reference_values` checks the
+constants against the published extremes, because every threshold is meaningless if that drifts.
+`text_meant_for_reading_clears_the_apca_body_text_floor` holds body text at Lc 85 across all eight
+palettes and the accent at Lc 75 for the Papa Nativa pair — verified by putting the old accent
+back and watching it fail with *"accent is Lc 47 on surface"*.
+
+The accent floor is asserted for **two** themes, not eight, and that is recorded rather than
+quietly scoped: **Mini-Me Dark measures Lc 48 and Slate Lc 51**. Same defect, older palettes, and
+a bigger change than this one.
+
+### One disagreement, resolved by taking the stricter side
+
+`text_faint` on the light half is the single value APCA did not settle alone. At the Lc it wanted,
+it measured 4.4 against the orange-tinted row — under the WCAG floor this repo enforces. It ships
+darker than APCA asks so that both scales pass. Where two measures disagree, the palette clears
+the higher bar; neither gets discarded because it was inconvenient.
+
+*Thirty-sixth: a test suite encodes which questions you thought to ask. Eight palettes passed
+every assertion in this file while one of them was unreadable in the way a reader actually
+noticed — because nothing had asked "is this comfortable", only "is this legible".*
