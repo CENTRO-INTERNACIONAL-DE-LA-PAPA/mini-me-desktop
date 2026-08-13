@@ -10992,3 +10992,43 @@ whichever axis they meet.** One says *be your content*, the other says *be your 
 
 *Forty-third: a fix that stacks a row changes which axis every child was relying on, and the child
 relying on it was two files away.*
+
+## 191. A key belongs to a company, not to a conversation (2026-08-13)
+
+> *"Check how Mini-Me's frontend structures the settings for the providers… Zed has a modal to
+> manage AI providers. Analyse and select the best, or join ideas."*
+
+Both references were read, and they agree — which made the decision easy rather than a matter of
+taste.
+
+**Mini-Me's own web panel** (`ModelConfigPanel.tsx`) lists every provider at once with a
+*Connected* badge, an Add-key / Disconnect control per row, and a `N connected` summary. Its
+subagent picker uses `<optgroup label={provider.name}>` with `{m.label} · {m.ctx}`.
+
+**Zed's LLM Providers page** is the same shape: one page, every provider, each with its own API
+key field and its own status.
+
+Neither makes you *switch to* a provider in order to configure it. This app did, and that was the
+whole defect: `Settings::key_name()` is `llm:<selected provider>`, so filing an Anthropic key
+meant selecting Anthropic, pasting, saving and switching back — with §186's confirmation
+interrupting each hop. Meanwhile the request path had supported a key per provider since §20:
+`extra_keys` gathers one for every provider a specialist names, and the backend derives the same
+set from the specs. **The plumbing was there and the pane was the bottleneck.**
+
+### What was taken from each
+
+- **From both: every provider visible at once.** A row of chips above the key field, each ticked
+  where a key is filed, so *which of these am I missing* is one glance rather than five clicks.
+  Choosing one retargets the field and **nothing else** — the coordinator does not move, so no
+  confirmation is owed and none is shown.
+- **From the web panel: the company's name once, over its models.** The specialist picker now
+  groups under provider headings. That is not only tidiness: it returns the width that
+  `OpenAI — billed separately`, repeated on every row, was taking from the model id — which is
+  the same width `meta-llama/llama-3.3-70b-instruct` needs.
+
+`key_target` is separate state from `draft.provider` for exactly the reason the references imply:
+a key is a fact about an account, and which conversation is running is a fact about right now.
+
+*Forty-fourth: when two independent designs converge, the argument is over. The interesting
+question is what they both refused to do — and neither of them makes you switch context to
+configure something.*
