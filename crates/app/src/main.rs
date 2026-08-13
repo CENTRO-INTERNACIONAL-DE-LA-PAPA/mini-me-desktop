@@ -34,8 +34,7 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use futures::StreamExt;
 use gpui::{
-    actions, div, img, prelude::*, px, relative, rgb, size, svg, AnimationExt as _, App,
-    Application, AssetSource, Bounds, ClipboardItem, Context, Entity, Focusable, FontStyle,
+    actions, div, img, prelude::*, px, relative, rgb, size, svg, App, Application, AssetSource, Bounds, ClipboardItem, Context, Entity, Focusable, FontStyle,
     FontWeight, HighlightStyle, KeyBinding, ListAlignment, ListState, SharedString, StyledText,
     Window, WindowBounds,
     WindowOptions,
@@ -2547,6 +2546,12 @@ struct Workbench {
     /// Read alongside the conversation list rather than per frame: the sidebar renders on every
     /// frame and this is a directory listing, which has no business on the render thread.
     folder_projects: Vec<String>,
+    /// A conversation is being fetched. Its own flag rather than a status string, because the
+    /// status bar is prose and prose cannot be asked a question (§177).
+    opening: bool,
+    /// The agent graph has not finished building. §176 measured that wait at fifteen seconds on
+    /// a real machine, which is far too long to leave a window looking idle.
+    warming: bool,
     /// An open sidebar `⋮` or `New` menu, and where its corner goes.
     sidebar_menu: Option<(SidebarMenu, gpui::Point<gpui::Pixels>)>,
     /// Which row of the `/name` picker is chosen. Reset on every keystroke.
@@ -2807,6 +2812,8 @@ impl Workbench {
             text_selection: selection::Transcript::default(),
             context_menu: None,
             folder_projects: Vec::new(),
+            opening: false,
+            warming: false,
             sidebar_menu: None,
             subagent_selected: 0,
             open_picker: None,
@@ -4379,6 +4386,7 @@ impl Workbench {
             // creating the same pause in the sidebar instead (docs §176).
             let graph = this.update(cx, |workbench, cx| {
                 workbench.status = "loading research tools…".into();
+                workbench.warming = true;
                 // Remembered, not just announced. Whether this app started the backend decides
                 // whether it is running this app's overlay, and the status line is gone by the
                 // time that matters (docs §80).
@@ -4393,6 +4401,7 @@ impl Workbench {
             };
             let outcome = graph.next().await;
             let _ = this.update(cx, |workbench, cx| {
+                workbench.warming = false;
                 match outcome {
                     Some(Ok(())) => workbench.status = status.label().into(),
                     Some(Err(error)) => {
@@ -4492,6 +4501,7 @@ impl Workbench {
         self.approve_conversation = false;
         self.approve_tasks.clear();
         self.status = "opening…".into();
+        self.opening = true;
 
         // Adopt the project it is filed under *before* the fetch, so `thread_workspace` — which
         // the figures and the provenance record are read from — is looking in the right folder
@@ -4544,6 +4554,7 @@ impl Workbench {
                             workbench.track_task(&owner, task, cx);
                         }
                     }
+                    workbench.opening = false;
                     workbench.status = "done".into();
                     workbench.refresh_project(cx);
                     cx.notify();
@@ -5099,6 +5110,21 @@ impl Workbench {
                     .p_2()
                     .text_color(rgb(theme::text_faint()))
                     .text_xs()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    // The mark goes where the researcher is already looking. A sentence alone
+                    // said the same thing and said it motionlessly, which is what a hung window
+                    // also looks like (§177).
+                    .when(!self.conversations_loaded, |row| {
+                        row.child(
+                            // Muted, matching the sentence beside it: this reports a state, and
+                            // the accent in this app means "act on me".
+                            ui::Spinner::new("loading-conversations")
+                                .colour(theme::text_muted()),
+                        )
+                    })
                     .child(if !self.conversations_loaded {
                         // The backend takes seconds to boot from cold, and this list is
                         // the first thing anyone looks at.
@@ -8790,6 +8816,21 @@ impl Workbench {
         }
     }
 
+    /// Whether anything the researcher is waiting for is in flight.
+    ///
+    /// **One question, five sources.** The status bar's mark used to be shown for two of them —
+    /// a streaming turn and a running setup fix — so the app was visibly busy exactly when it was
+    /// least likely to be mistaken for stuck, and perfectly still through the fifteen-second graph
+    /// build at launch (§176) and the pause while a conversation loads. Those are the waits that
+    /// read as a hang (§177).
+    fn is_waiting(&self) -> bool {
+        self.streaming
+            || self.running_fix.as_ref().is_some_and(|fix| !fix.done)
+            || self.warming
+            || self.opening
+            || !self.conversations_loaded
+    }
+
     fn chat_pane(&self, cx: &mut Context<Self>) -> impl IntoElement {
         // `min_w_0` is what makes long assistant text *wrap* instead of running off
         // the right edge: a flex item defaults to min-width:auto, so its content
@@ -10639,25 +10680,7 @@ impl Workbench {
             // 20–40 seconds building the agent — MCP tool fetches, middleware, model
             // construction — and a still window during that reads as a hang, which is the
             // single most common reason someone kills an app that was working fine.
-            .when(self.streaming || self.running_fix.is_some(), |bar| {
-                bar.child(
-                    div()
-                        .flex_none()
-                        .text_color(rgb(theme::accent()))
-                        .text_sm()
-                        .with_animation(
-                            "working",
-                            gpui::Animation::new(std::time::Duration::from_millis(1200)).repeat(),
-                            |label, delta| {
-                                // Four frames of a braille spinner: no font dependency,
-                                // no SVG to ship, and it reads as motion at any size.
-                                const FRAMES: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
-                                let frame = (delta * FRAMES.len() as f32) as usize;
-                                label.child(FRAMES[frame.min(FRAMES.len() - 1)])
-                            },
-                        ),
-                )
-            })
+            .when(self.is_waiting(), |bar| bar.child(ui::Spinner::new("status-working")))
             .flex()
             .flex_row()
             .items_center()
