@@ -197,16 +197,24 @@ fn picker_row(
         .py_1()
         .rounded_md()
         .when(selected, |row| row.bg(rgb(theme::accent_soft())))
-        .hover(|style| style.bg(rgb(theme::hover_over(theme::elevated()))).cursor_pointer())
-        .child(
-            ui::Label::new(label)
-                .colour(if selected {
-                    theme::text()
-                } else {
-                    theme::text_muted()
-                })
-                .ellipsis(),
-        )
+        // **Inherited, not set on the label.** A vivid hover fill needs its ink to flip, and
+        // `ui::Label::colour` writes the colour onto the element itself — which a parent's hover
+        // refinement cannot override (the same rule that stops `text_color` reaching an SVG,
+        // §157). So the row states the resting colour and the hover restates both together, which
+        // is the only arrangement where the two can disagree (docs §189).
+        .text_color(rgb(if selected {
+            theme::text()
+        } else {
+            theme::text_muted()
+        }))
+        .hover(|style| {
+            let fill = theme::hover_over(theme::elevated());
+            style
+                .bg(rgb(fill))
+                .text_color(rgb(theme::ink_on(fill)))
+                .cursor_pointer()
+        })
+        .child(ui::Label::new(label).inherit().ellipsis())
         .children(note.map(|note| {
             // Muted, not red: a missing key is a thing to do next, not a thing done wrong.
             ui::Label::new(note)

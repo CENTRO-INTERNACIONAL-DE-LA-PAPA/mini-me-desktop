@@ -179,7 +179,7 @@ pub const VIOLET_POTATO_LIGHT: Theme = Theme {
     // On paper this is the *darkest* surface, so it is what every ink here had to be checked
     // against — not the background.
     accent_soft: 0xf6e5db,
-    hover: 0xffd7e4,
+    hover: 0xd23482,
     text: 0x333135,
     text_muted: 0x545158,
     text_faint: 0x625d66,
@@ -209,7 +209,7 @@ pub const MAGENTA_POTATO: Theme = Theme {
 
 /// [`VIOLET_POTATO_LIGHT`] with the same swap.
 pub const MAGENTA_POTATO_LIGHT: Theme = Theme {
-    hover: 0xeedcff,
+    hover: 0xa63deb,
     accent: 0x883b58,
     accent_hover: 0x6b213f,
     ..VIOLET_POTATO_LIGHT
@@ -361,6 +361,32 @@ pub const HIGH_CONTRAST: Theme = Theme {
     error: 0xff7d80,
     running: 0x8cc2ff,
 };
+
+/// The ink that can be read on a fill, chosen by measuring rather than by assuming.
+///
+/// **Why a vivid fill needs this at all.** Asked for directly — *"I want vivid colours, not
+/// opaque ones… the vivid colours I want them for the boxes not for the text"* — and a saturated
+/// box cannot carry the page's dark ink. `#ed028c`, the magenta named in that request, measures
+/// 3.06:1 against this app's dark ink and 4.21:1 against white: at that exact lightness **no**
+/// text is comfortably readable on it, which is why the fills ship one step darker and the ink on
+/// them flips (docs §189).
+///
+/// Measured per fill rather than stored per theme, because the answer differs across the four
+/// surfaces a row can sit on and an imported palette has no such field to consult.
+pub fn ink_on(fill: u32) -> u32 {
+    // The theme's own inks first: a hover fill that the ordinary text still reads on should keep
+    // it, or every pale palette would flip to white for no reason.
+    if contrast(text(), fill) >= 4.5 {
+        return text();
+    }
+    // Otherwise whichever extreme is further away. Not always white — a vivid *light* fill wants
+    // near-black, and the point is to stop guessing which case this is.
+    if contrast(0xffffff, fill) >= contrast(0x111111, fill) {
+        0xffffff
+    } else {
+        0x111111
+    }
+}
 
 /// Palettes that were renamed, and what they are called now.
 ///
@@ -618,23 +644,51 @@ mod tests {
                     "{name}: hovering a row on {surface_name} changes it by {step:.3}, which is \
                      not a change anybody can see"
                 );
-                // And whatever it changes to, the row is still readable — a hover fill is a
-                // surface for the length of the hover, and the AA sweep never sees it.
-                for (ink, ink_name) in [
-                    (theme.text, "text"),
-                    (theme.text_muted, "text_muted"),
-                    (theme.text_faint, "text_faint"),
-                ] {
-                    let ratio = contrast(ink, fill);
-                    assert!(
-                        ratio >= 4.5,
-                        "{name}: {ink_name} on the hover fill over {surface_name} is {ratio:.2}:1"
-                    );
+                // And whatever it changes to, the row is still readable. Asserted against
+                // `ink_on` rather than the theme's own text, because a **vivid** fill flips the
+                // ink — asking whether the page's dark ink survives a saturated magenta box is
+                // asking about an arrangement the app no longer draws (§189).
+                let ratio = contrast(ink_on(fill), fill);
+                assert!(
+                    ratio >= 4.5,
+                    "{name}: the ink chosen for the hover fill over {surface_name} is \
+                     {ratio:.2}:1 against it"
+                );
+                // A fill the page's own ink already reads on must keep it: flipping to white on
+                // a pale tint would be a change nobody asked for and a worse-looking one.
+                if contrast(theme.text, fill) >= 4.5 {
+                    assert_eq!(ink_on(fill), theme.text, "{name}: {surface_name}");
                 }
             }
         }
         // A filter that quietly matched nothing would make every assertion above vacuous.
         assert_eq!(checked, 4, "the four potato palettes name their own hover fill");
+        apply(&DEFAULT);
+    }
+
+    #[test]
+    fn a_vivid_fill_gets_an_ink_that_can_be_read_on_it() {
+        // §189: `#ed028c` is the magenta that was asked for, and it sits in a lightness valley —
+        // 3.06:1 against this app's dark ink, 4.21:1 against white. *No* text is comfortably
+        // readable on it, which is why the fills ship one step darker rather than at that value.
+        assert!(contrast(0x333135, 0xed028c) < 4.5, "too dark for dark ink");
+        assert!(contrast(0xffffff, 0xed028c) < 4.5, "and too light for white");
+
+        // The ones that do ship carry white.
+        for fill in [0xd23482_u32, 0xa63deb] {
+            apply(&VIOLET_POTATO_LIGHT);
+            let ink = ink_on(fill);
+            assert!(
+                contrast(ink, fill) >= 4.5,
+                "#{fill:06x} got an unreadable ink #{ink:06x}"
+            );
+            assert_ne!(ink, VIOLET_POTATO_LIGHT.text, "a vivid box flips its ink");
+        }
+
+        // A pale fill keeps the page's own ink — flipping to white on a tint that already reads
+        // would be a change nobody asked for and a worse-looking one.
+        apply(&VIOLET_POTATO_LIGHT);
+        assert_eq!(ink_on(VIOLET_POTATO_LIGHT.accent_soft), VIOLET_POTATO_LIGHT.text);
         apply(&DEFAULT);
     }
 

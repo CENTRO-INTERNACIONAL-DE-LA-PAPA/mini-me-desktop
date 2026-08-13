@@ -10897,3 +10897,56 @@ a filter matching nothing and a provider returning nothing look identical otherw
 *Forty-first: a curated list is a claim about someone else's product, and it is wrong from the
 day it is written. The only question is whether anybody notices before the person who needed the
 model that was missing.*
+
+## 189. Vivid, and the valley in the middle (2026-08-13)
+
+> *"The magenta in Magenta Native Potato Light is too dark. I think the colour is #ed028c… I want
+> vivid colours not opaque ones."* Then, clarifying: *"The vivid colours I want them for the boxes
+> not for the text."*
+
+That clarification is the whole design. A colour used **as text** and a colour used **as a fill**
+are held to opposite constraints, and the first version of this measured the wrong one.
+
+`#ed028c` measures OKLCH L 0.62, C 0.253 — and against the light palette:
+
+| | |
+|---|---|
+| as text, on `surface` | WCAG **3.44**, APCA **Lc 61** |
+| as a fill, under this app's dark ink | WCAG **3.06** |
+| as a fill, under white | WCAG **4.21** |
+
+**Every one of those is under the floor.** That is not a limitation of the palette; it is a
+property of that lightness. `#ed028c` sits in the valley where a colour is too dark to carry dark
+text and too light to carry white — the one place nothing can be read.
+
+### What ships
+
+One step darker, at the researcher's own hue and chroma, so an ink can sit on it: **`#d23482`**
+(white at 4.61) and **`#a63deb`** (white at 4.68). Chroma **0.20 and 0.25**, against the 0.05 the
+tints had — four to five times more colour, which is what *vivid* was asking for.
+
+`ink_on` picks the ink by measuring the fill rather than assuming white. Measured per fill, not
+stored per theme, because the answer differs across the four surfaces a row can sit on and an
+imported palette has no such field. A fill the page's own ink already reads on **keeps it** —
+flipping to white on a pale tint would be a change nobody asked for and a worse-looking one.
+
+### The label had to stop naming its own colour
+
+`ui::Label::colour` writes the colour onto the element, and an element's own style beats a
+parent's refinement — the same rule that stops `text_color` reaching an SVG child (§157). So a
+label that names its colour can never change with the row it sits in, and a hover that flips its
+ink was impossible while every row did exactly that.
+
+`Label::inherit()` paints no colour at all, and the row states both: the resting colour on
+itself, the hover colour in the refinement. That is the only arrangement in which the two can
+disagree, which is what a state *is*.
+
+- ⬜ **Scrolling a list inside the settings modal scrolls the modal too.** Reported here: *"when I
+  scroll in the modal filter, at the same time I'm scrolling the options of the Custom model."*
+  Two nested `overflow_y_scroll` regions, both registering a wheel listener, both firing on the
+  bubble. Not yet fixed.
+- ⬜ **The sources panel still lists every reference in full.** Asked for: grouped like the images
+  gallery, opening into a scrollable list rather than a slider.
+
+*Forty-second: ask what a colour is *for* before measuring it. Text on a fill and a fill under
+text are different questions with different floors, and I answered the wrong one first.*
