@@ -33,6 +33,21 @@ use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+/// The one internal assistant used to make LangGraph run the graph factory during startup.
+///
+/// A stable UUID is load-bearing: `POST /assistants` rejects the graph id (`agent`) in this API
+/// version, while a fresh UUID on every launch would leave one invisible assistant behind per
+/// session. `if_exists: do_nothing` makes simultaneous/repeated warm-ups converge on this record.
+const GRAPH_WARM_UP_ASSISTANT_ID: &str = "709fdf35-66dd-4c0a-bc5f-35d0f33cb91e";
+
+/// Bound a dependency outage rather than leaving the desktop saying "starting" forever.
+///
+/// A healthy run on the Windows machine took 14-15 seconds because the graph factory connected to
+/// four MCP servers in sequence. Sixty seconds leaves room for that measured path while matching
+/// the backend supervisor's existing one-minute health budget. If hotel Wi-Fi black-holes an MCP
+/// host, the researcher gets the app back and the ordinary request can report the real error.
+const GRAPH_WARM_UP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// A decoded, UI-relevant event from a streaming run.
 #[derive(Clone, Debug, PartialEq)]
 pub enum TurnEvent {
@@ -840,12 +855,49 @@ impl LangGraphClient {
         self
     }
 
-    /// `GET /ok` — true when the server is up and the graph is loaded.
+    /// `GET /ok` — true when the HTTP server is accepting requests.
+    ///
+    /// It does **not** mean the graph is loaded. Measured on 2026-08-12: `/ok` answered, then the
+    /// first read-only `GET /threads/{id}/state` spent 14,982 ms constructing the graph and opening
+    /// its MCP clients. Keeping the boundary honest matters because startup uses this answer to
+    /// decide whether the researcher may safely open saved work (docs §175).
     pub async fn is_healthy(&self) -> bool {
         match self.http.get(format!("{}/ok", self.base_url)).send().await {
             Ok(resp) => resp.status().is_success(),
             Err(_) => false,
         }
+    }
+
+    /// Force the deployed graph factory to run before a researcher opens a conversation.
+    ///
+    /// LangGraph API 0.9.0 does not accept `GET /assistants/agent/schemas`: that route validates
+    /// `assistant_id` as a UUID. Searching assistants is cheap but also does not touch the graph.
+    /// A fixed internal assistant followed by its schemas route is the smallest read-only graph
+    /// access that did trigger the factory in a live probe. The assistant is deliberately retained:
+    /// one stable internal row is safer than create/delete races between two app windows, and it is
+    /// not a conversation or a second source of conversation metadata (docs §154, §175).
+    pub async fn warm_graph(&self) -> Result<()> {
+        self.http
+            .post(format!("{}/assistants", self.base_url))
+            .json(&graph_warm_up_assistant())
+            .send()
+            .await
+            .context("creating the internal graph warm-up assistant failed")?
+            .error_for_status()
+            .context("creating the internal graph warm-up assistant returned an error status")?;
+
+        self.http
+            .get(format!(
+                "{}/assistants/{GRAPH_WARM_UP_ASSISTANT_ID}/schemas",
+                self.base_url
+            ))
+            .timeout(GRAPH_WARM_UP_TIMEOUT)
+            .send()
+            .await
+            .context("warming the agent graph failed")?
+            .error_for_status()
+            .context("warming the agent graph returned an error status")?;
+        Ok(())
     }
 
     /// `GET /project` → the research project spine.
@@ -1509,6 +1561,16 @@ fn run_request_body(
     let mut body = stream_request_body(model, project, workspace_thread);
     body["input"] = json!({ "messages": [ { "type": "human", "content": prompt } ] });
     body
+}
+
+fn graph_warm_up_assistant() -> Value {
+    json!({
+        "assistant_id": GRAPH_WARM_UP_ASSISTANT_ID,
+        "graph_id": "agent",
+        "if_exists": "do_nothing",
+        "name": "Mini-Me startup warm-up (internal)",
+        "metadata": {"minime_internal": true},
+    })
 }
 
 /// Body for resuming a paused run with the human's decisions.
@@ -2547,6 +2609,15 @@ mod tests {
         // Without subgraphs a delegated turn streams nothing while the subagent
         // works — the silent gap the activity trace exists to close.
         assert_eq!(body["stream_subgraphs"], json!(true));
+    }
+
+    #[test]
+    fn repeated_startups_reuse_one_internal_graph_warm_up_assistant() {
+        let body = graph_warm_up_assistant();
+        assert_eq!(body["assistant_id"], GRAPH_WARM_UP_ASSISTANT_ID);
+        assert_eq!(body["graph_id"], "agent");
+        assert_eq!(body["if_exists"], "do_nothing");
+        assert_eq!(body["metadata"]["minime_internal"], true);
     }
 
     #[test]

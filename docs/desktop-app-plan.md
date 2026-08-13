@@ -9980,3 +9980,67 @@ composer below so a question and its answer start on the same x.
 
 *Twenty-seventh: a property that a container silently drops is worse than one it rejects. `p_4`
 should not compile on an element that means `py_4`.*
+
+
+## 175. `/ok` answered before the graph existed (2026-08-13)
+
+Reported as two delays: saved conversation names taking time to appear, and a saved conversation
+taking time to open. The initial suspicion was DeepAgents plus SQLite. The backend log separates
+them conclusively:
+
+- the LangGraph HTTP server started in **1.914–2.121 seconds**;
+- the custom `AsyncSqliteSaver` loaded in **0.00062 seconds**;
+- `POST /threads/search` returned two titles in **290 ms** in the direct Windows probe; and
+- the first `GET /threads/{id}/state` spent **14,154–14,982 ms** loading `agent`.
+
+That last request was read-only, but its log showed network handshakes with Asta, Dataverse,
+AGROVOC and Crop Ontology. `backend/agent.py:130-133` awaits those MCP tool bundles while assembling
+the DeepAgents graph, so reading stored state paid for every research tool before it could read the
+conversation. SQLite was not the bottleneck.
+
+### Expensive once per process, inexpensive on later graph access
+
+The MCP tool registry is cached at process scope. The same real backend process reported later
+graph factory accesses at **356.13 ms** and **249.4 ms**, with no repeated MCP handshakes. So the
+14-second part is a cold-process cost landing on the wrong interaction, not a 14-second tax on every
+conversation. The remaining quarter-second factory work is real and is the reason lazy graph
+construction is still the eventual backend fix, but it is not the defect the researcher felt.
+
+### The health check claimed a boundary the server does not provide
+
+`LangGraphClient::is_healthy` documented `/ok` as meaning *the server is up and the graph is
+loaded*. The log had `/ok` answering before any factory call, then `Slow graph load` on the first
+state request. The comment now says what the endpoint proves: HTTP readiness only.
+
+Three candidate warm-up routes were exercised against the installed LangGraph API 0.9.0:
+
+- `GET /assistants/agent/schemas` returns 422 because this version requires a UUID there.
+- `POST /assistants/search {"limit":1}` returns without loading the graph.
+- Creating one assistant with `graph_id: "agent"`, then requesting its `/schemas`, reaches the
+  graph factory. Repeating the create with a fixed UUID plus `if_exists: "do_nothing"` returned
+  200 both times, so launches converge on one internal record rather than accumulating them.
+
+The diagnostic shell deliberately did not extract the app's keychain secrets, so its schema probe
+stopped at the expected `ASTA_API_KEY` check. The earlier real app log supplies the successful,
+credentialed timing and the complete MCP sequence.
+
+### Warm the graph without making the sidebar wait for it
+
+Graph warm-up stays separate from backend warm-up. As soon as `/ok` answers, the UI refreshes the
+conversation list and project spine, then says **loading research tools…** while the fixed internal
+assistant's schema request constructs the graph. A 60-second request budget matches the existing
+backend health budget: hotel Wi-Fi may make one MCP host unreachable, but it cannot leave the
+desktop claiming to start forever. Failure is logged and the status says the tools are not ready;
+it does not invent success.
+
+This intentionally does not add a sidebar cache. §154 and §166 already show what happens when the
+client remembers conversation facts after the backend has deleted or reclassified them, and the
+measured warm `/threads/search` is not slow enough to justify a second registry.
+
+The first process still spends roughly 15 seconds connecting to four MCP servers sequentially; the
+client change moves that cost off the first click, it does not erase it. Gathering those clients
+concurrently, and ultimately keeping read-only state routes out of graph construction entirely,
+belong in the protected Python backend and remain the next performance work.
+
+*Twenty-eighth: readiness is not one fact. A socket can answer, history can be listed, and the agent
+can still be fifteen seconds away from usable.*

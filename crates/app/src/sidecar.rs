@@ -473,6 +473,22 @@ impl Sidecar {
         rx
     }
 
+    /// Build the graph while startup already tells the researcher the agent is loading.
+    ///
+    /// Kept separate from [`Self::warm_up`] so the UI can populate conversation names as soon as
+    /// the HTTP server is ready, then keep the honest "loading research tools" status until the
+    /// expensive factory finishes. Folding this into backend readiness would turn the measured
+    /// 15-second graph load into a new 15-second sidebar delay (docs §175).
+    pub fn warm_graph(&self) -> mpsc::UnboundedReceiver<Result<()>> {
+        let (tx, rx) = mpsc::unbounded();
+        let base_url = self.base_url.clone();
+        self.runtime.spawn(async move {
+            let outcome = LangGraphClient::new(base_url).warm_graph().await;
+            let _ = tx.unbounded_send(outcome);
+        });
+        rx
+    }
+
     /// Stop the backend and start it again, reporting what happened.
     ///
     /// The verb that was missing. `ensure_running` attaches to a healthy backend rather than
