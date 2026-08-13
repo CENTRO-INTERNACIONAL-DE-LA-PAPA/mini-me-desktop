@@ -10776,3 +10776,59 @@ orphaned over the workbench.
 *Thirty-ninth: "warned, not fatal" is a judgement about one moment, and it does not travel. The
 warning was written for a launch that could still be fixed, and then covered a turn where there
 was nothing to read it in.*
+
+## 187. The specialist was on a different account (2026-08-13)
+
+> *"My hypothesis is that the subagents are not getting the default model at the top."*
+
+Right, and the mechanism is worse than a subagent ignoring the default: **it had been given an
+explicit one, from a different provider, with nothing on screen to say so.**
+
+The settings pane showed the coordinator on **Custom (OpenAI-compatible)** with
+`openai/gpt-5.4` — an OpenRouter id, correctly set, on an account with credits. Below it,
+`academic_researcher` read **`gpt-4.1`**. The failing turn was a literature search, which
+delegates to exactly that specialist. §186 had just fixed the coordinator's path and the turn
+failed anyway, which is what made the hypothesis worth taking seriously.
+
+### One list, five providers, and a slash
+
+`specialist_list` offers every model from all five providers, flat. With the coordinator on
+`custom`, that list contains:
+
+| row | provider | account billed |
+|---|---|---|
+| `gpt-4.1` | `openai` | the OpenAI account |
+| `openai/gpt-4o-mini` | `custom` | the OpenRouter account |
+
+**A slash.** That was the entire visible difference between "runs where the rest of your work
+runs" and "runs on a different company's bill".
+
+The row *could* have said which provider it belonged to — the code computes it — but only
+rendered it when the key was **missing**, on this reasoning, quoted from the line itself:
+
+> *"Named only when it would be a second provider to key, since that is the thing a researcher
+> has to act on before the choice can work."*
+
+That is a defensible sentence about **whether a choice will function**, and this researcher had
+an OpenAI key, so it functioned perfectly and billed the wrong account. The same shape as §186,
+one screen down: the app said what was *broken* and never what it would *cost*.
+
+### Every row that leaves the coordinator now says so
+
+`specialist_note` annotates any model from a provider other than the one running the
+conversation — keyed or not — and the two messages are deliberately different, because they ask
+for different things:
+
+- **`OpenAI — no key stored`** — fix this before it works.
+- **`OpenAI — billed separately`** — know this before it costs.
+
+`None` only for the coordinator's own provider, where the models are billed exactly where every
+other turn is and a note on every row would be noise.
+
+- ⬜ **Nothing stops a specialist being pointed at an unkeyed provider.** §186 refuses a *turn*
+  whose coordinator has no key; an override to a provider with none still saves, and fails inside
+  the subagent minutes later. The gate reads the coordinator's settings alone. Recorded because
+  the fix is the same shape and the failure is slower and harder to read.
+
+*Fortieth: "is this configured correctly" and "what will this spend" are different questions, and
+a UI that only answers the first will let somebody spend confidently.*
