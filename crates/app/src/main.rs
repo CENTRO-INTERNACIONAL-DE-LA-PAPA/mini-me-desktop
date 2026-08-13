@@ -10,6 +10,7 @@
 //! rendering and the command palette are still open.
 
 mod backend;
+mod catalogue;
 mod composer;
 mod gallery;
 mod markdown;
@@ -182,10 +183,14 @@ fn picker_row(
     div()
         .id(SharedString::from(format!("row-{label}")))
         .flex()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .gap_2()
+        // **A column, because the note was eating the name.** Both sat in one row competing for
+        // width, and since the label is the one that ellipsises, `gpt-4.1 · OpenAI — billed
+        // separately` rendered as `gpt-4.` — reported as *"I cannot read the complete model
+        // name"*. Stacking gives the id the full width it needs, which matters more now that a
+        // gateway's ids look like `meta-llama/llama-3.3-70b-instruct` (docs §188).
+        .flex_col()
+        .items_start()
+        .gap_0p5()
         .w_full()
         .min_w_0()
         .px_2()
@@ -2607,6 +2612,9 @@ struct Workbench {
     /// Filters the *installed* theme list. With a hundred palettes installed, a list you
     /// can only scroll is a list you cannot use.
     theme_filter: Entity<Composer>,
+    /// Narrows the model picker. Necessary rather than a nicety: a gateway's catalogue runs to
+    /// several hundred ids, and a scroll box is not a way to find `deepseek` among them (§188).
+    model_filter: Entity<Composer>,
     /// Filter for the project picker, which doubles as the field a new project is named in.
     project_query: Entity<Composer>,
     theme_scroll: gpui::ScrollHandle,
@@ -2730,6 +2738,9 @@ struct Workbench {
     confirming_delete: Option<DeleteTarget>,
     /// A provider the researcher has clicked but not yet confirmed — see [`Workbench::provider_modal`].
     confirming_provider: Option<&'static settings::Provider>,
+    /// What each provider last said it offers — see [`catalogue`]. Read from disk at launch and
+    /// replaced in place when a refresh lands, so the picker never blocks on the network.
+    catalogue: catalogue::Catalogue,
     /// The confirmed target awaiting its backend and filesystem results.
     ///
     /// Optimistically removing the row made a failed or interrupted request look successful
@@ -2779,6 +2790,9 @@ impl Workbench {
         // Filtering installed themes, as you type — this one is local, so every keystroke
         // is free.
         let theme_filter = cx.new(|cx| Composer::new(cx, "Filter themes"));
+        let model_filter = cx.new(|cx| Composer::new(cx, "Filter models"));
+        cx.observe(&model_filter, |_workbench, _field, cx| cx.notify())
+            .detach();
         let project_query = cx.new(|cx| Composer::new(cx, "Find or name a project"));
         cx.observe(&project_query, |_workbench, _field, cx| cx.notify())
             .detach();
@@ -2886,6 +2900,7 @@ impl Workbench {
             approve_rest_of_turn: false,
             approve_conversation: false,
             theme_filter,
+            model_filter,
             project_query,
             theme_scroll: gpui::ScrollHandle::new(),
             model_scroll: gpui::ScrollHandle::new(),
@@ -2927,6 +2942,7 @@ impl Workbench {
             renaming: None,
             confirming_delete: None,
             confirming_provider: None,
+            catalogue: catalogue::load(),
             deleting: None,
             rename_editor,
             approve_tasks: std::collections::HashSet::new(),
@@ -4093,6 +4109,56 @@ impl Workbench {
     /// Kick off one coordinator turn and pump its events into the transcript.
     fn start_turn(&mut self, prompt: String, cx: &mut Context<Self>) {
         self.start_turn_as(prompt, subagent::Dispatch::default(), cx);
+    }
+
+    /// Ask the current provider what it offers, if nobody has asked today.
+    ///
+    /// **Called when the Model pane opens, not on a timer.** A background poll would spend a
+    /// researcher's key on a request they cannot see, and the only moment the answer matters is
+    /// the moment somebody is looking at the list. Opening the pane is that moment.
+    ///
+    /// Silent on failure by design. This is a nicety on top of a curated list that already works:
+    /// offline, rate-limited or a gateway that does not serve `/models` all mean *"keep the list
+    /// you have"*, and an error toast for a thing nobody asked for is noise.
+    fn refresh_models(&mut self, cx: &mut Context<Self>) {
+        let Some(spec) = settings::provider(&self.draft.provider) else {
+            return;
+        };
+        let Some((url, auth)) = catalogue::endpoint(spec.id, &self.draft.base_url) else {
+            return;
+        };
+        let now = provenance::now_ms();
+        if !self
+            .catalogue
+            .get(spec.id)
+            .is_none_or(|listing| listing.is_stale(now))
+        {
+            return;
+        }
+        // Read here, on the main thread — the keychain is not safe to touch from a Tokio worker.
+        let key = settings::secret(&format!("llm:{}", spec.id));
+        let mut done = self.sidecar.refresh_models(
+            spec.id.to_string(),
+            url,
+            auth,
+            key,
+            now,
+        );
+        cx.spawn(async move |this, cx| {
+            if let Some(outcome) = done.next().await {
+                let _ = this.update(cx, |workbench, cx| match outcome {
+                    Ok((provider, count)) => {
+                        // Re-read rather than patch: the file is the record, and another provider
+                        // may have been written while this one was in flight.
+                        workbench.catalogue = catalogue::load();
+                        tracing::info!(%provider, count, "model list refreshed");
+                        cx.notify();
+                    }
+                    Err(error) => tracing::debug!(%error, "could not refresh the model list"),
+                });
+            }
+        })
+        .detach();
     }
 
     /// The one thing stopping a turn from reaching the provider that was actually chosen.
@@ -5777,8 +5843,8 @@ impl Workbench {
     fn model_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let current = self.field_text_or(Field::ModelId, &self.draft.model_id, cx);
         let models = settings::provider(&self.draft.provider)
-            .map(|spec| spec.models)
-            .unwrap_or(&[]);
+            .map(|spec| catalogue::models_for(spec, &self.catalogue))
+            .unwrap_or_default();
 
         let mut list = div()
             .id("model-rows")
@@ -5795,8 +5861,20 @@ impl Workbench {
             .overflow_y_scroll()
             .track_scroll(&self.model_scroll);
 
-        for model in models {
-            let selected = *model == current;
+        // Fuzzy, the same scorer as every other list here, so `deepseek` finds
+        // `deepseek/deepseek-r1` and `kimi` finds `moonshotai/kimi-k2`.
+        let query = self.model_filter.read(cx).text().to_string();
+        let mut ranked: Vec<(i32, String)> = models
+            .into_iter()
+            .filter_map(|model| match_score(&query, &model).map(|score| (score, model)))
+            .collect();
+        if !query.trim().is_empty() {
+            ranked.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+        }
+        let shown = ranked.len();
+
+        for (_, model) in ranked {
+            let selected = model == current;
             list = list.child(
                 div()
                     .id(SharedString::from(format!("model-{model}")))
@@ -5834,20 +5912,40 @@ impl Workbench {
                         )
                     })
                     .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                        workbench.set_field(Field::ModelId, model, cx);
+                        workbench.set_field(Field::ModelId, &model, cx);
                         cx.notify();
                     })),
             );
         }
 
         div()
-            .relative()
             .flex()
             .flex_col()
             .w_full()
             .min_w_0()
-            .child(list)
-            .children(scrollbar(&self.model_scroll))
+            .gap_1()
+            // Above the rows, because a filter under the thing it filters is one nobody finds.
+            .child(self.filter_field(self.model_filter.clone(), cx))
+            .child(
+                div()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .min_w_0()
+                    .child(list)
+                    .children(scrollbar(&self.model_scroll)),
+            )
+            // **Said, not implied by an empty box.** A filter matching nothing and a provider
+            // that returned nothing look identical otherwise, and only one of them is fixed by
+            // typing less.
+            .when(shown == 0, |panel| {
+                panel.child(
+                    ui::Label::new("No model matches that.")
+                        .muted()
+                        .size(ui::Size::Compact),
+                )
+            })
     }
 
     /// Put text into one of the Settings fields.
@@ -6461,7 +6559,9 @@ impl Workbench {
         );
 
         for provider in settings::PROVIDERS {
-            for model in provider.models {
+            // The same live list the coordinator's picker uses, so a specialist can be pointed at
+            // anything the gateway actually carries rather than at four names written here.
+            for model in catalogue::models_for(&provider, &self.catalogue) {
                 let spec = format!("{}::{}", provider.id, model);
                 let selected = chosen.as_deref() == Some(spec.as_str());
                 let note = specialist_note(
@@ -6472,7 +6572,7 @@ impl Workbench {
                 let picked = name.clone();
                 let value = spec.clone();
                 list = list.child(
-                    picker_row(*model, selected, note)
+                    picker_row(model.clone(), selected, note)
                         .id(SharedString::from(format!("sa-{index}-{spec}")))
                         .on_click(cx.listener(move |workbench, _event, _window, cx| {
                             workbench
@@ -6584,6 +6684,9 @@ impl Workbench {
                             .on_click(cx.listener(move |workbench, _event, _window, cx| {
                                 workbench.confirming_provider = None;
                                 workbench.draft.provider = spec.id.to_string();
+                                // A different provider has a different catalogue, and the one on
+                                // screen a moment ago belonged to the provider being left.
+                                workbench.refresh_models(cx);
                                 // A model that exists for the provider just chosen, rather than
                                 // leaving one that does not.
                                 workbench.set_field(Field::ModelId, spec.suggested_model, cx);
@@ -9844,6 +9947,8 @@ impl Workbench {
         if self.settings_section == Section::Setup {
             self.settings_section = Section::Model;
         }
+        // The one moment a fresh list is worth a request: somebody is about to read it.
+        self.refresh_models(cx);
         let values: Vec<(Field, String)> = self
             .fields
             .iter()

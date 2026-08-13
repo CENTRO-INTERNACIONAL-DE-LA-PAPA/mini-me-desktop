@@ -116,6 +116,14 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   `<task>/guinea_pig_eda_output/plots/health_by_activity_box.png`. Its folder is created *inside*
   the conversation's, and the conversation it belongs to is remembered per thread because the run
   config is not visible at every construction site.
+- ⬜ **A finished background task should be a button, not a sentence to retype.** Asked for
+  directly: *"when a background task has a success, we should see a modal button that the user
+  can press and that serves as a check status, so the user doesn't type it every time in the
+  chatbox."* The app already knows a task finished — §31's Jobs panel polls for exactly that —
+  so the result is one press away and is currently a question the researcher has to compose. The
+  care needed: the button has to say *which* task, since several run at once (§43), and pressing
+  it should open the result rather than sending a turn that asks for it.
+
 - ⬜ **A loading state worth looking at.** Asked for after §177 and §178 put an honest one in
   place: *"maybe we can create a cool animation later for loading states."* What exists now is four
   braille frames and a sentence — correct, legible, and plainly a placeholder. The waits it covers
@@ -10832,3 +10840,60 @@ other turn is and a note on every row would be noise.
 
 *Fortieth: "is this configured correctly" and "what will this spend" are different questions, and
 a UI that only answers the first will let somebody spend confidently.*
+
+## 188. Ask the provider what it has (2026-08-13)
+
+> *"We need to have current available models updated from providers api… For the case of
+> openrouter which have more models including opensource models like kimi or deepseek we should
+> have a longer list."*
+>
+> *"The error happened when I selected gpt-4.1 even when from openrouter I should be able to use
+> it. So I'm thinking that you are using the url from openai and not the one from openrouter."*
+
+The second observation is the sharper one, and §187's account was true but incomplete. `gpt-4.1`
+came from the **openai** provider's curated list, so the app sent `openai::gpt-4.1` and OpenAI's
+URL — correct behaviour for that row, and not at all what the researcher meant. What they meant
+was *gpt-4.1 through OpenRouter*, which is a real model with a real id: **`openai/gpt-4.1`**. It
+was not offered, because the `custom` provider's curated list holds four entries and that is not
+one of them.
+
+So the fix is not a label. It is that this repo should stop guessing.
+
+### The list comes from the provider now
+
+`catalogue.rs` asks each provider's `/models` endpoint, caches the answer beside `settings.toml`,
+and refreshes when it is a day old. §58 already said why a hand-written list could not hold —
+*"a provider ships a model the day after a release"* — and that argument is merely uncomfortable
+for Anthropic's four and fatal for a gateway carrying several hundred, including the open-weight
+models a research centre has good reason to prefer.
+
+Three decisions worth stating:
+
+- **The provider replaces the curated list; it never merges with it.** A union would keep retired
+  ids in the picker forever, and the provider is the authority on this.
+- **Fetched when the Model pane opens, not on a timer.** A background poll spends a researcher's
+  key on a request they cannot see, and the only moment the answer matters is when somebody is
+  reading the list.
+- **Silent on failure.** Offline, rate-limited, or a gateway that does not serve `/models` all
+  mean *keep the list you have*. This is a nicety on top of something that already works.
+
+What leaves the machine is one `GET` asking "what models do you have", carrying the key that
+provider already receives on every turn. OpenRouter's needs no key at all, which is what lets its
+catalogue arrive before anything is configured.
+
+### Two things that fell out of it
+
+**The rows were unreadable.** `picker_row` put the label and its note in one row with
+`justify_between`, and since the label is the one that ellipsises, `gpt-4.1 · OpenAI — billed
+separately` rendered as **`gpt-4.`** — *"I cannot read the complete model name."* They stack now,
+which the gateway ids need anyway: `meta-llama/llama-3.3-70b-instruct` is not a thing to fit
+beside anything.
+
+**A filter stopped being optional.** Four names in a scroll box is a list; four hundred is a
+haystack. The model picker gets the same fuzzy field the theme picker has, so `kimi` finds
+`moonshotai/kimi-k2` — and says *"No model matches that"* rather than showing an empty box, since
+a filter matching nothing and a provider returning nothing look identical otherwise.
+
+*Forty-first: a curated list is a claim about someone else's product, and it is wrong from the
+day it is written. The only question is whether anybody notices before the person who needed the
+model that was missing.*
