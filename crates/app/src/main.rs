@@ -2752,6 +2752,15 @@ struct Workbench {
     /// What each provider last said it offers — see [`catalogue`]. Read from disk at launch and
     /// replaced in place when a refresh lands, so the picker never blocks on the network.
     catalogue: catalogue::Catalogue,
+    /// Whose key the API-key field is about to set.
+    ///
+    /// **Separate from the coordinator's provider on purpose.** A specialist may run on a second
+    /// provider — the request path has always sent a key per provider (`extra_keys`) — but the
+    /// field wrote to whichever provider was *selected*, so filing an Anthropic key meant
+    /// switching to Anthropic, pasting, saving, and switching back, with §186's confirmation
+    /// interrupting each hop. Asked after meeting exactly that: *"do I have the ability to select
+    /// the models for the subagents using independent API keys?"* (docs §191).
+    key_target: String,
     /// The confirmed target awaiting its backend and filesystem results.
     ///
     /// Optimistically removing the row made a failed or interrupted request look successful
@@ -2954,6 +2963,7 @@ impl Workbench {
             confirming_delete: None,
             confirming_provider: None,
             catalogue: catalogue::load(),
+            key_target: stored.provider.clone(),
             deleting: None,
             rename_editor,
             approve_tasks: std::collections::HashSet::new(),
@@ -6572,18 +6582,50 @@ impl Workbench {
         for provider in settings::PROVIDERS {
             // The same live list the coordinator's picker uses, so a specialist can be pointed at
             // anything the gateway actually carries rather than at four names written here.
-            for model in catalogue::models_for(&provider, &self.catalogue) {
+            let models = catalogue::models_for(&provider, &self.catalogue);
+            if models.is_empty() {
+                continue;
+            }
+            // **The company's name once, over its models** — the shape Mini-Me's own web panel
+            // uses (`<optgroup label={provider.name}>`) and the one Zed's provider page uses, and
+            // both are right for the same reason: repeating "OpenAI — billed separately" on every
+            // row spent the width the model id needed, to say a thing that is true of the whole
+            // group (docs §191).
+            let note = specialist_note(
+                &provider,
+                &self.draft.provider,
+                settings::secret(&format!("llm:{}", provider.id)).is_some(),
+            );
+            list = list.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_baseline()
+                    .gap_2()
+                    .w_full()
+                    .min_w_0()
+                    .px_2()
+                    .pt_2()
+                    .pb_1()
+                    .child(
+                        ui::Label::new(provider.label)
+                            .colour(theme::text())
+                            .size(ui::Size::Compact),
+                    )
+                    .children(note.map(|note| {
+                        ui::Label::new(note)
+                            .colour(theme::warning())
+                            .size(ui::Size::Compact)
+                    })),
+            );
+            for model in models {
                 let spec = format!("{}::{}", provider.id, model);
                 let selected = chosen.as_deref() == Some(spec.as_str());
-                let note = specialist_note(
-                    &provider,
-                    &self.draft.provider,
-                    settings::secret(&format!("llm:{}", provider.id)).is_some(),
-                );
+
                 let picked = name.clone();
                 let value = spec.clone();
                 list = list.child(
-                    picker_row(model.clone(), selected, note)
+                    picker_row(model.clone(), selected, None)
                         .id(SharedString::from(format!("sa-{index}-{spec}")))
                         .on_click(cx.listener(move |workbench, _event, _window, cx| {
                             workbench
@@ -10007,7 +10049,7 @@ impl Workbench {
         let mut stored = Vec::new();
         // Only non-empty fields are written, so a blank field means "leave it alone"
         // rather than "delete my key".
-        let key_name = self.draft.key_name();
+        let key_name = format!("llm:{}", self.key_target);
         let secrets: Vec<(String, String)> = self
             .fields
             .iter()
@@ -10216,7 +10258,6 @@ impl Workbench {
     fn settings_pane(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let provider = settings::provider(&self.draft.provider);
         let needs_base_url = provider.is_some_and(|p| p.needs_base_url);
-        let key_name = self.draft.key_name();
 
         // A centred modal, not a column. As a column it took 420px off the chat for as
         // long as it was open, and settings are something you visit and leave — the same
@@ -10275,7 +10316,7 @@ impl Workbench {
                 let name = field
                     .secret_name()
                     .map(str::to_string)
-                    .unwrap_or_else(|| key_name.clone());
+                    .unwrap_or_else(|| format!("llm:{}", self.key_target));
                 // Presence only — the value itself is never read back into the UI.
                 if settings::secret(&name).is_some() {
                     " · stored"
@@ -10285,6 +10326,74 @@ impl Workbench {
             } else {
                 ""
             };
+            // **Every provider at once, above the field.** Both references converge here: the
+            // web panel lists all providers with a Connected badge, and Zed's page gives each its
+            // own key row — because a key belongs to a *company*, not to whichever provider a
+            // conversation happens to be running on. Picking one here retargets the field and
+            // nothing else: the coordinator does not move, and no confirmation is owed (§191).
+            if *field == Field::ApiKey {
+                let mut chips = div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .gap_1()
+                    .w_full()
+                    .min_w_0();
+                for spec in settings::PROVIDERS {
+                    let chosen = spec.id == self.key_target;
+                    let has_key = settings::secret(&format!("llm:{}", spec.id)).is_some();
+                    chips = chips.child(
+                        div()
+                            .id(SharedString::from(format!("key-target-{}", spec.id)))
+                            .flex_none()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(if chosen {
+                                theme::accent()
+                            } else {
+                                theme::border()
+                            }))
+                            .when(chosen, |chip| chip.bg(rgb(theme::accent_soft())))
+                            .text_color(rgb(if chosen {
+                                theme::text()
+                            } else {
+                                theme::text_muted()
+                            }))
+                            .text_xs()
+                            .hover(|style| {
+                                let fill = theme::hover_over(theme::elevated());
+                                style
+                                    .bg(rgb(fill))
+                                    .text_color(rgb(theme::ink_on(fill)))
+                                    .cursor_pointer()
+                            })
+                            // A tick where a key is filed, so "which of these am I missing" is
+                            // one glance rather than five clicks.
+                            .child(format!("{}{}", if has_key { "✓ " } else { "" }, spec.label))
+                            .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                                workbench.key_target = spec.id.to_string();
+                                cx.notify();
+                            })),
+                    );
+                }
+                pane = pane.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .w_full()
+                        .min_w_0()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_color(rgb(theme::text_muted()))
+                                .text_xs()
+                                .child("Keys — one per company, set them in any order"),
+                        )
+                        .child(chips),
+                );
+            }
             pane = pane.child(
                 div()
                     .flex()
