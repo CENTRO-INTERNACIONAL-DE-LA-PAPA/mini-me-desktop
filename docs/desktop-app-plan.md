@@ -10398,3 +10398,74 @@ fresh installs are affected, so nobody's saved choice moves.
 
 *Thirty-fourth: when a decision is replaced, check what the old one argued, not just what it did.
 An argument about the room is not answered by an argument about the palette.*
+
+## 182. Cream is not an off-white (2026-08-13)
+
+> *"In my eyes the letters and the background compete so it disturbs the attention. Also we
+> should have a dark and a light theme for Papa Nativa."*
+
+Measuring the shipped palette turned that into two numbers, and they say the same thing:
+
+| | hue | saturation |
+|---|---|---|
+| `text` `#f2ebdd` | 40° (yellow) | **44.7%** |
+| `background` `#18141c` | 270° (violet) | 16.7% |
+
+The ink was not an off-white. It was **a colour**, at nearly half saturation, sitting 130° across
+the wheel from the ground it was set on — and carried at 15.3:1 luminance contrast, which is
+almost the maximum available and well past AAA's 7:1. Opposed chroma at near-maximum contrast is
+precisely the arrangement that vibrates. The report was not a matter of taste; it was a
+description of what those numbers do.
+
+Nothing in the suite could have caught it. `every_shipped_theme_is_readable` measures contrast,
+and cream on aubergine passes contrast *magnificently* — 15.3:1 is the problem, not the evidence
+of its absence.
+
+### The fix is two numbers
+
+The ink moved into the background's own hue family — 283°, under 10% saturation — and the
+contrast came down to 12.8:1. Still far above AAA, without the glare. **Hue belongs to surfaces
+and accents; text is not where a palette should be expressed.** The aubergine ladder is untouched,
+so the identity survives intact; what changed is that the letters stopped arguing with it.
+
+`the_ink_a_whole_answer_is_set_in_stays_near_grey` now pins it, on **channel spread** rather than
+HSL saturation — that measure explodes near white (it rates the cream 45% when its channels span
+21 of 255), so a threshold written against it would have to differ between light and dark themes
+to mean the same thing. The cap is 16: the highest body text among the eight shipped palettes is
+13, and the cream that caused the report was 21. Verified by reintroducing the cream and watching
+it fail.
+
+It applies to `text` alone. `text_muted` and `text_faint` are timestamps, labels and counts —
+small, sparse, and a tint there is part of how they read as a lesser role rather than as dimmer
+body copy. Slate's faint ink spans 23 and is right to.
+
+### The brand palette, measured rather than adapted
+
+The secondary CIP palette was supplied as swatches. Measuring all fourteen against both grounds
+found that most of them need no adjustment at all:
+
+- **Dark, shipping exactly as the brand guide prints them:** 369 C `#76B82A` (6.98:1) as
+  `success`, 137 C `#FBBA00` (9.78:1) as `warning`, Process Cyan `#009FE3` (5.70:1) as `running`.
+- **Light, likewise:** 2607 C `#56217A` (10.50:1) as `accent`, 364 C `#34752D` (5.33:1) as
+  `success`.
+
+Four needed moving, all of them for the same reason — a colour bright enough to print cannot also
+carry 4.5:1 against paper, and a print colour dark enough to sit on white cannot carry it on
+near-black. Only lightness and saturation moved; every hue is **within 3° of its source**, and
+three of the four are within 1°. That is the same rule §(Bench) already applied to its two adjusted
+inks, and it is what keeps "we use CIP's palette" a true sentence rather than a gesture.
+
+### Papa Nativa Light
+
+The counterpart §181's addendum said to build, and the reason it was worth predicting: the
+argument for a light default was never about colour identity, so a darker identity did not answer
+it. *"It is read next to a bench, a greenhouse window and a projector, and those are the rooms a
+dark UI actually fails in."* Now there is a light Papa Nativa, on the same 270–280° hue family, so
+the two read as one identity under two lights rather than as two themes.
+
+**The default is unchanged** — a fresh install still opens on the dark one. Moving it is a
+decision about where these researchers actually sit, and making that call quietly while shipping a
+palette is exactly what §181's addendum objected to.
+
+*Thirty-fifth: a passing contrast test says the text can be read, not that it is comfortable to
+read. 15:1 and 4.4:1 fail in opposite directions and only one of them has an assertion.*
