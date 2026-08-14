@@ -10954,12 +10954,9 @@ ink was impossible while every row did exactly that.
 itself, the hover colour in the refinement. That is the only arrangement in which the two can
 disagree, which is what a state *is*.
 
-- ⬜ **Scrolling a list inside the settings modal scrolls the modal too.** Reported here: *"when I
-  scroll in the modal filter, at the same time I'm scrolling the options of the Custom model."*
-  Two nested `overflow_y_scroll` regions, both registering a wheel listener, both firing on the
-  bubble. Not yet fixed.
-- ⬜ **The sources panel still lists every reference in full.** Asked for: grouped like the images
-  gallery, opening into a scrollable list rather than a slider.
+- ✅ **Scrolling a list inside the settings modal no longer scrolls the modal too** — reported
+  fixed by the researcher on 2026-08-13.
+- ✅ **The sources panel lists four and opens the rest** (§194). **Awaiting eyes.**
 
 *Forty-second: ask what a colour is *for* before measuring it. Text on a fill and a fill under
 text are different questions with different floors, and I answered the wrong one first.*
@@ -11104,3 +11101,30 @@ the reference point did. The orange was the reference all along.
 
 *Forty-sixth: when three fixes fail, stop generating a fourth explanation and go looking for the
 thing that already works. It is usually adjacent.*
+
+## 194. The reference list is a list, not a slideshow (2026-08-13)
+
+> *"Let's change the UI of sources like we did for the images. It's more ordered rather than
+> showing a long list of papers. And when the user clicks, instead of a sliding visualiser he can
+> see a nice list that can scroll in y direction. Like OS systems do in file explorers."*
+
+Twenty-six references rendered in full is a wall the researcher scrolls past to reach the files
+underneath — the same problem the images had before §152 put them behind one tile. The panel now
+shows **four** and offers `+22 more · open all`.
+
+**And deliberately not the slider the images got.** That distinction is the request's, and it is
+right: a figure is one thing you look at and the next is a different thing, so paging suits it. A
+reference list is one object you read *down*. Paging through citations one at a time would be the
+wrong gesture for the same reason paging through a folder would be.
+
+So the modal is a scroll region, 720px wide, holding every reference in the same rows the panel
+draws — **the same function**, called with `None` instead of `Some(4)`. Two renderers would be two
+places for the unverified mark or the link to go missing from one and not the other, and §185 put
+that mark there precisely so a researcher could trust its absence.
+
+The footer carries §185's count in words rather than as a number: *"3 of these came from the model
+rather than from a search — confirm them before citing."* Same function as the header, so the two
+cannot disagree.
+
+*Forty-seventh: two collections that look alike on screen can still want opposite gestures. What
+decides is whether the items are alternatives to each other or parts of one thing.*
