@@ -11176,3 +11176,39 @@ showing*.
 
 *Forty-ninth: a fallback that looks like the real thing is worse than one that looks broken. Six
 sections of work were invisible and the screen looked fine.*
+
+## 197. A filter for the reference list, and the flake I kept explaining away (2026-08-13)
+
+> *"Add a search bar in the modal panel when I open the sources so the user can filter."*
+
+The open list gets the same fuzzy field every other list here has, scored against **the citation
+as written** — which is what a researcher remembers: an author, a year, a word from the title.
+
+Two details that are not obvious:
+
+- **The field sits outside the scroll region.** `Modal::body` is itself a scroller, so a filter
+  placed inside it scrolls away from the list it filters. The inner `max_h` means the body's own
+  content fits and only the list moves.
+- **References are numbered before filtering.** `[3]` has to keep meaning the third reference of
+  the answer, because the prose points at it. A filtered list that renumbers is a list that
+  disagrees with the text above it.
+
+The panel's four are deliberately not filtered: a filter over a preview showing four of seventeen
+is a filter whose result you cannot see.
+
+### And the flake, which was mine
+
+A test had been failing about one run in four for the last several sections, and I called it *"a
+stale build"* three times without proving it. It is not. **`apply` writes the live theme to global
+atomics** — the whole design of this file, since free rendering helpers have no `Context` to reach
+a GPUI global through — and `cargo test` runs tests in parallel. Three tests call `apply` and then
+read `text()` or `ink_on()`. Whichever lost the race failed.
+
+A `THEME_LOCK` now serialises them, taken as the first statement of each, and recovering from
+poisoning so one panicking test does not fail the other two for a different reason. Five
+consecutive clean runs.
+
+Worth saying plainly: I attributed a real race to a build artefact three times because the rerun
+was always green. **A test that passes on retry is evidence of a race, not evidence of nothing.**
+
+*Fiftieth: "it passed the second time" is the beginning of an investigation, not the end of one.*
