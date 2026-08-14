@@ -415,6 +415,33 @@ impl Sidecar {
         rx
     }
 
+    /// Write a hand-edited mission, and hand back the spine the store saved.
+    ///
+    /// **Not fire-and-forget**, unlike renaming a conversation: the backend normalises what it
+    /// stores — 500 characters, runs of whitespace collapsed — so the panel has to render the
+    /// answer rather than the request, or a mission that was quietly truncated would look intact
+    /// until the next reload disagreed.
+    ///
+    /// Like `fetch_project` it does not start a backend that is not running — but unlike it, the
+    /// failure is reported: a spine read that finds nothing listening is a blank decoration, and a
+    /// spine write that finds nothing listening is an edit the researcher believes they made.
+    pub fn set_mission(&self, mission: String) -> mpsc::UnboundedReceiver<Result<Project, String>> {
+        let (tx, rx) = mpsc::unbounded();
+        let base_url = self.base_url.clone();
+        let project = self.project();
+
+        self.runtime.spawn(async move {
+            let client = LangGraphClient::new(base_url).with_project(project);
+            let outcome = client
+                .set_mission(&mission)
+                .await
+                .map_err(|error| format!("{error:#}"));
+            let _ = tx.unbounded_send(outcome);
+        });
+
+        rx
+    }
+
     /// Search Zed's theme gallery.
     ///
     /// On the sidecar's runtime because that is where this app's HTTP lives; it has

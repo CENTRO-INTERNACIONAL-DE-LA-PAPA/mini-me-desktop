@@ -11243,3 +11243,77 @@ Three things it does not do, each on purpose:
 
 *Fifty-first: before building a way to ask for something, check whether it is already sitting
 somewhere. The fastest request is the one that turns out to be a lookup.*
+
+## 199. Who made this, and what are we here for (2026-08-14)
+
+> *"I don't know the names of the subagents that produced this output. The name of the subagent
+> must appear in the provenance so I can know the path of work. This is related to: I cannot
+> modify the project mission."*
+
+Two complaints, one screenshot, and they really are related: both are the panel showing a fact and
+withholding the thing behind it.
+
+### The files did not say who wrote them
+
+`FILES · 26`, then `15 images`, then `Background task files`. Three headings, none of which names a
+producer. §152 had removed the 36-character UUID from the folder heading as app bookkeeping, which
+it is — but that UUID *is* the attribution. The background worker runs on its own thread and writes
+into a folder named after it, so the folder is the record of who produced the file, and stripping
+it left the only exact provenance the client has on the cutting-room floor.
+
+So the worker's name **takes the UUID's place** rather than disappearing with it. `background
+worker / plots`, not `plots`; `5 images from background worker`, not fifteen images from nowhere.
+
+And the image tray had to stop being one tray. §152 put every image in one grid because images are
+what a person opens the panel to look at — right within one body of work, wrong across two. A
+researcher reading *"15 images"* was looking at the conversation's plots and a worker's plots in
+one strip with no boundary drawn. `by_producer` now splits before `split_images` does, so
+"together" means together *with the rest of that job's output*. A background worker already has its
+own job row, its own folder and its own button; its figures are a separate body of work by the same
+argument.
+
+**What is deliberately not claimed.** The specialists consulted inside the conversation —
+`exploratory_data_analysis`, `academic_researcher` — share the conversation's thread and its one
+directory, and nothing on the wire says which of them wrote a given file. Matching mtimes against
+the road strip's arrival windows would produce an attribution for every file and would be a guess:
+a specialist can hand a filename to the coordinator that writes it, and two can overlap. That is
+`provenance.rs`'s own rule from §73 — *a provenance record that quietly guesses is worse than none,
+because it will be believed* — so the conversation's own files stay unlabelled, which is what
+"unlabelled" should mean. A thread with no matching task says `a background task`: the folder
+proves a worker wrote it even when the task list did not survive the reload, and "we don't know
+which" is not "nobody".
+
+### The mission could not be changed
+
+`PATCH /project` has existed the whole time. Its own docstring says what it is for — *"let the user
+read and edit it by hand — rename the mission, add a backlog item"* — and this client had never
+called it. The panel rendered `project.mission` as text with nothing to press, so a researcher
+whose opening question was a warm-up was stuck with it.
+
+Not stuck with a label, either. Two facts from the backend make this the difference between an
+annotation and a steering wheel:
+
+- `advance_project` seeds the mission from the first human message **only when it is empty**
+  (`backend/project.py:373`), so a hand-set one survives every later turn rather than being
+  overwritten by the next question.
+- `ProjectSpineMiddleware.awrap_model_call` injects the mission **into the coordinator's system
+  prompt** (`backend/middleware/project.py:136`), so editing it changes what the agent does — how
+  it delegates, what it passes the planner — and not only what the panel displays.
+
+Three decisions in the wiring:
+
+- **The write is scoped exactly like the read.** One `project_url` for both, because the overlay
+  wraps `get_project` and `patch_project` alike and a PATCH that spelled its scope differently
+  would save into a namespace the panel never reads — a save that looks like it silently did
+  nothing. There is a test for that and nothing else about the request.
+- **Not optimistic.** Renaming a conversation shows the typed name immediately because the name is
+  ours. A mission is the backend's: capped at 500 characters, runs of whitespace collapsed. The
+  panel renders what the store returned, or says why it could not — a silent failure here leaves a
+  researcher believing they redirected the agent when they did not.
+- **The `Edit` control lives in the heading, not on hover.** The mission text was already the
+  button; the affordance simply did not exist until the pointer was on it. Our researchers are not
+  developers, and an invisible affordance is not an answer to someone who has already concluded
+  there isn't one.
+
+*Fifty-second: when the client can't attribute something, say the smaller true thing. "A background
+task" is worth more than a confident guess and costs nothing to be right about.*
