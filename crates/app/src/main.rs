@@ -217,7 +217,13 @@ fn picker_row(
                 .text_color(rgb(theme::ink_on(fill)))
                 .cursor_pointer()
         })
-        .child(ui::Label::new(label).inherit().ellipsis())
+        // **No `ellipsis`, and this one was settled by comparison rather than by reasoning.**
+        // The provider headings two lines away are the same `Label` without it and render their
+        // text correctly, so the truncate path — `overflow_hidden` + `text_ellipsis` — is the
+        // difference, and it collapsed every model name to a bare "…" through three attempted
+        // fixes (§59, §190, §192). A row that is already a column has somewhere to put a long id:
+        // it wraps. That is worse than truncating and enormously better than showing nothing.
+        .child(ui::Label::new(label).inherit())
         .children(note.map(|note| {
             // Muted, not red: a missing key is a thing to do next, not a thing done wrong.
             ui::Label::new(note)
