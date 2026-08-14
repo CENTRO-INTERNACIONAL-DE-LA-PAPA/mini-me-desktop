@@ -11363,3 +11363,65 @@ draws as a blank line nobody typed and pushes every row below it down.
 *Fifty-third: a feature that handles the general case and not the common one is a feature nobody
 has. "Multi-line" meant the line breaks we could see, and the ones we couldn't were the only ones
 being typed.*
+
+## 201. Ask the process that did the writing (2026-08-14)
+
+> *"And yes we need to record the write, so maybe we can do that change."*
+
+§199 named the background worker and stopped, honestly, at the specialists. `exploratory_data_analysis`
+and `academic_researcher` share the conversation's thread and its one directory, and nothing on the
+wire says which of them wrote a given file. The client could have matched file timestamps against
+the road strip's arrival windows and produced an attribution for every file; it would have been a
+guess, and `provenance.rs` refuses guesses on the grounds that a provenance record that quietly
+guesses is worse than none, because it will be believed.
+
+The answer is not a better inference. It is asking the only party that was there. **The backend is
+the writer.** It knows which delegation it is inside, because the `task` tool was handed the name;
+and it knows which files a command produced, because it started the command and can look at the
+directory afterwards.
+
+`overlay/minime_local/authorship.py` writes one JSON line per file into `.authorship.jsonl` in the
+conversation's workspace — dot-prefixed, so the client's output scan, which already skips hidden
+names, never lists the record as one of the files it explains.
+
+**Two write paths, and the second is the one that matters.**
+
+- `write` / `upload_files` are deepagents' file tools; the path is the argument.
+- `aexecute` is a shell command, usually a Python script drawing plots. The desktop app's own
+  comment has said for months that *a file written by a script inside `execute` registers no
+  artifact, and those are most of them*. So the workspace is walked after the command and anything
+  newer than its start belongs to whoever issued it. This is not the timestamp inference rejected
+  above: one process takes both readings, from the same clock the filesystem stamps with, around a
+  command it started itself. The interval is proven, not reconstructed.
+
+**Three things it declines to do.** It never descends into a nested thread folder — a background
+worker writing while the coordinator runs a command is the one case where two authors are genuinely
+active in one tree, and §199 already answers for those files. It caps one scan and *says so in the
+log* when the cap bites, because "no line in the manifest" and "there were too many files to look
+at" produce the same empty panel. And it swallows its own failures: losing a line of provenance is
+a worse panel, while raising is a turn that died after writing a file successfully — §18's rule
+about what an overlay may risk.
+
+**A `ContextVar`, not a global.** LangGraph schedules concurrent tool calls as asyncio tasks and a
+task copies the context at creation, so each delegation's name is visible only inside its own
+subtree. A module global would have the second specialist overwrite the first and both sets of
+files come out wearing one name. Same shape, same reason, as `spine.py`'s `_http_project` — and
+the async wrapper is `async def` with the `await` inside the block, which is the mistake that file
+paid for: a sync wrapper sets the variable, builds the coroutine, resets, and hands back something
+unawaited, so the name is gone by the time the subagent runs and the patch looks installed while
+doing nothing.
+
+**On the client, the folder outranks the manifest.** Inside a worker's own run the manifest records
+that worker's coordinator, so reading it first would rename `background worker` to `coordinator` —
+true of the inner graph, useless to the person reading the panel. Two rules, each exact in its own
+domain, in a fixed order. The manifest is re-read only when its size or mtime has moved: it is
+append-only and grows by a line per file, and parsing it on every frame of a streaming answer is
+the disk I/O `shape_of` is cached to avoid.
+
+Everything without a record stays unlabelled, exactly as before. Conversations that ran before this
+existed have no manifest, and a backend without the overlay armed never writes one; both keep §199's
+behaviour rather than acquiring a wrong answer.
+
+*Fifty-fourth: when the client cannot know something, check whether the server was standing right
+there when it happened. Two rounds of this were spent making inferences on the wrong side of the
+wire.*

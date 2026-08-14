@@ -1218,10 +1218,12 @@ fn output_folder_groups(outputs: &[workspace::Output]) -> Vec<OutputFolderGroup<
 /// That component is app bookkeeping; removing only a leading UUID leaves `eda/plots`, the
 /// researcher's information, while the unshortened path remains the grouping identity above.
 ///
-/// `worker` is the specialist that owns that thread, when the app knows which one — it takes the
-/// UUID's place rather than being dropped with it, so the heading reads `background worker /
-/// plots` and the path of the work is legible from the panel (§199). `None` keeps §152's
-/// behaviour, which is what a reload with no task list still gets.
+/// `worker` is whoever produced the files, when the app knows — from the folder for a background
+/// worker (§199), from the backend's own record for a specialist (§201). It takes the leading
+/// position either way: the UUID's, when there was one, so nothing is lost by removing it; and
+/// otherwise ahead of the folder the agent chose. Either way the heading reads as a path of work
+/// — `background worker / plots`, `exploratory data analysis / plots`. `None` keeps §152's
+/// behaviour, which is what a conversation with no record still gets.
 fn output_folder_label(folder: &std::path::Path, worker: Option<&str>) -> String {
     let mut components: Vec<String> = folder
         .components()
@@ -1231,12 +1233,10 @@ fn output_folder_label(folder: &std::path::Path, worker: Option<&str>) -> String
         .first()
         .is_some_and(|component| workspace::looks_like_thread_id(component));
     if removed_thread {
-        match worker {
-            Some(name) => components[0] = name.to_string(),
-            None => {
-                components.remove(0);
-            }
-        }
+        components.remove(0);
+    }
+    if let Some(name) = worker {
+        components.insert(0, name.to_string());
     }
     if components.is_empty() {
         if removed_thread {
@@ -1268,7 +1268,7 @@ fn producing_thread(output: &workspace::Output) -> Option<&str> {
 }
 
 /// Outputs split by who produced them: the conversation's own first, then one group per
-/// background worker, in the order their first file appears.
+/// other author, in the order their first file appears.
 ///
 /// **Ahead of the image/other split, not after it.** §152 put every image in one grid because
 /// images are what a person opens the panel to look at. That was right within one body of work
@@ -1276,17 +1276,37 @@ fn producing_thread(output: &workspace::Output) -> Option<&str> {
 /// plots and a worker's plots in one tray, with nothing saying where the boundary was (§199). A
 /// background worker is already a separate run with its own job row and its own folder; its
 /// figures are a separate body of work for the same reason.
-fn by_producer(outputs: &[workspace::Output]) -> Vec<(Option<String>, Vec<workspace::Output>)> {
+///
+/// Two sources of truth, in this order, each exact within its own domain (§201):
+///
+/// 1. **The folder**, for a background worker — its own thread, its own directory, true by
+///    construction and true even for a conversation reopened years later.
+/// 2. **The manifest**, for everything else — what `overlay/minime_local/authorship.py` wrote
+///    down as each file was produced.
+///
+/// The folder wins where both speak, because inside a worker's run the manifest records that
+/// worker's *own* coordinator and would rename `background worker` to `coordinator` — technically
+/// true of the inner graph and useless to the person reading the panel.
+fn by_producer(
+    outputs: &[workspace::Output],
+    tasks: &[protocol::AsyncTask],
+    wrote: &std::collections::HashMap<String, String>,
+) -> Vec<(Option<String>, Vec<workspace::Output>)> {
     let mut groups: Vec<(Option<String>, Vec<workspace::Output>)> = Vec::new();
     for output in outputs {
-        let thread = producing_thread(output).map(str::to_owned);
-        match groups.iter_mut().find(|(owner, _)| *owner == thread) {
+        let by = match producing_thread(output) {
+            Some(thread) => produced_by(Some(thread), tasks),
+            None => wrote
+                .get(&workspace::normalise_separators(&output.name))
+                .map(|agent| agent.replace('_', " ")),
+        };
+        match groups.iter_mut().find(|(owner, _)| *owner == by) {
             Some((_, produced)) => produced.push(output.clone()),
-            None => groups.push((thread, vec![output.clone()])),
+            None => groups.push((by, vec![output.clone()])),
         }
     }
-    // The conversation's own files lead even when a worker wrote first: they are what the
-    // researcher asked for directly, and a delegated job is the detour under it.
+    // The conversation's own files lead even when someone else wrote first: they are what the
+    // researcher asked for directly, and a delegation is the detour under it.
     groups.sort_by_key(|(owner, _)| owner.is_some());
     groups
 }
@@ -1295,7 +1315,7 @@ fn by_producer(outputs: &[workspace::Output]) -> Vec<(Option<String>, Vec<worksp
 ///
 /// `None` is the conversation's own thread, and stays unlabelled: those files are the unmarked
 /// case, and spending a heading on *"from this conversation"* would name the default everywhere
-/// to say something only in the two places it is not true.
+/// to say something only where it is not true.
 ///
 /// A thread with no matching task is still *some* worker — the folder proves it — so it says so
 /// without naming one. That is the state after a reload whose snapshot carried no `async_tasks`,
@@ -2839,6 +2859,11 @@ struct Workbench {
     renaming: Option<String>,
     /// Whether the mission at the top of the research panel is being edited in place.
     editing_mission: bool,
+    /// Who wrote each file, as the backend recorded it — see [`workspace::authorship`].
+    authorship: std::collections::HashMap<String, String>,
+    /// The manifest's size and mtime when it was last read, so a frame that changed nothing
+    /// costs one `stat` rather than a parse.
+    authorship_stamp: Option<(std::time::SystemTime, u64)>,
     /// The conversation or project whose delete control opened the centred warning.
     ///
     /// This used to be an inline yes/no row. It could not say that saved files now go too, and a
@@ -3089,6 +3114,8 @@ impl Workbench {
             pending_title: None,
             renaming: None,
             editing_mission: false,
+            authorship: std::collections::HashMap::new(),
+            authorship_stamp: None,
             confirming_delete: None,
             confirming_provider: None,
             catalogue: catalogue::load(),
@@ -4904,6 +4931,10 @@ impl Workbench {
         self.buckets.clear();
         self.tasks.clear();
         self.jobs.clear();
+        // The record of who wrote what belongs to the conversation being left. Cleared with the
+        // stamp, or the next frame would see an unchanged `None` and keep the old map.
+        self.authorship.clear();
+        self.authorship_stamp = None;
         self.error = None;
         self.approve_conversation = false;
         self.approve_tasks.clear();
@@ -5160,6 +5191,28 @@ impl Workbench {
         }
         self.restore_focus = true;
         cx.notify();
+    }
+
+    /// Re-read who wrote what, but only when the record itself has moved.
+    ///
+    /// The manifest is append-only and grows by a line per file, so parsing it on every frame of
+    /// a streaming answer would be real work for an answer that changes a few times a turn. Size
+    /// **and** mtime, because an append that lands inside one filesystem timestamp tick still
+    /// changes the length.
+    fn refresh_authorship(&mut self) {
+        let Some(dir) = self.thread_workspace() else {
+            self.authorship.clear();
+            self.authorship_stamp = None;
+            return;
+        };
+        let stamp = std::fs::metadata(dir.join(workspace::AUTHORSHIP))
+            .ok()
+            .and_then(|meta| meta.modified().ok().map(|at| (at, meta.len())));
+        if stamp == self.authorship_stamp {
+            return;
+        }
+        self.authorship_stamp = stamp;
+        self.authorship = workspace::authorship(&dir);
     }
 
     /// Begin editing the mission, with the current one in the field.
@@ -6684,6 +6737,10 @@ impl Workbench {
         self.buckets.clear();
         self.tasks.clear();
         self.jobs.clear();
+        // The record of who wrote what belongs to the conversation being left. Cleared with the
+        // stamp, or the next frame would see an unchanged `None` and keep the old map.
+        self.authorship.clear();
+        self.authorship_stamp = None;
         self.error = None;
         // Blanket approval is scoped to the conversation, so it ends with it — together with
         // every per-task grant, whose tasks belonged to that conversation too.
@@ -9560,8 +9617,10 @@ impl Workbench {
         // Files remain after the answer that explains them. Preserve §162–§164's two bounded
         // galleries here: keeping PR #11's old per-file loop would compile and pass unit tests
         // while silently turning seven plots back into seven full transcript cards.
-        for (band, (thread, produced)) in by_producer(&message.outputs).into_iter().enumerate() {
-            let worker = produced_by(thread.as_deref(), &self.tasks);
+        for (band, (worker, produced)) in by_producer(&message.outputs, &self.tasks, &self.authorship)
+            .into_iter()
+            .enumerate()
+        {
             let (images, others) = split_images(&produced);
             if !images.is_empty() {
                 block = block.child(self.output_grid(
@@ -12800,8 +12859,10 @@ impl Workbench {
         //
         // "Together" is now bounded by who produced them (§199): one tray per body of work, not
         // one tray for the window.
-        for (band, (thread, produced)) in by_producer(&ordered_outputs).into_iter().enumerate() {
-            let worker = produced_by(thread.as_deref(), &self.tasks);
+        for (band, (worker, produced)) in by_producer(&ordered_outputs, &self.tasks, &self.authorship)
+            .into_iter()
+            .enumerate()
+        {
             let (images, others) = split_images(&produced);
             if !images.is_empty() {
                 section = section.child(self.output_grid(
@@ -12924,6 +12985,10 @@ impl Render for Workbench {
             let composer = self.composer.focus_handle(cx);
             window.focus(&composer);
         }
+        // Once per frame, and only actually read when the record has changed. Both the panel and
+        // every transcript block need it, and doing it in each would be a file read per message
+        // per frame — the mistake `shape_of` is cached to avoid.
+        self.refresh_authorship();
 
         // `relative` so the palette's `absolute` overlay is positioned against the
         // window rather than the page origin.
@@ -13286,6 +13351,12 @@ mod tests {
             output_folder_label(&groups[0].folder, Some("background worker")),
             "background worker / guinea_pig_eda_output / plots"
         );
+        // And a specialist inside the conversation, which has no UUID to replace: the name goes
+        // ahead of the folder rather than nowhere (§201).
+        assert_eq!(
+            output_folder_label(std::path::Path::new("plots"), Some("report writer")),
+            "report writer / plots"
+        );
     }
 
     /// One task, one thread, one name — the only attribution available without guessing.
@@ -13306,11 +13377,6 @@ mod tests {
         })
         .collect();
 
-        let groups = by_producer(&outputs);
-        assert_eq!(groups.len(), 2, "conversation and worker are two bodies of work");
-        assert_eq!(groups[0].0, None, "the conversation's own files lead");
-        assert_eq!(groups[1].0.as_deref(), Some(thread));
-
         let tasks = vec![protocol::AsyncTask {
             task_id: "t-1".into(),
             thread_id: thread.into(),
@@ -13322,6 +13388,16 @@ mod tests {
             activity: None,
             owner: String::new(),
         }];
+
+        let groups = by_producer(&outputs, &tasks, &std::collections::HashMap::new());
+        assert_eq!(
+            groups.len(),
+            2,
+            "conversation and worker are two bodies of work"
+        );
+        assert_eq!(groups[0].0, None, "the conversation's own files lead");
+        assert_eq!(groups[1].0.as_deref(), Some("background worker"));
+
         assert_eq!(produced_by(None, &tasks), None);
         assert_eq!(
             produced_by(Some(thread), &tasks).as_deref(),
@@ -13337,6 +13413,66 @@ mod tests {
             images_heading(5, Some("background worker")),
             "5 images from background worker",
         );
+    }
+
+    /// The half §199 could not do without the backend writing it down (§201).
+    #[test]
+    fn the_manifest_names_the_specialist_the_folder_cannot() {
+        let thread = "019fe9f6-9126-7710-a806-35d5e09170a4";
+        let outputs: Vec<workspace::Output> = [
+            PathBuf::from("plots").join("yield.png"),
+            PathBuf::from("notes.md"),
+            PathBuf::from(thread).join("worker.csv"),
+        ]
+        .into_iter()
+        .map(|name| workspace::Output {
+            path: name.clone(),
+            name: name.to_string_lossy().into_owned(),
+            kind: workspace::Kind::Other,
+            bytes: 1,
+            modified: std::time::SystemTime::UNIX_EPOCH,
+        })
+        .collect();
+
+        let tasks = vec![protocol::AsyncTask {
+            task_id: "t-1".into(),
+            thread_id: thread.into(),
+            agent_name: "background_worker".into(),
+            status: "success".into(),
+            description: String::new(),
+            pending: None,
+            error: None,
+            activity: None,
+            owner: String::new(),
+        }];
+
+        // Forward slashes, as the backend writes them — matched against a name Windows spells
+        // with backslashes. The two must not be able to disagree.
+        let mut wrote = std::collections::HashMap::new();
+        wrote.insert(
+            "plots/yield.png".to_string(),
+            "exploratory_data_analysis".to_string(),
+        );
+        // Recorded inside the worker's own run, where the manifest sees *its* coordinator. The
+        // folder outranks it, or `background worker` would be renamed to `coordinator`.
+        wrote.insert(
+            format!("{thread}/worker.csv"),
+            "coordinator".to_string(),
+        );
+
+        let groups = by_producer(&outputs, &tasks, &wrote);
+        let named: Vec<Option<&str>> = groups.iter().map(|(by, _)| by.as_deref()).collect();
+        assert_eq!(
+            named,
+            vec![
+                None,
+                Some("exploratory data analysis"),
+                Some("background worker")
+            ],
+            "the conversation's own files lead, then one group per author"
+        );
+        assert_eq!(groups[0].1.len(), 1, "notes.md has no record and stays unlabelled");
+        assert_eq!(groups[0].1[0].name, "notes.md");
     }
 
     /// `n` outputs, alternating image / not, named so a failure says which one moved.
