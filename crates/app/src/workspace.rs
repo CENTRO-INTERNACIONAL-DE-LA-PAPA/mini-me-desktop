@@ -219,6 +219,26 @@ pub fn thread_dir_in(project: Option<&str>, thread_id: &str) -> PathBuf {
     }
 }
 
+/// Where one background worker's files landed, inside the conversation that started it.
+///
+/// **A worker runs on its own LangGraph thread but writes inside its parent's folder** — the
+/// overlay composes `[conversation_thread, worker_thread]` when the two differ
+/// (`LazyLangsmithSandbox.__init__`), which is what §151 verified on a live run: plots appeared
+/// at `<task>/guinea_pig_eda_output/plots/…` rather than in a sibling directory nobody would
+/// think to open.
+///
+/// Falls back to the conversation's own folder when the worker wrote nothing of its own, because
+/// a button that opens a directory which does not exist is worse than one that opens the parent
+/// and lets somebody look.
+pub fn worker_dir(conversation: &Path, worker_thread: &str) -> PathBuf {
+    let own = conversation.join(worker_thread);
+    if own.is_dir() {
+        own
+    } else {
+        conversation.to_path_buf()
+    }
+}
+
 /// Move a conversation's folder into a different project, or out of one.
 ///
 /// **Moves rather than copies**, which is what a person expects of "move to project" and what
@@ -1055,6 +1075,36 @@ pub fn browse(url: &str) -> Result<()> {
         .spawn()
         .with_context(|| format!("could not open {url}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod worker_tests {
+    use super::*;
+
+    #[test]
+    fn a_worker_opens_its_own_folder_or_the_conversation_that_started_it() {
+        let root = std::env::temp_dir().join(format!("minime-worker-{}", std::process::id()));
+        let conversation = root.join("conv-1");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&conversation).expect("a conversation folder");
+
+        // Nothing of its own yet: the parent is the honest answer, because a button that opens a
+        // directory which does not exist is worse than one that opens the folder above it.
+        assert_eq!(worker_dir(&conversation, "worker-9"), conversation);
+
+        // Once it has written something, its own folder — the shape §151 verified on a live run,
+        // where the worker's files landed inside the conversation rather than beside it.
+        let own = conversation.join("worker-9");
+        std::fs::create_dir_all(&own).expect("a worker folder");
+        assert_eq!(worker_dir(&conversation, "worker-9"), own);
+
+        // A file of that name is not a folder to open, and must not be offered as one.
+        let decoy = conversation.join("worker-8");
+        std::fs::write(&decoy, "not a directory").expect("write");
+        assert_eq!(worker_dir(&conversation, "worker-8"), conversation);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
 
 #[cfg(test)]

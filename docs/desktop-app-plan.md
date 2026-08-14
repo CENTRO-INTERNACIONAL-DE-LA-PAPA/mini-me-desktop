@@ -129,7 +129,9 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   each of those switches. A key list that shows every provider at once, with "stored"/"not set"
   per row, is the fix; the request path underneath needs nothing.
 
-- ⬜ **A finished background task should be a button, not a sentence to retype.** Asked for
+- ✅ **A finished background task is a button, not a sentence to retype** (§198). **Awaiting a
+  live run.** Original note kept below for the reasoning.
+- 🟡 *(was)* **A finished background task should be a button, not a sentence to retype.** Asked for
   directly: *"when a background task has a success, we should see a modal button that the user
   can press and that serves as a check status, so the user doesn't type it every time in the
   chatbox."* The app already knows a task finished — §31's Jobs panel polls for exactly that —
@@ -11212,3 +11214,32 @@ Worth saying plainly: I attributed a real race to a build artefact three times b
 was always green. **A test that passes on retry is evidence of a race, not evidence of nothing.**
 
 *Fiftieth: "it passed the second time" is the beginning of an investigation, not the end of one.*
+
+## 198. The result is already on disk (2026-08-13)
+
+> *"When a background task has a success, we should see a modal button that the user can press
+> and that serves as a check status, so the user doesn't type it every time in the chatbox."*
+
+Asked which of two things the button should do — open what the worker produced, or send the
+question on the researcher's behalf — the answer was **open what it produced**. That is the
+cheaper and the truer one: a finished worker's output is *already on disk*, and asking a model to
+describe files it wrote ten minutes ago costs a turn to get a worse version of what is sitting in
+a folder.
+
+`worker_dir` finds it. A worker runs on its **own** LangGraph thread but writes **inside its
+parent's folder** — the overlay composes `[conversation_thread, worker_thread]` when the two
+differ, which is what §151 verified live, with plots at `<task>/guinea_pig_eda_output/plots/…`
+rather than in a sibling directory nobody would think to open.
+
+Three things it does not do, each on purpose:
+
+- **No turn, no model call, nothing billed.** The button is instant because the answer already
+  exists.
+- **Falls back to the conversation's folder** when the worker wrote nothing of its own. A button
+  that opens a directory which does not exist is worse than one that opens the folder above it
+  and lets somebody look. A *file* of that name is not a folder either, and is not offered as one.
+- **Names the specialist** — *"Show what exploratory data analysis produced"*. Several workers run
+  at once (§43), and a column of identical buttons is one you have to count rows to use.
+
+*Fifty-first: before building a way to ask for something, check whether it is already sitting
+somewhere. The fastest request is the one that turns out to be a lookup.*

@@ -11940,6 +11940,54 @@ impl Workbench {
                     );
                 }
             }
+
+            // **What it produced, one press away.** Asked for directly: *"when a background task
+            // has a success, we should see a modal button the user can press… so the user doesn't
+            // type it every time in the chatbox."* A finished worker's output is already on disk
+            // — §151 verified plots landing at `<task>/…` inside the conversation's own folder —
+            // and until now the only way to reach it was to compose a question and wait for a
+            // turn to answer it (docs §198).
+            //
+            // **Opens the folder rather than sending a turn.** No model call, nothing billed,
+            // and it is instant; the files are the result, not a description of them.
+            if task.succeeded() {
+                if let Some(dir) = self
+                    .thread_workspace()
+                    .map(|conversation| workspace::worker_dir(&conversation, &task.thread_id))
+                {
+                    row = row.child(
+                        div()
+                            .id(SharedString::from(format!("task-files-{}", task.task_id)))
+                            .flex_none()
+                            .mt_1()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(theme::border()))
+                            .text_color(rgb(theme::text_muted()))
+                            .text_xs()
+                            .hover(|style| {
+                                let fill = theme::hover_over(theme::surface());
+                                style
+                                    .bg(rgb(fill))
+                                    .text_color(rgb(theme::ink_on(fill)))
+                                    .cursor_pointer()
+                            })
+                            // Names the specialist, because several run at once (§43) and a row
+                            // of identical buttons is one you have to count rows to use.
+                            .child(format!(
+                                "Show what {} produced",
+                                task.agent_name.replace('_', " ")
+                            ))
+                            .on_click(move |_event, _window, _cx| {
+                                if let Err(error) = workspace::open(&dir) {
+                                    tracing::warn!(%error, "could not open a worker's folder");
+                                }
+                            }),
+                    );
+                }
+            }
             section = section.child(row);
         }
         for job in &self.jobs {
