@@ -11128,3 +11128,24 @@ cannot disagree.
 
 *Forty-seventh: two collections that look alike on screen can still want opposite gestures. What
 decides is whether the items are alternatives to each other or parts of one thing.*
+
+## 195. The citation is the target (2026-08-13)
+
+> *"I would like to have a hover colouring when I'm hovering a paper, so when I click it I'll be
+> redirected to the web page of the paper."*
+
+A twelve-pixel word reading `link` at the end of a four-line citation is a target you *aim* at.
+The citation is the thing being pointed at, so it should be the thing you press — and §194 made
+that plain by turning the list into something you read down, where the rows are the objects and
+the word at the end of each is furniture.
+
+The whole row now opens the paper and lights up to say so, using the same `hover_over` fill every
+other list uses, which since §193 is the orange's own 12% softness.
+
+**Only where there is somewhere to go.** A reference nothing could resolve gets no hover and no
+pointer: a row that lights up and then does nothing is worse than one that never offered, and
+§185 already marks those as unverified in words. The `link` word stays, because it says *before*
+you hover which rows have a destination — the hover confirms it, it does not announce it.
+
+*Forty-eighth: an affordance placed beside the content is a second thing to find. Making the
+content itself the control removes the search.*
