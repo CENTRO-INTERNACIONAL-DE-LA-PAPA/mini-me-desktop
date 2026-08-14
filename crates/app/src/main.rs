@@ -6579,10 +6579,23 @@ impl Workbench {
             )),
         );
 
+        // **The same filter the coordinator's list has**, asked for after the grouped list made
+        // the problem plain: four providers' catalogues stacked under headings is more rows than
+        // before, not fewer. Only one picker is open at a time, so one field serves both — they
+        // ask the same question of the same catalogue (docs §192).
+        let query = self.model_filter.read(cx).text().to_string();
         for provider in settings::PROVIDERS {
             // The same live list the coordinator's picker uses, so a specialist can be pointed at
             // anything the gateway actually carries rather than at four names written here.
-            let models = catalogue::models_for(&provider, &self.catalogue);
+            let mut models: Vec<(i32, String)> = catalogue::models_for(&provider, &self.catalogue)
+                .into_iter()
+                .filter_map(|model| match_score(&query, &model).map(|score| (score, model)))
+                .collect();
+            if !query.trim().is_empty() {
+                models.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+            }
+            // A provider whose whole catalogue was filtered out contributes no heading either,
+            // or the list becomes a column of company names with nothing under them.
             if models.is_empty() {
                 continue;
             }
@@ -6618,7 +6631,7 @@ impl Workbench {
                             .size(ui::Size::Compact)
                     })),
             );
-            for model in models {
+            for (_, model) in models {
                 let spec = format!("{}::{}", provider.id, model);
                 let selected = chosen.as_deref() == Some(spec.as_str());
 
@@ -6638,7 +6651,16 @@ impl Workbench {
                 );
             }
         }
-        list.into_any_element()
+        // The filter above the rows, so it is seen before the scrolling starts.
+        div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w_0()
+            .gap_1()
+            .child(self.filter_field(self.model_filter.clone(), cx))
+            .child(list)
+            .into_any_element()
     }
 
     /// The irreversible scope, in the centre of the window rather than squeezed into a row.

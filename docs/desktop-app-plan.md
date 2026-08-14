@@ -11032,3 +11032,41 @@ a key is a fact about an account, and which conversation is running is a fact ab
 *Forty-fourth: when two independent designs converge, the argument is over. The interesting
 question is what they both refused to do — and neither of them makes you switch context to
 configure something.*
+
+## 192. The same flex rule, from the third side (2026-08-13)
+
+> *"I cannot see the model so I cannot select! Each subagent selection must have a filtering as
+> the main model."*
+
+§190 diagnosed the bare `…` rows as `items_start` giving children content width, removed it, and
+was **wrong** — or rather, right about a real problem and not about this one. The rows were still
+ellipses afterwards.
+
+`Label::ellipsis` is `flex_grow().truncate()`, and the comment on it says exactly why:
+*"`flex_grow` is what gives it a width to truncate to."* True **in a row**. §188 turned
+`picker_row` into a **column**, and in a column `flex_grow` grows the *height* — the width stays
+at content, and content width for a truncating label is nothing.
+
+So the same rule has now produced three different bugs from three different directions:
+
+| | |
+|---|---|
+| §59 | no `flex_grow` in a row → bare `…` |
+| §184 | `items_start` in a column → a `flex_grow` child with no height |
+| §192 | `flex_grow` in a **column** → a label with no width |
+
+The fix is `w_full()` *and* `flex_grow()`: the first supplies width in either direction, the
+second still does §59's job where the parent is a row. One label that works in both, rather than
+a rule about which container it is allowed to sit in.
+
+### And the filter the grouping made necessary
+
+Grouping under provider headings (§191) made the list *longer*, not shorter — four catalogues
+stacked instead of one. The specialist picker gets the same fuzzy field the coordinator's has, and
+shares the same entity, since only one picker is open at a time and both ask the same question of
+the same catalogue. A provider whose whole catalogue filters out drops its heading too, or the
+result is a column of company names with nothing underneath them.
+
+*Forty-fifth: a comment that says why a line is there is only true of the container it was written
+in. "`flex_grow` gives it a width" was correct, load-bearing, and became false the moment
+something above it changed direction.*
