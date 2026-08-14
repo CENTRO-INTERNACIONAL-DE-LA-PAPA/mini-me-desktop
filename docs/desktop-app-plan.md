@@ -11149,3 +11149,30 @@ you hover which rows have a destination — the hover confirms it, it does not a
 
 *Forty-eighth: an affordance placed beside the content is a second thing to find. Making the
 content itself the control removes the search.*
+
+## 196. Restored the buckets and forgot the sources (2026-08-13)
+
+> *"When I reload the conversation, I cannot see the interaction of sources."*
+
+Two lists render the same references, and only one of them survived a reload.
+
+`open_conversation` restores `buckets`, `project`, `jobs` and `tasks` from the reopened
+snapshot — and not `sources`. So a reopened conversation showed the **generic bucket
+rendering**: a name, a count, and `+13 more`. Everything §185 through §195 built lives on
+`self.sources` — the unverified count, the provenance note, the link, the row you can press — and
+all of it was simply absent.
+
+What made this hard to see is that the two look **similar enough to be mistaken for each other**.
+Both say "sources" and a number. The bucket version is not obviously a fallback; it is just a
+quieter list. So the symptom read as *the feature is broken* rather than *a different renderer is
+showing*.
+
+`reports` was missing from the same block for the same reason, and is restored with it.
+
+- ⬜ **Two renderers for one collection.** The research panel draws `sources` from `buckets` when
+  the structured list is empty, and from `self.sources` when it is not. That is now correct in
+  both states and still two code paths for one thing — which is how this happened. The bucket
+  fallback should defer to the structured list rather than sit beside it.
+
+*Forty-ninth: a fallback that looks like the real thing is worse than one that looks broken. Six
+sections of work were invisible and the screen looked fine.*

@@ -4833,6 +4833,23 @@ impl Workbench {
                         if !snapshot.buckets.is_empty() {
                             workbench.buckets = snapshot.buckets;
                         }
+                        // **The reference list survives a reload too.** Restoring `buckets` and
+                        // not `sources` left the panel with the plain bucket rendering — a name,
+                        // a count and `+13 more` — while everything §185 to §195 built sat on
+                        // `self.sources`: the unverified count, the provenance note, the link,
+                        // the row you can press. Reported as *"when I reload the conversation I
+                        // cannot see the interaction of sources"*, and the two lists looked
+                        // similar enough that the difference read as the feature being broken
+                        // rather than as a second renderer (docs §196).
+                        if !snapshot.sources.is_empty() {
+                            workbench.sources = snapshot.sources;
+                            // Checked on reopen as on arrival, or a conversation returned to is
+                            // a conversation whose citations are all silently unverified.
+                            workbench.resolve_sources(cx);
+                        }
+                        if !snapshot.reports.is_empty() {
+                            workbench.reports = snapshot.reports;
+                        }
                         if let Some(project) = snapshot.project {
                             workbench.project =
                                 Some(merge_spine(workbench.project.as_ref(), project));
