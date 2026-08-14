@@ -909,25 +909,7 @@ impl LangGraphClient {
     pub async fn fetch_project(&self) -> Result<Project> {
         let resp = self
             .http
-            // The project this spine belongs to. Upstream keys it `(user_id, "project")` — one
-            // per person, accumulating forever — which mixes every line of work a researcher has
-            // ever had and never forgets a deleted conversation. The overlay reads this
-            // parameter and scopes the namespace to match what a turn writes; without it the two
-            // sides would disagree and the panel would go blank rather than become correct
-            // (`overlay/minime_local/spine.py`, docs §109).
-            .get(format!(
-                "{}/project{}",
-                self.base_url,
-                match self
-                    .project
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|p| !p.is_empty())
-                {
-                    Some(project) => format!("?project={}", urlencode(project)),
-                    None => String::new(),
-                }
-            ))
+            .get(self.project_url())
             .send()
             .await
             .context("GET /project failed (is the sidecar running?)")?
@@ -936,6 +918,69 @@ impl LangGraphClient {
         resp.json()
             .await
             .context("could not decode the project spine from GET /project")
+    }
+
+    /// `/project`, scoped to the project this client is working in.
+    ///
+    /// The project this spine belongs to. Upstream keys it `(user_id, "project")` — one per
+    /// person, accumulating forever — which mixes every line of work a researcher has ever had
+    /// and never forgets a deleted conversation. The overlay reads this parameter and scopes the
+    /// namespace to match what a turn writes; without it the two sides would disagree and the
+    /// panel would go blank rather than become correct (`overlay/minime_local/spine.py`, §109).
+    ///
+    /// Shared by the read and the write, which is not tidiness: the overlay wraps `get_project`
+    /// and `patch_project` alike, so a PATCH that spelled its scope differently from the GET
+    /// would save the mission into a namespace the panel never reads and look like a save that
+    /// silently did nothing.
+    fn project_url(&self) -> String {
+        format!(
+            "{}/project{}",
+            self.base_url,
+            match self
+                .project
+                .as_deref()
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+            {
+                Some(project) => format!("?project={}", urlencode(project)),
+                None => String::new(),
+            }
+        )
+    }
+
+    /// `PATCH /project` → set the mission by hand, and get the saved spine back.
+    ///
+    /// **The route was already there and this client had never called it.** Its own docstring
+    /// says the point out loud — *"let the user read and edit it by hand — rename the mission,
+    /// add a backlog item"* (`backend/routes/project.py`) — while the panel rendered
+    /// `project.mission` as plain text with nothing to press, so the only way to change a mission
+    /// was to phrase the first question of a project differently and never revisit it (§199).
+    ///
+    /// Two facts from the backend make this worth having rather than decorative:
+    ///
+    /// * A hand-set mission **survives every later turn**. The middleware seeds the mission from
+    ///   the first human message only when it is empty (`backend/project.py:373`), so this is an
+    ///   edit and not a suggestion that the next question overwrites.
+    /// * The mission is **injected into the coordinator's system prompt**
+    ///   (`backend/middleware/project.py:136`), so editing it changes what the agent does, not
+    ///   only what the panel shows.
+    ///
+    /// The response is the saved state, so the caller renders what the store holds rather than
+    /// what was typed — the backend caps the mission at 500 characters and collapses runs of
+    /// whitespace, and echoing the request would hide both.
+    pub async fn set_mission(&self, mission: &str) -> Result<Project> {
+        let resp = self
+            .http
+            .patch(self.project_url())
+            .json(&json!({ "mission": mission }))
+            .send()
+            .await
+            .context("PATCH /project failed (is the sidecar running?)")?
+            .error_for_status()
+            .context("PATCH /project returned an error status")?;
+        resp.json()
+            .await
+            .context("could not decode the project spine from PATCH /project")
     }
 
     /// Poll one long job, returning its status.
@@ -3479,6 +3524,28 @@ mod tests {
         let project = snapshot.project.as_ref().expect("spine rides along");
         assert_eq!(project.mission, "M");
         assert_eq!(project.completed, vec!["c"]);
+    }
+
+    /// Reading and writing the spine must name the same project, or a saved mission lands in a
+    /// namespace the panel never reads and the edit looks like it silently did nothing (§199).
+    #[test]
+    fn a_mission_is_written_to_the_project_it_was_read_from() {
+        let ungrouped = LangGraphClient::new("http://127.0.0.1:2024");
+        assert_eq!(ungrouped.project_url(), "http://127.0.0.1:2024/project");
+
+        let filed = LangGraphClient::new("http://127.0.0.1:2024")
+            .with_project(Some("Potato Late Blight".into()));
+        assert_eq!(
+            filed.project_url(),
+            "http://127.0.0.1:2024/project?project=Potato%20Late%20Blight",
+            "the overlay reads `?project` on GET and PATCH alike",
+        );
+
+        // Whitespace is not a project. `with_project(Some("  "))` used to be indistinguishable
+        // from naming one, and would have scoped the write to a namespace nothing else uses.
+        let blank =
+            LangGraphClient::new("http://127.0.0.1:2024").with_project(Some("  ".into()));
+        assert_eq!(blank.project_url(), "http://127.0.0.1:2024/project");
     }
 
     #[test]

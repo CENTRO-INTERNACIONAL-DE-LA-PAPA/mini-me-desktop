@@ -35,7 +35,7 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use futures::StreamExt;
 use gpui::{
-    actions, div, img, prelude::*, px, relative, rgb, size, svg, App, Application, AssetSource, Bounds, ClipboardItem, Context, Entity, Focusable, FontStyle,
+    actions, div, img, prelude::*, px, relative, rgb, size, svg, App, Application, AssetSource, Bounds, ClipboardItem, Context, Div, Entity, Focusable, FontStyle,
     FontWeight, HighlightStyle, KeyBinding, ListAlignment, ListState, SharedString, StyledText,
     Window, WindowBounds,
     WindowOptions,
@@ -1217,7 +1217,12 @@ fn output_folder_groups(outputs: &[workspace::Output]) -> Vec<OutputFolderGroup<
 /// The screenshot in §152 devoted its useful width to a 36-character UUID common to every row.
 /// That component is app bookkeeping; removing only a leading UUID leaves `eda/plots`, the
 /// researcher's information, while the unshortened path remains the grouping identity above.
-fn output_folder_label(folder: &std::path::Path) -> String {
+///
+/// `worker` is the specialist that owns that thread, when the app knows which one — it takes the
+/// UUID's place rather than being dropped with it, so the heading reads `background worker /
+/// plots` and the path of the work is legible from the panel (§199). `None` keeps §152's
+/// behaviour, which is what a reload with no task list still gets.
+fn output_folder_label(folder: &std::path::Path, worker: Option<&str>) -> String {
     let mut components: Vec<String> = folder
         .components()
         .filter_map(|component| component.as_os_str().to_str().map(str::to_owned))
@@ -1226,7 +1231,12 @@ fn output_folder_label(folder: &std::path::Path) -> String {
         .first()
         .is_some_and(|component| workspace::looks_like_thread_id(component));
     if removed_thread {
-        components.remove(0);
+        match worker {
+            Some(name) => components[0] = name.to_string(),
+            None => {
+                components.remove(0);
+            }
+        }
     }
     if components.is_empty() {
         if removed_thread {
@@ -1236,6 +1246,80 @@ fn output_folder_label(folder: &std::path::Path) -> String {
         }
     } else {
         components.join(" / ")
+    }
+}
+
+/// The worker thread a file sits under, when it sits under one.
+///
+/// The **only** attribution this client can make without guessing. A background worker runs on
+/// its own thread and writes into a folder named after it, so the folder *is* the record of who
+/// produced the file. Specialists consulted inside the conversation share the conversation's
+/// thread and its one directory, and nothing on the wire says which of them wrote a given file —
+/// so nothing here claims to know. That restraint is `provenance.rs`'s own rule from §73: a
+/// provenance record that quietly guesses is worse than none, because it will be believed.
+fn producing_thread(output: &workspace::Output) -> Option<&str> {
+    let first = std::path::Path::new(&output.name).components().next()?;
+    let name = first.as_os_str().to_str()?;
+    if workspace::looks_like_thread_id(name) {
+        Some(name)
+    } else {
+        None
+    }
+}
+
+/// Outputs split by who produced them: the conversation's own first, then one group per
+/// background worker, in the order their first file appears.
+///
+/// **Ahead of the image/other split, not after it.** §152 put every image in one grid because
+/// images are what a person opens the panel to look at. That was right within one body of work
+/// and wrong across two: a researcher looking at *"15 images"* was looking at the conversation's
+/// plots and a worker's plots in one tray, with nothing saying where the boundary was (§199). A
+/// background worker is already a separate run with its own job row and its own folder; its
+/// figures are a separate body of work for the same reason.
+fn by_producer(outputs: &[workspace::Output]) -> Vec<(Option<String>, Vec<workspace::Output>)> {
+    let mut groups: Vec<(Option<String>, Vec<workspace::Output>)> = Vec::new();
+    for output in outputs {
+        let thread = producing_thread(output).map(str::to_owned);
+        match groups.iter_mut().find(|(owner, _)| *owner == thread) {
+            Some((_, produced)) => produced.push(output.clone()),
+            None => groups.push((thread, vec![output.clone()])),
+        }
+    }
+    // The conversation's own files lead even when a worker wrote first: they are what the
+    // researcher asked for directly, and a delegated job is the detour under it.
+    groups.sort_by_key(|(owner, _)| owner.is_some());
+    groups
+}
+
+/// Who produced a group of files, in the researcher's words rather than the engine's.
+///
+/// `None` is the conversation's own thread, and stays unlabelled: those files are the unmarked
+/// case, and spending a heading on *"from this conversation"* would name the default everywhere
+/// to say something only in the two places it is not true.
+///
+/// A thread with no matching task is still *some* worker — the folder proves it — so it says so
+/// without naming one. That is the state after a reload whose snapshot carried no `async_tasks`,
+/// and it is the difference between "we don't know which" and "nobody".
+fn produced_by(thread: Option<&str>, tasks: &[protocol::AsyncTask]) -> Option<String> {
+    let thread = thread?;
+    Some(
+        tasks
+            .iter()
+            .find(|task| task.thread_id == thread)
+            // Underscores are the graph's spelling of a name, not a person's — the road strip and
+            // the jobs list both already say `background worker`, and a third spelling of the
+            // same specialist in a third panel is how one worker reads as two.
+            .map(|task| task.agent_name.replace('_', " "))
+            .unwrap_or_else(|| "a background task".to_string()),
+    )
+}
+
+/// `15 images`, or `5 images from background worker`.
+fn images_heading(count: usize, by: Option<&str>) -> String {
+    let plural = if count == 1 { "" } else { "s" };
+    match by {
+        Some(who) => format!("{count} image{plural} from {who}"),
+        None => format!("{count} image{plural}"),
     }
 }
 
@@ -2753,6 +2837,8 @@ struct Workbench {
     pending_title: Option<String>,
     /// The thread whose name is being edited, if any.
     renaming: Option<String>,
+    /// Whether the mission at the top of the research panel is being edited in place.
+    editing_mission: bool,
     /// The conversation or project whose delete control opened the centred warning.
     ///
     /// This used to be an inline yes/no row. It could not say that saved files now go too, and a
@@ -2789,6 +2875,8 @@ struct Workbench {
     /// name can be edited at a time, and a Composer per conversation would be an entity
     /// per row for a list that can run to hundreds.
     rename_editor: Entity<Composer>,
+    /// The field that edits the mission, live in the panel.
+    mission_editor: Entity<Composer>,
     /// Background tasks whose remaining commands are pre-approved, by task id.
     ///
     /// Separate from the turn grant because a background worker has no turn to belong to:
@@ -2861,6 +2949,25 @@ impl Workbench {
             &rename_editor,
             |workbench, _editor, event, cx| match event {
                 ComposerEvent::Submit(text) => workbench.commit_rename(text.clone(), cx),
+            },
+        )
+        .detach();
+
+        // Editing the mission, in the panel where it is read. Same shape as renaming, and for the
+        // same reason: the field replaces the text it is editing rather than opening somewhere
+        // else, so the researcher is looking at the thing they are changing.
+        let mission_editor = cx.new(|cx| {
+            let mut editor = Composer::new(cx, "What is this project trying to find out?");
+            // Enter on an empty field means "clear the mission", which the backend accepts and
+            // which is the only way back to the derived one. Without this, emptying the field and
+            // pressing Enter would do nothing and look broken.
+            editor.set_submits_empty(true);
+            editor
+        });
+        cx.subscribe(
+            &mission_editor,
+            |workbench, _editor, event, cx| match event {
+                ComposerEvent::Submit(text) => workbench.commit_mission(text.clone(), cx),
             },
         )
         .detach();
@@ -2981,6 +3088,7 @@ impl Workbench {
             backend_start: None,
             pending_title: None,
             renaming: None,
+            editing_mission: false,
             confirming_delete: None,
             confirming_provider: None,
             catalogue: catalogue::load(),
@@ -2989,6 +3097,7 @@ impl Workbench {
             sources_filter,
             deleting: None,
             rename_editor,
+            mission_editor,
             approve_tasks: std::collections::HashSet::new(),
             restore_focus: false,
         };
@@ -5051,6 +5160,67 @@ impl Workbench {
         }
         self.restore_focus = true;
         cx.notify();
+    }
+
+    /// Begin editing the mission, with the current one in the field.
+    fn start_mission_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self
+            .project
+            .as_ref()
+            .map(|project| project.mission.clone())
+            .unwrap_or_default();
+        self.editing_mission = true;
+        self.mission_editor.update(cx, |editor, cx| {
+            editor.set_text(&current, cx);
+        });
+        // Same reason as `start_rename`: without this the researcher presses the mission and
+        // types into the composer at the bottom of the window.
+        self.mission_editor.read(cx).focus_handle(cx).focus(window);
+        cx.notify();
+    }
+
+    /// Save a hand-edited mission, and show what the store actually kept.
+    ///
+    /// **Not optimistic**, unlike renaming a conversation. A name is ours and lives on the thread;
+    /// a mission is the backend's, which caps it at 500 characters and collapses whitespace before
+    /// storing it — and it is read back into the coordinator's system prompt on the next turn
+    /// (`backend/middleware/project.py`). Showing the typed text and letting the stored text
+    /// differ would mean the panel disagreed with what the agent is actually working to.
+    fn commit_mission(&mut self, mission: String, cx: &mut Context<Self>) {
+        if !self.editing_mission {
+            return;
+        }
+        self.editing_mission = false;
+        self.restore_focus = true;
+        let mission = mission.trim().to_string();
+        let mut saved = self.sidecar.set_mission(mission);
+        self.status = "saving the mission…".into();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            if let Some(outcome) = saved.next().await {
+                let _ = this.update(cx, |workbench, cx| {
+                    match outcome {
+                        // Only the spine's own fields: `PATCH /project` cannot return live
+                        // suggestions — its docstring says so, because they are derived from a
+                        // running thread's artifacts — and taking its empty list wholesale would
+                        // clear the advice on screen as a side effect of an unrelated edit.
+                        Ok(project) => {
+                            workbench.project =
+                                Some(merge_spine(workbench.project.as_ref(), project));
+                            workbench.status = "mission saved".into();
+                        }
+                        Err(error) => {
+                            // Said out loud, and the panel keeps the mission the backend still
+                            // holds. A silent failure here is the worst kind: the researcher
+                            // believes the agent has been redirected and it has not.
+                            workbench.status = format!("could not save the mission: {error}");
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     /// Note that a specialist produced something, now.
@@ -7945,10 +8115,12 @@ impl Workbench {
     ///
     /// A table shows its first rows, a figure shows itself, anything else shows its header. All
     /// three open the existing preview modal on click.
+    /// One file as a card under the answer. `by` names the worker that produced it, when one did.
     fn output_card(
         &self,
         key: usize,
         output: &workspace::Output,
+        by: Option<&str>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         /// Enough to see the shape of the table without becoming a table.
@@ -7958,6 +8130,10 @@ impl Workbench {
 
         let (glyph, ink) = file_mark(&output.path);
         let shape = self.shape_of(output);
+        let described = match by {
+            Some(who) => format!("from {who} · {}", shape.describe(output.bytes)),
+            None => shape.describe(output.bytes),
+        };
         let opened = output.path.clone();
         let revealed = output.path.parent().map(std::path::Path::to_path_buf);
         let previewed = output.clone();
@@ -7987,7 +8163,7 @@ impl Workbench {
                     .min_w_0()
                     .text_color(rgb(theme::text_faint()))
                     .text_size(px(12.))
-                    .child(shape.describe(output.bytes)),
+                    .child(described),
             )
             .child(
                 div()
@@ -8411,13 +8587,24 @@ impl Workbench {
             }))
     }
 
+    /// One file on its own row. `by` names the worker that produced it, when one did.
+    ///
+    /// A lone file gets no gallery heading to carry its attribution, so it carries it on the line
+    /// that already describes the file — otherwise a worker that wrote exactly one report would
+    /// be the one case §199 still left anonymous.
     fn output_panel_row(
         &self,
         id: String,
         output: &workspace::Output,
+        by: Option<&str>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let shown = output.clone();
+        let shape = self.shape_of(output).describe(output.bytes);
+        let shape = match by {
+            Some(who) => format!("from {who} · {shape}"),
+            None => shape,
+        };
         let (glyph, ink) = file_mark(&output.path);
         div()
             .id(SharedString::from(id))
@@ -8451,7 +8638,7 @@ impl Workbench {
                         div()
                             .text_color(rgb(theme::text_faint()))
                             .text_size(px(11.))
-                            .child(self.shape_of(output).describe(output.bytes)),
+                            .child(shape),
                     ),
             )
             .on_click(cx.listener(move |workbench, _event, _window, cx| {
@@ -9373,35 +9560,42 @@ impl Workbench {
         // Files remain after the answer that explains them. Preserve §162–§164's two bounded
         // galleries here: keeping PR #11's old per-file loop would compile and pass unit tests
         // while silently turning seven plots back into seven full transcript cards.
-        let (images, others) = split_images(&message.outputs);
-        if !images.is_empty() {
-            block = block.child(self.output_grid(
-                &format!("transcript-{index}"),
-                format!(
-                    "{} image{}",
-                    images.len(),
-                    if images.len() == 1 { "" } else { "s" }
-                ),
-                &images,
-                false,
-                cx,
-            ));
-        }
-        for (at, group) in output_folder_groups(&others).iter().enumerate() {
-            if let [output] = group.outputs.as_slice() {
-                block = block.child(self.output_card(index * 64 + at, output, cx));
-            } else {
+        for (band, (thread, produced)) in by_producer(&message.outputs).into_iter().enumerate() {
+            let worker = produced_by(thread.as_deref(), &self.tasks);
+            let (images, others) = split_images(&produced);
+            if !images.is_empty() {
                 block = block.child(self.output_grid(
-                    &format!("transcript-{index}-{at}"),
-                    distinguishing_tail(&output_folder_label(&group.folder), 40),
-                    &group
-                        .outputs
-                        .iter()
-                        .map(|output| (*output).clone())
-                        .collect::<Vec<_>>(),
+                    &format!("transcript-{index}-i{band}"),
+                    images_heading(images.len(), worker.as_deref()),
+                    &images,
                     false,
                     cx,
                 ));
+            }
+            for (at, group) in output_folder_groups(&others).iter().enumerate() {
+                if let [output] = group.outputs.as_slice() {
+                    block = block.child(self.output_card(
+                        index * 64 + band * 16 + at,
+                        output,
+                        worker.as_deref(),
+                        cx,
+                    ));
+                } else {
+                    block = block.child(self.output_grid(
+                        &format!("transcript-{index}-{band}-{at}"),
+                        distinguishing_tail(
+                            &output_folder_label(&group.folder, worker.as_deref()),
+                            40,
+                        ),
+                        &group
+                            .outputs
+                            .iter()
+                            .map(|output| (*output).clone())
+                            .collect::<Vec<_>>(),
+                        false,
+                        cx,
+                    ));
+                }
             }
         }
 
@@ -10013,6 +10207,14 @@ impl Workbench {
             return;
         }
         if self.renaming.take().is_some() {
+            self.restore_focus = true;
+            cx.notify();
+            return;
+        }
+        if self.editing_mission {
+            // Escape abandons the edit and leaves the stored mission alone — nothing was sent
+            // until Enter, so there is nothing to undo.
+            self.editing_mission = false;
             self.restore_focus = true;
             cx.notify();
             return;
@@ -11637,6 +11839,77 @@ impl Workbench {
             .children(scrollbar(&self.panel_scroll))
     }
 
+    /// The mission, and the way to change it.
+    ///
+    /// **It had never been changeable.** The mission is seeded server-side from the first human
+    /// message of a project and then rendered here as plain text, so a researcher whose opening
+    /// question was a warm-up — or whose project turned out to be about something else — had no
+    /// way to say so: the panel showed a sentence they could not edit, and the coordinator was
+    /// reading that same sentence into its system prompt on every turn
+    /// (`backend/middleware/project.py`). Reported as *"I cannot modify the project mission"*
+    /// (§199). The route to change it had existed the whole time and this client had never
+    /// called it — see [`protocol::LangGraphClient::set_mission`].
+    ///
+    /// Editing happens in place, as renaming a conversation does, and for the same reason: the
+    /// field replaces the text it is about, so the researcher is looking at what they are
+    /// changing rather than at a copy of it in a dialog.
+    fn mission_block(&self, mission: &str, cx: &mut Context<Self>) -> Div {
+        let block = div().flex().flex_col().w_full().min_w_0().gap_1();
+
+        if self.editing_mission {
+            return block
+                .child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgb(theme::accent()))
+                        .child(self.mission_editor.clone()),
+                )
+                .child(
+                    div()
+                        .text_color(rgb(theme::text_muted()))
+                        .text_xs()
+                        // What it costs to be wrong, said before the press rather than after:
+                        // this sentence is read by the coordinator on every turn, so it is not a
+                        // label on the work — it is an instruction to it.
+                        .child(
+                            "Enter to save · Esc to cancel. Mini-Me reads this on every turn.",
+                        ),
+                );
+        }
+
+        block.child(
+            div()
+                .id("mission")
+                .w_full()
+                .min_w_0()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .hover(|style| {
+                    style
+                        .bg(rgb(theme::hover_over(theme::surface())))
+                        .cursor_pointer()
+                })
+                .on_click(cx.listener(|workbench, _event, window, cx| {
+                    workbench.start_mission_edit(window, cx)
+                }))
+                .when(mission.is_empty(), |empty| {
+                    empty
+                        .text_color(rgb(theme::text_muted()))
+                        .text_sm()
+                        .child("No mission yet — press to write one, or it comes from your first question.")
+                })
+                .when(!mission.is_empty(), |set| {
+                    set.text_color(rgb(theme::text())).child(mission.to_string())
+                }),
+        )
+    }
+
     fn artifacts_contents(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut panel = div()
             .id("spine")
@@ -11652,34 +11925,61 @@ impl Workbench {
             // `MISSION`, not `RESEARCH PROJECT`. The panel *is* the research project — saying so
             // at the top of it spends the widest heading in the column on a word that names the
             // container rather than its first section.
-            .child(section_label("MISSION"));
+            //
+            // The heading carries the edit control rather than the mission carrying a hover-only
+            // one. Our researchers are not developers, and *"I cannot modify the project mission"*
+            // was said about a panel where the text was in fact the button — an affordance that
+            // only exists once the pointer is already on it cannot be the answer to someone who
+            // has concluded there isn't one (§199).
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .w_full()
+                    .min_w_0()
+                    .child(section_label("MISSION"))
+                    .when(!self.editing_mission, |heading| {
+                        heading.child(
+                            div()
+                                .id("edit-mission")
+                                .px_1()
+                                .rounded_sm()
+                                .text_xs()
+                                .text_color(rgb(theme::accent()))
+                                .hover(|style| {
+                                    style
+                                        .bg(rgb(theme::hover_over(theme::surface())))
+                                        .cursor_pointer()
+                                })
+                                .child("Edit")
+                                .on_click(cx.listener(|workbench, _event, window, cx| {
+                                    workbench.start_mission_edit(window, cx)
+                                })),
+                        )
+                    }),
+            );
+
+        let mission = self
+            .project
+            .as_ref()
+            .map(|project| project.mission.clone())
+            .unwrap_or_default();
+        // The same block whether or not a spine has arrived: with no project there is nothing to
+        // *read*, but there is still something to *write*, and a researcher who knows what this
+        // project is for should be able to say so before the first question rather than having
+        // one derived from it (§199).
+        panel = panel.child(self.mission_block(&mission, cx));
 
         let Some(project) = &self.project else {
             // No spine yet, but a run may already be producing outputs — still show
             // them rather than an empty panel.
             return panel
-                .child(
-                    div()
-                        .text_color(rgb(theme::text_muted()))
-                        .text_sm()
-                        .child("No project loaded yet. Run a turn — the mission is derived from your first question."),
-                )
                 .child(self.jobs_section(cx))
                 .child(self.outputs_section(cx))
                 .child(self.sources_section(Some(SOURCES_IN_PANEL), cx));
         };
-
-        panel = panel.child(if project.mission.is_empty() {
-            div()
-                .text_color(rgb(theme::text_muted()))
-                .text_sm()
-                .child("No mission yet — it comes from your first question.")
-        } else {
-            div()
-                .w_full()
-                .text_color(rgb(theme::text()))
-                .child(project.mission.clone())
-        });
 
         if !project.completed.is_empty() {
             panel = panel.child(spine_list("COMPLETED", &project.completed, "✓"));
@@ -12497,39 +12797,45 @@ impl Workbench {
         // Images first and together, then everything else — the two groups the researcher asked
         // for. Images lead because they are what a person opens the panel to look at; a CSV is
         // opened to *check* something, which is a deliberate act further down.
-        let (images, others) = split_images(&ordered_outputs);
-        if !images.is_empty() {
-            section = section.child(self.output_grid(
-                "panel",
-                format!(
-                    "{} image{}",
-                    images.len(),
-                    if images.len() == 1 { "" } else { "s" }
-                ),
-                &images,
-                true,
-                cx,
-            ));
-        }
-        for (at, group) in output_folder_groups(&others).iter().enumerate() {
-            if let [output] = group.outputs.as_slice() {
-                // A lone file stays a row: it has the whole width for its name and shape, and a
-                // grid of one is a tile with nothing to compare it to.
-                section = section.child(self.output_panel_row(
-                    format!("panel-output-{}", output.name),
-                    output,
-                    cx,
-                ));
-            } else {
-                // Still folder-grouped, because two runs' `results/` directories are still two
-                // things — the image grid above is the only surface where kind outranks folder.
+        //
+        // "Together" is now bounded by who produced them (§199): one tray per body of work, not
+        // one tray for the window.
+        for (band, (thread, produced)) in by_producer(&ordered_outputs).into_iter().enumerate() {
+            let worker = produced_by(thread.as_deref(), &self.tasks);
+            let (images, others) = split_images(&produced);
+            if !images.is_empty() {
                 section = section.child(self.output_grid(
-                    &format!("panel-{at}"),
-                    distinguishing_tail(&output_folder_label(&group.folder), 28),
-                    &group.outputs.iter().map(|o| (*o).clone()).collect::<Vec<_>>(),
+                    &format!("panel-{band}"),
+                    images_heading(images.len(), worker.as_deref()),
+                    &images,
                     true,
                     cx,
                 ));
+            }
+            for (at, group) in output_folder_groups(&others).iter().enumerate() {
+                if let [output] = group.outputs.as_slice() {
+                    // A lone file stays a row: it has the whole width for its name and shape, and
+                    // a grid of one is a tile with nothing to compare it to.
+                    section = section.child(self.output_panel_row(
+                        format!("panel-output-{}", output.name),
+                        output,
+                        worker.as_deref(),
+                        cx,
+                    ));
+                } else {
+                    // Still folder-grouped, because two runs' `results/` directories are still two
+                    // things — the image grid above is the only surface where kind outranks folder.
+                    section = section.child(self.output_grid(
+                        &format!("panel-{band}-{at}"),
+                        distinguishing_tail(
+                            &output_folder_label(&group.folder, worker.as_deref()),
+                            28,
+                        ),
+                        &group.outputs.iter().map(|o| (*o).clone()).collect::<Vec<_>>(),
+                        true,
+                        cx,
+                    ));
+                }
             }
         }
 
@@ -12971,8 +13277,65 @@ mod tests {
         assert_eq!(groups[0].outputs.len(), 2);
         assert_eq!(groups[1].outputs.len(), 1);
         assert_eq!(
-            output_folder_label(&groups[0].folder),
+            output_folder_label(&groups[0].folder, None),
             "guinea_pig_eda_output / plots"
+        );
+        // The same folder, once the app knows whose thread that UUID is: the worker takes the
+        // UUID's place rather than vanishing with it, so the heading reads as a path of work.
+        assert_eq!(
+            output_folder_label(&groups[0].folder, Some("background worker")),
+            "background worker / guinea_pig_eda_output / plots"
+        );
+    }
+
+    /// One task, one thread, one name — the only attribution available without guessing.
+    #[test]
+    fn files_under_a_worker_thread_are_named_after_the_worker() {
+        let thread = "019fe9f6-9126-7710-a806-35d5e09170a4";
+        let outputs: Vec<workspace::Output> = [
+            PathBuf::from("summary.csv"),
+            PathBuf::from(thread).join("plots/yield.png"),
+        ]
+        .into_iter()
+        .map(|name| workspace::Output {
+            path: name.clone(),
+            name: name.to_string_lossy().into_owned(),
+            kind: workspace::Kind::Other,
+            bytes: 1,
+            modified: std::time::SystemTime::UNIX_EPOCH,
+        })
+        .collect();
+
+        let groups = by_producer(&outputs);
+        assert_eq!(groups.len(), 2, "conversation and worker are two bodies of work");
+        assert_eq!(groups[0].0, None, "the conversation's own files lead");
+        assert_eq!(groups[1].0.as_deref(), Some(thread));
+
+        let tasks = vec![protocol::AsyncTask {
+            task_id: "t-1".into(),
+            thread_id: thread.into(),
+            agent_name: "background_worker".into(),
+            status: "success".into(),
+            description: String::new(),
+            pending: None,
+            error: None,
+            activity: None,
+            owner: String::new(),
+        }];
+        assert_eq!(produced_by(None, &tasks), None);
+        assert_eq!(
+            produced_by(Some(thread), &tasks).as_deref(),
+            Some("background worker"),
+        );
+        // A reload that carried no task list still knows a worker wrote these, and says only that.
+        assert_eq!(
+            produced_by(Some(thread), &[]).as_deref(),
+            Some("a background task"),
+        );
+        assert_eq!(images_heading(1, None), "1 image");
+        assert_eq!(
+            images_heading(5, Some("background worker")),
+            "5 images from background worker",
         );
     }
 
