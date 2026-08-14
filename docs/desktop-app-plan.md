@@ -11317,3 +11317,49 @@ Three decisions in the wiring:
 
 *Fifty-second: when the client can't attribute something, say the smaller true thing. "A background
 task" is worth more than a confident guess and costs nothing to be right about.*
+
+## 200. The line nobody broke (2026-08-14)
+
+> *"When I write a long text the box doesn't increase in height, which causes I cannot see what
+> I'm typing."*
+
+§55 made the composer multi-line by splitting on `\n` and shaping one line per segment. `shape_line`
+lays out exactly one line and takes no wrap width, so a paragraph typed without pressing
+shift-enter was **one row** — shaped at its natural width, painted from the left edge, and clipped
+by §97's content mask at the right. The caret went out with the text. The field stayed one line
+tall while it happened, because the height was `newlines + 1`.
+
+Every part of that was working as written. The gap is that *nobody types their own line breaks in
+a research question*, so the only case that mattered in daily use was the one case the feature had
+never handled.
+
+**Wrapping in the string domain, not the layout domain.** `shape_text` returns wrapped lines with
+their own coordinate space; adopting it would have meant rewriting caret placement, per-row hit
+testing, the selection quads and the IME rectangle in one change. Instead `LineWrapper` — the same
+one gpui's own text element uses — is asked where each hard line has to break, and each resulting
+row is shaped on its own. Downstream, `lines` is still `Vec<(byte offset, ShapedLine)>`; there are
+simply more of them. Nothing else in the element changed.
+
+**The height is measured against the previous frame's width.** This is the one thing here that
+looks like a shortcut. Wrapping needs a width; the width is only known once layout has run. The
+alternative is `request_measured_layout`, which means giving up the `width: 100%` + `flex_grow` +
+`min_width: 120px` triple in `request_layout` — and this file has paid for that combination four
+times (§72, §88, §97, §99), each time with a field collapsed to a sliver and a placeholder painting
+out the side. The cost of using last frame's number is one stale frame while a window is being
+dragged wider, and a drag is a stream of frames. That trade is written down at the call site.
+
+**Past eight lines the box moves instead of growing.** The cap was already there; what was missing
+is that a capped box has to *follow the caret*, or a researcher on line twenty is shown lines one
+to eight. `first_row` is now remembered on the composer, because both conversions between screen
+and offset — mouse hit-testing and the IME rectangle — have to subtract it. A scrolled field that
+forgot how far it had scrolled would put the caret eight lines from where the click landed.
+
+The wrapping itself is gpui's and needs a window to measure. What this module can get wrong on its
+own is turning break points into ranges over the whole string, so `row_ranges` takes the breaks as
+a closure and the tests supply a fake one. Two of the three cases they cover are the degenerate
+ones: a break at the very end, and a break at zero, each of which would add an empty row that
+draws as a blank line nobody typed and pushes every row below it down.
+
+*Fifty-third: a feature that handles the general case and not the common one is a feature nobody
+has. "Multi-line" meant the line breaks we could see, and the ones we couldn't were the only ones
+being typed.*

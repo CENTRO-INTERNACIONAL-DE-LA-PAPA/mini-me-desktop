@@ -26,9 +26,9 @@ use std::ops::Range;
 use gpui::{
     actions, div, fill, point, prelude::*, px, relative, rgb, rgba, App, Bounds, ClipboardItem,
     Context, CursorStyle, ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle,
-    Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, SharedString, Style, TextRun,
-    UTF16Selection, UnderlineStyle, Window,
+    Focusable, GlobalElementId, KeyBinding, LayoutId, LineFragment, LineWrapper, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine,
+    SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -110,6 +110,13 @@ pub struct Composer {
     last_bounds: Option<Bounds<Pixels>>,
     /// The line height the last frame drew with, so mouse rows can be worked out.
     line_height: Pixels,
+    /// The topmost visual row actually painted.
+    ///
+    /// The field stops growing at [`MAX_VISIBLE_LINES`], so past that it has to *move* instead —
+    /// otherwise the caret walks off the bottom and the researcher is typing into a box that
+    /// shows them the beginning of what they wrote. Every screen ↔ offset conversion has to
+    /// subtract it, which is why it is remembered here rather than recomputed per query.
+    first_row: usize,
     is_selecting: bool,
     /// Whether Enter on an *empty* field still counts as a submission. False for the
     /// chat composer (an empty prompt is nothing to send); true for the command
@@ -136,6 +143,7 @@ impl Composer {
             last_layout: Vec::new(),
             last_bounds: None,
             line_height: px(20.),
+            first_row: 0,
             is_selecting: false,
             submits_empty: false,
             masked: false,
@@ -401,8 +409,10 @@ impl Composer {
         if position.y > bounds.bottom() {
             return self.content.len();
         }
-        // Which visual line the pointer is on, then where along it.
-        let row = ((position.y - bounds.top()) / self.line_height).floor() as usize;
+        // Which visual line the pointer is on, then where along it. Offset by the scroll, or a
+        // click in a field showing rows 12–19 would land in rows 0–7.
+        let row = self.first_row
+            + ((position.y - bounds.top()) / self.line_height).floor() as usize;
         let row = row.min(self.last_layout.len().saturating_sub(1));
         let (start, line) = &self.last_layout[row];
         start + line.closest_index_for_x(position.x - bounds.left())
@@ -597,7 +607,7 @@ impl EntityInputHandler for Composer {
         let (end_row, end_x) = self.position_for_offset(range.end)?;
         // The IME panel wants one rectangle; for a marked range spanning lines the
         // sensible answer is the first line's, which is where the caret is.
-        let top = bounds.top() + self.line_height * start_row as f32;
+        let top = bounds.top() + self.line_height * (start_row as f32 - self.first_row as f32);
         let bottom = top + self.line_height;
         let end_x = if end_row == start_row { end_x } else { start_x };
         Some(Bounds::from_corners(
@@ -630,6 +640,8 @@ struct PrepaintState {
     /// One rectangle per line a selection covers — a selection spanning three lines is
     /// three quads, not one box swallowing the text between them.
     selection: Vec<PaintQuad>,
+    /// The row drawn at the top of the box — see [`Composer::first_row`].
+    first_row: usize,
 }
 
 /// How tall the field is allowed to grow before it simply stops.
@@ -637,6 +649,72 @@ struct PrepaintState {
 /// A pasted script should make the composer bigger, not eat the transcript. Eight lines is
 /// enough to see a short command in full and still leave the conversation on screen.
 const MAX_VISIBLE_LINES: usize = 8;
+
+/// The byte range of every **visual** row the text occupies at a given width.
+///
+/// **A line the researcher did not break still has to break.** §55 made the field multi-line by
+/// splitting on `\n` and shaping one line per segment, with no wrap width — so a long paragraph
+/// typed without pressing shift-enter was one row, shaped at its natural width and clipped at the
+/// field's right edge. The text and the caret both went out the side, and the box stayed one line
+/// tall while it happened: *"when I write a long text the box doesn't increase in height, which
+/// causes I cannot see what I'm typing"* (docs §200). Nobody writing a research question types
+/// their own line breaks, so the only line that mattered was the one case this never handled.
+///
+/// Wrapping is done in the **string** domain and each row is then shaped on its own, which keeps
+/// every existing mechanism — caret `x_for_index`, per-row hit testing, one selection quad per
+/// row — working unchanged on a longer list. `shape_text` would have returned wrapped lines with
+/// their own coordinate space and asked all four of those to be rewritten at once.
+///
+/// `breaks` is asked, per hard line, for the offsets **within that line** where a new row starts;
+/// an empty answer means the line does not wrap. Passed in rather than measured here so the part
+/// that can be wrong on its own — turning break points into ranges over the whole string — is
+/// testable without a window, and so the first frame (which has no width yet) can simply say
+/// "nowhere".
+fn row_ranges(text: &str, mut breaks: impl FnMut(&str) -> Vec<usize>) -> Vec<Range<usize>> {
+    let mut rows: Vec<Range<usize>> = Vec::new();
+    let mut offset = 0usize;
+    // Hard breaks first: they are the researcher's own, and the wrapper skips `\n` entirely.
+    for segment in text.split('\n') {
+        let end = offset + segment.len();
+        let mut start = offset;
+        for at in breaks(segment) {
+            let at = offset + at;
+            // Bounded on both sides: a boundary at or before where this row began would make an
+            // empty range, and one at the very end would give the field a blank final row it
+            // never earned.
+            if at > start && at < end {
+                rows.push(start..at);
+                start = at;
+            }
+        }
+        rows.push(start..end);
+        // +1 for the newline itself, so offsets keep matching the real string.
+        offset = end + 1;
+    }
+    rows
+}
+
+/// Ask the text system where a line has to break, at a known width.
+///
+/// `None` — or a width of zero — means "don't wrap", which is the first frame's answer: the width
+/// comes from the previous frame's bounds and there isn't one yet.
+fn wrap_at<'a>(
+    wrapper: &'a mut LineWrapper,
+    wrap_width: Option<Pixels>,
+) -> impl FnMut(&str) -> Vec<usize> + 'a {
+    move |segment: &str| match wrap_width {
+        Some(width) if width > px(0.) => {
+            // Bound to a `let`: `wrap_line` borrows the fragments for as long as the iterator
+            // lives, so a temporary built in the call expression would not outlive the collect.
+            let fragments = [LineFragment::text(segment)];
+            wrapper
+                .wrap_line(&fragments, width)
+                .map(|boundary| boundary.ix)
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
 
 /// Slice global text runs down to one line's byte range.
 ///
@@ -689,15 +767,35 @@ impl Element for ComposerElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        // Height follows the content, capped. Counting newlines here rather than in
-        // prepaint because layout has to know the size before anything is shaped.
-        let lines = self
-            .composer
-            .read(cx)
-            .display_content()
-            .matches('\n')
-            .count()
-            + 1;
+        // Height follows the content, capped — counted here rather than in prepaint because
+        // layout has to know the size before anything is shaped.
+        //
+        // **Measured against the previous frame's width**, which is the one thing in this
+        // function that looks like a shortcut and is not. Wrapping needs a width; the width is
+        // only known once layout has run; so a truthful height needs either last frame's number
+        // or `request_measured_layout`. The second means giving up the `width: 100%` +
+        // `flex_grow` + `min_width` triple below, and this file has paid for that combination
+        // three times over (§72, §88, §97, §99) with fields that collapsed to a 10px sliver.
+        // The cost of the first is one frame of stale height while a window is being dragged
+        // wider, which the next frame corrects — and a resize is a stream of frames.
+        let (content, wrap_width) = {
+            let composer = self.composer.read(cx);
+            let content = composer.display_content();
+            (
+                if content.is_empty() {
+                    composer.placeholder.clone()
+                } else {
+                    content
+                },
+                composer.last_bounds.map(|bounds| bounds.size.width),
+            )
+        };
+        let text_style = window.text_style();
+        let font_size = text_style.font_size.to_pixels(window.rem_size());
+        let lines = {
+            let mut wrapper = cx.text_system().line_wrapper(text_style.font(), font_size);
+            row_ranges(&content, wrap_at(&mut wrapper, wrap_width)).len()
+        };
         let mut style = Style::default();
         style.size.width = relative(1.).into();
         // **And grow, which is the half that was missing.** `width: 100%` only means anything
@@ -809,24 +907,44 @@ impl Element for ComposerElement {
         let font_size = style.font_size.to_pixels(window.rem_size());
         let line_height = window.line_height();
 
-        // One shaped line per `\n`. GPUI's `shape_line` is exactly that — one line — so
-        // multi-line means doing the splitting ourselves and placing each row.
+        // One shaped line per *visual* row — the researcher's own breaks and the ones the width
+        // forced. GPUI's `shape_line` is exactly one line, so both kinds of splitting are ours.
         let mut lines: Vec<(usize, ShapedLine)> = Vec::new();
-        let mut offset = 0usize;
-        for segment in display_text.split('\n') {
-            let end = offset + segment.len();
+        {
+            let mut wrapper = cx.text_system().line_wrapper(style.font(), font_size);
+            row_ranges(&display_text, wrap_at(&mut wrapper, Some(bounds.size.width)))
+        }
+        .into_iter()
+        .for_each(|range| {
             let shaped = window.text_system().shape_line(
-                SharedString::from(segment.to_string()),
+                SharedString::from(display_text[range.clone()].to_string()),
                 font_size,
-                &runs_for(&runs, offset, end),
+                &runs_for(&runs, range.start, range.end),
                 None,
             );
-            lines.push((offset, shaped));
-            // +1 for the newline itself, so offsets keep matching the real string.
-            offset = end + 1;
-        }
+            lines.push((range.start, shaped));
+        });
 
-        let row_top = |row: usize| bounds.top() + line_height * row as f32;
+        // Which row sits at the top of the box.
+        //
+        // The field grows to [`MAX_VISIBLE_LINES`] and then stops, so beyond that the *window*
+        // over the rows has to follow the caret or the box would show the first eight lines of
+        // something being typed on the twentieth. Clamped to the last full screenful, so the
+        // final row never floats above empty space.
+        let caret_row = lines
+            .iter()
+            .position(|(start, line)| cursor <= start + line.len())
+            .unwrap_or_else(|| lines.len().saturating_sub(1));
+        let first_row = if lines.len() <= MAX_VISIBLE_LINES {
+            0
+        } else {
+            caret_row
+                .saturating_sub(MAX_VISIBLE_LINES - 1)
+                .min(lines.len() - MAX_VISIBLE_LINES)
+        };
+
+        let row_top =
+            |row: usize| bounds.top() + line_height * (row as f32 - first_row as f32);
         let position = |target: usize| -> (usize, Pixels) {
             for (row, (start, line)) in lines.iter().enumerate() {
                 if target <= start + line.len() {
@@ -885,6 +1003,7 @@ impl Element for ComposerElement {
             lines,
             cursor,
             selection,
+            first_row,
         }
     }
 
@@ -917,9 +1036,13 @@ impl Element for ComposerElement {
         // That is why a 10px box appeared to contain a full-length placeholder. With the mask, a
         // future layout mistake becomes "text visibly cut off", which is a bug report someone
         // can act on, instead of "text floating over unrelated UI" (docs §97).
+        let first_row = prepaint.first_row;
         window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
             for (row, (_, line)) in prepaint.lines.iter().enumerate() {
-                let origin = point(bounds.origin.x, bounds.origin.y + line_height * row as f32);
+                let origin = point(
+                    bounds.origin.x,
+                    bounds.origin.y + line_height * (row as f32 - first_row as f32),
+                );
                 line.paint(origin, line_height, window, cx).unwrap();
             }
         });
@@ -936,6 +1059,10 @@ impl Element for ComposerElement {
             composer.last_layout = std::mem::take(&mut prepaint.lines);
             composer.last_bounds = Some(bounds);
             composer.line_height = line_height;
+            // Hit-testing and the IME rect both convert between rows and screen y, and a scrolled
+            // field that forgot how far it had scrolled would put the caret eight lines from
+            // where the click was.
+            composer.first_row = first_row;
         });
     }
 }
@@ -1030,14 +1157,66 @@ mod tests {
         assert!(runs_for(&runs, 2, 2).is_empty());
     }
 
+    /// Break every `every` bytes, standing in for what the text system measures.
+    ///
+    /// The pixel measurement is gpui's and needs a window; what this module can get wrong on its
+    /// own is turning break points into ranges over the whole string, and that is what is tested.
+    fn every(every: usize) -> impl FnMut(&str) -> Vec<usize> {
+        move |segment: &str| (every..segment.len()).step_by(every).collect()
+    }
+
+    #[test]
+    fn a_line_nobody_broke_still_becomes_rows() {
+        // The defect: one long line was one row, shaped past the right edge and clipped, with the
+        // caret out there with it (§200).
+        let rows = row_ranges("abcdefghij", every(4));
+        assert_eq!(rows, vec![0..4, 4..8, 8..10]);
+
+        // Offsets stay in the *whole string's* terms across a hard break, newline included, or
+        // the caret and the selection would be placed against the wrong text.
+        let rows = row_ranges("abcdef\nghi", every(4));
+        assert_eq!(rows, vec![0..4, 4..6, 7..10]);
+
+        // Nothing to wrap: unchanged from §55, which is what the first frame and every short
+        // prompt get.
+        assert_eq!(row_ranges("one\ntwo", |_| Vec::new()), vec![0..3, 4..7]);
+        assert_eq!(row_ranges("", |_| Vec::new()), vec![0..0]);
+    }
+
+    #[test]
+    fn a_wrap_point_at_the_edge_does_not_add_an_empty_row() {
+        // A break exactly at the end of the text, and one at the start: both would produce an
+        // empty range, which draws as a blank line the researcher did not type and — worse —
+        // moves every row below it down by one.
+        assert_eq!(row_ranges("abcd", |_| vec![4]), vec![0..4]);
+        assert_eq!(row_ranges("abcd", |_| vec![0]), vec![0..4]);
+        assert_eq!(row_ranges("abcd", |_| vec![2, 2]), vec![0..2, 2..4]);
+    }
+
     #[test]
     fn the_field_grows_with_its_lines_but_stops() {
-        // The rule the element's layout applies, checked here because layout itself
-        // needs a Window: a pasted script makes the composer taller, up to a point,
-        // and then stops rather than eating the transcript.
-        let rows = |text: &str| (text.matches('\n').count() + 1).min(MAX_VISIBLE_LINES);
-        assert_eq!(rows("one line"), 1);
-        assert_eq!(rows("one\ntwo\nthree"), 3);
-        assert_eq!(rows(&"x\n".repeat(40)), MAX_VISIBLE_LINES);
+        // A pasted script makes the composer taller, up to a point, and then stops rather than
+        // eating the transcript. Past the cap the *window* over the rows follows the caret —
+        // checked here because the element's own layout needs a Window.
+        let rows = |text: &str, breaks: usize| row_ranges(text, every(breaks)).len();
+        assert_eq!(rows("one line", 40), 1);
+        assert_eq!(rows("one\ntwo\nthree", 40), 3);
+        assert!(rows(&"x".repeat(400), 10) > MAX_VISIBLE_LINES);
+
+        // The scroll rule from `prepaint`, stated where it can be checked: the caret's row is
+        // always on screen, and the last screenful never floats above empty space.
+        let first_row = |caret: usize, total: usize| {
+            if total <= MAX_VISIBLE_LINES {
+                0
+            } else {
+                caret
+                    .saturating_sub(MAX_VISIBLE_LINES - 1)
+                    .min(total - MAX_VISIBLE_LINES)
+            }
+        };
+        assert_eq!(first_row(0, 3), 0, "a short field never scrolls");
+        assert_eq!(first_row(0, 20), 0, "nor does one whose caret is at the top");
+        assert_eq!(first_row(9, 20), 2, "the caret's row is the last one shown");
+        assert_eq!(first_row(19, 20), 12, "and the bottom stops at the bottom");
     }
 }
