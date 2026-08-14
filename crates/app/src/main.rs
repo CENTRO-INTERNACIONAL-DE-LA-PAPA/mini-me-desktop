@@ -2775,6 +2775,10 @@ struct Workbench {
     key_target: String,
     /// Whether the whole reference list is open over the workbench.
     sources_open: bool,
+    /// Narrows the open reference list. Only the modal reads it — the panel's four are a
+    /// preview, and filtering something that shows four of seventeen would be a filter whose
+    /// result you cannot see (§197).
+    sources_filter: Entity<Composer>,
     /// The confirmed target awaiting its backend and filesystem results.
     ///
     /// Optimistically removing the row made a failed or interrupted request look successful
@@ -2825,6 +2829,9 @@ impl Workbench {
         // is free.
         let theme_filter = cx.new(|cx| Composer::new(cx, "Filter themes"));
         let model_filter = cx.new(|cx| Composer::new(cx, "Filter models"));
+        let sources_filter = cx.new(|cx| Composer::new(cx, "Filter by author, title or year"));
+        cx.observe(&sources_filter, |_workbench, _field, cx| cx.notify())
+            .detach();
         cx.observe(&model_filter, |_workbench, _field, cx| cx.notify())
             .detach();
         let project_query = cx.new(|cx| Composer::new(cx, "Find or name a project"));
@@ -2979,6 +2986,7 @@ impl Workbench {
             catalogue: catalogue::load(),
             key_target: stored.provider.clone(),
             sources_open: false,
+            sources_filter,
             deleting: None,
             rename_editor,
             approve_tasks: std::collections::HashSet::new(),
@@ -12041,15 +12049,27 @@ impl Workbench {
             .focus(&self.delete_focus)
             .body(
                 div()
-                    .id("all-sources")
                     .flex()
                     .flex_col()
                     .w_full()
                     .min_w_0()
-                    .gap_1()
-                    .max_h(px(520.))
-                    .overflow_y_scroll()
-                    .child(self.sources_section(None, cx)),
+                    .gap_2()
+                    // The field sits outside the scroll region, so it cannot scroll away from
+                    // the list it filters. `Modal::body` is itself a scroller, and the inner
+                    // `max_h` means its content fits — so only the list moves.
+                    .child(self.filter_field(self.sources_filter.clone(), cx))
+                    .child(
+                        div()
+                            .id("all-sources")
+                            .flex()
+                            .flex_col()
+                            .w_full()
+                            .min_w_0()
+                            .gap_1()
+                            .max_h(px(480.))
+                            .overflow_y_scroll()
+                            .child(self.sources_section(None, cx)),
+                    ),
             )
             .actions(
                 ui::actions().child(div().flex_grow()).child(
@@ -12119,8 +12139,23 @@ impl Workbench {
             );
         }
 
-        let showing = limit.unwrap_or(self.sources.len());
-        for (at, source) in self.sources.iter().enumerate().take(showing) {
+        // Scored against the citation as written, which is what a researcher remembers: an
+        // author's name, a year, a word from the title. The same fuzzy scorer as every other
+        // filter here, so `2024 orchid` finds what you would expect it to.
+        let query = match limit {
+            Some(_) => String::new(),
+            None => self.sources_filter.read(cx).text().to_string(),
+        };
+        let matching: Vec<(usize, &protocol::Source)> = self
+            .sources
+            .iter()
+            .enumerate()
+            // **Numbered before filtering.** `[3]` has to keep meaning the third reference of
+            // the answer, or a filtered list renumbers the citations the prose points at.
+            .filter(|(_, source)| match_score(&query, &source.citation).is_some())
+            .collect();
+        let showing = limit.unwrap_or(matching.len());
+        for (at, source) in matching.into_iter().take(showing) {
             let verdict = self.checked.get(&source.citation);
             // **Three states, not two.** `None` is *not looked up yet*; `Some(None)` is *looked
             // up, and the registry has nothing*. Collapsing them with `.flatten()` — which this
@@ -12289,6 +12324,17 @@ impl Workbench {
 
             row = row.child(body);
             section = section.child(row);
+        }
+
+        // Said, rather than left as an empty panel: a filter matching nothing and a
+        // conversation with no references look identical otherwise, and only one of them is
+        // fixed by typing less.
+        if showing == 0 && !query.trim().is_empty() {
+            section = section.child(
+                ui::Label::new("No reference matches that.")
+                    .muted()
+                    .size(ui::Size::Compact),
+            );
         }
 
         // **The way in, and the count it hides.** A panel that lists twenty-six references in
