@@ -615,8 +615,23 @@ pub fn contrast(a: u32, b: u32) -> f64 {
 mod tests {
     use super::*;
 
+    /// Serialises every test that calls [`apply`].
+    ///
+    /// **The live theme is global**, which is the whole design — free rendering helpers have no
+    /// `Context` to reach a GPUI global through. It also means two tests that `apply` different
+    /// palettes and then read `text()` or `ink_on()` are racing, and `cargo test` runs them in
+    /// parallel by default. That produced a failure roughly one run in four, always in whichever
+    /// test lost, which reads as a flake and is a genuine data race between tests (docs §197).
+    static THEME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Take the lock, surviving a panic in a test that held it before.
+    fn hold_theme() -> std::sync::MutexGuard<'static, ()> {
+        THEME_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn a_hover_is_visible_over_every_surface_it_can_cover() {
+        let _theme = hold_theme();
         // §184: rows hovered to `elevated` while sitting *inside* containers painted `elevated`
         // — `menu_card` and the rail both do — so the hover was not faint, it was the same
         // colour, in every theme since this file was written. Where it did differ it borrowed
@@ -668,6 +683,7 @@ mod tests {
 
     #[test]
     fn a_vivid_fill_gets_an_ink_that_can_be_read_on_it() {
+        let _theme = hold_theme();
         // §189: `#ed028c` is the magenta that was asked for, and it sits in a lightness valley —
         // 3.06:1 against this app's dark ink, 4.21:1 against white. *No* text is comfortably
         // readable on it, which is why the fills ship one step darker rather than at that value.
@@ -924,6 +940,7 @@ mod tests {
 
     #[test]
     fn a_fresh_window_draws_the_default_before_settings_load() {
+        let _theme = hold_theme();
         // The window paints its first frame from these atomics, before `apply_theme` has read
         // `settings.toml` — so if the seeds and `THEMES[0]` disagreed, a fresh install would
         // flash one palette and settle on another. They cannot disagree now; this checks the
