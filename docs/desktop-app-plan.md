@@ -11070,3 +11070,37 @@ result is a column of company names with nothing underneath them.
 *Forty-fifth: a comment that says why a line is there is only true of the container it was written
 in. "`flex_grow` gives it a width" was correct, load-bearing, and became false the moment
 something above it changed direction.*
+
+## 193. Settled by comparison, not by reasoning (2026-08-13)
+
+> *"The ellipsis is not fixed."* — third report, after §190 and §192 each fixed a real thing that
+> was not this.
+
+Three attempts, three plausible mechanisms, three wrong answers. What settled it was not a fourth
+theory but a **comparison already on screen**: the provider headings added in §191 sit two lines
+away in the same list, are the same `ui::Label`, and render their text correctly. The only
+difference between them and the rows is `.ellipsis()` — `overflow_hidden` + `whitespace_nowrap`
++ `text_ellipsis`.
+
+So the truncate path is removed from `picker_row`. A row that is already a column has somewhere
+to put a long id: it wraps. Wrapping is worse than truncating and **enormously** better than
+showing nothing, which is what three rounds of clever fixes had shipped.
+
+The rule that failed here is not a flex rule. It is that I kept reasoning about layout I could not
+see, in a window I cannot open, while a working counter-example sat in the same function.
+
+### Softness, matched to the orange rather than chosen
+
+> *"If you see the softness of the orange, we should simulate that softness for the potato light
+> themes."*
+
+The orange is CIP 1505 C at **12%** over the surface, and that number was already in the file. The
+potato hovers now use the same 12% of their own pigment — `#f9dbef` and `#ecdbf6` — which is the
+literal answer to *simulate that softness*, and it means the fills stop needing an ink flip: dark
+text reads on them at 5.01 and 4.89.
+
+§189's vivid fills and §190's 70% composites were both answers to *"vivid"* that arrived before
+the reference point did. The orange was the reference all along.
+
+*Forty-sixth: when three fixes fail, stop generating a fourth explanation and go looking for the
+thing that already works. It is usually adjacent.*

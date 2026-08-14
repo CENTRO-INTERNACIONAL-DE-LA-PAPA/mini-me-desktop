@@ -179,7 +179,7 @@ pub const VIOLET_POTATO_LIGHT: Theme = Theme {
     // On paper this is the *darkest* surface, so it is what every ink here had to be checked
     // against — not the background.
     accent_soft: 0xf6e5db,
-    hover: 0xbc4b8d,
+    hover: 0xf9dbef,
     text: 0x333135,
     text_muted: 0x545158,
     text_faint: 0x625d66,
@@ -209,7 +209,7 @@ pub const MAGENTA_POTATO: Theme = Theme {
 
 /// [`VIOLET_POTATO_LIGHT`] with the same swap.
 pub const MAGENTA_POTATO_LIGHT: Theme = Theme {
-    hover: 0xa64bd2,
+    hover: 0xecdbf6,
     accent: 0x883b58,
     accent_hover: 0x6b213f,
     ..VIOLET_POTATO_LIGHT
