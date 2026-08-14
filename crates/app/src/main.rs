@@ -12137,6 +12137,30 @@ impl Workbench {
                 .min_w_0()
                 .p_2()
                 .rounded_lg()
+                // **The whole row opens the paper, and lights up to say so.** Asked for after
+                // §194 made the list long enough to read down: *"I would like to have a hover
+                // colouring when I'm hovering a paper so when I click it I'll be redirected to
+                // the web page."* A twelve-pixel word called `link` at the end of a four-line
+                // citation is a target you aim at; the citation itself is the thing being
+                // pointed at, so it should be the thing you press (docs §195).
+                //
+                // **Only when there is somewhere to go.** A reference nothing could resolve gets
+                // no hover and no pointer, because a row that lights up and then does nothing is
+                // worse than one that never offered (§185 marks those as unverified already).
+                .when_some(link.clone(), |row, url| {
+                    row.hover(|style| {
+                        let fill = theme::hover_over(theme::surface());
+                        style
+                            .bg(rgb(fill))
+                            .text_color(rgb(theme::ink_on(fill)))
+                            .cursor_pointer()
+                    })
+                    .on_click(move |_event, _window, _cx| {
+                        if let Err(error) = workspace::browse(&url) {
+                            tracing::warn!(%error, "could not open a source");
+                        }
+                    })
+                })
                 .child(
                     div()
                         .flex_none()
