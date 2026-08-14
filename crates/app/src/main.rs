@@ -919,6 +919,12 @@ const SCROLL_GROUP: &str = "scroll-region";
 /// before §174 found that half of it never applied.
 const TRANSCRIPT_INSET: f32 = 16.;
 
+/// How many references the side panel lists before offering the rest in one press.
+///
+/// Four, the same count the image gallery shows before its `+N` tile (§152). Enough to see whose
+/// work this is; few enough that the files below stay on screen.
+const SOURCES_IN_PANEL: usize = 4;
+
 fn scrollbar(handle: &gpui::ScrollHandle) -> Option<impl IntoElement> {
     let overflow = handle.max_offset().height;
     let viewport = handle.bounds().size.height;
@@ -2767,6 +2773,8 @@ struct Workbench {
     /// interrupting each hop. Asked after meeting exactly that: *"do I have the ability to select
     /// the models for the subagents using independent API keys?"* (docs §191).
     key_target: String,
+    /// Whether the whole reference list is open over the workbench.
+    sources_open: bool,
     /// The confirmed target awaiting its backend and filesystem results.
     ///
     /// Optimistically removing the row made a failed or interrupted request look successful
@@ -2970,6 +2978,7 @@ impl Workbench {
             confirming_provider: None,
             catalogue: catalogue::load(),
             key_target: stored.provider.clone(),
+            sources_open: false,
             deleting: None,
             rename_editor,
             approve_tasks: std::collections::HashSet::new(),
@@ -9962,6 +9971,12 @@ impl Workbench {
             cx.notify();
             return;
         }
+        if self.sources_open {
+            self.sources_open = false;
+            self.restore_focus = true;
+            cx.notify();
+            return;
+        }
         if self.confirming_provider.take().is_some() {
             // Escape leaves the provider as it was: this modal exists precisely so the change
             // needs a deliberate press, and dismissing is not one.
@@ -11626,7 +11641,7 @@ impl Workbench {
                 )
                 .child(self.jobs_section(cx))
                 .child(self.outputs_section(cx))
-                .child(self.sources_section());
+                .child(self.sources_section(Some(SOURCES_IN_PANEL), cx));
         };
 
         panel = panel.child(if project.mission.is_empty() {
@@ -11721,7 +11736,7 @@ impl Workbench {
         panel
             .child(self.jobs_section(cx))
             .child(self.outputs_section(cx))
-            .child(self.sources_section())
+            .child(self.sources_section(Some(SOURCES_IN_PANEL), cx))
     }
 
     /// Long jobs still running, and the ones that finished this session.
@@ -11995,7 +12010,64 @@ impl Workbench {
             .count()
     }
 
-    fn sources_section(&self) -> impl IntoElement {
+    /// Every reference, in a list you scroll rather than a panel you fight.
+    ///
+    /// Asked for in these terms: *"a nice list that can scroll in y direction, like OS systems do
+    /// in file explorers"* — and pointedly **not** the slider the images got. A figure is one
+    /// thing you look at and the next is a different thing; a reference list is one object you
+    /// read down. Paging through twenty-six citations one at a time would be the wrong gesture
+    /// for the same reason paging through a folder would be (docs §194).
+    fn sources_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let unverified = self.unverified_sources();
+        ui::Modal::new("sources", format!("Sources · {}", self.sources.len()))
+            .width(720.)
+            .focus(&self.delete_focus)
+            .body(
+                div()
+                    .id("all-sources")
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .min_w_0()
+                    .gap_1()
+                    .max_h(px(520.))
+                    .overflow_y_scroll()
+                    .child(self.sources_section(None, cx)),
+            )
+            .actions(
+                ui::actions().child(div().flex_grow()).child(
+                    ui::Button::new("sources-close", "Close").on_click(cx.listener(
+                        |workbench, _event, _window, cx| {
+                            workbench.sources_open = false;
+                            workbench.restore_focus = true;
+                            cx.notify();
+                        },
+                    )),
+                ),
+            )
+            .footer(
+                ui::Label::new(match unverified {
+                    // The same count the panel header carries, from the same function, so the
+                    // two cannot disagree about what "unverified" means (§185).
+                    0 => "Every reference here came from a search or was checked against a \
+                          registry."
+                        .to_string(),
+                    n => format!(
+                        "{n} of these came from the model rather than from a search — confirm \
+                         them before citing."
+                    ),
+                })
+                .muted()
+                .size(ui::Size::Compact),
+            )
+    }
+
+    /// The reference list, capped for the panel and whole for the modal.
+    ///
+    /// **One function rather than two, because they must agree.** A compact panel list and a full
+    /// one are the same rows with a different count — and the moment they are written separately,
+    /// the unverified mark or the link is in one and not the other (docs §194).
+    fn sources_section(&self, limit: Option<usize>, cx: &mut Context<Self>) -> impl IntoElement {
         let mut section = div()
             .flex()
             .flex_col()
@@ -12030,7 +12102,8 @@ impl Workbench {
             );
         }
 
-        for (at, source) in self.sources.iter().enumerate() {
+        let showing = limit.unwrap_or(self.sources.len());
+        for (at, source) in self.sources.iter().enumerate().take(showing) {
             let verdict = self.checked.get(&source.citation);
             // **Three states, not two.** `None` is *not looked up yet*; `Some(None)` is *looked
             // up, and the registry has nothing*. Collapsing them with `.flatten()` — which this
@@ -12175,6 +12248,45 @@ impl Workbench {
 
             row = row.child(body);
             section = section.child(row);
+        }
+
+        // **The way in, and the count it hides.** A panel that lists twenty-six references in
+        // full is a wall a researcher scrolls past to reach the files below it — the same problem
+        // the images had before §152 grouped them behind one tile. The rest are one press away.
+        let hidden = self.sources.len().saturating_sub(showing);
+        if hidden > 0 {
+            section = section.child(
+                div()
+                    .id("open-all-sources")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .w_full()
+                    .min_w_0()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_color(rgb(theme::accent()))
+                    .hover(|style| {
+                        let fill = theme::hover_over(theme::surface());
+                        style
+                            .bg(rgb(fill))
+                            .text_color(rgb(theme::ink_on(fill)))
+                            .cursor_pointer()
+                    })
+                    .child(ui::Label::new(format!("+{hidden} more")).inherit().size(ui::Size::Compact))
+                    .child(
+                        ui::Label::new("open all")
+                            .inherit()
+                            .size(ui::Size::Compact),
+                    )
+                    .on_click(cx.listener(|workbench, _event, _window, cx| {
+                        workbench.sources_open = true;
+                        cx.notify();
+                    })),
+            );
         }
         section
     }
@@ -12524,6 +12636,12 @@ impl Render for Workbench {
                 cx,
             )),
             None => root,
+        };
+
+        let root = if self.sources_open {
+            root.child(self.sources_modal(cx))
+        } else {
+            root
         };
 
         let root = match &self.confirming_delete {
