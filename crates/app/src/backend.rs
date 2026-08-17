@@ -1832,6 +1832,7 @@ mod tests {
         let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
         let script = overlay.join("minime_local/make_config.py");
         if std::process::Command::new("python3")
+            .env("PYTHONIOENCODING", "utf-8")
             .arg("--version")
             .output()
             .is_err()
@@ -1853,6 +1854,7 @@ mod tests {
         // No PYTHONPATH, no cwd trickery, no `-c` wrapper: the launch sets none of those for
         // this step, and every one of them would hide the failure it shipped with.
         let out = std::process::Command::new("python3")
+            .env("PYTHONIOENCODING", "utf-8")
             .arg(&script)
             .arg(&scratch)
             .env_remove("PYTHONPATH")
@@ -1883,6 +1885,7 @@ mod tests {
         // so assert the relationship rather than a fixed answer — the test has to pass on a
         // machine with the package and on one without.
         let available = std::process::Command::new("python3")
+            .env("PYTHONIOENCODING", "utf-8")
             .arg("-c")
             .arg("import langgraph.checkpoint.sqlite.aio")
             .output()
@@ -2771,6 +2774,7 @@ mod source_tests {
     #[test]
     fn the_backend_says_which_commit_it_is_running() {
         if std::process::Command::new("python3")
+            .env("PYTHONIOENCODING", "utf-8")
             .arg("--version")
             .output()
             .is_err()
@@ -2800,6 +2804,7 @@ mod source_tests {
                 dir = dir.to_string_lossy(),
             );
             let out = std::process::Command::new("python3")
+            .env("PYTHONIOENCODING", "utf-8")
                 .arg("-c")
                 .arg(&script)
                 .output()

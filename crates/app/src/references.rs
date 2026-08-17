@@ -368,6 +368,41 @@ pub fn title_of(body: &serde_json::Value) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// The Python this machine has, by the name that works here.
+    ///
+    /// **Two things Windows does differently, and both cost a red release build (§214).**
+    ///
+    /// `python3` is not the name there: the launcher is `py` and the interpreter is `python`.
+    /// Tried in order so a machine with any of them runs these tests rather than skipping every
+    /// one — which is the worse failure, because it is green.
+    ///
+    /// The **program name**, not a `Command`: a `Command` accumulates its arguments, and two of
+    /// these tests spawn inside a loop. Handing the same one round a loop reruns the first
+    /// iteration's arguments with the second iteration's expectation, which fails while pointing
+    /// at the wrong record. Caught locally; it would have been a genuinely confusing red build.
+    fn python() -> Option<&'static str> {
+        ["python3", "python", "py"].into_iter().find(|name| {
+            std::process::Command::new(name)
+                .arg("--version")
+                .output()
+                .is_ok_and(|out| out.status.success())
+        })
+    }
+
+    /// A fresh interpreter, told to speak UTF-8.
+    ///
+    /// `PYTHONIOENCODING` is the load-bearing part. Python picks its stdout encoding from the
+    /// console code page, which on a Windows runner is cp1252 — so an en-dash written by the
+    /// overlay arrives as the single byte `0x96`, and reading it back as UTF-8 gives `�`. The test
+    /// then compares `603�627` against `603–627` and fails on a citation the overlay had formatted
+    /// perfectly. Nothing about the product: in a real run this text crosses HTTP as JSON, which is
+    /// UTF-8 by definition, and the overlay only ever runs inside WSL.
+    fn interpreter(program: &str) -> std::process::Command {
+        let mut command = std::process::Command::new(program);
+        command.env("PYTHONIOENCODING", "utf-8");
+        command
+    }
+
     #[test]
     fn where_a_reference_came_from_is_a_separate_question_from_whether_it_is_broken() {
         use Origin::*;
@@ -647,14 +682,10 @@ mod tests {
     /// It cannot be written once, so it is checked instead.
     #[test]
     fn the_rust_and_python_matchers_agree() {
-        if std::process::Command::new("python3")
-            .arg("--version")
-            .output()
-            .is_err()
-        {
-            eprintln!("skipping: python3 is not on PATH");
+        let Some(python) = python() else {
+            eprintln!("skipping: no Python on PATH");
             return;
-        }
+        };
         let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
 
         // (citation, candidate titles) — the real cases from §119 and §120, plus the ties.
@@ -713,7 +744,7 @@ mod tests {
                 .collect();
             let ours = best_match(citation, &candidates).map(|repair| repair.title);
 
-            let out = std::process::Command::new("python3")
+            let out = interpreter(python)
                 .arg("-c")
                 .arg(&script)
                 .arg(citation)
@@ -739,14 +770,10 @@ mod tests {
     /// no Python harness, and a rule that only runs in production is a rule nobody checks.
     #[test]
     fn the_overlay_builds_a_citation_the_model_could_not() {
-        if std::process::Command::new("python3")
-            .arg("--version")
-            .output()
-            .is_err()
-        {
-            eprintln!("skipping: python3 is not on PATH");
+        let Some(python) = python() else {
+            eprintln!("skipping: no Python on PATH");
             return;
-        }
+        };
         let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
 
         // Real Semantic Scholar records, verbatim. The first two are the papers whose DOIs the
@@ -812,7 +839,7 @@ mod tests {
                  print(citations.apa(json.loads(sys.argv[1])))",
                 overlay = overlay.to_string_lossy()
             );
-            let out = std::process::Command::new("python3")
+            let out = interpreter(python)
                 .arg("-c")
                 .arg(&script)
                 .arg(record)
@@ -843,14 +870,10 @@ mod tests {
     /// executes in production is one nobody tests.
     #[test]
     fn the_overlays_tool_wrapper_runs() {
-        if std::process::Command::new("python3")
-            .arg("--version")
-            .output()
-            .is_err()
-        {
-            eprintln!("skipping: python3 is not on PATH");
+        let Some(python) = python() else {
+            eprintln!("skipping: no Python on PATH");
             return;
-        }
+        };
         let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
         // Upstream's wrapper around ours, with the tool call in a child task — the arrangement
         // the backend actually uses, and the one where a ContextVar store silently failed (§123).
@@ -890,7 +913,7 @@ asyncio.run(main())
 "#,
             overlay = overlay.to_string_lossy()
         );
-        let out = std::process::Command::new("python3")
+        let out = interpreter(python)
             .arg("-c")
             .arg(&script)
             .output()
@@ -921,14 +944,10 @@ asyncio.run(main())
     /// DOI from the publisher's record, and a corpus id reconstructed here would be worse.
     #[test]
     fn the_overlay_records_the_cli_search_as_well_as_the_mcp_one() {
-        if std::process::Command::new("python3")
-            .arg("--version")
-            .output()
-            .is_err()
-        {
-            eprintln!("skipping: python3 is not on PATH");
+        let Some(python) = python() else {
+            eprintln!("skipping: no Python on PATH");
             return;
-        }
+        };
         let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
         let script = format!(
             r#"
@@ -961,7 +980,7 @@ asyncio.run(main())
 "#,
             overlay = overlay.to_string_lossy()
         );
-        let out = std::process::Command::new("python3")
+        let out = interpreter(python)
             .arg("-c")
             .arg(&script)
             .output()
@@ -992,14 +1011,10 @@ asyncio.run(main())
     /// had invented rather than the one it had. The turn then reported that plots had been saved.
     #[test]
     fn a_failed_command_tells_the_model_where_it_ran() {
-        if std::process::Command::new("python3")
-            .arg("--version")
-            .output()
-            .is_err()
-        {
-            eprintln!("skipping: python3 is not on PATH");
+        let Some(python) = python() else {
+            eprintln!("skipping: no Python on PATH");
             return;
-        }
+        };
         let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
         // The helpers are lifted out of the module verbatim rather than imported, because
         // importing `minime_local.workspace` drags in deepagents and langgraph.
@@ -1042,7 +1057,7 @@ print("ok")
 "#,
             overlay = overlay.to_string_lossy()
         );
-        let out = std::process::Command::new("python3")
+        let out = interpreter(python)
             .arg("-c")
             .arg(&script)
             .output()
@@ -1068,14 +1083,10 @@ print("ok")
     /// its thread, which is why the files were one directory sideways rather than lost.
     #[test]
     fn background_work_is_pinned_to_the_conversation_from_whichever_key_has_it() {
-        if std::process::Command::new("python3")
-            .arg("--version")
-            .output()
-            .is_err()
-        {
-            eprintln!("skipping: python3 is not on PATH");
+        let Some(python) = python() else {
+            eprintln!("skipping: no Python on PATH");
             return;
-        }
+        };
         let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
         let script = format!(
             r#"
@@ -1111,7 +1122,7 @@ print("ok")
 "#,
             overlay = overlay.to_string_lossy()
         );
-        let out = std::process::Command::new("python3")
+        let out = interpreter(python)
             .arg("-c")
             .arg(&script)
             .output()
@@ -1136,14 +1147,10 @@ print("ok")
     /// into the conversation's folder would have destroyed by mixing every worker together.
     #[test]
     fn a_background_workers_folder_is_nested_inside_the_conversations() {
-        if std::process::Command::new("python3")
-            .arg("--version")
-            .output()
-            .is_err()
-        {
-            eprintln!("skipping: python3 is not on PATH");
+        let Some(python) = python() else {
+            eprintln!("skipping: no Python on PATH");
             return;
-        }
+        };
         let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
         // The layout is lifted out of `LocalSandbox.__init__` verbatim — importing the module
         // drags in deepagents and langgraph.
@@ -1159,7 +1166,10 @@ assert "root.joinpath(" in src, "the work dir is no longer composed from parts"
 
 def layout(root, project, pinned, own):
     parts = [pinned] + ([own] if own and own != pinned else [])
-    return str(pathlib.Path(root).joinpath(*([project] if project else []), *parts))
+    # `as_posix`, not `str`: the rule under test is which folder nests inside which, and `str`
+    # of a WindowsPath spells the same layout with backslashes. The overlay itself only ever
+    # runs inside WSL, so its own separator is never in question (§214).
+    return pathlib.Path(root).joinpath(*([project] if project else []), *parts).as_posix()
 
 # A worker nests inside the conversation; the conversation itself does not move.
 assert layout("/w", "proj", "A", "B") == "/w/proj/A/B", layout("/w", "proj", "A", "B")
@@ -1197,7 +1207,7 @@ print("ok")
 "#,
             overlay = overlay.to_string_lossy()
         );
-        let out = std::process::Command::new("python3")
+        let out = interpreter(python)
             .arg("-c")
             .arg(&script)
             .output()
@@ -1224,14 +1234,10 @@ print("ok")
     /// producing a description that still argues for absolute paths.
     #[test]
     fn execute_is_told_to_keep_its_output_in_the_workspace() {
-        if std::process::Command::new("python3")
-            .arg("--version")
-            .output()
-            .is_err()
-        {
-            eprintln!("skipping: python3 is not on PATH");
+        let Some(python) = python() else {
+            eprintln!("skipping: no Python on PATH");
             return;
-        }
+        };
         let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
         let script = format!(
             r#"
@@ -1278,7 +1284,7 @@ print("ok")
 "#,
             overlay = overlay.to_string_lossy()
         );
-        let out = std::process::Command::new("python3")
+        let out = interpreter(python)
             .arg("-c")
             .arg(&script)
             .output()
