@@ -11618,3 +11618,42 @@ existed that had an opinion.
 
 *Fifty-eighth: when two correct rules combine into a wrong answer, the missing thing is usually
 intent — not precision.*
+
+## 206. The log that was never being kept (2026-08-17)
+
+Twice in one session a diagnostic was added, the researcher was asked to grep for it, and the answer
+was empty:
+
+```
+PS> Select-String -Path ...\mini-me-app.log -Pattern 'no usable'
+PS>
+```
+
+The second time that emptiness was taken as evidence — *"`next` is present, so the missing-field
+theory is wrong"* — and it sent the next diagnosis down a path chosen by nothing at all. It was
+caught only by a follow-up check on the same file, which found no lines from that session either.
+The file was from an earlier attempt with `Tee-Object`; the run being asked about had never written to
+it.
+
+**The app kept no log.** `backend.rs` has always written the sidecar's output to
+`%TEMP%\mini-me-desktop-backend.log`, and the app's own `tracing_subscriber` wrote to stderr only —
+which for a windowed program means a console the researcher closes. Every `warn!` this project has
+added for a researcher to read has been going somewhere nobody keeps.
+
+So the app writes its own, beside the backend's, and three details are the point:
+
+- **Both destinations, not either.** A `Tee` writer: the console for whoever is watching live, the
+  file for whoever reads it afterwards. The console's result is the one returned, so a locked or full
+  file can never cost a line someone is watching arrive.
+- **Truncated per launch.** A researcher told to read this file must be reading *this* run. An
+  appended log would answer today's question with lines from Tuesday — the same failure, one step
+  removed.
+- **No ANSI.** The file exists to be grepped and pasted; the console reads fine without colour.
+
+*Related, and the reason this is its own entry rather than a footnote:* the empty grep was treated as
+a measurement. §203 already recorded the cost of reasoning past what can be observed, and this is the
+inverse mistake — believing an observation without checking the instrument was on. A grep that finds
+nothing has two explanations and only one of them is about the code.
+
+*Fifty-ninth: before a null result becomes evidence, prove the instrument was recording. "No hit"
+and "no data" print identically.*

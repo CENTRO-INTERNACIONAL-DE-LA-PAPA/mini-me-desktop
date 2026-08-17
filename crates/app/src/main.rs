@@ -14853,12 +14853,76 @@ fn set_secret_from_args(args: &[String]) -> Option<i32> {
     }
 }
 
+/// Where the app writes its own log, beside the one it keeps for the backend.
+///
+/// **Because for six months it kept none.** `backend.rs` has always written the sidecar's output to
+/// a file, and the app's own tracing went to stderr only — which for a windowed program means a
+/// console nobody kept. Twice in one session a diagnostic was added, the researcher was asked to
+/// grep for it, and the answer was empty because the console output had never been captured; the
+/// second time that empty answer was mistaken for evidence and sent a diagnosis down the wrong path
+/// (§206). A log a person has to remember to record is a log that is not there when it matters.
+pub fn app_log_path() -> std::path::PathBuf {
+    std::env::temp_dir().join("mini-me-desktop-app.log")
+}
+
+/// A log destination that is the console *and* a file.
+///
+/// Both, not either: the console is what a developer watches live, and the file is what survives to
+/// be read afterwards. Cloneable and shared behind a mutex because `MakeWriter` hands out a fresh
+/// writer per event.
+#[derive(Clone)]
+struct Tee(Option<std::sync::Arc<std::sync::Mutex<std::fs::File>>>);
+
+impl std::io::Write for Tee {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // The console first and its result is the one returned: a full disk or a locked file must
+        // never cost the line someone is watching arrive.
+        let written = std::io::stderr().write(buf)?;
+        if let Some(file) = &self.0 {
+            if let Ok(mut file) = file.lock() {
+                let _ = file.write_all(buf);
+            }
+        }
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let _ = std::io::stderr().flush();
+        if let Some(file) = &self.0 {
+            if let Ok(mut file) = file.lock() {
+                let _ = file.flush();
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Tee {
+    type Writer = Tee;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
 fn main() {
+    // **Truncated, not appended.** The whole point is that a researcher told to read this file is
+    // reading *this* launch. An appended log would have answered the question we actually asked
+    // with lines from a run three days earlier, which is the failure one step removed.
+    let log = std::fs::File::create(app_log_path()).ok();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
+        // No escape codes: the console is still perfectly readable without them, and the file is
+        // meant to be grepped and pasted.
+        .with_ansi(false)
+        .with_writer(Tee(log.map(|file| {
+            std::sync::Arc::new(std::sync::Mutex::new(file))
+        })))
         .init();
+    // First line, and it names a path — the same reason the backend's log path is printed (§115).
+    tracing::info!(path = %app_log_path().display(), "app log");
 
     // The researcher's palette, before the first frame — so the window never opens in
     // one theme and repaints into another.
