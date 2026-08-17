@@ -7396,6 +7396,28 @@ impl Workbench {
             .child(team)
             .child(section_label("WHERE THE DATA COMES FROM"))
             .child(sources)
+            .child(section_label("THIS BUILD"))
+            // **Because a tester's report is unusable without it.** The app has never shown its
+            // own version anywhere: not in the window, not in the log, not in the About page. It
+            // logged the *backend* checkout's commit as its very first line (§115) and said nothing
+            // about itself — so "it doesn't work" from a second machine could be any of 183
+            // commits, and the first question back would always be the same one (§213).
+            //
+            // Selectable, like the citation below, because the whole point is pasting it into a
+            // message.
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .child(ui::Label::new(build_stamp()).colour(theme::accent()))
+                    .child(
+                        ui::Label::new(
+                            "Include this line when reporting a problem, with the two log files                              named in Setup.",
+                        )
+                        .muted()
+                        .size(ui::Size::Compact),
+                    ),
+            )
             .child(section_label("WHERE CODE RUNS"))
             .child(
                 div()
@@ -15295,6 +15317,23 @@ fn set_secret_from_args(args: &[String]) -> Option<i32> {
     }
 }
 
+/// What this build is, in one line a researcher can paste into a message.
+///
+/// `CARGO_PKG_VERSION` alone would not distinguish two builds a fortnight apart from the same
+/// version, and that fortnight is where this project lives. The commit is stamped at build time by
+/// the release workflow; a local `cargo run` has none, and says so rather than implying a release.
+fn build_stamp() -> String {
+    match option_env!("MINIME_BUILD_COMMIT") {
+        Some(commit) if !commit.trim().is_empty() => {
+            format!("Mini-Me Desktop {} ({})", env!("CARGO_PKG_VERSION"), commit.trim())
+        }
+        _ => format!(
+            "Mini-Me Desktop {} (built from source)",
+            env!("CARGO_PKG_VERSION")
+        ),
+    }
+}
+
 /// Where the app writes its own log, beside the one it keeps for the backend.
 ///
 /// **Because for six months it kept none.** `backend.rs` has always written the sidecar's output to
@@ -15363,7 +15402,10 @@ fn main() {
             std::sync::Arc::new(std::sync::Mutex::new(file))
         })))
         .init();
-    // First line, and it names a path — the same reason the backend's log path is printed (§115).
+    // First two lines, and they name what everything after them is about: which build this is, and
+    // where the record of it will be. The backend's own version has been logged since §115; the
+    // app's never was (§213).
+    tracing::info!(build = %build_stamp(), "starting");
     tracing::info!(path = %app_log_path().display(), "app log");
 
     // The researcher's palette, before the first frame — so the window never opens in

@@ -11945,3 +11945,48 @@ level of the configuration while the model read all of it.
 
 *Sixty-sixth: a UI that lists everything and annotates the unusable has not warned anyone. If it
 cannot be paid for, it should not be pressable.*
+
+## 213. Shipping it to somebody else (2026-08-17)
+
+> *"Let's ship v0.1.0 so we can test with another person."*
+
+The draft release was built on **2026-08-05**, and there are **183 commits** behind it. Publishing
+it would have sent a second researcher an app without the wrapping composer, the editable mission,
+file authorship, the plan display, or the unkeyed-provider gate — and every bug report would have
+been about defects fixed a fortnight earlier. So this is `v0.2.0`, cut from today.
+
+### The app never said which build it was
+
+`CARGO_PKG_VERSION` appeared nowhere: not in the window, not in the log, not in the About page. The
+app has logged the *backend checkout's* commit as its very first line since §115 — the entry that
+argued a diagnosis without a version costs a night — and said nothing at all about itself.
+
+That is survivable with one user who is also the developer. It is not survivable with a second
+person on another machine, where *"it doesn't work"* could be any of 183 commits and the first
+question back is always the same one.
+
+So: `Mini-Me Desktop 0.2.0 (4f1e697)` in the first log line and under a **THIS BUILD** heading in
+About, selectable because the whole point is pasting it into a message. The commit is stamped by the
+release workflow; a local `cargo run` says *"built from source"* rather than implying a release it
+is not.
+
+### What the release notes had to gain
+
+They described the install and stopped. Three things a remote tester needs and could not have known:
+
+- **The first run installs WSL, wants administrator rights, and needs a restart.** §61 proved that
+  flow works on a third laptop. Nobody told the person who would meet it.
+- **Where the two logs are.** §206 gave the app one at last; a tester who cannot find it is back to
+  describing symptoms in prose.
+- **What to send back** — the build line and both logs, with the assurance that neither holds an API
+  key, because the org's rule about credentials is exactly what a researcher will worry about before
+  sending a file.
+
+### Still unsigned
+
+SmartScreen will say *"Windows protected your PC"*, and the notes say which two words to click. That
+is an organisational decision about a certificate, not an engineering one, and it stays open. Worth
+knowing what it costs: for a non-developer audience, that dialog is where most installs end.
+
+*Sixty-seventh: the version is not metadata, it is the first question of every support conversation.
+An app that cannot answer it makes every reporter answer it for you, wrongly.*

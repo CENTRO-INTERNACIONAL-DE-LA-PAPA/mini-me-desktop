@@ -39,6 +39,13 @@ jobs:
           echo "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
           echo "found $($fxc.FullName)"
 
+      # Stamped into the binary so the About page and the first log line can say which build
+      # this is. Without it a report from a second machine could be any commit, and the first
+      # question back is always the same one (docs §213).
+      - name: Stamp the build
+        shell: bash
+        run: echo "MINIME_BUILD_COMMIT=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+
       - name: Build
         run: cargo build --release -p mini-me-desktop-app
 
@@ -102,8 +109,24 @@ jobs:
 
             No terminal, no GitHub account, no Python install. The backend is included.
 
+            **The first run installs WSL** if this machine has never had it. That step asks for
+            administrator rights and then **needs a restart** — reopen the app afterwards and the
+            Setup pane picks up where it left off. Nothing to type at any point.
+
             ## Notes
 
             - Keys go in Windows Credential Manager, never in a file.
             - Files the agent creates land in **Documents\Mini-Me**, one folder per conversation.
             - Commands the agent wants to run wait for your approval first.
+            - Long jobs show the agent's own plan, so you can see how far through it is.
+
+            ## If something goes wrong
+
+            Send back **three things** and it can usually be diagnosed without a call:
+
+            1. The line under **THIS BUILD** in the About page (the ⌂ icon, top left).
+            2. `%TEMP%\mini-me-desktop-app.log` — what the app did.
+            3. `%TEMP%\mini-me-desktop-backend.log` — what the agent did.
+
+            Both logs are rewritten on each launch, so they describe the run that just failed.
+            Neither contains an API key.
