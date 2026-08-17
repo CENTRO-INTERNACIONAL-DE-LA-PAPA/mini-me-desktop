@@ -1043,6 +1043,18 @@ const GRID_GAP: f32 = 8.;
 /// the transcript is the whole conversation — one folder of files claimed a band wider than the
 /// answer that produced it. Two fixed tiles make the block `2 × tile + gap` and no wider, which is
 /// how the phone gallery being imitated stays a block you flick past rather than a wall (§164).
+/// How many characters a folder heading gets in the research panel.
+///
+/// The heading box is [`GRID_TILE_COMPACT`] × [`GRID_COLUMNS`] + [`GRID_GAP`] = 304px, and
+/// `click to open all` takes about a hundred of them — so roughly 32 characters at
+/// [`ui::Size::Compact`]. It was 28, chosen before headings carried a producer's name and two
+/// characters short of fitting `background worker / … / tables` (§208). `ui::Label` here has no
+/// `.ellipsis()` (§193), so this number is the only thing keeping the text inside the box.
+const PANEL_HEADING_CHARS: usize = 32;
+
+/// The same, for a heading under an answer in the transcript, where the box is 408px.
+const TRANSCRIPT_HEADING_CHARS: usize = 40;
+
 const GRID_TILE_COMPACT: f32 = 148.;
 const GRID_TILE_ROOMY: f32 = 200.;
 
@@ -1355,6 +1367,43 @@ fn distinguishing_tail(text: &str, max_chars: usize) -> String {
     }
     let keep = max_chars.saturating_sub(1);
     format!("…{}", text.chars().skip(count - keep).collect::<String>())
+}
+
+/// Shorten an `a / b / c` heading to fit, giving up the middle rather than either end.
+///
+/// **[`distinguishing_tail`] keeps the wrong end for these.** §152 chose tail-keeping because its
+/// labels shared a long *prefix* and differed at the end — the right rule for a filename. §201 then
+/// put the producing worker's name at the *head*, which inverts it: `background worker / outputs /
+/// tables` came out as `…d worker / outputs / tables`, throwing away the one word the attribution
+/// exists to show. Spotted in a screenshot of the feature working (§208).
+///
+/// So both ends survive and the middle gives way. If it still will not fit, the **head** is kept
+/// whole and the tail is trimmed — the producer outranks the leaf folder, because a heading that
+/// cannot say who made these files is the heading §201 replaced.
+fn shorten_path_label(label: &str, max_chars: usize) -> String {
+    if label.chars().count() <= max_chars {
+        return label.to_string();
+    }
+    let segments: Vec<&str> = label.split(" / ").collect();
+    let (Some(head), Some(tail)) = (segments.first(), segments.last()) else {
+        return distinguishing_tail(label, max_chars);
+    };
+    if segments.len() < 2 {
+        // One segment: no middle to drop, so §152's rule is still the best available.
+        return distinguishing_tail(label, max_chars);
+    }
+    let spacer = if segments.len() > 2 { " / … / " } else { " / " };
+    let joined = format!("{head}{spacer}{tail}");
+    if joined.chars().count() <= max_chars {
+        return joined;
+    }
+    let room = max_chars.saturating_sub(head.chars().count() + spacer.chars().count());
+    // Below four characters a trimmed tail is all ellipsis and no information; better to fall back
+    // than to print `… / … / …s`.
+    if room >= 4 {
+        return format!("{head}{spacer}{}", distinguishing_tail(tail, room));
+    }
+    distinguishing_tail(label, max_chars)
 }
 
 fn output_filename(output: &workspace::Output) -> String {
@@ -9648,9 +9697,9 @@ impl Workbench {
                 } else {
                     block = block.child(self.output_grid(
                         &format!("transcript-{index}-{band}-{at}"),
-                        distinguishing_tail(
+                        shorten_path_label(
                             &output_folder_label(&group.folder, worker.as_deref()),
-                            40,
+                            TRANSCRIPT_HEADING_CHARS,
                         ),
                         &group
                             .outputs
@@ -12894,9 +12943,9 @@ impl Workbench {
                     // things — the image grid above is the only surface where kind outranks folder.
                     section = section.child(self.output_grid(
                         &format!("panel-{band}-{at}"),
-                        distinguishing_tail(
+                        shorten_path_label(
                             &output_folder_label(&group.folder, worker.as_deref()),
-                            28,
+                            PANEL_HEADING_CHARS,
                         ),
                         &group.outputs.iter().map(|o| (*o).clone()).collect::<Vec<_>>(),
                         true,
@@ -13363,6 +13412,59 @@ mod tests {
             output_folder_label(std::path::Path::new("plots"), Some("report writer")),
             "report writer / plots"
         );
+    }
+
+    /// The heading that cut off the very thing §201 added (§208).
+    #[test]
+    fn a_folder_heading_gives_up_its_middle_before_either_end() {
+        // The screenshot's case, verbatim: 35 characters into a 32-character budget.
+        let real = "background worker / outputs / tables";
+        assert_eq!(
+            distinguishing_tail(real, PANEL_HEADING_CHARS),
+            "…round worker / outputs / tables",
+            "what §152's rule did: the producer's name is the part that goes"
+        );
+        assert_eq!(
+            shorten_path_label(real, PANEL_HEADING_CHARS),
+            "background worker / … / tables",
+            "both ends survive, the middle gives way"
+        );
+
+        // Already short enough: untouched, ellipsis and all.
+        assert_eq!(
+            shorten_path_label("background worker", PANEL_HEADING_CHARS),
+            "background worker"
+        );
+        assert_eq!(
+            shorten_path_label("eda / plots", PANEL_HEADING_CHARS),
+            "eda / plots"
+        );
+
+        // Two segments have no middle to drop, so the tail is trimmed and the head — the producer —
+        // is kept whole.
+        let two = "exploratory data analysis / a_very_long_output_folder";
+        let shortened = shorten_path_label(two, PANEL_HEADING_CHARS);
+        assert!(
+            shortened.starts_with("exploratory data analysis / "),
+            "{shortened}"
+        );
+        assert!(shortened.chars().count() <= PANEL_HEADING_CHARS, "{shortened}");
+
+        // A head that cannot fit on its own falls back rather than printing all punctuation.
+        let hopeless = "an_extremely_long_single_component_with_no_separators_at_all";
+        assert_eq!(
+            shorten_path_label(hopeless, 12),
+            distinguishing_tail(hopeless, 12),
+            "one segment keeps §152's rule"
+        );
+        assert!(shorten_path_label(hopeless, 12).chars().count() <= 12);
+
+        // Whatever the budget, the answer fits it. This is the only thing holding the text inside
+        // a fixed-width box, since the label has no ellipsis of its own (§193).
+        for max in 6..48 {
+            let out = shorten_path_label(real, max);
+            assert!(out.chars().count() <= max, "{max}: {out}");
+        }
     }
 
     /// One task, one thread, one name — the only attribution available without guessing.

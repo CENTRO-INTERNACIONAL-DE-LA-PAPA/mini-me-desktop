@@ -11741,3 +11741,48 @@ same shape, same cost: a status a researcher believes because nothing contradict
 *Sixty-first: when the instrument finally speaks and contradicts every theory including your own
 favourite, that is the instrument working. Three rounds of guessing were the price of not having
 built it first.*
+
+## 208. The heading cut off the thing it was added to say (2026-08-17)
+
+A screenshot of §201 working showed the group heading as `...d worker / outputs / tables`.
+
+The full label is `background worker / outputs / tables` — 35 characters into a 28-character budget,
+shortened by `distinguishing_tail`, which keeps the **tail**. §152 chose that end deliberately and was
+right at the time: its labels shared a long *prefix* (`<uuid>/eda/plots`, `<uuid>/eda/tables`) and
+differed at the end, so keeping the tail kept the information. §201 then put the producing worker's
+name at the *head* and inverted the assumption without re-checking it — so the one word the whole
+feature exists to show became the one word guaranteed to be dropped.
+
+Both ends now survive and the middle gives way: `background worker / … / tables`. If it still will not
+fit, the **head** is kept whole and the tail is trimmed, because a heading that cannot say who made
+these files is the heading §201 replaced.
+
+The budget was wrong too, and only by two characters — which is why it mattered. The heading box is
+`GRID_TILE_COMPACT × GRID_COLUMNS + GRID_GAP` = 304px less about a hundred for `click to open all`,
+so roughly 32 characters, not 28. `ui::Label` here carries no `.ellipsis()` (§193 removed it), so that
+number is the *only* thing keeping the text inside a fixed-width box — which is now said at the
+constant, and there is a test asserting the output fits every budget from 6 to 48.
+
+*Fifty-second… no: sixty-second.* **When you move information to a new position, re-check every rule
+that was written for the old one.** The truncation was not a bug when it was written; it became one
+the moment something else claimed the head.
+
+### And the background-task hunt closes
+
+Both cases now reach `status=success next=[]` unaided, measured end to end:
+
+| | light run | heavy run |
+| --- | --- | --- |
+| duration | 90s | 6m 42s |
+| approval gate rounds | 2 | 8 |
+| seconds per `execute` | ~35 | 35–43 |
+| flipped to ✓ without being asked | yes | yes |
+
+So §204's "big bug" was not a bug in the watcher. It was a long run, plus — in the original
+observation — a coordinator that reported `success` for work whose folders it then found empty. The
+app was showing the honest status and had no way to say so.
+
+What remains from it is real but different, and belongs to the deferred loading-state item: **six
+minutes of `running · execute` says nothing about how much is left.** The worker is calling
+`write todos` between commands, so a plan exists on its thread. A progress display that reads that
+plan would be worth more than any animation.
