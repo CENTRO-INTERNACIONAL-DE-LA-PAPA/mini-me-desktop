@@ -11902,3 +11902,46 @@ trip to relearn that. The fix follows the line.
 
 *Sixty-fifth: a config that travels between runs needs a receipt at both ends. The sender knowing
 what it sent is not the same as the receiver knowing what it got.*
+## 212. The same model, under two companies (2026-08-17)
+
+§211 instrumented the failure; a sentence from the researcher identified it:
+
+> *"But I have gpt5.4 available from openrouter so why I cannot use it?"*
+
+They could. They had picked it from the wrong company.
+
+`subagent_model_list` lists **every** provider's catalogue under its own heading, which §191 built
+deliberately — pointing literature search at a cheap long-context model from another provider is the
+main reason the feature exists. What that produces for a researcher on OpenRouter is the same model
+twice:
+
+| heading | id | works? |
+| --- | --- | --- |
+| OpenAI | `gpt-4.1` | needs an OpenAI key |
+| OpenRouter | `openai/gpt-4.1` | covered by the key they have |
+
+They differ by a **prefix**. Pick the first and the override saves without complaint, the
+conversation keeps chatting because the coordinator's own key is fine, and the first anyone hears of
+it is a 429 from an OpenAI billing page, raised inside a background worker several minutes later.
+
+There *was* a `— no key stored` note beside the heading. It was scrolled past, and it would be
+scrolled past by every researcher who ever uses this panel. A warning next to four hundred pickable
+rows is not a gate; it is a caption.
+
+**Two layers now, because either alone leaves a hole.**
+
+- **The picker stops offering them.** A provider with no key contributes its heading and one line —
+  *"412 models here once an OpenAI key is stored — add one under API key above"* — and nothing to
+  press. The heading stays: hiding the provider entirely would leave someone who *does* have an
+  OpenAI account with no clue why it is not offered.
+- **The turn gate reads the specialists too.** §186 refused a turn whose *coordinator* had no key
+  and looked no further, which is the whole reason this could happen. Now an override to an unkeyed
+  provider is refused in the same place, before anything is spent, naming the specialist and the
+  company. This is what catches a settings file written before today, which no picker change can.
+
+*What this cost:* four rounds — §186, §187, §211, and this — for one shape of mistake. Each time the
+gate was made stricter about the thing that had just failed, and each time it was still reading one
+level of the configuration while the model read all of it.
+
+*Sixty-sixth: a UI that lists everything and annotates the unusable has not warned anyone. If it
+cannot be paid for, it should not be pressable.*
