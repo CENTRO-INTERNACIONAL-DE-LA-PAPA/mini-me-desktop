@@ -11476,3 +11476,41 @@ error means we cannot tell, which is the same as not knowing.
 
 *Fifty-fifth: a warning that fires when it shouldn't costs exactly what a missing one does. Both
 teach the reader to disbelieve the log.*
+
+## 203. Provably right on paper, wrong on the window (2026-08-17)
+
+§202 fixed the caret two ways and shipped both to a real Windows machine for verification. Four of
+five cases passed. The one that failed was the one the fix was *for*:
+
+> *"Clicking immediately before `has` on the lower wrapped row drew the caret at the right edge of
+> the upper row, after `row`."*
+
+The rule was right. Its inputs were not verifiable.
+
+**What the rule needs.** At a soft wrap, row N's end and row N+1's start are the *same* byte offset —
+no character was consumed to make the break. A typed newline consumes one, so the two differ. That
+single comparison is the whole distinction, and the two cases want opposite answers.
+
+**What it was comparing.** `start + ShapedLine::len()` against the next row's start. `len()` is
+exact on Windows — `direct_write.rs:666` sets it to `text.len()` — and traced on paper the redirect
+fires. On the machine it did not. Reading gpui twice did not explain it and a third reading would
+not have either: this is the same dead end as §190 and §192, and §193 already recorded what to do
+instead of arguing with code you cannot watch run.
+
+So the quantity was removed rather than explained. The **ranges are already known exactly** — they
+come out of the wrapping, before any shaping happens — and they were being thrown away and then
+reconstructed from a shaped line one layer down. Rows now carry `Range<usize>`, and `caret_row` is a
+free function over ranges alone: no shaping, no window, and every case the machine exercised is a
+unit test, including the one it failed on.
+
+That also made two other conversions exact. `index_for_mouse_position` and `position_for_offset` both
+did the same `start + len()` arithmetic, so both had the same latent dependency, and
+`position_for_offset` had a second copy of the boundary rule that could drift from the first.
+
+*What this cost:* one round trip to a machine with a screen, because the failing case cannot be
+reproduced here. Worth naming as a standing constraint rather than an accident — this project's UI
+defects keep being ones no test on this machine can see, and the cheapest response is to shrink what
+depends on the parts that need eyes.
+
+*Fifty-sixth: when a rule is right and the answer is wrong, stop re-deriving the rule and look at
+what it is reading. A correct comparison over a value you cannot verify is not a correct program.*

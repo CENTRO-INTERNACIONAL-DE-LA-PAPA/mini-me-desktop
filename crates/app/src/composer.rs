@@ -99,14 +99,20 @@ pub struct Composer {
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
-    /// Last shaped line + bounds, cached by the element so mouse hit-testing
-    /// and IME rect queries can map coordinates back to string offsets.
-    /// One shaped line per `\n`-separated line, with the byte offset it starts at.
+    /// One shaped line per *visual* row, with the byte range it covers — cached by the element so
+    /// mouse hit-testing and IME rect queries can map coordinates back to string offsets.
     ///
-    /// Was a single `ShapedLine`. A prompt carrying a script or a list has to be typeable,
-    /// and that means the field has to be genuinely multi-line — caret, selection and
-    /// hit-testing included, not just a `\n` the renderer swallows (docs §55).
-    last_layout: Vec<(usize, ShapedLine)>,
+    /// Was a single `ShapedLine`. A prompt carrying a script or a list has to be typeable, and that
+    /// means the field has to be genuinely multi-line — caret, selection and hit-testing included,
+    /// not just a `\n` the renderer swallows (docs §55).
+    ///
+    /// **The byte range, not just the start.** A row's end used to be derived as
+    /// `start + ShapedLine::len()`, which put one unverifiable quantity inside every screen ↔
+    /// offset conversion: the rule that decides whether a break was a wrap or a typed newline
+    /// compares a row's end against the next row's start, and it silently gave the wrong answer on
+    /// a real window while being provably right on the ranges (§203). The ranges are known
+    /// exactly, from the wrapping itself, so they are carried rather than reconstructed.
+    last_layout: Vec<(Range<usize>, ShapedLine)>,
     last_bounds: Option<Bounds<Pixels>>,
     /// The line height the last frame drew with, so mouse rows can be worked out.
     line_height: Pixels,
@@ -414,26 +420,23 @@ impl Composer {
         let row = self.first_row
             + ((position.y - bounds.top()) / self.line_height).floor() as usize;
         let row = row.min(self.last_layout.len().saturating_sub(1));
-        let (start, line) = &self.last_layout[row];
-        start + line.closest_index_for_x(position.x - bounds.left())
+        let (range, line) = &self.last_layout[row];
+        range.start + line.closest_index_for_x(position.x - bounds.left())
     }
 
-    /// Where a byte offset sits on screen, as (line index, x within the line).
+    /// Where a byte offset sits on screen, as (row, x within that row).
     fn position_for_offset(&self, offset: usize) -> Option<(usize, Pixels)> {
-        for (row, (start, line)) in self.last_layout.iter().enumerate() {
-            let end = start + line.len();
-            // `<=` so the caret at the very end of a line lands on that line rather
-            // than falling through to the next one.
-            if offset <= end {
-                return Some((row, line.x_for_index(offset.saturating_sub(*start))));
-            }
+        if self.last_layout.is_empty() {
+            return None;
         }
-        self.last_layout.last().map(|(start, line)| {
-            (
-                self.last_layout.len() - 1,
-                line.x_for_index(offset.saturating_sub(*start)),
-            )
-        })
+        let rows: Vec<Range<usize>> = self
+            .last_layout
+            .iter()
+            .map(|(range, _)| range.clone())
+            .collect();
+        let row = caret_row(&rows, offset);
+        let (range, line) = self.last_layout.get(row)?;
+        Some((row, line.x_for_index(offset.saturating_sub(range.start))))
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -635,7 +638,8 @@ struct ComposerElement {
 }
 
 struct PrepaintState {
-    lines: Vec<(usize, ShapedLine)>,
+    /// Each row's byte range and its shaped line — see [`Composer::last_layout`].
+    lines: Vec<(Range<usize>, ShapedLine)>,
     cursor: Option<PaintQuad>,
     /// One rectangle per line a selection covers — a selection spanning three lines is
     /// three quads, not one box swallowing the text between them.
@@ -736,6 +740,37 @@ fn wrap_at<'a>(
         }
         _ => Vec::new(),
     }
+}
+
+/// Which visual row a caret at `target` belongs on.
+///
+/// **The rule that decides it is the gap between two ranges, and nothing else.** At a soft wrap,
+/// row N's end and row N+1's start are the *same* byte offset — no character was consumed to make
+/// the break. A typed newline consumes one, so the two differ. That single comparison is what tells
+/// the cases apart, and they want opposite answers: at a wrap the caret goes with the character it
+/// precedes, on the row below; at a typed break it stays on the row above, where the key was
+/// pressed.
+///
+/// Taking ranges rather than shaped lines is the point. The first version derived a row's end as
+/// `start + ShapedLine::len()` inside the element, which made the comparison depend on a quantity
+/// this code cannot see — and it drew the caret at the right-hand end of the upper row on a real
+/// window while being provably right on paper (§203). Ranges are what the wrapping produced; they
+/// are exact, and the rule over them is testable without a window.
+fn caret_row(rows: &[Range<usize>], target: usize) -> usize {
+    for (row, range) in rows.iter().enumerate() {
+        if target > range.end {
+            continue;
+        }
+        if target == range.end
+            && rows
+                .get(row + 1)
+                .is_some_and(|next| next.start == range.end)
+        {
+            return row + 1;
+        }
+        return row;
+    }
+    rows.len().saturating_sub(1)
 }
 
 /// Slice global text runs down to one line's byte range.
@@ -933,48 +968,34 @@ impl Element for ComposerElement {
 
         // One shaped line per *visual* row — the researcher's own breaks and the ones the width
         // forced. GPUI's `shape_line` is exactly one line, so both kinds of splitting are ours.
-        let mut lines: Vec<(usize, ShapedLine)> = Vec::new();
-        {
+        //
+        // Each row keeps its byte **range**. The end is not recomputed from the shaped line: the
+        // rule that tells a soft wrap from a typed newline compares one row's end against the
+        // next's start, and deriving either from `ShapedLine::len()` put the whole decision behind
+        // a number this code cannot check (§203).
+        let ranges = {
             let mut wrapper = cx.text_system().line_wrapper(style.font(), font_size);
             row_ranges(&display_text, wrap_at(&mut wrapper, wrappable(bounds.size.width)))
-        }
-        .into_iter()
-        .for_each(|range| {
-            let shaped = window.text_system().shape_line(
-                SharedString::from(display_text[range.clone()].to_string()),
-                font_size,
-                &runs_for(&runs, range.start, range.end),
-                None,
-            );
-            lines.push((range.start, shaped));
-        });
+        };
+        let lines: Vec<(Range<usize>, ShapedLine)> = ranges
+            .iter()
+            .map(|range| {
+                let shaped = window.text_system().shape_line(
+                    SharedString::from(display_text[range.clone()].to_string()),
+                    font_size,
+                    &runs_for(&runs, range.start, range.end),
+                    None,
+                );
+                (range.clone(), shaped)
+            })
+            .collect();
 
         let position = |target: usize| -> (usize, Pixels) {
-            for (row, (start, line)) in lines.iter().enumerate() {
-                let end = start + line.len();
-                if target > end {
-                    continue;
+            let row = caret_row(&ranges, target);
+            match lines.get(row) {
+                Some((range, line)) => {
+                    (row, line.x_for_index(target.saturating_sub(range.start)))
                 }
-                // **At a wrap, the caret belongs to the row the next character is on.** Row N's
-                // end and row N+1's start are the *same* offset when the break was forced by the
-                // width rather than typed — a hard newline consumes a byte and these two differ by
-                // one. Without the distinction the caret sits at the right-hand end of the row
-                // *above* the character it precedes, which is the same "it went off the side" it
-                // was supposed to fix (§202).
-                if target == end {
-                    if let Some((next_start, next_line)) = lines.get(row + 1) {
-                        if *next_start == end {
-                            return (row + 1, next_line.x_for_index(0));
-                        }
-                    }
-                }
-                return (row, line.x_for_index(target.saturating_sub(*start)));
-            }
-            match lines.last() {
-                Some((start, line)) => (
-                    lines.len().saturating_sub(1),
-                    line.x_for_index(target.saturating_sub(*start)),
-                ),
                 None => (0, px(0.)),
             }
         };
@@ -986,13 +1007,13 @@ impl Element for ComposerElement {
         // something being typed on the twentieth. Clamped to the last full screenful, so the
         // final row never floats above empty space.
         //
-        // Read from `position` rather than worked out again, so the row the box scrolls to and the
-        // row the caret is drawn on cannot disagree at a wrap boundary.
-        let caret_row = position(cursor).0;
+        // Read through `position` rather than worked out again, so the row the box scrolls to and
+        // the row the caret is drawn on cannot disagree at a wrap boundary.
+        let showing = position(cursor).0;
         let first_row = if lines.len() <= MAX_VISIBLE_LINES {
             0
         } else {
-            caret_row
+            showing
                 .saturating_sub(MAX_VISIBLE_LINES - 1)
                 .min(lines.len() - MAX_VISIBLE_LINES)
         };
@@ -1270,31 +1291,10 @@ mod tests {
         assert_eq!(wrappable(px(0.)), None);
     }
 
-    /// Which row the caret is on, extracted from `prepaint` so the rule can be checked.
-    ///
-    /// `rows` is `(start, len)` per row — a shaped line's two load-bearing numbers.
-    fn caret_row(rows: &[(usize, usize)], target: usize) -> usize {
-        for (row, (start, len)) in rows.iter().enumerate() {
-            let end = start + len;
-            if target > end {
-                continue;
-            }
-            if target == end {
-                if let Some((next_start, _)) = rows.get(row + 1) {
-                    if *next_start == end {
-                        return row + 1;
-                    }
-                }
-            }
-            return row;
-        }
-        rows.len().saturating_sub(1)
-    }
-
     #[test]
     fn the_caret_at_a_wrap_belongs_to_the_row_below() {
         // "hello " / "world": a *wrap*, so row 1 starts at the same offset row 0 ends at.
-        let wrapped = [(0usize, 6usize), (6, 5)];
+        let wrapped = [0..6, 6..11];
         assert_eq!(caret_row(&wrapped, 3), 0, "inside the first row");
         assert_eq!(
             caret_row(&wrapped, 6),
@@ -1305,8 +1305,31 @@ mod tests {
 
         // "hello" \n "world": a typed break, which consumes a byte — so the caret before the
         // newline stays on the row above it, where the person pressed the key.
-        let typed = [(0usize, 5usize), (6, 5)];
+        let typed = [0..5, 6..11];
         assert_eq!(caret_row(&typed, 5), 0, "before the newline, not after it");
         assert_eq!(caret_row(&typed, 6), 1);
+
+        // The case a real window failed on (§203): a wrap after a space, so the upper row keeps
+        // the space and clicking before the first letter of the lower row lands on the shared
+        // offset. `…outline row ` / `has …`.
+        let after_a_space = [0..14, 14..20];
+        assert_eq!(
+            caret_row(&after_a_space, 14),
+            1,
+            "the lower row's start, not the upper row's right edge"
+        );
+        assert_eq!(caret_row(&after_a_space, 13), 0, "the trailing space is row 0's");
+
+        // Degenerate shapes, because these reach the same rule from the panel's edges.
+        let empty_row = [Range { start: 0, end: 0 }];
+        assert_eq!(caret_row(&empty_row, 0), 0, "an empty field still has one row");
+        assert_eq!(caret_row(&[], 4), 0, "no rows is row zero, not a panic");
+        let one_row = [Range { start: 0, end: 3 }];
+        assert_eq!(caret_row(&one_row, 9), 0, "past the end clamps to the last row");
+        // Three rows of one wrapped line: every shared boundary steps down exactly once.
+        let three = [0..5, 5..10, 10..15];
+        assert_eq!(caret_row(&three, 5), 1);
+        assert_eq!(caret_row(&three, 10), 2);
+        assert_eq!(caret_row(&three, 15), 2);
     }
 }
