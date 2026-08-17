@@ -644,7 +644,15 @@ fn collect_outputs(
         // and `memories\instructions.txt` showing up in a panel headed FILES invites a researcher
         // to open, edit or delete a file that is not theirs and whose loss changes how the agent
         // behaves (§173).
-        if base_name.starts_with('.') || base_name == "__pycache__" || base_name == "memories" {
+        // `provenance.json` joins them: it is the app's own record of which specialists ran, written
+        // beside the conversation's files so the road strip survives a reload. A researcher reading
+        // a panel headed FILES has no use for it and every reason to think it is an output they
+        // asked for — *"I think we shouldn't show the provenance json file"* (§204).
+        if base_name.starts_with('.')
+            || base_name == "__pycache__"
+            || base_name == "memories"
+            || base_name == crate::provenance::FILENAME
+        {
             continue;
         }
 

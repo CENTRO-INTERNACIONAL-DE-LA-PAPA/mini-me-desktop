@@ -41,11 +41,17 @@ actions!(
         Delete,
         Left,
         Right,
+        Up,
+        Down,
         SelectLeft,
         SelectRight,
+        SelectUp,
+        SelectDown,
         SelectAll,
         Home,
         End,
+        DocumentHome,
+        DocumentEnd,
         ShowCharacterPalette,
         Paste,
         Cut,
@@ -59,15 +65,40 @@ actions!(
 /// `enter` and friends only apply while the field is focused.
 pub fn key_bindings() -> Vec<KeyBinding> {
     let ctx = Some("Composer");
+    // The extra identifier a multi-row field adds to its own key context — see `set_multiline`.
+    let rows = Some("Multiline");
     let mut bindings = vec![
         KeyBinding::new("backspace", Backspace, ctx),
         KeyBinding::new("delete", Delete, ctx),
         KeyBinding::new("left", Left, ctx),
         KeyBinding::new("right", Right, ctx),
+        // **Up and down were never bound**, which did not matter while the field was one row per
+        // typed newline and mattered the moment §200 made a long prompt several rows. With no
+        // vertical motion and a `Home` that jumped to the start of the whole text, a researcher
+        // eight rows into a paragraph had no way back to row three — reported as *"I don't have a
+        // scroll bar in the chatbox so I cannot go to the beginning"* (§204).
+        //
+        // **Scoped to `Multiline`, not to `Composer`.** The command palette binds `up`/`down` to
+        // move its highlighted command, and its query field is a `Composer` nested inside the
+        // palette — so a `Composer`-scoped binding sits *deeper* in the dispatch tree and wins,
+        // silently taking the palette's arrow keys away. Only a field that can have more than one
+        // row asks for these, and the palette's cannot.
+        KeyBinding::new("up", Up, rows),
+        KeyBinding::new("down", Down, rows),
         KeyBinding::new("shift-left", SelectLeft, ctx),
         KeyBinding::new("shift-right", SelectRight, ctx),
+        KeyBinding::new("shift-up", SelectUp, rows),
+        KeyBinding::new("shift-down", SelectDown, rows),
+        // **Home and End are the row's, not the document's.** They were the document's, which is
+        // what every other multi-line field reserves `ctrl-home` for — and it is why the caret
+        // appeared to jump rows when `End` was pressed on a wrapped line: it was doing exactly what
+        // it was told, at the far end of the text.
         KeyBinding::new("home", Home, ctx),
         KeyBinding::new("end", End, ctx),
+        KeyBinding::new("ctrl-home", DocumentHome, ctx),
+        KeyBinding::new("ctrl-end", DocumentEnd, ctx),
+        KeyBinding::new("cmd-up", DocumentHome, ctx),
+        KeyBinding::new("cmd-down", DocumentEnd, ctx),
         KeyBinding::new("enter", Submit, ctx),
         // Shift-Enter for a line break. Enter still sends, because sending is what a
         // chat field is for and rebinding it would surprise everyone — but a prompt
@@ -133,6 +164,12 @@ pub struct Composer {
     masked: bool,
     /// While a turn is in flight the field is read-only.
     disabled: bool,
+    /// Whether this field is one a person writes *paragraphs* in.
+    ///
+    /// Adds `Multiline` to the key context, which is what the vertical-motion bindings are scoped
+    /// to. Off by default so a filter, a rename or the command palette's query keeps every key it
+    /// has today — the palette's own `up`/`down` are the ones at stake (see [`key_bindings`]).
+    multiline: bool,
 }
 
 impl gpui::EventEmitter<ComposerEvent> for Composer {}
@@ -154,7 +191,13 @@ impl Composer {
             submits_empty: false,
             masked: false,
             disabled: false,
+            multiline: false,
         }
+    }
+
+    /// Let arrow-up and arrow-down walk the rows. For fields that hold more than one.
+    pub fn set_multiline(&mut self, multiline: bool) {
+        self.multiline = multiline;
     }
 
     /// The current text. Read by the command palette to filter on every keystroke.
@@ -312,11 +355,80 @@ impl Composer {
         self.replace_text_in_range(None, &text, window, cx);
     }
 
+    /// The byte range of the visual row the caret is on, or the whole text if nothing is laid out.
+    ///
+    /// Rows come from the last painted frame, which is the only place the *visual* rows exist — a
+    /// wrapped line has no `\n` to find it by.
+    fn row_bounds(&self) -> Range<usize> {
+        if self.last_layout.is_empty() {
+            return 0..self.content.len();
+        }
+        let ranges: Vec<Range<usize>> = self
+            .last_layout
+            .iter()
+            .map(|(range, _)| range.clone())
+            .collect();
+        let row = caret_row(&ranges, self.cursor_offset());
+        ranges.get(row).cloned().unwrap_or(0..self.content.len())
+    }
+
+    /// Where the caret lands after moving `rows` visual rows, keeping the column it was in.
+    ///
+    /// The x it was at, resolved against the target row's *own* shaping — which is what keeps the
+    /// caret under itself through rows of different lengths, rather than under the same byte. At the
+    /// top or the bottom it goes to the start or the end of the text, as every editor does.
+    fn offset_after_rows(&self, rows: isize) -> usize {
+        let cursor = self.cursor_offset();
+        if self.last_layout.is_empty() {
+            return cursor;
+        }
+        let ranges: Vec<Range<usize>> = self
+            .last_layout
+            .iter()
+            .map(|(range, _)| range.clone())
+            .collect();
+        let row = caret_row(&ranges, cursor);
+        let last = ranges.len().saturating_sub(1);
+        let target = (row as isize + rows).clamp(0, last as isize) as usize;
+        if target == row {
+            return if rows < 0 { 0 } else { self.content.len() };
+        }
+        let x = self.last_layout[row]
+            .1
+            .x_for_index(cursor.saturating_sub(ranges[row].start));
+        let (range, line) = &self.last_layout[target];
+        range.start + line.closest_index_for_x(x)
+    }
+
+    fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(self.offset_after_rows(-1), cx);
+    }
+
+    fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(self.offset_after_rows(1), cx);
+    }
+
+    fn select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.offset_after_rows(-1), cx);
+    }
+
+    fn select_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.offset_after_rows(1), cx);
+    }
+
     fn home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_to(0, cx);
+        self.move_to(self.row_bounds().start, cx);
     }
 
     fn end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(self.row_bounds().end, cx);
+    }
+
+    fn document_home(&mut self, _: &DocumentHome, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(0, cx);
+    }
+
+    fn document_end(&mut self, _: &DocumentEnd, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(self.content.len(), cx);
     }
 
@@ -1133,7 +1245,11 @@ impl Render for Composer {
             .flex()
             .flex_grow()
             .min_w_0()
-            .key_context("Composer")
+            .key_context(if self.multiline {
+                "Composer Multiline"
+            } else {
+                "Composer"
+            })
             .track_focus(&self.focus_handle(cx))
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(Self::submit))
@@ -1142,11 +1258,17 @@ impl Render for Composer {
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::left))
             .on_action(cx.listener(Self::right))
+            .on_action(cx.listener(Self::up))
+            .on_action(cx.listener(Self::down))
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
+            .on_action(cx.listener(Self::select_up))
+            .on_action(cx.listener(Self::select_down))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
+            .on_action(cx.listener(Self::document_home))
+            .on_action(cx.listener(Self::document_end))
             .on_action(cx.listener(Self::show_character_palette))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::cut))
@@ -1278,6 +1400,23 @@ mod tests {
         assert_eq!(first_row(0, 20), 0, "nor does one whose caret is at the top");
         assert_eq!(first_row(9, 20), 2, "the caret's row is the last one shown");
         assert_eq!(first_row(19, 20), 12, "and the bottom stops at the bottom");
+    }
+
+    /// Which row `Home` and `End` act on, and which row arrow-up lands on.
+    ///
+    /// Both read the row from `caret_row`, so the case that matters is the wrap boundary: `End` on a
+    /// wrapped row must stop at that row's end, not run to the end of the text (§204).
+    #[test]
+    fn home_and_end_belong_to_a_row_not_the_document() {
+        let rows = [0..6, 6..11, 11..18];
+        // Caret mid-row: Home and End are that row's edges.
+        assert_eq!(rows[caret_row(&rows, 8)].start, 6);
+        assert_eq!(rows[caret_row(&rows, 8)].end, 11);
+        // Caret *at* a wrap: it belongs to the lower row, so End is the lower row's end. Pressing
+        // End here used to jump to byte 18 — the far end of the text, two rows away.
+        assert_eq!(rows[caret_row(&rows, 6)].end, 11);
+        // And on the last row, the row's end *is* the document's end. Same answer, different reason.
+        assert_eq!(rows[caret_row(&rows, 18)].end, 18);
     }
 
     #[test]

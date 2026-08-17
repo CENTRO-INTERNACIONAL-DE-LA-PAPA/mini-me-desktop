@@ -1073,8 +1073,32 @@ impl LangGraphClient {
                     .find_map(error_text)
             });
 
-        let next_is_empty = state
-            .get("next")
+        // **The whole status hangs on this one field, so say when it is not there.**
+        //
+        // `is_some_and` reads a *missing* `next` as "not empty", which resolves to `running` —
+        // forever, silently, for a worker that finished minutes ago. Reported as: *"if I don't ask
+        // about the status the app is not checking the success or failure; if I ask, the success
+        // appears even though the agent had already finished"* (§204). The coordinator's own
+        // `check_async_task` reads a different source and gets it right, which is why asking works.
+        //
+        // Whether that is what is happening here cannot be settled from this machine — so the value
+        // the argument needs goes in the log, naming what the payload *did* carry. Fifth time in
+        // this project that the missing evidence was a value the program already had (§116).
+        let next = state.get("next");
+        if next.and_then(Value::as_array).is_none() {
+            let carried: Vec<&str> = state
+                .as_object()
+                .map(|fields| fields.keys().map(String::as_str).collect())
+                .unwrap_or_default();
+            tracing::warn!(
+                thread = %thread_id,
+                next = %next.map(ToString::to_string).unwrap_or_else(|| "<absent>".into()),
+                carried = ?carried,
+                "a background task's thread state has no usable `next`, so its status cannot be \
+                 read — it will report running until the coordinator is asked (docs §204)"
+            );
+        }
+        let next_is_empty = next
             .and_then(Value::as_array)
             .is_some_and(|next| next.is_empty());
         // Failure first. A run that died leaves its task pending, so `next` is *not*

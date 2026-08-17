@@ -11514,3 +11514,69 @@ depends on the parts that need eyes.
 
 *Fifty-sixth: when a rule is right and the answer is wrong, stop re-deriving the rule and look at
 what it is reading. A correct comparison over a value you cannot verify is not a correct program.*
+
+## 204. Four reports, and one of them was my test being wrong (2026-08-17)
+
+### `End` was never a row's key
+
+> *"This doesn't work: type a line, shift-enter, then press End on the upper line. The caret must
+> stay on the upper row."*
+
+It didn't, and §203 is not why. `End` was `move_to(self.content.len())` — the end of the whole
+text — and `Home` was `move_to(0)`. So pressing `End` anywhere put the caret on the last row, which
+is exactly what was reported and has nothing to do with the wrap-boundary rule. **The test
+instruction was wrong**, and it was written by someone who had read the file that morning.
+
+Worth naming as a failure mode of its own: a verification step that asserts the wrong thing costs
+the same round trip as a bug, and it spends the tester's trust rather than mine.
+
+`Home` and `End` are now the row's, with `ctrl-home` / `ctrl-end` for the document — which is what
+every other multi-row field reserves them for.
+
+### Up and down were never bound at all
+
+> *"I don't have a scroll bar in the chatbox so I cannot go to the beginning."*
+
+The composer had `left`, `right`, `home`, `end` and no vertical motion. That was survivable while a
+row meant a typed newline; §200 made a long prompt several rows and §202 capped the box at eight, so
+a researcher eight rows in had no way back to row three. Not a missing scrollbar — a missing arrow
+key. A text field's answer to "take me back up there" is `up`, and this one had none.
+
+**Scoped to `Multiline`, not to `Composer`.** The command palette binds `up`/`down` to move its
+highlighted command, and its query field *is* a `Composer` nested inside the palette — so a
+`Composer`-scoped binding sits deeper in the dispatch tree and wins, quietly taking the palette's
+arrow keys away. Only a field that can hold a paragraph adds the identifier: the chat composer and
+the mission editor. Caught before shipping by looking for other `up` bindings, which is the check
+§84 already paid for once.
+
+### The app's own bookkeeping was in the FILES panel
+
+> *"I think we shouldn't show the provenance json file."*
+
+`provenance.json` is the road strip's record, written beside the conversation's files so it survives
+a reload. The output scan already skips hidden names, `__pycache__` and `memories` for exactly this
+reason — §173's argument was that a researcher reading a panel headed FILES will open, edit or delete
+what they find there. It just never listed this one. Now it does.
+
+### The status nobody was reading
+
+> *"We have a big bug. If I don't ask about the status the app is not checking the success or
+> failure. If I asked, the success appears even when the agent already finished his work."*
+
+The watcher is alive — it polls every four seconds and the panel's `running · data cleaning` proves
+it, because that activity string comes from the same request. What it cannot do is notice the end.
+
+`thread_state` derives status from `next`: empty means done, non-empty means running. It is written
+`state.get("next").and_then(as_array).is_some_and(is_empty)`, so a **missing** `next` reads as "not
+empty" and resolves to `running` — for as long as the app is open. The coordinator's
+`check_async_task` reads a different source and gets it right, which is precisely why asking works
+and waiting does not.
+
+Whether that is the mechanism cannot be settled from a machine with no backend on it, and §203 was
+one round trip too many spent guessing. So the value the argument needs now goes **in the log**,
+naming what the payload did carry, the moment `next` cannot be read. Fifth time in this project that
+the missing evidence was a value the program already had (§99, §91, §110, §114, §116). The fix
+follows the log line, not the other way round.
+
+*Fifty-seventh: check your test instructions against the code as carefully as the code. A wrong
+assertion and a wrong implementation are indistinguishable from the far end of the round trip.*

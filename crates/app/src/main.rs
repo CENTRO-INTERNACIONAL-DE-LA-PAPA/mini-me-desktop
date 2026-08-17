@@ -2919,10 +2919,14 @@ impl Workbench {
     fn new(sidecar: Arc<Sidecar>, cx: &mut Context<Self>) -> Self {
         // Opens empty. The placeholder says what to do, which is all a first launch needs.
         let composer = cx.new(|cx| {
-            Composer::new(
+            let mut composer = Composer::new(
                 cx,
                 "Ask Mini-Me…  (Enter to send, Shift-Enter for a new line)",
-            )
+            );
+            // A research question is a paragraph, so this field is genuinely several rows and needs
+            // arrow-up and arrow-down to walk them (§204).
+            composer.set_multiline(true);
+            composer
         });
         // The composer only reports *that* text was submitted; deciding it means
         // "run a coordinator turn" stays here.
@@ -2983,6 +2987,8 @@ impl Workbench {
         // else, so the researcher is looking at the thing they are changing.
         let mission_editor = cx.new(|cx| {
             let mut editor = Composer::new(cx, "What is this project trying to find out?");
+            // Capped at 500 characters by the backend, which is still four or five rows.
+            editor.set_multiline(true);
             // Enter on an empty field means "clear the mission", which the backend accepts and
             // which is the only way back to the derived one. Without this, emptying the field and
             // pressing Enter would do nothing and look broken.
