@@ -11851,3 +11851,54 @@ the plan display has been lived with.
 
 *Sixty-third: "it is working" is not a status. The agent had written down what it was doing all
 along; nobody had read it.*
+
+## 211. A worker billed to an account nobody chose (2026-08-17)
+
+> *"I saw that after re-stating an api message even when I can chat with openrouter."*
+
+The panel showed a background worker with the ✗ mark and this beneath it:
+
+```
+RateLimitError("Error code: 429 - {'error': {'message': 'You have no credits remaining.
+Add credits to continue using the API at https://platform.openai.com/…/billing',
+'type': 'insufficient_quota', 'code': 'credit_balance_exhausted'}}")
+```
+
+An **OpenAI** billing page, for a researcher whose coordinator is on OpenRouter and whose
+conversation chats perfectly well. That is §186 and §187 for the third time, one layer further
+down: the coordinator's own turns carry the model, the key and the `base_url` in the request, and a
+background worker is a *different run* that only has what was forwarded to it.
+
+Two ways it can go wrong, and they look identical from the panel:
+
+- **The keys did not travel.** `_forwarded_config` already warns when `model_config` is missing —
+  the loud case, no model at all. `__llm_keys` had no such line, and it is the quiet one: the worker
+  builds exactly the model the researcher chose, has no key or **no `base_url`** for it, and the
+  client library falls back to its own default host. For OpenRouter that host is `api.openai.com`.
+- **A specialist names a provider no key covers.** §187 already recorded this as open —
+  *"nothing stops a specialist being pointed at an unkeyed provider; the gate reads the
+  coordinator's settings alone"* — and this is what it looks like when it fires: a 429, minutes
+  later, inside a worker, from an account the researcher has never used.
+
+The second is knowable **before the run starts**. `model_config` carries `default` and `subagents`,
+every value is a `provider::model_id`, and `__llm_keys` is right there. Comparing the two sets is
+four lines, and it turns "the async subagent encountered an error" into the provider's name.
+
+So the overlay now says, at the moment it hands work to a worker:
+
+```
+minime_local: background work will bill custom, model custom::moonshotai/kimi-k2
+minime_local: background work names openai and carries no key for it — those requests will
+  fail inside the worker, on whatever host the client library defaults to
+```
+
+**Provider names, the model spec, and whether a `base_url` came with each — never the key.** That is
+exactly enough to tell "went to the wrong host" from "had no key at all", and nothing a log should
+hold. The org's own rule about credentials is not a thing to be clever around.
+
+This entry is instrumentation, not a fix, and deliberately so: which of the two cases the researcher
+hit cannot be settled from a machine with no backend on it, and §203, §206 and §207 each cost a round
+trip to relearn that. The fix follows the line.
+
+*Sixty-fifth: a config that travels between runs needs a receipt at both ends. The sender knowing
+what it sent is not the same as the receiver knowing what it got.*
