@@ -11990,3 +11990,37 @@ knowing what it costs: for a non-developer audience, that dialog is where most i
 
 *Sixty-seventh: the version is not metadata, it is the first question of every support conversation.
 An app that cannot answer it makes every reporter answer it for you, wrongly.*
+
+## 214. Green here, red on the machine that ships it (2026-08-17)
+
+`v0.2.0` was tagged and the release build failed — two tests, both in `references.rs`, both passing
+on every run this project has ever made and neither ever run on Windows before. The release
+workflow runs `cargo test --release` on a Windows runner, and these tests were written after
+`v0.1.0` was cut, so today was the first time they met it.
+
+**`603�627`.** The overlay formats a citation with an en-dash. Python picks its stdout encoding from
+the console code page, which on that runner is cp1252, so U+2013 goes out as the single byte `0x96`
+— and reading it back as UTF-8 yields the replacement character. The test then compared
+`603�627` with `603–627` and failed on a citation the overlay had formatted perfectly.
+
+Nothing about the product: in a real run this text crosses HTTP as JSON, which is UTF-8 by
+definition, and the overlay only ever executes inside WSL. `PYTHONIOENCODING=utf-8` on the child,
+at all fifteen spawn sites — seven of which pass today only because their Python happens to print
+ASCII, and this repository deals in accented Spanish and potato cultivar names.
+
+**`\w\proj\A\B`.** A layout assertion compared `str(pathlib.Path(...))` against `"/w/proj/A/B"`.
+The rule under test is *which folder nests inside which*; the separator is the platform's opinion.
+`as_posix()` says the rule and not the opinion.
+
+**And one I introduced fixing them.** The first version handed each test a prepared `Command`. A
+`Command` accumulates its arguments, and two of these tests spawn inside a loop — so the second
+iteration reran the first record's arguments against the second record's expectation and failed
+while pointing at the wrong data entirely. Caught locally, and worth recording because the symptom
+was so misleading: the assertion named a record that was never the one being run.
+
+The helper now hands out the **program name**, and each spawn builds its own interpreter. It also
+tries `python`, `py` and `python3` in turn, because `python3` is not the name on Windows and a test
+that skips itself is worse than one that fails: it is green.
+
+*Sixty-eighth: a test suite that has only ever run on one platform is a test suite for that
+platform. The release build is where that bill arrives, which is the worst moment to receive it.*
