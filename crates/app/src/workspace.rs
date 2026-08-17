@@ -1182,6 +1182,7 @@ mod project_tests {
     #[test]
     fn the_rust_and_python_project_names_agree() {
         if std::process::Command::new("python3")
+            .env("PYTHONIOENCODING", "utf-8")
             .arg("--version")
             .output()
             .is_err()
@@ -1225,6 +1226,7 @@ mod project_tests {
 
         for name in names {
             let out = std::process::Command::new("python3")
+            .env("PYTHONIOENCODING", "utf-8")
                 .arg("-c")
                 .arg(&script)
                 .arg(name)
