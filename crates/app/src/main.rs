@@ -4437,7 +4437,20 @@ impl Workbench {
     fn provider_blocker(&self) -> Option<String> {
         let stored = settings::Settings::load();
         let has_key = settings::secret(&stored.key_name()).is_some();
-        stored.misdirects_a_turn(has_key)
+        if let Some(blocker) = stored.misdirects_a_turn(has_key) {
+            return blocker.into();
+        }
+        // **And the specialists.** §186's gate read the coordinator alone, so an override to an
+        // unkeyed provider sailed through and failed minutes later inside a worker, billed to an
+        // account the researcher had never opened (§212). Refused here for the same reason and in
+        // the same place: before anything is spent.
+        //
+        // The keychain read stays on this thread, which is why `unkeyed_specialists` takes the
+        // lookup rather than doing it — `secret` is not async-safe.
+        stored
+            .unkeyed_specialists(|id| settings::secret(&format!("llm:{id}")).is_some())
+            .into_iter()
+            .next()
     }
 
     /// Start a turn, choosing how a `/name` command should reach its specialist.
@@ -6972,11 +6985,8 @@ impl Workbench {
             // both are right for the same reason: repeating "OpenAI — billed separately" on every
             // row spent the width the model id needed, to say a thing that is true of the whole
             // group (docs §191).
-            let note = specialist_note(
-                &provider,
-                &self.draft.provider,
-                settings::secret(&format!("llm:{}", provider.id)).is_some(),
-            );
+            let keyed = settings::secret(&format!("llm:{}", provider.id)).is_some();
+            let note = specialist_note(&provider, &self.draft.provider, keyed);
             list = list.child(
                 div()
                     .flex()
@@ -6999,6 +7009,35 @@ impl Workbench {
                             .size(ui::Size::Compact)
                     })),
             );
+            // **A provider with no key offers nothing to press.**
+            //
+            // It used to list its whole catalogue with `— no key stored` beside the company name,
+            // and a researcher scrolling 400 models past a heading picked one and got a 429 from a
+            // billing page they had never seen, minutes later, inside a background worker. The
+            // same model is very often present *twice* — `gpt-4.1` under OpenAI and
+            // `openai/gpt-4.1` under OpenRouter — so the trap is not exotic: one of the two works,
+            // they differ by a prefix, and only one of them is paid for (§212).
+            //
+            // The heading stays, and says what to do. Hiding the provider entirely would leave a
+            // researcher who *has* an OpenAI account with no clue why it is not offered.
+            if !keyed {
+                list = list.child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .px_2()
+                        .pb_2()
+                        .text_xs()
+                        .text_color(rgb(theme::text_muted()))
+                        .child(format!(
+                            "{} {} here once a {} key is stored — add one under API key above.",
+                            models.len(),
+                            if models.len() == 1 { "model" } else { "models" },
+                            provider.label
+                        )),
+                );
+                continue;
+            }
             for (_, model) in models {
                 let spec = format!("{}::{}", provider.id, model);
                 let selected = chosen.as_deref() == Some(spec.as_str());
