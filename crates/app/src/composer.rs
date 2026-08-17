@@ -644,6 +644,28 @@ struct PrepaintState {
     first_row: usize,
 }
 
+/// Room kept clear at the right edge, so the caret has somewhere to be.
+///
+/// **The caret is painted after the last glyph.** A row wrapped at exactly the box width therefore
+/// leaves it nowhere to go: it lands on the border, a couple of pixels outside the text, which
+/// reads as the text having run off the side — *"the bar is beyond the text"* (§202). Wrapping one
+/// character earlier costs nothing and keeps the thing you are typing with inside the thing you
+/// are typing in.
+const CARET_ROOM: Pixels = px(4.);
+
+/// The width text may occupy inside a box this wide, or `None` if there is no room to speak of.
+///
+/// Shared by the height calculation and the shaping, because a wrap width they disagreed about is
+/// a box whose height is measured for one layout and painted with another.
+fn wrappable(width: Pixels) -> Option<Pixels> {
+    let usable = width - CARET_ROOM;
+    if usable > px(0.) {
+        Some(usable)
+    } else {
+        None
+    }
+}
+
 /// How tall the field is allowed to grow before it simply stops.
 ///
 /// A pasted script should make the composer bigger, not eat the transcript. Eight lines is
@@ -787,7 +809,9 @@ impl Element for ComposerElement {
                 } else {
                     content
                 },
-                composer.last_bounds.map(|bounds| bounds.size.width),
+                composer
+                    .last_bounds
+                    .and_then(|bounds| wrappable(bounds.size.width)),
             )
         };
         let text_style = window.text_style();
@@ -912,7 +936,7 @@ impl Element for ComposerElement {
         let mut lines: Vec<(usize, ShapedLine)> = Vec::new();
         {
             let mut wrapper = cx.text_system().line_wrapper(style.font(), font_size);
-            row_ranges(&display_text, wrap_at(&mut wrapper, Some(bounds.size.width)))
+            row_ranges(&display_text, wrap_at(&mut wrapper, wrappable(bounds.size.width)))
         }
         .into_iter()
         .for_each(|range| {
@@ -925,31 +949,26 @@ impl Element for ComposerElement {
             lines.push((range.start, shaped));
         });
 
-        // Which row sits at the top of the box.
-        //
-        // The field grows to [`MAX_VISIBLE_LINES`] and then stops, so beyond that the *window*
-        // over the rows has to follow the caret or the box would show the first eight lines of
-        // something being typed on the twentieth. Clamped to the last full screenful, so the
-        // final row never floats above empty space.
-        let caret_row = lines
-            .iter()
-            .position(|(start, line)| cursor <= start + line.len())
-            .unwrap_or_else(|| lines.len().saturating_sub(1));
-        let first_row = if lines.len() <= MAX_VISIBLE_LINES {
-            0
-        } else {
-            caret_row
-                .saturating_sub(MAX_VISIBLE_LINES - 1)
-                .min(lines.len() - MAX_VISIBLE_LINES)
-        };
-
-        let row_top =
-            |row: usize| bounds.top() + line_height * (row as f32 - first_row as f32);
         let position = |target: usize| -> (usize, Pixels) {
             for (row, (start, line)) in lines.iter().enumerate() {
-                if target <= start + line.len() {
-                    return (row, line.x_for_index(target.saturating_sub(*start)));
+                let end = start + line.len();
+                if target > end {
+                    continue;
                 }
+                // **At a wrap, the caret belongs to the row the next character is on.** Row N's
+                // end and row N+1's start are the *same* offset when the break was forced by the
+                // width rather than typed — a hard newline consumes a byte and these two differ by
+                // one. Without the distinction the caret sits at the right-hand end of the row
+                // *above* the character it precedes, which is the same "it went off the side" it
+                // was supposed to fix (§202).
+                if target == end {
+                    if let Some((next_start, next_line)) = lines.get(row + 1) {
+                        if *next_start == end {
+                            return (row + 1, next_line.x_for_index(0));
+                        }
+                    }
+                }
+                return (row, line.x_for_index(target.saturating_sub(*start)));
             }
             match lines.last() {
                 Some((start, line)) => (
@@ -959,6 +978,26 @@ impl Element for ComposerElement {
                 None => (0, px(0.)),
             }
         };
+
+        // Which row sits at the top of the box.
+        //
+        // The field grows to [`MAX_VISIBLE_LINES`] and then stops, so beyond that the *window*
+        // over the rows has to follow the caret or the box would show the first eight lines of
+        // something being typed on the twentieth. Clamped to the last full screenful, so the
+        // final row never floats above empty space.
+        //
+        // Read from `position` rather than worked out again, so the row the box scrolls to and the
+        // row the caret is drawn on cannot disagree at a wrap boundary.
+        let caret_row = position(cursor).0;
+        let first_row = if lines.len() <= MAX_VISIBLE_LINES {
+            0
+        } else {
+            caret_row
+                .saturating_sub(MAX_VISIBLE_LINES - 1)
+                .min(lines.len() - MAX_VISIBLE_LINES)
+        };
+
+        let row_top = |row: usize| bounds.top() + line_height * (row as f32 - first_row as f32);
 
         let (selection, cursor) = if selected_range.is_empty() {
             let (row, x) = position(cursor);
@@ -1218,5 +1257,56 @@ mod tests {
         assert_eq!(first_row(0, 20), 0, "nor does one whose caret is at the top");
         assert_eq!(first_row(9, 20), 2, "the caret's row is the last one shown");
         assert_eq!(first_row(19, 20), 12, "and the bottom stops at the bottom");
+    }
+
+    #[test]
+    fn the_caret_has_room_at_the_right_edge() {
+        // Wrapping at the full box width leaves the caret — painted *after* the last glyph —
+        // sitting on the border, which is what "the bar is beyond the text" was (§202).
+        assert_eq!(wrappable(px(800.)), Some(px(796.)));
+        // And a box too narrow to hold anything says so rather than asking for a wrap at zero,
+        // which would break after every character.
+        assert_eq!(wrappable(px(4.)), None);
+        assert_eq!(wrappable(px(0.)), None);
+    }
+
+    /// Which row the caret is on, extracted from `prepaint` so the rule can be checked.
+    ///
+    /// `rows` is `(start, len)` per row — a shaped line's two load-bearing numbers.
+    fn caret_row(rows: &[(usize, usize)], target: usize) -> usize {
+        for (row, (start, len)) in rows.iter().enumerate() {
+            let end = start + len;
+            if target > end {
+                continue;
+            }
+            if target == end {
+                if let Some((next_start, _)) = rows.get(row + 1) {
+                    if *next_start == end {
+                        return row + 1;
+                    }
+                }
+            }
+            return row;
+        }
+        rows.len().saturating_sub(1)
+    }
+
+    #[test]
+    fn the_caret_at_a_wrap_belongs_to_the_row_below() {
+        // "hello " / "world": a *wrap*, so row 1 starts at the same offset row 0 ends at.
+        let wrapped = [(0usize, 6usize), (6, 5)];
+        assert_eq!(caret_row(&wrapped, 3), 0, "inside the first row");
+        assert_eq!(
+            caret_row(&wrapped, 6),
+            1,
+            "at the break, with the character it precedes"
+        );
+        assert_eq!(caret_row(&wrapped, 11), 1, "at the end of the text, and stays");
+
+        // "hello" \n "world": a typed break, which consumes a byte — so the caret before the
+        // newline stays on the row above it, where the person pressed the key.
+        let typed = [(0usize, 5usize), (6, 5)];
+        assert_eq!(caret_row(&typed, 5), 0, "before the newline, not after it");
+        assert_eq!(caret_row(&typed, 6), 1);
     }
 }

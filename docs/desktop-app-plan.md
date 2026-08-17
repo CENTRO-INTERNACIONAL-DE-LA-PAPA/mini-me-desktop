@@ -11425,3 +11425,54 @@ behaviour rather than acquiring a wrong answer.
 *Fifty-fourth: when the client cannot know something, check whether the server was standing right
 there when it happened. Two rounds of this were spent making inferences on the wrong side of the
 wire.*
+
+## 202. The caret had nowhere to be, and the warning cried wolf (2026-08-17)
+
+Two defects from one testing session, neither of them the feature under test.
+
+### The caret on the border
+
+> *"If you see the image, you'll see that the bar `|` is beyond the text."*
+
+The screenshot shows §200 working: text that was one clipped line is now two rows and the box grew
+to fit them. What it also shows is the caret sitting on the box's right border, a couple of pixels
+outside the text — which reads exactly like the defect §200 was supposed to fix.
+
+`LineWrapper` was asked to wrap at `bounds.size.width`, so a full row ends flush with the inside of
+the border. The caret is painted **after** the last glyph. At the end of a full row it therefore has
+nowhere to go. Four pixels of reserved width fixes it, shared by the height calculation and the
+shaping so the two cannot disagree about where a row ends.
+
+The second half is subtler and would have shown up as soon as the researcher clicked mid-text: at a
+wrap, row N's end and row N+1's start are the **same offset**. The old rule returned the first row
+whose end reached the target, so a caret at that offset drew at the far right of the row *above* the
+character it precedes. A typed newline consumes a byte and the two offsets differ, which is what
+tells the cases apart — and for a typed break the caret does belong on the upper row, where the key
+was pressed. `caret_row` now reads its answer from the same rule, so the row the box scrolls to and
+the row the caret is drawn on cannot disagree.
+
+*What settled it:* not reasoning about the wrapper, which is where the previous two composer
+diagnoses went wrong (§190, §192). The screenshot showed two rows where there had been one, so
+wrapping was working; the only thing left in the picture was where the caret was drawn.
+
+### The warning that cried wolf
+
+The same log carried this three times, after the researcher had killed the old backend and watched
+this app start a new one:
+
+> *attached to a backend that was already running — it is on the code it started with, not what
+> this app now ships.*
+
+`ensure_running` is called **once per turn**, not once per launch. It warned whenever the health
+check passed, with no regard for who had answered it — so every turn after the app spawned its own
+sidecar reported it as a leftover. §130 wrote that warning because the failure it describes is
+invisible and expensive; saying it when it is false spends the same credibility in the opposite
+direction, and it told a researcher whose restart had worked that their restart had not. It also lit
+the amber banner in the Setup pane for the rest of the session.
+
+`self.child` already knew. `try_wait` rather than `is_some`, because a child that died leaves its
+handle behind and whatever answered the health check after that is genuinely not ours — and an
+error means we cannot tell, which is the same as not knowing.
+
+*Fifty-fifth: a warning that fires when it shouldn't costs exactly what a missing one does. Both
+teach the reader to disbelieve the log.*
