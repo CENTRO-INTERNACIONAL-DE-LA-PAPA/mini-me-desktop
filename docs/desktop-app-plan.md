@@ -11580,3 +11580,41 @@ follows the log line, not the other way round.
 
 *Fifty-seventh: check your test instructions against the code as carefully as the code. A wrong
 assertion and a wrong implementation are indistinguishable from the far end of the round trip.*
+
+## 205. One offset, two right answers (2026-08-17)
+
+> *"When I'm on the last line, pressing home and end works as expected. But when I'm at the
+> beginning of the prompt, pressing end directs me to the beginning of the last line."*
+
+Both halves of §204 were doing exactly what they were told, and together they were wrong.
+
+`End` goes to `row_bounds().end` — row 0's end offset. §203's rule then draws that offset on the row
+*below*, because at a soft wrap **row N's end and row N+1's start are the same byte offset**. So the
+caret went where `End` sent it and appeared where the rule put it, one row further down than anyone
+asked for.
+
+This is the affinity problem, and it has no answer in the offset alone. A wrap boundary has two
+correct screen positions and the right one depends on how the caret arrived:
+
+- **Downstream** — the lower row's start. Where a click on the lower row's first character belongs,
+  and where an inserted character lands, so it stays the default.
+- **Upstream** — the upper row's end. What `End` means by "the end of *this* row", and where
+  vertical motion belongs when it lands on a row end.
+
+`Affinity` is now carried on the composer, reset inside `move_to` so it has to be *asked* for and no
+later cursor move can inherit a stale one, and set immediately afterwards by the two operations that
+mean a specific row. `caret_row` takes it and uses it for one thing only: breaking the tie. Every
+non-boundary offset returns the same row under either value, which is what stops it becoming a second
+rule that can disagree with the first — and there is a test that asserts exactly that.
+
+A typed newline is not a tie at all. It consumes a byte, so the two offsets differ and there is
+nothing to break; `End` before a shift-enter stays put under either affinity, also tested.
+
+*What this cost:* nothing extra, because it arrived in the same round trip as the arrow keys it was
+found by. Worth noting the shape though — §203 removed an ambiguity from the *inputs* and this one was
+in the *question*. A shared boundary offset cannot be resolved by being more careful about ranges; it
+needs a second piece of information, and there was nowhere for it to come from until an operation
+existed that had an opinion.
+
+*Fifty-eighth: when two correct rules combine into a wrong answer, the missing thing is usually
+intent — not precision.*

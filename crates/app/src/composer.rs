@@ -164,6 +164,8 @@ pub struct Composer {
     masked: bool,
     /// While a turn is in flight the field is read-only.
     disabled: bool,
+    /// Which side of a soft wrap the caret is showing on — see [`Affinity`].
+    affinity: Affinity,
     /// Whether this field is one a person writes *paragraphs* in.
     ///
     /// Adds `Multiline` to the key context, which is what the vertical-motion bindings are scoped
@@ -192,6 +194,7 @@ impl Composer {
             masked: false,
             disabled: false,
             multiline: false,
+            affinity: Affinity::Downstream,
         }
     }
 
@@ -368,7 +371,7 @@ impl Composer {
             .iter()
             .map(|(range, _)| range.clone())
             .collect();
-        let row = caret_row(&ranges, self.cursor_offset());
+        let row = caret_row(&ranges, self.cursor_offset(), self.affinity);
         ranges.get(row).cloned().unwrap_or(0..self.content.len())
     }
 
@@ -387,7 +390,7 @@ impl Composer {
             .iter()
             .map(|(range, _)| range.clone())
             .collect();
-        let row = caret_row(&ranges, cursor);
+        let row = caret_row(&ranges, cursor, self.affinity);
         let last = ranges.len().saturating_sub(1);
         let target = (row as isize + rows).clamp(0, last as isize) as usize;
         if target == row {
@@ -401,11 +404,27 @@ impl Composer {
     }
 
     fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_to(self.offset_after_rows(-1), cx);
+        self.move_to_row(-1, cx);
     }
 
     fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_to(self.offset_after_rows(1), cx);
+        self.move_to_row(1, cx);
+    }
+
+    /// Step the caret `rows` rows and keep it *on the row it was aimed at*.
+    ///
+    /// Landing exactly on a row's end offset is common when the row above is longer, and drawing
+    /// that downstream would put the caret a row past where the arrow key was pointing.
+    fn move_to_row(&mut self, rows: isize, cx: &mut Context<Self>) {
+        let target = self.offset_after_rows(rows);
+        let lands_on_a_row_end = self
+            .last_layout
+            .iter()
+            .any(|(range, _)| range.end == target && range.start != target);
+        self.move_to(target, cx);
+        if lands_on_a_row_end {
+            self.affinity = Affinity::Upstream;
+        }
     }
 
     fn select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
@@ -422,6 +441,10 @@ impl Composer {
 
     fn end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(self.row_bounds().end, cx);
+        // **The whole reason affinity exists.** A row's end offset is also the next row's start, so
+        // without this `End` walked the caret to the beginning of the row below — reported from the
+        // first row of a wrapped prompt, where it looked like a jump to the last line (§205).
+        self.affinity = Affinity::Upstream;
     }
 
     fn document_home(&mut self, _: &DocumentHome, _: &mut Window, cx: &mut Context<Self>) {
@@ -500,6 +523,10 @@ impl Composer {
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.selected_range = offset..offset;
+        // Reset here rather than in each caller, so a new affinity has to be *asked* for and no
+        // future cursor move can inherit a stale one. `end` and vertical motion set it back
+        // immediately after.
+        self.affinity = Affinity::Downstream;
         cx.notify()
     }
 
@@ -546,7 +573,7 @@ impl Composer {
             .iter()
             .map(|(range, _)| range.clone())
             .collect();
-        let row = caret_row(&rows, offset);
+        let row = caret_row(&rows, offset, self.affinity);
         let (range, line) = self.last_layout.get(row)?;
         Some((row, line.x_for_index(offset.saturating_sub(range.start))))
     }
@@ -863,17 +890,20 @@ fn wrap_at<'a>(
 /// precedes, on the row below; at a typed break it stays on the row above, where the key was
 /// pressed.
 ///
+/// `affinity` breaks the tie the shared offset creates — see [`Affinity`].
+///
 /// Taking ranges rather than shaped lines is the point. The first version derived a row's end as
 /// `start + ShapedLine::len()` inside the element, which made the comparison depend on a quantity
 /// this code cannot see — and it drew the caret at the right-hand end of the upper row on a real
 /// window while being provably right on paper (§203). Ranges are what the wrapping produced; they
 /// are exact, and the rule over them is testable without a window.
-fn caret_row(rows: &[Range<usize>], target: usize) -> usize {
+fn caret_row(rows: &[Range<usize>], target: usize, affinity: Affinity) -> usize {
     for (row, range) in rows.iter().enumerate() {
         if target > range.end {
             continue;
         }
         if target == range.end
+            && affinity == Affinity::Downstream
             && rows
                 .get(row + 1)
                 .is_some_and(|next| next.start == range.end)
@@ -883,6 +913,24 @@ fn caret_row(rows: &[Range<usize>], target: usize) -> usize {
         return row;
     }
     rows.len().saturating_sub(1)
+}
+
+/// Which of a soft wrap's two screen positions the caret is showing at.
+///
+/// **A wrap boundary is one byte offset with two right answers.** It is the end of the upper row and
+/// the start of the lower one, and which the caret should sit at depends on how it got there.
+/// Pressing `End` means "the end of *this* row" and wants the upper; clicking the lower row's first
+/// character, or typing into the boundary, wants the lower. Editors call this affinity.
+///
+/// Without it, `End` pressed at the start of a wrapped paragraph moved the caret to the *start of
+/// the next row*: `End` correctly went to row 0's end offset, and that offset was then drawn
+/// downstream, one row down (§205). Both halves were doing what they were told.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Affinity {
+    /// The start of the lower row. The default, because it is where an inserted character lands.
+    Downstream,
+    /// The end of the upper row. Where `End` and vertical motion leave it.
+    Upstream,
 }
 
 /// Slice global text runs down to one line's byte range.
@@ -1000,6 +1048,7 @@ impl Element for ComposerElement {
         let content = composer.display_content();
         let selected_range = composer.selected_range.clone();
         let cursor = composer.cursor_offset();
+        let affinity = composer.affinity;
         let style = window.text_style();
 
         // What the box actually measures, which nobody has ever read.
@@ -1103,7 +1152,7 @@ impl Element for ComposerElement {
             .collect();
 
         let position = |target: usize| -> (usize, Pixels) {
-            let row = caret_row(&ranges, target);
+            let row = caret_row(&ranges, target, affinity);
             match lines.get(row) {
                 Some((range, line)) => {
                     (row, line.x_for_index(target.saturating_sub(range.start)))
@@ -1410,13 +1459,47 @@ mod tests {
     fn home_and_end_belong_to_a_row_not_the_document() {
         let rows = [0..6, 6..11, 11..18];
         // Caret mid-row: Home and End are that row's edges.
-        assert_eq!(rows[caret_row(&rows, 8)].start, 6);
-        assert_eq!(rows[caret_row(&rows, 8)].end, 11);
+        assert_eq!(rows[caret_row(&rows, 8, Affinity::Downstream)].start, 6);
+        assert_eq!(rows[caret_row(&rows, 8, Affinity::Downstream)].end, 11);
         // Caret *at* a wrap: it belongs to the lower row, so End is the lower row's end. Pressing
         // End here used to jump to byte 18 — the far end of the text, two rows away.
-        assert_eq!(rows[caret_row(&rows, 6)].end, 11);
+        assert_eq!(rows[caret_row(&rows, 6, Affinity::Downstream)].end, 11);
         // And on the last row, the row's end *is* the document's end. Same answer, different reason.
-        assert_eq!(rows[caret_row(&rows, 18)].end, 18);
+        assert_eq!(rows[caret_row(&rows, 18, Affinity::Downstream)].end, 18);
+    }
+
+    /// The bug `End` had at the start of a wrapped prompt (§205), and the rule that fixes it.
+    #[test]
+    fn a_wrap_boundary_shows_on_whichever_row_asked_for_it() {
+        let rows = [0..6, 6..11, 11..18];
+
+        // Offset 6 is row 0's end *and* row 1's start. Both answers are correct; which one is
+        // wanted depends entirely on how the caret arrived.
+        assert_eq!(
+            caret_row(&rows, 6, Affinity::Downstream),
+            1,
+            "clicking the lower row's first character, or typing into the break"
+        );
+        assert_eq!(
+            caret_row(&rows, 6, Affinity::Upstream),
+            0,
+            "pressing End on row 0 — the end of *this* row, not the start of the next"
+        );
+
+        // Affinity only ever settles a tie. Everywhere else it changes nothing, which is what
+        // keeps it from becoming a second rule that can disagree with the first.
+        for affinity in [Affinity::Downstream, Affinity::Upstream] {
+            assert_eq!(caret_row(&rows, 3, affinity), 0, "mid-row: {affinity:?}");
+            assert_eq!(caret_row(&rows, 13, affinity), 2, "mid-row: {affinity:?}");
+            assert_eq!(caret_row(&rows, 18, affinity), 2, "end of text: {affinity:?}");
+        }
+
+        // A typed newline is not a tie: the offsets differ, so there is nothing to break. `End`
+        // before a shift-enter break stays put under either affinity.
+        let typed = [0..5, 6..11];
+        for affinity in [Affinity::Downstream, Affinity::Upstream] {
+            assert_eq!(caret_row(&typed, 5, affinity), 0, "typed break: {affinity:?}");
+        }
     }
 
     #[test]
@@ -1434,41 +1517,41 @@ mod tests {
     fn the_caret_at_a_wrap_belongs_to_the_row_below() {
         // "hello " / "world": a *wrap*, so row 1 starts at the same offset row 0 ends at.
         let wrapped = [0..6, 6..11];
-        assert_eq!(caret_row(&wrapped, 3), 0, "inside the first row");
+        assert_eq!(caret_row(&wrapped, 3, Affinity::Downstream), 0, "inside the first row");
         assert_eq!(
-            caret_row(&wrapped, 6),
+            caret_row(&wrapped, 6, Affinity::Downstream),
             1,
             "at the break, with the character it precedes"
         );
-        assert_eq!(caret_row(&wrapped, 11), 1, "at the end of the text, and stays");
+        assert_eq!(caret_row(&wrapped, 11, Affinity::Downstream), 1, "at the end of the text, and stays");
 
         // "hello" \n "world": a typed break, which consumes a byte — so the caret before the
         // newline stays on the row above it, where the person pressed the key.
         let typed = [0..5, 6..11];
-        assert_eq!(caret_row(&typed, 5), 0, "before the newline, not after it");
-        assert_eq!(caret_row(&typed, 6), 1);
+        assert_eq!(caret_row(&typed, 5, Affinity::Downstream), 0, "before the newline, not after it");
+        assert_eq!(caret_row(&typed, 6, Affinity::Downstream), 1);
 
         // The case a real window failed on (§203): a wrap after a space, so the upper row keeps
         // the space and clicking before the first letter of the lower row lands on the shared
         // offset. `…outline row ` / `has …`.
         let after_a_space = [0..14, 14..20];
         assert_eq!(
-            caret_row(&after_a_space, 14),
+            caret_row(&after_a_space, 14, Affinity::Downstream),
             1,
             "the lower row's start, not the upper row's right edge"
         );
-        assert_eq!(caret_row(&after_a_space, 13), 0, "the trailing space is row 0's");
+        assert_eq!(caret_row(&after_a_space, 13, Affinity::Downstream), 0, "the trailing space is row 0's");
 
         // Degenerate shapes, because these reach the same rule from the panel's edges.
         let empty_row = [Range { start: 0, end: 0 }];
-        assert_eq!(caret_row(&empty_row, 0), 0, "an empty field still has one row");
-        assert_eq!(caret_row(&[], 4), 0, "no rows is row zero, not a panic");
+        assert_eq!(caret_row(&empty_row, 0, Affinity::Downstream), 0, "an empty field still has one row");
+        assert_eq!(caret_row(&[], 4, Affinity::Downstream), 0, "no rows is row zero, not a panic");
         let one_row = [Range { start: 0, end: 3 }];
-        assert_eq!(caret_row(&one_row, 9), 0, "past the end clamps to the last row");
+        assert_eq!(caret_row(&one_row, 9, Affinity::Downstream), 0, "past the end clamps to the last row");
         // Three rows of one wrapped line: every shared boundary steps down exactly once.
         let three = [0..5, 5..10, 10..15];
-        assert_eq!(caret_row(&three, 5), 1);
-        assert_eq!(caret_row(&three, 10), 2);
-        assert_eq!(caret_row(&three, 15), 2);
+        assert_eq!(caret_row(&three, 5, Affinity::Downstream), 1);
+        assert_eq!(caret_row(&three, 10, Affinity::Downstream), 2);
+        assert_eq!(caret_row(&three, 15, Affinity::Downstream), 2);
     }
 }
