@@ -11317,3 +11317,472 @@ Three decisions in the wiring:
 
 *Fifty-second: when the client can't attribute something, say the smaller true thing. "A background
 task" is worth more than a confident guess and costs nothing to be right about.*
+
+## 200. The line nobody broke (2026-08-14)
+
+> *"When I write a long text the box doesn't increase in height, which causes I cannot see what
+> I'm typing."*
+
+§55 made the composer multi-line by splitting on `\n` and shaping one line per segment. `shape_line`
+lays out exactly one line and takes no wrap width, so a paragraph typed without pressing
+shift-enter was **one row** — shaped at its natural width, painted from the left edge, and clipped
+by §97's content mask at the right. The caret went out with the text. The field stayed one line
+tall while it happened, because the height was `newlines + 1`.
+
+Every part of that was working as written. The gap is that *nobody types their own line breaks in
+a research question*, so the only case that mattered in daily use was the one case the feature had
+never handled.
+
+**Wrapping in the string domain, not the layout domain.** `shape_text` returns wrapped lines with
+their own coordinate space; adopting it would have meant rewriting caret placement, per-row hit
+testing, the selection quads and the IME rectangle in one change. Instead `LineWrapper` — the same
+one gpui's own text element uses — is asked where each hard line has to break, and each resulting
+row is shaped on its own. Downstream, `lines` is still `Vec<(byte offset, ShapedLine)>`; there are
+simply more of them. Nothing else in the element changed.
+
+**The height is measured against the previous frame's width.** This is the one thing here that
+looks like a shortcut. Wrapping needs a width; the width is only known once layout has run. The
+alternative is `request_measured_layout`, which means giving up the `width: 100%` + `flex_grow` +
+`min_width: 120px` triple in `request_layout` — and this file has paid for that combination four
+times (§72, §88, §97, §99), each time with a field collapsed to a sliver and a placeholder painting
+out the side. The cost of using last frame's number is one stale frame while a window is being
+dragged wider, and a drag is a stream of frames. That trade is written down at the call site.
+
+**Past eight lines the box moves instead of growing.** The cap was already there; what was missing
+is that a capped box has to *follow the caret*, or a researcher on line twenty is shown lines one
+to eight. `first_row` is now remembered on the composer, because both conversions between screen
+and offset — mouse hit-testing and the IME rectangle — have to subtract it. A scrolled field that
+forgot how far it had scrolled would put the caret eight lines from where the click landed.
+
+The wrapping itself is gpui's and needs a window to measure. What this module can get wrong on its
+own is turning break points into ranges over the whole string, so `row_ranges` takes the breaks as
+a closure and the tests supply a fake one. Two of the three cases they cover are the degenerate
+ones: a break at the very end, and a break at zero, each of which would add an empty row that
+draws as a blank line nobody typed and pushes every row below it down.
+
+*Fifty-third: a feature that handles the general case and not the common one is a feature nobody
+has. "Multi-line" meant the line breaks we could see, and the ones we couldn't were the only ones
+being typed.*
+
+## 201. Ask the process that did the writing (2026-08-14)
+
+> *"And yes we need to record the write, so maybe we can do that change."*
+
+§199 named the background worker and stopped, honestly, at the specialists. `exploratory_data_analysis`
+and `academic_researcher` share the conversation's thread and its one directory, and nothing on the
+wire says which of them wrote a given file. The client could have matched file timestamps against
+the road strip's arrival windows and produced an attribution for every file; it would have been a
+guess, and `provenance.rs` refuses guesses on the grounds that a provenance record that quietly
+guesses is worse than none, because it will be believed.
+
+The answer is not a better inference. It is asking the only party that was there. **The backend is
+the writer.** It knows which delegation it is inside, because the `task` tool was handed the name;
+and it knows which files a command produced, because it started the command and can look at the
+directory afterwards.
+
+`overlay/minime_local/authorship.py` writes one JSON line per file into `.authorship.jsonl` in the
+conversation's workspace — dot-prefixed, so the client's output scan, which already skips hidden
+names, never lists the record as one of the files it explains.
+
+**Two write paths, and the second is the one that matters.**
+
+- `write` / `upload_files` are deepagents' file tools; the path is the argument.
+- `aexecute` is a shell command, usually a Python script drawing plots. The desktop app's own
+  comment has said for months that *a file written by a script inside `execute` registers no
+  artifact, and those are most of them*. So the workspace is walked after the command and anything
+  newer than its start belongs to whoever issued it. This is not the timestamp inference rejected
+  above: one process takes both readings, from the same clock the filesystem stamps with, around a
+  command it started itself. The interval is proven, not reconstructed.
+
+**Three things it declines to do.** It never descends into a nested thread folder — a background
+worker writing while the coordinator runs a command is the one case where two authors are genuinely
+active in one tree, and §199 already answers for those files. It caps one scan and *says so in the
+log* when the cap bites, because "no line in the manifest" and "there were too many files to look
+at" produce the same empty panel. And it swallows its own failures: losing a line of provenance is
+a worse panel, while raising is a turn that died after writing a file successfully — §18's rule
+about what an overlay may risk.
+
+**A `ContextVar`, not a global.** LangGraph schedules concurrent tool calls as asyncio tasks and a
+task copies the context at creation, so each delegation's name is visible only inside its own
+subtree. A module global would have the second specialist overwrite the first and both sets of
+files come out wearing one name. Same shape, same reason, as `spine.py`'s `_http_project` — and
+the async wrapper is `async def` with the `await` inside the block, which is the mistake that file
+paid for: a sync wrapper sets the variable, builds the coroutine, resets, and hands back something
+unawaited, so the name is gone by the time the subagent runs and the patch looks installed while
+doing nothing.
+
+**On the client, the folder outranks the manifest.** Inside a worker's own run the manifest records
+that worker's coordinator, so reading it first would rename `background worker` to `coordinator` —
+true of the inner graph, useless to the person reading the panel. Two rules, each exact in its own
+domain, in a fixed order. The manifest is re-read only when its size or mtime has moved: it is
+append-only and grows by a line per file, and parsing it on every frame of a streaming answer is
+the disk I/O `shape_of` is cached to avoid.
+
+Everything without a record stays unlabelled, exactly as before. Conversations that ran before this
+existed have no manifest, and a backend without the overlay armed never writes one; both keep §199's
+behaviour rather than acquiring a wrong answer.
+
+*Fifty-fourth: when the client cannot know something, check whether the server was standing right
+there when it happened. Two rounds of this were spent making inferences on the wrong side of the
+wire.*
+
+## 202. The caret had nowhere to be, and the warning cried wolf (2026-08-17)
+
+Two defects from one testing session, neither of them the feature under test.
+
+### The caret on the border
+
+> *"If you see the image, you'll see that the bar `|` is beyond the text."*
+
+The screenshot shows §200 working: text that was one clipped line is now two rows and the box grew
+to fit them. What it also shows is the caret sitting on the box's right border, a couple of pixels
+outside the text — which reads exactly like the defect §200 was supposed to fix.
+
+`LineWrapper` was asked to wrap at `bounds.size.width`, so a full row ends flush with the inside of
+the border. The caret is painted **after** the last glyph. At the end of a full row it therefore has
+nowhere to go. Four pixels of reserved width fixes it, shared by the height calculation and the
+shaping so the two cannot disagree about where a row ends.
+
+The second half is subtler and would have shown up as soon as the researcher clicked mid-text: at a
+wrap, row N's end and row N+1's start are the **same offset**. The old rule returned the first row
+whose end reached the target, so a caret at that offset drew at the far right of the row *above* the
+character it precedes. A typed newline consumes a byte and the two offsets differ, which is what
+tells the cases apart — and for a typed break the caret does belong on the upper row, where the key
+was pressed. `caret_row` now reads its answer from the same rule, so the row the box scrolls to and
+the row the caret is drawn on cannot disagree.
+
+*What settled it:* not reasoning about the wrapper, which is where the previous two composer
+diagnoses went wrong (§190, §192). The screenshot showed two rows where there had been one, so
+wrapping was working; the only thing left in the picture was where the caret was drawn.
+
+### The warning that cried wolf
+
+The same log carried this three times, after the researcher had killed the old backend and watched
+this app start a new one:
+
+> *attached to a backend that was already running — it is on the code it started with, not what
+> this app now ships.*
+
+`ensure_running` is called **once per turn**, not once per launch. It warned whenever the health
+check passed, with no regard for who had answered it — so every turn after the app spawned its own
+sidecar reported it as a leftover. §130 wrote that warning because the failure it describes is
+invisible and expensive; saying it when it is false spends the same credibility in the opposite
+direction, and it told a researcher whose restart had worked that their restart had not. It also lit
+the amber banner in the Setup pane for the rest of the session.
+
+`self.child` already knew. `try_wait` rather than `is_some`, because a child that died leaves its
+handle behind and whatever answered the health check after that is genuinely not ours — and an
+error means we cannot tell, which is the same as not knowing.
+
+*Fifty-fifth: a warning that fires when it shouldn't costs exactly what a missing one does. Both
+teach the reader to disbelieve the log.*
+
+## 203. Provably right on paper, wrong on the window (2026-08-17)
+
+§202 fixed the caret two ways and shipped both to a real Windows machine for verification. Four of
+five cases passed. The one that failed was the one the fix was *for*:
+
+> *"Clicking immediately before `has` on the lower wrapped row drew the caret at the right edge of
+> the upper row, after `row`."*
+
+The rule was right. Its inputs were not verifiable.
+
+**What the rule needs.** At a soft wrap, row N's end and row N+1's start are the *same* byte offset —
+no character was consumed to make the break. A typed newline consumes one, so the two differ. That
+single comparison is the whole distinction, and the two cases want opposite answers.
+
+**What it was comparing.** `start + ShapedLine::len()` against the next row's start. `len()` is
+exact on Windows — `direct_write.rs:666` sets it to `text.len()` — and traced on paper the redirect
+fires. On the machine it did not. Reading gpui twice did not explain it and a third reading would
+not have either: this is the same dead end as §190 and §192, and §193 already recorded what to do
+instead of arguing with code you cannot watch run.
+
+So the quantity was removed rather than explained. The **ranges are already known exactly** — they
+come out of the wrapping, before any shaping happens — and they were being thrown away and then
+reconstructed from a shaped line one layer down. Rows now carry `Range<usize>`, and `caret_row` is a
+free function over ranges alone: no shaping, no window, and every case the machine exercised is a
+unit test, including the one it failed on.
+
+That also made two other conversions exact. `index_for_mouse_position` and `position_for_offset` both
+did the same `start + len()` arithmetic, so both had the same latent dependency, and
+`position_for_offset` had a second copy of the boundary rule that could drift from the first.
+
+*What this cost:* one round trip to a machine with a screen, because the failing case cannot be
+reproduced here. Worth naming as a standing constraint rather than an accident — this project's UI
+defects keep being ones no test on this machine can see, and the cheapest response is to shrink what
+depends on the parts that need eyes.
+
+*Fifty-sixth: when a rule is right and the answer is wrong, stop re-deriving the rule and look at
+what it is reading. A correct comparison over a value you cannot verify is not a correct program.*
+
+## 204. Four reports, and one of them was my test being wrong (2026-08-17)
+
+### `End` was never a row's key
+
+> *"This doesn't work: type a line, shift-enter, then press End on the upper line. The caret must
+> stay on the upper row."*
+
+It didn't, and §203 is not why. `End` was `move_to(self.content.len())` — the end of the whole
+text — and `Home` was `move_to(0)`. So pressing `End` anywhere put the caret on the last row, which
+is exactly what was reported and has nothing to do with the wrap-boundary rule. **The test
+instruction was wrong**, and it was written by someone who had read the file that morning.
+
+Worth naming as a failure mode of its own: a verification step that asserts the wrong thing costs
+the same round trip as a bug, and it spends the tester's trust rather than mine.
+
+`Home` and `End` are now the row's, with `ctrl-home` / `ctrl-end` for the document — which is what
+every other multi-row field reserves them for.
+
+### Up and down were never bound at all
+
+> *"I don't have a scroll bar in the chatbox so I cannot go to the beginning."*
+
+The composer had `left`, `right`, `home`, `end` and no vertical motion. That was survivable while a
+row meant a typed newline; §200 made a long prompt several rows and §202 capped the box at eight, so
+a researcher eight rows in had no way back to row three. Not a missing scrollbar — a missing arrow
+key. A text field's answer to "take me back up there" is `up`, and this one had none.
+
+**Scoped to `Multiline`, not to `Composer`.** The command palette binds `up`/`down` to move its
+highlighted command, and its query field *is* a `Composer` nested inside the palette — so a
+`Composer`-scoped binding sits deeper in the dispatch tree and wins, quietly taking the palette's
+arrow keys away. Only a field that can hold a paragraph adds the identifier: the chat composer and
+the mission editor. Caught before shipping by looking for other `up` bindings, which is the check
+§84 already paid for once.
+
+### The app's own bookkeeping was in the FILES panel
+
+> *"I think we shouldn't show the provenance json file."*
+
+`provenance.json` is the road strip's record, written beside the conversation's files so it survives
+a reload. The output scan already skips hidden names, `__pycache__` and `memories` for exactly this
+reason — §173's argument was that a researcher reading a panel headed FILES will open, edit or delete
+what they find there. It just never listed this one. Now it does.
+
+### The status nobody was reading
+
+> *"We have a big bug. If I don't ask about the status the app is not checking the success or
+> failure. If I asked, the success appears even when the agent already finished his work."*
+
+The watcher is alive — it polls every four seconds and the panel's `running · data cleaning` proves
+it, because that activity string comes from the same request. What it cannot do is notice the end.
+
+`thread_state` derives status from `next`: empty means done, non-empty means running. It is written
+`state.get("next").and_then(as_array).is_some_and(is_empty)`, so a **missing** `next` reads as "not
+empty" and resolves to `running` — for as long as the app is open. The coordinator's
+`check_async_task` reads a different source and gets it right, which is precisely why asking works
+and waiting does not.
+
+Whether that is the mechanism cannot be settled from a machine with no backend on it, and §203 was
+one round trip too many spent guessing. So the value the argument needs now goes **in the log**,
+naming what the payload did carry, the moment `next` cannot be read. Fifth time in this project that
+the missing evidence was a value the program already had (§99, §91, §110, §114, §116). The fix
+follows the log line, not the other way round.
+
+*Fifty-seventh: check your test instructions against the code as carefully as the code. A wrong
+assertion and a wrong implementation are indistinguishable from the far end of the round trip.*
+
+## 205. One offset, two right answers (2026-08-17)
+
+> *"When I'm on the last line, pressing home and end works as expected. But when I'm at the
+> beginning of the prompt, pressing end directs me to the beginning of the last line."*
+
+Both halves of §204 were doing exactly what they were told, and together they were wrong.
+
+`End` goes to `row_bounds().end` — row 0's end offset. §203's rule then draws that offset on the row
+*below*, because at a soft wrap **row N's end and row N+1's start are the same byte offset**. So the
+caret went where `End` sent it and appeared where the rule put it, one row further down than anyone
+asked for.
+
+This is the affinity problem, and it has no answer in the offset alone. A wrap boundary has two
+correct screen positions and the right one depends on how the caret arrived:
+
+- **Downstream** — the lower row's start. Where a click on the lower row's first character belongs,
+  and where an inserted character lands, so it stays the default.
+- **Upstream** — the upper row's end. What `End` means by "the end of *this* row", and where
+  vertical motion belongs when it lands on a row end.
+
+`Affinity` is now carried on the composer, reset inside `move_to` so it has to be *asked* for and no
+later cursor move can inherit a stale one, and set immediately afterwards by the two operations that
+mean a specific row. `caret_row` takes it and uses it for one thing only: breaking the tie. Every
+non-boundary offset returns the same row under either value, which is what stops it becoming a second
+rule that can disagree with the first — and there is a test that asserts exactly that.
+
+A typed newline is not a tie at all. It consumes a byte, so the two offsets differ and there is
+nothing to break; `End` before a shift-enter stays put under either affinity, also tested.
+
+*What this cost:* nothing extra, because it arrived in the same round trip as the arrow keys it was
+found by. Worth noting the shape though — §203 removed an ambiguity from the *inputs* and this one was
+in the *question*. A shared boundary offset cannot be resolved by being more careful about ranges; it
+needs a second piece of information, and there was nowhere for it to come from until an operation
+existed that had an opinion.
+
+*Fifty-eighth: when two correct rules combine into a wrong answer, the missing thing is usually
+intent — not precision.*
+
+## 206. The log that was never being kept (2026-08-17)
+
+Twice in one session a diagnostic was added, the researcher was asked to grep for it, and the answer
+was empty:
+
+```
+PS> Select-String -Path ...\mini-me-app.log -Pattern 'no usable'
+PS>
+```
+
+The second time that emptiness was taken as evidence — *"`next` is present, so the missing-field
+theory is wrong"* — and it sent the next diagnosis down a path chosen by nothing at all. It was
+caught only by a follow-up check on the same file, which found no lines from that session either.
+The file was from an earlier attempt with `Tee-Object`; the run being asked about had never written to
+it.
+
+**The app kept no log.** `backend.rs` has always written the sidecar's output to
+`%TEMP%\mini-me-desktop-backend.log`, and the app's own `tracing_subscriber` wrote to stderr only —
+which for a windowed program means a console the researcher closes. Every `warn!` this project has
+added for a researcher to read has been going somewhere nobody keeps.
+
+So the app writes its own, beside the backend's, and three details are the point:
+
+- **Both destinations, not either.** A `Tee` writer: the console for whoever is watching live, the
+  file for whoever reads it afterwards. The console's result is the one returned, so a locked or full
+  file can never cost a line someone is watching arrive.
+- **Truncated per launch.** A researcher told to read this file must be reading *this* run. An
+  appended log would answer today's question with lines from Tuesday — the same failure, one step
+  removed.
+- **No ANSI.** The file exists to be grepped and pasted; the console reads fine without colour.
+
+*Related, and the reason this is its own entry rather than a footnote:* the empty grep was treated as
+a measurement. §203 already recorded the cost of reasoning past what can be observed, and this is the
+inverse mistake — believing an observation without checking the instrument was on. A grep that finds
+nothing has two explanations and only one of them is about the code.
+
+*Fifty-ninth: before a null result becomes evidence, prove the instrument was recording. "No hit"
+and "no data" print identically.*
+
+## 207. The poll that reported nothing (2026-08-17)
+
+> *"If I don't ask about the status the app is not checking the success or failure. If I asked, the
+> success appears even when the agent already finished his work."*
+
+Three rounds went into this without a single measurement, which is the part worth recording.
+
+**What is now established, from evidence rather than reading:**
+
+- *The poll succeeds.* The panel showed `running · data cleaning` and `running · exploratory data
+  analysis` — two different activity strings for two workers. `decode_async_tasks` sets
+  `activity: None` and `track_task` never copies it from a later snapshot, so an activity string on a
+  tracked task can **only** have come from `watch_task`'s own HTTP poll. That rules out a dead
+  watcher, which was the leading theory.
+- *`next` is present and is an array.* §204's warning fires when it is not, the app now keeps its own
+  log (§206), and the log from a real run carries exactly one `WARN` — the host-execution banner.
+
+Which leaves one conclusion: `next` is present and **non-empty** on a worker whose run has ended, so
+`next_is_empty` is the wrong test for "done". The coordinator's `check_async_task` reads the
+middleware's own record and says `success`, which is why asking works.
+
+And the two are not simply disagreeing about a bug — a turn in this very session had the coordinator
+report *"the folders `eda/`, `diagnostic/`, `reports/` and `scripts/` exist but are empty, so the
+background task only partially completed despite reporting success."* The middleware records that the
+run returned; the thread's checkpoint says the graph never reached its end. Both are telling the
+truth about different things, and the panel has been showing the more pessimistic one with no way to
+say why.
+
+**What this entry actually changes** is only the instrumentation, deliberately:
+
+- The watcher logs the state its decision is read from, **once per task** — status, `next`, activity.
+  Once, not per four-second poll, because a log that scrolls is a log nobody reads.
+- It logs again on every change, which is naturally rate-limited: the watcher only forwards changes.
+- The poll's failure path was `debug!`, below the default filter. A poll failing every four seconds
+  left the panel saying `running` for ever while saying nothing a researcher could see —
+  indistinguishable from a worker still working. Now `warn!`, once per task.
+
+The fix follows the value. Three guesses have already been spent, and §203 and §206 both say the same
+thing from opposite directions: do not reason past what is observed, and do not accept an observation
+until the instrument is known to be recording.
+
+*Sixtieth: a poll that cannot say what it saw is not an observation, it is a hope. Instrument the
+decision, not the outcome.*
+
+### 207a. What the instrument said (2026-08-17)
+
+One run, and the poll turned out to be right all along:
+
+```
+15:43:11  status=running      next=[model]                              activity=write todos
+15:43:15  status=running      next=[model]                              activity=ls
+15:43:45  status=interrupted  next=[HumanInTheLoopMiddleware.after_model] activity=execute
+15:44:15  status=running      next=[tools]                              activity=execute
+15:44:28  status=interrupted  next=[HumanInTheLoopMiddleware.after_model] activity=execute
+15:44:32  status=running      next=[tools]                              activity=execute
+15:44:41  status=success      next=[]                                   activity=write todos
+```
+
+`next=[]` and `status=success`, ninety seconds in, with nobody asking. **The watcher works, `next` is
+the right test, and every theory in §204 and §207 was wrong** — including the one that survived two
+eliminations.
+
+The gate rounds are worth noticing too: `interrupted` twice with `next=[HumanInTheLoopMiddleware.after_model]`,
+each cleared within seconds by the standing approval. That path is doing exactly what §31 built it for.
+
+**So what was reported?** Two different things wearing one sentence.
+
+1. *The waits were real.* The earlier runs generated 500 records and ran a full EDA across two
+   workers; four minutes of that is not a stuck panel.
+2. *And in that run the middleware was the optimistic one, not the app.* The coordinator itself said
+   so: *"the folders `eda/`, `diagnostic/`, `reports/` and `scripts/` exist but are empty — so the
+   background task only partially completed despite reporting success."* `check_async_task` read the
+   middleware's record and said `success`; the thread's `next` said there was more to do. Asking did
+   not reveal a status the app had missed — **it produced a more flattering one.** The panel was
+   right and had no way to say why.
+
+That last point is the finding, and it is the opposite of the bug report. It goes on the open list
+against the backend, beside §35's theorizer reporting a guess instead of the command's real output —
+same shape, same cost: a status a researcher believes because nothing contradicts it.
+
+*Sixty-first: when the instrument finally speaks and contradicts every theory including your own
+favourite, that is the instrument working. Three rounds of guessing were the price of not having
+built it first.*
+
+## 208. The heading cut off the thing it was added to say (2026-08-17)
+
+A screenshot of §201 working showed the group heading as `...d worker / outputs / tables`.
+
+The full label is `background worker / outputs / tables` — 35 characters into a 28-character budget,
+shortened by `distinguishing_tail`, which keeps the **tail**. §152 chose that end deliberately and was
+right at the time: its labels shared a long *prefix* (`<uuid>/eda/plots`, `<uuid>/eda/tables`) and
+differed at the end, so keeping the tail kept the information. §201 then put the producing worker's
+name at the *head* and inverted the assumption without re-checking it — so the one word the whole
+feature exists to show became the one word guaranteed to be dropped.
+
+Both ends now survive and the middle gives way: `background worker / … / tables`. If it still will not
+fit, the **head** is kept whole and the tail is trimmed, because a heading that cannot say who made
+these files is the heading §201 replaced.
+
+The budget was wrong too, and only by two characters — which is why it mattered. The heading box is
+`GRID_TILE_COMPACT × GRID_COLUMNS + GRID_GAP` = 304px less about a hundred for `click to open all`,
+so roughly 32 characters, not 28. `ui::Label` here carries no `.ellipsis()` (§193 removed it), so that
+number is the *only* thing keeping the text inside a fixed-width box — which is now said at the
+constant, and there is a test asserting the output fits every budget from 6 to 48.
+
+*Fifty-second… no: sixty-second.* **When you move information to a new position, re-check every rule
+that was written for the old one.** The truncation was not a bug when it was written; it became one
+the moment something else claimed the head.
+
+### And the background-task hunt closes
+
+Both cases now reach `status=success next=[]` unaided, measured end to end:
+
+| | light run | heavy run |
+| --- | --- | --- |
+| duration | 90s | 6m 42s |
+| approval gate rounds | 2 | 8 |
+| seconds per `execute` | ~35 | 35–43 |
+| flipped to ✓ without being asked | yes | yes |
+
+So §204's "big bug" was not a bug in the watcher. It was a long run, plus — in the original
+observation — a coordinator that reported `success` for work whose folders it then found empty. The
+app was showing the honest status and had no way to say so.
+
+What remains from it is real but different, and belongs to the deferred loading-state item: **six
+minutes of `running · execute` says nothing about how much is left.** The worker is calling
+`write todos` between commands, so a plan exists on its thread. A progress display that reads that
+plan would be worth more than any animation.

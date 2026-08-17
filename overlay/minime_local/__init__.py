@@ -119,6 +119,7 @@ def _patch(module) -> None:
         # the tool is built (`filesystem.py:1481`), and `backend/agent.py` builds its agent
         # after this import completes.
         _rewrite_execute_description(execute_rule)
+        _name_the_writer()
         approval.install(module)
         # After approval, so the background worker inherits the same gate: its wrapper
         # calls whatever `create_deep_agent` is current, which is the gated one.
@@ -150,6 +151,37 @@ def _rewrite_execute_description(execute_rule) -> None:
         log.warning(
             "minime_local: could not rewrite the execute description (%s) — commands may write "
             "outside the conversation's folder (docs §160)",
+            exc,
+        )
+
+
+def _name_the_writer() -> None:
+    """Make the `task` tool announce which specialist it is running, so writes can be attributed.
+
+    Only under host execution, because that is the only arrangement where the files land somewhere
+    the researcher can look at them: with the remote sandbox they are inside a container and the
+    desktop app never sees a workspace to explain.
+
+    Reached through the package for the same reason as the `execute` description above —
+    `deepagents/__init__.py` has already imported the middleware by the time this hook fires, so a
+    meta-path target on the submodule would never trigger. What matters is that it runs before
+    `SubAgentMiddleware.__init__`, which happens when `backend/agent.py` builds its agent, after
+    this import completes.
+
+    Wrapped in a `try` because the failure mode without the patch is *files attributed to the
+    coordinator that a specialist wrote* — a worse panel — while the failure mode with a raising
+    hook is no backend at all (§18).
+    """
+    try:
+        from deepagents.middleware import subagents
+
+        from minime_local import authorship
+
+        authorship.install(subagents)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "minime_local: could not name the writer (%s) — files a specialist wrote will be "
+            "attributed to the coordinator (docs §201)",
             exc,
         )
 

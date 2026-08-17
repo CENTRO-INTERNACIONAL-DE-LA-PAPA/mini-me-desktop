@@ -1306,6 +1306,21 @@ impl BackendSupervisor {
     /// otherwise spawn and wait. Returns a status string for the UI.
     pub async fn ensure_running(&mut self, client: &LangGraphClient) -> Result<Started> {
         if client.is_healthy().await {
+            // **Ours, or somebody else's?** This is called once per turn, not once per launch, so
+            // after the app spawns its own sidecar every later turn finds a healthy backend — and
+            // reported it as one that "was already running". A researcher who had just killed the
+            // old server, watched this app start a new one, and then read three warnings telling
+            // them to kill it again has been told the fix did not work when it did (docs §202).
+            //
+            // `try_wait` and not just `is_some()`: a child that died leaves the handle behind, and
+            // whatever answered the health check after that is not the process we started. An
+            // error means we cannot tell, which is the same as not knowing it is ours.
+            if matches!(
+                self.child.as_mut().map(std::process::Child::try_wait),
+                Some(Ok(None))
+            ) {
+                return Ok(Started::Spawned);
+            }
             // **The one case the source mirror cannot reach.** It runs as part of the launch
             // command, so a server left over from a previous session has already imported
             // whatever it imported and nothing here can change that — and `langgraph dev`

@@ -601,6 +601,12 @@ pub struct ThreadState {
     /// What the worker is doing right now — the subagent it delegated to, or the tool it
     /// is running. `None` when nothing has been called yet.
     pub activity: Option<String>,
+    /// The nodes the thread would run next — the value `status` is derived from.
+    ///
+    /// Carried out of this function so the *watcher* can report it, once per task rather than
+    /// once per four-second poll. Everything about the "a finished worker keeps saying running"
+    /// hunt turns on what is in here, and it was the one number nobody could see (§207).
+    pub next: Vec<String>,
 }
 
 /// What the worker is busy with, from the last tool call in its thread.
@@ -1073,8 +1079,47 @@ impl LangGraphClient {
                     .find_map(error_text)
             });
 
-        let next_is_empty = state
-            .get("next")
+        // **The whole status hangs on this one field, so say when it is not there.**
+        //
+        // `is_some_and` reads a *missing* `next` as "not empty", which resolves to `running` —
+        // forever, silently, for a worker that finished minutes ago. Reported as: *"if I don't ask
+        // about the status the app is not checking the success or failure; if I ask, the success
+        // appears even though the agent had already finished"* (§204). The coordinator's own
+        // `check_async_task` reads a different source and gets it right, which is why asking works.
+        //
+        // Whether that is what is happening here cannot be settled from this machine — so the value
+        // the argument needs goes in the log, naming what the payload *did* carry. Fifth time in
+        // this project that the missing evidence was a value the program already had (§116).
+        let next = state.get("next");
+        // `as_str` before `to_string`: a `Value::String` stringifies *with* its JSON quotes, so the
+        // first version of this logged `next=["\"model\""]` — readable, but every reader has to
+        // discount a layer of escaping that is an artefact of how it was printed.
+        let next_nodes: Vec<String> = next
+            .and_then(Value::as_array)
+            .map(|nodes| {
+                nodes
+                    .iter()
+                    .map(|node| match node.as_str() {
+                        Some(name) => name.to_string(),
+                        None => node.to_string(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if next.and_then(Value::as_array).is_none() {
+            let carried: Vec<&str> = state
+                .as_object()
+                .map(|fields| fields.keys().map(String::as_str).collect())
+                .unwrap_or_default();
+            tracing::warn!(
+                thread = %thread_id,
+                next = %next.map(ToString::to_string).unwrap_or_else(|| "<absent>".into()),
+                carried = ?carried,
+                "a background task's thread state has no usable `next`, so its status cannot be \
+                 read — it will report running until the coordinator is asked (docs §204)"
+            );
+        }
+        let next_is_empty = next
             .and_then(Value::as_array)
             .is_some_and(|next| next.is_empty());
         // Failure first. A run that died leaves its task pending, so `next` is *not*
@@ -1094,6 +1139,7 @@ impl LangGraphClient {
             pending,
             error,
             activity: last_activity(&state),
+            next: next_nodes,
         })
     }
 
