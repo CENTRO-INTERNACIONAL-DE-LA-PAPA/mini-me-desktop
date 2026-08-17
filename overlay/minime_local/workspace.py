@@ -39,6 +39,8 @@ from deepagents.backends.protocol import ExecuteResponse
 # context window and is not sandbox-specific.
 from backend.sandbox import _emit_sandbox_status, _truncate_execute_response
 
+from minime_local import authorship
+
 #: Where per-thread workspaces live. The desktop app sets this; the fallback keeps
 #: a bare ``langgraph dev`` working.
 WORKSPACE_ROOT_ENV = "MINIME_LOCAL_WORKSPACE"
@@ -541,12 +543,17 @@ class LocalWorkspaceBackend(LocalShellBackend):
         return path
 
     def write(self, file_path: str, content: str):
-        return super().write(self._reroute_write(file_path), content)
+        path = self._reroute_write(file_path)
+        result = super().write(path, content)
+        # After the write, so a failed one is not recorded as having happened.
+        authorship.record(self._work_dir, [path])
+        return result
 
     def upload_files(self, files: list[tuple[str, bytes]]):
-        return super().upload_files(
-            [(self._reroute_write(path), data) for path, data in files]
-        )
+        rerouted = [(self._reroute_write(path), data) for path, data in files]
+        result = super().upload_files(rerouted)
+        authorship.record(self._work_dir, [path for path, _ in rerouted])
+        return result
 
     # -- the surface upstream added on top of deepagents -------------------------
 
@@ -575,7 +582,25 @@ class LocalWorkspaceBackend(LocalShellBackend):
         invalid JSON.
         """
         await self.aresolve()
-        return await asyncio.to_thread(self._execute_with_token, command, timeout)
+        # **Both `aexecute` paths run through here**, which is why the bracket is here rather than
+        # on the caller: a plot written by a script inside `execute` registers no artifact, and the
+        # desktop app's own comment says those are most of the files it shows.
+        #
+        # Taken *before* the command, from the same clock the filesystem stamps with, and compared
+        # afterwards against the tree this workspace owns. One process reading two of its own
+        # readings around one command it started — an interval it can prove, not one inferred from
+        # a timeline (docs §201). `authorship` names whoever issued it.
+        started = time.time()
+        author = authorship.current_agent()
+        try:
+            return await asyncio.to_thread(self._execute_with_token, command, timeout)
+        finally:
+            # In `finally` because a command that fails part-way still wrote what it wrote, and a
+            # file on disk with no author is the defect this exists to close. The walk itself
+            # never raises out — see `authorship.record_written_since`.
+            await asyncio.to_thread(
+                authorship.record_written_since, self._work_dir, started, author
+            )
 
     def _execute_with_token(self, command: str, timeout: int | None) -> ExecuteResponse:
         """Run a command with a currently-valid Asta token in its environment.

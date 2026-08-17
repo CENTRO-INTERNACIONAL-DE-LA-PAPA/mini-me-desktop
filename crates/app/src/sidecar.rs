@@ -918,10 +918,25 @@ impl Sidecar {
         self.runtime.spawn(async move {
             let client = LangGraphClient::new(base_url);
             let mut task = task;
+            // Said once per task, not once per four-second poll. Everything about "a finished
+            // worker keeps saying running" turns on what `next` holds, and until now the poll
+            // reported nothing at any level a researcher sees (§207).
+            let mut reported = false;
+            let mut complained = false;
             loop {
                 tokio::time::sleep(TASK_POLL_INTERVAL).await;
                 match client.thread_state(&task.thread_id).await {
                     Ok(state) => {
+                        if !reported {
+                            reported = true;
+                            tracing::info!(
+                                thread = %task.thread_id,
+                                status = %state.status,
+                                next = ?state.next,
+                                activity = ?state.activity,
+                                "watching a background task — this is the state its status is read from"
+                            );
+                        }
                         let changed = state.status != task.status
                             || state.pending != task.pending
                             || state.error != task.error
@@ -934,6 +949,13 @@ impl Sidecar {
                             continue;
                         }
                         let finished = task.is_finished();
+                        tracing::info!(
+                            thread = %task.thread_id,
+                            status = %task.status,
+                            next = ?state.next,
+                            activity = ?task.activity,
+                            "a background task's state changed"
+                        );
                         if tx.unbounded_send(task.clone()).is_err() {
                             return;
                         }
@@ -942,6 +964,19 @@ impl Sidecar {
                         }
                     }
                     Err(error) => {
+                        // **Was `debug!`, which the default filter hides.** A poll that fails every
+                        // four seconds leaves the panel saying `running` for ever and says nothing
+                        // a researcher can see — indistinguishable from a worker that is genuinely
+                        // still working. Once per task, so a backend restart does not fill the log.
+                        if !complained {
+                            complained = true;
+                            tracing::warn!(
+                                thread = %task.thread_id,
+                                %error,
+                                "could not read a background task's thread; its status will not \
+                                 update until this starts working (docs §207)"
+                            );
+                        }
                         tracing::debug!(thread = %task.thread_id, %error, "task poll failed; retrying")
                     }
                 }

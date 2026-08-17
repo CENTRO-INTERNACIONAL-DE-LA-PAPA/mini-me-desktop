@@ -525,6 +525,55 @@ pub fn outputs(dir: &Path) -> Vec<(Kind, Vec<Output>)> {
     output_listing(dir).groups
 }
 
+/// What the backend writes down about who produced each file, inside the conversation's folder.
+///
+/// Dot-prefixed, so [`collect_outputs`] already skips it: the record of what made the files never
+/// turns up as one of them.
+pub const AUTHORSHIP: &str = ".authorship.jsonl";
+
+/// Who wrote each file, as the backend recorded it at the time.
+///
+/// **Read rather than inferred.** §199 could name a background worker, because a worker runs on
+/// its own thread and writes into a folder named after it. The specialists a conversation
+/// consults share one thread and one directory, so the client had nothing to go on and correctly
+/// said nothing. `overlay/minime_local/authorship.py` now writes the fact down as it happens —
+/// the delegation's own name, and the interval of the command that produced the file — and this
+/// reads it back (§201).
+///
+/// One JSON object per line, appended. **The last line for a path wins**, which is what a
+/// filesystem does anyway: a file rewritten by a second specialist belongs to the second one. A
+/// malformed line is skipped rather than failing the read, because a truncated final line is what
+/// a crash mid-append leaves and losing one attribution is better than losing all of them.
+///
+/// Keys are the same relative paths [`Output::name`] carries, with separators normalised —
+/// the manifest is written with forward slashes and Windows lists files with backslashes, which
+/// is not a difference a researcher should be able to see.
+pub fn authorship(dir: &Path) -> std::collections::HashMap<String, String> {
+    let mut who = std::collections::HashMap::new();
+    let Ok(text) = std::fs::read_to_string(dir.join(AUTHORSHIP)) else {
+        return who;
+    };
+    for line in text.lines() {
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let path = record.get("path").and_then(serde_json::Value::as_str);
+        let agent = record.get("agent").and_then(serde_json::Value::as_str);
+        if let (Some(path), Some(agent)) = (path, agent) {
+            let agent = agent.trim();
+            if !path.is_empty() && !agent.is_empty() {
+                who.insert(normalise_separators(path), agent.to_string());
+            }
+        }
+    }
+    who
+}
+
+/// One spelling for a relative path, whichever platform listed it.
+pub fn normalise_separators(path: &str) -> String {
+    path.replace('\\', "/")
+}
+
 /// The same grouped files as [`outputs`], plus whether its documented safety bounds hid any.
 ///
 /// The ordinary callers only need the files. The Outputs panel uses this fuller answer so a
@@ -595,7 +644,15 @@ fn collect_outputs(
         // and `memories\instructions.txt` showing up in a panel headed FILES invites a researcher
         // to open, edit or delete a file that is not theirs and whose loss changes how the agent
         // behaves (§173).
-        if base_name.starts_with('.') || base_name == "__pycache__" || base_name == "memories" {
+        // `provenance.json` joins them: it is the app's own record of which specialists ran, written
+        // beside the conversation's files so the road strip survives a reload. A researcher reading
+        // a panel headed FILES has no use for it and every reason to think it is an output they
+        // asked for — *"I think we shouldn't show the provenance json file"* (§204).
+        if base_name.starts_with('.')
+            || base_name == "__pycache__"
+            || base_name == "memories"
+            || base_name == crate::provenance::FILENAME
+        {
             continue;
         }
 
@@ -1408,6 +1465,62 @@ mod report_tests {
         save_report(&dir, "Trial Report", "# Yield\n\nRevised.\n").expect("third write");
         assert!(std::fs::read_to_string(&first).unwrap().contains("Revised"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod authorship_tests {
+    use super::*;
+
+    /// The contract with `overlay/minime_local/authorship.py`, checked against the bytes it
+    /// actually writes rather than against a struct both sides agree on in prose.
+    #[test]
+    fn the_last_writer_of_a_file_owns_it() {
+        let dir = std::env::temp_dir().join(format!("minime-authorship-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        std::fs::write(
+            dir.join(AUTHORSHIP),
+            concat!(
+                r#"{"path": "plots/yield.png", "agent": "exploratory_data_analysis", "at": 1.0}"#,
+                "\n",
+                r#"{"path": "notes.md", "agent": "coordinator", "at": 2.0}"#,
+                "\n",
+                // Rewritten later by someone else. A filesystem lets that happen, so the record
+                // has to as well — the newest line wins.
+                r#"{"path": "notes.md", "agent": "report_writer", "at": 3.0}"#,
+                "\n",
+                // What a crash mid-append leaves. Skipped, rather than costing every line above.
+                r#"{"path": "half-writ"#,
+                "\n",
+                // Neither field may be blank: an entry that names no author is not an author.
+                r#"{"path": "orphan.csv", "agent": "  "}"#,
+                "\n",
+            ),
+        )
+        .expect("manifest");
+
+        let who = authorship(&dir);
+        assert_eq!(
+            who.get("plots/yield.png").map(String::as_str),
+            Some("exploratory_data_analysis")
+        );
+        assert_eq!(who.get("notes.md").map(String::as_str), Some("report_writer"));
+        assert!(!who.contains_key("orphan.csv"));
+        assert_eq!(who.len(), 2, "the torn line is skipped, not fatal");
+
+        // No record at all is not an error — it is every conversation that ran before this
+        // existed, and every one on a backend without the overlay armed.
+        std::fs::remove_file(dir.join(AUTHORSHIP)).ok();
+        assert!(authorship(&dir).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn one_spelling_of_a_path_whichever_platform_listed_it() {
+        // The backend writes `plots/yield.png`; Windows lists `plots\yield.png`. Windows is
+        // ~98% of these users, so this is the ordinary case, not the exotic one.
+        assert_eq!(normalise_separators(r"plots\yield.png"), "plots/yield.png");
+        assert_eq!(normalise_separators("plots/yield.png"), "plots/yield.png");
     }
 }
 
