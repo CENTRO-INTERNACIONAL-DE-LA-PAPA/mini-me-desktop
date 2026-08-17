@@ -11786,3 +11786,68 @@ What remains from it is real but different, and belongs to the deferred loading-
 minutes of `running · execute` says nothing about how much is left.** The worker is calling
 `write todos` between commands, so a plan exists on its thread. A progress display that reads that
 plan would be worth more than any animation.
+
+## 209. Six minutes of "running", with a denominator (2026-08-17)
+
+> *"When we have these long runs, we need a status bar or something to communicate to the user the
+> status of the plan or work. I know that deepagents planifies a plan and then executes."*
+
+§208's trace is the argument: a heavy run took **6m 42s** across eight approval rounds, with the
+panel saying `running · execute` throughout. §42 had already fixed the worse version of this — the
+panel used to say only `running`, and naming the tool was a real gain — but a tool name still cannot
+answer *how much is left*.
+
+**The plan is real and was already on the wire.** `TodoListMiddleware` gives every agent a
+`write_todos` tool and keeps the result in state as `todos: list[{content, status}]`, with `status`
+one of `pending` / `in_progress` / `completed`. §207's own log shows `activity=write todos` between
+commands, so the worker maintains it live. Two feeds, both already open:
+
+- **foreground turns** — `todos` sits beside `artifacts` in the `values` frame we already decode. It
+  is agent state, not an artifact, which is why it is read from the top level.
+- **background workers** — the same `GET /threads/{id}/state` the watcher has been polling for its
+  status all along.
+
+Each agent's list is its own: `deepagents`' `_EXCLUDED_STATE_KEYS` keeps `todos` out of what a
+subagent inherits. That is what lets a plan belong to exactly one row on screen instead of being a
+pile nobody owns.
+
+**What is drawn.** The plan, as a checklist, under the row it belongs to:
+
+```
+◐ background worker                                  2 of 4
+   ✓  Generate the synthetic guinea pig dataset
+   ✓  Clean and validate the columns
+   ◐  Build the diagnostic model              execute
+   ○  Write the report
+```
+
+and one line in the status bar for whoever does not have the panel open —
+`background worker · step 3 of 4 · execute`.
+
+**Four rules, each of which something in this project already paid for:**
+
+- **No percentage, no bar, no estimate.** §73's rule — a provenance record that guesses gets
+  believed — applies to progress at least as hard. The only honest denominator is the one the agent
+  wrote down itself.
+- **No plan, no section.** `write_todos` is optional and the model skips it for simple requests, so
+  a plan is a thing that sometimes exists. §178's version of this mistake was an invitation to start
+  displayed over a conversation already chosen.
+- **`done + 1` is the step being worked on.** Two of four finished means the third is running.
+  "Step 2 of 4" would be a wrong statement about where the work is, and it is a one-character bug.
+- **Replaced, not merged.** A plan is a whole statement of current intent: the model rewrites the
+  list to reorder or drop a step, so keeping old items when a shorter list arrives would show work
+  the agent has abandoned. Guarded on non-empty for the opposite reason — a frame carrying no
+  `todos` is *silent* about the plan, not a claim there is none.
+
+The status line prefers an **unfinished worker** over the conversation's own plan, because a worker
+is the thing running while nobody is looking; a finished one says nothing at all, since its row
+already carries a tick and a button and a stale count would outlive the work. The rule is a free
+function over `(&[AsyncTask], &[Todo])`, tested without a window — §203 and §205 each cost a round
+trip to a machine with a screen to learn that.
+
+**Deliberately not in this version:** elapsed time per step. It needs a first-seen stamp per todo
+that nothing currently keeps, and the count is the information that was missing. Worth adding when
+the plan display has been lived with.
+
+*Sixty-third: "it is working" is not a status. The agent had written down what it was doing all
+along; nobody had read it.*
