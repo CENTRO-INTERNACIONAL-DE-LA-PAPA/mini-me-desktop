@@ -16,6 +16,7 @@ use futures::channel::mpsc;
 use tokio::sync::Mutex;
 
 use crate::backend::{BackendConfig, BackendSupervisor, Started};
+use crate::preflight::Cancel;
 use crate::protocol::urlencode;
 use crate::references;
 use crate::protocol::{
@@ -54,6 +55,40 @@ const TASK_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(4
 pub enum FixEvent {
     Line(String),
     Finished { ok: bool, note: String },
+}
+
+/// Which managed folder accompanies a confirmed server-side deletion.
+///
+/// Kept with the request so deleting the durable thread and deleting its files cannot drift into
+/// two unrelated click handlers. They still cannot be atomic across HTTP and a disk, so the
+/// server goes first: a rejected request preserves the files; a failed cleanup after success is
+/// returned as an orphan the researcher can recover manually (§155).
+#[derive(Clone, Debug)]
+pub enum DeleteFiles {
+    Conversation {
+        project: Option<String>,
+        thread_id: String,
+    },
+    Project {
+        name: String,
+    },
+}
+
+/// A conversation listing, and whether the pre-tag scan ran to completion behind it.
+///
+/// `scanned` is what the caller persists. Reported separately from the list because the two
+/// answer different questions: the list is what to show, `scanned` is whether the migration is
+/// finished and must never run again (docs §166).
+#[derive(Debug)]
+pub struct Adopted {
+    pub conversations: Vec<Conversation>,
+    pub scanned: bool,
+}
+
+#[derive(Debug)]
+pub struct DeleteOutcome {
+    /// `Some` means the server records are gone but Windows could not remove the named folder.
+    pub files_error: Option<String>,
 }
 
 /// The conversation's thread id: created on first use, then reused.
@@ -137,6 +172,11 @@ impl Sidecar {
     /// A dropped file's path, as the backend would have to open it.
     pub fn path_for_backend(&self, path: &std::path::Path) -> String {
         self.config.path_for_backend(path)
+    }
+
+    /// Whether the backend could open this path at all — see [`crate::backend::wsl_can_open`].
+    pub fn can_open(&self, path: &std::path::Path) -> bool {
+        self.config.can_open(path)
     }
 
     pub fn execution(&self) -> &'static str {
@@ -375,6 +415,33 @@ impl Sidecar {
         rx
     }
 
+    /// Write a hand-edited mission, and hand back the spine the store saved.
+    ///
+    /// **Not fire-and-forget**, unlike renaming a conversation: the backend normalises what it
+    /// stores — 500 characters, runs of whitespace collapsed — so the panel has to render the
+    /// answer rather than the request, or a mission that was quietly truncated would look intact
+    /// until the next reload disagreed.
+    ///
+    /// Like `fetch_project` it does not start a backend that is not running — but unlike it, the
+    /// failure is reported: a spine read that finds nothing listening is a blank decoration, and a
+    /// spine write that finds nothing listening is an edit the researcher believes they made.
+    pub fn set_mission(&self, mission: String) -> mpsc::UnboundedReceiver<Result<Project, String>> {
+        let (tx, rx) = mpsc::unbounded();
+        let base_url = self.base_url.clone();
+        let project = self.project();
+
+        self.runtime.spawn(async move {
+            let client = LangGraphClient::new(base_url).with_project(project);
+            let outcome = client
+                .set_mission(&mission)
+                .await
+                .map_err(|error| format!("{error:#}"));
+            let _ = tx.unbounded_send(outcome);
+        });
+
+        rx
+    }
+
     /// Search Zed's theme gallery.
     ///
     /// On the sidecar's runtime because that is where this app's HTTP lives; it has
@@ -390,6 +457,49 @@ impl Sidecar {
                 .await
                 .map_err(|error| format!("{error:#}"));
             let _ = tx.unbounded_send(outcome);
+        });
+        rx
+    }
+
+    /// Ask one provider what models it offers, and cache the answer.
+    ///
+    /// Returns how many came back. The key is read on the **main thread** by the caller and
+    /// passed in, for the same reason every other secret is: the Linux keychain client panics
+    /// when called from a Tokio worker (docs §22).
+    pub fn refresh_models(
+        &self,
+        provider: String,
+        url: String,
+        auth: crate::catalogue::Auth,
+        api_key: Option<String>,
+        now_ms: u64,
+    ) -> mpsc::UnboundedReceiver<Result<(String, usize), String>> {
+        let (tx, rx) = mpsc::unbounded();
+        self.runtime.spawn(async move {
+            let client = reqwest::Client::new();
+            let outcome =
+                crate::catalogue::fetch(&client, &url, auth, api_key.as_deref()).await;
+            let result = match outcome {
+                Ok(models) => {
+                    let count = models.len();
+                    // Read, amend, write: other providers' listings live in the same file and a
+                    // whole-map overwrite would drop whichever was fetched most recently.
+                    let mut catalogue = crate::catalogue::load();
+                    catalogue.insert(
+                        provider.clone(),
+                        crate::catalogue::Listing {
+                            models,
+                            fetched_ms: now_ms,
+                        },
+                    );
+                    match crate::catalogue::save(&catalogue) {
+                        Ok(()) => Ok((provider, count)),
+                        Err(error) => Err(format!("{error:#}")),
+                    }
+                }
+                Err(error) => Err(format!("{error:#}")),
+            };
+            let _ = tx.unbounded_send(result);
         });
         rx
     }
@@ -438,6 +548,22 @@ impl Sidecar {
         rx
     }
 
+    /// Build the graph while startup already tells the researcher the agent is loading.
+    ///
+    /// Kept separate from [`Self::warm_up`] so the UI can populate conversation names as soon as
+    /// the HTTP server is ready, then keep the honest "loading research tools" status until the
+    /// expensive factory finishes. Folding this into backend readiness would turn the measured
+    /// 15-second graph load into a new 15-second sidebar delay (docs §176).
+    pub fn warm_graph(&self) -> mpsc::UnboundedReceiver<Result<()>> {
+        let (tx, rx) = mpsc::unbounded();
+        let base_url = self.base_url.clone();
+        self.runtime.spawn(async move {
+            let outcome = LangGraphClient::new(base_url).warm_graph().await;
+            let _ = tx.unbounded_send(outcome);
+        });
+        rx
+    }
+
     /// Stop the backend and start it again, reporting what happened.
     ///
     /// The verb that was missing. `ensure_running` attaches to a healthy backend rather than
@@ -466,28 +592,44 @@ impl Sidecar {
     }
 
     /// The researcher's past conversations, newest first.
-    pub fn list_conversations(&self) -> mpsc::UnboundedReceiver<Vec<Conversation>> {
+    /// `adopt` runs §90's one-time migration of pre-tag conversations first.
+    ///
+    /// **The caller decides, and remembers.** It used to decide for itself by asking whether any
+    /// tagged conversation existed, which is empty both on the launch that needs the migration
+    /// and on the launch after a researcher deletes their last conversation — so deleting
+    /// everything re-tagged whatever threads were left, background workers included, and the
+    /// deleted rows came back (docs §166). Emptiness is a symptom; whether the migration has run
+    /// is a fact, and it belongs in the settings file.
+    pub fn list_conversations(&self, adopt: bool) -> mpsc::UnboundedReceiver<Adopted> {
         let (tx, rx) = mpsc::unbounded();
         let base_url = self.base_url.clone();
         self.runtime.spawn(async move {
             let client = LangGraphClient::new(base_url);
-            // Before the first listing, adopt anything that predates the tag. Cheap and
-            // self-cancelling — it returns at once as soon as one tagged thread exists — and
-            // it is the difference between a researcher's history being there and appearing
-            // to have been deleted by an update (docs §90).
-            match client.adopt_untagged_conversations().await {
-                Ok(0) => {}
-                Ok(adopted) => tracing::info!(adopted, "adopted conversations from before the tag"),
-                // `debug`, not `warn`. The first refresh fires while the backend is still
-                // starting, so this fails once on every launch — and a warning that appears every
-                // time is one nobody reads the day it means something. `list_conversations`
-                // beside it already reasoned exactly this way.
-                Err(error) => tracing::debug!(%error, "could not adopt older conversations yet"),
+            let mut scanned = false;
+            if adopt {
+                match client.adopt_untagged_conversations().await {
+                Ok(count) => {
+                    scanned = true;
+                    if count > 0 {
+                        tracing::info!(count, "adopted conversations from before the tag");
+                    }
+                }
+                    // `debug`, not `warn`. The first refresh fires while the backend is still
+                    // starting, so this fails once on every launch — and a warning that appears
+                    // every time is one nobody reads the day it means something. And `scanned`
+                    // stays false, so the marker is not written for a scan that never ran.
+                    Err(error) => {
+                        tracing::debug!(%error, "could not adopt older conversations yet")
+                    }
+                }
             }
             // 200 is far past what the sidebar can usefully show and still one request.
             match client.list_conversations(200).await {
                 Ok(conversations) => {
-                    let _ = tx.unbounded_send(conversations);
+                    let _ = tx.unbounded_send(Adopted {
+                        conversations,
+                        scanned,
+                    });
                 }
                 // Not an error the researcher needs: an empty sidebar says the same thing,
                 // and a backend that is still starting will answer the next refresh.
@@ -519,15 +661,45 @@ impl Sidecar {
         rx
     }
 
-    /// Delete a conversation. The caller has already confirmed and removed the row.
-    pub fn delete_conversation(&self, thread_id: String) {
+    /// Delete confirmed conversations, then remove the workspace folder that represented them.
+    ///
+    /// This used to be fire-and-forget while the caller removed the row immediately. A failed or
+    /// interrupted request therefore looked successful until the next launch restored the still-
+    /// existing thread — and its project heading with it (§154). The UI now waits for this answer
+    /// before claiming either one is gone. Recursive filesystem work stays off both GPUI and
+    /// Tokio's reactor workers; either one may be carrying a live research turn.
+    pub fn delete_conversations(
+        &self,
+        thread_ids: Vec<String>,
+        files: DeleteFiles,
+    ) -> mpsc::UnboundedReceiver<Result<DeleteOutcome>> {
+        let (tx, rx) = mpsc::unbounded();
         let base_url = self.base_url.clone();
         self.runtime.spawn(async move {
             let client = LangGraphClient::new(base_url);
-            if let Err(error) = client.delete_conversation(&thread_id).await {
-                tracing::warn!(%error, "could not delete a conversation");
+            for thread_id in &thread_ids {
+                if let Err(error) = client.delete_conversation(thread_id).await {
+                    tracing::warn!(%error, %thread_id, "could not delete a conversation");
+                    let _ = tx.unbounded_send(Err(error));
+                    return;
+                }
             }
+
+            let files_error = tokio::task::spawn_blocking(move || match files {
+                DeleteFiles::Conversation { project, thread_id } => {
+                    crate::workspace::delete_thread(project.as_deref(), &thread_id)
+                }
+                DeleteFiles::Project { name } => crate::workspace::delete_project(&name),
+            })
+            .await
+            .map_err(anyhow::Error::from)
+            .and_then(|result| result.map(|_| ()))
+            .err()
+            .map(|error| format!("{error:#}"));
+
+            let _ = tx.unbounded_send(Ok(DeleteOutcome { files_error }));
         });
+        rx
     }
 
     /// Name a conversation. Fire-and-forget: the sidebar already shows the new name.
@@ -746,22 +918,48 @@ impl Sidecar {
         self.runtime.spawn(async move {
             let client = LangGraphClient::new(base_url);
             let mut task = task;
+            // Said once per task, not once per four-second poll. Everything about "a finished
+            // worker keeps saying running" turns on what `next` holds, and until now the poll
+            // reported nothing at any level a researcher sees (§207).
+            let mut reported = false;
+            let mut complained = false;
             loop {
                 tokio::time::sleep(TASK_POLL_INTERVAL).await;
                 match client.thread_state(&task.thread_id).await {
                     Ok(state) => {
+                        if !reported {
+                            reported = true;
+                            tracing::info!(
+                                thread = %task.thread_id,
+                                status = %state.status,
+                                next = ?state.next,
+                                activity = ?state.activity,
+                                "watching a background task — this is the state its status is read from"
+                            );
+                        }
                         let changed = state.status != task.status
                             || state.pending != task.pending
                             || state.error != task.error
-                            || state.activity != task.activity;
+                            || state.activity != task.activity
+                            // A plan that advanced is news even when nothing else moved — it is
+                            // the only thing that changes during a 40-second command (§209).
+                            || state.todos != task.todos;
                         task.status = state.status;
                         task.pending = state.pending;
                         task.error = state.error;
                         task.activity = state.activity;
+                        task.todos = state.todos;
                         if !changed {
                             continue;
                         }
                         let finished = task.is_finished();
+                        tracing::info!(
+                            thread = %task.thread_id,
+                            status = %task.status,
+                            next = ?state.next,
+                            activity = ?task.activity,
+                            "a background task's state changed"
+                        );
                         if tx.unbounded_send(task.clone()).is_err() {
                             return;
                         }
@@ -770,6 +968,19 @@ impl Sidecar {
                         }
                     }
                     Err(error) => {
+                        // **Was `debug!`, which the default filter hides.** A poll that fails every
+                        // four seconds leaves the panel saying `running` for ever and says nothing
+                        // a researcher can see — indistinguishable from a worker that is genuinely
+                        // still working. Once per task, so a backend restart does not fill the log.
+                        if !complained {
+                            complained = true;
+                            tracing::warn!(
+                                thread = %task.thread_id,
+                                %error,
+                                "could not read a background task's thread; its status will not \
+                                 update until this starts working (docs §207)"
+                            );
+                        }
                         tracing::debug!(thread = %task.thread_id, %error, "task poll failed; retrying")
                     }
                 }
@@ -780,7 +991,18 @@ impl Sidecar {
     }
 
     /// Answer a background worker's approval request on its own thread.
-    pub fn decide_task(&self, thread_id: String, decisions: Vec<Decision>) {
+    ///
+    /// `owner` is the conversation whose folder the worker writes into — passed in by the
+    /// caller, and **never** read from `self.thread_id()` here. A backend restart can erase the
+    /// backend's in-memory worker→conversation map while a task waits for approval, which is why
+    /// the resume carries the owner at all; but the conversation *open* at approval time need not
+    /// be the one that launched the task, and naming it files the worker's output under an
+    /// unrelated conversation (docs §159).
+    ///
+    /// `None` means the caller does not know. It is sent as no key at all, so the backend falls
+    /// back to its own inference — at worst a visible sibling folder, which is the failure this
+    /// project already knows how to spot.
+    pub fn decide_task(&self, thread_id: String, owner: Option<String>, decisions: Vec<Decision>) {
         let base_url = self.base_url.clone();
         let model = self.model.lock().expect("model mutex").clone();
         let project = self.project();
@@ -788,7 +1010,10 @@ impl Sidecar {
             let client = LangGraphClient::new(base_url)
                 .with_model(model)
                 .with_project(project);
-            if let Err(error) = client.resume_background(&thread_id, &decisions).await {
+            if let Err(error) = client
+                .resume_background(&thread_id, owner.as_deref(), &decisions)
+                .await
+            {
                 tracing::error!(%thread_id, %error, "could not answer a background task");
             }
         });
@@ -830,12 +1055,21 @@ impl Sidecar {
     /// `spawn_blocking` again, and for a much longer stay than the probes: provisioning
     /// clones a repository and syncs the scientific stack, so this task can live for
     /// minutes. It must not sit on a reactor worker that a turn also needs.
-    pub fn run_fix(&self, argv: Vec<String>) -> mpsc::UnboundedReceiver<FixEvent> {
+    /// Run a setup repair, and hand back the way to stop it alongside its output.
+    ///
+    /// **The handle has to come out with the receiver.** §146 declined to ship a Stop button
+    /// because nothing at this layer owned anything killable: dropping the receiver does not
+    /// cancel `spawn_blocking`, and aborting the Tokio task does not either. What is killable is
+    /// the process `run_streaming` spawns, so that is what escapes — see `preflight::Cancel`, and
+    /// §170 for why it is a pid and not the process-group handshake §168 designed.
+    pub fn run_fix(&self, argv: Vec<String>) -> (mpsc::UnboundedReceiver<FixEvent>, Cancel) {
         let (tx, rx) = mpsc::unbounded();
+        let cancel = Cancel::default();
+        let armed = cancel.clone();
         self.runtime.spawn(async move {
             let emit = tx.clone();
             let outcome = tokio::task::spawn_blocking(move || {
-                crate::preflight::run_streaming(&argv, |line| {
+                crate::preflight::run_streaming(&argv, &armed, |line| {
                     let _ = emit.unbounded_send(FixEvent::Line(line));
                 })
             })
@@ -866,7 +1100,7 @@ impl Sidecar {
             };
             let _ = tx.unbounded_send(event);
         });
-        rx
+        (rx, cancel)
     }
 
     /// Headless check of the backend path — no GPUI, no window. Verifies the

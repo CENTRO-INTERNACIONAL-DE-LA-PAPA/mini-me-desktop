@@ -18,7 +18,7 @@ sidecar** that the client spawns and supervises.
 | **P6.3.5** — visuals pass, starting with **markdown rendering** | ✅ **verified on Windows** — emphasis, inline code, links, headings, lists and fenced code render; accented Spanish came through intact. Tables deferred by agreement. §16/§23 |
 | **Native-Windows probe** | ✅ **answered** — `cmd.exe` is ruled out by upstream's *own* tool code (POSIX pipes, `mkdir -p`, `shlex.quote`), so WSL2 stays the v1 runtime and the installer's job is guided provisioning. Native-plus-Git-Bash is a documented half-day experiment. §21 |
 | **P6.4a** — settings panel + keychain secrets | ✅ **built** — a turn runs with no provider key in the backend's `.env`; keys come from the OS keychain and ride in the run request, and `ctrl-,` opens a Settings pane (provider, model, keys, execution). **Never rendered — needs a look on Windows.** §20/§22/§22b |
-| **P6.4b** — native affordances + shipping | ✅ **ships** — `bundle-backend.sh` → `--release` → `package.sh` gives a 21 MB folder; **the packaged build ran a real turn on Windows**. **Job Object verified 2026-08-01** — after closing the app, `wsl -- pgrep -af "langgraph dev"` prints nothing. Resources resolve beside the executable, and **drop a file on the window** turns it into a question. Remaining: click-to-update, cancel a running fix. §24/§25/§26/§28 |
+| **P6.4b** — native affordances + shipping | ✅ **ships** — `bundle-backend.sh` → `--release` → `package.sh` gives a 21 MB folder; **the packaged build ran a real turn on Windows**. **Job Object verified 2026-08-01** — after closing the app, `wsl -- pgrep -af "langgraph dev"` prints nothing. Resources resolve beside the executable, and **a file dropped on the window — or added with the composer's clip — becomes part of the question**, with a path the agent can open and a refusal for one it cannot. Remaining: click-to-update, and **actually dragging a file onto a real window**, which nobody has done. §24/§25/§26/§28/§179 |
 | **P6.5** — background work + Jobs panel | ✅ **done, end to end (2026-08-01)** — background work had in fact never run until §39: our graph factory took no `config` and raised `TypeError` at construction. Now a worker generates data, **stops at the approval gate on its own thread**, and the answer reaches it. Failures report the real exception, and the panel shows which subagent is running. §29–§31/§36–§42 |
 | **P6.6** — outputs the researcher can see | ✅ **done** — files land in `Documents\Mini-Me\<thread>`, figures render in the chat, and OUTPUTS opens the folder. §42 |
 | **P6.7** — the UI itself | ✅ **done, verified on Windows** — a role-based palette with four built-ins **and Zed's whole theme gallery** installable in-app; conversation sidebar with fuzzy search and rename; collapsible panels; a file preview modal; visible scrollbars; rainbow CSV; a three-state send button; rounded panels and a window-wide status bar. §43/§47–§53 |
@@ -67,14 +67,15 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   was re-parsed sixty times a second. Cached beside the body now. The list's own entry said
   `uniform_list`, which was **wrong**: it lays every element out at the height of the first, and
   these are a one-line question next to a two-page report.
-- ⬜ **Virtualize the transcript** with `list` + `ListState` — the honest version of the above,
+- ✅ **Virtualize the transcript** with `list` + `ListState` (§156) — the honest version of the above,
   wanted only once a conversation is long enough to feel it.
-- ⬜ **SVG icons** instead of `◎ ▤ ▥ ⏎` — deferred (§70): needs an `AssetSource` and
+- ✅ **SVG icons** instead of `◎ ▤ ▥ ⏎` (§157, §171) — was deferred (§70) because it needs an `AssetSource` and
   hand-authored assets, to replace glyphs that render correctly, for no functional gain.
 
 **Felt friction**
 - ✅ **Multi-line composer** — Shift-Enter inserts a break, Enter still sends (§55).
-- ✅ **Escape closes things**, inside-out; **conversations can be deleted** in two steps;
+- ✅ **Escape closes things**, inside-out; **conversations and projects can be deleted** from a
+  centred warning that names the chat history and saved folders that will go (§58/§155);
   **theme and model are filterable lists**; **corners are rounded** (§58/§59).
 - ✅ **Text selection in the transcript** (§62) — drag across paragraphs, code blocks and table
   cells; `ctrl-c` copies, `ctrl-shift-a` takes everything, both also in the palette.
@@ -86,7 +87,14 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   the one part nobody can see.
 - ✅ **Right-click menu** (§64) — confirmed: copy/select-all in the transcript, cut/copy/paste
   in the composer, rows greyed when they would do nothing, each showing its own binding.
-- ⬜ **Cancel a running setup fix** (§28).
+- ✅ **Cancel a running setup fix** for ordinary repairs (§28 → §146 → §168 → §170 → §172).
+  Still open: **elevated installs**, which sit outside this app's token and need §168's second-UAC
+  policy and a disposable-VM test before Stop can honestly appear on them. §168 now specifies exactly what a
+  truthful Stop requires: a published numeric PGID and `kill -- -PGID` for the ordinary WSL
+  repair, a **second** UAC-approved `taskkill /T` for an elevated install, and five tests —
+  four of which need the target Windows/WSL pair and one a disposable VM. Still deliberately
+  unbuilt: a Stop button at the layer that owns only an event receiver would change the
+  screen and nothing else, which is the dishonest outcome §146 refused.
 - ✅ **Markdown gaps** (§65, §66) — verified on a real answer: blockquotes, nested lists whose
   depth comes from the indents actually seen (two- and four-space sources rendered identically,
   which was the point), images no longer showing their own punctuation. The one defect the
@@ -103,7 +111,67 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
 - 🟡 **A background worker guessed where it was** (§149) — `pd.read_csv('/data/…')`, then
   `/home/piero_linux/Mini-Me/…`, both exit 1, when the bare filename would have worked. A failed
   command now names the directory it ran in. **Awaiting a live run.**
-- 🟡 **A background worker's output is visible in the app** (§151) — its folder is now created
+- ✅ **A background worker's output is visible in the app** (§151) — **verified on a live run**:
+  plots render in the transcript and the panel lists
+  `<task>/guinea_pig_eda_output/plots/health_by_activity_box.png`. Its folder is created *inside*
+  the conversation's, and the conversation it belongs to is remembered per thread because the run
+  config is not visible at every construction site.
+- 🟡 **A key per provider, for specialists on other providers.** Asked: *"what happens if I have
+  an API from OpenAI, Google, Anthropic — do I have the ability to select the models for the
+  subagents using independent API keys?"* **Half of it already works.** `ModelChoice.extra_keys`
+  gathers one key per *other* provider any specialist was pointed at, reading `llm:<provider>`
+  from the keychain, and `run_request_body` sends them all — the backend derives the same set
+  from the specs (`models.py:117-122`), so a specialist on Anthropic while the coordinator is on
+  OpenRouter is a supported shape today.
+  **What is missing is the way to store the second key.** The Settings pane writes the key field
+  to `llm:<currently selected provider>`, so filing an Anthropic key means selecting Anthropic,
+  pasting, saving, and switching back — which nobody would guess, and §186's modal now interrupts
+  each of those switches. A key list that shows every provider at once, with "stored"/"not set"
+  per row, is the fix; the request path underneath needs nothing.
+
+- ✅ **A finished background task is a button, not a sentence to retype** (§198). **Awaiting a
+  live run.** Original note kept below for the reasoning.
+- 🟡 *(was)* **A finished background task should be a button, not a sentence to retype.** Asked for
+  directly: *"when a background task has a success, we should see a modal button that the user
+  can press and that serves as a check status, so the user doesn't type it every time in the
+  chatbox."* The app already knows a task finished — §31's Jobs panel polls for exactly that —
+  so the result is one press away and is currently a question the researcher has to compose. The
+  care needed: the button has to say *which* task, since several run at once (§43), and pressing
+  it should open the result rather than sending a turn that asks for it.
+
+- ⬜ **A loading state worth looking at.** Asked for after §177 and §178 put an honest one in
+  place: *"maybe we can create a cool animation later for loading states."* What exists now is four
+  braille frames and a sentence — correct, legible, and plainly a placeholder. The waits it covers
+  are real and long: fifteen seconds of graph construction at launch (§176), a conversation
+  opening, a turn that has not started streaming. Worth noting what the plain version already gets
+  right, so a prettier one does not lose it: it never guesses how long the wait will be, it says
+  *which* wait it is, and it appears in the place the result will appear. A skeleton of grey bars
+  is the obvious upgrade and is the one to be careful with — it has to guess how many messages are
+  coming and how tall each is, and guessing wrong makes the real transcript jump when it lands.
+
+- ✅ **A file's own symbol, so the kind is readable at a glance** (§171). Asked for directly: *"add to the
+  plan how we can put symbols of the files to know what is what. For example if its a python script
+  the symbol of python must appear. its the same for json, etc etc etc."* Today `file_mark`
+  (`main.rs`) returns one of four geometric glyphs — `▤` for anything tabular, `▩` for an image,
+  `▦` for a PDF, `▤` again for everything else — so a `.py`, a `.json`, a `.log` and a `.txt` are
+  all the same mark in the same colour. On a grid of tiles that is the only thing distinguishing
+  them besides the name. Wanted: a per-extension mark for the kinds a research run actually
+  produces — `.py`, `.ipynb`, `.json`, `.yaml`, `.md`, `.txt`, `.log`, `.html`, `.zip`, `.parquet`,
+  `.db` — recognisable as *that* language or format rather than as a generic file. Note the
+  constraint §12 already settled for the toolbar: a bundled SVG per kind is the honest route (PR #12
+  builds exactly that machinery for the core controls, so this should reuse it rather than invent a
+  second scheme), and a bare Unicode glyph is what we have because it needs no assets. Whichever
+  way, `file_mark` is the one place it lands, and its colour should keep following the theme.
+- ✅ **The Outputs panel does not survive a productive run** (§152 → §153 → §162). Twelve artifacts
+  became twelve near-identical rows, each truncated to the 36 characters they *share*, and the
+  transcript rendered every figure full width — ten plots, ten screens. Now: images in one group as
+  a capped 2×2 grid whose fourth tile reads `+N`, everything else folder-grouped below it, and one
+  click opens a modal with arrows, a `3 of 8` counter and a clickable filmstrip. Still open from
+  this thread: **keyboard navigation in the modal** — arrow keys need a focus handle on the modal,
+  because an unscoped binding would take the arrows away from the composer and a scoped one never
+  fires from there (the §58/§84 trap).
+- 🟡 **superseded** *(kept for the trail)* — **A background worker's output is visible in the app**
+  (§151) — its folder is now created
   *inside* the conversation's rather than beside it, so `workspace::outputs` finds it by descending
   (§143) and shows `<task-id>/plot_yield.png` with the run that made it still legible. **Awaiting a
   live run.** Previously: The researcher's framing is the
@@ -117,16 +185,27 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   - the app reads a finished task's own folder and folds it into Outputs, so a worker that lands
     anywhere is still visible.
   The second is the one that cannot silently fail, and it is not built.
-- ⬜ **The turn says files were saved without checking.** Two failed attempts and the answer
-  reported plots on disk; a later run listed ten filenames the panel could not show. The prompt
-  says *"NEVER invent findings, numbers, or charts"* — the third capital-letter rule measured at
-  zero compliance. Structural version: the workspace diff already exists (§42 finds figures that
-  way), so a claim about files can be checked against it and corrected instead of relayed.
-- ⬜ **Conversations start already inside a project, and a deleted project comes back on the next
-  launch.** *"the conversations start already in a project and thats bad. Also I delete the project
-  and when start up they appear again."* Related to
-  `docs/upstream/mini-me/project-spine-is-not-per-project.md`; the resurrection after deletion is
-  new and is the worse half — a delete that does not delete.
+- 🟡 **`execute` was told to prefer absolute paths, and sixteen files went to `/tmp`** (§160,
+  §161). deepagents' own execute description says *"maintain your current working directory … by
+  using absolute paths"* — sound inside a container the agent owns, and here `virtual_mode=False`
+  means an absolute path is the researcher's real filesystem. The description is rewritten at
+  import: the sentence is replaced, a rule naming the consequence is appended, and an upstream
+  rewording is reported rather than silently failing. **Advice, not containment.**
+  **Awaiting a live run.**
+- ⬜ **`execute` can still write anywhere.** The rewrite above changes what the model is *told*.
+  Real containment means the workspace is the only writable persistent mount — a bind-mount of
+  `<work_dir>/tmp` over `/tmp`, or an isolated execution namespace. Not attempted, and explicitly
+  not faked: pattern-matching a shell command for writes produces a containment claim that is
+  false in every case nobody thought of.
+- ✅ **The turn says files were saved without checking** (§175). An answer's filenames are now
+  compared against the conversation's folder as outputs settle, and what is missing is said under
+  the answer. Still a *report*, not a verdict: a file can be absent because the command failed,
+  because it landed outside the workspace (§160), or because the answer invented it, and the app
+  cannot tell those apart.
+- ✅ **Conversations start already inside a project, and a deleted project comes back**
+  (§154, §155, §166). Ordinary New starts at the workspace root; deletion waits for the backend
+  and takes the folder with it; and §90's pre-tag migration no longer re-tags leftovers the moment
+  the list is empty, which is what actually resurrected them.
 - ⬜ **`start_async_task` accepts only `background_worker`**, by design (§114), while `/subagent`
   lists ten specialist names. Every researcher will reach for `exploratory_data_analysis` first, as
   this one did twice. Either the tool description says so, or it routes.
@@ -160,12 +239,17 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   the first attempt was a 502 on the whole PDF over the reference list alone. Fixed on both sides —
   and sending the object sends the `link` the client had held and dropped since §91, so a rendered
   bibliography now resolves.
-- ⬜ **Papers the model adds from memory are not marked.** Barrera et al. (2016) came back real
-  and relevant from a journal Semantic Scholar indexes poorly — much of CIP's own literature
-  looks like that. Those sit beside record-backed citations looking identical, and their links
-  are still the model's guess.
+- ✅ **Papers the model adds from memory are marked** (§185). Barrera et al. (2016) came back
+  real and relevant from a journal Semantic Scholar indexes poorly — much of CIP's own literature
+  looks like that — and sat beside record-backed citations looking identical, because the panel
+  reported *errors* and silence meant both "nothing wrong" and "nothing checked". `Origin` is now
+  a separate question from `Verdict`: the header counts what is unverified, the row says which,
+  and an exported `.bib` carries the same note into Zotero. **Awaiting a live run.**
 - ⬜ **A paper with no DOI and no corpus id** is invisible to the "never reported" accounting
-  (7 returned, 6 recorded, on 2026-08-09).
+  (7 returned, 6 recorded, on 2026-08-09). Backend, not client: `_papers()` in
+  `overlay/minime_local/sources.py` is keyed on the identifiers such a paper does not have, so it
+  is missing from the set the count is taken against. §185 makes the *client* say what is
+  unverified; this is the other half, and it is a log line rather than a screen.
 - ✅ **`dataverse_explorer` searches, and reads what it found, before it can recommend** (§142,
   Mini-Me PR #45). **Verified on a live run**: both gates fired, and all four persistent ids
   resolved to real CIP datasets on late blight clone trials in Peru. The filename it was asked for
@@ -175,8 +259,10 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   `response_format` and so each has the §133 exit. `hypothesis_generator` is next — it emits
   citations too, so it can reproduce the §138 bug somewhere nobody would think to look. The
   mechanism is a base class now (`middleware/tool_gate.py`), so each costs a `steps` tuple.
-- ⬜ **~10s of every startup** is an Asta token minted fresh with no validity check
-  (`backend.rs`, §131).
+- ✅ **~10s of every startup** was an Asta token minted fresh with no validity check
+  (`backend.rs`, §131). `mint_asta_token` now tries the keychain, then the CLI's own cache,
+  and checks `exp` before paying for a network mint — so the seconds are spent once a week
+  rather than once a launch. **Awaiting a stopwatch**, which is the only thing that settles it.
 - ⬜ **`setup-wsl.sh` leaves a checkout with every file modified** from line endings, which breaks
   any git operation on it.
 - ⬜ **Publish `v0.1.0`** — tagged and built; the draft needs a decision about who may have it.
@@ -8736,3 +8822,3171 @@ honoured, because a thread belongs to one conversation for its whole life.
 
 *Eighth time the value needed was one the program already had — and the second time in this thread
 that it was held somewhere a later caller could not reach.*
+
+
+## 152. Twelve rows that all begin the same way (2026-08-10)
+
+It works. A background worker generated a dataset, analysed it, drew ten figures, and the researcher
+saw them without being told a path:
+
+    019fe9f6-9126-7710-a806-35d5e09170a4/guinea_pig_eda_output/plots/health_by_activity_box.png
+
+And the panel showing them is now the problem. Twelve artifacts, twelve rows, every one truncated to
+
+    019fe9f6-9126-7710-a806-35d5e09170a4\guin…
+
+**The characters they share are displayed; the characters that distinguish them are cut off.** A
+list where every row reads the same is not a list, and this is the §59 failure in a new place — a
+label that collapses under its own length — arriving because the workspace finally has enough in it
+to expose it.
+
+The transcript has the matching problem: every figure renders at full width, so a productive run is
+ten screens of scrolling past pictures the researcher has not chosen to look at yet.
+
+### What the researcher asked for
+
+> *"when we have too many plots and table maybe doing something like whats do with too many photos.
+> Group them and only when click you can view it and scroll in x axis."*
+
+A gallery. Grouped, collapsed to thumbnails, opened on click, scrollable sideways.
+
+**And the grouping already exists in the data.** The agent organised its own work into
+`guinea_pig_eda_output/plots/` — §143 taught the panel to descend through exactly that structure
+and then flattens it back into one list. The folder the agent chose is a statement about what
+belongs together, and the panel is discarding it.
+
+*Ninth: the value needed was one the program already had.*
+
+
+## 153. The folder becomes the gallery (2026-08-10)
+
+§152 did not need an invented grouping model. The recursive output walk already retained the
+relative parent of every artifact; the two renderers were simply throwing that boundary away.
+They now group on the **full parent path**, so two different workers' `plots/` directories cannot
+silently merge, while the heading removes only a leading generated thread UUID and says the part
+the agent chose: `guinea_pig_eda_output / plots`.
+
+The interaction follows the platform's own collection pattern rather than copying WhatsApp's
+decoration. Microsoft's Windows guidance names interactive photo libraries as an ItemsView use
+case and puts scrolling inside the collection
+([Items view](https://learn.microsoft.com/en-us/windows/apps/develop/ui/controls/itemsview)). In
+GPUI that becomes one fixed-size thumbnail rail per folder, horizontal overflow, a visible
+horizontal thumb, and the existing preview modal on click. A folder with one artifact keeps its
+larger card; collapsing it would save no space and make an ordinary one-file answer worse.
+
+Both surfaces use the same grouping rule:
+
+- In the transcript, a productive folder is one rail instead of one full-width card per file.
+- In Outputs, the same folder is one compact rail instead of twelve near-identical rows.
+- A tile's primary label is the basename, never the shared relative path. If the basename itself
+  is too long, its **leading** edge is elided so the differentiating tail and extension survive.
+- Every rail owns its own `ScrollHandle`; moving one folder cannot move another. The bar is drawn
+  explicitly because GPUI's overflow scrolls but supplies no visual affordance, and a clipped row
+  on a mouse-driven Windows desktop does not communicate sideways content.
+
+The structural before/after is deterministic even in the headless build environment: the reported
+ten-plot turn built ten figure cards, each allowed up to 420px of image height; it now builds one
+folder block whose figures share a single 118px-high rail. The exact rendered pixels still need a
+Windows-eye check because this machine cannot open GPUI. Two sentence-named tests pin the folder
+boundary, UUID removal and distinguishing filename tail. The complete result is **241 passing
+tests**, with no new Clippy warning (the base branch's existing warnings remain).
+
+*Tenth: the value needed was one the program already had — and this time the implementation keeps
+it instead of flattening it twice.*
+
+
+## 154. A project existed in two places (2026-08-10)
+
+The report was two symptoms of one contradiction: *new conversations already start in a project*,
+and *a deleted project comes back after launch*.
+
+§106 says a project is exactly a name carried by at least one conversation — no project registry,
+because a second truth will drift. But §107 added `settings.project`, remembered the last project
+opened, restored it on startup, and deliberately inherited it for ordinary **New thread**. An empty
+project therefore still existed in settings after its last conversation left the sidebar, and the
+next launch put fresh work back under that name. The persistence was not hidden in the backend;
+it was a second client-side registry this plan had explicitly ruled out one section earlier.
+
+The related upstream report, `docs/upstream/mini-me/project-spine-is-not-per-project.md`, identifies
+a different boundary: the spine route is server/user-scoped rather than project-scoped. That can
+make project *content* look shared, but it does not create the sidebar heading or choose the
+workspace directory. Treating it as this resurrection would have changed the protected backend
+and left the actual `settings.toml` value untouched.
+
+There are now only two ways to choose a project:
+
+- Open a conversation already filed there.
+- Click the `+` beside that project heading to start a conversation there deliberately.
+
+Launch and ordinary **New thread** both choose the workspace root. The old `project` settings key
+is accepted and ignored when upgrading, then disappears on the next save. Root conversations are
+labelled **Ungrouped Conversations** in the sidebar and picker — still `None` in metadata and still
+directly under `Documents/Mini-Me`, so the friendly name does not become a third registry or a
+real folder that can collide with one the researcher creates.
+
+### Why deletion also had to change
+
+A project heading is derived from its conversations, so deleting the last one is deleting the
+project from the app. The row used to disappear and say *conversation deleted* **before** the
+HTTP delete answered. `Sidecar::delete_conversation` then ran fire-and-forget; if the request
+failed or the app closed first, the durable thread remained and the next listing correctly brought
+it — and its project — back. The UI had reported an operation that had not happened.
+
+Deletion now leaves the row in a **Deleting…** state and removes it only after a successful server
+answer. Failure or a dropped answer keeps the conversation visible and says it was not deleted.
+Deleting the open conversation also clears the sidecar's project, so the empty slate cannot inherit
+the project whose last durable member just went away. Files and empty project folders in Documents
+are deliberately not deleted: they are researcher-owned outputs, and §58's delete contract has
+always promised to leave them alone.
+
+Two sentence-named tests hold the upgrade and failure paths: an older remembered project is ignored
+and not written back, and every non-successful delete resolution keeps the row. The window still
+needs the Windows restart check; this headless environment can prove the state transitions and wire
+result, not watch the heading disappear and stay gone across two launches.
+
+*The eleventh value the program already had was `None`. Remembering more state was the defect.*
+
+
+## 155. Deleting the label left the laboratory behind (2026-08-11)
+
+The Windows check of §154 found the other half immediately: the project stopped returning to the
+sidebar, but its conversation directories and every file in them remained under
+`Documents\Mini-Me`. The plan said that was deliberate in §58 and repeated it in §154 — files were
+the researcher's, therefore deletion must leave them alone. The researcher changed that contract
+after seeing it operate: *"We need to sync that."*
+
+That is the better rule now that §105 made projects real folders. A conversation in the sidebar and
+its directory in Explorer are two representations of the same work. Deleting one while preserving
+the other is not caution; it is an orphan that looks like the deletion failed. The confirmation is
+where caution belongs.
+
+### The warning moved to the centre because its scope grew
+
+The old confirmation replaced a sidebar row with *Delete this conversation? · delete · keep*. It
+could fit a noun and two verbs. It could not honestly say that the chat history **and every saved
+output** were going, show the exact directory, or explain that deleting a project also removes files
+placed directly in its folder. A second click without those consequences stated is not informed
+confirmation.
+
+Deletion now uses the existing centred `Modal`, with pinned Cancel and red Delete actions and an
+explicit *There is no undo*. A conversation warning names the conversation and its exact folder. A
+project warning names the project, counts every conversation, shows the project path, and says that
+the entire directory goes — including files Mini-Me did not create.
+
+### A project has a delete control of its own
+
+Named project headings now appear even when there is only one group. §106 hid a single heading as
+noise; it is no longer decoration once it owns **open folder**, **new conversation here**, and
+**delete project**. The delete control targets the complete project from `self.conversations`, never
+the rows surviving the sidebar search — filtering for one title must not turn "Delete project"
+into "delete the one conversation I can currently see". Ungrouped Conversations is still not a
+project and therefore has no project-delete control; its conversations can be deleted individually.
+
+### The two irreversible systems cannot be atomic
+
+LangGraph and NTFS cannot share a transaction. The order is therefore server first, filesystem
+second:
+
+1. Delete every durable thread and keep the rows in **Deleting…** state while that happens.
+2. Only after those requests succeed, recursively remove the confirmed conversation or project
+   folder on a blocking worker, never on GPUI's render thread or Tokio's reactor.
+   A currently open target cannot be deleted while its foreground turn or background work is still
+   writing there. **Only the open one**, and that is a real limit rather than an oversight: the
+   workbench holds `tasks` for the conversation on screen and clears them when another is opened,
+   so it cannot know that a conversation it is *not* showing has a worker still running. Delete
+   that one and its tree goes while the worker writes into it — the server thread is already gone,
+   so the worst case is a folder that reappears owning nothing, which is visible and recoverable
+   rather than silent. Closing it properly needs the backend to report a conversation's live
+   workers, which is the same missing fact §42 wants for "a run claims files it never wrote".
+3. If the server refuses, preserve the files and refresh the list; a project batch may have stopped
+   after earlier threads succeeded.
+4. If Windows has the folder open and cleanup fails, remove the now-nonexistent conversation from
+   the sidebar but report that its recoverable folder remains. Restoring a row whose server thread
+   is gone would be another lie.
+
+The destructive path validates the thread id as one path component before recursion. It refuses to
+descend through a project symlink or junction, and unlinks a target link rather than following it;
+one malformed server id or an Explorer shortcut must never widen one confirmation beyond the
+Mini-Me workspace. Deleting one conversation removes its nested output tree and then its project
+directory only when empty. Deleting a project removes the complete named directory.
+
+Four sentence-named filesystem tests pin the boundaries: nested files go with their conversation,
+a neighbouring conversation survives, the last conversation removes an empty project, a whole
+project deletion leaves its neighbour alone, and hostile thread ids cannot escape the workspace.
+UI tests keep a failed durable delete visible, keep a folder-cleanup failure from resurrecting a
+deleted thread, prove a project target contains conversations hidden by search, and end the active
+project when its final conversation disappears.
+
+This explicitly supersedes §58 and §154's decision to preserve output files. The warning makes the
+new deletion contract visible before the click rather than leaving the cost behind afterward.
+
+Headless verification on the Windows checkout: **248 tests pass**. `cargo clippy
+-p mini-me-desktop-app --all-targets` adds no warning; it still reports the branch's existing 15
+warnings in untouched call sites. The modal itself still needs the Windows-eye check — specifically
+its path wrapping and the two hover controls on a single-project heading.
+## 156. A transcript row should not exist until the viewport needs it (2026-08-10)
+
+The transcript still did this on every render:
+
+```rust
+for message in self.transcript.iter() {
+    // build the entire GPUI element tree
+}
+```
+
+Markdown parsing was no longer in that loop — §70 already moved the expensive parse to the one
+message whose body changes — so claiming virtualization would make the app faster without measuring
+would repeat the plan's original mistake. The unit that can be measured honestly in a headless TTY
+is **row-construction calls per frame**. With 500 alternating 36px/180px rows in a 600px GPUI test
+window, the eager loop constructs **500 of 500**; `gpui::list` with 240px overdraw constructs **15 of
+500**. This is not a wall-clock claim. It proves the allocation/layout work was removed from the
+off-screen 97%, while acknowledging that cached Markdown parsing was probably the larger win.
+
+`uniform_list` is wrong here. It assigns every row the first row's height, while this transcript
+ranges from a one-line question to a report several pages long. The workbench now owns a
+`ListState`, renders with GPUI's variable-height `list`, and splices only the in-flight message or a
+trace whose disclosure changed. The live status line is another row. The visible scrollbar remains;
+`ListState` exposes different offset metrics from `ScrollHandle`, so it has a matching small helper
+instead of a second scroll container fighting the list.
+
+Virtualization exposed a less obvious dependency: §62's selection registry used paint order as
+document order, and Select All discovered its text from the spans painted that frame. That would
+make row identities shift during a scroll and would copy only the viewport. Selectable runs are now
+keyed by `(message, run)`, text from visited rows outlives their layout rectangles for drag-copy, and
+Select All builds a logical plain-text transcript from the already-cached message blocks. A test
+proves an unpainted Markdown message still copies the same rendered words, not Markdown punctuation.
+
+The headless tests establish variable heights, the 500-to-15 construction count, stable span order,
+and off-screen Select All. They cannot establish wheel feel or visual scroll anchoring on the target
+machine; that remains a short Windows app check after the branches are merged.
+
+## 157. Four glyphs become four packaged icons (2026-08-10)
+
+The deferred §70 item was kept deliberately narrow. Settings, the conversations toggle, the
+research toggle and the command palette's Enter hint now use four hand-authored 24×24 SVGs. Their
+labels, hit targets, colours and surrounding layout are unchanged; this is an asset substitution,
+not another navigation redesign.
+
+The first literal set — gear, one speech card, paper under a magnifier — was technically clear and
+looked like every utility application. The approved set shares a **research atelier** language:
+Settings is a calibration instrument, Conversations is two distinct voices facing opposite ways,
+Research is an open field notebook with discovery outside its pages, and Enter is one curved ink
+stroke. Small solid points and the same rounded 1.55 stroke tie them together without adding detail
+that disappears at the 14px size where they actually render.
+
+GPUI resolves `svg().path(...)` only through an `AssetSource`. Reading an `assets/` path at runtime
+would work in a checkout and fail in the installed Windows executable, so the source maps four
+known paths to `include_bytes!` data compiled into the binary. Every stroke uses `currentColor`,
+which lets the existing semantic text colour and hover state tint it. A test loads every declared
+path through the same source, checks the shared view box and tint token, and proves an unknown path
+returns absence instead of a misleading asset.
+
+The identical glyphs used as data/file-type marks and in the empty-state suggestions were not
+changed. They describe different concepts and replacing them would widen a four-control cleanup
+into an icon-system redesign — exactly the scope this deferred item said to avoid.
+
+### Caught in review: they rendered nothing
+
+`app_icon` was `svg().path(p).w(14).h(14).flex_none()` — no colour. GPUI paints an SVG by
+rasterising it to a mask and multiplying by the element's text colour, and `Svg::paint` is
+literally:
+
+```rust
+if let Some((path, color)) = self.path.as_ref().zip(style.text.color) { … }
+```
+
+`None` there paints nothing. And that colour is **not inherited**: `compute_style` starts from
+`Style::default()`, whose `text.color` is `None`, and refines it with the element's *own* styles —
+so the `.text_color(…)` each call site sets on the surrounding row never reached the icon inside
+it. All four were invisible.
+
+`ink` is a required argument now, so the compiler refuses a call site that forgets. That is the
+right instrument here, because the alternative is a rule written down, and this file already
+records what happens to rules written down (§59, three times).
+
+### The test could not have caught it
+
+It asserted the SVG source contains `currentColor` and called the icon *"tintable"*. GPUI never
+reads `currentColor`; usvg resolves it while rasterising and the result is a mask. So the
+assertion passed identically whether the icons rendered or not — the shape this project keeps
+finding, a diagnostic that prints the same for success and failure (§38, §148, §161, §166).
+
+It now claims only what it settles: the bytes are embedded, every declared path resolves, and an
+undeclared one does not. Whether an icon *appears* is a fact about the call site, and the type
+system holds that one.
+
+**Still unverified:** whether the four drawings read at 14px on both palettes. That needs eyes on
+a window and this build machine has none.
+The state existed on disk the whole time; the sidebar was reading the wrong evidence for it.*
+## 158. A scrollbar that only looked interactive, and an image cache that remembered too soon (2026-08-11)
+
+The first Windows pass on §153 found both failures immediately. The agent generated the figures,
+their cards appeared, and the pictures themselves stayed blank until the application restarted.
+The horizontal thumb was visible beneath them, but clicking and dragging it did nothing.
+
+These were two different stale-state mistakes:
+
+- The Outputs panel scans the filesystem whenever it paints, including while an `execute` process
+  still has a PNG open. GPUI's global image cache keys a local image by path and retains a decode
+  error just as it retains a decoded image. If the first read lands between create and close, every
+  later frame asks for the same path and receives the same cached failure. Restarting worked only
+  because it rebuilt that cache. A finished foreground turn or background task now schedules two
+  bounded follow-up passes across the Windows/WSL hand-off. Each pass re-collects late files,
+  evicts figure paths from GPUI's asset cache, and repaints. This is deliberately not a permanent
+  watcher: outputs are bounded completion events, and polling the researcher's Documents folder
+  forever would spend idle time fixing a race that only exists while a writer is finishing.
+- `horizontal_scrollbar` was a six-pixel painted `div`, not a control. It communicated the native
+  scrollbar contract without implementing it. The gallery now gives the bar a 12px mouse target,
+  maps the thumb's travel onto the `ScrollHandle`'s hidden width, preserves the point grabbed
+  inside the thumb, supports clicking the track, and ends the drag even when release is observed
+  away from the thumb. Each rail still owns its own handle, so §153's independent positions remain.
+
+The mapping is a pure function with a sentence-named regression test: the left edge produces zero
+offset, the midpoint reveals half the hidden width, and dragging beyond the right edge clamps at
+the last file. The image-cache correction still needs the same Windows-eye check that found it:
+generate several plots, leave the app open, and confirm the thumbnails fill without a restart.
+
+*Eleventh: an affordance is a promise of behavior, and a cache key needs the version of the thing
+it remembers—even when the library only gives us its path.*
+
+
+## 159. The client knew the parent; the worker was asked to guess it (2026-08-11)
+
+A second live EDA exposed the same filing defect §150/§151 had made less likely, not impossible:
+
+```
+Documents/Mini-Me/019ff21e-a473-…/   the conversation
+Documents/Mini-Me/019ff231-2332-…/   its delegated worker, beside it
+```
+
+The worker completed and the answer rendered, but the conversation's Outputs panel contained only
+its own two bookkeeping files. The researcher deleted that reproduction before it could be read
+from disk; the exact UUIDs and timestamps remain in the screenshot, while both backend routes now
+correctly return 404 for the deleted threads. A following run landed correctly. That difference is
+the evidence: this is an intermittent ownership signal, not a deterministic path calculation.
+
+### The request already had the only authoritative value
+
+Every coordinator request is sent to `/threads/<conversation>/runs/stream`. The Rust client
+therefore knows the conversation id at the point it assembles the run config, but sent the model,
+keys and project without `__workspace_thread__`. The overlay then tried to reconstruct the missing
+owner inside `start_async_task` from, in order, an inherited pin and three LangGraph thread metadata
+locations. §150 already measured why that cannot be load-bearing: not every tool-call context has
+those metadata fields. When none does, a valid worker starts with its own UUID as the workspace
+root; no error occurs and every generated file is filed one directory sideways.
+
+The client now sends `configurable.__workspace_thread__ = <conversation>` on every fresh turn and
+foreground resume. The async launcher already gives an explicit pin priority and forwards it under
+its directory-only key, so the background thread still owns its checkpoints while its files are
+nested under the conversation. No protected overlay code needed to change.
+
+Background approval resumes carry the owner again. This closes a second version of the same race:
+the overlay remembers worker→conversation ownership in process memory, but a backend restart while
+a task waits clears that map. A decision made afterwards must not let the rest of the task resume in
+a sibling folder.
+
+### The resume asked the wrong object which conversation it was
+
+Caught in review, before the change shipped. The resume path read the owner from
+`Sidecar::thread_id()` — *the conversation open right now* — and those are not the same thing.
+`open_conversation` clears the task list, so switching conversations is safe; `Command::NewThread`
+never did, so a pending task from the previous conversation stayed on screen and stayed clickable
+while `thread_id()` moved on to a new thread. Approving it then named the new conversation as the
+worker's owner.
+
+With the backend still running this was invisible: `_PINNED_BY_THREAD` already held the true owner,
+first-sighting-wins kept it, and the disagreement was logged. With the backend restarted — the one
+case this whole change exists for — that map is empty and the new conversation wins. So the fix was
+inert exactly where it was safe and wrong exactly where it mattered, and its failure mode was
+*worse* than the one it replaced: a sibling UUID folder is visibly wrong, while files appearing
+inside an unrelated conversation's Outputs panel look like they belong there.
+
+The owner is now carried on `AsyncTask`, stamped by whichever call site ingested it — the streaming
+snapshot (safe to read the open thread there: `apply` only runs mid-turn, and both New thread and
+opening a conversation refuse while streaming) or `open_conversation`'s own parameter. A task
+already being watched keeps the owner it was first seen with. `owning_conversation()` puts the
+"blank is not a directory name" rule next to the field instead of at the call site, because an
+empty pin would write to the workspace *root* — strictly worse again. Unknown sends no key at all
+and lets the backend fall back to its own inference. `Command::NewThread` now clears `tasks` and
+`jobs`, which is the pre-existing bug this change had made load-bearing.
+
+Three sentence-named tests: blank and whitespace owners name no conversation, the payload decoder
+does not invent one, and the request shape covers fresh runs, resumes and blank ids.
+
+The live Windows confirmation is deliberately exact: start a new conversation, ask it to delegate an
+EDA, and leave Explorer open at `Documents\Mini-Me`. The correct result is one new top-level
+conversation UUID and the worker UUID, if it creates one, **inside** it—never a second UUID beside
+it. Then the harder half: with a task waiting for approval, press New thread. The pending card
+should disappear with the conversation it belonged to.
+
+*Twelfth: a value known at the boundary should cross the boundary explicitly, especially when its
+absence is a successful-looking failure. And the corollary the review found — the boundary has to
+send the value that belongs to the **work**, not the one that belongs to the window.*
+## 160. Sixteen real files escaped to WSL `/tmp` (2026-08-11)
+
+This first looked like §150 again: Explorer showed two UUID folders under `Documents\Mini-Me`
+after one EDA. They were not duplicates. The backend store identified them as two independent
+conversations:
+
+```
+019ff236-183c-…  14:04  earlier penguin conversation
+019ff25d-f0ee-…  14:47  current Coffea arabica conversation
+```
+
+The current run used the ordinary synchronous `task` tool, had no `async_tasks`, and every one of
+its three run/resume requests stayed on `019ff25d-f0ee-…`. There was no background-worker UUID to
+pin. Its empty Outputs panel was a different failure.
+
+The coordinator explicitly asked `exploratory_data_analysis` to *"save outputs in the working
+directory using relative paths."* The subagent reported sixteen paths such as
+`tmp/coffee_eda/coffee_arabica_dummy_dataset.csv`, while the conversation's stored
+`artifacts.files` was empty and the directory contained only `memories/` and `provenance.json`.
+The files did exist, byte-for-byte, here:
+
+```
+/tmp/coffee_eda/
+├── coffee_arabica_dummy_dataset.csv       46,772 bytes
+├── eda_*.csv / top_correlations.csv         7 summary CSVs
+├── fig_*.png                                7 figures
+└── eda_notes.txt
+```
+
+All sixteen timestamps fall between 14:49:30 and 14:50:05, inside the measured tool run. This is
+not hallucinated output. It is successful work written to WSL's disposable global temp directory,
+where Explorer, `workspace::outputs`, artifact capture, conversation deletion and project moves
+cannot see it.
+
+### The two instructions disagree, and `execute` makes the dangerous one real
+
+The installed DeepAgents `EXECUTE_TOOL_DESCRIPTION` tells the model:
+
+> *"Try to maintain your current working directory throughout the session by using absolute paths
+> and avoiding usage of cd."*
+
+Its examples are `/foo/bar` and `/path/to/script.py`; it does not name this run's actual work
+directory. The task's request for relative paths therefore loses to a filesystem system prompt
+that says absolute paths are the convention, and `/tmp` is a plausible guess for an isolated
+sandbox.
+
+The enforcement gap is in `overlay/minime_local/workspace.py`, at
+`LocalWorkspaceBackend.aexecute`, not in the Rust Outputs walk and not in background pinning:
+
+- `LocalWorkspaceBackend` deliberately uses `virtual_mode=False`, so file operations and executed
+  Python share one real path namespace (§18).
+- `_reroute_write` safely re-roots absolute paths used through `write` and `upload_files`.
+- Shell/Python execution is different: `aexecute` runs with the conversation as `cwd`, but an
+  absolute `/tmp/...` remains an absolute host path. §18 records this as merely human-gated; the
+  approval gate controls whether a command runs, not where it writes.
+- Artifact capture scans the conversation work directory. An escaped file is correctly absent
+  from `artifacts.files`, which is why both the transcript gallery and Outputs stay empty.
+
+### Fix it at the execution boundary
+
+The durable invariant is: **a command may read an explicitly named external input, but every
+persistent output it creates belongs below `LocalWorkspaceBackend._work_dir`.** The local backend
+owner should implement and test that invariant around `aexecute`:
+
+1. Give the local-mode execute tool an instruction that names the real `aget_work_dir()` and says
+   persistent outputs must use that directory or paths relative to its `cwd`; `/tmp` is explicitly
+   ephemeral and outside the app.
+2. Add enforcement, not only prose. At minimum, refuse obvious persistent writes to `/tmp` and
+   return a tool error naming the current work directory so the model can retry correctly. The
+   complete version isolates execution so the workspace is the only writable persistent mount, or
+   bind-mounts the run's `<work_dir>/tmp` over `/tmp`. Do **not** try to understand arbitrary shell
+   syntax with a regex and call that containment.
+3. Add a cross-layer regression test that runs Python writing
+   `/tmp/minime-escape/result.csv` and proves either the command is refused or the bytes appear at
+   `<work_dir>/tmp/minime-escape/result.csv`, never in WSL's global `/tmp`; then prove artifact
+   capture returns that file.
+4. Keep external reads working. Researchers intentionally attach datasets outside the workspace
+   (§28), so making the whole filesystem unreadable would fix outputs by breaking inputs.
+
+Three tempting fixes do not close this bug: `TMPDIR=<work_dir>/tmp` does not affect a literal
+`/tmp/...`; `virtual_mode=True` does not constrain `execute` (§18); and copying paths mentioned in
+assistant prose would let untrusted text ask the desktop client to import arbitrary host files.
+
+Until enforcement ships, the current sixteen files can be preserved by copying
+`/tmp/coffee_eda/` into `Documents\Mini-Me\019ff25d-f0ee-…\coffee_eda\`. Copy, do not move: the
+diagnostic reproduction should remain intact until the backend fix is verified.
+
+*Thirteenth: a working directory is a default, not a boundary.*
+
+
+## 161. Advice, where a boundary was wanted (2026-08-11)
+
+§160 found sixteen real files in WSL's global `/tmp` and located the cause precisely. Both of its
+load-bearing claims verify against the pinned package: `filesystem.py:422` carries *"Try to
+maintain your current working directory throughout the session by using absolute paths and
+avoiding usage of cd"* verbatim, and `_reroute_write` is called from `write` and `upload_files`
+and **nothing else**, so `aexecute` has never been re-rooted.
+
+The description is now rewritten before any middleware is built. The sentence is replaced, and a
+rule is appended that names the consequence in terms the model can act on — *"do not appear in the
+researcher's Outputs panel, are not kept when the conversation is filed or deleted, and are erased
+by the operating system"* — rather than the useless abstraction *"outside the workspace"*. Reading
+an absolute path stays allowed: a researcher attaches datasets from anywhere (§28), and a rule that
+forbade absolute reads would fix outputs by breaking inputs. Upstream's own guidance about `&&`
+versus `;` is left exactly as written; this replaces one sentence, not a document somebody else
+maintains.
+
+### What it is not
+
+**It is advice.** §160 proposes, as a fallback, refusing "obvious persistent writes to `/tmp`" —
+and in the same section warns *"do not try to understand arbitrary shell syntax with a regex and
+call that containment."* Both cannot stand. A command is an arbitrary program; pattern-matching it
+produces a claim that is false in every case nobody thought of, and **a false boundary is worse
+than a documented absence of one**, because the next reader stops looking.
+
+So the boundary stays open and stays recorded as open. Real containment is a bind-mount of
+`<work_dir>/tmp` over `/tmp`, or an execution namespace where the workspace is the only writable
+persistent mount. That is a larger change than a docstring and worth making; it is not worth
+pretending to have made.
+
+### Patched by name, and honest about it
+
+`create_deep_agent` takes no `custom_tool_descriptions`, and `FilesystemMiddleware` reads the
+module global when it builds the tool (`filesystem.py:1481`), so replacing that global before any
+middleware is constructed is the reachable point. Patching a third party by name is one of this
+project's recurring bug shapes, so the replacement targets an exact sentence and **logs either
+outcome**: if upstream rewords that line, the log says the advice it contradicts may have returned,
+instead of reporting success over a no-op. §132's rule, applied to our own patch.
+
+*Fourteenth, and §160's own sentence is the right one: a working directory is a default, not a
+boundary.*
+
+
+## 162. Four tiles, and the fourth one counts the rest (2026-08-12)
+
+§153 gave every folder a sideways strip, which fixed the ten-screens problem and left two the
+researcher named as soon as they saw it on their own data:
+
+> *"I want to group images and in another group other files. So when the user clicks a modal
+> appears and we can click and scroll at the bottom so the user can select which picture to see."*
+
+Their reference was explicit, and a phone: a 2×2 photo grid whose fourth tile reads `+5`, opening
+into a viewer with arrows, `1 de 8`, and a filmstrip along the bottom with the current frame
+outlined.
+
+### Kind outranks folder on the surface you flick through
+
+§153 grouped by the directory the agent chose and was right about structure. It was wrong about
+kind: the run that prompted this wrote seven figures and a summary CSV into one folder, so the CSV
+sat in the middle of the strip you scan looking for a plot. `split_images` now puts figures in one
+group and everything else in another, images first, because a figure is what the panel is opened
+to *look at* while a CSV is opened to check something.
+
+Folder grouping is kept for the non-image group. Two runs' `results/` directories are still two
+things; the image grid is the one surface where kind wins.
+
+### The preview had nothing to go next to
+
+`preview: Option<workspace::Output>` held a file, so choosing among eight figures meant closing the
+modal, finding the next thumbnail and opening it again. It now holds a `Preview` — the set and a
+position in it — which is the single fact the arrows, the `3 of 8` counter and the highlighted
+filmstrip tile all render. §158's rule about one calculation, applied to three affordances that all
+mean *this one*.
+
+`Preview::opening` is the only constructor and returns `Option`, because `current()` indexes: a
+click can arrive after the files behind it were moved, and §159's own reproduction was deleted
+mid-diagnosis. Out-of-range clamps, empty is `None`, and stepping wraps — the counter says which of
+how many, so wrapping cannot be misread as a dead button, and comparing the first plot of a series
+with the last should not mean travelling back through the middle.
+
+### The `+N` was wrong and the test said so
+
+The first implementation counted `total - tiles`, which for eight images in four tiles reads `+4`.
+The phone reads `+5`. The scrimmed tile is *covered*, so it counts among the hidden: three pictures
+you can see, five you cannot. `image_grid_shape` is one function used by the grid and by its test —
+not two copies of the rule — and the test asserts the property the off-by-one broke, that at every
+size every image is either visible or counted. It failed on the first run and named the number.
+
+No arrow-key bindings, deliberately. Focus lives in the composer, an unscoped `left`/`right` would
+take the arrows away from typing, and a scoped binding never fires from there — the trap §58 and
+§84 already paid for twice. The modal is clickable and Escape already closes it; keyboard
+navigation wants a focus handle on the modal and is its own change.
+
+*Fifteenth: when someone hands you the thing they want copied, copy the arithmetic too — `+4` is
+defensible in review and wrong beside the screenshot.*
+
+
+## 163. Painting over something is not being in front of it (2026-08-12)
+
+Three defects from the first real look at §162, and the third is the one worth the section.
+
+### The arrows closed the modal they were stepping through
+
+Click handlers fire on GPUI's **bubble** phase, innermost first, and every one on the path runs
+unless something stops it. The arrows sit inside the panel, the panel sits inside the backdrop, and
+the backdrop closes the preview on click. So a press on `›` stepped forward and then closed.
+
+`stop_propagation` on the panel, not on each control: the same path was already reachable from
+`open outside` and from every filmstrip tile, and one guard at the boundary covers the controls that
+do not exist yet. This was live for the header buttons before §162 and nobody had clicked one.
+
+### The picture was cut off at the top
+
+`img().max_w_full().object_fit(Contain)` bounds one dimension. The height resolved to the file's
+own, which for a tall plot exceeded what the flex row allowed, and `items_center` then clipped it
+symmetrically — the top of a stacked bar chart gone, dead space underneath, and `Contain` never
+getting the chance to letterbox because there was no box to contain it in.
+
+Both dimensions are now set, on a named constant, and the body has its own ceiling: a child with
+`overflow_y_scroll` needs a bounded height to scroll *within*, or the clipping simply moves
+somewhere else. The modal also went from 760px to 880px wide — 760 was chosen when this previewed
+CSV rows, and it is narrow for a figure with five rotated category names on the x axis.
+
+### Every overlay in the app was click-through
+
+The researcher's words, and they generalised it themselves before I did:
+
+> *"If I click something in a modal and in the background there is something clickable, the
+> interaction in the background happens. It means that if two buttons overlap, and I click the
+> button in front, both buttons activate."*
+
+GPUI hit-tests **every** element whose bounds contain the pointer. Painting later puts you on top
+visually and does nothing to the hitboxes underneath, so a dimmed backdrop was a picture of
+exclusivity rather than exclusivity. `occlude()` sets `HitboxBehavior::BlockMouse`, which is the
+thing that was missing — from the preview backdrop, the command palette, the toast stack, and
+`ui::Modal`, which is to say from Settings, About and Provenance at once.
+
+Fixed in `ui::Modal` rather than in its three callers, because all three had the same defect for the
+same reason and a fourth modal would have inherited it.
+
+The context menu is the tell that this was known and half-solved. It already carried:
+
+```rust
+// Swallow the press so the click that chooses an item does not also land on the
+// transcript underneath and start a fresh selection there.
+.on_mouse_down(gpui::MouseButton::Left, |_event, _window, cx| cx.stop_propagation());
+```
+
+A press guard, written against one observed symptom. A click is a press *and* a release, so the
+release still reached whatever was behind — and no other overlay got even that much. The press
+guard stays, because it also stops the drag a mouse-down on the transcript begins; `occlude` is the
+general form of what that line was reaching for.
+
+Not verified here: all three are GUI behaviour on a headless machine. The arithmetic has constants
+and the occlusion has a named API, but whether the picture now fits and whether the arrows now step
+is something only running it can say.
+
+*Sixteenth: z-order is a fact about drawing. Reachability is a separate fact, and it has to be
+stated separately.*
+
+
+## 164. The strip was the wrong shape, and one renderer is enough (2026-08-12)
+
+§162 worked, and looking at it against the thing it was imitating showed two more:
+
+> *"For files we should do the same. Also I think the grouping occupies too much space in the
+> conversation (too wide). Check the screenshot from WhatsApp. Is less invasive and functions the
+> same."*
+
+### Fixed tiles, not fractions
+
+The image grid used `flex_1` tiles, so the block was as wide as whatever held it — in the transcript,
+the whole conversation. A folder of seven files claimed a band wider than the answer that produced
+it, which is the §152 complaint in a new direction: not ten screens tall, one screen wide.
+
+The phone gallery it is compared against is a *block* — about 415px, the same whatever the chat
+window is doing. So tiles are now a fixed width and there are two per row, which makes the grid
+exactly `2 × tile + gap` and no wider: 304px in the panel, 408px in the transcript. There is a test,
+because "too wide" is the complaint and a `flex_1` slipped back in would look correct in review.
+
+### One renderer for images and for files
+
+§153's sideways strip is gone. It had a heading, a `scroll sideways` hint, a visible scrollbar, and
+a full-width band per folder — furniture, for three CSVs. Files now use the same capped grid as
+images, so they get the `+N` tile and the modal with it, and the strip's scroll machinery lives on
+where it is actually wanted: the preview filmstrip, which is the surface §162 gave it.
+
+Two differences inside a tile, and they are the whole reason one renderer works. A figure shows the
+picture and **no filename** — the image identifies itself, the modal's header names it, and a caption
+under every thumbnail was half of what made the strip feel heavy. A data file shows a glyph, the
+name and the shape, because one CSV looks exactly like another.
+
+`Contain` rather than `Cover` for a tile's picture: a photo crops acceptably and a chart does not.
+Cropping the axes off a plot makes the thumbnail useless for the only job it has, which is choosing
+between seven of them.
+
+### §59, third time
+
+Every file tile in the panel rendered its name as a bare `…`. `Label::ellipsis` produces
+`flex_grow().min_w_0().truncate()`, `flex_grow` needs a flex parent to grow within, and GPUI's `div`
+defaults to `Display::Block` — so a tile's label row was a block container and the text collapsed to
+its ellipsis. The `ui` module documents this defect, names it §59, and says *"there is no way to ask
+for the broken combination"*; there is, and §153's tile found it.
+
+The names are now shortened in Rust, by character count from the tile width, and rendered as plain
+labels. No truncation machinery, so no layout to get wrong.
+
+*Seventeenth: a component that documents its own trap is not the same as a component that prevents
+it — and the trap was two layers away from where the note lives.*
+
+
+## 165. Four abbreviations you had to hover to find (2026-08-12)
+
+A screenshot of the sidebar beside a screenshot of another app's `⋮` menu, and the ask:
+
+> *"I think we need to improve the app control to create a new project and to create new
+> conversations. We can use the vertical 3 dots and when click we can show the options … There is a
+> New button so when click new a sub modal menu can say: New conversation and the other option New
+> project."*
+
+### Creating a project had no button at all
+
+A project is "a name some conversation is filed under" (§106), so the only route to a new one was
+the *file* picker: open a conversation, open the picker, type a name, and the conversation moves
+into the folder that naming it created. That is a real gesture and it works, but it is filing —
+there was nothing that meant **start** a project, and a researcher beginning a new line of enquiry
+starts before they have anything to file.
+
+`New` is now a menu with two rows. `New project…` opens the same picker in a mode where choosing a
+name calls `new_thread_in` instead of `file_in_project` — the same list, the same
+`New project “…”` first row, the same typing. Only what choosing *does* differs, so there is no
+second way to name a project and no second place for the rules to drift.
+
+### One target instead of four, and words instead of characters
+
+Each row carried `rename` and `✕`; each project heading carried `+` and `✕`. All four appeared only
+on hover, so the way to discover what a row could do was to point at it and decode two
+abbreviations — and `+` beside a heading is not self-evidently "start a conversation in this
+project". They are one always-visible `⋮` per row and per heading now, whose contents are
+sentences. `New conversation in Late blight` says which project even when the menu is floating over
+a list of them.
+
+Nothing new is reachable: every row calls a method the sidebar already had. That is `menu.rs`'s
+stated rule for the right-click menu — *"the menu is a second door onto the same room, not a second
+implementation"* — and it is why this is a rearrangement rather than a feature.
+
+### §163, one layer further in
+
+A conversation row opens that conversation on click; a project heading opens its folder in
+Explorer. The `⋮` sits inside both. Without `stop_propagation`, asking a row what it can do would
+*switch conversations* first, and asking a heading would launch a file manager. The same shape as
+§163's overlays, at a smaller scale, and reachable the same way: a control drawn on top of a
+clickable thing is not thereby the only thing that was clicked.
+
+`menu_card()` is now one function. Both menus need `occlude` and both need the left press swallowed;
+the right-click menu had learned both, and a second menu written beside it would have had to learn
+them again.
+
+*Eighteenth: an affordance nobody can find is not smaller than a missing one, it is worse — it
+looks like the feature exists.*
+## 166. The migration could not tell an empty list from a cleared one (2026-08-12)
+
+§154 and §155 shipped, the researcher deleted their test conversations, restarted, and the
+conversations were back. Explorer showed `Documents\Mini-Me` holding one file — `subagents.json` —
+so the *files* had gone. Only the rows returned.
+
+That is the reverse of §154's failure, which makes it a different bug wearing the same shirt: there
+the deletion never became durable, here it did and something put the rows back.
+
+### §90's rescue has no memory
+
+`adopt_untagged_conversations` exists because `dfea94a` began filtering the sidebar on a metadata
+tag, which hid every conversation created before it — *"the conversations doesn't load, like this
+was erased"* (§90). It searches untagged threads, keeps the ones with human messages, and tags
+them. Its own doc says **"Runs once, and only when there is nothing to lose."**
+
+It runs on **every** listing, and its guard is not "has it run" but "is the tagged list empty":
+
+```rust
+if !self.list_conversations(1).await?.is_empty() {
+    return Ok(0);
+}
+```
+
+Emptiness is true in two situations the guard cannot tell apart. One is the launch after a pull,
+where old history is hidden and the scan is exactly right. The other is **the researcher having
+just deleted everything** — and then the scan re-tags whatever threads are left. Background workers'
+threads are left, because a conversation's delete removes its own thread and not the ones it
+delegated to; the workers carry the task description as a human message, which is the very test
+adoption uses to recognise a conversation.
+
+So: delete your last conversation, and the next refresh promotes leftovers into the sidebar. The
+folders stay deleted, because that half worked. The rows come back.
+
+### A fact, not a symptom
+
+`adopted_untagged` is now a settings field, written once the scan completes — including when it
+adopts nothing, which is the ordinary case and precisely the installation that must stop scanning.
+The caller decides and the caller remembers; `list_conversations` takes `adopt` and reports back
+whether the scan ran, because "what to show" and "is the migration finished" are two questions and
+one return value was answering only the first.
+
+Read from the stored settings rather than from `self.draft`, for the reason `remember_panels`
+already gives: the draft is the Settings pane's editing buffer, and this decision has to be made
+from what survives to the next launch.
+
+The doc comment was not merely optimistic, it was **false** — "runs once" described a design nobody
+had built, and it sat directly above the loop that ran every time. Three sections this week have
+turned on a comment asserting something the code did not do (§148's docstring, §161's advice,
+§155's guard). The pattern is specific enough to name: when a comment claims a *frequency* or a
+*boundary*, that claim is testable, and if it is worth writing down it is worth a test.
+
+*Nineteenth: a one-time migration needs a record that it ran. Inferring it from the state it
+produces means it fires again the moment a person legitimately reproduces that state.*
+
+
+## 167. A project you named, and a sidebar that could not see it (2026-08-12)
+
+§165 gave `New` a menu whose second row is `New project…`. Naming one and pressing Enter left the
+sidebar saying *"Conversations you start will appear here."*
+
+> *"When I click to create new project, nothing appears in the conversations panel. This means we
+> should create the logic to have empty named projects."*
+
+Correct, and the gap was mine: §165 shipped the affordance and left the state it implies for later
+without saying so.
+
+### §106 was right about the registry and wrong about the evidence
+
+*"A project is exactly 'a name some conversation is filed under', so there is no separate registry
+to fall out of step with the sidebar."* The first half is the part worth keeping — a list of
+projects in the settings file is precisely what §154 deleted, because it survived the conversations
+it described and resurrected them. The second half made a project unable to exist before its first
+conversation, and `new_thread_in` does not create a thread; it decides where the *next* turn will
+write. Until that turn happens there is no thread, no metadata, and nothing for a sidebar reading
+conversations to show.
+
+§105 had already settled where the missing fact lives: a project **is** a directory under
+`Documents\Mini-Me`. Reading that directory is not a second registry, it is reading the thing
+itself — the same argument §106 makes, applied to the evidence §106 overlooked. `workspace::projects()`
+lists them and `create_project` makes one, so naming a project creates it and the sidebar shows it
+immediately, empty.
+
+### Telling a project from a conversation
+
+Both sit directly under the workspace root. The discriminator is the shape of the name: a thread is
+a UUID, a project is whatever a researcher typed. That predicate already existed — §152 wrote it to
+strip a leading UUID from an Outputs folder label — so it moved to `workspace` where both callers
+can reach it rather than being written a second time.
+
+Files are skipped, which is what keeps `subagents.json` out of the sidebar.
+
+### Two smaller things that fall out of it
+
+`create_project` returns the name the folder **actually** got, and that is what gets stored on the
+conversation. `project_folder` rewrites characters a path cannot hold, so keeping the typed text
+would file work under `Q1/Q2` while the directory is `Q1_Q2` — and a sidebar reading both sources
+would show one project twice, under two spellings.
+
+Empty projects are seeded only when the search box is empty. A filter is a way to find work; an
+empty project matches nothing, and leaving them in a filtered list would make searching look broken.
+
+### And then it read them at the wrong moment
+
+Reported on the next launch: the project was not there. The directory listing was written inside
+the *answer* to `list_conversations`, so a fact about this machine's disk was waiting on an HTTP
+reply — and the first refresh of a cold launch reliably fires before the backend is up, which
+`list_conversations` documents in its own comment two lines away. No reply, no headings, and an
+empty project simply absent on the launch after it was created.
+
+It is read before the request now, and again on the answer in case a turn created one meanwhile.
+The same shape as the bug above it, one layer down: the sidebar had the right evidence and asked
+the wrong thing for permission to look at it.
+
+*Twentieth: "derive it, don't store it" is a good rule that says nothing about **which** derivation.
+The state existed on disk the whole time; the sidebar was reading the wrong evidence for it — and
+then, having found the right evidence, waited on something unrelated before reading it.*
+## 168. Setup Stop: the boundary is now concrete, and still not safe blind (2026-08-10)
+
+§146 left this open because a setup repair crosses two process boundaries. Reading the current
+ownership makes the failure mode more precise:
+
+1. `Workbench::start_fix` owns only an `UnboundedReceiver<FixEvent>`.
+2. `Sidecar::run_fix` owns a Tokio task, which waits on `spawn_blocking`.
+3. `preflight::run_streaming` spawns the command, then moves the `Child` into a waiter thread.
+
+There is no cancellation handle at any layer. Dropping the receiver or aborting the Tokio task
+does not cancel `spawn_blocking`; its OS process and waiter continue. Adding a Stop button at the
+first layer would therefore change only the screen — the exact dishonest result §146 refused.
+
+### The ordinary WSL repair needs a Linux process-group handshake
+
+Every non-runtime fix on Windows is `wsl.exe … bash -lc <script>`. §26 already established that
+killing `wsl.exe` does not reliably reap what it launched inside the distro. The safe protocol is:
+
+1. Give each fix a random run id.
+2. Inside WSL, start the repair in a new session/process group and publish its **numeric PGID** to
+   a run-id-specific control file visible to the Windows app *before* the repair can do work.
+3. Stop launches a second `wsl.exe` call and passes that numeric value as a literal argument to
+   `kill -- -PGID`: TERM, a bounded wait, then KILL if the group still exists.
+4. The UI says **stopped** only after the original command exits and a group-existence probe says
+   no process remains. Until then it says **stopping**; a failed probe says it could not confirm.
+
+The numeric handoff matters on this machine. §147 found variables assigned inside `wsl bash -lc`
+arriving empty and deleting the checkout when interpolated into paths. A cancellation wrapper that
+kept `$pid` or `$pgid` in a generated shell command would place a dynamic value in the same failure
+class. Rust must read, validate and write the literal decimal PGID into the separate kill argv.
+
+### An elevated WSL install is a different operation
+
+`Install WSL` / `Install Ubuntu` runs through `Start-Process -Verb RunAs`. ShellExecute owns the
+elevation boundary; the unelevated app does not own a killable child tree. The elevated wrapper
+would have to publish its PID, and Stop would need a **second UAC-approved elevated** `taskkill /T`
+request. Refusing that second prompt means *not stopped*. Closing the visible elevated console may
+also be graceful rather than terminal during a Windows component install, so the app cannot infer
+success from the window disappearing.
+
+That policy needs a disposable Windows VM: force-killing `wsl --install` on a developer's real
+machine to see whether Windows servicing remains recoverable is not an acceptable test. The UI
+must say in advance that stopping an OS install asks for admin rights again and may still require a
+restart; it must never reuse the ordinary repair's one-click wording.
+
+### The tests that make implementation safe
+
+- **WSL tree test:** a wrapper starts a shell, child and grandchild in one new group; all three
+  append heartbeats. Cancel by the published PGID, wait, and prove every heartbeat stops and the
+  group-existence probe fails. Run this on the target Windows/WSL pair, not native Linux alone.
+- **Race test:** cancel before the PGID control file exists, while it is being written, and after
+  the process exits naturally. No empty/unvalidated value may ever reach `kill`.
+- **UAC refusal test:** refuse the second elevation prompt. The pane must remain *not confirmed
+  stopped*, retain the log, and allow another attempt.
+- **Disposable-VM servicing test:** cancel both `wsl --install` and distro installation, reboot,
+  and prove Setup can run the same repair to completion afterwards.
+- **Window-close test:** close the app during each kind of repair. The same cancellation policy
+  must run, or the app must explicitly leave the independently elevated install visible; silently
+  detaching is not a third policy.
+
+This environment cannot run the first test: `wsl.exe --status` returns Spanish
+`Acceso denegado`, `Wsl/EnumerateDistros/Service/E_ACCESSDENIED`. It also cannot safely perform the
+disposable-VM test. No code or cosmetic Stop control is added in this task; the implementation is
+blocked on those two target-platform proofs, not on an unknown design.
+
+*A button is not cancellation. The proof is that the grandchildren stopped.*
+
+
+## 169. A rail whose line stopped a third of the way down (2026-08-12)
+
+The road shipped with §74 and has looked wrong ever since without anyone naming it. Put beside the
+design it was drawn from, two faults:
+
+> *"We need to fix how we connect the dot for the road. And its awful when closed."*
+
+### `items_start` is why the line never arrived
+
+Each stage is a row: a fixed-width gutter holding the dot and, below it, a connector that continues
+to the next stage. The connector is `flex_grow` with a 14px minimum, which is the right shape — it
+should take whatever height the row turns out to be.
+
+The row was `items_start`. That aligns children to the top *and leaves them at their content
+height*, so the gutter stood 23px tall — a 9px dot plus the connector's minimum — while the row
+beside it stood at 46px for a two-line label. The connector had no height to grow into and stopped
+a third of the way down, so every dot hung unconnected under a stub.
+
+Removing `items_start` lets the gutter stretch to the row, and the connector then spans it. The
+label column takes `items_start` for itself, which is what it actually wanted; the row's copy was
+doing that job by accident and breaking the rail as a side effect.
+
+### Folded, the rail *is* the content
+
+At 38px there are no labels, but the rows still reserved 46px each — so the dots sat far apart with
+stubs between them, which is the "awful when closed" state. Folded rows are 26px now, which closes
+them into one strung line. The same numbers, named: `ROW_OPEN` and `ROW_FOLDED`.
+
+### And the third toggle finally has an icon
+
+§157 gave Settings, the conversation list and the research panel drawn icons and left the road
+reading `◧ road` beside them. `road.svg` is the rail itself — a line, two filled dots and an open
+one — which is the same picture the strip draws, at 14px.
+
+### Shipped as a claim before it was shipped as a change
+
+§169 went in describing the fix above, and the fix was not in the commit. The script making the
+edit asserted on its third replacement, raised, and exited **before writing the file** — so the
+first two edits, the ones that mattered, were discarded. `cargo build` and 266 tests passed,
+because an unchanged file compiles perfectly. The icon in the same commit *did* land, which made
+the result look like a partial success rather than a no-op.
+
+Two things follow. A batch edit that fails partway must not leave the earlier work unwritten and
+the reader believing otherwise — write each change or none, and check the file afterwards rather
+than trusting the tool that reported success. And a green suite is not evidence a change landed:
+these tests never touched `road_strip`, so they were as green before the edit as after.
+
+The researcher found it the only way it could be found, by looking at the window: the dots were
+still hanging under stubs, in a build whose plan said they were not.
+### Folded, it sat against the left edge
+
+The gutter is the row's only child when folded, and the row is `w_full`, so a 12px rail sat at
+x=0 of a 38px strip. `justify_center` when folded puts it down the middle, which is where the
+design the researcher supplied has it.
+
+The chevron above it had the same fault for a different reason and was missed on the first pass:
+the header is `justify_between`, which puts a **lone** child at the start, and folded the chevron
+is the only child. So the fold control sat against the left edge above a rail that had just been
+centred — which is more obviously wrong than either was alone. Same one-line fix.
+
+*Twenty-first: a `flex_grow` child is a promise about a parent that has a size. `items_start` takes
+that size away, and the symptom appears two elements away from the line that caused it.*
+
+*Twenty-second, and the more expensive one: "the tests pass" answers a question about the code that
+is there. It says nothing about whether the code you wrote is the code that is there.*
+
+## 170. The handshake §168 specified would have caused the orphaning it prevents (2026-08-12)
+
+§168 was written by reading code and reasoning from §26. It was then **run**, on the target
+Windows/WSL pair, by the second agent. Two of its three claims held and the recommendation did not.
+
+Measured:
+
+- **Process-group cancellation works.** PGID `450` published, `kill -- -450` stopped the shell,
+  both children and their `sleep` processes; heartbeats `126 → 126`.
+- **The races behave as §168 assumed.** Read immediately, the control file is absent; a second
+  later it holds a complete `445\n` with no partial write seen. A repeat kill answers "No such
+  process", which a caller must read as *already stopped*. Blank and non-numeric values still have
+  to be rejected before the argv is built.
+- **Killing the attached `wsl.exe` reaps everything.** Wrapper PID `28084`; after `Stop-Process`
+  the wrapper exited and every Linux descendant went with it. Heartbeats `3 → 3`.
+
+And the finding that overturns the design:
+
+> *Launching through `setsid` caused `wsl.exe` to exit by itself while the Linux process tree
+> continued running.*
+
+`setsid` is what detaches the repair from the very Windows process the app already owns and can
+already kill. §168's protocol would therefore **create** the orphan it was designed to prevent —
+the app would hold a handle to a wrapper that had already exited, and a tree that no longer
+answered to it.
+
+### What §26 actually established
+
+§26 is why §168 reached for process groups at all: *killing `wsl.exe` does not reliably reap what
+it launched inside the distro*. On this machine, today, it does. Either the platform changed or §26
+described a detached case and the note generalised it. Nothing here settles which, and the honest
+record is that the claim was carried forward for months without a measurement.
+
+### The implementation this leaves
+
+Keep the ordinary repair attached to the `wsl.exe` the app spawned; hold that `Child`; make Stop
+terminate it and treat "already exited" as stopped. `preflight::run_streaming` currently moves the
+`Child` into a waiter thread with no handle escaping — that, not the shell protocol, is the change
+to make. The validated PGID mechanism stays documented as the fallback for a future repair that
+deliberately detaches.
+
+Elevated installs are untouched and still separate: §168's second-UAC policy stands, and the
+disposable-VM test was correctly not run on the researcher's machine.
+
+*Twenty-third: a specification derived from reading is a hypothesis. This one was careful, cited its
+evidence, and was wrong in the direction that would have hurt — the mechanism it added was the
+mechanism that broke the thing already working.*
+
+
+## 171. Twelve drawings, and not one logo (2026-08-12)
+
+The deferred item from §164, asked for plainly: *"if its a python script the symbol of python must
+appear. its the same for json, etc etc etc."* Every file tile drew one of four geometric glyphs, so
+a `.py`, a `.json`, a `.log` and a `.txt` were the same mark in the same colour, and the name did
+all the work.
+
+The suggestion was to take Zed's set. Two reasons not to. Zed is GPL-3.0 and its `assets/icons` are
+a mix of original and Lucide-derived work, so copying the directory means auditing provenance
+file by file and carrying attribution — against the rule this organisation sets about third-party
+material. And they would not match: the five icons §157 shipped share a 24px canvas, a 1.55 stroke
+and round caps, and a borrowed set beside them looks worse than the glyphs did.
+
+So they are hand-authored on the same canvas, and they are **format families rather than brand
+logos** — the second half deliberate. A recognisable Python or Docker mark is a trademark, and
+reproducing one inside a shipped product is a different question from drawing a file with angle
+brackets on it. `.py`, `.r`, `.jl`, `.sh`, `.sql` share one *code* icon and differ by nothing;
+what tells them apart is the filename, which is already on the tile. What the icon settles is the
+question a person actually has scanning a folder: is this a table, a picture, a script, a
+notebook, a config, a document, a log, an archive, a database.
+
+Twelve, sharing one page-with-a-folded-corner outline so a column of them lines up, with the
+distinguishing mark in the lower two-thirds.
+
+The test asserts the thing that can silently break: **every mark `file_mark` can return is a
+declared and loadable asset**. A new extension arm naming an icon nobody added would draw nothing
+at all — §157's failure one layer along — and a count would only have reported that the number
+changed.
+
+*Twenty-fourth: "use their icons" is a licence decision wearing the clothes of a shortcut.*
+
+
+## 172. Stop, built from what the measurement left standing (2026-08-12)
+
+§28 asked for it, §146 refused it, §168 specified the wrong mechanism and §170 measured that. What
+remains is small.
+
+`preflight::Cancel` holds a pid and nothing else. `run_streaming` arms it the moment `spawn`
+returns — before a line is read, so a Stop pressed during a cold WSL start has something to act on,
+which is the race §168 wanted a control file to solve — and disarms it once the child is reaped.
+While armed the waiter thread still holds the `Child`, so neither operating system can hand that
+number to anyone else; the late-click hazard is closed by construction rather than by a check.
+
+The button says **stopping**, not stopped. The only honest report of a stop is the command
+exiting, and that arrives as `FixEvent::Finished` on the same channel as any other ending. A repair
+that finished between the click and the call is *stopped*: `Cancel::stop` reports there was nothing
+to signal, and nothing left to stop is the outcome the button was pressed for.
+
+### The test found what the reasoning had not
+
+The first Unix implementation signalled the child alone. The test hung, and the assertion that
+fired was the one about elapsed time.
+
+`sh -c "…; sleep 30; …"` killed at the shell leaves `sleep` running **and holding the inherited
+stdout pipe open**, so `run_streaming` blocks on EOF until the grandchild finishes by itself — a
+Stop that reports nothing for thirty seconds. That is §26's complaint reproduced in miniature, and
+it is the thing §168 built its whole protocol around.
+
+So the child is spawned into its own process group on Unix and signalled with a negative pid.
+Windows keeps the attached wrapper, because there `wsl.exe` *is* the group leader in every sense
+that matters and §170 measured that killing it takes the Linux tree with it. The asymmetry is the
+measurement, not an oversight: the same gesture that fixes Unix — `setsid` — is what breaks
+Windows.
+
+Which means §168 was not wrong about mechanism so much as wrong about *where*. Process groups were
+the answer, on the platform nobody was worried about.
+
+### Still not done
+
+Elevated installs. `Start-Process -Verb RunAs` puts the child outside this app's token, so Stop
+cannot reach it and the button must not pretend otherwise — §168's second-UAC policy stands
+unimplemented and the disposable-VM test remains unrun. The button appears for ordinary repairs;
+an elevated one needs its own wording before it gets one.
+
+*Twenty-fifth: the measurement that overturns a design does not always overturn its mechanism. This
+one moved it to the other platform.*
+
+
+## 173. Four complaints about chrome, and one about ownership (2026-08-12)
+
+A screenshot of a finished EDA and a short list. Three are the same kind of thing; the fourth is
+not.
+
+### The road was inside the conversation's card
+
+> *"The conversation panel (center panel) is colliding with the road."*
+
+The sidebar is a card. The research panel is a card. The road was a bordered strip **inside** the
+chat pane's card, so the two read as one panel with a notch cut out of the left of it, and folding
+the road left a 38px stub of a different background attached to the transcript. It is its own card
+now, a sibling of its neighbours in the root row, with the same `m_1 rounded_lg border`.
+
+That was §74's arrangement and it made sense when the road was decoration inside the conversation.
+It stopped making sense when the road gained a fold control, a full-graph button and its own
+identity.
+
+### A scrollbar is a control, and a control that is always drawn is furniture
+
+Both — the transcript's and the research panel's — sat permanently against the right edge, close
+enough that a long line of the answer ran under the transcript's. They are revealed on hover of the
+region they scroll, which keeps them findable exactly when someone reaches for one: the pointer is
+already there. `SCROLL_GROUP` names the region, and the two helpers that paint a thumb both watch
+it, so a third scrollbar cannot be added that forgets.
+
+§40 asked for a *visible* affordance because there had been none at all. Visible on approach still
+satisfies that; permanently painted was one reading too many.
+
+### `memories/` was never the researcher's
+
+The Outputs panel listed `memories\instructions.txt`, 436 B. That is where the agent keeps its own
+instructions between turns. A panel headed **FILES** invites a person to open, rename or delete
+what it lists — and deleting that one silently changes how the agent behaves afterwards, with
+nothing to connect the two events.
+
+It joins dotfiles and `__pycache__` in the skip list. The line those three share is not "hidden" or
+"cache", it is **not the researcher's to manage**, and the comment now says so.
+
+*Twenty-sixth: "show everything" is a defensible default for a file list right up to the moment the
+list contains something the reader can break.*
+
+
+## 174. Half a padding, silently (2026-08-12)
+
+> *"The conversation is too close to the left end. That's a visual problem."*
+
+§156 replaced the eager scrolling `div` with `gpui::list`, and carried its `.p_4()` across. On a
+`div` that is sixteen pixels on four sides. On a `list` it is sixteen pixels on **two**:
+
+```rust
+// gpui-0.2.2/src/elements/list.rs:812
+let mut item_origin = bounds.origin + Point::new(px(0.), padding.top);
+```
+
+The horizontal half is computed from the style two lines earlier and then never used. So the
+transcript moved flush against its own border, and the change that did it looks like a
+straight port.
+
+Nothing could have caught this. It compiles, every test passes, and the property is "sixteen
+pixels of nothing on the left" — visible in a screenshot and in no other artefact. It arrived with
+§156 and was reported after §173 moved the road out of the pane, which is what removed the
+accidental inset that had been hiding it.
+
+The inset is on the row now, where a `div` honours it, and named: `TRANSCRIPT_INSET`, matching the
+composer below so a question and its answer start on the same x.
+
+*Twenty-seventh: a property that a container silently drops is worse than one it rejects. `p_4`
+should not compile on an element that means `py_4`.*
+## 175. The claim was never checked against the folder (2026-08-12)
+
+The oldest red item, and the one that mattered most: an answer would list ten filenames and the
+Outputs panel would show none of them. Twice, a turn reported plots saved after the command that
+would have written them had failed. The system prompt already says *"NEVER invent findings,
+numbers, or charts"* — the third capital-letter rule this project has measured at zero compliance,
+which is what a rule with nothing behind it is worth.
+
+The app had the answer the whole time. `collect_plots` walks the conversation's folder at the end
+of every turn to find files no message has claimed yet; the same walk says what the folder holds.
+Nothing compared it to what the answer said.
+
+### Reading a name out of prose without inventing one
+
+`named_files` is the whole risk. A false positive puts a correction under a sentence that was fine,
+and a warning that cries wolf is one nobody reads on the day it is right. So:
+
+- The extension must be one a research run actually **writes**. `CLAIMABLE` is deliberately
+  narrower than `file_mark`'s list — no `.sh`, `.js`, `.rs`, because an answer is likelier to
+  mention one in passing than to have produced it.
+- The stem must contain a letter and be at least two characters. `0.96` fails on the extension;
+  `figure 4.png` fails here, while `fig4.png` passes.
+- Punctuation is trimmed, backticks and asterisks are separators, and a path is reduced to its
+  basename — the question is whether the file exists, not whether the model recited its directory.
+
+Tested against the real answer that prompted this and against seven lines of prose that look like
+filenames and are not, including `annual_income vs monthly_spend = 0.96` and a `doi.org` URL.
+
+### Two things it deliberately does not do
+
+**It does not accuse.** A named file can be absent because the command failed, because it landed
+outside the workspace (§160), or because the answer invented it. The app cannot tell those apart,
+so it reports the check — *"named above but not in this conversation's folder"* — and no verdict.
+
+**It does not fix the answer.** Editing the model's text would make the transcript disagree with
+what was actually said, which is a different lie and a worse one.
+
+### Why it self-corrects
+
+Recomputed over every assistant message each time outputs settle, not fixed when the turn ends. A
+background worker can still be writing, so a name missing at second one and present at second three
+was never a false claim — and flagging it would be its own kind of dishonesty. The workspace only
+grows, so the note disappears on its own when the file arrives. Names the *researcher* introduced
+are excluded outright: dropped files are read where they lie (§13), and an input on the desktop was
+never supposed to be in the folder.
+
+*Twenty-eighth: the prompt had the rule and the app had the evidence, and for four months neither
+one knew about the other.*
+
+
+## 176. `/ok` answered before the graph existed (2026-08-13)
+
+Reported as two delays: saved conversation names taking time to appear, and a saved conversation
+taking time to open. The initial suspicion was DeepAgents plus SQLite. The backend log separates
+them conclusively:
+
+- the LangGraph HTTP server started in **1.914–2.121 seconds**;
+- the custom `AsyncSqliteSaver` loaded in **0.00062 seconds**;
+- `POST /threads/search` returned two titles in **290 ms** in the direct Windows probe; and
+- the first `GET /threads/{id}/state` spent **14,154–14,982 ms** loading `agent`.
+
+That last request was read-only, but its log showed network handshakes with Asta, Dataverse,
+AGROVOC and Crop Ontology. `backend/agent.py:130-133` awaits those MCP tool bundles while assembling
+the DeepAgents graph, so reading stored state paid for every research tool before it could read the
+conversation. SQLite was not the bottleneck.
+
+### Expensive once per process, inexpensive on later graph access
+
+The MCP tool registry is cached at process scope. The same real backend process reported later
+graph factory accesses at **356.13 ms** and **249.4 ms**, with no repeated MCP handshakes. So the
+14-second part is a cold-process cost landing on the wrong interaction, not a 14-second tax on every
+conversation. The remaining quarter-second factory work is real and is the reason lazy graph
+construction is still the eventual backend fix, but it is not the defect the researcher felt.
+
+### The health check claimed a boundary the server does not provide
+
+`LangGraphClient::is_healthy` documented `/ok` as meaning *the server is up and the graph is
+loaded*. The log had `/ok` answering before any factory call, then `Slow graph load` on the first
+state request. The comment now says what the endpoint proves: HTTP readiness only.
+
+Three candidate warm-up routes were exercised against the installed LangGraph API 0.9.0:
+
+- `GET /assistants/agent/schemas` returns 422 because this version requires a UUID there.
+- `POST /assistants/search {"limit":1}` returns without loading the graph.
+- Creating one assistant with `graph_id: "agent"`, then requesting its `/schemas`, reaches the
+  graph factory. Repeating the create with a fixed UUID plus `if_exists: "do_nothing"` returned
+  200 both times, so launches converge on one internal record rather than accumulating them.
+
+The diagnostic shell deliberately did not extract the app's keychain secrets, so its schema probe
+stopped at the expected `ASTA_API_KEY` check. The earlier real app log supplies the successful,
+credentialed timing and the complete MCP sequence.
+
+### Warm the graph without making the sidebar wait for it
+
+Graph warm-up stays separate from backend warm-up. As soon as `/ok` answers, the UI refreshes the
+conversation list and project spine, then says **loading research tools…** while the fixed internal
+assistant's schema request constructs the graph. A 60-second request budget matches the existing
+backend health budget: hotel Wi-Fi may make one MCP host unreachable, but it cannot leave the
+desktop claiming to start forever. Failure is logged and the status says the tools are not ready;
+it does not invent success.
+
+This intentionally does not add a sidebar cache. §154 and §166 already show what happens when the
+client remembers conversation facts after the backend has deleted or reclassified them, and the
+measured warm `/threads/search` is not slow enough to justify a second registry.
+
+The first process still spends roughly 15 seconds connecting to four MCP servers sequentially; the
+client change moves that cost off the first click, it does not erase it. Gathering those clients
+concurrently, and ultimately keeping read-only state routes out of graph construction entirely,
+belong in the protected Python backend and remain the next performance work.
+
+*Twenty-eighth: readiness is not one fact. A socket can answer, history can be listed, and the agent
+can still be fifteen seconds away from usable.*
+
+
+## 177. The app had a spinner and never showed it when it mattered (2026-08-13)
+
+> *"The delay at loading the conversations doesn't show any animation that says loading."*
+
+There **is** a moving mark. It has been in the status bar since §51, four braille frames on a
+repeating animation, and the comment beside it says exactly why:
+
+> *"a still window during that reads as a hang, which is the single most common reason someone
+> kills an app that was working fine."*
+
+It is shown `when(self.streaming || self.running_fix.is_some())`. So it appears while a turn
+streams — when the transcript is already filling with tokens and nobody could mistake the app for
+stuck — and stays hidden through the two longest silences in the product: the fifteen seconds of
+graph construction at launch (§176), and the pause while a conversation loads. The right reasoning,
+attached to the wrong condition.
+
+### One question instead of two booleans at a call site
+
+`is_waiting()` gathers all five: a streaming turn, a running setup fix, the graph warming, a
+conversation opening, and the conversation list not yet loaded. The status bar asks that rather
+than naming states, so the next wait somebody adds is covered by adding it to one predicate instead
+of being forgotten in a `when`.
+
+Two of those needed a flag. `opening` and `warming` exist because the app knew about both only as
+*prose* — `"opening…"`, `"loading research tools…"` — and prose cannot be asked a question. That is
+§79's rule again: matching on a message to discover a fact is how the two get out of step.
+
+### And a second one, where the researcher is looking
+
+The status bar is at the bottom of the window; the wait being complained about is in the sidebar at
+the top left, under a heading that already said `Loading your conversations…` and said it
+motionlessly. There is a mark beside it now, muted rather than accent — this reports a state, and
+in this app the accent means *act on me*.
+
+`ui::Spinner` is a component for the reason every other one in that module is: the version that
+existed was fifteen lines inline at one call site, so the second place that needed it got a
+sentence instead.
+
+*Twenty-ninth: a feature that exists and is wired to the wrong condition is harder to find than one
+that was never built, because the code review that would catch it sees the feature and stops.*
+
+
+## 178. An invitation to start, over a conversation already chosen (2026-08-13)
+
+> *"When I click a conversation and it is opening, I would like to see it at the middle panel
+> rather than at the bottom left."*
+
+`open_conversation` clears the transcript before its fetch lands, so for the width of that request
+`self.transcript.is_empty()` is true and the centre drew the empty state — *"What are you working
+on?"*, with three suggestions for starting something. Offered over a conversation the researcher
+had just chosen, because the app had nothing else to draw there.
+
+§177 put the honest report in the status bar, which is the right place for a *second* copy and the
+wrong place for the only one: the bottom-left corner is the furthest point in the window from the
+row that was clicked and from the space the answer is about to fill.
+
+The centre now says which wait it is, in the place the result will appear.
+
+Deliberately plain — a mark and a sentence. The obvious upgrade is a skeleton of grey bars, and
+that is the one to be careful with: it has to guess how many messages are coming and how tall each
+is, and a wrong guess makes the real transcript jump when it arrives. Recorded as an open item
+rather than improvised here, because "cool" and "does not lie about what is coming" are two
+requirements and only one of them is free.
+
+*Thirtieth: an empty state is an answer to "there is nothing here", not to "I do not have it yet".
+The app had one string for both, so it gave the confident answer to the uncertain question.*
+
+## 179. The feature nobody could find, and the question it ate (2026-08-13)
+
+§28 built "local file → analysis" — the MVP's *one thing the web app cannot do* — and then
+closed with a line that stayed true for twelve days: **"never dropped anything."** Reading it
+before verifying it found two defects that a live drop would have shown in about four seconds,
+and one that it would not have shown at all.
+
+### It overwrote the question
+
+`files_dropped` called `composer.set_text(prompt)` unconditionally. So the sequence a person
+actually performs — decide what to ask, type it, *then* go and fetch the file — destroyed the
+first step at the last one. Silently: the composer simply held different text than the one they
+had written, with nothing to say it had been replaced.
+
+The composer now keeps what is there and puts the paths underneath it, after one blank line. It
+adds no prose of its own, because a prepared sentence appended to somebody's question reads as a
+second question arguing with the first about what to do with the file. *(This first kept the
+prepared sentence for the empty composer. §180 removed that too, on sight.)*
+
+### It was invisible
+
+Dropping was announced in one line of the **empty state** — a screen that vanishes the moment a
+conversation has anything in it. From the second turn onwards, nothing in the window said the
+app took files at all.
+
+And dragging is the harder gesture on the platform this app is for. It needs Explorer and a
+*not*-maximised window arranged side by side, which is not how anybody works; a researcher who
+has just found their CSV is looking at a full-screen file manager. So the composer now carries a
+clip, left of the field, opening the platform's own chooser. Files only — Windows'
+`can_select_mixed_files_and_dirs` is `false` because `FOS_PICKFOLDERS` *toggles* the dialog
+rather than widening it, so asking for both would hand a folder picker to someone looking for a
+spreadsheet. Dragging still accepts a folder, which is the gesture that suits one.
+
+Dragging also now shows that it will be accepted: the composer lights up while a file is over
+the window. It is styled through gpui's `drag_over` rather than a flag on `Workbench`, and that
+is not a preference — `FileDropEvent::Exited` clears `active_drag` but is dispatched to no
+element, so a flag set on enter has no way to learn the drag left and would stay lit until the
+next drop.
+
+### The one a live drop would not have caught
+
+`wsl_path` translates `C:\…` to `/mnt/c/…` by reading the drive letter. A **UNC path** has none,
+so it falls through to the pass-through arm and the agent receives `//nas/shared/yield.csv` — a
+path that exists in no Linux filesystem. The turn then fails a minute later with
+`FileNotFoundError`, naming neither the share nor the reason.
+
+This would not have shown up in a test drop from the Desktop, and it is not a rare shape here: a
+CGIAR centre keeps data on network shares. `can_open` is now asked **before** anything reaches
+the composer, and the refusal names the file and the fix a non-programmer can act on — copy it
+to this computer first. Mapping the share inside the distro is the other fix and is not one to
+suggest to someone who does not code. Files that *are* reachable still go in; the ones left out
+are named rather than counted, because "3 of 4 added" leaves them hunting for which.
+
+### What is still unverified
+
+The same thing as before, and it is the user's step: no file has been dragged onto a real
+window, and no chooser has been opened on Windows. What has changed is that the code no longer
+has three defects waiting behind that gesture.
+
+*Thirty-first: "built" and "used once" are different claims, and a plan that records the first
+in the tense of the second will keep its defects for as long as nobody tries it.*
+
+## 180. The app was writing the research question (2026-08-13)
+
+> *"When we attach a file I see a prefilled text. Let's avoid that so the user can have
+> flexibility in his query."*
+
+§28 filled the composer with a whole question — *"Analyse the data in
+`/mnt/c/…/yield.csv`. Start by describing what it contains."* — and §179 kept it for the case
+where nothing had been typed yet, on the argument that it was the case §28 was written for and
+the one where a prepared sentence is genuinely useful.
+
+Seen once, that argument does not survive. **The prepared question is a guess about the
+research, written by the only participant who has not seen the data.** "Start by describing what
+it contains" is a reasonable opening for a stranger's CSV and quite wrong for a scientist who
+knows exactly what is in theirs and wants the second question, not the first. The cost of
+guessing is not that the sentence is unhelpful — it is that it has to be *deleted* before the
+real question can be typed, which is work the app created.
+
+What is left is the part the app actually knows: **where the file is**. That is genuinely worth
+having, because `/mnt/c/Users/…/2024_yield_trials_huancayo.csv` is not something anyone should
+retype, and getting the WSL spelling right is the one piece of this a researcher could not do
+themselves.
+
+So the composer gets the path and nothing else:
+
+- **Nothing typed yet** — the path, then a blank line to write under. The blank line is
+  load-bearing: `set_text` leaves the caret at the end, and without it the first character typed
+  joins onto the filename.
+- **Something typed** — the path underneath it, after a blank line, every word left alone.
+
+The status bar takes over the job the prefilled sentence was doing badly — *"added yield.csv —
+say what you want done with it"* — where it costs nothing and deletes nothing.
+
+Two things fell out. `prompt_for_dropped` is gone entirely, and with it the directory special
+case: *"Have a look at the files in …"* existed only to write a sentence, and with no sentence to
+write a folder is a path like any other. The `directories: &[bool]` parameter and the `is_dir()`
+call that fed it went with it — a syscall per dropped file, spent on prose.
+
+*Thirty-second: a prefilled field is a guess with the confidence of a decision. Prefill what
+cannot be got wrong — a path, a name, a number the app measured — and leave the sentence with an
+opinion in it to the person who has one.*
+
+## 181. A potato centre has more colours than its logo (2026-08-13)
+
+> *"Usually they use orange and brown but these colours are painful to see together. Because we
+> are the potato center, potatoes have a variety of beautiful colours when we talk about native
+> potatoes."*
+
+The sources agree with both halves of that observation. CIP's official branding guide names
+**`#EE7203` orange and `#5D2E00` brown** as the primary pair, then gives green, red, purple,
+magenta, yellow and cyan as its secondary publication palette. CIP's own native-potato material
+is broader and more specific to the institution's subject: more than 4,000 Andean varieties,
+with flesh and skins running through white, yellow, pink, red, purple, blue and black
+([brand guide](https://cipotato.org/site/logo/pdf/BrandingGuidelines.PDF),
+[native varieties](https://cipotato.org/potato/native-potato-varieties/),
+[potato nutrition](https://cipotato.org/potato/potatonutrition/)). The logo pair is therefore a
+rule for the logo, not an obligation to make the whole workbench orange-on-brown.
+
+Zed's [Theme Builder](https://zed.dev/theme-builder) made the other boundary explicit. It does
+not offer one global colour replacement: it separates eleven surface roles, six borders, six
+text roles, editor/navigation/element states and the status colours, with values able to link to
+one another. This app has fewer roles, but the same semantic split. A good palette here therefore
+needs a quiet surface ladder first and crop colours assigned to jobs; distributing saturated
+potato colours evenly across the window would be a poster, not a reading tool.
+
+### Papa Nativa
+
+The new built-in and fresh-install default is **Papa Nativa**:
+
+- aubergine-black surfaces, rising from `#18141C` to `#352A3C`, take the dark-purple and black
+  end of native-potato diversity without tinting every line of text;
+- cream text carries long reports; muted mauves keep timestamps and labels in the same family;
+- pink-purple is reserved for interactive controls, preserving the rule from §49/§118 that an
+  accent means *you can act here* rather than *this heading is important*;
+- green, gold, coral and highland blue remain separate success, warning, error and running
+  signals. They are the small places where the crop's variety is useful rather than noisy;
+- CIP orange survives only in `accent_soft`, as **12% orange over the surface**. `Theme` stores
+  opaque `u32` fills and the Zed importer deliberately drops alpha, so the blend is
+  pre-composited as `#3A2522`. It looks like low-alpha orange on every panel instead of changing
+  with whatever happens to be behind it.
+
+The existing six themes stay available; a saved preference also stays saved. Papa Nativa becomes
+the default only where no preference exists, because changing someone's chosen palette during an
+upgrade would turn a design improvement into a settings bug. The existing contrast and elevation
+tests run over the seventh palette unchanged: every ink/surface pair clears WCAG AA and every
+surface step still rises in luminance.
+
+### Installing without removing was only half a gallery
+
+The gallery wrote Zed JSON files into `themes/` and then forgot where each displayed palette came
+from. That was enough to install but not to uninstall, and a palette name could not recover the
+answer: one Zed file may contain a family of several names, while one file may also override a
+built-in.
+
+`ThemeEntry` now carries the exact source file alongside the name and palette. Built-ins have no
+source and no **remove** control. A palette read from disk does; removing it removes that one JSON
+file and therefore every palette the family contains. The tooltip states that scope before the
+click. If the file overrode a built-in, the bundled palette underneath is immediately reapplied.
+If it supplied a name that no longer exists, the live choice and Settings draft both fall back to
+Papa Nativa — no dead name is left to fail silently at the next launch.
+
+Deletion accepts only an immediate `.json` child of the app's own `themes/` directory. That check
+is repeated at the filesystem boundary even though the UI obtained the path from the loader: a
+stale callback should not be able to turn *remove this theme* into removal of settings or research
+data. `uninstalling_one_zed_file_removes_its_whole_family_and_nothing_beside_it` proves both sides
+with a two-palette family and a neighbouring file.
+
+### What the Windows validation found
+
+The first full run was 276/277: the UNC-drop test constructed its supposed host backend with
+`BackendConfig::default()`, which deliberately selects WSL on Windows. The assertion passed on
+Linux and failed on the target platform because its fixture changed meaning with the OS. The test
+now sets `wsl: None` explicitly; application behaviour is unchanged. The second run is **277/277**
+and `cargo clippy -p mini-me-desktop-app --all-targets` is clean.
+
+The remaining check is visual and belongs on the real window: open **Settings → Theme**, choose
+**Papa Nativa**, and inspect a long answer, a selected conversation, an approval card and a
+running specialist. The correct result is cream text on purple-black panels, pink-purple only on
+actions, and orange visible as a quiet selected-row tint — never orange text on a brown panel.
+Install any Zed theme, reopen the theme list, press **remove**, and confirm every palette from that
+installed family disappears immediately while Papa Nativa and the other built-ins cannot be
+removed.
+
+*Thirty-third: brand fidelity is not counting how many times a logo colour appears. It is keeping
+the logo exact, then using the institution's real subject matter to give the product a colour
+language suited to the work.*
+
+### §181 addendum — removing a theme is not a draft (2026-08-13, review)
+
+Two corrections found reviewing the branch before merge. The palette itself needed none: the
+contrast and elevation tests enumerate every ink against every surface, and Papa Nativa clears
+them, so *"cream stays readable on aubergine"* is machine-checked rather than asserted.
+
+**The removal did not survive Esc.** `uninstall_theme` fixed `applied_theme` and `draft.theme`
+and stopped there, and everything else in that pane is deliberately a draft — the dismiss path
+reloads `settings.toml` because *"an unsaved palette was a look, not a change"*. Deleting a file
+is not a look. So: remove the theme you are using, press Escape, and the app restored the name of
+a palette whose JSON no longer existed. `apply_theme` fell back to the default, so the window was
+painted correctly while the dropdown read `Catppuccin Mocha` — and because the name was still on
+disk, no restart cleared it. §181 claimed the opposite in prose (*"no dead name is left to fail
+silently at the next launch"*), which is the exact shape this document keeps recording: the
+sentence was true of the two places the code touched and false of the third.
+
+The stored name is now rewritten at the moment of removal, through a fresh `Settings::load()`
+rather than by saving the draft — the draft may be holding model or key edits nobody chose to
+keep. It is asked separately from the live choice because those two strings drift apart as soon
+as somebody previews a theme, and `theme_after_removal` exists so the rule can be tested against
+both.
+
+**A comment outlived its decision.** `BENCH` still opened *"Neutral paper and one deep teal. The
+default"*, and it is no longer the default. Worth more than the one-word fix, though, is what the
+paragraph under it said and this change did not answer:
+
+> *A light default is a deliberate reversal. The app opened on charcoal because editors do, and
+> this is not an editor — it is read next to a bench, a greenhouse window and a projector, and
+> those are the rooms a dark UI actually fails in.*
+
+That argument is about **rooms**, and §181's is about **colour identity**; the second does not
+refute the first, it changes the subject. Papa Nativa is the better palette on the merits and it
+is dark, so a fresh install now opens dark in a building full of greenhouses. Recorded rather than
+reverted, because the answer if it bites is a light Papa Nativa, not a return to teal — and only
+fresh installs are affected, so nobody's saved choice moves.
+
+*Thirty-fourth: when a decision is replaced, check what the old one argued, not just what it did.
+An argument about the room is not answered by an argument about the palette.*
+
+## 182. Cream is not an off-white (2026-08-13)
+
+> *"In my eyes the letters and the background compete so it disturbs the attention. Also we
+> should have a dark and a light theme for Papa Nativa."*
+
+Measuring the shipped palette turned that into two numbers, and they say the same thing:
+
+| | hue | saturation |
+|---|---|---|
+| `text` `#f2ebdd` | 40° (yellow) | **44.7%** |
+| `background` `#18141c` | 270° (violet) | 16.7% |
+
+The ink was not an off-white. It was **a colour**, at nearly half saturation, sitting 130° across
+the wheel from the ground it was set on — and carried at 15.3:1 luminance contrast, which is
+almost the maximum available and well past AAA's 7:1. Opposed chroma at near-maximum contrast is
+precisely the arrangement that vibrates. The report was not a matter of taste; it was a
+description of what those numbers do.
+
+Nothing in the suite could have caught it. `every_shipped_theme_is_readable` measures contrast,
+and cream on aubergine passes contrast *magnificently* — 15.3:1 is the problem, not the evidence
+of its absence.
+
+### The fix is two numbers
+
+The ink moved into the background's own hue family — 283°, under 10% saturation — and the
+contrast came down to 12.8:1. Still far above AAA, without the glare. **Hue belongs to surfaces
+and accents; text is not where a palette should be expressed.** The aubergine ladder is untouched,
+so the identity survives intact; what changed is that the letters stopped arguing with it.
+
+`the_ink_a_whole_answer_is_set_in_stays_near_grey` now pins it, on **channel spread** rather than
+HSL saturation — that measure explodes near white (it rates the cream 45% when its channels span
+21 of 255), so a threshold written against it would have to differ between light and dark themes
+to mean the same thing. The cap is 16: the highest body text among the eight shipped palettes is
+13, and the cream that caused the report was 21. Verified by reintroducing the cream and watching
+it fail.
+
+It applies to `text` alone. `text_muted` and `text_faint` are timestamps, labels and counts —
+small, sparse, and a tint there is part of how they read as a lesser role rather than as dimmer
+body copy. Slate's faint ink spans 23 and is right to.
+
+### The brand palette, measured rather than adapted
+
+The secondary CIP palette was supplied as swatches. Measuring all fourteen against both grounds
+found that most of them need no adjustment at all:
+
+- **Dark, shipping exactly as the brand guide prints them:** 369 C `#76B82A` (6.98:1) as
+  `success`, 137 C `#FBBA00` (9.78:1) as `warning`, Process Cyan `#009FE3` (5.70:1) as `running`.
+- **Light, likewise:** 2607 C `#56217A` (10.50:1) as `accent`, 364 C `#34752D` (5.33:1) as
+  `success`.
+
+Four needed moving, all of them for the same reason — a colour bright enough to print cannot also
+carry 4.5:1 against paper, and a print colour dark enough to sit on white cannot carry it on
+near-black. Only lightness and saturation moved; every hue is **within 3° of its source**, and
+three of the four are within 1°. That is the same rule §(Bench) already applied to its two adjusted
+inks, and it is what keeps "we use CIP's palette" a true sentence rather than a gesture.
+
+### Papa Nativa Light
+
+The counterpart §181's addendum said to build, and the reason it was worth predicting: the
+argument for a light default was never about colour identity, so a darker identity did not answer
+it. *"It is read next to a bench, a greenhouse window and a projector, and those are the rooms a
+dark UI actually fails in."* Now there is a light Papa Nativa, on the same 270–280° hue family, so
+the two read as one identity under two lights rather than as two themes.
+
+**The default is unchanged** — a fresh install still opens on the dark one. Moving it is a
+decision about where these researchers actually sit, and making that call quietly while shipping a
+palette is exactly what §181's addendum objected to.
+
+*Thirty-fifth: a passing contrast test says the text can be read, not that it is comfortable to
+read. 15:1 and 4.4:1 fail in opposite directions and only one of them has an assertion.*
+
+## 183. Measuring a reading tool with an editor's instrument (2026-08-13)
+
+> *"I still don't like these. Light is better, but remember: the users are not coders. It seems
+> these themes are for coders. Our users are scientists that read, analyze. So look on the web
+> for colour theory and how to select colours so the human eye doesn't feel overwhelmed."*
+
+The first half of that is a genre diagnosis and it is correct. Every palette here had been
+borrowing from code editors — dark ground, saturated accents, syntax-colour habits — and an
+editor is a tool for scanning short lines of structured symbols. A scientist reading a two-page
+answer needs the opposite: a room that holds still. The second half turned out to be the more
+useful instruction, because the published guidance disagrees with what this repo had been
+measuring.
+
+### WCAG 2 is the wrong instrument for a dark theme
+
+APCA's own documentation is blunt: WCAG 2 *"far overstates contrast for dark colors to the point
+that 4.5:1 can be functionally unreadable"*, and *"cannot be used for guidance designing dark
+mode"* — because reading performance differs between polarities at the same ratio, and one fixed
+formula cannot model both.
+
+Measuring the shipped palette in APCA found what the eye had already reported:
+
+| | APCA | WCAG 2 |
+|---|---|---|
+| body text on background | Lc 82 | 12.8:1 |
+| **accent on surface** | **Lc 47** | **6.1:1** |
+
+APCA's levels are Lc 90 preferred for columns of body text, **Lc 75 the minimum**, Lc 60 the
+minimum for content text that is not body text. The accent was at **Lc 47 — under the floor for
+incidental text** — while WCAG called it a healthy 6.1:1 and every test passed. And this app
+draws filenames and column names in the accent, so in the transcript that colour is not a button
+label glanced at; it is text a researcher reads by the paragraph. Under-contrasted *and*
+over-saturated at once: chroma 0.162 against surfaces at 0.025.
+
+That is the whole of *"overwhelmed"*, in two numbers.
+
+### What the sources actually say
+
+- **No pure black, and no maximum contrast.** Pure black grounds cause halation — light text
+  blooming into the ground — worst for the roughly half of readers with astigmatism, and reading
+  speed drops measurably against a tuned dark grey. `#121212` is the commonly cited floor.
+- **Desaturate on dark.** Saturated colours produce optical vibration against dark grounds. This
+  is exactly the pink in the screenshot.
+- **Off-white, not white, for long reading on light.**
+- **OKLCH for the arithmetic.** Perceptually uniform, so an even lightness ladder *looks* even and
+  equal chroma across a set means equal visual weight. This is why the old signals could all pass
+  their tests and still fight each other: nothing had ever asked them to weigh the same.
+
+### Both palettes are now solved, not chosen
+
+Every value comes from a target rather than a judgement:
+
+- **Body text at Lc 90** in both halves — the level named as preferred for columns of body text.
+  Deliberately *not* higher: the very first cut ran at 15.3:1, near the maximum available, and
+  maximum contrast is what makes text bloom.
+- **Three ink roles at Lc 90 / 76 / 66** (dark) and 90 / 78 / 70 (light). The previous pair
+  collapsed — `text_muted` and `text_faint` came out five hex digits apart and were the same
+  colour to a reader.
+- **Signals at equal OKLCH chroma** — 0.09 on dark, 0.11 on light — against print originals of
+  0.15–0.24. Equal chroma is what stops any one status shouting.
+- **Surfaces on four even OKLCH lightness steps** at chroma 0.018 (dark) and 0.006 (light); the
+  same tint reads far stronger against paper than against near-black.
+- **One CIP hue for the room and the accent.** Both are 2607 C purple's 308°, and what separates
+  a panel from a link is *chroma alone* — 0.018 against 0.09. The four signals are 369 C, 137 C,
+  1795 C and Process Cyan, each within 1° of the printed colour.
+
+Two rules are now pinned. `apca_agrees_with_its_own_published_reference_values` checks the
+constants against the published extremes, because every threshold is meaningless if that drifts.
+`text_meant_for_reading_clears_the_apca_body_text_floor` holds body text at Lc 85 across all eight
+palettes and the accent at Lc 75 for the Papa Nativa pair — verified by putting the old accent
+back and watching it fail with *"accent is Lc 47 on surface"*.
+
+The accent floor is asserted for **two** themes, not eight, and that is recorded rather than
+quietly scoped: **Mini-Me Dark measures Lc 48 and Slate Lc 51**. Same defect, older palettes, and
+a bigger change than this one.
+
+### One disagreement, resolved by taking the stricter side
+
+`text_faint` on the light half is the single value APCA did not settle alone. At the Lc it wanted,
+it measured 4.4 against the orange-tinted row — under the WCAG floor this repo enforces. It ships
+darker than APCA asks so that both scales pass. Where two measures disagree, the palette clears
+the higher bar; neither gets discarded because it was inconvenient.
+
+*Thirty-sixth: a test suite encodes which questions you thought to ask. Eight palettes passed
+every assertion in this file while one of them was unreadable in the way a reader actually
+noticed — because nothing had asked "is this comfortable", only "is this legible".*
+
+## 184. Three pigments, three jobs (2026-08-13)
+
+> *"When I hover on buttons my eye cannot distinguish the hovering and the background."*
+>
+> *"Maintain the pale orange for the conversations and the hovering must be the magenta potato.
+> That theme must be named violet native potato, so we can create a third theme where we
+> interchange the violet and magenta."*
+
+### The hover was not faint, it was absent
+
+`picker_row` hovered to `elevated`. `menu_card` — the card those rows are drawn inside — **is**
+`elevated`. Same for the rail. So in those places the hover fill was not a small change, it was
+**the same colour**, in every theme since this file was written, and no amount of squinting was
+going to find it.
+
+Where the two did differ it borrowed the elevation ladder, and an elevation ladder is built to be
+subtle. The light potato's steps are **0.012 apart in OKLCH lightness**, about a third of what an
+eye can find on a large flat area. Two different jobs had been sharing one set of colours: *this
+panel is above that one* and *the pointer is here* need different amounts, and only one of them
+should be quiet.
+
+### The researcher's fix is better than the one being written
+
+Mid-change, the instruction above arrived, and it resolved an objection already half-written into
+the code. A hover tinted with the accent was rejected because **orange already means chosen** —
+eight rows paint `accent_soft` when selected — so a hover wearing orange would claim a row was
+picked when the pointer was only passing over it. The neutral lightness step being written
+instead was the second-best answer to that problem.
+
+Giving hover **its own pigment** dissolves it. Three CIP colours, three jobs:
+
+| | |
+|---|---|
+| 2607 C violet | what you can act on |
+| Process Magenta `#E6007E` | where the pointer is |
+| 1505 C orange, 12% | the row you chose |
+
+It is also more visible than the neutral step, because hue and lightness both move.
+
+And it makes the palette's name mean something, which is why the pair was renamed and a second
+pair added on the researcher's own construction — *"a third theme where we interchange the violet
+and magenta"*. **Violet Native Potato** and **Magenta Native Potato**, each light and dark, named
+by their accent, identical in every other value. The magenta accent is solved to the same Lc 76
+on `surface` as the violet it replaces, so it is exactly as readable and no more.
+
+### A rename is a silent theme change
+
+`apply_theme` resolves a name and falls back to the default when it finds none — right for a
+palette somebody deleted, exactly wrong for one that was renamed. Left alone, a researcher
+reading on *Papa Nativa Light* would have opened the app next morning in the dark default, with
+nothing said and nothing they did to cause it. `canonical_name` maps the retired names forward on
+read, so the picker's tick, the dropdown's label and the palette actually painted cannot
+disagree, and the new name is written back on the next save.
+
+### Where the promise stops, and why it is written down
+
+A hover fill is a **surface** for the length of the hover, and the AA sweep never saw it — so the
+first version of the check found `text_faint` at 4.33 on the light potato's own hover. Fixed by
+darkening that ink and the fill together, and both new palettes now clear 4.5 on every hover fill
+as well as every surface.
+
+Then the derived fallback was measured across the six older palettes, and there is **no fraction
+that works**:
+
+| | smallest lift that is visible | largest lift keeping inks at AA |
+|---|---|---|
+| Bench | 0.055 | 0.010 |
+| Bench Night | 0.040 | 0.025 |
+| Mini-Me Dark | 0.050 | 0.040 |
+| Slate | 0.050 | 0.025 |
+| Paper | 0.055 | 0.115 |
+| High Contrast | 0.070 | 0.190 |
+
+Four of them carry inks so close to the 4.5 floor that **every step large enough to see drops one
+under AA**. So those six keep `elevated` and a weak hover rather than gaining an unreadable one,
+`hover_over` promises nothing it cannot keep, and the test asserts only over the palettes that
+name a fill — with a count, so a filter that quietly matched nothing could not make it vacuous.
+Verified by pointing a potato hover back at `elevated` and watching it fail with *"changes it by
+1.000"*.
+
+- ⬜ **Four older palettes cannot show a hover** — Bench, Bench Night, Mini-Me Dark and Slate.
+  Fixing them means retuning their inks for headroom, which is their own job and a bigger one.
+
+*Thirty-seventh: two jobs sharing one colour is not a saving, it is a coincidence waiting to be
+noticed. Elevation and hover were the same value here for as long as the file has existed, and
+the day one theme made the ladder subtle, the other job simply stopped happening.*
+
+## 185. Silence was carrying two meanings (2026-08-13)
+
+The sources panel had a rule, and it was a good one: **only say something when something is
+wrong.** A line under every reference confirming it checked out is fourteen lines of reassurance
+nobody reads, and it buries the two that matter.
+
+The rule answers *is this broken*. The trouble is what silence then meant. Three different facts
+rendered identically:
+
+- this came out of a search, and nothing in the link was composed;
+- the model wrote a DOI down and Crossref agrees it names this paper;
+- **the model wrote this from memory and nothing has confirmed it.**
+
+The third is not an error. Barrera et al. (2016) came back real, relevant, and from a journal
+Semantic Scholar indexes poorly — which describes a great deal of CIP's own literature. It is a
+citation a **subject-matter expert has to settle**, and a researcher could not tell which ones
+those were, because they looked exactly like the verified ones.
+
+That is the thing org policy asks for, in its own words: *validate AI-generated content with
+subject matter experts*, and *disclose when generative AI has been used in your work*. Neither is
+possible if the app will not say which references it stands behind.
+
+### Origin is a different question from Verdict
+
+`references::origin(verdict, matched_in_registry)` answers **where did this come from**, and it
+needs both arguments because neither settles it alone — a citation whose own DOI named the wrong
+paper is registry-backed once Crossref finds the right one and unconfirmed when it does not, and
+the `Verdict` is `Mismatch` in both cases.
+
+Four answers, named for **what was done** rather than for what is true, which is the rule the
+rest of that module already follows. `Unconfirmed` does not mean invented; most of these are real
+papers, and saying otherwise with the app's authority is the §(references) mistake — *"does not
+appear to describe a real paper"* about a correctly cited monograph.
+
+`Pending` is the fourth and it is load-bearing. Reporting a reference as unchecked while its
+lookup is in flight is precisely the bug that told a correctly cited Magurran 1988 it matched
+nothing, mid-request. But a check that **failed** is not pending — nothing is coming back, and a
+row stuck on *"checking…"* reads as verified to anybody who looks away and returns.
+
+### Three places, one function
+
+The header counts (`SOURCES · 14 · 3 UNVERIFIED`), the row says which, and the exported `.bib`
+carries `annote = {unverified: this reference came from the model, not from a search}`. All three
+read `source_origins()`, because three re-derivations of "unverified" from two maps is three
+chances to drift apart, and a header that disagreed with its own rows would be worse than either.
+
+The export matters most. The panel can be re-read; a `.bib` in somebody's Zotero is on its own,
+and it is the copy that ends up in a manuscript.
+
+### What this also closed
+
+Every arm of the row's `match` answers *is this broken*, so falling through to `_ => None` meant
+"nothing wrong" — and `(NoIdentifier, None)`, `(Unregistered, None)` and a source with no verdict
+at all once resolution had stopped all landed there. Silence by omission rather than by decision.
+Asking a second question with an answer in every case is what closes those, rather than adding
+three more arms and waiting for the fourth.
+
+*Thirty-eighth: when a display speaks only on failure, absence of a message is doing real work —
+and it will quietly acquire every meaning nobody assigned it.*
+
+## 186. A turn billed to a provider nobody chose (2026-08-13)
+
+> *"This is weird, I set OpenRouter and I have credits."*
+
+A turn failed with **"An internal error occurred"** and a pointer to the sidecar log. The log had
+the real answer, and it was not the one the message implied:
+
+```
+openai.RateLimitError: 429 — 'You have no credits remaining. Add credits to continue
+using the API at https://platform.openai.com/settings/organization/billing/'
+```
+
+**OpenAI.** The researcher had selected OpenRouter and had credits there. The request went
+somewhere they had not chosen, and the first news of it was somebody else's billing page.
+
+### How a request reaches the wrong provider
+
+OpenRouter is not a pill of its own — it is reached through `custom` plus a base URL, which is
+the documented design and is fine. What is not fine is the path when something is missing:
+
+1. `model_choice` reads the key from the keychain under `llm:<provider>`. Keys are filed **per
+   provider**, so one pasted while another pill was selected belongs to that one.
+2. With no key, `run_request_body` omits the whole `__llm_keys` block — **and `base_url` lives
+   inside it.** So the request carries neither a credential nor an endpoint.
+3. The backend builds a bare OpenAI client, which falls back to whatever `OPENAI_API_KEY` the
+   distro holds, and posts to `api.openai.com`.
+
+Every step is locally reasonable. Together they turn a missing key into *a turn against a
+different company's account*, several minutes later, reported as an internal error.
+
+### It was already known, and deliberately not acted on
+
+`problems()` has computed exactly this since §20 — *"No API key stored for X."* — and `main`
+says what it did with it, in its own comment: **"Warned, not fatal: the app still opens, which is
+where the user fixes it."**
+
+That reasoning holds for *opening the app*, and does not survive being extended to running a
+turn. There is no warning to read in a failure with no message. `misdirects_a_turn` now refuses
+the turn and opens Settings › Model on the sentence that explains it.
+
+**Only the two failures that are silent.** A wrong model id is not blocked: it fails loudly, at
+the provider that was chosen, in a sentence naming the model — and refusing it would stop
+somebody trying a model released this week, which §58 already decided against.
+
+### Choosing a provider now takes a decision
+
+> *"Also a modal that confirms the user when he sets the providers, and when he wants to change
+> the providers there must appear a modal that the user must confirm."*
+
+Which provider is selected decides **which account is billed**, and the only thing that said so
+was which pill was lit — one click, no confirmation, no statement of consequence. The pill now
+stages the change and a modal states the three facts a person needs, read from the keychain and
+the settings rather than from what the panel happens to show:
+
+- whether a key exists **for the provider being moved to**, said plainly *because keys are filed
+  per provider* — which is precisely how this one went missing;
+- that a custom endpoint needs its base URL, and what OpenRouter's is;
+- which model id it is about to be set to, since changing the provider changes that too.
+
+It mounts **above** the Settings pane and is dismissed **before** it, neither of which is
+cosmetic: the pill that raises it lives inside that pane, so a confirmation drawn underneath
+would be invisible, and an Escape that closed the pane first would leave the confirmation
+orphaned over the workbench.
+
+*Thirty-ninth: "warned, not fatal" is a judgement about one moment, and it does not travel. The
+warning was written for a launch that could still be fixed, and then covered a turn where there
+was nothing to read it in.*
+
+## 187. The specialist was on a different account (2026-08-13)
+
+> *"My hypothesis is that the subagents are not getting the default model at the top."*
+
+Right, and the mechanism is worse than a subagent ignoring the default: **it had been given an
+explicit one, from a different provider, with nothing on screen to say so.**
+
+The settings pane showed the coordinator on **Custom (OpenAI-compatible)** with
+`openai/gpt-5.4` — an OpenRouter id, correctly set, on an account with credits. Below it,
+`academic_researcher` read **`gpt-4.1`**. The failing turn was a literature search, which
+delegates to exactly that specialist. §186 had just fixed the coordinator's path and the turn
+failed anyway, which is what made the hypothesis worth taking seriously.
+
+### One list, five providers, and a slash
+
+`specialist_list` offers every model from all five providers, flat. With the coordinator on
+`custom`, that list contains:
+
+| row | provider | account billed |
+|---|---|---|
+| `gpt-4.1` | `openai` | the OpenAI account |
+| `openai/gpt-4o-mini` | `custom` | the OpenRouter account |
+
+**A slash.** That was the entire visible difference between "runs where the rest of your work
+runs" and "runs on a different company's bill".
+
+The row *could* have said which provider it belonged to — the code computes it — but only
+rendered it when the key was **missing**, on this reasoning, quoted from the line itself:
+
+> *"Named only when it would be a second provider to key, since that is the thing a researcher
+> has to act on before the choice can work."*
+
+That is a defensible sentence about **whether a choice will function**, and this researcher had
+an OpenAI key, so it functioned perfectly and billed the wrong account. The same shape as §186,
+one screen down: the app said what was *broken* and never what it would *cost*.
+
+### Every row that leaves the coordinator now says so
+
+`specialist_note` annotates any model from a provider other than the one running the
+conversation — keyed or not — and the two messages are deliberately different, because they ask
+for different things:
+
+- **`OpenAI — no key stored`** — fix this before it works.
+- **`OpenAI — billed separately`** — know this before it costs.
+
+`None` only for the coordinator's own provider, where the models are billed exactly where every
+other turn is and a note on every row would be noise.
+
+- ⬜ **Nothing stops a specialist being pointed at an unkeyed provider.** §186 refuses a *turn*
+  whose coordinator has no key; an override to a provider with none still saves, and fails inside
+  the subagent minutes later. The gate reads the coordinator's settings alone. Recorded because
+  the fix is the same shape and the failure is slower and harder to read.
+
+*Fortieth: "is this configured correctly" and "what will this spend" are different questions, and
+a UI that only answers the first will let somebody spend confidently.*
+
+## 188. Ask the provider what it has (2026-08-13)
+
+> *"We need to have current available models updated from providers api… For the case of
+> openrouter which have more models including opensource models like kimi or deepseek we should
+> have a longer list."*
+>
+> *"The error happened when I selected gpt-4.1 even when from openrouter I should be able to use
+> it. So I'm thinking that you are using the url from openai and not the one from openrouter."*
+
+The second observation is the sharper one, and §187's account was true but incomplete. `gpt-4.1`
+came from the **openai** provider's curated list, so the app sent `openai::gpt-4.1` and OpenAI's
+URL — correct behaviour for that row, and not at all what the researcher meant. What they meant
+was *gpt-4.1 through OpenRouter*, which is a real model with a real id: **`openai/gpt-4.1`**. It
+was not offered, because the `custom` provider's curated list holds four entries and that is not
+one of them.
+
+So the fix is not a label. It is that this repo should stop guessing.
+
+### The list comes from the provider now
+
+`catalogue.rs` asks each provider's `/models` endpoint, caches the answer beside `settings.toml`,
+and refreshes when it is a day old. §58 already said why a hand-written list could not hold —
+*"a provider ships a model the day after a release"* — and that argument is merely uncomfortable
+for Anthropic's four and fatal for a gateway carrying several hundred, including the open-weight
+models a research centre has good reason to prefer.
+
+Three decisions worth stating:
+
+- **The provider replaces the curated list; it never merges with it.** A union would keep retired
+  ids in the picker forever, and the provider is the authority on this.
+- **Fetched when the Model pane opens, not on a timer.** A background poll spends a researcher's
+  key on a request they cannot see, and the only moment the answer matters is when somebody is
+  reading the list.
+- **Silent on failure.** Offline, rate-limited, or a gateway that does not serve `/models` all
+  mean *keep the list you have*. This is a nicety on top of something that already works.
+
+What leaves the machine is one `GET` asking "what models do you have", carrying the key that
+provider already receives on every turn. OpenRouter's needs no key at all, which is what lets its
+catalogue arrive before anything is configured.
+
+### Two things that fell out of it
+
+**The rows were unreadable.** `picker_row` put the label and its note in one row with
+`justify_between`, and since the label is the one that ellipsises, `gpt-4.1 · OpenAI — billed
+separately` rendered as **`gpt-4.`** — *"I cannot read the complete model name."* They stack now,
+which the gateway ids need anyway: `meta-llama/llama-3.3-70b-instruct` is not a thing to fit
+beside anything.
+
+**A filter stopped being optional.** Four names in a scroll box is a list; four hundred is a
+haystack. The model picker gets the same fuzzy field the theme picker has, so `kimi` finds
+`moonshotai/kimi-k2` — and says *"No model matches that"* rather than showing an empty box, since
+a filter matching nothing and a provider returning nothing look identical otherwise.
+
+*Forty-first: a curated list is a claim about someone else's product, and it is wrong from the
+day it is written. The only question is whether anybody notices before the person who needed the
+model that was missing.*
+
+## 189. Vivid, and the valley in the middle (2026-08-13)
+
+> *"The magenta in Magenta Native Potato Light is too dark. I think the colour is #ed028c… I want
+> vivid colours not opaque ones."* Then, clarifying: *"The vivid colours I want them for the boxes
+> not for the text."*
+
+That clarification is the whole design. A colour used **as text** and a colour used **as a fill**
+are held to opposite constraints, and the first version of this measured the wrong one.
+
+`#ed028c` measures OKLCH L 0.62, C 0.253 — and against the light palette:
+
+| | |
+|---|---|
+| as text, on `surface` | WCAG **3.44**, APCA **Lc 61** |
+| as a fill, under this app's dark ink | WCAG **3.06** |
+| as a fill, under white | WCAG **4.21** |
+
+**Every one of those is under the floor.** That is not a limitation of the palette; it is a
+property of that lightness. `#ed028c` sits in the valley where a colour is too dark to carry dark
+text and too light to carry white — the one place nothing can be read.
+
+### What ships
+
+One step darker, at the researcher's own hue and chroma, so an ink can sit on it: **`#d23482`**
+(white at 4.61) and **`#a63deb`** (white at 4.68). Chroma **0.20 and 0.25**, against the 0.05 the
+tints had — four to five times more colour, which is what *vivid* was asking for.
+
+`ink_on` picks the ink by measuring the fill rather than assuming white. Measured per fill, not
+stored per theme, because the answer differs across the four surfaces a row can sit on and an
+imported palette has no such field. A fill the page's own ink already reads on **keeps it** —
+flipping to white on a pale tint would be a change nobody asked for and a worse-looking one.
+
+### The label had to stop naming its own colour
+
+`ui::Label::colour` writes the colour onto the element, and an element's own style beats a
+parent's refinement — the same rule that stops `text_color` reaching an SVG child (§157). So a
+label that names its colour can never change with the row it sits in, and a hover that flips its
+ink was impossible while every row did exactly that.
+
+`Label::inherit()` paints no colour at all, and the row states both: the resting colour on
+itself, the hover colour in the refinement. That is the only arrangement in which the two can
+disagree, which is what a state *is*.
+
+- ✅ **Scrolling a list inside the settings modal no longer scrolls the modal too** — reported
+  fixed by the researcher on 2026-08-13.
+- ✅ **The sources panel lists four and opens the rest** (§194). **Awaiting eyes.**
+
+*Forty-second: ask what a colour is *for* before measuring it. Text on a fill and a fill under
+text are different questions with different floors, and I answered the wrong one first.*
+
+## 190. Three constraints, and only two of them fit (2026-08-13)
+
+> *"To the vivid boxes put an alpha around 0.7."*
+
+Measured, that asks for three things at once against a near-white page: **saturated**, **70% over
+the surface**, and **an ink that can be read on the result**. Any two hold. All three do not.
+
+At 0.7 the §189 fills composite to white-at-3.03 and dark-ink-at-4.25 — back in the same valley
+`#ed028c` was in, one step along. Solving for a base whose composite carries the *page's* ink
+collapses straight back to the pale tints the request was trying to leave. So the base moves down
+instead, and the composite carries **white**: `#bc4b8d` and `#a64bd2`, chroma 0.19 and 0.24 on the
+base. Softer than §189, still four times a tint.
+
+### And a regression, shipped by me
+
+§188 stacked `picker_row` into a column so a note could not eat the model name. It also set
+`items_start`, which sets the cross axis to **content width** — and `Label::ellipsis` works by
+growing to fill a width and then truncating to it. With nothing to fill, every row truncated to a
+bare `…`, and the specialist picker became a list of ellipses: *"I can't select models for the
+subagents."*
+
+That is §59 exactly, one axis over, and §184 hit the same rule from the other side (*"`items_start`
+leaves children at content height, so a `flex_grow` child has nothing to grow into"*). Three times
+now. The rule, stated so it can be looked up: **`items_start` and `flex_grow` are opposites, on
+whichever axis they meet.** One says *be your content*, the other says *be your container*.
+
+*Forty-third: a fix that stacks a row changes which axis every child was relying on, and the child
+relying on it was two files away.*
+
+## 191. A key belongs to a company, not to a conversation (2026-08-13)
+
+> *"Check how Mini-Me's frontend structures the settings for the providers… Zed has a modal to
+> manage AI providers. Analyse and select the best, or join ideas."*
+
+Both references were read, and they agree — which made the decision easy rather than a matter of
+taste.
+
+**Mini-Me's own web panel** (`ModelConfigPanel.tsx`) lists every provider at once with a
+*Connected* badge, an Add-key / Disconnect control per row, and a `N connected` summary. Its
+subagent picker uses `<optgroup label={provider.name}>` with `{m.label} · {m.ctx}`.
+
+**Zed's LLM Providers page** is the same shape: one page, every provider, each with its own API
+key field and its own status.
+
+Neither makes you *switch to* a provider in order to configure it. This app did, and that was the
+whole defect: `Settings::key_name()` is `llm:<selected provider>`, so filing an Anthropic key
+meant selecting Anthropic, pasting, saving and switching back — with §186's confirmation
+interrupting each hop. Meanwhile the request path had supported a key per provider since §20:
+`extra_keys` gathers one for every provider a specialist names, and the backend derives the same
+set from the specs. **The plumbing was there and the pane was the bottleneck.**
+
+### What was taken from each
+
+- **From both: every provider visible at once.** A row of chips above the key field, each ticked
+  where a key is filed, so *which of these am I missing* is one glance rather than five clicks.
+  Choosing one retargets the field and **nothing else** — the coordinator does not move, so no
+  confirmation is owed and none is shown.
+- **From the web panel: the company's name once, over its models.** The specialist picker now
+  groups under provider headings. That is not only tidiness: it returns the width that
+  `OpenAI — billed separately`, repeated on every row, was taking from the model id — which is
+  the same width `meta-llama/llama-3.3-70b-instruct` needs.
+
+`key_target` is separate state from `draft.provider` for exactly the reason the references imply:
+a key is a fact about an account, and which conversation is running is a fact about right now.
+
+*Forty-fourth: when two independent designs converge, the argument is over. The interesting
+question is what they both refused to do — and neither of them makes you switch context to
+configure something.*
+
+## 192. The same flex rule, from the third side (2026-08-13)
+
+> *"I cannot see the model so I cannot select! Each subagent selection must have a filtering as
+> the main model."*
+
+§190 diagnosed the bare `…` rows as `items_start` giving children content width, removed it, and
+was **wrong** — or rather, right about a real problem and not about this one. The rows were still
+ellipses afterwards.
+
+`Label::ellipsis` is `flex_grow().truncate()`, and the comment on it says exactly why:
+*"`flex_grow` is what gives it a width to truncate to."* True **in a row**. §188 turned
+`picker_row` into a **column**, and in a column `flex_grow` grows the *height* — the width stays
+at content, and content width for a truncating label is nothing.
+
+So the same rule has now produced three different bugs from three different directions:
+
+| | |
+|---|---|
+| §59 | no `flex_grow` in a row → bare `…` |
+| §184 | `items_start` in a column → a `flex_grow` child with no height |
+| §192 | `flex_grow` in a **column** → a label with no width |
+
+The fix is `w_full()` *and* `flex_grow()`: the first supplies width in either direction, the
+second still does §59's job where the parent is a row. One label that works in both, rather than
+a rule about which container it is allowed to sit in.
+
+### And the filter the grouping made necessary
+
+Grouping under provider headings (§191) made the list *longer*, not shorter — four catalogues
+stacked instead of one. The specialist picker gets the same fuzzy field the coordinator's has, and
+shares the same entity, since only one picker is open at a time and both ask the same question of
+the same catalogue. A provider whose whole catalogue filters out drops its heading too, or the
+result is a column of company names with nothing underneath them.
+
+*Forty-fifth: a comment that says why a line is there is only true of the container it was written
+in. "`flex_grow` gives it a width" was correct, load-bearing, and became false the moment
+something above it changed direction.*
+
+## 193. Settled by comparison, not by reasoning (2026-08-13)
+
+> *"The ellipsis is not fixed."* — third report, after §190 and §192 each fixed a real thing that
+> was not this.
+
+Three attempts, three plausible mechanisms, three wrong answers. What settled it was not a fourth
+theory but a **comparison already on screen**: the provider headings added in §191 sit two lines
+away in the same list, are the same `ui::Label`, and render their text correctly. The only
+difference between them and the rows is `.ellipsis()` — `overflow_hidden` + `whitespace_nowrap`
++ `text_ellipsis`.
+
+So the truncate path is removed from `picker_row`. A row that is already a column has somewhere
+to put a long id: it wraps. Wrapping is worse than truncating and **enormously** better than
+showing nothing, which is what three rounds of clever fixes had shipped.
+
+The rule that failed here is not a flex rule. It is that I kept reasoning about layout I could not
+see, in a window I cannot open, while a working counter-example sat in the same function.
+
+### Softness, matched to the orange rather than chosen
+
+> *"If you see the softness of the orange, we should simulate that softness for the potato light
+> themes."*
+
+The orange is CIP 1505 C at **12%** over the surface, and that number was already in the file. The
+potato hovers now use the same 12% of their own pigment — `#f9dbef` and `#ecdbf6` — which is the
+literal answer to *simulate that softness*, and it means the fills stop needing an ink flip: dark
+text reads on them at 5.01 and 4.89.
+
+§189's vivid fills and §190's 70% composites were both answers to *"vivid"* that arrived before
+the reference point did. The orange was the reference all along.
+
+*Forty-sixth: when three fixes fail, stop generating a fourth explanation and go looking for the
+thing that already works. It is usually adjacent.*
+
+## 194. The reference list is a list, not a slideshow (2026-08-13)
+
+> *"Let's change the UI of sources like we did for the images. It's more ordered rather than
+> showing a long list of papers. And when the user clicks, instead of a sliding visualiser he can
+> see a nice list that can scroll in y direction. Like OS systems do in file explorers."*
+
+Twenty-six references rendered in full is a wall the researcher scrolls past to reach the files
+underneath — the same problem the images had before §152 put them behind one tile. The panel now
+shows **four** and offers `+22 more · open all`.
+
+**And deliberately not the slider the images got.** That distinction is the request's, and it is
+right: a figure is one thing you look at and the next is a different thing, so paging suits it. A
+reference list is one object you read *down*. Paging through citations one at a time would be the
+wrong gesture for the same reason paging through a folder would be.
+
+So the modal is a scroll region, 720px wide, holding every reference in the same rows the panel
+draws — **the same function**, called with `None` instead of `Some(4)`. Two renderers would be two
+places for the unverified mark or the link to go missing from one and not the other, and §185 put
+that mark there precisely so a researcher could trust its absence.
+
+The footer carries §185's count in words rather than as a number: *"3 of these came from the model
+rather than from a search — confirm them before citing."* Same function as the header, so the two
+cannot disagree.
+
+*Forty-seventh: two collections that look alike on screen can still want opposite gestures. What
+decides is whether the items are alternatives to each other or parts of one thing.*
+
+## 195. The citation is the target (2026-08-13)
+
+> *"I would like to have a hover colouring when I'm hovering a paper, so when I click it I'll be
+> redirected to the web page of the paper."*
+
+A twelve-pixel word reading `link` at the end of a four-line citation is a target you *aim* at.
+The citation is the thing being pointed at, so it should be the thing you press — and §194 made
+that plain by turning the list into something you read down, where the rows are the objects and
+the word at the end of each is furniture.
+
+The whole row now opens the paper and lights up to say so, using the same `hover_over` fill every
+other list uses, which since §193 is the orange's own 12% softness.
+
+**Only where there is somewhere to go.** A reference nothing could resolve gets no hover and no
+pointer: a row that lights up and then does nothing is worse than one that never offered, and
+§185 already marks those as unverified in words. The `link` word stays, because it says *before*
+you hover which rows have a destination — the hover confirms it, it does not announce it.
+
+*Forty-eighth: an affordance placed beside the content is a second thing to find. Making the
+content itself the control removes the search.*
+
+## 196. Restored the buckets and forgot the sources (2026-08-13)
+
+> *"When I reload the conversation, I cannot see the interaction of sources."*
+
+Two lists render the same references, and only one of them survived a reload.
+
+`open_conversation` restores `buckets`, `project`, `jobs` and `tasks` from the reopened
+snapshot — and not `sources`. So a reopened conversation showed the **generic bucket
+rendering**: a name, a count, and `+13 more`. Everything §185 through §195 built lives on
+`self.sources` — the unverified count, the provenance note, the link, the row you can press — and
+all of it was simply absent.
+
+What made this hard to see is that the two look **similar enough to be mistaken for each other**.
+Both say "sources" and a number. The bucket version is not obviously a fallback; it is just a
+quieter list. So the symptom read as *the feature is broken* rather than *a different renderer is
+showing*.
+
+`reports` was missing from the same block for the same reason, and is restored with it.
+
+- ⬜ **Two renderers for one collection.** The research panel draws `sources` from `buckets` when
+  the structured list is empty, and from `self.sources` when it is not. That is now correct in
+  both states and still two code paths for one thing — which is how this happened. The bucket
+  fallback should defer to the structured list rather than sit beside it.
+
+*Forty-ninth: a fallback that looks like the real thing is worse than one that looks broken. Six
+sections of work were invisible and the screen looked fine.*
+
+## 197. A filter for the reference list, and the flake I kept explaining away (2026-08-13)
+
+> *"Add a search bar in the modal panel when I open the sources so the user can filter."*
+
+The open list gets the same fuzzy field every other list here has, scored against **the citation
+as written** — which is what a researcher remembers: an author, a year, a word from the title.
+
+Two details that are not obvious:
+
+- **The field sits outside the scroll region.** `Modal::body` is itself a scroller, so a filter
+  placed inside it scrolls away from the list it filters. The inner `max_h` means the body's own
+  content fits and only the list moves.
+- **References are numbered before filtering.** `[3]` has to keep meaning the third reference of
+  the answer, because the prose points at it. A filtered list that renumbers is a list that
+  disagrees with the text above it.
+
+The panel's four are deliberately not filtered: a filter over a preview showing four of seventeen
+is a filter whose result you cannot see.
+
+### And the flake, which was mine
+
+A test had been failing about one run in four for the last several sections, and I called it *"a
+stale build"* three times without proving it. It is not. **`apply` writes the live theme to global
+atomics** — the whole design of this file, since free rendering helpers have no `Context` to reach
+a GPUI global through — and `cargo test` runs tests in parallel. Three tests call `apply` and then
+read `text()` or `ink_on()`. Whichever lost the race failed.
+
+A `THEME_LOCK` now serialises them, taken as the first statement of each, and recovering from
+poisoning so one panicking test does not fail the other two for a different reason. Five
+consecutive clean runs.
+
+Worth saying plainly: I attributed a real race to a build artefact three times because the rerun
+was always green. **A test that passes on retry is evidence of a race, not evidence of nothing.**
+
+*Fiftieth: "it passed the second time" is the beginning of an investigation, not the end of one.*
+
+## 198. The result is already on disk (2026-08-13)
+
+> *"When a background task has a success, we should see a modal button that the user can press
+> and that serves as a check status, so the user doesn't type it every time in the chatbox."*
+
+Asked which of two things the button should do — open what the worker produced, or send the
+question on the researcher's behalf — the answer was **open what it produced**. That is the
+cheaper and the truer one: a finished worker's output is *already on disk*, and asking a model to
+describe files it wrote ten minutes ago costs a turn to get a worse version of what is sitting in
+a folder.
+
+`worker_dir` finds it. A worker runs on its **own** LangGraph thread but writes **inside its
+parent's folder** — the overlay composes `[conversation_thread, worker_thread]` when the two
+differ, which is what §151 verified live, with plots at `<task>/guinea_pig_eda_output/plots/…`
+rather than in a sibling directory nobody would think to open.
+
+Three things it does not do, each on purpose:
+
+- **No turn, no model call, nothing billed.** The button is instant because the answer already
+  exists.
+- **Falls back to the conversation's folder** when the worker wrote nothing of its own. A button
+  that opens a directory which does not exist is worse than one that opens the folder above it
+  and lets somebody look. A *file* of that name is not a folder either, and is not offered as one.
+- **Names the specialist** — *"Show what exploratory data analysis produced"*. Several workers run
+  at once (§43), and a column of identical buttons is one you have to count rows to use.
+
+*Fifty-first: before building a way to ask for something, check whether it is already sitting
+somewhere. The fastest request is the one that turns out to be a lookup.*
+
+## 199. Who made this, and what are we here for (2026-08-14)
+
+> *"I don't know the names of the subagents that produced this output. The name of the subagent
+> must appear in the provenance so I can know the path of work. This is related to: I cannot
+> modify the project mission."*
+
+Two complaints, one screenshot, and they really are related: both are the panel showing a fact and
+withholding the thing behind it.
+
+### The files did not say who wrote them
+
+`FILES · 26`, then `15 images`, then `Background task files`. Three headings, none of which names a
+producer. §152 had removed the 36-character UUID from the folder heading as app bookkeeping, which
+it is — but that UUID *is* the attribution. The background worker runs on its own thread and writes
+into a folder named after it, so the folder is the record of who produced the file, and stripping
+it left the only exact provenance the client has on the cutting-room floor.
+
+So the worker's name **takes the UUID's place** rather than disappearing with it. `background
+worker / plots`, not `plots`; `5 images from background worker`, not fifteen images from nowhere.
+
+And the image tray had to stop being one tray. §152 put every image in one grid because images are
+what a person opens the panel to look at — right within one body of work, wrong across two. A
+researcher reading *"15 images"* was looking at the conversation's plots and a worker's plots in
+one strip with no boundary drawn. `by_producer` now splits before `split_images` does, so
+"together" means together *with the rest of that job's output*. A background worker already has its
+own job row, its own folder and its own button; its figures are a separate body of work by the same
+argument.
+
+**What is deliberately not claimed.** The specialists consulted inside the conversation —
+`exploratory_data_analysis`, `academic_researcher` — share the conversation's thread and its one
+directory, and nothing on the wire says which of them wrote a given file. Matching mtimes against
+the road strip's arrival windows would produce an attribution for every file and would be a guess:
+a specialist can hand a filename to the coordinator that writes it, and two can overlap. That is
+`provenance.rs`'s own rule from §73 — *a provenance record that quietly guesses is worse than none,
+because it will be believed* — so the conversation's own files stay unlabelled, which is what
+"unlabelled" should mean. A thread with no matching task says `a background task`: the folder
+proves a worker wrote it even when the task list did not survive the reload, and "we don't know
+which" is not "nobody".
+
+### The mission could not be changed
+
+`PATCH /project` has existed the whole time. Its own docstring says what it is for — *"let the user
+read and edit it by hand — rename the mission, add a backlog item"* — and this client had never
+called it. The panel rendered `project.mission` as text with nothing to press, so a researcher
+whose opening question was a warm-up was stuck with it.
+
+Not stuck with a label, either. Two facts from the backend make this the difference between an
+annotation and a steering wheel:
+
+- `advance_project` seeds the mission from the first human message **only when it is empty**
+  (`backend/project.py:373`), so a hand-set one survives every later turn rather than being
+  overwritten by the next question.
+- `ProjectSpineMiddleware.awrap_model_call` injects the mission **into the coordinator's system
+  prompt** (`backend/middleware/project.py:136`), so editing it changes what the agent does — how
+  it delegates, what it passes the planner — and not only what the panel displays.
+
+Three decisions in the wiring:
+
+- **The write is scoped exactly like the read.** One `project_url` for both, because the overlay
+  wraps `get_project` and `patch_project` alike and a PATCH that spelled its scope differently
+  would save into a namespace the panel never reads — a save that looks like it silently did
+  nothing. There is a test for that and nothing else about the request.
+- **Not optimistic.** Renaming a conversation shows the typed name immediately because the name is
+  ours. A mission is the backend's: capped at 500 characters, runs of whitespace collapsed. The
+  panel renders what the store returned, or says why it could not — a silent failure here leaves a
+  researcher believing they redirected the agent when they did not.
+- **The `Edit` control lives in the heading, not on hover.** The mission text was already the
+  button; the affordance simply did not exist until the pointer was on it. Our researchers are not
+  developers, and an invisible affordance is not an answer to someone who has already concluded
+  there isn't one.
+
+*Fifty-second: when the client can't attribute something, say the smaller true thing. "A background
+task" is worth more than a confident guess and costs nothing to be right about.*
+
+## 200. The line nobody broke (2026-08-14)
+
+> *"When I write a long text the box doesn't increase in height, which causes I cannot see what
+> I'm typing."*
+
+§55 made the composer multi-line by splitting on `\n` and shaping one line per segment. `shape_line`
+lays out exactly one line and takes no wrap width, so a paragraph typed without pressing
+shift-enter was **one row** — shaped at its natural width, painted from the left edge, and clipped
+by §97's content mask at the right. The caret went out with the text. The field stayed one line
+tall while it happened, because the height was `newlines + 1`.
+
+Every part of that was working as written. The gap is that *nobody types their own line breaks in
+a research question*, so the only case that mattered in daily use was the one case the feature had
+never handled.
+
+**Wrapping in the string domain, not the layout domain.** `shape_text` returns wrapped lines with
+their own coordinate space; adopting it would have meant rewriting caret placement, per-row hit
+testing, the selection quads and the IME rectangle in one change. Instead `LineWrapper` — the same
+one gpui's own text element uses — is asked where each hard line has to break, and each resulting
+row is shaped on its own. Downstream, `lines` is still `Vec<(byte offset, ShapedLine)>`; there are
+simply more of them. Nothing else in the element changed.
+
+**The height is measured against the previous frame's width.** This is the one thing here that
+looks like a shortcut. Wrapping needs a width; the width is only known once layout has run. The
+alternative is `request_measured_layout`, which means giving up the `width: 100%` + `flex_grow` +
+`min_width: 120px` triple in `request_layout` — and this file has paid for that combination four
+times (§72, §88, §97, §99), each time with a field collapsed to a sliver and a placeholder painting
+out the side. The cost of using last frame's number is one stale frame while a window is being
+dragged wider, and a drag is a stream of frames. That trade is written down at the call site.
+
+**Past eight lines the box moves instead of growing.** The cap was already there; what was missing
+is that a capped box has to *follow the caret*, or a researcher on line twenty is shown lines one
+to eight. `first_row` is now remembered on the composer, because both conversions between screen
+and offset — mouse hit-testing and the IME rectangle — have to subtract it. A scrolled field that
+forgot how far it had scrolled would put the caret eight lines from where the click landed.
+
+The wrapping itself is gpui's and needs a window to measure. What this module can get wrong on its
+own is turning break points into ranges over the whole string, so `row_ranges` takes the breaks as
+a closure and the tests supply a fake one. Two of the three cases they cover are the degenerate
+ones: a break at the very end, and a break at zero, each of which would add an empty row that
+draws as a blank line nobody typed and pushes every row below it down.
+
+*Fifty-third: a feature that handles the general case and not the common one is a feature nobody
+has. "Multi-line" meant the line breaks we could see, and the ones we couldn't were the only ones
+being typed.*
+
+## 201. Ask the process that did the writing (2026-08-14)
+
+> *"And yes we need to record the write, so maybe we can do that change."*
+
+§199 named the background worker and stopped, honestly, at the specialists. `exploratory_data_analysis`
+and `academic_researcher` share the conversation's thread and its one directory, and nothing on the
+wire says which of them wrote a given file. The client could have matched file timestamps against
+the road strip's arrival windows and produced an attribution for every file; it would have been a
+guess, and `provenance.rs` refuses guesses on the grounds that a provenance record that quietly
+guesses is worse than none, because it will be believed.
+
+The answer is not a better inference. It is asking the only party that was there. **The backend is
+the writer.** It knows which delegation it is inside, because the `task` tool was handed the name;
+and it knows which files a command produced, because it started the command and can look at the
+directory afterwards.
+
+`overlay/minime_local/authorship.py` writes one JSON line per file into `.authorship.jsonl` in the
+conversation's workspace — dot-prefixed, so the client's output scan, which already skips hidden
+names, never lists the record as one of the files it explains.
+
+**Two write paths, and the second is the one that matters.**
+
+- `write` / `upload_files` are deepagents' file tools; the path is the argument.
+- `aexecute` is a shell command, usually a Python script drawing plots. The desktop app's own
+  comment has said for months that *a file written by a script inside `execute` registers no
+  artifact, and those are most of them*. So the workspace is walked after the command and anything
+  newer than its start belongs to whoever issued it. This is not the timestamp inference rejected
+  above: one process takes both readings, from the same clock the filesystem stamps with, around a
+  command it started itself. The interval is proven, not reconstructed.
+
+**Three things it declines to do.** It never descends into a nested thread folder — a background
+worker writing while the coordinator runs a command is the one case where two authors are genuinely
+active in one tree, and §199 already answers for those files. It caps one scan and *says so in the
+log* when the cap bites, because "no line in the manifest" and "there were too many files to look
+at" produce the same empty panel. And it swallows its own failures: losing a line of provenance is
+a worse panel, while raising is a turn that died after writing a file successfully — §18's rule
+about what an overlay may risk.
+
+**A `ContextVar`, not a global.** LangGraph schedules concurrent tool calls as asyncio tasks and a
+task copies the context at creation, so each delegation's name is visible only inside its own
+subtree. A module global would have the second specialist overwrite the first and both sets of
+files come out wearing one name. Same shape, same reason, as `spine.py`'s `_http_project` — and
+the async wrapper is `async def` with the `await` inside the block, which is the mistake that file
+paid for: a sync wrapper sets the variable, builds the coroutine, resets, and hands back something
+unawaited, so the name is gone by the time the subagent runs and the patch looks installed while
+doing nothing.
+
+**On the client, the folder outranks the manifest.** Inside a worker's own run the manifest records
+that worker's coordinator, so reading it first would rename `background worker` to `coordinator` —
+true of the inner graph, useless to the person reading the panel. Two rules, each exact in its own
+domain, in a fixed order. The manifest is re-read only when its size or mtime has moved: it is
+append-only and grows by a line per file, and parsing it on every frame of a streaming answer is
+the disk I/O `shape_of` is cached to avoid.
+
+Everything without a record stays unlabelled, exactly as before. Conversations that ran before this
+existed have no manifest, and a backend without the overlay armed never writes one; both keep §199's
+behaviour rather than acquiring a wrong answer.
+
+*Fifty-fourth: when the client cannot know something, check whether the server was standing right
+there when it happened. Two rounds of this were spent making inferences on the wrong side of the
+wire.*
+
+## 202. The caret had nowhere to be, and the warning cried wolf (2026-08-17)
+
+Two defects from one testing session, neither of them the feature under test.
+
+### The caret on the border
+
+> *"If you see the image, you'll see that the bar `|` is beyond the text."*
+
+The screenshot shows §200 working: text that was one clipped line is now two rows and the box grew
+to fit them. What it also shows is the caret sitting on the box's right border, a couple of pixels
+outside the text — which reads exactly like the defect §200 was supposed to fix.
+
+`LineWrapper` was asked to wrap at `bounds.size.width`, so a full row ends flush with the inside of
+the border. The caret is painted **after** the last glyph. At the end of a full row it therefore has
+nowhere to go. Four pixels of reserved width fixes it, shared by the height calculation and the
+shaping so the two cannot disagree about where a row ends.
+
+The second half is subtler and would have shown up as soon as the researcher clicked mid-text: at a
+wrap, row N's end and row N+1's start are the **same offset**. The old rule returned the first row
+whose end reached the target, so a caret at that offset drew at the far right of the row *above* the
+character it precedes. A typed newline consumes a byte and the two offsets differ, which is what
+tells the cases apart — and for a typed break the caret does belong on the upper row, where the key
+was pressed. `caret_row` now reads its answer from the same rule, so the row the box scrolls to and
+the row the caret is drawn on cannot disagree.
+
+*What settled it:* not reasoning about the wrapper, which is where the previous two composer
+diagnoses went wrong (§190, §192). The screenshot showed two rows where there had been one, so
+wrapping was working; the only thing left in the picture was where the caret was drawn.
+
+### The warning that cried wolf
+
+The same log carried this three times, after the researcher had killed the old backend and watched
+this app start a new one:
+
+> *attached to a backend that was already running — it is on the code it started with, not what
+> this app now ships.*
+
+`ensure_running` is called **once per turn**, not once per launch. It warned whenever the health
+check passed, with no regard for who had answered it — so every turn after the app spawned its own
+sidecar reported it as a leftover. §130 wrote that warning because the failure it describes is
+invisible and expensive; saying it when it is false spends the same credibility in the opposite
+direction, and it told a researcher whose restart had worked that their restart had not. It also lit
+the amber banner in the Setup pane for the rest of the session.
+
+`self.child` already knew. `try_wait` rather than `is_some`, because a child that died leaves its
+handle behind and whatever answered the health check after that is genuinely not ours — and an
+error means we cannot tell, which is the same as not knowing.
+
+*Fifty-fifth: a warning that fires when it shouldn't costs exactly what a missing one does. Both
+teach the reader to disbelieve the log.*
+
+## 203. Provably right on paper, wrong on the window (2026-08-17)
+
+§202 fixed the caret two ways and shipped both to a real Windows machine for verification. Four of
+five cases passed. The one that failed was the one the fix was *for*:
+
+> *"Clicking immediately before `has` on the lower wrapped row drew the caret at the right edge of
+> the upper row, after `row`."*
+
+The rule was right. Its inputs were not verifiable.
+
+**What the rule needs.** At a soft wrap, row N's end and row N+1's start are the *same* byte offset —
+no character was consumed to make the break. A typed newline consumes one, so the two differ. That
+single comparison is the whole distinction, and the two cases want opposite answers.
+
+**What it was comparing.** `start + ShapedLine::len()` against the next row's start. `len()` is
+exact on Windows — `direct_write.rs:666` sets it to `text.len()` — and traced on paper the redirect
+fires. On the machine it did not. Reading gpui twice did not explain it and a third reading would
+not have either: this is the same dead end as §190 and §192, and §193 already recorded what to do
+instead of arguing with code you cannot watch run.
+
+So the quantity was removed rather than explained. The **ranges are already known exactly** — they
+come out of the wrapping, before any shaping happens — and they were being thrown away and then
+reconstructed from a shaped line one layer down. Rows now carry `Range<usize>`, and `caret_row` is a
+free function over ranges alone: no shaping, no window, and every case the machine exercised is a
+unit test, including the one it failed on.
+
+That also made two other conversions exact. `index_for_mouse_position` and `position_for_offset` both
+did the same `start + len()` arithmetic, so both had the same latent dependency, and
+`position_for_offset` had a second copy of the boundary rule that could drift from the first.
+
+*What this cost:* one round trip to a machine with a screen, because the failing case cannot be
+reproduced here. Worth naming as a standing constraint rather than an accident — this project's UI
+defects keep being ones no test on this machine can see, and the cheapest response is to shrink what
+depends on the parts that need eyes.
+
+*Fifty-sixth: when a rule is right and the answer is wrong, stop re-deriving the rule and look at
+what it is reading. A correct comparison over a value you cannot verify is not a correct program.*
+
+## 204. Four reports, and one of them was my test being wrong (2026-08-17)
+
+### `End` was never a row's key
+
+> *"This doesn't work: type a line, shift-enter, then press End on the upper line. The caret must
+> stay on the upper row."*
+
+It didn't, and §203 is not why. `End` was `move_to(self.content.len())` — the end of the whole
+text — and `Home` was `move_to(0)`. So pressing `End` anywhere put the caret on the last row, which
+is exactly what was reported and has nothing to do with the wrap-boundary rule. **The test
+instruction was wrong**, and it was written by someone who had read the file that morning.
+
+Worth naming as a failure mode of its own: a verification step that asserts the wrong thing costs
+the same round trip as a bug, and it spends the tester's trust rather than mine.
+
+`Home` and `End` are now the row's, with `ctrl-home` / `ctrl-end` for the document — which is what
+every other multi-row field reserves them for.
+
+### Up and down were never bound at all
+
+> *"I don't have a scroll bar in the chatbox so I cannot go to the beginning."*
+
+The composer had `left`, `right`, `home`, `end` and no vertical motion. That was survivable while a
+row meant a typed newline; §200 made a long prompt several rows and §202 capped the box at eight, so
+a researcher eight rows in had no way back to row three. Not a missing scrollbar — a missing arrow
+key. A text field's answer to "take me back up there" is `up`, and this one had none.
+
+**Scoped to `Multiline`, not to `Composer`.** The command palette binds `up`/`down` to move its
+highlighted command, and its query field *is* a `Composer` nested inside the palette — so a
+`Composer`-scoped binding sits deeper in the dispatch tree and wins, quietly taking the palette's
+arrow keys away. Only a field that can hold a paragraph adds the identifier: the chat composer and
+the mission editor. Caught before shipping by looking for other `up` bindings, which is the check
+§84 already paid for once.
+
+### The app's own bookkeeping was in the FILES panel
+
+> *"I think we shouldn't show the provenance json file."*
+
+`provenance.json` is the road strip's record, written beside the conversation's files so it survives
+a reload. The output scan already skips hidden names, `__pycache__` and `memories` for exactly this
+reason — §173's argument was that a researcher reading a panel headed FILES will open, edit or delete
+what they find there. It just never listed this one. Now it does.
+
+### The status nobody was reading
+
+> *"We have a big bug. If I don't ask about the status the app is not checking the success or
+> failure. If I asked, the success appears even when the agent already finished his work."*
+
+The watcher is alive — it polls every four seconds and the panel's `running · data cleaning` proves
+it, because that activity string comes from the same request. What it cannot do is notice the end.
+
+`thread_state` derives status from `next`: empty means done, non-empty means running. It is written
+`state.get("next").and_then(as_array).is_some_and(is_empty)`, so a **missing** `next` reads as "not
+empty" and resolves to `running` — for as long as the app is open. The coordinator's
+`check_async_task` reads a different source and gets it right, which is precisely why asking works
+and waiting does not.
+
+Whether that is the mechanism cannot be settled from a machine with no backend on it, and §203 was
+one round trip too many spent guessing. So the value the argument needs now goes **in the log**,
+naming what the payload did carry, the moment `next` cannot be read. Fifth time in this project that
+the missing evidence was a value the program already had (§99, §91, §110, §114, §116). The fix
+follows the log line, not the other way round.
+
+*Fifty-seventh: check your test instructions against the code as carefully as the code. A wrong
+assertion and a wrong implementation are indistinguishable from the far end of the round trip.*
+
+## 205. One offset, two right answers (2026-08-17)
+
+> *"When I'm on the last line, pressing home and end works as expected. But when I'm at the
+> beginning of the prompt, pressing end directs me to the beginning of the last line."*
+
+Both halves of §204 were doing exactly what they were told, and together they were wrong.
+
+`End` goes to `row_bounds().end` — row 0's end offset. §203's rule then draws that offset on the row
+*below*, because at a soft wrap **row N's end and row N+1's start are the same byte offset**. So the
+caret went where `End` sent it and appeared where the rule put it, one row further down than anyone
+asked for.
+
+This is the affinity problem, and it has no answer in the offset alone. A wrap boundary has two
+correct screen positions and the right one depends on how the caret arrived:
+
+- **Downstream** — the lower row's start. Where a click on the lower row's first character belongs,
+  and where an inserted character lands, so it stays the default.
+- **Upstream** — the upper row's end. What `End` means by "the end of *this* row", and where
+  vertical motion belongs when it lands on a row end.
+
+`Affinity` is now carried on the composer, reset inside `move_to` so it has to be *asked* for and no
+later cursor move can inherit a stale one, and set immediately afterwards by the two operations that
+mean a specific row. `caret_row` takes it and uses it for one thing only: breaking the tie. Every
+non-boundary offset returns the same row under either value, which is what stops it becoming a second
+rule that can disagree with the first — and there is a test that asserts exactly that.
+
+A typed newline is not a tie at all. It consumes a byte, so the two offsets differ and there is
+nothing to break; `End` before a shift-enter stays put under either affinity, also tested.
+
+*What this cost:* nothing extra, because it arrived in the same round trip as the arrow keys it was
+found by. Worth noting the shape though — §203 removed an ambiguity from the *inputs* and this one was
+in the *question*. A shared boundary offset cannot be resolved by being more careful about ranges; it
+needs a second piece of information, and there was nowhere for it to come from until an operation
+existed that had an opinion.
+
+*Fifty-eighth: when two correct rules combine into a wrong answer, the missing thing is usually
+intent — not precision.*
+
+## 206. The log that was never being kept (2026-08-17)
+
+Twice in one session a diagnostic was added, the researcher was asked to grep for it, and the answer
+was empty:
+
+```
+PS> Select-String -Path ...\mini-me-app.log -Pattern 'no usable'
+PS>
+```
+
+The second time that emptiness was taken as evidence — *"`next` is present, so the missing-field
+theory is wrong"* — and it sent the next diagnosis down a path chosen by nothing at all. It was
+caught only by a follow-up check on the same file, which found no lines from that session either.
+The file was from an earlier attempt with `Tee-Object`; the run being asked about had never written to
+it.
+
+**The app kept no log.** `backend.rs` has always written the sidecar's output to
+`%TEMP%\mini-me-desktop-backend.log`, and the app's own `tracing_subscriber` wrote to stderr only —
+which for a windowed program means a console the researcher closes. Every `warn!` this project has
+added for a researcher to read has been going somewhere nobody keeps.
+
+So the app writes its own, beside the backend's, and three details are the point:
+
+- **Both destinations, not either.** A `Tee` writer: the console for whoever is watching live, the
+  file for whoever reads it afterwards. The console's result is the one returned, so a locked or full
+  file can never cost a line someone is watching arrive.
+- **Truncated per launch.** A researcher told to read this file must be reading *this* run. An
+  appended log would answer today's question with lines from Tuesday — the same failure, one step
+  removed.
+- **No ANSI.** The file exists to be grepped and pasted; the console reads fine without colour.
+
+*Related, and the reason this is its own entry rather than a footnote:* the empty grep was treated as
+a measurement. §203 already recorded the cost of reasoning past what can be observed, and this is the
+inverse mistake — believing an observation without checking the instrument was on. A grep that finds
+nothing has two explanations and only one of them is about the code.
+
+*Fifty-ninth: before a null result becomes evidence, prove the instrument was recording. "No hit"
+and "no data" print identically.*
+
+## 207. The poll that reported nothing (2026-08-17)
+
+> *"If I don't ask about the status the app is not checking the success or failure. If I asked, the
+> success appears even when the agent already finished his work."*
+
+Three rounds went into this without a single measurement, which is the part worth recording.
+
+**What is now established, from evidence rather than reading:**
+
+- *The poll succeeds.* The panel showed `running · data cleaning` and `running · exploratory data
+  analysis` — two different activity strings for two workers. `decode_async_tasks` sets
+  `activity: None` and `track_task` never copies it from a later snapshot, so an activity string on a
+  tracked task can **only** have come from `watch_task`'s own HTTP poll. That rules out a dead
+  watcher, which was the leading theory.
+- *`next` is present and is an array.* §204's warning fires when it is not, the app now keeps its own
+  log (§206), and the log from a real run carries exactly one `WARN` — the host-execution banner.
+
+Which leaves one conclusion: `next` is present and **non-empty** on a worker whose run has ended, so
+`next_is_empty` is the wrong test for "done". The coordinator's `check_async_task` reads the
+middleware's own record and says `success`, which is why asking works.
+
+And the two are not simply disagreeing about a bug — a turn in this very session had the coordinator
+report *"the folders `eda/`, `diagnostic/`, `reports/` and `scripts/` exist but are empty, so the
+background task only partially completed despite reporting success."* The middleware records that the
+run returned; the thread's checkpoint says the graph never reached its end. Both are telling the
+truth about different things, and the panel has been showing the more pessimistic one with no way to
+say why.
+
+**What this entry actually changes** is only the instrumentation, deliberately:
+
+- The watcher logs the state its decision is read from, **once per task** — status, `next`, activity.
+  Once, not per four-second poll, because a log that scrolls is a log nobody reads.
+- It logs again on every change, which is naturally rate-limited: the watcher only forwards changes.
+- The poll's failure path was `debug!`, below the default filter. A poll failing every four seconds
+  left the panel saying `running` for ever while saying nothing a researcher could see —
+  indistinguishable from a worker still working. Now `warn!`, once per task.
+
+The fix follows the value. Three guesses have already been spent, and §203 and §206 both say the same
+thing from opposite directions: do not reason past what is observed, and do not accept an observation
+until the instrument is known to be recording.
+
+*Sixtieth: a poll that cannot say what it saw is not an observation, it is a hope. Instrument the
+decision, not the outcome.*
+
+### 207a. What the instrument said (2026-08-17)
+
+One run, and the poll turned out to be right all along:
+
+```
+15:43:11  status=running      next=[model]                              activity=write todos
+15:43:15  status=running      next=[model]                              activity=ls
+15:43:45  status=interrupted  next=[HumanInTheLoopMiddleware.after_model] activity=execute
+15:44:15  status=running      next=[tools]                              activity=execute
+15:44:28  status=interrupted  next=[HumanInTheLoopMiddleware.after_model] activity=execute
+15:44:32  status=running      next=[tools]                              activity=execute
+15:44:41  status=success      next=[]                                   activity=write todos
+```
+
+`next=[]` and `status=success`, ninety seconds in, with nobody asking. **The watcher works, `next` is
+the right test, and every theory in §204 and §207 was wrong** — including the one that survived two
+eliminations.
+
+The gate rounds are worth noticing too: `interrupted` twice with `next=[HumanInTheLoopMiddleware.after_model]`,
+each cleared within seconds by the standing approval. That path is doing exactly what §31 built it for.
+
+**So what was reported?** Two different things wearing one sentence.
+
+1. *The waits were real.* The earlier runs generated 500 records and ran a full EDA across two
+   workers; four minutes of that is not a stuck panel.
+2. *And in that run the middleware was the optimistic one, not the app.* The coordinator itself said
+   so: *"the folders `eda/`, `diagnostic/`, `reports/` and `scripts/` exist but are empty — so the
+   background task only partially completed despite reporting success."* `check_async_task` read the
+   middleware's record and said `success`; the thread's `next` said there was more to do. Asking did
+   not reveal a status the app had missed — **it produced a more flattering one.** The panel was
+   right and had no way to say why.
+
+That last point is the finding, and it is the opposite of the bug report. It goes on the open list
+against the backend, beside §35's theorizer reporting a guess instead of the command's real output —
+same shape, same cost: a status a researcher believes because nothing contradicts it.
+
+*Sixty-first: when the instrument finally speaks and contradicts every theory including your own
+favourite, that is the instrument working. Three rounds of guessing were the price of not having
+built it first.*
+
+## 208. The heading cut off the thing it was added to say (2026-08-17)
+
+A screenshot of §201 working showed the group heading as `...d worker / outputs / tables`.
+
+The full label is `background worker / outputs / tables` — 35 characters into a 28-character budget,
+shortened by `distinguishing_tail`, which keeps the **tail**. §152 chose that end deliberately and was
+right at the time: its labels shared a long *prefix* (`<uuid>/eda/plots`, `<uuid>/eda/tables`) and
+differed at the end, so keeping the tail kept the information. §201 then put the producing worker's
+name at the *head* and inverted the assumption without re-checking it — so the one word the whole
+feature exists to show became the one word guaranteed to be dropped.
+
+Both ends now survive and the middle gives way: `background worker / … / tables`. If it still will not
+fit, the **head** is kept whole and the tail is trimmed, because a heading that cannot say who made
+these files is the heading §201 replaced.
+
+The budget was wrong too, and only by two characters — which is why it mattered. The heading box is
+`GRID_TILE_COMPACT × GRID_COLUMNS + GRID_GAP` = 304px less about a hundred for `click to open all`,
+so roughly 32 characters, not 28. `ui::Label` here carries no `.ellipsis()` (§193 removed it), so that
+number is the *only* thing keeping the text inside a fixed-width box — which is now said at the
+constant, and there is a test asserting the output fits every budget from 6 to 48.
+
+*Fifty-second… no: sixty-second.* **When you move information to a new position, re-check every rule
+that was written for the old one.** The truncation was not a bug when it was written; it became one
+the moment something else claimed the head.
+
+### And the background-task hunt closes
+
+Both cases now reach `status=success next=[]` unaided, measured end to end:
+
+| | light run | heavy run |
+| --- | --- | --- |
+| duration | 90s | 6m 42s |
+| approval gate rounds | 2 | 8 |
+| seconds per `execute` | ~35 | 35–43 |
+| flipped to ✓ without being asked | yes | yes |
+
+So §204's "big bug" was not a bug in the watcher. It was a long run, plus — in the original
+observation — a coordinator that reported `success` for work whose folders it then found empty. The
+app was showing the honest status and had no way to say so.
+
+What remains from it is real but different, and belongs to the deferred loading-state item: **six
+minutes of `running · execute` says nothing about how much is left.** The worker is calling
+`write todos` between commands, so a plan exists on its thread. A progress display that reads that
+plan would be worth more than any animation.
+
+## 209. Six minutes of "running", with a denominator (2026-08-17)
+
+> *"When we have these long runs, we need a status bar or something to communicate to the user the
+> status of the plan or work. I know that deepagents planifies a plan and then executes."*
+
+§208's trace is the argument: a heavy run took **6m 42s** across eight approval rounds, with the
+panel saying `running · execute` throughout. §42 had already fixed the worse version of this — the
+panel used to say only `running`, and naming the tool was a real gain — but a tool name still cannot
+answer *how much is left*.
+
+**The plan is real and was already on the wire.** `TodoListMiddleware` gives every agent a
+`write_todos` tool and keeps the result in state as `todos: list[{content, status}]`, with `status`
+one of `pending` / `in_progress` / `completed`. §207's own log shows `activity=write todos` between
+commands, so the worker maintains it live. Two feeds, both already open:
+
+- **foreground turns** — `todos` sits beside `artifacts` in the `values` frame we already decode. It
+  is agent state, not an artifact, which is why it is read from the top level.
+- **background workers** — the same `GET /threads/{id}/state` the watcher has been polling for its
+  status all along.
+
+Each agent's list is its own: `deepagents`' `_EXCLUDED_STATE_KEYS` keeps `todos` out of what a
+subagent inherits. That is what lets a plan belong to exactly one row on screen instead of being a
+pile nobody owns.
+
+**What is drawn.** The plan, as a checklist, under the row it belongs to:
+
+```
+◐ background worker                                  2 of 4
+   ✓  Generate the synthetic guinea pig dataset
+   ✓  Clean and validate the columns
+   ◐  Build the diagnostic model              execute
+   ○  Write the report
+```
+
+and one line in the status bar for whoever does not have the panel open —
+`background worker · step 3 of 4 · execute`.
+
+**Four rules, each of which something in this project already paid for:**
+
+- **No percentage, no bar, no estimate.** §73's rule — a provenance record that guesses gets
+  believed — applies to progress at least as hard. The only honest denominator is the one the agent
+  wrote down itself.
+- **No plan, no section.** `write_todos` is optional and the model skips it for simple requests, so
+  a plan is a thing that sometimes exists. §178's version of this mistake was an invitation to start
+  displayed over a conversation already chosen.
+- **`done + 1` is the step being worked on.** Two of four finished means the third is running.
+  "Step 2 of 4" would be a wrong statement about where the work is, and it is a one-character bug.
+- **Replaced, not merged.** A plan is a whole statement of current intent: the model rewrites the
+  list to reorder or drop a step, so keeping old items when a shorter list arrives would show work
+  the agent has abandoned. Guarded on non-empty for the opposite reason — a frame carrying no
+  `todos` is *silent* about the plan, not a claim there is none.
+
+The status line prefers an **unfinished worker** over the conversation's own plan, because a worker
+is the thing running while nobody is looking; a finished one says nothing at all, since its row
+already carries a tick and a button and a stale count would outlive the work. The rule is a free
+function over `(&[AsyncTask], &[Todo])`, tested without a window — §203 and §205 each cost a round
+trip to a machine with a screen to learn that.
+
+**Deliberately not in this version:** elapsed time per step. It needs a first-seen stamp per todo
+that nothing currently keeps, and the count is the information that was missing. Worth adding when
+the plan display has been lived with.
+
+*Sixty-third: "it is working" is not a status. The agent had written down what it was doing all
+along; nobody had read it.*
+
+## 211. A worker billed to an account nobody chose (2026-08-17)
+
+> *"I saw that after re-stating an api message even when I can chat with openrouter."*
+
+The panel showed a background worker with the ✗ mark and this beneath it:
+
+```
+RateLimitError("Error code: 429 - {'error': {'message': 'You have no credits remaining.
+Add credits to continue using the API at https://platform.openai.com/…/billing',
+'type': 'insufficient_quota', 'code': 'credit_balance_exhausted'}}")
+```
+
+An **OpenAI** billing page, for a researcher whose coordinator is on OpenRouter and whose
+conversation chats perfectly well. That is §186 and §187 for the third time, one layer further
+down: the coordinator's own turns carry the model, the key and the `base_url` in the request, and a
+background worker is a *different run* that only has what was forwarded to it.
+
+Two ways it can go wrong, and they look identical from the panel:
+
+- **The keys did not travel.** `_forwarded_config` already warns when `model_config` is missing —
+  the loud case, no model at all. `__llm_keys` had no such line, and it is the quiet one: the worker
+  builds exactly the model the researcher chose, has no key or **no `base_url`** for it, and the
+  client library falls back to its own default host. For OpenRouter that host is `api.openai.com`.
+- **A specialist names a provider no key covers.** §187 already recorded this as open —
+  *"nothing stops a specialist being pointed at an unkeyed provider; the gate reads the
+  coordinator's settings alone"* — and this is what it looks like when it fires: a 429, minutes
+  later, inside a worker, from an account the researcher has never used.
+
+The second is knowable **before the run starts**. `model_config` carries `default` and `subagents`,
+every value is a `provider::model_id`, and `__llm_keys` is right there. Comparing the two sets is
+four lines, and it turns "the async subagent encountered an error" into the provider's name.
+
+So the overlay now says, at the moment it hands work to a worker:
+
+```
+minime_local: background work will bill custom, model custom::moonshotai/kimi-k2
+minime_local: background work names openai and carries no key for it — those requests will
+  fail inside the worker, on whatever host the client library defaults to
+```
+
+**Provider names, the model spec, and whether a `base_url` came with each — never the key.** That is
+exactly enough to tell "went to the wrong host" from "had no key at all", and nothing a log should
+hold. The org's own rule about credentials is not a thing to be clever around.
+
+This entry is instrumentation, not a fix, and deliberately so: which of the two cases the researcher
+hit cannot be settled from a machine with no backend on it, and §203, §206 and §207 each cost a round
+trip to relearn that. The fix follows the line.
+
+*Sixty-fifth: a config that travels between runs needs a receipt at both ends. The sender knowing
+what it sent is not the same as the receiver knowing what it got.*
+## 212. The same model, under two companies (2026-08-17)
+
+§211 instrumented the failure; a sentence from the researcher identified it:
+
+> *"But I have gpt5.4 available from openrouter so why I cannot use it?"*
+
+They could. They had picked it from the wrong company.
+
+`subagent_model_list` lists **every** provider's catalogue under its own heading, which §191 built
+deliberately — pointing literature search at a cheap long-context model from another provider is the
+main reason the feature exists. What that produces for a researcher on OpenRouter is the same model
+twice:
+
+| heading | id | works? |
+| --- | --- | --- |
+| OpenAI | `gpt-4.1` | needs an OpenAI key |
+| OpenRouter | `openai/gpt-4.1` | covered by the key they have |
+
+They differ by a **prefix**. Pick the first and the override saves without complaint, the
+conversation keeps chatting because the coordinator's own key is fine, and the first anyone hears of
+it is a 429 from an OpenAI billing page, raised inside a background worker several minutes later.
+
+There *was* a `— no key stored` note beside the heading. It was scrolled past, and it would be
+scrolled past by every researcher who ever uses this panel. A warning next to four hundred pickable
+rows is not a gate; it is a caption.
+
+**Two layers now, because either alone leaves a hole.**
+
+- **The picker stops offering them.** A provider with no key contributes its heading and one line —
+  *"412 models here once an OpenAI key is stored — add one under API key above"* — and nothing to
+  press. The heading stays: hiding the provider entirely would leave someone who *does* have an
+  OpenAI account with no clue why it is not offered.
+- **The turn gate reads the specialists too.** §186 refused a turn whose *coordinator* had no key
+  and looked no further, which is the whole reason this could happen. Now an override to an unkeyed
+  provider is refused in the same place, before anything is spent, naming the specialist and the
+  company. This is what catches a settings file written before today, which no picker change can.
+
+*What this cost:* four rounds — §186, §187, §211, and this — for one shape of mistake. Each time the
+gate was made stricter about the thing that had just failed, and each time it was still reading one
+level of the configuration while the model read all of it.
+
+*Sixty-sixth: a UI that lists everything and annotates the unusable has not warned anyone. If it
+cannot be paid for, it should not be pressable.*
+
+## 213. Shipping it to somebody else (2026-08-17)
+
+> *"Let's ship v0.1.0 so we can test with another person."*
+
+The draft release was built on **2026-08-05**, and there are **183 commits** behind it. Publishing
+it would have sent a second researcher an app without the wrapping composer, the editable mission,
+file authorship, the plan display, or the unkeyed-provider gate — and every bug report would have
+been about defects fixed a fortnight earlier. So this is `v0.2.0`, cut from today.
+
+### The app never said which build it was
+
+`CARGO_PKG_VERSION` appeared nowhere: not in the window, not in the log, not in the About page. The
+app has logged the *backend checkout's* commit as its very first line since §115 — the entry that
+argued a diagnosis without a version costs a night — and said nothing at all about itself.
+
+That is survivable with one user who is also the developer. It is not survivable with a second
+person on another machine, where *"it doesn't work"* could be any of 183 commits and the first
+question back is always the same one.
+
+So: `Mini-Me Desktop 0.2.0 (4f1e697)` in the first log line and under a **THIS BUILD** heading in
+About, selectable because the whole point is pasting it into a message. The commit is stamped by the
+release workflow; a local `cargo run` says *"built from source"* rather than implying a release it
+is not.
+
+### What the release notes had to gain
+
+They described the install and stopped. Three things a remote tester needs and could not have known:
+
+- **The first run installs WSL, wants administrator rights, and needs a restart.** §61 proved that
+  flow works on a third laptop. Nobody told the person who would meet it.
+- **Where the two logs are.** §206 gave the app one at last; a tester who cannot find it is back to
+  describing symptoms in prose.
+- **What to send back** — the build line and both logs, with the assurance that neither holds an API
+  key, because the org's rule about credentials is exactly what a researcher will worry about before
+  sending a file.
+
+### Still unsigned
+
+SmartScreen will say *"Windows protected your PC"*, and the notes say which two words to click. That
+is an organisational decision about a certificate, not an engineering one, and it stays open. Worth
+knowing what it costs: for a non-developer audience, that dialog is where most installs end.
+
+*Sixty-seventh: the version is not metadata, it is the first question of every support conversation.
+An app that cannot answer it makes every reporter answer it for you, wrongly.*

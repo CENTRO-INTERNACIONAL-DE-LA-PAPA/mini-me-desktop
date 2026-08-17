@@ -37,7 +37,8 @@
 //! starts growing flags nobody can keep straight.
 
 use gpui::{
-    div, prelude::*, rgb, App, ClickEvent, Div, ElementId, IntoElement, SharedString, Window,
+    div, prelude::*, rgb, AnimationExt as _, App, ClickEvent, Div, ElementId, IntoElement,
+    SharedString, Window,
 };
 
 use crate::theme;
@@ -56,11 +57,11 @@ pub enum Tone {
     /// Everything alongside it — Copy, Close, Settings. The common case, hence the default.
     #[default]
     Quiet,
-    // No `Danger`. The one destructive control in the app — "delete" in the conversation
-    // list's confirmation row — is a *borderless* chip inside an already-red row, so it is
-    // one of the rows this type deliberately does not cover. A tone with no caller is a
-    // design vocabulary invented ahead of the design; it goes in when a bordered destructive
-    // button exists.
+    /// An irreversible action whose scope has just been stated in a confirmation modal.
+    ///
+    /// Added only when deletion moved from a borderless inline chip to a real modal button:
+    /// before §155 there was no bordered destructive control for this vocabulary to describe.
+    Danger,
 }
 
 impl Tone {
@@ -68,6 +69,7 @@ impl Tone {
         match self {
             Tone::Accent => theme::accent(),
             Tone::Quiet => theme::border(),
+            Tone::Danger => theme::error(),
         }
     }
 
@@ -75,6 +77,7 @@ impl Tone {
         match self {
             Tone::Accent => theme::accent(),
             Tone::Quiet => theme::text_muted(),
+            Tone::Danger => theme::error(),
         }
     }
 }
@@ -214,6 +217,12 @@ impl RenderOnce for Button {
 pub struct Label {
     text: SharedString,
     colour: u32,
+    /// When false the label paints no colour of its own and takes the parent's.
+    ///
+    /// **Necessary for any state a parent expresses**, hover most of all: a colour written onto
+    /// the element wins over a parent's refinement, so a label that names its own can never
+    /// change with the row it sits in (docs §189).
+    owns_colour: bool,
     size: Size,
     ellipsis: bool,
 }
@@ -223,13 +232,21 @@ impl Label {
         Self {
             text: text.into(),
             colour: theme::text(),
+            owns_colour: true,
             size: Size::Regular,
             ellipsis: false,
         }
     }
 
+    /// Take whatever colour the parent is painting, so the parent can change it per state.
+    pub fn inherit(mut self) -> Self {
+        self.owns_colour = false;
+        self
+    }
+
     pub fn colour(mut self, colour: u32) -> Self {
         self.colour = colour;
+        self.owns_colour = true;
         self
     }
 
@@ -252,18 +269,76 @@ impl Label {
 
 impl RenderOnce for Label {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let text = div().min_w_0().text_color(rgb(self.colour));
+        let text = div().min_w_0();
+        // No `text_color` at all when inheriting — setting one, even the parent's current value,
+        // would pin it and defeat the point.
+        let text = if self.owns_colour {
+            text.text_color(rgb(self.colour))
+        } else {
+            text
+        };
         let text = match self.size {
             Size::Regular => text.text_sm(),
             Size::Compact | Size::Chip => text.text_xs(),
         };
         if self.ellipsis {
-            // `flex_grow` is what gives it a width to truncate *to*. Without it this is the
-            // §59 bug.
-            text.flex_grow().truncate().child(self.text)
+            // **`w_full` *and* `flex_grow`.** `flex_grow` alone gives a width only in a *row*;
+            // in a column it grows the height and the width stays at content — which is how
+            // every model name in the specialist picker rendered as a bare "…" even after
+            // `items_start` was removed. `w_full` supplies the width in both, and `flex_grow`
+            // still does §59's job where the parent is a row (docs §192).
+            text.w_full().flex_grow().truncate().child(self.text)
         } else {
             text.w_full().child(self.text)
         }
+    }
+}
+
+/// A moving mark, for any wait the researcher is looking at.
+///
+/// **Extracted because the app had exactly one and it was in the wrong places.** The status bar
+/// span it came from is shown only while a turn streams or a setup fix runs — so the two longest
+/// waits in the app, the fifteen seconds of graph construction at startup (§176) and the pause
+/// while a conversation opens, were a still window with a sentence on it. A still window reads as
+/// a hang, which is the most common reason someone kills an app that was working.
+///
+/// Braille frames rather than an SVG or a rotation: no asset to ship, no font dependency, and it
+/// reads as motion at any size.
+#[derive(IntoElement)]
+pub struct Spinner {
+    id: SharedString,
+    colour: u32,
+}
+
+impl Spinner {
+    pub fn new(id: impl Into<SharedString>) -> Self {
+        Self {
+            id: id.into(),
+            colour: theme::accent(),
+        }
+    }
+
+    pub fn colour(mut self, colour: u32) -> Self {
+        self.colour = colour;
+        self
+    }
+}
+
+impl RenderOnce for Spinner {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        const FRAMES: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
+        div()
+            .flex_none()
+            .text_color(rgb(self.colour))
+            .text_sm()
+            .with_animation(
+                ElementId::from(self.id),
+                gpui::Animation::new(std::time::Duration::from_millis(1200)).repeat(),
+                |label, delta| {
+                    let frame = (delta * FRAMES.len() as f32) as usize;
+                    label.child(FRAMES[frame.min(FRAMES.len() - 1)])
+                },
+            )
     }
 }
 
@@ -429,6 +504,13 @@ impl RenderOnce for Modal {
             .id(SharedString::from(format!("{}-backdrop", self.id)))
             .absolute()
             .inset_0()
+            // **Visible behind it, not reachable behind it.** GPUI hit-tests every element whose
+            // bounds contain the pointer, so an overlay that only *paints* over the workbench
+            // leaves it live: a click on Settings also pressed whatever sat under that spot.
+            // `occlude` blocks the mouse from everything behind this hitbox. Here rather than in
+            // each caller, because every modal in the app is built from this one type and the
+            // three that existed all had the defect (docs §163).
+            .occlude()
             .flex()
             .items_center()
             .justify_center()
@@ -488,7 +570,7 @@ impl RenderOnce for NavEntry {
                 theme::text_muted()
             }))
             .when(self.selected, |row| row.bg(rgb(theme::elevated())))
-            .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
+            .hover(|style| style.bg(rgb(theme::hover_over(theme::elevated()))).cursor_pointer())
             .child(self.label);
         match self.on_click {
             Some(handler) => row.on_click(move |event, window, cx| handler(event, window, cx)),
@@ -763,7 +845,7 @@ mod tests {
         // The colour and the inertness come from one flag, so they cannot disagree — which
         // they could when each call site kept its own `busy` boolean and its own palette.
         theme::apply(&theme::MINI_ME_DARK);
-        for tone in [Tone::Accent, Tone::Quiet] {
+        for tone in [Tone::Accent, Tone::Quiet, Tone::Danger] {
             let live = Button::new("b", "Go").tone(tone);
             assert_eq!(live.tone.ink(), tone.ink());
             let dead = Button::new("b", "Go").tone(tone).disabled(true);
@@ -772,11 +854,16 @@ mod tests {
     }
 
     #[test]
-    fn the_two_tones_are_distinguishable() {
+    fn every_button_tone_is_distinguishable() {
         // A tone that resolved to the same colour as another would make the set decorative.
         theme::apply(&theme::MINI_ME_DARK);
-        assert_ne!(Tone::Accent.ink(), Tone::Quiet.ink());
-        assert_ne!(Tone::Accent.border(), Tone::Quiet.border());
+        let tones = [Tone::Accent, Tone::Quiet, Tone::Danger];
+        for (at, tone) in tones.iter().enumerate() {
+            for other in tones.iter().skip(at + 1) {
+                assert_ne!(tone.ink(), other.ink(), "{tone:?} and {other:?}");
+                assert_ne!(tone.border(), other.border(), "{tone:?} and {other:?}");
+            }
+        }
     }
 
     #[test]

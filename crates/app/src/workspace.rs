@@ -155,11 +155,87 @@ pub fn project_folder(name: &str) -> Option<String> {
     (!clipped.is_empty()).then_some(clipped)
 }
 
+/// Whether a directory name is a generated thread id rather than something a person typed.
+///
+/// The one thing that tells a project folder from an ungrouped conversation's folder, because
+/// both sit directly under the workspace root. A thread id is a UUID and a project name is
+/// whatever a researcher called their work, so the shape is the discriminator — and it is the
+/// same predicate the Outputs panel uses to strip a leading UUID from a folder label (§152).
+pub fn looks_like_thread_id(component: &str) -> bool {
+    component.len() == 36
+        && component
+            .chars()
+            .enumerate()
+            .all(|(at, character)| match at {
+                8 | 13 | 18 | 23 => character == '-',
+                _ => character.is_ascii_hexdigit(),
+            })
+}
+
+/// Every project that has a folder, whether or not a conversation is filed under it yet.
+///
+/// **This is what makes an empty project possible**, and it is not a second registry — §105 made
+/// a project a real directory, so the directory *is* the project and reading it is reading the
+/// thing itself. §106's rule that a project is "a name some conversation is filed under" was
+/// right about not keeping a list in settings and wrong about the only evidence: naming a project
+/// created the folder and then showed nothing, because the sidebar could only see projects
+/// through conversations (§167).
+///
+/// Excludes generated thread folders and anything hidden. Files are skipped, which is what keeps
+/// `subagents.json` out of the sidebar.
+pub fn projects() -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(root()) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+        .filter(|name| !name.starts_with('.') && !looks_like_thread_id(name))
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Make a project's folder, so it exists before anything is filed into it.
+///
+/// Returns the sanitised name the folder actually carries — which is what the rest of the app
+/// must use, since `project_folder` may have rewritten characters a path cannot hold.
+pub fn create_project(name: &str) -> Result<String> {
+    let folder = project_folder(name)
+        .with_context(|| format!("{name:?} does not make a valid project folder"))?;
+    let path = root().join(&folder);
+    std::fs::create_dir_all(&path)
+        .with_context(|| format!("could not create {}", path.display()))?;
+    Ok(folder)
+}
+
 /// Where one conversation's files live, inside its project if it has one.
 pub fn thread_dir_in(project: Option<&str>, thread_id: &str) -> PathBuf {
     match project.and_then(project_folder) {
         Some(folder) => root().join(folder).join(thread_id),
         None => root().join(thread_id),
+    }
+}
+
+/// Where one background worker's files landed, inside the conversation that started it.
+///
+/// **A worker runs on its own LangGraph thread but writes inside its parent's folder** — the
+/// overlay composes `[conversation_thread, worker_thread]` when the two differ
+/// (`LazyLangsmithSandbox.__init__`), which is what §151 verified on a live run: plots appeared
+/// at `<task>/guinea_pig_eda_output/plots/…` rather than in a sibling directory nobody would
+/// think to open.
+///
+/// Falls back to the conversation's own folder when the worker wrote nothing of its own, because
+/// a button that opens a directory which does not exist is worse than one that opens the parent
+/// and lets somebody look.
+pub fn worker_dir(conversation: &Path, worker_thread: &str) -> PathBuf {
+    let own = conversation.join(worker_thread);
+    if own.is_dir() {
+        own
+    } else {
+        conversation.to_path_buf()
     }
 }
 
@@ -198,6 +274,114 @@ pub fn move_thread(from: Option<&str>, to: Option<&str>, thread_id: &str) -> Res
         }
     }
     Ok(())
+}
+
+/// Delete one conversation's managed folder, and its now-empty project folder if applicable.
+///
+/// This deliberately changes §58's original decision to leave files behind. Once projects became
+/// real folders (§105), keeping a deleted conversation's directory made Explorer contradict the
+/// sidebar and made an empty project look alive. The confirmation dialog now names the files, so
+/// the safe promise is one operation that removes both records rather than an undocumented orphan.
+pub fn delete_thread(project: Option<&str>, thread_id: &str) -> Result<bool> {
+    delete_thread_at(&root(), project, thread_id)
+}
+
+/// Delete a project's whole managed folder after all of its server conversations are gone.
+///
+/// The whole project, not merely the known thread directories: a researcher can add notes beside
+/// those directories in Explorer, and a button labelled "Delete project" must either warn that
+/// the folder goes too or leave a project-shaped orphan. The modal supplies that warning.
+pub fn delete_project(project: &str) -> Result<bool> {
+    delete_project_at(&root(), project)
+}
+
+/// A server-provided thread id may name one child and nothing else.
+///
+/// `thread_dir_in` is also used for reads, where a malformed id can only fail to find something.
+/// Deletion is different: accepting `..`, a separator, or a Windows drive prefix here could turn
+/// one confirmed conversation into a recursive delete outside Mini-Me's workspace (§154).
+fn thread_segment(thread_id: &str) -> Result<&str> {
+    let thread_id = thread_id.trim();
+    let mut components = Path::new(thread_id).components();
+    let one_normal = matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none();
+    if thread_id.is_empty()
+        || thread_id.contains(['/', '\\'])
+        || matches!(thread_id, "." | "..")
+        || !one_normal
+    {
+        anyhow::bail!("refusing to delete an invalid conversation id: {thread_id:?}");
+    }
+    Ok(thread_id)
+}
+
+fn delete_thread_at(base: &Path, project: Option<&str>, thread_id: &str) -> Result<bool> {
+    let thread_id = thread_segment(thread_id)?;
+    let project = project.and_then(project_folder);
+    let parent = project
+        .as_ref()
+        .map(|folder| base.join(folder))
+        .unwrap_or_else(|| base.to_path_buf());
+
+    // A project directory can be replaced by a junction or symlink in Explorer. Descending
+    // through it would make `base/project/thread` look scoped while it actually names somewhere
+    // else. Refuse the automatic cleanup; the server deletion still reports the exact error.
+    if project.is_some()
+        && std::fs::symlink_metadata(&parent)
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        anyhow::bail!(
+            "refusing to delete through the linked project folder {}",
+            parent.display()
+        );
+    }
+
+    let target = parent.join(thread_id);
+    if !target.exists() && std::fs::symlink_metadata(&target).is_err() {
+        return Ok(false);
+    }
+    remove_managed_tree(&target)?;
+
+    // Never remove the workspace root. A named project's empty directory, however, is the
+    // project according to §106; leaving it behind is the stale state this operation fixes.
+    if project.is_some() {
+        let _ = std::fs::remove_dir(&parent);
+    }
+    Ok(true)
+}
+
+fn delete_project_at(base: &Path, project: &str) -> Result<bool> {
+    let folder = project_folder(project)
+        .with_context(|| format!("{project:?} does not make a valid project folder"))?;
+    let target = base.join(folder);
+    if !target.exists() && std::fs::symlink_metadata(&target).is_err() {
+        return Ok(false);
+    }
+    remove_managed_tree(&target)?;
+    Ok(true)
+}
+
+/// Remove a real tree, or unlink a tree-shaped shortcut without following it.
+///
+/// Windows junctions matter here: scientific projects are often moved to OneDrive and linked
+/// back. Recursive deletion must never walk through one and erase a directory outside the
+/// workspace merely because the link itself sits inside it (§154).
+fn remove_managed_tree(path: &Path) -> Result<()> {
+    let link = std::fs::symlink_metadata(path)
+        .with_context(|| format!("reading {} before deletion", path.display()))?;
+    if link.file_type().is_symlink() {
+        let points_to_directory = std::fs::metadata(path).is_ok_and(|metadata| metadata.is_dir());
+        let result = if points_to_directory {
+            std::fs::remove_dir(path)
+        } else {
+            std::fs::remove_file(path)
+        };
+        return result.with_context(|| format!("unlinking {}", path.display()));
+    }
+    if !link.is_dir() {
+        anyhow::bail!("{} is not a conversation directory", path.display());
+    }
+    std::fs::remove_dir_all(path).with_context(|| format!("deleting {}", path.display()))
 }
 
 /// Turn a report's title into a filename a person would recognise in a folder listing.
@@ -341,6 +525,55 @@ pub fn outputs(dir: &Path) -> Vec<(Kind, Vec<Output>)> {
     output_listing(dir).groups
 }
 
+/// What the backend writes down about who produced each file, inside the conversation's folder.
+///
+/// Dot-prefixed, so [`collect_outputs`] already skips it: the record of what made the files never
+/// turns up as one of them.
+pub const AUTHORSHIP: &str = ".authorship.jsonl";
+
+/// Who wrote each file, as the backend recorded it at the time.
+///
+/// **Read rather than inferred.** §199 could name a background worker, because a worker runs on
+/// its own thread and writes into a folder named after it. The specialists a conversation
+/// consults share one thread and one directory, so the client had nothing to go on and correctly
+/// said nothing. `overlay/minime_local/authorship.py` now writes the fact down as it happens —
+/// the delegation's own name, and the interval of the command that produced the file — and this
+/// reads it back (§201).
+///
+/// One JSON object per line, appended. **The last line for a path wins**, which is what a
+/// filesystem does anyway: a file rewritten by a second specialist belongs to the second one. A
+/// malformed line is skipped rather than failing the read, because a truncated final line is what
+/// a crash mid-append leaves and losing one attribution is better than losing all of them.
+///
+/// Keys are the same relative paths [`Output::name`] carries, with separators normalised —
+/// the manifest is written with forward slashes and Windows lists files with backslashes, which
+/// is not a difference a researcher should be able to see.
+pub fn authorship(dir: &Path) -> std::collections::HashMap<String, String> {
+    let mut who = std::collections::HashMap::new();
+    let Ok(text) = std::fs::read_to_string(dir.join(AUTHORSHIP)) else {
+        return who;
+    };
+    for line in text.lines() {
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let path = record.get("path").and_then(serde_json::Value::as_str);
+        let agent = record.get("agent").and_then(serde_json::Value::as_str);
+        if let (Some(path), Some(agent)) = (path, agent) {
+            let agent = agent.trim();
+            if !path.is_empty() && !agent.is_empty() {
+                who.insert(normalise_separators(path), agent.to_string());
+            }
+        }
+    }
+    who
+}
+
+/// One spelling for a relative path, whichever platform listed it.
+pub fn normalise_separators(path: &str) -> String {
+    path.replace('\\', "/")
+}
+
 /// The same grouped files as [`outputs`], plus whether its documented safety bounds hid any.
 ///
 /// The ordinary callers only need the files. The Outputs panel uses this fuller answer so a
@@ -406,7 +639,20 @@ fn collect_outputs(
         };
         // Dotfiles and tool caches are the agent's business, not the researcher's. Apply the
         // existing top-level rule at every depth now that §117 makes those depths visible.
-        if base_name.starts_with('.') || base_name == "__pycache__" {
+        //
+        // `memories/` joins them: it is where the agent keeps its own instructions between turns,
+        // and `memories\instructions.txt` showing up in a panel headed FILES invites a researcher
+        // to open, edit or delete a file that is not theirs and whose loss changes how the agent
+        // behaves (§173).
+        // `provenance.json` joins them: it is the app's own record of which specialists ran, written
+        // beside the conversation's files so the road strip survives a reload. A researcher reading
+        // a panel headed FILES has no use for it and every reason to think it is an output they
+        // asked for — *"I think we shouldn't show the provenance json file"* (§204).
+        if base_name.starts_with('.')
+            || base_name == "__pycache__"
+            || base_name == "memories"
+            || base_name == crate::provenance::FILENAME
+        {
             continue;
         }
 
@@ -889,6 +1135,36 @@ pub fn browse(url: &str) -> Result<()> {
 }
 
 #[cfg(test)]
+mod worker_tests {
+    use super::*;
+
+    #[test]
+    fn a_worker_opens_its_own_folder_or_the_conversation_that_started_it() {
+        let root = std::env::temp_dir().join(format!("minime-worker-{}", std::process::id()));
+        let conversation = root.join("conv-1");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&conversation).expect("a conversation folder");
+
+        // Nothing of its own yet: the parent is the honest answer, because a button that opens a
+        // directory which does not exist is worse than one that opens the folder above it.
+        assert_eq!(worker_dir(&conversation, "worker-9"), conversation);
+
+        // Once it has written something, its own folder — the shape §151 verified on a live run,
+        // where the worker's files landed inside the conversation rather than beside it.
+        let own = conversation.join("worker-9");
+        std::fs::create_dir_all(&own).expect("a worker folder");
+        assert_eq!(worker_dir(&conversation, "worker-9"), own);
+
+        // A file of that name is not a folder to open, and must not be offered as one.
+        let decoy = conversation.join("worker-8");
+        std::fs::write(&decoy, "not a directory").expect("write");
+        assert_eq!(worker_dir(&conversation, "worker-8"), conversation);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
 mod project_tests {
     use super::*;
 
@@ -992,6 +1268,150 @@ mod project_tests {
             root().join("Late blight").join("t-1")
         );
     }
+
+    #[test]
+    fn a_project_folder_is_told_apart_from_a_conversations_own() {
+        // Both sit directly under the workspace root, so the shape of the name is the only
+        // discriminator — and getting it wrong would list every ungrouped conversation as a
+        // project heading (§167).
+        assert!(looks_like_thread_id("019ff651-0cd7-71c1-9f17-5fc9250b10d1"));
+        assert!(looks_like_thread_id("019FF651-0CD7-71C1-9F17-5FC9250B10D1"));
+        // A name a researcher would type, however UUID-ish it looks.
+        assert!(!looks_like_thread_id("Late blight"));
+        assert!(!looks_like_thread_id("2026-08-12-trial"));
+        assert!(!looks_like_thread_id("019ff651-0cd7-71c1-9f17-5fc9250b10d"), "35 characters");
+        assert!(!looks_like_thread_id("019ff651_0cd7_71c1_9f17_5fc9250b10d1"), "wrong separator");
+        assert!(!looks_like_thread_id("019ff651-0cd7-71c1-9f17-5fc9250b10dZ"), "not hex");
+    }
+
+    #[test]
+    fn a_named_project_exists_as_a_folder_before_anything_is_filed_into_it() {
+        let base = std::env::temp_dir().join(format!(
+            "mini-me-empty-project-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&base).expect("workspace");
+        // `root()` reads an environment variable, and so does half of `backend`'s suite. The
+        // shared lock is what keeps two tests from redirecting the workspace out from under each
+        // other — a failure that would look like this feature not working.
+        let _env = crate::backend::env_lock::hold();
+        let previous = std::env::var_os(WORKSPACE_ENV);
+        // SAFETY: the lock above makes this the only thread touching the variable; restored below.
+        unsafe { std::env::set_var(WORKSPACE_ENV, &base) };
+
+        // Nothing yet.
+        assert!(projects().is_empty());
+
+        // Naming one creates the directory, and the directory is what the sidebar reads: this is
+        // the whole of §167. `create_project` reports the name the folder actually carries.
+        assert_eq!(create_project("Late blight").unwrap(), "Late blight");
+        assert_eq!(projects(), vec!["Late blight".to_string()]);
+
+        // A conversation's own folder sits beside it at the root and is not a project.
+        std::fs::create_dir_all(base.join("019ff651-0cd7-71c1-9f17-5fc9250b10d1")).expect("thread");
+        // Nor is a file, which is what keeps `subagents.json` out of the sidebar.
+        std::fs::write(base.join("subagents.json"), b"{}").expect("registry");
+        assert_eq!(projects(), vec!["Late blight".to_string()]);
+
+        // A name a path cannot hold is rewritten, and the rewritten one is what comes back — so
+        // the metadata and the folder cannot end up spelling the same project two ways.
+        let folder = create_project("Q1/Q2").unwrap();
+        assert_eq!(folder, "Q1_Q2");
+        assert!(projects().contains(&folder));
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var(WORKSPACE_ENV, value) },
+            None => unsafe { std::env::remove_var(WORKSPACE_ENV) },
+        }
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn deleting_a_conversation_deletes_its_files_but_not_its_neighbours() {
+        let base = std::env::temp_dir().join(format!(
+            "mini-me-delete-one-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let first = base.join("Late blight").join("thread-one");
+        let second = base.join("Late blight").join("thread-two");
+        std::fs::create_dir_all(first.join("eda_outputs")).expect("first conversation");
+        std::fs::write(first.join("eda_outputs/plot.png"), b"plot").expect("first output");
+        std::fs::create_dir_all(&second).expect("second conversation");
+        std::fs::write(second.join("notes.md"), b"notes").expect("second output");
+
+        assert!(delete_thread_at(&base, Some("Late blight"), "thread-one").unwrap());
+        assert!(!first.exists(), "the confirmed conversation goes");
+        assert!(second.join("notes.md").is_file(), "its neighbour survives");
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn deleting_the_last_conversation_removes_its_empty_project_folder() {
+        let base = std::env::temp_dir().join(format!(
+            "mini-me-delete-last-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let project = base.join("Late blight");
+        std::fs::create_dir_all(project.join("thread-one")).expect("conversation");
+
+        assert!(delete_thread_at(&base, Some("Late blight"), "thread-one").unwrap());
+        assert!(!project.exists(), "an empty project is not left behind");
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn deleting_a_project_removes_its_whole_folder_and_nothing_beside_it() {
+        let base = std::env::temp_dir().join(format!(
+            "mini-me-delete-project-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let doomed = base.join("Late blight");
+        let kept = base.join("Yield trials").join("thread-three");
+        std::fs::create_dir_all(doomed.join("thread-one/plots")).expect("first conversation");
+        std::fs::create_dir_all(doomed.join("thread-two")).expect("second conversation");
+        // A project delete names the whole folder, including files a researcher placed beside
+        // conversation directories; the modal must therefore say exactly that (§154).
+        std::fs::write(doomed.join("project-notes.md"), b"notes").expect("project note");
+        std::fs::create_dir_all(&kept).expect("neighbour project");
+
+        assert!(delete_project_at(&base, "Late blight").unwrap());
+        assert!(!doomed.exists(), "the project folder goes");
+        assert!(kept.is_dir(), "the neighbouring project survives");
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn a_malformed_conversation_id_cannot_escape_the_workspace_during_deletion() {
+        let base = std::env::temp_dir().join(format!(
+            "mini-me-delete-escape-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let outside = base.with_extension("outside");
+        std::fs::create_dir_all(&base).expect("workspace");
+        std::fs::create_dir_all(&outside).expect("outside sentinel");
+
+        for hostile in ["..", "../outside", r"..\outside", "a/b", r"a\b", ""] {
+            assert!(
+                delete_thread_at(&base, None, hostile).is_err(),
+                "accepted {hostile:?}"
+            );
+        }
+        assert!(
+            outside.is_dir(),
+            "nothing outside the workspace was touched"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::remove_dir_all(&outside).ok();
+    }
 }
 
 #[cfg(test)]
@@ -1045,6 +1465,62 @@ mod report_tests {
         save_report(&dir, "Trial Report", "# Yield\n\nRevised.\n").expect("third write");
         assert!(std::fs::read_to_string(&first).unwrap().contains("Revised"));
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod authorship_tests {
+    use super::*;
+
+    /// The contract with `overlay/minime_local/authorship.py`, checked against the bytes it
+    /// actually writes rather than against a struct both sides agree on in prose.
+    #[test]
+    fn the_last_writer_of_a_file_owns_it() {
+        let dir = std::env::temp_dir().join(format!("minime-authorship-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        std::fs::write(
+            dir.join(AUTHORSHIP),
+            concat!(
+                r#"{"path": "plots/yield.png", "agent": "exploratory_data_analysis", "at": 1.0}"#,
+                "\n",
+                r#"{"path": "notes.md", "agent": "coordinator", "at": 2.0}"#,
+                "\n",
+                // Rewritten later by someone else. A filesystem lets that happen, so the record
+                // has to as well — the newest line wins.
+                r#"{"path": "notes.md", "agent": "report_writer", "at": 3.0}"#,
+                "\n",
+                // What a crash mid-append leaves. Skipped, rather than costing every line above.
+                r#"{"path": "half-writ"#,
+                "\n",
+                // Neither field may be blank: an entry that names no author is not an author.
+                r#"{"path": "orphan.csv", "agent": "  "}"#,
+                "\n",
+            ),
+        )
+        .expect("manifest");
+
+        let who = authorship(&dir);
+        assert_eq!(
+            who.get("plots/yield.png").map(String::as_str),
+            Some("exploratory_data_analysis")
+        );
+        assert_eq!(who.get("notes.md").map(String::as_str), Some("report_writer"));
+        assert!(!who.contains_key("orphan.csv"));
+        assert_eq!(who.len(), 2, "the torn line is skipped, not fatal");
+
+        // No record at all is not an error — it is every conversation that ran before this
+        // existed, and every one on a backend without the overlay armed.
+        std::fs::remove_file(dir.join(AUTHORSHIP)).ok();
+        assert!(authorship(&dir).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn one_spelling_of_a_path_whichever_platform_listed_it() {
+        // The backend writes `plots/yield.png`; Windows lists `plots\yield.png`. Windows is
+        // ~98% of these users, so this is the ordinary case, not the exotic one.
+        assert_eq!(normalise_separators(r"plots\yield.png"), "plots/yield.png");
+        assert_eq!(normalise_separators("plots/yield.png"), "plots/yield.png");
     }
 }
 
@@ -1442,6 +1918,39 @@ mod tests {
         assert_eq!(names.len(), 1, "{names:?}");
         assert!(names[0].ends_with("report.md"), "{names:?}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_agents_own_memory_is_not_offered_as_the_researchers_output() {
+        let base = std::env::temp_dir().join(format!(
+            "mini-me-memories-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(base.join("memories")).expect("agent memory");
+        std::fs::write(base.join("memories/instructions.txt"), b"how to behave").expect("write");
+        std::fs::create_dir_all(base.join("outputs")).expect("outputs");
+        std::fs::write(base.join("outputs/summary.csv"), b"a,b\n1,2\n").expect("write");
+
+        let names: Vec<String> = outputs(&base)
+            .into_iter()
+            .flat_map(|(_kind, items)| items)
+            .map(|output| output.name)
+            .collect();
+
+        // A panel headed FILES invites a researcher to open, edit or delete what it lists, and
+        // `memories/instructions.txt` is the agent's own state — losing it changes how the agent
+        // behaves, and it was never theirs to manage (§173).
+        assert!(
+            !names.iter().any(|name| name.contains("instructions.txt")),
+            "{names:?}"
+        );
+        assert!(
+            names.iter().any(|name| name.ends_with("summary.csv")),
+            "real output still appears: {names:?}"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]

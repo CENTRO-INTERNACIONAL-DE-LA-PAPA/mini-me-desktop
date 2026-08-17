@@ -12,9 +12,9 @@
 //! the *run request* (`configurable.__llm_keys`, see `protocol.rs`), so nobody has to
 //! hand-edit a `.env` inside a WSL distro to get started (docs §20).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, Result};
+use anyhow::{bail, Context as _, Result};
 use serde::{Deserialize, Serialize};
 
 /// The keychain service every secret is filed under.
@@ -147,19 +147,24 @@ pub struct Settings {
     /// every save is one nobody can diff.
     #[serde(default)]
     pub subagents: std::collections::BTreeMap<String, String>,
-    /// The project new conversations start in. Empty means none.
+    /// Whether §90's one-time adoption of pre-tag conversations has already run.
     ///
-    /// Remembered rather than asked, because a researcher works through one line of enquiry over
-    /// days: choosing once and continuing is the shape of the work, and a dialog before every
-    /// question is not (docs §106).
+    /// **The migration had no "done" marker, only a symptom.** It ran whenever the tagged search
+    /// came back empty, and its doc called that self-cancelling — but "no conversations" is true
+    /// in two situations it cannot tell apart: a fresh pull where the tag is new and old history
+    /// is hidden, and *the researcher having just deleted everything*. In the second it re-tagged
+    /// every remaining thread with human messages, including the background workers' own, so
+    /// deleted test conversations came back on the next refresh (docs §166).
+    ///
+    /// Written once the scan completes, whatever it adopted — including zero, which is the
+    /// ordinary case on an installation that never had untagged threads.
     #[serde(default)]
-    pub project: String,
+    pub adopted_untagged: bool,
     /// Whether the conversation list on the left is showing.
     ///
-    /// The three panel states are remembered for the same reason the project is: someone who
-    /// closed the conversation list to get the screen back did not mean "until I next launch".
-    /// They were `true` on every start until now, which made folding a panel a thing you had to
-    /// do again every morning.
+    /// Someone who closed the conversation list to get the screen back did not mean "until I next
+    /// launch". These were `true` on every start until persistence was added, which made folding
+    /// a panel a thing the researcher had to do again every morning.
     ///
     /// Safe to persist closed because all three toggles live in the status bar and are always
     /// present — a folded panel is never a one-way door.
@@ -197,7 +202,7 @@ impl Default for Settings {
             async_subagents: false,
             theme: crate::theme::DEFAULT_NAME.to_string(),
             subagents: std::collections::BTreeMap::new(),
-            project: String::new(),
+            adopted_untagged: false,
             sidebar_open: true,
             panel_open: true,
             road_open: true,
@@ -247,13 +252,89 @@ impl Settings {
         problems
     }
 
+    /// Why a turn would not reach the provider that was chosen — as opposed to failing at it.
+    ///
+    /// **The distinction is which failures are silent.** A wrong model id fails loudly, from the
+    /// provider you picked, in a sentence naming the model; there is nothing to protect anybody
+    /// from. These two do not fail at all: with no key, `run_request_body` omits `__llm_keys`
+    /// entirely — and `base_url` lives *inside* that block — so the backend builds a bare
+    /// OpenAI client, picks up whatever `OPENAI_API_KEY` the distro holds, and bills an account
+    /// nobody selected. The researcher's first news of it was an out-of-credits page for a
+    /// service they were not using (docs §186).
+    ///
+    /// Typed here rather than matched on prose at the call site, so rewording a message cannot
+    /// quietly stop a turn from being blocked.
+    pub fn misdirects_a_turn(&self, has_key: bool) -> Option<String> {
+        let spec = provider(&self.provider)?;
+        if !has_key {
+            return Some(format!(
+                "No API key stored for {} — a turn would run on whichever provider the backend \
+                 falls back to",
+                spec.label
+            ));
+        }
+        if spec.needs_base_url && self.base_url.trim().is_empty() {
+            return Some(format!(
+                "{} needs its base URL — without one the request has no address and falls back \
+                 to OpenAI's",
+                spec.label
+            ));
+        }
+        None
+    }
+
+    /// Specialists pointed at a provider no key covers, as sentences a researcher can act on.
+    ///
+    /// **The gate §186 built reads the coordinator's settings alone.** A specialist override to a
+    /// second provider still saved, and the first anyone heard of it was a 429 from that
+    /// provider's billing page, raised inside a background worker several minutes later — with the
+    /// conversation itself chatting perfectly well the whole time, because the coordinator's own
+    /// key was fine (§187, and §212 when it finally happened to somebody).
+    ///
+    /// It is the same trap the picker sets: the same model is listed under two companies, one of
+    /// which the researcher can pay and one of which they cannot, and the names differ by a prefix.
+    ///
+    /// `has_key_for` is passed in rather than read here because the keychain is not async-safe and
+    /// this is called from wherever the caller already holds the main thread.
+    pub fn unkeyed_specialists(&self, has_key_for: impl Fn(&str) -> bool) -> Vec<String> {
+        let mut problems = Vec::new();
+        for (specialist, spec) in &self.subagents {
+            let spec = spec.trim();
+            if spec.is_empty() {
+                continue;
+            }
+            // Tolerant of both spellings for the same reason `_provider_of` is on the Python side:
+            // a check that silently matches neither is worse than no check.
+            let Some(id) = spec
+                .split_once("::")
+                .map(|(id, _)| id)
+                .or_else(|| spec.split_once(':').map(|(id, _)| id))
+            else {
+                continue;
+            };
+            if has_key_for(id) {
+                continue;
+            }
+            let label = provider(id).map(|p| p.label.to_string()).unwrap_or_else(|| id.to_string());
+            problems.push(format!(
+                "{} is set to a {label} model and no {label} key is stored — that specialist \
+                 would fail partway through a turn, on somebody else's account",
+                specialist.replace('_', " ")
+            ));
+        }
+        problems
+    }
+
     pub fn load() -> Self {
         let path = settings_path();
         let Ok(text) = std::fs::read_to_string(&path) else {
             return Self::default();
         };
-        match toml::from_str(&text) {
-            Ok(settings) => settings,
+        match toml::from_str::<Self>(&text) {
+            Ok(mut settings) => {
+                settings.theme = crate::theme::canonical_name(&settings.theme).to_string();
+                settings
+            }
             // A corrupt file must not stop the app from opening — the panel is how the
             // user would fix it.
             Err(error) => {
@@ -286,14 +367,32 @@ pub fn themes_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("themes"))
 }
 
+/// One palette in the picker, including the file that can remove it when it did not ship here.
+///
+/// The source is attached to the parsed palette rather than inferred later from its name. A Zed
+/// family file may contain several differently named palettes, and a file may replace a built-in;
+/// names alone cannot answer which one piece of user-owned data must be removed (docs §181).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ThemeEntry {
+    pub name: String,
+    pub palette: crate::theme::Theme,
+    /// `None` is a built-in and cannot be uninstalled. `Some` is the exact JSON file read.
+    pub source: Option<PathBuf>,
+}
+
 /// Every palette the researcher can choose: the built-ins, then any of their own.
 ///
 /// A file whose name matches a built-in replaces it, which is how someone tweaks the
-/// default rather than being stuck with it.
-pub fn available_themes() -> Vec<(String, crate::theme::Theme)> {
-    let mut themes: Vec<(String, crate::theme::Theme)> = crate::theme::THEMES
+/// default rather than being stuck with it. The replacing entry keeps the file as its source, so
+/// removing it reveals the built-in again instead of making an overridden theme permanent.
+pub fn available_theme_entries() -> Vec<ThemeEntry> {
+    let mut themes: Vec<ThemeEntry> = crate::theme::THEMES
         .iter()
-        .map(|(name, theme)| (name.to_string(), *theme))
+        .map(|(name, theme)| ThemeEntry {
+            name: name.to_string(),
+            palette: *theme,
+            source: None,
+        })
         .collect();
     let Ok(entries) = std::fs::read_dir(themes_dir()) else {
         return themes;
@@ -337,16 +436,47 @@ pub fn available_themes() -> Vec<(String, crate::theme::Theme)> {
         for (found_name, theme) in found {
             match themes
                 .iter_mut()
-                .find(|(existing, _)| existing.eq_ignore_ascii_case(&found_name))
+                .find(|existing| existing.name.eq_ignore_ascii_case(&found_name))
             {
                 // A file naming a built-in replaces it: how someone tweaks the default
                 // rather than ending up with two entries a letter apart.
-                Some(slot) => slot.1 = theme,
-                None => themes.push((found_name, theme)),
+                Some(slot) => {
+                    slot.palette = theme;
+                    slot.source = Some(path.clone());
+                }
+                None => themes.push(ThemeEntry {
+                    name: found_name,
+                    palette: theme,
+                    source: Some(path.clone()),
+                }),
             }
         }
     }
     themes
+}
+
+/// The old tuple shape for callers that only need to apply or compare palettes.
+pub fn available_themes() -> Vec<(String, crate::theme::Theme)> {
+    available_theme_entries()
+        .into_iter()
+        .map(|entry| (entry.name, entry.palette))
+        .collect()
+}
+
+/// Remove one theme file the picker actually discovered.
+///
+/// A UI callback handing a filesystem path to deletion is still a deletion boundary. Restricting
+/// it to one immediate `.json` child of `themes/` means a stale or malformed event cannot turn
+/// "remove this palette" into removal of an arbitrary settings or research file. One Zed file can
+/// contain a family, so removing it intentionally removes every palette sourced from that file.
+pub fn uninstall_theme_file(path: &Path) -> Result<()> {
+    let dir = themes_dir();
+    if path.parent() != Some(dir.as_path())
+        || path.extension().and_then(|extension| extension.to_str()) != Some("json")
+    {
+        bail!("only an installed theme file can be removed");
+    }
+    std::fs::remove_file(path).with_context(|| format!("could not remove {}", path.display()))
 }
 
 /// Apply the configured palette. Falls back to the default rather than failing.
@@ -469,6 +599,51 @@ pub fn asta_env() -> Vec<(String, String)> {
 mod tests {
     use super::*;
 
+    /// The gate §186 built read the coordinator alone; this is the half it missed (§212).
+    #[test]
+    fn a_specialist_on_an_unkeyed_provider_is_refused_before_the_turn() {
+        let mut stored = Settings {
+            provider: "custom".into(),
+            base_url: "https://openrouter.ai/api/v1".into(),
+            ..Settings::default()
+        };
+        stored.subagents.insert(
+            "exploratory_data_analysis".into(),
+            "openai::gpt-4.1".into(),
+        );
+        stored
+            .subagents
+            .insert("academic_researcher".into(), "custom::openai/gpt-4.1".into());
+
+        // Only OpenRouter is paid for. The OpenAI-hosted twin of the very same model is refused,
+        // and the OpenRouter one — which differs by a prefix — is not.
+        let problems = stored.unkeyed_specialists(|id| id == "custom");
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("exploratory data analysis"), "{problems:?}");
+        assert!(problems[0].contains("OpenAI"), "{problems:?}");
+
+        // With both keys filed, nothing is in the way.
+        assert!(stored
+            .unkeyed_specialists(|id| id == "custom" || id == "openai")
+            .is_empty());
+
+        // A specialist following the coordinator is not an override and cannot be wrong.
+        let plain = Settings {
+            provider: "custom".into(),
+            ..Settings::default()
+        };
+        assert!(plain.unkeyed_specialists(|_| false).is_empty());
+
+        // The single-colon spelling is caught too, and an unparseable entry is left alone rather
+        // than blocking every turn on a string nobody can read.
+        let mut odd = Settings::default();
+        odd.subagents.insert("report_writer".into(), "anthropic:claude".into());
+        odd.subagents.insert("data_cleaner".into(), "nonsense".into());
+        let problems = odd.unkeyed_specialists(|_| false);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("report writer"), "{problems:?}");
+    }
+
     #[test]
     fn a_researchers_own_palette_can_replace_a_built_in() {
         let _env = crate::backend::env_lock::hold();
@@ -522,6 +697,60 @@ mod tests {
     }
 
     #[test]
+    fn uninstalling_one_zed_file_removes_its_whole_family_and_nothing_beside_it() {
+        let _env = crate::backend::env_lock::hold();
+        let dir = std::env::temp_dir().join(format!(
+            "minime-theme-uninstall-test-{}",
+            std::process::id()
+        ));
+        let themes = dir.join("themes");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&themes).expect("a themes directory");
+        // SAFETY: the lock above serialises every test that touches the environment.
+        unsafe { std::env::set_var("MINIME_SETTINGS", dir.join("settings.toml")) };
+
+        let family = themes.join("andean.json");
+        std::fs::write(
+            &family,
+            serde_json::json!({
+                "themes": [
+                    {"name": "Oca Purple", "appearance": "dark", "style": {"accent": "#d991c8ff"}},
+                    {"name": "Mashua Gold", "appearance": "light", "style": {"accent": "#8a5d04ff"}}
+                ]
+            })
+            .to_string(),
+        )
+        .expect("write a Zed family");
+
+        let installed: Vec<_> = available_theme_entries()
+            .into_iter()
+            .filter(|entry| entry.source.as_deref() == Some(family.as_path()))
+            .map(|entry| entry.name)
+            .collect();
+        assert_eq!(installed, ["Oca Purple", "Mashua Gold"]);
+
+        let beside = dir.join("keep.json");
+        std::fs::write(&beside, "research, not a theme").expect("write the neighbour");
+        assert!(
+            uninstall_theme_file(&beside).is_err(),
+            "a path outside themes/ must never reach remove_file"
+        );
+        assert!(beside.exists(), "the rejected neighbour was removed");
+
+        uninstall_theme_file(&family).expect("uninstall the family");
+        assert!(!family.exists());
+        let names: Vec<_> = available_themes()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert!(!names.iter().any(|name| name == "Oca Purple"));
+        assert!(!names.iter().any(|name| name == "Mashua Gold"));
+
+        unsafe { std::env::remove_var("MINIME_SETTINGS") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn round_trips_through_toml() {
         let settings = Settings {
             provider: "custom".into(),
@@ -533,7 +762,7 @@ mod tests {
             backend_dir: "~/Mini-Me".into(),
             async_subagents: true,
             theme: "Slate".into(),
-            project: "Late blight".into(),
+            adopted_untagged: false,
             subagents: [("report_writer".to_string(), "openai::gpt-5.4".to_string())]
                 .into_iter()
                 .collect(),
@@ -568,6 +797,51 @@ mod tests {
     }
 
     #[test]
+    fn the_pre_tag_scan_is_remembered_so_it_cannot_resurrect_deleted_work() {
+        // §90's migration guarded itself on "there are no tagged conversations", which is true
+        // both on the launch that needs it and on the launch after a researcher deletes their
+        // last conversation. In the second case it re-tagged whatever threads were left — the
+        // background workers' among them — and the deleted rows came back (§166).
+        let fresh = Settings::default();
+        assert!(
+            !fresh.adopted_untagged,
+            "a new installation still owes the one-time scan"
+        );
+
+        // An older settings file predates the field, and must still parse — it is exactly the
+        // installation whose history the migration was written to rescue.
+        let older: Settings = toml::from_str(
+            "provider = \"anthropic\"\nmodel_id = \"claude-sonnet-4-5\"",
+        )
+        .expect("a settings file from before this field");
+        assert!(!older.adopted_untagged);
+
+        // And once recorded it survives the round trip, which is the whole point: the fact has
+        // to outlive the process that learned it.
+        let done = Settings {
+            adopted_untagged: true,
+            ..older
+        };
+        let text = toml::to_string_pretty(&done).expect("serialise");
+        let read_back: Settings = toml::from_str(&text).expect("parse");
+        assert!(read_back.adopted_untagged);
+    }
+
+    #[test]
+    fn a_project_remembered_by_an_older_build_cannot_file_new_work() {
+        // §106 defines projects from conversation metadata. The removed `project` setting was a
+        // second registry: after the last conversation was deleted, this stale value restored its
+        // project on launch and put the next conversation inside it (§154). Serde deliberately
+        // accepts the old key for upgrade compatibility, but a save no longer writes it back.
+        let settings: Settings = toml::from_str(
+            "provider = \"anthropic\"\nmodel_id = \"claude-sonnet-4-5\"\nproject = \"Deleted work\"",
+        )
+        .expect("an older settings file");
+        let rewritten = toml::to_string_pretty(&settings).expect("serialise current settings");
+        assert!(!rewritten.contains("project ="), "{rewritten}");
+    }
+
+    #[test]
     fn builds_the_spec_the_backend_expects() {
         let settings = Settings {
             provider: "anthropic".into(),
@@ -576,6 +850,61 @@ mod tests {
         };
         assert_eq!(settings.model_spec(), "anthropic::claude-sonnet-4-5");
         assert_eq!(settings.key_name(), "llm:anthropic");
+    }
+
+    #[test]
+    fn a_turn_is_blocked_only_by_the_failures_that_would_be_silent() {
+        // §186: with no key, `run_request_body` omits `__llm_keys` — and `base_url` is inside
+        // that block — so the backend builds a bare OpenAI client, uses whatever
+        // `OPENAI_API_KEY` the distro holds, and bills an account nobody chose. That is what has
+        // to be refused; it cannot be left as a warning, because there is nothing to warn *in*.
+        let ready = Settings::default();
+        assert_eq!(ready.misdirects_a_turn(true), None, "nothing wrong here");
+
+        let no_key = ready.misdirects_a_turn(false).expect("blocked");
+        assert!(no_key.contains("No API key stored"), "{no_key}");
+        // The message has to say what would otherwise happen, or "no key" reads as a formality.
+        assert!(no_key.contains("falls back"), "{no_key}");
+
+        // OpenRouter is reached through `custom`, and its endpoint is what makes it OpenRouter
+        // rather than OpenAI. A key without a URL is the shape that lost an afternoon.
+        let openrouter = Settings {
+            provider: "custom".into(),
+            model_id: "openai/gpt-4o-mini".into(),
+            base_url: String::new(),
+            ..Default::default()
+        };
+        let missing_url = openrouter.misdirects_a_turn(true).expect("blocked");
+        assert!(missing_url.contains("base URL"), "{missing_url}");
+        let with_url = Settings {
+            base_url: "https://openrouter.ai/api/v1".into(),
+            ..openrouter.clone()
+        };
+        assert_eq!(with_url.misdirects_a_turn(true), None);
+
+        // A missing key outranks a missing URL: it is the one that decides whether *any*
+        // endpoint is sent, and reporting the second first would have somebody fill in a URL
+        // that still goes nowhere.
+        let neither = openrouter.misdirects_a_turn(false).expect("blocked");
+        assert!(neither.contains("No API key stored"), "{neither}");
+
+        // **A wrong model id is not blocked**, deliberately. It fails loudly, at the provider
+        // that was chosen, in a sentence naming the model — there is nothing silent to protect
+        // anybody from, and refusing here would stop somebody trying a model released this week.
+        let unlisted = Settings {
+            model_id: "claude-opus-9".into(),
+            ..Default::default()
+        };
+        assert_eq!(unlisted.misdirects_a_turn(true), None);
+
+        // An unknown provider cannot be reasoned about, so it is not this function's to refuse;
+        // `problems()` already reports it and the pane shows it.
+        let nonsense = Settings {
+            provider: "not-a-provider".into(),
+            ..Default::default()
+        };
+        assert_eq!(nonsense.misdirects_a_turn(false), None);
+        assert!(!nonsense.problems(false).is_empty(), "still reported");
     }
 
     #[test]

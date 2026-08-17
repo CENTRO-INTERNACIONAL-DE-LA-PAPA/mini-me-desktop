@@ -33,6 +33,21 @@ use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+/// The one internal assistant used to make LangGraph run the graph factory during startup.
+///
+/// A stable UUID is load-bearing: `POST /assistants` rejects the graph id (`agent`) in this API
+/// version, while a fresh UUID on every launch would leave one invisible assistant behind per
+/// session. `if_exists: do_nothing` makes simultaneous/repeated warm-ups converge on this record.
+const GRAPH_WARM_UP_ASSISTANT_ID: &str = "709fdf35-66dd-4c0a-bc5f-35d0f33cb91e";
+
+/// Bound a dependency outage rather than leaving the desktop saying "starting" forever.
+///
+/// A healthy run on the Windows machine took 14-15 seconds because the graph factory connected to
+/// four MCP servers in sequence. Sixty seconds leaves room for that measured path while matching
+/// the backend supervisor's existing one-minute health budget. If hotel Wi-Fi black-holes an MCP
+/// host, the researcher gets the app back and the ordinary request can report the real error.
+const GRAPH_WARM_UP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// A decoded, UI-relevant event from a streaming run.
 #[derive(Clone, Debug, PartialEq)]
 pub enum TurnEvent {
@@ -124,12 +139,93 @@ pub struct Snapshot {
     pub tasks: Vec<AsyncTask>,
     /// Reports, with their bodies. See [`Report`].
     pub reports: Vec<Report>,
+    /// The coordinator's own plan for this turn, when it wrote one. See [`Todo`].
+    pub todos: Vec<Todo>,
     /// Citations gathered so far, **whole**.
     ///
     /// Separate from the `sources` bucket, whose items are truncated to 96 characters for a
     /// side panel that has to stay scannable. A rendered report's citation list must not be —
     /// a bibliography ending in `…` is not a bibliography.
     pub sources: Vec<Source>,
+}
+
+/// One step of an agent's own plan.
+///
+/// **The agent writes these; we only read them.** `TodoListMiddleware` gives every agent a
+/// `write_todos` tool and keeps the result in state as `todos`, and a background worker calls it
+/// between commands — which is what makes a six-minute run describable rather than merely long
+/// (§209). Nothing here is derived, estimated or filled in: an empty plan renders as no plan.
+///
+/// Each agent's list is its own. `deepagents`' `_EXCLUDED_STATE_KEYS` keeps `todos` out of what a
+/// subagent inherits, so a worker's plan is the worker's, which is what lets a plan belong to
+/// exactly one row on screen.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Todo {
+    pub content: String,
+    /// `pending`, `in_progress` or `completed`, as `langchain`'s `Todo` defines them. Kept as the
+    /// string it arrived as rather than an enum: an unknown fourth value should render as "not
+    /// finished", not panic or silently count as done.
+    pub status: String,
+}
+
+impl Todo {
+    pub fn is_done(&self) -> bool {
+        self.status == "completed"
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.status == "in_progress"
+    }
+
+    /// The mark this step gets in a list: done, doing, or waiting.
+    pub fn mark(&self) -> &'static str {
+        if self.is_done() {
+            "✓"
+        } else if self.is_running() {
+            "◐"
+        } else {
+            "○"
+        }
+    }
+}
+
+/// How far through a plan the work is — `(completed, total)`.
+///
+/// `None` when there is no plan, which is not the same as nothing done: `write_todos` is optional
+/// and the model skips it for simple requests. A "0 of 0" would be a claim about work that was
+/// never planned.
+pub fn plan_progress(todos: &[Todo]) -> Option<(usize, usize)> {
+    if todos.is_empty() {
+        return None;
+    }
+    Some((todos.iter().filter(|todo| todo.is_done()).count(), todos.len()))
+}
+
+/// Read an agent's plan out of a `values`-shaped payload.
+fn decode_todos(values: &Value) -> Vec<Todo> {
+    values
+        .get("todos")
+        .and_then(Value::as_array)
+        .map(|todos| {
+            todos
+                .iter()
+                .filter_map(|todo| {
+                    let content = todo.get("content").and_then(Value::as_str)?.trim();
+                    if content.is_empty() {
+                        return None;
+                    }
+                    Some(Todo {
+                        content: content.to_string(),
+                        status: todo
+                            .get("status")
+                            .and_then(Value::as_str)
+                            .unwrap_or("pending")
+                            .to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// One work this conversation cited.
@@ -286,6 +382,23 @@ pub struct AsyncTask {
     /// The subagent or tool the worker is on right now, so "running" for ten minutes says
     /// something about *what* is running (docs §42).
     pub activity: Option<String>,
+    /// The worker's plan, so "running" for ten minutes also says *how far through* (§209).
+    ///
+    /// Filled by the watcher, never by [`decode_async_tasks`]: the `async_tasks` map records what
+    /// the coordinator asked for, and the plan lives in the worker's own state.
+    pub todos: Vec<Todo>,
+    /// The conversation whose folder owns this worker's files.
+    ///
+    /// **Not decodable from the payload**, which is why it is filled by whoever ingests the
+    /// task rather than by `decode_async_tasks`: the `async_tasks` map records the worker's
+    /// own thread and nothing about its parent. The parent is a property of *where the
+    /// snapshot came from*, and only the caller that asked for that snapshot knows it.
+    ///
+    /// Carried on the task instead of read from "the conversation open right now" because
+    /// those are not the same thing: pressing New thread leaves a pending task on screen
+    /// while the open thread moves on, and answering it then named the wrong owner
+    /// (docs §159). Empty means unknown — see [`AsyncTask::owning_conversation`].
+    pub owner: String,
 }
 
 impl AsyncTask {
@@ -309,6 +422,18 @@ impl AsyncTask {
     pub fn needs_approval(&self) -> bool {
         self.pending.is_some()
     }
+
+    /// The conversation whose folder this worker's files belong in, or `None` when unknown.
+    ///
+    /// The rule lives here rather than at the call site because it is easy to get wrong in a
+    /// way nothing notices: blank must become `None`, never a directory name. A run pinned to
+    /// an empty path segment writes to the *workspace root* — beside every conversation instead
+    /// of inside one — which is the shape §150 spent a night on. `None` sends no key at all and
+    /// lets the backend fall back to its own inference.
+    pub fn owning_conversation(&self) -> Option<&str> {
+        let owner = self.owner.trim();
+        (!owner.is_empty()).then_some(owner)
+    }
 }
 
 /// Metadata key marking a thread as a conversation the researcher started.
@@ -325,6 +450,14 @@ const CONVERSATION_TAG: &str = "minime_conversation";
 /// `overlay/minime_local/workspace.py`). The folder is where the files are; this is how the app
 /// knows which folder to look in — see docs §105 for why it is both and not either.
 const PROJECT_KEY: &str = "minime_project";
+
+/// Config key naming the conversation whose folder owns a run's files.
+///
+/// This must agree exactly with `WORKSPACE_THREAD_KEY` in
+/// `overlay/minime_local/workspace.py`. The client already knows the conversation id; making the
+/// backend rediscover it from LangGraph metadata was intermittent because that metadata is not
+/// present in every tool-call context (docs §159).
+const WORKSPACE_THREAD_KEY: &str = "__workspace_thread__";
 
 /// A stored thread that is not yet tagged, by id.
 ///
@@ -554,6 +687,14 @@ pub struct ThreadState {
     /// What the worker is doing right now — the subagent it delegated to, or the tool it
     /// is running. `None` when nothing has been called yet.
     pub activity: Option<String>,
+    /// The worker's own plan, from the same request. See [`Todo`].
+    pub todos: Vec<Todo>,
+    /// The nodes the thread would run next — the value `status` is derived from.
+    ///
+    /// Carried out of this function so the *watcher* can report it, once per task rather than
+    /// once per four-second poll. Everything about the "a finished worker keeps saying running"
+    /// hunt turns on what is in here, and it was the one number nobody could see (§207).
+    pub next: Vec<String>,
 }
 
 /// What the worker is busy with, from the last tool call in its thread.
@@ -659,6 +800,15 @@ fn decode_async_tasks(artifacts: &Value, root: &Value) -> Vec<AsyncTask> {
                 pending: None,
                 error: None,
                 activity: None,
+                // Empty for the same reason `activity` is: this map is what the coordinator
+                // recorded, and the worker's plan lives in the worker's own state. The watcher
+                // fills both.
+                todos: Vec::new(),
+                // Deliberately blank. This function is a pure decoder of one payload, and the
+                // payload does not say which conversation the worker belongs to; guessing —
+                // `thread_id`, say — would name the worker as its own owner and defeat the
+                // nesting entirely. See the field's own note.
+                owner: String::new(),
             })
         })
         .collect();
@@ -803,12 +953,49 @@ impl LangGraphClient {
         self
     }
 
-    /// `GET /ok` — true when the server is up and the graph is loaded.
+    /// `GET /ok` — true when the HTTP server is accepting requests.
+    ///
+    /// It does **not** mean the graph is loaded. Measured on 2026-08-12: `/ok` answered, then the
+    /// first read-only `GET /threads/{id}/state` spent 14,982 ms constructing the graph and opening
+    /// its MCP clients. Keeping the boundary honest matters because startup uses this answer to
+    /// decide whether the researcher may safely open saved work (docs §176).
     pub async fn is_healthy(&self) -> bool {
         match self.http.get(format!("{}/ok", self.base_url)).send().await {
             Ok(resp) => resp.status().is_success(),
             Err(_) => false,
         }
+    }
+
+    /// Force the deployed graph factory to run before a researcher opens a conversation.
+    ///
+    /// LangGraph API 0.9.0 does not accept `GET /assistants/agent/schemas`: that route validates
+    /// `assistant_id` as a UUID. Searching assistants is cheap but also does not touch the graph.
+    /// A fixed internal assistant followed by its schemas route is the smallest read-only graph
+    /// access that did trigger the factory in a live probe. The assistant is deliberately retained:
+    /// one stable internal row is safer than create/delete races between two app windows, and it is
+    /// not a conversation or a second source of conversation metadata (docs §154, §176).
+    pub async fn warm_graph(&self) -> Result<()> {
+        self.http
+            .post(format!("{}/assistants", self.base_url))
+            .json(&graph_warm_up_assistant())
+            .send()
+            .await
+            .context("creating the internal graph warm-up assistant failed")?
+            .error_for_status()
+            .context("creating the internal graph warm-up assistant returned an error status")?;
+
+        self.http
+            .get(format!(
+                "{}/assistants/{GRAPH_WARM_UP_ASSISTANT_ID}/schemas",
+                self.base_url
+            ))
+            .timeout(GRAPH_WARM_UP_TIMEOUT)
+            .send()
+            .await
+            .context("warming the agent graph failed")?
+            .error_for_status()
+            .context("warming the agent graph returned an error status")?;
+        Ok(())
     }
 
     /// `GET /project` → the research project spine.
@@ -820,25 +1007,7 @@ impl LangGraphClient {
     pub async fn fetch_project(&self) -> Result<Project> {
         let resp = self
             .http
-            // The project this spine belongs to. Upstream keys it `(user_id, "project")` — one
-            // per person, accumulating forever — which mixes every line of work a researcher has
-            // ever had and never forgets a deleted conversation. The overlay reads this
-            // parameter and scopes the namespace to match what a turn writes; without it the two
-            // sides would disagree and the panel would go blank rather than become correct
-            // (`overlay/minime_local/spine.py`, docs §109).
-            .get(format!(
-                "{}/project{}",
-                self.base_url,
-                match self
-                    .project
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|p| !p.is_empty())
-                {
-                    Some(project) => format!("?project={}", urlencode(project)),
-                    None => String::new(),
-                }
-            ))
+            .get(self.project_url())
             .send()
             .await
             .context("GET /project failed (is the sidecar running?)")?
@@ -847,6 +1016,69 @@ impl LangGraphClient {
         resp.json()
             .await
             .context("could not decode the project spine from GET /project")
+    }
+
+    /// `/project`, scoped to the project this client is working in.
+    ///
+    /// The project this spine belongs to. Upstream keys it `(user_id, "project")` — one per
+    /// person, accumulating forever — which mixes every line of work a researcher has ever had
+    /// and never forgets a deleted conversation. The overlay reads this parameter and scopes the
+    /// namespace to match what a turn writes; without it the two sides would disagree and the
+    /// panel would go blank rather than become correct (`overlay/minime_local/spine.py`, §109).
+    ///
+    /// Shared by the read and the write, which is not tidiness: the overlay wraps `get_project`
+    /// and `patch_project` alike, so a PATCH that spelled its scope differently from the GET
+    /// would save the mission into a namespace the panel never reads and look like a save that
+    /// silently did nothing.
+    fn project_url(&self) -> String {
+        format!(
+            "{}/project{}",
+            self.base_url,
+            match self
+                .project
+                .as_deref()
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+            {
+                Some(project) => format!("?project={}", urlencode(project)),
+                None => String::new(),
+            }
+        )
+    }
+
+    /// `PATCH /project` → set the mission by hand, and get the saved spine back.
+    ///
+    /// **The route was already there and this client had never called it.** Its own docstring
+    /// says the point out loud — *"let the user read and edit it by hand — rename the mission,
+    /// add a backlog item"* (`backend/routes/project.py`) — while the panel rendered
+    /// `project.mission` as plain text with nothing to press, so the only way to change a mission
+    /// was to phrase the first question of a project differently and never revisit it (§199).
+    ///
+    /// Two facts from the backend make this worth having rather than decorative:
+    ///
+    /// * A hand-set mission **survives every later turn**. The middleware seeds the mission from
+    ///   the first human message only when it is empty (`backend/project.py:373`), so this is an
+    ///   edit and not a suggestion that the next question overwrites.
+    /// * The mission is **injected into the coordinator's system prompt**
+    ///   (`backend/middleware/project.py:136`), so editing it changes what the agent does, not
+    ///   only what the panel shows.
+    ///
+    /// The response is the saved state, so the caller renders what the store holds rather than
+    /// what was typed — the backend caps the mission at 500 characters and collapses runs of
+    /// whitespace, and echoing the request would hide both.
+    pub async fn set_mission(&self, mission: &str) -> Result<Project> {
+        let resp = self
+            .http
+            .patch(self.project_url())
+            .json(&json!({ "mission": mission }))
+            .send()
+            .await
+            .context("PATCH /project failed (is the sidecar running?)")?
+            .error_for_status()
+            .context("PATCH /project returned an error status")?;
+        resp.json()
+            .await
+            .context("could not decode the project spine from PATCH /project")
     }
 
     /// Poll one long job, returning its status.
@@ -939,8 +1171,47 @@ impl LangGraphClient {
                     .find_map(error_text)
             });
 
-        let next_is_empty = state
-            .get("next")
+        // **The whole status hangs on this one field, so say when it is not there.**
+        //
+        // `is_some_and` reads a *missing* `next` as "not empty", which resolves to `running` —
+        // forever, silently, for a worker that finished minutes ago. Reported as: *"if I don't ask
+        // about the status the app is not checking the success or failure; if I ask, the success
+        // appears even though the agent had already finished"* (§204). The coordinator's own
+        // `check_async_task` reads a different source and gets it right, which is why asking works.
+        //
+        // Whether that is what is happening here cannot be settled from this machine — so the value
+        // the argument needs goes in the log, naming what the payload *did* carry. Fifth time in
+        // this project that the missing evidence was a value the program already had (§116).
+        let next = state.get("next");
+        // `as_str` before `to_string`: a `Value::String` stringifies *with* its JSON quotes, so the
+        // first version of this logged `next=["\"model\""]` — readable, but every reader has to
+        // discount a layer of escaping that is an artefact of how it was printed.
+        let next_nodes: Vec<String> = next
+            .and_then(Value::as_array)
+            .map(|nodes| {
+                nodes
+                    .iter()
+                    .map(|node| match node.as_str() {
+                        Some(name) => name.to_string(),
+                        None => node.to_string(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if next.and_then(Value::as_array).is_none() {
+            let carried: Vec<&str> = state
+                .as_object()
+                .map(|fields| fields.keys().map(String::as_str).collect())
+                .unwrap_or_default();
+            tracing::warn!(
+                thread = %thread_id,
+                next = %next.map(ToString::to_string).unwrap_or_else(|| "<absent>".into()),
+                carried = ?carried,
+                "a background task's thread state has no usable `next`, so its status cannot be \
+                 read — it will report running until the coordinator is asked (docs §204)"
+            );
+        }
+        let next_is_empty = next
             .and_then(Value::as_array)
             .is_some_and(|next| next.is_empty());
         // Failure first. A run that died leaves its task pending, so `next` is *not*
@@ -960,6 +1231,8 @@ impl LangGraphClient {
             pending,
             error,
             activity: last_activity(&state),
+            next: next_nodes,
+            todos: state.get("values").map(decode_todos).unwrap_or_default(),
         })
     }
 
@@ -968,10 +1241,20 @@ impl LangGraphClient {
     /// Deliberately not streamed into the transcript: the background run's tokens are not
     /// the answer to anything the researcher asked in the chat, and mixing them into the
     /// conversation is how "what did I just read?" happens. The Jobs panel reports it.
-    pub async fn resume_background(&self, thread_id: &str, decisions: &[Decision]) -> Result<()> {
+    pub async fn resume_background(
+        &self,
+        thread_id: &str,
+        workspace_thread: Option<&str>,
+        decisions: &[Decision],
+    ) -> Result<()> {
         // The same body a foreground resume sends — one definition, so a change to the
         // decision shape cannot fix one path and leave the other broken.
-        let payload = resume_request_body(decisions, self.model.as_ref(), self.project.as_deref());
+        let payload = resume_request_body(
+            decisions,
+            self.model.as_ref(),
+            self.project.as_deref(),
+            workspace_thread,
+        );
         self.http
             .post(format!(
                 "{}/threads/{}/runs",
@@ -1256,8 +1539,9 @@ impl LangGraphClient {
     ///
     /// **Irreversible, and the caller must have asked first.** This is why the sidebar
     /// makes it a two-step: a conversation is somebody's work, and there is no undo on the
-    /// server side (docs §58). Files the turn wrote are *not* touched — those live in the
-    /// researcher's own Documents and are not ours to remove.
+    /// server side (docs §58). This route knows nothing about the Windows workspace; the desktop
+    /// deletes those files only after this durable operation succeeds and after its centred modal
+    /// has named that consequence explicitly (docs §155).
     pub async fn delete_conversation(&self, thread_id: &str) -> Result<()> {
         self.http
             .delete(format!(
@@ -1332,7 +1616,12 @@ impl LangGraphClient {
     ) -> Result<TurnOutcome> {
         self.stream(
             thread_id,
-            run_request_body(prompt, self.model.as_ref(), self.project.as_deref()),
+            run_request_body(
+                prompt,
+                self.model.as_ref(),
+                self.project.as_deref(),
+                Some(thread_id),
+            ),
             on_event,
         )
         .await
@@ -1347,7 +1636,12 @@ impl LangGraphClient {
     ) -> Result<TurnOutcome> {
         self.stream(
             thread_id,
-            resume_request_body(decisions, self.model.as_ref(), self.project.as_deref()),
+            resume_request_body(
+                decisions,
+                self.model.as_ref(),
+                self.project.as_deref(),
+                Some(thread_id),
+            ),
             on_event,
         )
         .await
@@ -1442,10 +1736,25 @@ impl LangGraphClient {
 /// Asking for `messages` instead selects the v1 path, which emits
 /// `messages/partial` + `messages/complete` with a different payload shape — and
 /// yields no tokens through this decoder.
-fn run_request_body(prompt: &str, model: Option<&ModelChoice>, project: Option<&str>) -> Value {
-    let mut body = stream_request_body(model, project);
+fn run_request_body(
+    prompt: &str,
+    model: Option<&ModelChoice>,
+    project: Option<&str>,
+    workspace_thread: Option<&str>,
+) -> Value {
+    let mut body = stream_request_body(model, project, workspace_thread);
     body["input"] = json!({ "messages": [ { "type": "human", "content": prompt } ] });
     body
+}
+
+fn graph_warm_up_assistant() -> Value {
+    json!({
+        "assistant_id": GRAPH_WARM_UP_ASSISTANT_ID,
+        "graph_id": "agent",
+        "if_exists": "do_nothing",
+        "name": "Mini-Me startup warm-up (internal)",
+        "metadata": {"minime_internal": true},
+    })
 }
 
 /// Body for resuming a paused run with the human's decisions.
@@ -1457,6 +1766,7 @@ fn resume_request_body(
     decisions: &[Decision],
     model: Option<&ModelChoice>,
     project: Option<&str>,
+    workspace_thread: Option<&str>,
 ) -> Value {
     let decisions: Vec<Value> = decisions
         .iter()
@@ -1465,7 +1775,7 @@ fn resume_request_body(
             Decision::Reject { message } => json!({ "type": "reject", "message": message }),
         })
         .collect();
-    let mut body = stream_request_body(model, project);
+    let mut body = stream_request_body(model, project, workspace_thread);
     body["command"] = json!({ "resume": { "decisions": decisions } });
     body
 }
@@ -1485,7 +1795,11 @@ pub enum TurnOutcome {
 }
 
 /// The parts of the request body shared by a fresh run and a resume.
-fn stream_request_body(model: Option<&ModelChoice>, project: Option<&str>) -> Value {
+fn stream_request_body(
+    model: Option<&ModelChoice>,
+    project: Option<&str>,
+    workspace_thread: Option<&str>,
+) -> Value {
     json!({
         "assistant_id": "agent",
         "stream_mode": ["messages-tuple", "values", "custom"],
@@ -1494,12 +1808,16 @@ fn stream_request_body(model: Option<&ModelChoice>, project: Option<&str>) -> Va
         // the silent gap the activity trace exists to close. On a measured turn this
         // flag is the difference between 176 and 495 message events.
         "stream_subgraphs": true,
-        "config": config_for(model, project),
+        "config": config_for(model, project, workspace_thread),
     })
 }
 
 /// The `config` object: recursion limit, model routing, and the key.
-fn config_for(model: Option<&ModelChoice>, project: Option<&str>) -> Value {
+fn config_for(
+    model: Option<&ModelChoice>,
+    project: Option<&str>,
+    workspace_thread: Option<&str>,
+) -> Value {
     let mut configurable = json!({
         // Marks this as a real run rather than a read-only graph load, which is what the
         // backend's key check keys off.
@@ -1511,6 +1829,19 @@ fn config_for(model: Option<&ModelChoice>, project: Option<&str>) -> Value {
     // thing a person types (docs §105).
     if let Some(project) = project.map(str::trim).filter(|name| !name.is_empty()) {
         configurable["__workspace_project__"] = json!(project);
+    }
+
+    // **Name the owner instead of asking the backend to infer it.** A background tool is launched
+    // from the conversation's run, but LangGraph does not expose `metadata.thread_id` in every
+    // context where that tool executes. When it was absent, the worker used its own UUID as a
+    // top-level folder and a complete EDA appeared beside the conversation (docs §159). This key
+    // is deliberately separate from LangGraph's `thread_id`: it chooses a directory and cannot
+    // make the worker write checkpoints into the conversation's thread.
+    if let Some(thread_id) = workspace_thread
+        .map(str::trim)
+        .filter(|thread_id| !thread_id.is_empty())
+    {
+        configurable[WORKSPACE_THREAD_KEY] = json!(thread_id);
     }
 
     if let Some(model) = model {
@@ -1708,12 +2039,16 @@ fn decode_values(data: &str) -> Option<Snapshot> {
     let tasks = decode_async_tasks(artifacts, &value);
     let reports = decode_reports(artifacts);
     let sources = decode_sources(artifacts);
+    // Read from the top level, not from `artifacts`: `todos` is the agent's own state, written by
+    // its `write_todos` tool, and never passes through the artifacts middleware.
+    let todos = decode_todos(&value);
 
     if buckets.is_empty()
         && project.is_none()
         && jobs.is_empty()
         && tasks.is_empty()
         && reports.is_empty()
+        && todos.is_empty()
     {
         return None;
     }
@@ -1724,6 +2059,7 @@ fn decode_values(data: &str) -> Option<Snapshot> {
         tasks,
         reports,
         sources,
+        todos,
     })
 }
 
@@ -2451,7 +2787,7 @@ mod tests {
         // tokens, because the server then emits `messages/partial` frames.
         // `values` rides alongside for the artifacts/spine snapshot — verified on a
         // live backend that asking for both still produces `event: messages`.
-        let body = run_request_body("hi", None, None);
+        let body = run_request_body("hi", None, None, None);
         assert_eq!(
             body["stream_mode"],
             json!(["messages-tuple", "values", "custom"])
@@ -2462,6 +2798,15 @@ mod tests {
         // Without subgraphs a delegated turn streams nothing while the subagent
         // works — the silent gap the activity trace exists to close.
         assert_eq!(body["stream_subgraphs"], json!(true));
+    }
+
+    #[test]
+    fn repeated_startups_reuse_one_internal_graph_warm_up_assistant() {
+        let body = graph_warm_up_assistant();
+        assert_eq!(body["assistant_id"], GRAPH_WARM_UP_ASSISTANT_ID);
+        assert_eq!(body["graph_id"], "agent");
+        assert_eq!(body["if_exists"], "do_nothing");
+        assert_eq!(body["metadata"]["minime_internal"], true);
     }
 
     #[test]
@@ -2476,7 +2821,7 @@ mod tests {
             base_url: Some("https://openrouter.ai/api/v1".into()),
             ..Default::default()
         };
-        let body = run_request_body("hi", Some(&model), None);
+        let body = run_request_body("hi", Some(&model), None, None);
         let configurable = &body["config"]["configurable"];
         assert_eq!(
             configurable["model_config"]["default"],
@@ -2495,7 +2840,7 @@ mod tests {
 
         // A resume carries the same routing: the continuation must not silently switch
         // model or lose the key mid-turn.
-        let resumed = resume_request_body(&[Decision::Approve], Some(&model), None);
+        let resumed = resume_request_body(&[Decision::Approve], Some(&model), None, None);
         assert_eq!(
             resumed["config"]["configurable"]["__llm_keys"],
             configurable["__llm_keys"]
@@ -2534,7 +2879,7 @@ mod tests {
                 .into_iter()
                 .collect(),
         };
-        let body = run_request_body("hi", Some(&model), None);
+        let body = run_request_body("hi", Some(&model), None, None);
         let configurable = &body["config"]["configurable"];
 
         assert_eq!(
@@ -2561,8 +2906,8 @@ mod tests {
                 .into_iter()
                 .collect(),
         };
-        let keys =
-            &run_request_body("hi", Some(&model), None)["config"]["configurable"]["__llm_keys"];
+        let keys = &run_request_body("hi", Some(&model), None, None)["config"]["configurable"]
+            ["__llm_keys"];
         assert_eq!(keys["custom"]["api_key"], "sk-custom");
         assert_eq!(keys["custom"]["base_url"], "https://openrouter.ai/api/v1");
     }
@@ -2577,7 +2922,8 @@ mod tests {
             api_key: Some("sk".into()),
             ..Default::default()
         };
-        let configurable = &run_request_body("hi", Some(&model), None)["config"]["configurable"];
+        let configurable =
+            &run_request_body("hi", Some(&model), None, None)["config"]["configurable"];
         assert!(
             configurable["model_config"].get("subagents").is_none(),
             "{}",
@@ -2596,7 +2942,7 @@ mod tests {
             base_url: None,
             ..Default::default()
         };
-        let body = run_request_body("hi", Some(&model), None);
+        let body = run_request_body("hi", Some(&model), None, None);
         let configurable = &body["config"]["configurable"];
         assert_eq!(configurable["model_config"]["default"], "openai::gpt-5.4");
         assert!(configurable["model_config"]["storage_mode"].is_null());
@@ -2814,13 +3160,13 @@ mod tests {
         // The other half of §105's pair: the label tells the app where to look, this tells the
         // backend where to write. They are computed from the same string by two sanitisers that
         // `workspace.rs` has a test to keep byte-identical.
-        let body = run_request_body("hi", None, Some("Late blight"));
+        let body = run_request_body("hi", None, Some("Late blight"), None);
         assert_eq!(
             body["config"]["configurable"]["__workspace_project__"],
             "Late blight"
         );
         // No project, no key — an ungrouped conversation keeps the path it always had.
-        let plain = run_request_body("hi", None, None);
+        let plain = run_request_body("hi", None, None, None);
         assert!(
             plain["config"]["configurable"]
                 .get("__workspace_project__")
@@ -2829,10 +3175,40 @@ mod tests {
             plain["config"]["configurable"]
         );
         assert!(
-            run_request_body("hi", None, Some("   "))["config"]["configurable"]
+            run_request_body("hi", None, Some("   "), None)["config"]["configurable"]
                 .get("__workspace_project__")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn every_run_names_the_conversation_that_owns_its_files() {
+        // The UUID is already the request URL. Sending it again under a directory-only key is
+        // intentional: LangGraph's thread metadata is absent in some tool-call contexts, and an
+        // async worker launched there otherwise creates a sibling folder under the workspace
+        // root. This is the client-side fact that makes the backend's §151 nesting deterministic
+        // instead of dependent on context propagation (docs §159).
+        let fresh = run_request_body("hi", None, None, Some("conversation-1"));
+        assert_eq!(
+            fresh["config"]["configurable"][WORKSPACE_THREAD_KEY],
+            "conversation-1"
+        );
+
+        // Resumes carry the owner too. In particular, a background task may wait across a backend
+        // restart, which clears the backend's in-memory worker→conversation map; the decision
+        // request must restore the owner before the worker writes anything else.
+        let resumed = resume_request_body(&[Decision::Approve], None, None, Some("conversation-1"));
+        assert_eq!(
+            resumed["config"]["configurable"][WORKSPACE_THREAD_KEY],
+            "conversation-1"
+        );
+
+        // Blank is absence, never a directory name and never an instruction to pin a worker to
+        // an empty path segment.
+        let blank = run_request_body("hi", None, None, Some("   "));
+        assert!(blank["config"]["configurable"]
+            .get(WORKSPACE_THREAD_KEY)
+            .is_none());
     }
 
     #[test]
@@ -3072,6 +3448,8 @@ mod tests {
             pending: None,
             error: None,
             activity: None,
+            todos: Vec::new(),
+            owner: String::new(),
         };
         assert!(!waiting.is_finished(), "interrupted is not terminal");
         for status in ["success", "error", "timeout", "cancelled"] {
@@ -3089,6 +3467,69 @@ mod tests {
             };
             assert!(!going.is_finished(), "{status}");
         }
+    }
+
+    #[test]
+    fn a_worker_with_no_recorded_owner_names_no_conversation_at_all() {
+        // The half of §159 that is easy to get backwards. Naming the owner is what stops a
+        // background worker filing its figures beside the conversation instead of inside it —
+        // but an owner the app does not actually know must not be invented, and blank is not a
+        // directory name. Sending `""` would pin the run to the workspace *root*, which is
+        // strictly worse than the sibling folder the backend falls back to on its own.
+        let task = AsyncTask {
+            task_id: "t".into(),
+            thread_id: "worker-thread".into(),
+            agent_name: "background_worker".into(),
+            status: "interrupted".into(),
+            description: String::new(),
+            pending: None,
+            error: None,
+            activity: None,
+            todos: Vec::new(),
+            owner: String::new(),
+        };
+        assert_eq!(task.owning_conversation(), None);
+        // Whitespace is absence too: it survives a round trip through JSON looking like a value.
+        let blank = AsyncTask {
+            owner: "   ".into(),
+            ..task.clone()
+        };
+        assert_eq!(blank.owning_conversation(), None);
+        let owned = AsyncTask {
+            owner: "conversation-1".into(),
+            ..task.clone()
+        };
+        assert_eq!(owned.owning_conversation(), Some("conversation-1"));
+    }
+
+    #[test]
+    fn decoding_a_snapshot_does_not_guess_which_conversation_owns_a_worker() {
+        // `async_tasks` records the worker's own thread and says nothing about its parent, so
+        // this decoder cannot know — and the ingesting caller can. Pinned here so a later reader
+        // does not "helpfully" default the field to `thread_id`.
+        let snapshot = decode_values(
+            &json!({
+                "artifacts": {
+                    "async_tasks": {
+                        "task-1": {
+                            "task_id": "task-1",
+                            "thread_id": "worker-thread",
+                            "agent_name": "background_worker",
+                            "status": "running"
+                        }
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .expect("a snapshot with one task");
+        let task = snapshot.tasks.first().expect("the task");
+        assert_eq!(task.thread_id, "worker-thread");
+        assert_eq!(
+            task.owning_conversation(),
+            None,
+            "the payload carries no owner, so the decoder must not supply one"
+        );
     }
 
     #[test]
@@ -3229,6 +3670,99 @@ mod tests {
         let project = snapshot.project.as_ref().expect("spine rides along");
         assert_eq!(project.mission, "M");
         assert_eq!(project.completed, vec!["c"]);
+    }
+
+    /// The plan the panel counts, read from the shape `TodoListMiddleware` actually writes.
+    #[test]
+    fn a_plan_is_read_from_the_agents_own_todo_list() {
+        // `langchain`'s `Todo` verbatim: `content` plus one of three statuses.
+        let values = json!({
+            "todos": [
+                {"content": "Generate the synthetic dataset", "status": "completed"},
+                {"content": "Clean and validate the columns", "status": "completed"},
+                {"content": "Build the diagnostic model", "status": "in_progress"},
+                {"content": "Write the report", "status": "pending"},
+            ]
+        });
+        let todos = decode_todos(&values);
+        assert_eq!(todos.len(), 4);
+        assert_eq!(plan_progress(&todos), Some((2, 4)));
+        let marks: Vec<&str> = todos.iter().map(Todo::mark).collect();
+        assert_eq!(marks, ["✓", "✓", "◐", "○"]);
+
+        // **No plan is not a plan of zero steps.** `write_todos` is optional and the model skips it
+        // for simple requests, so "0 of 0" would be a claim about work nobody planned.
+        assert_eq!(plan_progress(&[]), None);
+        assert!(decode_todos(&json!({})).is_empty());
+
+        // A step with no text is not a step. A status we have never seen counts as unfinished,
+        // rather than panicking or quietly counting as done.
+        let ragged = decode_todos(&json!({
+            "todos": [
+                {"content": "  ", "status": "completed"},
+                {"content": "Real step", "status": "cancelled"},
+                {"status": "pending"},
+            ]
+        }));
+        assert_eq!(ragged.len(), 1);
+        assert_eq!(ragged[0].content, "Real step");
+        assert!(!ragged[0].is_done() && !ragged[0].is_running());
+        assert_eq!(ragged[0].mark(), "○");
+        assert_eq!(plan_progress(&ragged), Some((0, 1)));
+
+        // A missing `status` defaults to pending, not to done — the safe direction for a count a
+        // researcher reads as "how much is left".
+        let bare = decode_todos(&json!({"todos": [{"content": "Step"}]}));
+        assert_eq!(bare[0].status, "pending");
+    }
+
+    /// A whole `values` frame carrying a plan, so the wire shape is pinned and not just the helper.
+    #[test]
+    fn a_turn_that_only_wrote_a_plan_is_still_a_snapshot() {
+        // `todos` sits beside `artifacts`, not inside it: it is agent state, not an artifact.
+        let data = json!({
+            "todos": [{"content": "Read the papers", "status": "in_progress"}],
+            "artifacts": {}
+        })
+        .to_string();
+        let decoded = decode(&SseEvent {
+            name: "values".into(),
+            data,
+        });
+        let [TurnEvent::Snapshot(snapshot)] = decoded.as_slice() else {
+            panic!("a plan alone is worth a snapshot, got {decoded:?}");
+        };
+        assert_eq!(snapshot.todos.len(), 1);
+        assert!(snapshot.buckets.is_empty(), "and nothing else is invented");
+
+        // An empty frame is still nothing at all.
+        assert!(decode(&SseEvent {
+            name: "values".into(),
+            data: json!({"artifacts": {}}).to_string(),
+        })
+        .is_empty());
+    }
+
+    /// Reading and writing the spine must name the same project, or a saved mission lands in a
+    /// namespace the panel never reads and the edit looks like it silently did nothing (§199).
+    #[test]
+    fn a_mission_is_written_to_the_project_it_was_read_from() {
+        let ungrouped = LangGraphClient::new("http://127.0.0.1:2024");
+        assert_eq!(ungrouped.project_url(), "http://127.0.0.1:2024/project");
+
+        let filed = LangGraphClient::new("http://127.0.0.1:2024")
+            .with_project(Some("Potato Late Blight".into()));
+        assert_eq!(
+            filed.project_url(),
+            "http://127.0.0.1:2024/project?project=Potato%20Late%20Blight",
+            "the overlay reads `?project` on GET and PATCH alike",
+        );
+
+        // Whitespace is not a project. `with_project(Some("  "))` used to be indistinguishable
+        // from naming one, and would have scoped the write to a namespace nothing else uses.
+        let blank =
+            LangGraphClient::new("http://127.0.0.1:2024").with_project(Some("  ".into()));
+        assert_eq!(blank.project_url(), "http://127.0.0.1:2024/project");
     }
 
     #[test]

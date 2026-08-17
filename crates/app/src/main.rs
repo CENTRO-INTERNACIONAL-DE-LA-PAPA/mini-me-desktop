@@ -10,6 +10,7 @@
 //! rendering and the command palette are still open.
 
 mod backend;
+mod catalogue;
 mod composer;
 mod gallery;
 mod markdown;
@@ -26,6 +27,7 @@ mod theme;
 mod ui;
 mod workspace;
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -33,9 +35,10 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use futures::StreamExt;
 use gpui::{
-    actions, div, img, prelude::*, px, relative, rgb, size, AnimationExt as _, App, Application,
-    Bounds, ClipboardItem, Context, Entity, Focusable, FontStyle, FontWeight, HighlightStyle,
-    KeyBinding, SharedString, StyledText, Window, WindowBounds, WindowOptions,
+    actions, div, img, prelude::*, px, relative, rgb, size, svg, App, Application, AssetSource, Bounds, ClipboardItem, Context, Div, Entity, Focusable, FontStyle,
+    FontWeight, HighlightStyle, KeyBinding, ListAlignment, ListState, SharedString, StyledText,
+    Window, WindowBounds,
+    WindowOptions,
 };
 
 use composer::{Composer, ComposerEvent};
@@ -61,6 +64,104 @@ const CHECK_PROMPT: &str = "In one short paragraph, what is your role as the Min
 const ASTA_CITATION: &str = "AstaBench: Rigorous Benchmarking of AI Agents with a Scientific \
      Research Suite. arXiv:2510.21652 — https://arxiv.org/abs/2510.21652";
 
+/// The root workspace said as a useful place rather than as the absence of organisation.
+///
+/// `None` remains the metadata value and the files remain directly under `Documents/Mini-Me`;
+/// this is only the researcher-facing name requested in §154, so it cannot become a second
+/// project registry or collide with a real folder of the same name.
+const UNGROUPED_PROJECT_LABEL: &str = "Ungrouped Conversations";
+const ICON_PATHS: [&str; 18] = [
+    "icons/settings.svg",
+    "icons/conversations.svg",
+    "icons/research.svg",
+    "icons/road.svg",
+    "icons/enter.svg",
+    "icons/attach.svg",
+    "icons/file-table.svg",
+    "icons/file-image.svg",
+    "icons/file-code.svg",
+    "icons/file-notebook.svg",
+    "icons/file-data.svg",
+    "icons/file-web.svg",
+    "icons/file-text.svg",
+    "icons/file-log.svg",
+    "icons/file-doc.svg",
+    "icons/file-archive.svg",
+    "icons/file-db.svg",
+    "icons/file-blank.svg",
+];
+
+/// The four small UI icons, compiled into the executable rather than read beside it.
+///
+/// Windows installs do not preserve a source-tree-relative assets directory. GPUI still needs an
+/// [`AssetSource`] to resolve `svg().path(...)`, so embedding the hand-authored files makes the
+/// packaged and development builds follow the same path (docs §157).
+struct Assets;
+
+impl AssetSource for Assets {
+    fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
+        let bytes: Option<&'static [u8]> = match path {
+            "icons/settings.svg" => Some(include_bytes!("../assets/icons/settings.svg")),
+            "icons/conversations.svg" => {
+                Some(include_bytes!("../assets/icons/conversations.svg"))
+            }
+            "icons/research.svg" => Some(include_bytes!("../assets/icons/research.svg")),
+            "icons/road.svg" => Some(include_bytes!("../assets/icons/road.svg")),
+            "icons/enter.svg" => Some(include_bytes!("../assets/icons/enter.svg")),
+            "icons/attach.svg" => Some(include_bytes!("../assets/icons/attach.svg")),
+            "icons/file-table.svg" => Some(include_bytes!("../assets/icons/file-table.svg")),
+            "icons/file-image.svg" => Some(include_bytes!("../assets/icons/file-image.svg")),
+            "icons/file-code.svg" => Some(include_bytes!("../assets/icons/file-code.svg")),
+            "icons/file-notebook.svg" => Some(include_bytes!("../assets/icons/file-notebook.svg")),
+            "icons/file-data.svg" => Some(include_bytes!("../assets/icons/file-data.svg")),
+            "icons/file-web.svg" => Some(include_bytes!("../assets/icons/file-web.svg")),
+            "icons/file-text.svg" => Some(include_bytes!("../assets/icons/file-text.svg")),
+            "icons/file-log.svg" => Some(include_bytes!("../assets/icons/file-log.svg")),
+            "icons/file-doc.svg" => Some(include_bytes!("../assets/icons/file-doc.svg")),
+            "icons/file-archive.svg" => Some(include_bytes!("../assets/icons/file-archive.svg")),
+            "icons/file-db.svg" => Some(include_bytes!("../assets/icons/file-db.svg")),
+            "icons/file-blank.svg" => Some(include_bytes!("../assets/icons/file-blank.svg")),
+            _ => None,
+        };
+        Ok(bytes.map(Cow::Borrowed))
+    }
+
+    fn list(&self, path: &str) -> anyhow::Result<Vec<SharedString>> {
+        Ok(ICON_PATHS
+            .iter()
+            .filter(|asset| path.is_empty() || asset.starts_with(path))
+            .copied()
+            .map(SharedString::from)
+            .collect())
+    }
+}
+
+/// A theme-tinted 14px icon, matching the text it replaces without changing control geometry.
+///
+/// **`ink` is required, and that is the whole point.** GPUI paints an SVG by rasterising it to a
+/// mask and multiplying by `style.text.color` — and `Svg::paint` is literally
+/// `self.path.as_ref().zip(style.text.color)`, so a `None` there paints *nothing at all*. That
+/// colour is not inherited: `Interactivity::compute_style` starts from `Style::default()`, whose
+/// `text.color` is `None`, and refines it with the element's **own** styles. A parent's
+/// `.text_color(…)` never reaches the child (docs §157).
+///
+/// So the argument is not a convenience. Without it every icon here is invisible, and no test
+/// that reads the SVG file can tell — which is why this is a parameter the compiler demands
+/// rather than a rule written down.
+fn app_icon(path: &'static str, ink: u32) -> impl IntoElement {
+    app_icon_at(path, ink, 14.)
+}
+
+/// The same, at a size the caller chooses — a file tile wants more than 14px.
+fn app_icon_at(path: &'static str, ink: u32, size: f32) -> impl IntoElement {
+    svg()
+        .path(path)
+        .w(px(size))
+        .h(px(size))
+        .flex_none()
+        .text_color(rgb(ink))
+}
+
 /// [`section_label`] for a heading only known at runtime.
 fn section_label_owned(text: String) -> impl IntoElement {
     div()
@@ -82,26 +183,47 @@ fn picker_row(
     div()
         .id(SharedString::from(format!("row-{label}")))
         .flex()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .gap_2()
+        // **A column, because the note was eating the name.** Both sat in one row competing for
+        // width, and since the label is the one that ellipsises, `gpt-4.1 · OpenAI — billed
+        // separately` rendered as `gpt-4.` — reported as *"I cannot read the complete model
+        // name"*. Stacking gives the id the full width it needs, which matters more now that a
+        // gateway's ids look like `meta-llama/llama-3.3-70b-instruct` (docs §188).
+        .flex_col()
+        // **No `items_start`.** It sets the cross axis to content width, and `Label::ellipsis`
+        // grows to fill a width it then truncates to — so with content width there was nothing to
+        // fill and every row rendered as a bare "…", reported as *"I can't select models for the
+        // subagents"*. Stretch is the default and is what a full-width row wants (§59, §190).
+        .gap_0p5()
         .w_full()
         .min_w_0()
         .px_2()
         .py_1()
         .rounded_md()
         .when(selected, |row| row.bg(rgb(theme::accent_soft())))
-        .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
-        .child(
-            ui::Label::new(label)
-                .colour(if selected {
-                    theme::text()
-                } else {
-                    theme::text_muted()
-                })
-                .ellipsis(),
-        )
+        // **Inherited, not set on the label.** A vivid hover fill needs its ink to flip, and
+        // `ui::Label::colour` writes the colour onto the element itself — which a parent's hover
+        // refinement cannot override (the same rule that stops `text_color` reaching an SVG,
+        // §157). So the row states the resting colour and the hover restates both together, which
+        // is the only arrangement where the two can disagree (docs §189).
+        .text_color(rgb(if selected {
+            theme::text()
+        } else {
+            theme::text_muted()
+        }))
+        .hover(|style| {
+            let fill = theme::hover_over(theme::elevated());
+            style
+                .bg(rgb(fill))
+                .text_color(rgb(theme::ink_on(fill)))
+                .cursor_pointer()
+        })
+        // **No `ellipsis`, and this one was settled by comparison rather than by reasoning.**
+        // The provider headings two lines away are the same `Label` without it and render their
+        // text correctly, so the truncate path — `overflow_hidden` + `text_ellipsis` — is the
+        // difference, and it collapsed every model name to a bare "…" through three attempted
+        // fixes (§59, §190, §192). A row that is already a column has somewhere to put a long id:
+        // it wraps. That is worse than truncating and enormously better than showing nothing.
+        .child(ui::Label::new(label).inherit())
         .children(note.map(|note| {
             // Muted, not red: a missing key is a thing to do next, not a thing done wrong.
             ui::Label::new(note)
@@ -138,7 +260,7 @@ fn section_label(text: &'static str) -> impl IntoElement {
 /// entry is verbatim, and nothing is attributed to anyone the agent did not name. A researcher
 /// fills in the fields their journal wants, which they were going to check anyway (org policy:
 /// *validate AI-generated content with subject matter experts*).
-fn bibliography(sources: &[protocol::Source]) -> String {
+fn bibliography(sources: &[protocol::Source], origins: &[references::Origin]) -> String {
     let mut out = String::new();
     for (at, source) in sources.iter().enumerate() {
         let citation = source.citation.trim();
@@ -155,10 +277,20 @@ fn bibliography(sources: &[protocol::Source]) -> String {
         // A disagreement travels with the entry rather than being resolved here. A reference
         // manager shows `annote`, and someone importing forty references should not have to come
         // back to this window to find out which two were doubtful.
-        if let Some(written) = disputed_link(source) {
-            out.push_str(&format!(
+        //
+        // **And which ones nothing checked.** This is the copy that leaves the app — into Zotero,
+        // into a manuscript, into a colleague's inbox — so it is the one place the distinction
+        // most needs to survive. The panel can be re-read; an exported `.bib` is on its own, and
+        // the note has to travel with the entry it belongs to (docs §185).
+        match (disputed_link(source), origins.get(at)) {
+            (Some(written), _) => out.push_str(&format!(
                 "  annote = {{unverified: the citation text gives {written}}},\n"
-            ));
+            )),
+            (None, Some(origin)) if origin.needs_a_human() => out.push_str(
+                "  annote = {unverified: this reference came from the model, not from a search — \
+                 confirm it before citing},\n",
+            ),
+            (None, _) => {}
         }
         out.push_str("}\n\n");
     }
@@ -593,11 +725,154 @@ fn file_mark(path: &std::path::Path) -> (&'static str, u32) {
         .unwrap_or_default()
         .to_ascii_lowercase();
     match extension.as_str() {
-        "csv" | "tsv" | "xlsx" | "parquet" => ("▤", theme::success()),
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" => ("▩", theme::running()),
-        "pdf" => ("▦", theme::error()),
-        _ => ("▤", theme::warning()),
+        "csv" | "tsv" | "xlsx" | "xls" | "parquet" | "feather" => {
+            ("icons/file-table.svg", theme::success())
+        }
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" => {
+            ("icons/file-image.svg", theme::running())
+        }
+        "py" | "r" | "jl" | "sh" | "js" | "ts" | "rs" | "sql" => {
+            ("icons/file-code.svg", theme::accent())
+        }
+        "ipynb" => ("icons/file-notebook.svg", theme::accent()),
+        "json" | "yaml" | "yml" | "toml" | "xml" => ("icons/file-data.svg", theme::warning()),
+        "html" | "htm" => ("icons/file-web.svg", theme::warning()),
+        "md" | "txt" | "rst" => ("icons/file-text.svg", theme::text_muted()),
+        "log" | "out" | "err" => ("icons/file-log.svg", theme::text_faint()),
+        "pdf" | "docx" | "doc" | "typ" => ("icons/file-doc.svg", theme::error()),
+        "zip" | "gz" | "tar" | "tgz" | "7z" => ("icons/file-archive.svg", theme::text_muted()),
+        "db" | "sqlite" | "sqlite3" | "duckdb" => ("icons/file-db.svg", theme::success()),
+        _ => ("icons/file-blank.svg", theme::text_muted()),
     }
+}
+
+/// Extensions a research run actually writes, for [`named_files`].
+///
+/// **Deliberately narrower than `file_mark`'s.** That one maps whatever exists on disk to an icon
+/// and can afford a catch-all; this one decides whether a word in an *answer* is a claim about a
+/// file, and a wrong yes puts a correction under a sentence that was fine. So `.sh`, `.js` and
+/// `.rs` are absent: an answer is far likelier to mention one in passing than to have written it.
+const CLAIMABLE: [&str; 20] = [
+    "png", "jpg", "jpeg", "gif", "webp", "svg", "pdf", "csv", "tsv", "xlsx", "parquet", "json",
+    "txt", "md", "html", "typ", "zip", "db", "sqlite", "ipynb",
+];
+
+/// Filenames an answer names, in the order it names them.
+///
+/// The turn tells the researcher what it produced, and until now nothing compared that to the
+/// folder. Two failed attempts reported plots on disk that were not there, and a later answer
+/// listed ten filenames the panel could not show (§42). The prompt already says *"NEVER invent
+/// findings, numbers, or charts"* — measured at zero compliance, which is what a rule with no
+/// check is worth.
+///
+/// Basenames only: an answer may write `outputs/plots/a.png` for a file the workspace holds at a
+/// different depth, and the question is whether the file exists, not whether the model recited its
+/// path correctly.
+fn named_files(text: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for token in text.split(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | '[' | ']' | '`' | '"' | '\'' | ',' | ';' | '<' | '>' | '|' | '*')) {
+        // Trailing sentence punctuation is not part of a name; a leading bullet is not either.
+        let token = token.trim_matches(|c: char| matches!(c, '.' | ':' | '!' | '?' | '·' | '-' | '#'));
+        let Some(name) = token.rsplit(['/', '\\']).next() else {
+            continue;
+        };
+        let Some((stem, extension)) = name.rsplit_once('.') else {
+            continue;
+        };
+        if !CLAIMABLE.contains(&extension.to_ascii_lowercase().as_str()) {
+            continue;
+        }
+        // A stem has to look like a name. `0.96` fails on the extension already; this catches
+        // the rest of the numeric and single-character noise.
+        if stem.len() < 2 || !stem.chars().any(|c| c.is_ascii_alphabetic()) {
+            continue;
+        }
+        let name = name.to_string();
+        if !found.contains(&name) {
+            found.push(name);
+        }
+    }
+    found
+}
+
+/// A menu opened from a control in the sidebar rather than by right-clicking.
+///
+/// **Why a menu and not more inline chips.** Each row carried `rename` and `✕` revealed on hover,
+/// and each project heading carried `+` and `✕`. Four controls, all of them one or two characters
+/// wide, all of them appearing only when the pointer is already on top of them — so the way to
+/// find out what a row can do was to hover it and read two abbreviations. A `⋮` is one target in
+/// a fixed place whose contents are words, which is the shape every list of this kind uses.
+///
+/// The `New` variant is the same idea aimed the other way: one button whose menu says what the
+/// two kinds of new thing are, rather than a button that silently means only one of them.
+#[derive(Clone, Debug)]
+enum SidebarMenu {
+    New,
+    Conversation(protocol::Conversation),
+    Project {
+        name: String,
+        conversations: Vec<protocol::Conversation>,
+    },
+}
+
+/// One row of a sidebar menu: a label, and whether it is the destructive one.
+struct MenuRow {
+    id: &'static str,
+    label: String,
+    danger: bool,
+}
+
+impl SidebarMenu {
+    fn rows(&self) -> Vec<MenuRow> {
+        let row = |id, label: String| MenuRow {
+            id,
+            label,
+            danger: false,
+        };
+        let danger = |id, label: String| MenuRow {
+            id,
+            label,
+            danger: true,
+        };
+        match self {
+            Self::New => vec![
+                row("menu-new-conversation", "New conversation".into()),
+                // The ellipsis is a promise: this one asks for a name before anything happens.
+                row("menu-new-project", "New project…".into()),
+            ],
+            Self::Conversation(_) => vec![
+                row("menu-rename", "Rename".into()),
+                danger("menu-delete", "Delete".into()),
+            ],
+            Self::Project { name, .. } => vec![
+                row("menu-new-here", format!("New conversation in {name}")),
+                danger("menu-delete-project", "Delete project".into()),
+            ],
+        }
+    }
+}
+
+/// The card every popup menu is drawn on.
+///
+/// One definition because the discipline is easy to omit and invisible when it is: a menu must
+/// `occlude`, or a click on a row also lands on whatever the menu was drawn over (§163), and it
+/// must swallow the left press, or choosing an item starts a text selection in the transcript
+/// underneath. The right-click menu learned both the hard way; a second menu written from scratch
+/// beside it would have learned them again.
+fn menu_card() -> gpui::Div {
+    div()
+        .flex()
+        .flex_col()
+        .min_w(px(190.))
+        .py_1()
+        .rounded_md()
+        .bg(rgb(theme::elevated()))
+        .border_1()
+        .border_color(rgb(theme::border_strong()))
+        .occlude()
+        .on_mouse_down(gpui::MouseButton::Left, |_event, _window, cx| {
+            cx.stop_propagation();
+        })
 }
 
 /// One line of the activity trace: a tool call, or a delegation.
@@ -628,6 +903,28 @@ fn step_line(label: &str) -> impl IntoElement {
 /// which is how the theme rows ended up with a thumb sitting on their swatches (docs §100).
 pub const SCROLL_GUTTER: f32 = 12.;
 
+/// The group name a scrollbar watches, so the thumb appears only while the pointer is over the
+/// region it scrolls.
+///
+/// **A scrollbar is a control, and a control that is always drawn is furniture.** The transcript's
+/// sat permanently against the right edge, close enough to the text that a long line ran under it.
+/// Revealed on hover it is still findable — the pointer is already there when you reach for it —
+/// and gone the rest of the time (§173).
+const SCROLL_GROUP: &str = "scroll-region";
+
+/// How far the conversation sits from its own edge.
+///
+/// Matches the composer below it, which is `m_2` outside a `p_2` box — so the question a
+/// researcher types and the answer they read start on the same x. 16px was the list's padding
+/// before §174 found that half of it never applied.
+const TRANSCRIPT_INSET: f32 = 16.;
+
+/// How many references the side panel lists before offering the rest in one press.
+///
+/// Four, the same count the image gallery shows before its `+N` tile (§152). Enough to see whose
+/// work this is; few enough that the files below stay on screen.
+const SOURCES_IN_PANEL: usize = 4;
+
 fn scrollbar(handle: &gpui::ScrollHandle) -> Option<impl IntoElement> {
     let overflow = handle.max_offset().height;
     let viewport = handle.bounds().size.height;
@@ -643,6 +940,528 @@ fn scrollbar(handle: &gpui::ScrollHandle) -> Option<impl IntoElement> {
     Some(
         div()
             .absolute()
+            .invisible()
+            .group_hover(SCROLL_GROUP, |style| style.visible())
+            .top(travel * progress)
+            .right(px(2.))
+            .w(px(6.))
+            .h(thumb)
+            .rounded_full()
+            .bg(rgb(theme::border_strong())),
+    )
+}
+
+/// The geometry shared by painting and dragging a gallery scrollbar.
+///
+/// It has to be one calculation. The first Windows pass found a painted thumb that could not be
+/// dragged at all; letting its hit-testing use a second set of numbers would be the same defect
+/// one layer later (docs §158).
+#[derive(Clone, Copy, Debug)]
+struct HorizontalScrollMetrics {
+    overflow: gpui::Pixels,
+    viewport: gpui::Pixels,
+    thumb: gpui::Pixels,
+    travel: gpui::Pixels,
+    progress: f32,
+}
+
+/// How wide the thumb is for a rail showing `viewport` of `viewport + overflow` content.
+///
+/// Split out from the metrics only so it can be tested without a laid-out `ScrollHandle`; the
+/// metrics still compute it exactly once, which is the property the type above exists to hold.
+///
+/// Two bounds, and the second matters as much as the first. The 28px floor keeps a thumb
+/// grabbable on a long rail. The `viewport` ceiling keeps that floor from exceeding the track it
+/// sits in: without it a rail narrower than 28px yields a *negative* `travel`, so the thumb is
+/// painted to the left of its own track while `horizontal_drag_offset` refuses to move it — the
+/// "looked interactive, wasn't" shape of §158, one case further out.
+fn horizontal_thumb_width(viewport: gpui::Pixels, overflow: gpui::Pixels) -> gpui::Pixels {
+    let content = viewport + overflow;
+    (viewport * (viewport / content)).max(px(28.)).min(viewport)
+}
+
+fn horizontal_scroll_metrics(handle: &gpui::ScrollHandle) -> Option<HorizontalScrollMetrics> {
+    let overflow = handle.max_offset().width;
+    let viewport = handle.bounds().size.width;
+    if overflow <= px(0.) || viewport <= px(0.) {
+        return None;
+    }
+    let thumb = horizontal_thumb_width(viewport, overflow);
+    let travel = viewport - thumb;
+    let progress = (-handle.offset().x / overflow).clamp(0.0, 1.0);
+    Some(HorizontalScrollMetrics {
+        overflow,
+        viewport,
+        thumb,
+        travel,
+        progress,
+    })
+}
+
+/// Convert a dragged thumb position into GPUI's negative content offset.
+fn horizontal_drag_offset(
+    pointer_x: gpui::Pixels,
+    track_left: gpui::Pixels,
+    grab_x: gpui::Pixels,
+    travel: gpui::Pixels,
+    overflow: gpui::Pixels,
+) -> gpui::Pixels {
+    if travel <= px(0.) {
+        return px(0.);
+    }
+    let thumb_left = (pointer_x - track_left - grab_x).clamp(px(0.), travel);
+    -(overflow * (thumb_left / travel))
+}
+
+/// Outputs that share the directory the agent chose share one visual gallery.
+///
+/// §143 deliberately retained each relative path while making nested work visible. §152 found
+/// that rendering those paths as independent rows flattened the useful structure straight back
+/// out. Keep the full parent as the identity so two separate runs' `plots/` folders never merge.
+struct OutputFolderGroup<'a> {
+    folder: PathBuf,
+    outputs: Vec<&'a workspace::Output>,
+}
+
+/// How many image tiles the panel shows before the last one becomes a count.
+///
+/// Four, and 2×2, because that is the arrangement the researcher pointed at: a phone's photo
+/// grid, where the fourth tile carries `+5` rather than the grid growing. §152's complaint was
+/// never that the thumbnails were too small — it was that a productive run claimed the whole
+/// panel before anyone had chosen a figure to look at.
+const IMAGE_GRID_TILES: usize = 4;
+
+/// Tiles per row. Two, which with [`IMAGE_GRID_TILES`] makes the 2×2 the researcher pointed at.
+const GRID_COLUMNS: usize = 2;
+
+/// The gap between tiles, matching `gap_2`. Named because the heading is sized from it.
+const GRID_GAP: f32 = 8.;
+
+/// Tile width in the 330px Outputs panel, and in the transcript.
+///
+/// **Fixed, not a fraction.** A grid of `flex_1` tiles is as wide as whatever holds it, which in
+/// the transcript is the whole conversation — one folder of files claimed a band wider than the
+/// answer that produced it. Two fixed tiles make the block `2 × tile + gap` and no wider, which is
+/// how the phone gallery being imitated stays a block you flick past rather than a wall (§164).
+/// How many characters a folder heading gets in the research panel.
+///
+/// The heading box is [`GRID_TILE_COMPACT`] × [`GRID_COLUMNS`] + [`GRID_GAP`] = 304px, and
+/// `click to open all` takes about a hundred of them — so roughly 32 characters at
+/// [`ui::Size::Compact`]. It was 28, chosen before headings carried a producer's name and two
+/// characters short of fitting `background worker / … / tables` (§208). `ui::Label` here has no
+/// `.ellipsis()` (§193), so this number is the only thing keeping the text inside the box.
+const PANEL_HEADING_CHARS: usize = 32;
+
+/// The same, for a heading under an answer in the transcript, where the box is 408px.
+const TRANSCRIPT_HEADING_CHARS: usize = 40;
+
+const GRID_TILE_COMPACT: f32 = 148.;
+const GRID_TILE_ROOMY: f32 = 200.;
+
+/// A tile's media area, as a fraction of its width.
+///
+/// Landscape rather than square: the figures are matplotlib plots, which are wider than tall, and
+/// a square tile showing a `Contain`ed plot is mostly empty box.
+const GRID_TILE_ASPECT: f32 = 0.7;
+
+/// The `+N` glyph, sized to the tile it sits on.
+fn media_scrim_size(tile: f32) -> f32 {
+    (tile / 4.).max(18.)
+}
+
+/// How many characters of a filename fit across a tile at `text_xs`.
+///
+/// Measured rather than truncated by the layout, for the reason [`Workbench::output_grid_tile`]
+/// gives: `Label::ellipsis` collapses to a bare `…` without a flex parent to grow within (§59).
+/// Roughly 6px per character at 12px type, less the tile's own padding.
+fn name_chars(tile: f32) -> usize {
+    (((tile - 16.) / 6.) as usize).max(8)
+}
+
+/// The height of the image area in the preview, and the modal's own size.
+///
+/// Explicit rather than "as tall as the picture": the modal has a header above and a filmstrip
+/// below, and an image sized from the file pushed both out of a bounded panel. 380 + the header +
+/// the strip sits inside [`PREVIEW_MAX_HEIGHT`] with room to spare, so the layout cannot depend on
+/// what the agent happened to plot.
+const PREVIEW_IMAGE_HEIGHT: f32 = 380.;
+
+/// The body's own ceiling, so it scrolls instead of growing the panel.
+///
+/// A flex child with `overflow_y_scroll` needs a bounded height to scroll *within*; unbounded, it
+/// resolves to its content and the clipping happens somewhere else — which is how a plot ended up
+/// cut at the top. 440 leaves the image box its 380 plus the 24 of padding around it, and a long
+/// CSV scrolls inside the same frame.
+const PREVIEW_BODY_HEIGHT: f32 = 440.;
+
+/// Wide enough to read a plot's axis labels. Was 760, which was chosen when the preview was a
+/// table of CSV rows and is narrow for a figure with five rotated category names on the x axis.
+const PREVIEW_WIDTH: f32 = 880.;
+
+/// Leaves the workbench visible at the edges — it is a modal, not a screen (docs §49).
+const PREVIEW_MAX_HEIGHT: f32 = 640.;
+
+/// How many tiles the grid draws, and how many images the last one stands in for.
+///
+/// **The scrimmed tile counts among the hidden**, because it is covered: eight images in four
+/// tiles reads `+5` — three pictures you can see, five you cannot — which is what the phone
+/// gallery the researcher pointed at shows for the same eight. `total - tiles` gives `+4` and
+/// looks perfectly reasonable in review; it is only wrong beside the thing it is imitating. One
+/// function so the grid and its test cannot hold two versions of the rule.
+fn image_grid_shape(total: usize) -> (usize, usize) {
+    let shown = total.min(IMAGE_GRID_TILES);
+    let hidden = if total > IMAGE_GRID_TILES {
+        total - (IMAGE_GRID_TILES - 1)
+    } else {
+        0
+    };
+    (shown, hidden)
+}
+
+/// Ink for text drawn on a dark scrim over a picture.
+///
+/// Deliberately **not** a theme role. The scrim beneath it is a fixed dark wash in both palettes,
+/// so a role that followed the theme would put near-black text on it in the light one. The colour
+/// belongs to the scrim, not to the page — the same reason the modal's own backdrop is a literal.
+const SCRIM_INK: u32 = 0xf5f5f5;
+
+/// A file open in the preview, and the set the researcher can step through from it.
+///
+/// **Why a set and not a file.** The preview held one `Output`, so it had nothing to go "next"
+/// to: choosing between eight figures meant closing the modal, finding the next thumbnail, and
+/// opening it again. Holding the group it was opened from is what makes the arrows, the counter
+/// and the filmstrip possible, and all three are the same fact rendered three ways.
+struct Preview {
+    /// Never empty — see [`Preview::opening`], which is the only way to build one.
+    items: Vec<workspace::Output>,
+    at: usize,
+}
+
+impl Preview {
+    /// Open `items` at `at`, or `None` when there is nothing to show.
+    ///
+    /// The emptiness check is here rather than at the call sites because `current()` indexes,
+    /// and an empty preview would be a panic reachable from a click on a folder whose files were
+    /// deleted between the scan and the click — which on this project's own evidence is not a
+    /// hypothetical (§159's reproduction was deleted mid-diagnosis).
+    fn opening(items: Vec<workspace::Output>, at: usize) -> Option<Self> {
+        (!items.is_empty()).then(|| {
+            let at = at.min(items.len() - 1);
+            Self { items, at }
+        })
+    }
+
+    /// One file, with nothing to step to. What a non-image row still opens.
+    fn single(output: workspace::Output) -> Option<Self> {
+        Self::opening(vec![output], 0)
+    }
+
+    fn current(&self) -> &workspace::Output {
+        // `at` is clamped on construction and only ever moved by `step`, which wraps.
+        &self.items[self.at]
+    }
+
+    /// Move `by` places, wrapping at both ends.
+    ///
+    /// Wrapping rather than stopping: the counter says which of how many, so there is no risk of
+    /// mistaking the end for a broken button, and a researcher comparing the first and last plot
+    /// of a series should not have to travel back through six.
+    fn step(&mut self, by: isize) {
+        let count = self.items.len() as isize;
+        if count <= 1 {
+            return;
+        }
+        let at = self.at as isize + by;
+        self.at = at.rem_euclid(count) as usize;
+    }
+}
+
+/// Images in one group, everything else in another, each keeping its listing order.
+///
+/// **The boundary the researcher asked for**, in their words: *"I want to group images and in
+/// another group other files."* §152's gallery grouped by the folder the agent chose, which was
+/// right about structure and wrong about kind — a folder holding seven plots and a summary CSV
+/// put the CSV in the middle of the strip, and the strip is the thing you flick through looking
+/// for a figure.
+///
+/// `Kind::Figure` is the test rather than the extension, so this cannot disagree with the
+/// thumbnail renderer about what an image is: both ask the same enum.
+fn split_images(
+    outputs: &[workspace::Output],
+) -> (Vec<workspace::Output>, Vec<workspace::Output>) {
+    outputs
+        .iter()
+        .cloned()
+        .partition(|output| output.kind == workspace::Kind::Figure)
+}
+
+/// One mouse-held gallery thumb.
+struct GalleryScrollDrag {
+    handle: gpui::ScrollHandle,
+    track_left: gpui::Pixels,
+    grab_x: gpui::Pixels,
+    travel: gpui::Pixels,
+    overflow: gpui::Pixels,
+}
+
+fn output_folder_groups(outputs: &[workspace::Output]) -> Vec<OutputFolderGroup<'_>> {
+    let mut groups: Vec<OutputFolderGroup<'_>> = Vec::new();
+    for output in outputs {
+        let folder = std::path::Path::new(&output.name)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new(""))
+            .to_path_buf();
+        if let Some(group) = groups.iter_mut().find(|group| group.folder == folder) {
+            group.outputs.push(output);
+        } else {
+            groups.push(OutputFolderGroup {
+                folder,
+                outputs: vec![output],
+            });
+        }
+    }
+    groups
+}
+
+
+/// Name the folder the agent chose, not the generated background-thread directory above it.
+///
+/// The screenshot in §152 devoted its useful width to a 36-character UUID common to every row.
+/// That component is app bookkeeping; removing only a leading UUID leaves `eda/plots`, the
+/// researcher's information, while the unshortened path remains the grouping identity above.
+///
+/// `worker` is whoever produced the files, when the app knows — from the folder for a background
+/// worker (§199), from the backend's own record for a specialist (§201). It takes the leading
+/// position either way: the UUID's, when there was one, so nothing is lost by removing it; and
+/// otherwise ahead of the folder the agent chose. Either way the heading reads as a path of work
+/// — `background worker / plots`, `exploratory data analysis / plots`. `None` keeps §152's
+/// behaviour, which is what a conversation with no record still gets.
+fn output_folder_label(folder: &std::path::Path, worker: Option<&str>) -> String {
+    let mut components: Vec<String> = folder
+        .components()
+        .filter_map(|component| component.as_os_str().to_str().map(str::to_owned))
+        .collect();
+    let removed_thread = components
+        .first()
+        .is_some_and(|component| workspace::looks_like_thread_id(component));
+    if removed_thread {
+        components.remove(0);
+    }
+    if let Some(name) = worker {
+        components.insert(0, name.to_string());
+    }
+    if components.is_empty() {
+        if removed_thread {
+            "Background task files".to_string()
+        } else {
+            "Conversation files".to_string()
+        }
+    } else {
+        components.join(" / ")
+    }
+}
+
+/// The worker thread a file sits under, when it sits under one.
+///
+/// The **only** attribution this client can make without guessing. A background worker runs on
+/// its own thread and writes into a folder named after it, so the folder *is* the record of who
+/// produced the file. Specialists consulted inside the conversation share the conversation's
+/// thread and its one directory, and nothing on the wire says which of them wrote a given file —
+/// so nothing here claims to know. That restraint is `provenance.rs`'s own rule from §73: a
+/// provenance record that quietly guesses is worse than none, because it will be believed.
+fn producing_thread(output: &workspace::Output) -> Option<&str> {
+    let first = std::path::Path::new(&output.name).components().next()?;
+    let name = first.as_os_str().to_str()?;
+    if workspace::looks_like_thread_id(name) {
+        Some(name)
+    } else {
+        None
+    }
+}
+
+/// Outputs split by who produced them: the conversation's own first, then one group per
+/// other author, in the order their first file appears.
+///
+/// **Ahead of the image/other split, not after it.** §152 put every image in one grid because
+/// images are what a person opens the panel to look at. That was right within one body of work
+/// and wrong across two: a researcher looking at *"15 images"* was looking at the conversation's
+/// plots and a worker's plots in one tray, with nothing saying where the boundary was (§199). A
+/// background worker is already a separate run with its own job row and its own folder; its
+/// figures are a separate body of work for the same reason.
+///
+/// Two sources of truth, in this order, each exact within its own domain (§201):
+///
+/// 1. **The folder**, for a background worker — its own thread, its own directory, true by
+///    construction and true even for a conversation reopened years later.
+/// 2. **The manifest**, for everything else — what `overlay/minime_local/authorship.py` wrote
+///    down as each file was produced.
+///
+/// The folder wins where both speak, because inside a worker's run the manifest records that
+/// worker's *own* coordinator and would rename `background worker` to `coordinator` — technically
+/// true of the inner graph and useless to the person reading the panel.
+fn by_producer(
+    outputs: &[workspace::Output],
+    tasks: &[protocol::AsyncTask],
+    wrote: &std::collections::HashMap<String, String>,
+) -> Vec<(Option<String>, Vec<workspace::Output>)> {
+    let mut groups: Vec<(Option<String>, Vec<workspace::Output>)> = Vec::new();
+    for output in outputs {
+        let by = match producing_thread(output) {
+            Some(thread) => produced_by(Some(thread), tasks),
+            None => wrote
+                .get(&workspace::normalise_separators(&output.name))
+                .map(|agent| agent.replace('_', " ")),
+        };
+        match groups.iter_mut().find(|(owner, _)| *owner == by) {
+            Some((_, produced)) => produced.push(output.clone()),
+            None => groups.push((by, vec![output.clone()])),
+        }
+    }
+    // The conversation's own files lead even when someone else wrote first: they are what the
+    // researcher asked for directly, and a delegation is the detour under it.
+    groups.sort_by_key(|(owner, _)| owner.is_some());
+    groups
+}
+
+/// Who produced a group of files, in the researcher's words rather than the engine's.
+///
+/// `None` is the conversation's own thread, and stays unlabelled: those files are the unmarked
+/// case, and spending a heading on *"from this conversation"* would name the default everywhere
+/// to say something only where it is not true.
+///
+/// A thread with no matching task is still *some* worker — the folder proves it — so it says so
+/// without naming one. That is the state after a reload whose snapshot carried no `async_tasks`,
+/// and it is the difference between "we don't know which" and "nobody".
+fn produced_by(thread: Option<&str>, tasks: &[protocol::AsyncTask]) -> Option<String> {
+    let thread = thread?;
+    Some(
+        tasks
+            .iter()
+            .find(|task| task.thread_id == thread)
+            // Underscores are the graph's spelling of a name, not a person's — the road strip and
+            // the jobs list both already say `background worker`, and a third spelling of the
+            // same specialist in a third panel is how one worker reads as two.
+            .map(|task| task.agent_name.replace('_', " "))
+            .unwrap_or_else(|| "a background task".to_string()),
+    )
+}
+
+/// `15 images`, or `5 images from background worker`.
+fn images_heading(count: usize, by: Option<&str>) -> String {
+    let plural = if count == 1 { "" } else { "s" };
+    match by {
+        Some(who) => format!("{count} image{plural} from {who}"),
+        None => format!("{count} image{plural}"),
+    }
+}
+
+/// Keep the distinguishing tail when a filename itself is too long for a thumbnail.
+///
+/// `Label::ellipsis()` correctly protects layout (§59), but its trailing ellipsis preserves the
+/// shared prefix and removes the useful suffix in §152. Shortening the string from the leading
+/// edge before layout means the extension and differentiating part survive even in a 140px tile.
+fn distinguishing_tail(text: &str, max_chars: usize) -> String {
+    let count = text.chars().count();
+    if count <= max_chars || max_chars == 0 {
+        return text.to_string();
+    }
+    let keep = max_chars.saturating_sub(1);
+    format!("…{}", text.chars().skip(count - keep).collect::<String>())
+}
+
+/// The status bar's one-line answer to "what is happening, and how far through".
+///
+/// Free of `self` so the rule can be checked without a window — the lesson §203 and §205 both cost
+/// a round trip to learn.
+///
+/// **`done + 1` is the step being worked on**, not `done`: with two of four finished, the third is
+/// the one running, and "step 2 of 4" tells a researcher the wrong thing about where the work is.
+fn summary_for(tasks: &[protocol::AsyncTask], plan: &[protocol::Todo]) -> Option<String> {
+    let worker = tasks
+        .iter()
+        .filter(|task| !task.is_finished() && !task.todos.is_empty())
+        .max_by_key(|task| protocol::plan_progress(&task.todos).map(|(done, _)| done));
+    if let Some(task) = worker {
+        let (done, total) = protocol::plan_progress(&task.todos)?;
+        let name = task.agent_name.replace('_', " ");
+        return Some(match &task.activity {
+            Some(activity) => format!("{name} · step {} of {total} · {activity}", done + 1),
+            None => format!("{name} · step {} of {total}", done + 1),
+        });
+    }
+    let (done, total) = protocol::plan_progress(plan)?;
+    // Every step done: say nothing rather than sit at "step 3 of 2" for the rest of the session.
+    if done == total {
+        return None;
+    }
+    Some(format!("step {} of {total}", done + 1))
+}
+
+/// Shorten an `a / b / c` heading to fit, giving up the middle rather than either end.
+///
+/// **[`distinguishing_tail`] keeps the wrong end for these.** §152 chose tail-keeping because its
+/// labels shared a long *prefix* and differed at the end — the right rule for a filename. §201 then
+/// put the producing worker's name at the *head*, which inverts it: `background worker / outputs /
+/// tables` came out as `…d worker / outputs / tables`, throwing away the one word the attribution
+/// exists to show. Spotted in a screenshot of the feature working (§208).
+///
+/// So both ends survive and the middle gives way. If it still will not fit, the **head** is kept
+/// whole and the tail is trimmed — the producer outranks the leaf folder, because a heading that
+/// cannot say who made these files is the heading §201 replaced.
+fn shorten_path_label(label: &str, max_chars: usize) -> String {
+    if label.chars().count() <= max_chars {
+        return label.to_string();
+    }
+    let segments: Vec<&str> = label.split(" / ").collect();
+    let (Some(head), Some(tail)) = (segments.first(), segments.last()) else {
+        return distinguishing_tail(label, max_chars);
+    };
+    if segments.len() < 2 {
+        // One segment: no middle to drop, so §152's rule is still the best available.
+        return distinguishing_tail(label, max_chars);
+    }
+    let spacer = if segments.len() > 2 { " / … / " } else { " / " };
+    let joined = format!("{head}{spacer}{tail}");
+    if joined.chars().count() <= max_chars {
+        return joined;
+    }
+    let room = max_chars.saturating_sub(head.chars().count() + spacer.chars().count());
+    // Below four characters a trimmed tail is all ellipsis and no information; better to fall back
+    // than to print `… / … / …s`.
+    if room >= 4 {
+        return format!("{head}{spacer}{}", distinguishing_tail(tail, room));
+    }
+    distinguishing_tail(label, max_chars)
+}
+
+fn output_filename(output: &workspace::Output) -> String {
+    let name = std::path::Path::new(&output.name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(&output.name);
+    distinguishing_tail(name, 36)
+}
+
+/// A visible scrollbar for GPUI's variable-height list.
+///
+/// `list` stores its offset in [`ListState`], not a `ScrollHandle`. This keeps §40's visible
+/// affordance without adding a second scroll container around the virtual list (docs §156).
+fn list_scrollbar(state: &ListState) -> Option<impl IntoElement> {
+    let overflow = state.max_offset_for_scrollbar().height;
+    let viewport = state.viewport_bounds().size.height;
+    if overflow <= px(0.) || viewport <= px(0.) {
+        return None;
+    }
+    let content = viewport + overflow;
+    let thumb = (viewport * (viewport / content)).max(px(28.));
+    let travel = viewport - thumb;
+    let progress = (-state.scroll_px_offset_for_scrollbar().y / overflow).clamp(0.0, 1.0);
+
+    Some(
+        div()
+            .absolute()
+            .invisible()
+            .group_hover(SCROLL_GROUP, |style| style.visible())
             .top(travel * progress)
             .right(px(2.))
             .w(px(6.))
@@ -791,6 +1610,9 @@ enum Picker {
     Model,
     /// Which project the open conversation is filed under.
     Project,
+    /// Which project a *new* conversation should start in. Same list, same "New project “…”"
+    /// row; only what choosing does differs, so naming a project is one gesture either way.
+    NewProject,
     /// A model for one specialist, by its index in the registry.
     ///
     /// The index rather than the name because a `Picker` is `Copy` and lives in a field that is
@@ -1362,32 +2184,102 @@ fn markdown_block(
 /// Advisory content is different from state: a payload without suggestions means "no new
 /// advice", not "the advice is withdrawn". Everything else — mission, completed, pending —
 /// is authoritative and replaces.
-/// Turn dropped files into a prompt the researcher can edit before sending.
+/// Put file paths into the composer, and write nothing else.
 ///
 /// **Loaded into the composer, never sent.** Dropping a file is a clumsy gesture — it
 /// happens by accident — and the same rule already governs the suggestion cards: the app
 /// prepares the question, the person asks it (docs §12).
 ///
-/// Directories are named as directories, because "analyse this folder of readings" is a
-/// real request and the agent can list it itself.
-fn prompt_for_dropped(paths: &[String], directories: &[bool]) -> String {
-    match paths {
-        [] => String::new(),
-        [one] => {
-            if directories.first().copied().unwrap_or(false) {
-                format!("Have a look at the files in {one} and tell me what is there.")
-            } else {
-                format!("Analyse the data in {one}. Start by describing what it contains.")
-            }
-        }
-        many => format!(
-            "Analyse these files together:\n{}",
-            many.iter()
-                .map(|path| format!("- {path}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        ),
+/// **And it prepares only the part it knows.** §28 filled the composer with a whole
+/// question — *"Analyse the data in …. Start by describing what it contains."* — which is a
+/// guess about the research, made by the only participant who has not seen the data. Asked
+/// to remove it: *"let's avoid that so the user can have flexibility in his query"* (§180).
+/// The path is the one thing here the app knows and the researcher would rather not type;
+/// what to do with it is theirs.
+///
+/// So the paths go in and the caret ends after them, wherever they are:
+///
+/// - Nothing typed yet — the paths first, then a blank line to carry on writing under.
+/// - Something typed — the paths underneath it, after a blank line, leaving every word alone.
+///
+/// Directories need no special case now that no sentence is written about them. The agent
+/// can list one itself, and "analyse this folder of readings" is the researcher's sentence
+/// to write.
+fn compose_with_dropped(typed: &str, paths: &[String]) -> String {
+    let typed = typed.trim_end();
+    if paths.is_empty() {
+        return typed.to_string();
     }
+    let paths = paths.join("\n");
+    if typed.is_empty() {
+        // The trailing blank line is where they type. Without it the caret sits flush
+        // against the path and the first character typed joins onto the filename.
+        return format!("{paths}\n\n");
+    }
+    // One blank line, then the paths on consecutive lines: they read as an attachment to
+    // the question rather than as the end of its last sentence.
+    format!("{typed}\n\n{paths}")
+}
+
+/// What a per-specialist model row has to say about the provider it would actually run on.
+///
+/// **A flat list of five providers' models, and only one thing told them apart.** The row used to
+/// be annotated *only* when the provider had no key — on the argument that a missing key is the
+/// thing a researcher has to act on before the choice can work. True, and it optimised for *can
+/// this run* while the question that mattered was *whose account pays*.
+///
+/// Here is what that cost. With the coordinator on `custom` (which is how OpenRouter is reached),
+/// the same dropdown offers:
+///
+/// - `gpt-4.1` — the `openai` provider. OpenAI direct, billed to an OpenAI account.
+/// - `openai/gpt-4o-mini` — the `custom` provider. OpenRouter, billed to an OpenRouter account.
+///
+/// A slash. That was the entire visible difference. A researcher with credits on OpenRouter set
+/// `academic_researcher` to `gpt-4.1`, saw no warning *because they did have an OpenAI key*, and
+/// the next literature search — which delegates to exactly that specialist — died several minutes
+/// in on an exhausted account they had not chosen to use (docs §187).
+///
+/// So every row that leaves the coordinator's provider now says so, keyed or not. `None` only for
+/// the provider already running the conversation, where there is nothing to warn about and a note
+/// on every row would be noise.
+fn specialist_note(
+    model_provider: &settings::Provider,
+    coordinator: &str,
+    has_key: bool,
+) -> Option<String> {
+    if model_provider.id == coordinator {
+        return None;
+    }
+    Some(if has_key {
+        // The consequence, not the mechanism: "a different provider" is a fact about
+        // configuration, "billed separately" is a fact about money.
+        format!("{} — billed separately", model_provider.label)
+    } else {
+        format!("{} — no key stored", model_provider.label)
+    })
+}
+
+/// What a recorded theme name should become once a palette file has been removed.
+///
+/// `None` when the name still resolves — either it was a built-in all along, or the deleted file
+/// was only *overriding* one and the bundled palette underneath has taken its place. `Some` names
+/// the default, the one palette guaranteed to exist.
+///
+/// A function rather than a line inside the handler because it has to be asked twice, of two
+/// strings that are not the same: the palette on screen, and the one `settings.toml` records.
+/// Those drift apart the moment somebody previews a theme, and only the second one survives Esc.
+fn theme_after_removal(name: &str, survivors: &[(String, theme::Theme)]) -> Option<String> {
+    let survives = survivors
+        .iter()
+        .any(|(candidate, _)| candidate.eq_ignore_ascii_case(name));
+    (!survives).then(|| theme::DEFAULT_NAME.to_string())
+}
+
+/// A dropped path as a person would name it: the filename, or the whole path if it has none.
+fn file_label(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned())
 }
 
 /// The first URL in a line of text.
@@ -1503,6 +2395,95 @@ fn merge_spine(previous: Option<&Project>, incoming: Project) -> Project {
     merged
 }
 
+/// The unit a centred confirmation is about.
+///
+/// The project variant owns its complete conversation list at the moment it opens. Building it
+/// from the sidebar's *filtered* rows would make a search silently spare conversations that the
+/// modal just said were going away (§155).
+#[derive(Clone, Debug)]
+enum DeleteTarget {
+    Conversation(protocol::Conversation),
+    Project {
+        name: String,
+        conversations: Vec<protocol::Conversation>,
+    },
+}
+
+impl DeleteTarget {
+    fn thread_ids(&self) -> Vec<String> {
+        match self {
+            Self::Conversation(conversation) => vec![conversation.thread_id.clone()],
+            Self::Project { conversations, .. } => conversations
+                .iter()
+                .map(|conversation| conversation.thread_id.clone())
+                .collect(),
+        }
+    }
+
+    fn contains_thread(&self, thread_id: &str) -> bool {
+        match self {
+            Self::Conversation(conversation) => conversation.thread_id == thread_id,
+            Self::Project { conversations, .. } => conversations
+                .iter()
+                .any(|conversation| conversation.thread_id == thread_id),
+        }
+    }
+
+    fn files(&self) -> sidecar::DeleteFiles {
+        match self {
+            Self::Conversation(conversation) => sidecar::DeleteFiles::Conversation {
+                project: conversation.project.clone(),
+                thread_id: conversation.thread_id.clone(),
+            },
+            Self::Project { name, .. } => sidecar::DeleteFiles::Project { name: name.clone() },
+        }
+    }
+
+    fn noun(&self) -> &'static str {
+        match self {
+            Self::Conversation(_) => "conversation",
+            Self::Project { .. } => "project",
+        }
+    }
+}
+
+/// What the sidebar may do after asking the backend to delete confirmed work.
+///
+/// Kept separate from the async UI so the dangerous rule is testable: absence of a successful
+/// answer means the durable thread may still exist, therefore its row must stay (§154).
+enum DeleteResolution {
+    Remove { files_error: Option<String> },
+    Keep(String),
+}
+
+fn resolve_delete(
+    noun: &str,
+    result: Option<anyhow::Result<sidecar::DeleteOutcome>>,
+) -> DeleteResolution {
+    match result {
+        Some(Ok(outcome)) => DeleteResolution::Remove {
+            files_error: outcome.files_error,
+        },
+        Some(Err(error)) => {
+            DeleteResolution::Keep(format!("couldn't delete the {noun}: {error:#}"))
+        }
+        None => DeleteResolution::Keep(format!(
+            "couldn't confirm deletion — the {noun} is still shown"
+        )),
+    }
+}
+
+/// Whether a project still exists after a deletion result has been applied.
+///
+/// §106 defines existence from conversation metadata, not from a remembered selection and not
+/// from a possibly locked folder. Keeping this tiny rule outside the callback makes the
+/// last-conversation boundary testable — the boundary that resurrected projects in §154.
+fn project_exists(conversations: &[protocol::Conversation], name: &str) -> bool {
+    conversations
+        .iter()
+        .any(|conversation| conversation.project.as_deref() == Some(name))
+}
+
 /// A single chat message in the transcript, plus the agent activity behind it.
 struct Message {
     role: &'static str,
@@ -1511,6 +2492,12 @@ struct Message {
     steps: Vec<String>,
     /// One group per subagent invocation.
     agents: Vec<AgentTrace>,
+    /// Files this answer named that the conversation's folder does not hold.
+    ///
+    /// Recomputed as outputs settle rather than fixed when the turn ends, because a background
+    /// worker can still be writing — a name that is missing at second one and present at second
+    /// three was never a false claim, and flagging it would be its own kind of lie (§175).
+    unverified: Vec<String>,
     /// Whether the coordinator's own steps are showing.
     ///
     /// Open while the turn runs, because during a two-minute wait the steps *are* the only
@@ -1559,6 +2546,7 @@ impl Message {
             steps_expanded: true,
             stopped: false,
             outputs: Vec::new(),
+            unverified: Vec::new(),
         }
     }
 
@@ -1587,6 +2575,32 @@ impl Message {
         // the whole record of what happened, and pruning it would leave a question that
         // appears never to have been answered for no stated reason (docs §63).
         self.body.is_empty() && self.steps.is_empty() && self.agents.is_empty() && !self.stopped
+    }
+
+    /// The rendered words Select All should copy when this row is off screen (docs §156).
+    fn selection_text(&self) -> String {
+        use markdown::Block;
+
+        if self.role == "you" {
+            return self.body.clone();
+        }
+        let mut runs = Vec::new();
+        for block in &self.blocks {
+            match block {
+                Block::Heading { inlines, .. }
+                | Block::Paragraph(inlines)
+                | Block::ListItem { inlines, .. }
+                | Block::Quote { inlines, .. } => runs.push(inlines.text.clone()),
+                Block::Code { text, .. } => runs.push(text.clone()),
+                Block::Table { header, rows } => {
+                    runs.extend(header.iter().map(|cell| cell.text.clone()));
+                    runs.extend(rows.iter().flat_map(|row| row.iter().map(|cell| cell.text.clone())));
+                }
+                // These have never registered selectable transcript text.
+                Block::Image { .. } | Block::Rule => {}
+            }
+        }
+        runs.join("\n")
     }
 }
 
@@ -1686,6 +2700,12 @@ struct RunningFix {
     check_id: &'static str,
     done: bool,
     ok: bool,
+    /// The way to stop it, for as long as there is a process to stop (docs §172).
+    cancel: preflight::Cancel,
+    /// Set once Stop has been pressed, so the pane can say *stopping* rather than claiming a
+    /// finish it has not seen. §168's rule: **stopped** is only true once the command has
+    /// actually exited, and that arrives as `FixEvent::Finished` like any other ending.
+    stopping: bool,
 }
 
 /// How much of a fix's output the pane keeps.
@@ -1796,6 +2816,9 @@ struct Workbench {
     /// Filters the *installed* theme list. With a hundred palettes installed, a list you
     /// can only scroll is a list you cannot use.
     theme_filter: Entity<Composer>,
+    /// Narrows the model picker. Necessary rather than a nicety: a gateway's catalogue runs to
+    /// several hundred ids, and a scroll box is not a way to find `deepseek` among them (§188).
+    model_filter: Entity<Composer>,
     /// Filter for the project picker, which doubles as the field a new project is named in.
     project_query: Entity<Composer>,
     theme_scroll: gpui::ScrollHandle,
@@ -1804,14 +2827,27 @@ struct Workbench {
     gallery_query: Entity<Composer>,
     gallery_results: Vec<gallery::Listing>,
     gallery_note: String,
-    /// Scroll positions we draw scrollbars from. GPUI keeps the offset itself; these let
-    /// us *read* it, which is what a visible bar needs.
-    transcript_scroll: gpui::ScrollHandle,
+    /// Measured variable-height rows and their scroll position. `uniform_list` would assign a
+    /// one-line question and a two-page answer the same height (docs §156).
+    transcript_list: ListState,
     /// Selected transcript text, and the span registry a drag hit-tests against.
     /// See [`selection`] — the registry is rebuilt every frame, the selection is not.
     text_selection: selection::Transcript,
     /// An open right-click menu, if any.
     context_menu: Option<menu::ContextMenu>,
+    /// Projects that have a folder, including ones nothing is filed under yet.
+    ///
+    /// Read alongside the conversation list rather than per frame: the sidebar renders on every
+    /// frame and this is a directory listing, which has no business on the render thread.
+    folder_projects: Vec<String>,
+    /// A conversation is being fetched. Its own flag rather than a status string, because the
+    /// status bar is prose and prose cannot be asked a question (§177).
+    opening: bool,
+    /// The agent graph has not finished building. §176 measured that wait at fifteen seconds on
+    /// a real machine, which is far too long to leave a window looking idle.
+    warming: bool,
+    /// An open sidebar `⋮` or `New` menu, and where its corner goes.
+    sidebar_menu: Option<(SidebarMenu, gpui::Point<gpui::Pixels>)>,
     /// Which row of the `/name` picker is chosen. Reset on every keystroke.
     subagent_selected: usize,
     /// An open choice popup: which choice, and where its trigger was clicked.
@@ -1831,6 +2867,9 @@ struct Workbench {
     provenance_focus: gpui::FocusHandle,
     /// The About window's own focus, for the same reason (docs §71).
     about_focus: gpui::FocusHandle,
+    /// The delete warning's focus. It has buttons but no text field, so leaving focus on the
+    /// sidebar row it covers would make Escape depend on an element hidden behind the modal.
+    delete_focus: gpui::FocusHandle,
     /// Recent outcomes, newest last, each fading on its own timer.
     ///
     /// The status bar holds exactly one line, so an outcome worth reading — "copied 12 lines",
@@ -1840,6 +2879,18 @@ struct Workbench {
     /// be a wall of them.
     toasts: Vec<SharedString>,
     panel_scroll: gpui::ScrollHandle,
+    /// One horizontal position per output folder gallery.
+    ///
+    /// A single handle would make scrolling one folder move every other folder too. The full
+    /// folder path plus its surface owns the state, matching §152's rule that each agent-chosen
+    /// folder is one independent photo-like collection.
+    output_gallery_scrolls: std::cell::RefCell<HashMap<String, gpui::ScrollHandle>>,
+    /// The gallery thumb currently held by the mouse, if any.
+    ///
+    /// Kept separately from pane resizing because both are drags but their units differ: pane
+    /// dividers follow window pixels directly, while a gallery thumb maps a short track onto a
+    /// wider hidden content range (docs §158).
+    gallery_scroll_drag: Option<GalleryScrollDrag>,
     /// The palette on screen right now, which is not always the saved one: the picker
     /// applies as you point at it so a theme can be judged by looking at it.
     applied_theme: String,
@@ -1869,8 +2920,8 @@ struct Workbench {
         std::cell::RefCell<HashMap<PathBuf, (std::time::SystemTime, Option<Vec<Vec<String>>>)>>,
     /// What the sidebar's search box holds. Empty means "show everything".
     conversation_query: Entity<Composer>,
-    /// A file being previewed in the centre, if any.
-    preview: Option<workspace::Output>,
+    /// A file being previewed in the centre, if any — and the set it can be stepped through.
+    preview: Option<Preview>,
     /// The researcher's past conversations, newest first.
     conversations: Vec<protocol::Conversation>,
     /// How the app got hold of the backend it is talking to. `None` until it has one.
@@ -1883,15 +2934,53 @@ struct Workbench {
     pending_title: Option<String>,
     /// The thread whose name is being edited, if any.
     renaming: Option<String>,
-    /// The thread whose delete has been clicked once and not yet confirmed.
+    /// Whether the mission at the top of the research panel is being edited in place.
+    editing_mission: bool,
+    /// The coordinator's own plan for this conversation, when it wrote one. See [`protocol::Todo`].
+    plan: Vec<protocol::Todo>,
+    /// Who wrote each file, as the backend recorded it — see [`workspace::authorship`].
+    authorship: std::collections::HashMap<String, String>,
+    /// The manifest's size and mtime when it was last read, so a frame that changed nothing
+    /// costs one `stat` rather than a parse.
+    authorship_stamp: Option<(std::time::SystemTime, u64)>,
+    /// The conversation or project whose delete control opened the centred warning.
     ///
-    /// Two steps because there is no undo on the server: a conversation is somebody's
-    /// work, and a stray click on a `✕` in a list is exactly how it would be lost.
-    confirming_delete: Option<String>,
+    /// This used to be an inline yes/no row. It could not say that saved files now go too, and a
+    /// project delete needs a count and a path; destructive scope belongs where it can be read
+    /// before acting (§155).
+    confirming_delete: Option<DeleteTarget>,
+    /// A provider the researcher has clicked but not yet confirmed — see [`Workbench::provider_modal`].
+    confirming_provider: Option<&'static settings::Provider>,
+    /// What each provider last said it offers — see [`catalogue`]. Read from disk at launch and
+    /// replaced in place when a refresh lands, so the picker never blocks on the network.
+    catalogue: catalogue::Catalogue,
+    /// Whose key the API-key field is about to set.
+    ///
+    /// **Separate from the coordinator's provider on purpose.** A specialist may run on a second
+    /// provider — the request path has always sent a key per provider (`extra_keys`) — but the
+    /// field wrote to whichever provider was *selected*, so filing an Anthropic key meant
+    /// switching to Anthropic, pasting, saving, and switching back, with §186's confirmation
+    /// interrupting each hop. Asked after meeting exactly that: *"do I have the ability to select
+    /// the models for the subagents using independent API keys?"* (docs §191).
+    key_target: String,
+    /// Whether the whole reference list is open over the workbench.
+    sources_open: bool,
+    /// Narrows the open reference list. Only the modal reads it — the panel's four are a
+    /// preview, and filtering something that shows four of seventeen would be a filter whose
+    /// result you cannot see (§197).
+    sources_filter: Entity<Composer>,
+    /// The confirmed target awaiting its backend and filesystem results.
+    ///
+    /// Optimistically removing the row made a failed or interrupted request look successful
+    /// until restart, when the durable conversation — and therefore its project — returned
+    /// (§154). Keep it visible as pending until the server has actually deleted it.
+    deleting: Option<DeleteTarget>,
     /// The field that edits it. One shared editor rather than one per row — only one
     /// name can be edited at a time, and a Composer per conversation would be an entity
     /// per row for a list that can run to hundreds.
     rename_editor: Entity<Composer>,
+    /// The field that edits the mission, live in the panel.
+    mission_editor: Entity<Composer>,
     /// Background tasks whose remaining commands are pre-approved, by task id.
     ///
     /// Separate from the turn grant because a background worker has no turn to belong to:
@@ -1909,10 +2998,14 @@ impl Workbench {
     fn new(sidecar: Arc<Sidecar>, cx: &mut Context<Self>) -> Self {
         // Opens empty. The placeholder says what to do, which is all a first launch needs.
         let composer = cx.new(|cx| {
-            Composer::new(
+            let mut composer = Composer::new(
                 cx,
                 "Ask Mini-Me…  (Enter to send, Shift-Enter for a new line)",
-            )
+            );
+            // A research question is a paragraph, so this field is genuinely several rows and needs
+            // arrow-up and arrow-down to walk them (§204).
+            composer.set_multiline(true);
+            composer
         });
         // The composer only reports *that* text was submitted; deciding it means
         // "run a coordinator turn" stays here.
@@ -1931,6 +3024,12 @@ impl Workbench {
         // Filtering installed themes, as you type — this one is local, so every keystroke
         // is free.
         let theme_filter = cx.new(|cx| Composer::new(cx, "Filter themes"));
+        let model_filter = cx.new(|cx| Composer::new(cx, "Filter models"));
+        let sources_filter = cx.new(|cx| Composer::new(cx, "Filter by author, title or year"));
+        cx.observe(&sources_filter, |_workbench, _field, cx| cx.notify())
+            .detach();
+        cx.observe(&model_filter, |_workbench, _field, cx| cx.notify())
+            .detach();
         let project_query = cx.new(|cx| Composer::new(cx, "Find or name a project"));
         cx.observe(&project_query, |_workbench, _field, cx| cx.notify())
             .detach();
@@ -1958,6 +3057,27 @@ impl Workbench {
             &rename_editor,
             |workbench, _editor, event, cx| match event {
                 ComposerEvent::Submit(text) => workbench.commit_rename(text.clone(), cx),
+            },
+        )
+        .detach();
+
+        // Editing the mission, in the panel where it is read. Same shape as renaming, and for the
+        // same reason: the field replaces the text it is editing rather than opening somewhere
+        // else, so the researcher is looking at the thing they are changing.
+        let mission_editor = cx.new(|cx| {
+            let mut editor = Composer::new(cx, "What is this project trying to find out?");
+            // Capped at 500 characters by the backend, which is still four or five rows.
+            editor.set_multiline(true);
+            // Enter on an empty field means "clear the mission", which the backend accepts and
+            // which is the only way back to the derived one. Without this, emptying the field and
+            // pressing Enter would do nothing and look broken.
+            editor.set_submits_empty(true);
+            editor
+        });
+        cx.subscribe(
+            &mission_editor,
+            |workbench, _editor, event, cx| match event {
+                ComposerEvent::Submit(text) => workbench.commit_mission(text.clone(), cx),
             },
         )
         .detach();
@@ -2038,25 +3158,33 @@ impl Workbench {
             approve_rest_of_turn: false,
             approve_conversation: false,
             theme_filter,
+            model_filter,
             project_query,
             theme_scroll: gpui::ScrollHandle::new(),
             model_scroll: gpui::ScrollHandle::new(),
             gallery_query,
             gallery_results: Vec::new(),
             gallery_note: String::new(),
-            transcript_scroll: gpui::ScrollHandle::new(),
+            transcript_list: ListState::new(0, ListAlignment::Top, px(240.)),
             text_selection: selection::Transcript::default(),
             context_menu: None,
+            folder_projects: Vec::new(),
+            opening: false,
+            warming: false,
+            sidebar_menu: None,
             subagent_selected: 0,
             open_picker: None,
             settings_focus: cx.focus_handle(),
             provenance_focus: cx.focus_handle(),
             about_focus: cx.focus_handle(),
+            delete_focus: cx.focus_handle(),
             sidebar_width: 240.,
             panel_width: 320.,
             dragging: None,
             toasts: Vec::new(),
             panel_scroll: gpui::ScrollHandle::new(),
+            output_gallery_scrolls: std::cell::RefCell::new(HashMap::new()),
+            gallery_scroll_drag: None,
             applied_theme: stored.theme.clone(),
             sidebar_open: stored.sidebar_open,
             panel_open: stored.panel_open,
@@ -2070,8 +3198,19 @@ impl Workbench {
             backend_start: None,
             pending_title: None,
             renaming: None,
+            editing_mission: false,
+            plan: Vec::new(),
+            authorship: std::collections::HashMap::new(),
+            authorship_stamp: None,
             confirming_delete: None,
+            confirming_provider: None,
+            catalogue: catalogue::load(),
+            key_target: stored.provider.clone(),
+            sources_open: false,
+            sources_filter,
+            deleting: None,
             rename_editor,
+            mission_editor,
             approve_tasks: std::collections::HashSet::new(),
             restore_focus: false,
         };
@@ -2102,12 +3241,12 @@ impl Workbench {
         // the thing actually standing in their way.
         workbench.run_preflight(cx);
 
-        // Pick up where the last session left off. Without this a cold start begins in "No
-        // project" however long the researcher has been working in one, and the first new
-        // conversation of the day lands outside it (docs §107).
-        workbench.sidecar.set_project(
-            Some(workbench.draft.project.clone()).filter(|name| !name.trim().is_empty()),
-        );
+        // A launch opens at the workspace root. The previous project used to be a second project
+        // registry in settings.toml, despite §106 defining a project solely by the conversations
+        // filed under it. That stale value resurrected an empty project and silently filed the
+        // morning's first conversation inside it (§154). Opening a saved conversation or using a
+        // project heading's `+` remains the explicit way to enter one.
+        workbench.sidecar.set_project(None);
         // Populate the spine if a backend is already listening. This does not
         // start one — see `Sidecar::fetch_project`.
         workbench.refresh_project(cx);
@@ -2179,13 +3318,26 @@ impl Workbench {
     }
 
     /// Start watching a background worker's thread, if it isn't already watched.
-    fn track_task(&mut self, task: protocol::AsyncTask, cx: &mut Context<Self>) {
+    ///
+    /// `owner` is the conversation whose snapshot carried this task. Passed in rather than looked
+    /// up, because the two call sites are the only places that know it for certain and the answer
+    /// has to survive the researcher moving on to another conversation (docs §159). Stamped
+    /// *before* the watcher is armed, so the poll — which mutates only status, pending, error and
+    /// activity — carries it for the task's whole life.
+    fn track_task(&mut self, owner: &str, mut task: protocol::AsyncTask, cx: &mut Context<Self>) {
+        task.owner = owner.to_string();
         if let Some(existing) = self.tasks.iter_mut().find(|t| t.task_id == task.task_id) {
             // The snapshot knows the status the coordinator last recorded; the *watcher*
             // knows whether it is stopped at the gate right now. Never let a stale
             // snapshot erase a pending approval the user is looking at.
             if existing.pending.is_none() && !existing.is_finished() {
                 existing.status = task.status;
+            }
+            // A task already being watched keeps the owner it was first seen with: re-stamping
+            // would reintroduce the drift this argument exists to prevent, on any later snapshot
+            // that arrives from somewhere else.
+            if existing.owner.is_empty() {
+                existing.owner = task.owner;
             }
             return;
         }
@@ -2231,6 +3383,7 @@ impl Workbench {
                             "a background task stopped".into()
                         };
                         workbench.collect_plots();
+                        workbench.settle_outputs(cx);
                         workbench.refresh_project(cx);
                     }
                     cx.notify();
@@ -2267,8 +3420,23 @@ impl Workbench {
             })
             .collect();
         let thread_id = task.thread_id.clone();
+        // **The task's own owner, not the conversation on screen.** Answering an approval is the
+        // moment a background worker is told where to write, and it happens whenever the
+        // researcher gets to it — by then they may have pressed New thread or opened something
+        // else. Sending the open conversation put a worker's figures into a conversation that
+        // never asked for them (docs §159). Unknown stays unknown: `None` sends no key, and the
+        // backend falls back to the sibling folder it used before, which is at least visible.
+        let owner = task.owning_conversation().map(str::to_string);
+        if owner.is_none() {
+            tracing::warn!(
+                task = %task_id,
+                worker = %thread_id,
+                "answering a background task whose owning conversation was never recorded — \
+                 its files may land beside the conversation instead of inside it"
+            );
+        }
         task.status = "running".into();
-        self.sidecar.decide_task(thread_id, decisions);
+        self.sidecar.decide_task(thread_id, owner, decisions);
         self.status = if approve {
             "background task approved — running…"
         } else {
@@ -2278,12 +3446,57 @@ impl Workbench {
         cx.notify();
     }
 
-    /// A file was dropped on the window.
+    /// Open the platform's file chooser, and add whatever comes back.
+    ///
+    /// **The affordance dragging never had.** §28 accepted a drop anywhere on the window and
+    /// then said so in one line of the empty state — which vanishes the moment a conversation
+    /// has anything in it, leaving the feature invisible for the whole rest of the session.
+    /// Dragging is also the harder gesture on the platform this app is for: it needs Explorer
+    /// and a *not*-maximised window side by side, which is not how anyone works.
+    ///
+    /// Files only. `can_select_mixed_files_and_dirs` is `false` on Windows — the
+    /// `FOS_PICKFOLDERS` flag toggles the dialog between the two rather than widening it — so
+    /// asking for both would silently give a folder picker to someone looking for a CSV.
+    /// Dragging still accepts a folder, which is the gesture that suits one anyway.
+    fn choose_files(&mut self, cx: &mut Context<Self>) {
+        if self.streaming {
+            self.status = "finish this turn before adding files".into();
+            cx.notify();
+            return;
+        }
+        let chosen = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: None,
+        });
+        cx.spawn(async move |this, cx| {
+            // Three outcomes worth telling apart: paths, a cancel, and a picker that would
+            // not open. Only the last is a problem, and it is the one a silent `_ => {}`
+            // would turn into a button that does nothing.
+            match chosen.await {
+                Ok(Ok(Some(paths))) => {
+                    let _ = this.update(cx, |workbench, cx| workbench.add_files(&paths, cx));
+                }
+                Ok(Ok(None)) => {}
+                Ok(Err(error)) => {
+                    let _ = this.update(cx, |workbench, cx| {
+                        workbench.error = Some(format!("could not open the file chooser: {error}"));
+                        cx.notify();
+                    });
+                }
+                Err(_) => {}
+            }
+        })
+        .detach();
+    }
+
+    /// Put files into the question being written — dropped on the window, or chosen.
     ///
     /// The one thing the web app cannot do: the researcher's data is already on this
     /// machine, and this is the whole distance between "here is my CSV" and an analysis —
     /// no upload, no copy, no bucket.
-    fn files_dropped(&mut self, paths: &[std::path::PathBuf], cx: &mut Context<Self>) {
+    fn add_files(&mut self, paths: &[std::path::PathBuf], cx: &mut Context<Self>) {
         if paths.is_empty() {
             return;
         }
@@ -2292,28 +3505,58 @@ impl Workbench {
             cx.notify();
             return;
         }
+        // Checked before anything is written into the composer, because the alternative is a
+        // turn that runs for a minute and then reports a missing file. A share the agent
+        // cannot reach is worth one sentence now rather than a puzzle later (§179).
+        let (usable, unreachable): (Vec<_>, Vec<_>) = paths
+            .iter()
+            .partition(|path| self.sidecar.can_open(path.as_path()));
+        // Named, never counted: "1 of 3 added" leaves the researcher hunting for which one,
+        // and which one is the only actionable part of the sentence.
+        let skipped = unreachable
+            .iter()
+            .map(|path| file_label(path))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if usable.is_empty() {
+            self.error = Some(format!(
+                "{skipped} is on a network share the agent cannot open — copy it to this \
+                 computer first"
+            ));
+            cx.notify();
+            return;
+        }
+
         // Translated to the backend's view of the filesystem — on Windows the agent runs
         // inside WSL, where `C:\…` is `/mnt/c/…`.
-        let translated: Vec<String> = paths
+        let translated: Vec<String> = usable
             .iter()
             .map(|path| self.sidecar.path_for_backend(path))
             .collect();
-        let directories: Vec<bool> = paths.iter().map(|path| path.is_dir()).collect();
 
-        let prompt = prompt_for_dropped(&translated, &directories);
+        // **Never overwrites what they typed.** `set_text` was unconditional, so a question
+        // written first and a file dropped second lost the question — and dropping is exactly
+        // the gesture people reach for *after* deciding what to ask (§179).
+        let typed = self.composer.read(cx).text().to_string();
+        let prompt = compose_with_dropped(&typed, &translated);
         self.composer
             .update(cx, |composer, cx| composer.set_text(prompt, cx));
         self.restore_focus = true;
-        self.status = match paths.len() {
+        // Says what to do next, because the composer no longer does. With the prepared
+        // question gone (§180) there is a path sitting in the field and nothing asking
+        // anything, and one line is cheaper than leaving a researcher to infer it.
+        self.status = match usable.len() {
             1 => format!(
-                "added {} — edit the question and press Enter",
-                paths[0]
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| translated[0].clone())
+                "added {} — say what you want done with it",
+                file_label(usable[0])
             ),
-            n => format!("added {n} files — edit the question and press Enter"),
+            n => format!("added {n} files — say what you want done with them"),
         };
+        // Assigned rather than only set, so a second add clears the first one's warning. A
+        // stale "left out yield.csv" beside a composer that no longer mentions it is worse
+        // than the older, already-seen error this replaces.
+        self.error = (!unreachable.is_empty())
+            .then(|| format!("left out {skipped} — on a network share the agent cannot open"));
         cx.notify();
     }
 
@@ -2501,6 +3744,11 @@ impl Workbench {
             stack = stack.child(
                 div()
                     .id(SharedString::from(format!("toast-{index}")))
+                    // A toast floats over the composer and the transcript, and dismissing one used
+                    // to press whatever it was covering as well (docs §163). Only the card
+                    // occludes, not the stack: the gaps between toasts are not the toast's, and
+                    // blocking them would put a dead strip across the window.
+                    .occlude()
                     .max_w(px(360.))
                     .px_3()
                     .py_2()
@@ -2556,7 +3804,8 @@ impl Workbench {
                 .child(self.model_list(cx))
                 .into_any_element(),
             Picker::Subagent(index) => self.subagent_model_list(index, cx).into_any_element(),
-            Picker::Project => self.project_list(cx).into_any_element(),
+            Picker::Project => self.project_list(false, cx).into_any_element(),
+            Picker::NewProject => self.project_list(true, cx).into_any_element(),
         };
         Some(
             ui::picker_popup(
@@ -2669,20 +3918,7 @@ impl Workbench {
 
     fn context_menu(&self, open: menu::ContextMenu, cx: &mut Context<Self>) -> impl IntoElement {
         let target = open.target;
-        let mut panel = div()
-            .flex()
-            .flex_col()
-            .min_w(px(190.))
-            .py_1()
-            .rounded_md()
-            .bg(rgb(theme::elevated()))
-            .border_1()
-            .border_color(rgb(theme::border_strong()))
-            // Swallow the press so the click that chooses an item does not also land on the
-            // transcript underneath and start a fresh selection there.
-            .on_mouse_down(gpui::MouseButton::Left, |_event, _window, cx| {
-                cx.stop_propagation();
-            });
+        let mut panel = menu_card();
 
         for &item in open.items() {
             let enabled = self.menu_item_enabled(item, target, cx);
@@ -2737,6 +3973,145 @@ impl Workbench {
         ))
     }
 
+    /// The `⋮` and `New` menus, drawn where their control is.
+    fn sidebar_menu_element(
+        &self,
+        open: SidebarMenu,
+        at: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mut panel = menu_card();
+        for row in open.rows() {
+            let chosen = open.clone();
+            let id = row.id;
+            panel = panel.child(
+                div()
+                    .id(id)
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .w_full()
+                    .min_w_0()
+                    .px_3()
+                    .py_1()
+                    .text_sm()
+                    .text_color(rgb(if row.danger {
+                        theme::error()
+                    } else {
+                        theme::text()
+                    }))
+                    .hover(|style| style.bg(rgb(theme::accent_soft())).cursor_pointer())
+                    .child(row.label)
+                    .on_click(cx.listener(move |workbench, _event, window, cx| {
+                        workbench.sidebar_menu = None;
+                        workbench.run_sidebar_menu(&chosen, id, window, cx);
+                    })),
+            );
+        }
+
+        gpui::deferred(
+            gpui::anchored().position(at).snap_to_window().child(
+                panel.on_mouse_down_out(cx.listener(|workbench, _event: &gpui::MouseDownEvent, _window, cx| {
+                    workbench.sidebar_menu = None;
+                    cx.notify();
+                })),
+            ),
+        )
+    }
+
+    /// What each row does. **Nothing new lives here** — every arm calls a method the sidebar
+    /// already had, which is the rule `menu.rs` states for the right-click menu and the reason
+    /// this change is a rearrangement rather than a feature with its own behaviour.
+    fn run_sidebar_menu(
+        &mut self,
+        open: &SidebarMenu,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match (open, id) {
+            (SidebarMenu::New, "menu-new-conversation") => self.new_thread_in(None, cx),
+            (SidebarMenu::New, "menu-new-project") => {
+                // The project picker already knows how to name one that does not exist yet —
+                // typing offers `New project “…”` as its first row. `NewProject` only changes
+                // what choosing does: start a conversation there, rather than move the open one.
+                self.open_picker = Some((Picker::NewProject, gpui::point(px(24.), px(120.))));
+                self.project_query.update(cx, |query, cx| query.set_text("", cx));
+                cx.notify();
+            }
+            (SidebarMenu::Conversation(conversation), "menu-rename") => {
+                self.start_rename(conversation.thread_id.clone(), window, cx)
+            }
+            (SidebarMenu::Conversation(conversation), "menu-delete") => {
+                self.request_delete(DeleteTarget::Conversation(conversation.clone()), window, cx)
+            }
+            (SidebarMenu::Project { name, .. }, "menu-new-here") => {
+                self.new_thread_in(Some(name.clone()), cx)
+            }
+            (
+                SidebarMenu::Project {
+                    name,
+                    conversations,
+                },
+                "menu-delete-project",
+            ) => self.request_delete(
+                DeleteTarget::Project {
+                    name: name.clone(),
+                    conversations: conversations.clone(),
+                },
+                window,
+                cx,
+            ),
+            _ => {}
+        }
+    }
+
+    /// The `⋮` that opens one of those menus.
+    ///
+    /// Always drawn, never revealed on hover: the inline chips this replaces were invisible until
+    /// the pointer was already on the row, so the only way to learn what a row could do was to
+    /// point at it and decode two abbreviations.
+    fn sidebar_menu_button(
+        &self,
+        id: String,
+        menu: SidebarMenu,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .id(SharedString::from(id))
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .w(px(20.))
+            .rounded_md()
+            .text_color(rgb(theme::text_faint()))
+            .text_sm()
+            .hover(|style| {
+                style
+                    .bg(rgb(theme::accent_soft()))
+                    .text_color(rgb(theme::text()))
+                    .cursor_pointer()
+            })
+            .child("⋮")
+            .on_click(cx.listener(move |workbench, event: &gpui::ClickEvent, _window, cx| {
+                // **The row underneath must not also fire.** A conversation row opens that
+                // conversation on click and a project heading opens its folder in Explorer, so
+                // without this, asking a row what it can do would switch conversations, and
+                // asking a heading would launch a file manager (§163, one layer in).
+                cx.stop_propagation();
+                // Anchored to the pointer rather than to the button's bounds, which GPUI does not
+                // hand a click handler. Nudged down so the menu opens below the control it came
+                // from instead of on top of it.
+                let at = match event {
+                    gpui::ClickEvent::Mouse(click) => click.up.position,
+                    _ => gpui::point(px(120.), px(160.)),
+                };
+                workbench.sidebar_menu = Some((menu.clone(), gpui::point(at.x, at.y + px(6.))));
+                cx.notify();
+            }))
+    }
+
     /// Copy the selected transcript text.
     ///
     /// Reached from `ctrl-c` when the composer declines it, so the ordinary shortcut works on
@@ -2779,7 +4154,9 @@ impl Workbench {
     }
 
     fn select_whole_transcript(&mut self, cx: &mut Context<Self>) {
-        self.text_selection.select_all();
+        let text = self.transcript.iter().map(Message::selection_text)
+            .filter(|message| !message.is_empty()).collect::<Vec<_>>().join("\n");
+        self.text_selection.select_all(text);
         // Only reports a count once there is something to count: on the very first frame the
         // registry is still empty, and "selected 0 messages" would be a lie about a feature
         // rather than a fact about the conversation.
@@ -2860,6 +4237,36 @@ impl Workbench {
     ///
     /// Re-checks automatically when it finishes, so a successful install turns its own
     /// row green without the user having to work out that they should press Re-check.
+    /// Stop the repair that is running, if one is.
+    ///
+    /// **Says `stopping`, not `stopped`.** The only honest report of a stop is the command
+    /// actually exiting, which arrives as `FixEvent::Finished` on the same channel as any other
+    /// ending — so this asks, marks the pane, and waits to be told. §146 refused a Stop button
+    /// precisely because the version that flips a label without owning a process claims the
+    /// machine stopped changing when it has not.
+    ///
+    /// A repair that finished between the click and this call is **stopped**, not an error:
+    /// `Cancel::stop` reports there was nothing to signal, and there being nothing left to stop
+    /// is the outcome the button was pressed for.
+    fn stop_fix(&mut self, cx: &mut Context<Self>) {
+        let Some(fix) = self.running_fix.as_mut() else {
+            return;
+        };
+        if fix.done || fix.stopping {
+            return;
+        }
+        fix.stopping = true;
+        if fix.cancel.stop() {
+            fix.notes.push("— asked to stop; waiting for the command to exit".into());
+            self.status = "stopping the repair…".into();
+        } else {
+            // Nothing was armed: it had already exited and the Finished event is on its way.
+            fix.notes.push("— it had already finished".into());
+            self.status = "the repair had already finished".into();
+        }
+        cx.notify();
+    }
+
     fn start_fix(
         &mut self,
         label: String,
@@ -2871,6 +4278,7 @@ impl Workbench {
             return;
         }
         self.status = format!("running: {label}");
+        let (events, cancel) = self.sidecar.run_fix(argv);
         self.running_fix = Some(RunningFix {
             label,
             link: None,
@@ -2879,8 +4287,10 @@ impl Workbench {
             check_id,
             done: false,
             ok: false,
+            cancel: cancel.clone(),
+            stopping: false,
         });
-        let mut events = self.sidecar.run_fix(argv);
+        let mut events = events;
         cx.spawn(async move |this, cx| {
             while let Some(event) = events.next().await {
                 let update = this.update(cx, |workbench, cx| {
@@ -2967,6 +4377,82 @@ impl Workbench {
         self.start_turn_as(prompt, subagent::Dispatch::default(), cx);
     }
 
+    /// Ask the current provider what it offers, if nobody has asked today.
+    ///
+    /// **Called when the Model pane opens, not on a timer.** A background poll would spend a
+    /// researcher's key on a request they cannot see, and the only moment the answer matters is
+    /// the moment somebody is looking at the list. Opening the pane is that moment.
+    ///
+    /// Silent on failure by design. This is a nicety on top of a curated list that already works:
+    /// offline, rate-limited or a gateway that does not serve `/models` all mean *"keep the list
+    /// you have"*, and an error toast for a thing nobody asked for is noise.
+    fn refresh_models(&mut self, cx: &mut Context<Self>) {
+        let Some(spec) = settings::provider(&self.draft.provider) else {
+            return;
+        };
+        let Some((url, auth)) = catalogue::endpoint(spec.id, &self.draft.base_url) else {
+            return;
+        };
+        let now = provenance::now_ms();
+        if !self
+            .catalogue
+            .get(spec.id)
+            .is_none_or(|listing| listing.is_stale(now))
+        {
+            return;
+        }
+        // Read here, on the main thread — the keychain is not safe to touch from a Tokio worker.
+        let key = settings::secret(&format!("llm:{}", spec.id));
+        let mut done = self.sidecar.refresh_models(
+            spec.id.to_string(),
+            url,
+            auth,
+            key,
+            now,
+        );
+        cx.spawn(async move |this, cx| {
+            if let Some(outcome) = done.next().await {
+                let _ = this.update(cx, |workbench, cx| match outcome {
+                    Ok((provider, count)) => {
+                        // Re-read rather than patch: the file is the record, and another provider
+                        // may have been written while this one was in flight.
+                        workbench.catalogue = catalogue::load();
+                        tracing::info!(%provider, count, "model list refreshed");
+                        cx.notify();
+                    }
+                    Err(error) => tracing::debug!(%error, "could not refresh the model list"),
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// The one thing stopping a turn from reaching the provider that was actually chosen.
+    ///
+    /// Read from the **saved** settings rather than from `self.draft`, because the draft is what
+    /// somebody is halfway through editing and the request is built from what was saved. Only
+    /// the two failures that silently redirect a turn — a missing key and a custom provider with
+    /// no endpoint — because a wrong *model id* fails loudly, from the provider you picked, in a
+    /// sentence that names the model.
+    fn provider_blocker(&self) -> Option<String> {
+        let stored = settings::Settings::load();
+        let has_key = settings::secret(&stored.key_name()).is_some();
+        if let Some(blocker) = stored.misdirects_a_turn(has_key) {
+            return blocker.into();
+        }
+        // **And the specialists.** §186's gate read the coordinator alone, so an override to an
+        // unkeyed provider sailed through and failed minutes later inside a worker, billed to an
+        // account the researcher had never opened (§212). Refused here for the same reason and in
+        // the same place: before anything is spent.
+        //
+        // The keychain read stays on this thread, which is why `unkeyed_specialists` takes the
+        // lookup rather than doing it — `secret` is not async-safe.
+        stored
+            .unkeyed_specialists(|id| settings::secret(&format!("llm:{id}")).is_some())
+            .into_iter()
+            .next()
+    }
+
     /// Start a turn, choosing how a `/name` command should reach its specialist.
     fn start_turn_as(
         &mut self,
@@ -2975,6 +4461,21 @@ impl Workbench {
         cx: &mut Context<Self>,
     ) {
         if self.streaming || prompt.trim().is_empty() {
+            return;
+        }
+        // **Refuse rather than fall through to somebody else's account.** `problems()` has always
+        // been computed and, in `main`'s own words, *"warned, not fatal"* — logged at launch and
+        // shown in the pane. A turn ran regardless, and the consequence was not a clear failure:
+        // with no key for the chosen provider, `run_request_body` omits `__llm_keys` **entirely**,
+        // and `base_url` lives inside that block. The backend then builds a bare OpenAI client,
+        // picks up whatever `OPENAI_API_KEY` the distro happens to hold, and bills a provider
+        // nobody selected. Reported as *"this is weird, I set OpenRouter and I have credits"* —
+        // with an out-of-credits page for OpenAI (docs §186).
+        if let Some(problem) = self.provider_blocker() {
+            self.error = Some(format!("{problem} — Settings › Model"));
+            self.settings_section = Section::Model;
+            self.settings_open = true;
+            cx.notify();
             return;
         }
         // `/name …` names a specialist. Resolved *before* anything is sent, because the failure
@@ -3086,6 +4587,9 @@ impl Workbench {
                 // the reason is on screen rather than one click away.
                 message.steps_expanded = true;
             }
+        }
+        if let Some(last) = self.transcript.len().checked_sub(1) {
+            self.invalidate_transcript_message(last);
         }
         // Said differently in the two cases because they are different: one stopped the run,
         // the other only stopped us watching it.
@@ -3339,9 +4843,22 @@ impl Workbench {
                 if !snapshot.buckets.is_empty() {
                     self.buckets = snapshot.buckets;
                 }
+                // **Replaced, not merged.** A plan is a whole statement about the current
+                // intention: the model rewrites the list to reorder or drop a step, so keeping
+                // the old items when a shorter list arrives would show work the agent has
+                // abandoned. Guarded on non-empty for the opposite reason — a frame that carries
+                // no `todos` at all is silent about the plan, not a claim there isn't one (§209).
+                if !snapshot.todos.is_empty() {
+                    self.plan = snapshot.todos;
+                }
                 for job in snapshot.jobs {
                     self.track_job(job, cx);
                 }
+                // The conversation this stream belongs to, and so the owner of any worker it
+                // launched. Safe to read here and nowhere else: `apply` only runs mid-turn, and
+                // both `New thread` and opening another conversation refuse while streaming — so
+                // the open thread cannot have moved by the time this line runs.
+                let owner = self.sidecar.thread_id().unwrap_or_default();
                 for task in snapshot.tasks {
                     // Into the provenance record as well as the Jobs panel. A background worker
                     // runs on its own LangGraph thread, so none of its events reach this
@@ -3354,7 +4871,7 @@ impl Workbench {
                         &task.agent_name,
                         provenance::now_ms(),
                     );
-                    self.track_task(task, cx);
+                    self.track_task(&owner, task, cx);
                 }
             }
             TurnEvent::Done => {
@@ -3402,16 +4919,43 @@ impl Workbench {
         let mut ready = self.sidecar.warm_up();
         cx.spawn(async move |this, cx| {
             let status = ready.next().await;
-            let _ = this.update(cx, |workbench, cx| {
-                if let Some(status) = status {
-                    workbench.status = status.label().into();
-                    // Remembered, not just announced. Whether this app started the backend
-                    // decides whether the backend is running this app's overlay, and the
-                    // status line is gone by the time that matters (docs §80).
-                    workbench.backend_start = Some(status);
-                }
+            let Some(status) = status else {
+                return;
+            };
+            // Populate names as soon as the server can answer. Graph construction is unrelated to
+            // `/threads/search`; making the list wait for it would fix the first-click pause by
+            // creating the same pause in the sidebar instead (docs §176).
+            let graph = this.update(cx, |workbench, cx| {
+                workbench.status = "loading research tools…".into();
+                workbench.warming = true;
+                // Remembered, not just announced. Whether this app started the backend decides
+                // whether it is running this app's overlay, and the status line is gone by the
+                // time that matters (docs §80).
+                workbench.backend_start = Some(status);
                 workbench.refresh_conversations(cx);
                 workbench.refresh_project(cx);
+                cx.notify();
+                workbench.sidecar.warm_graph()
+            });
+            let Ok(mut graph) = graph else {
+                return;
+            };
+            let outcome = graph.next().await;
+            let _ = this.update(cx, |workbench, cx| {
+                workbench.warming = false;
+                match outcome {
+                    Some(Ok(())) => workbench.status = status.label().into(),
+                    Some(Err(error)) => {
+                        // Startup remains usable: a dependency may be temporarily unreachable,
+                        // and the first real turn will surface its contextual error. What must not
+                        // happen is the status bar claiming the graph is ready, or waiting forever.
+                        tracing::warn!(%error, "agent graph did not finish warming at startup");
+                        workbench.status = "backend started; research tools are not ready".into();
+                    }
+                    None => {
+                        workbench.status = "backend started; research tools are not ready".into();
+                    }
+                }
                 cx.notify();
             });
         })
@@ -3422,20 +4966,56 @@ impl Workbench {
     }
 
     fn refresh_conversations(&mut self, cx: &mut Context<Self>) {
-        let mut updates = self.sidecar.list_conversations();
+        // Read from disk rather than from `self.draft`, which is the Settings pane's editing
+        // buffer — the same argument `remember_panels` makes. The migration must be decided by
+        // what is *stored*, because that is what survives to the next launch.
+        let adopt = !settings::Settings::load().adopted_untagged;
+        // **Read here, not in the answer.** Projects are directories on this machine and the
+        // backend has nothing to do with them, but hanging the read off a successful HTTP reply
+        // meant a cold launch — where the first refresh reliably fires before the server is up,
+        // as `list_conversations` itself documents — showed no project headings at all until some
+        // later refresh happened to succeed. An empty project would simply not be there on the
+        // launch after it was created (§167).
+        self.folder_projects = workspace::projects();
+        let mut updates = self.sidecar.list_conversations(adopt);
         cx.spawn(async move |this, cx| {
-            if let Some(conversations) = updates.next().await {
+            if let Some(answer) = updates.next().await {
                 let _ = this.update(cx, |workbench, cx| {
-                    workbench.conversations = conversations;
+                    workbench.conversations = answer.conversations;
+                    // Again on the answer, because a turn may have created a project folder
+                    // while this request was in flight. Cheap: one `read_dir` of a directory
+                    // holding a handful of entries.
+                    workbench.folder_projects = workspace::projects();
                     // Only on a real answer. A failed fetch sends nothing, so the list keeps
                     // saying "loading" rather than claiming the researcher has none — a
                     // backend that is still booting will answer the next refresh.
                     workbench.conversations_loaded = true;
+                    if answer.scanned {
+                        workbench.remember_adoption();
+                    }
                     cx.notify();
                 });
             }
         })
         .detach();
+    }
+
+    /// Record that §90's pre-tag scan has run, so it can never run again.
+    ///
+    /// Deliberately *not* conditional on having adopted anything: an installation with no
+    /// untagged threads is exactly the one that must stop scanning, and it is the one where
+    /// deleting every conversation used to bring the leftovers back (docs §166).
+    fn remember_adoption(&self) {
+        let mut stored = settings::Settings::load();
+        if stored.adopted_untagged {
+            return;
+        }
+        stored.adopted_untagged = true;
+        if let Err(error) = stored.save() {
+            // The scan did run; all that failed is remembering it. Worth a log because the
+            // consequence is a repeat scan, which is the defect this whole field exists for.
+            tracing::warn!(%error, "could not record that the pre-tag scan has run");
+        }
     }
 
     /// Reopen a past conversation: switch threads and rebuild the transcript.
@@ -3450,17 +5030,24 @@ impl Workbench {
         // Clear what belongs to the conversation being left. The spine is
         // thread-independent, so it stays — same rule as `New thread`.
         self.transcript.clear();
+        self.reset_transcript_list();
         // Read back from the thread being opened, below. Cleared first so a failure to load
         // shows the new conversation as having no record rather than the previous one's.
         self.provenance = provenance::Record::default();
-        self.text_selection.update(|selection| selection.clear());
+        self.text_selection.clear_document();
         self.buckets.clear();
         self.tasks.clear();
         self.jobs.clear();
+        self.plan.clear();
+        // The record of who wrote what belongs to the conversation being left. Cleared with the
+        // stamp, or the next frame would see an unchanged `None` and keep the old map.
+        self.authorship.clear();
+        self.authorship_stamp = None;
         self.error = None;
         self.approve_conversation = false;
         self.approve_tasks.clear();
         self.status = "opening…".into();
+        self.opening = true;
 
         // Adopt the project it is filed under *before* the fetch, so `thread_workspace` — which
         // the figures and the provenance record are read from — is looking in the right folder
@@ -3470,11 +5057,11 @@ impl Workbench {
             .iter()
             .find(|conversation| conversation.thread_id == thread_id)
             .and_then(|conversation| conversation.project.clone());
-        // Remembered as well as adopted: "the project you are working in" is the one you last
-        // looked at, not only the one you last filed something into.
-        self.remember_project(filed.clone());
         self.sidecar.set_project(filed);
         self.project = None;
+        // Kept before the id is handed to the sidecar: any worker in this conversation's state
+        // belongs to *this* conversation, and that is the fact `decide_task` needs later.
+        let owner = thread_id.clone();
         let mut messages = self.sidecar.open_conversation(thread_id);
         cx.spawn(async move |this, cx| {
             if let Some((messages, snapshot)) = messages.next().await {
@@ -3502,6 +5089,28 @@ impl Workbench {
                         if !snapshot.buckets.is_empty() {
                             workbench.buckets = snapshot.buckets;
                         }
+                        // **The reference list survives a reload too.** Restoring `buckets` and
+                        // not `sources` left the panel with the plain bucket rendering — a name,
+                        // a count and `+13 more` — while everything §185 to §195 built sat on
+                        // `self.sources`: the unverified count, the provenance note, the link,
+                        // the row you can press. Reported as *"when I reload the conversation I
+                        // cannot see the interaction of sources"*, and the two lists looked
+                        // similar enough that the difference read as the feature being broken
+                        // rather than as a second renderer (docs §196).
+                        if !snapshot.sources.is_empty() {
+                            workbench.sources = snapshot.sources;
+                            // Checked on reopen as on arrival, or a conversation returned to is
+                            // a conversation whose citations are all silently unverified.
+                            workbench.resolve_sources(cx);
+                        }
+                        if !snapshot.reports.is_empty() {
+                            workbench.reports = snapshot.reports;
+                        }
+                        // Restored with them, and for §196's reason: a conversation reopened
+                        // mid-plan showing no plan reads as the feature being broken.
+                        if !snapshot.todos.is_empty() {
+                            workbench.plan = snapshot.todos;
+                        }
                         if let Some(project) = snapshot.project {
                             workbench.project =
                                 Some(merge_spine(workbench.project.as_ref(), project));
@@ -3510,9 +5119,10 @@ impl Workbench {
                             workbench.track_job(job, cx);
                         }
                         for task in snapshot.tasks {
-                            workbench.track_task(task, cx);
+                            workbench.track_task(&owner, task, cx);
                         }
                     }
+                    workbench.opening = false;
                     workbench.status = "done".into();
                     workbench.refresh_project(cx);
                     cx.notify();
@@ -3523,24 +5133,139 @@ impl Workbench {
         cx.notify();
     }
 
-    /// Delete a conversation, after the row has asked.
-    fn delete_conversation(&mut self, thread_id: String, cx: &mut Context<Self>) {
-        self.confirming_delete = None;
-        self.conversations
-            .retain(|conversation| conversation.thread_id != thread_id);
-        // If it was the open one, leave an empty slate rather than a transcript whose
-        // thread no longer exists.
-        if self.sidecar.thread_id().as_deref() == Some(thread_id.as_str()) {
-            self.sidecar.reset_thread();
-            self.transcript.clear();
-            self.provenance = provenance::Record::default();
-            self.text_selection.update(|selection| selection.clear());
-            self.buckets.clear();
-            self.tasks.clear();
-            self.jobs.clear();
+    /// Open the centred warning for a conversation or a whole project.
+    fn request_delete(
+        &mut self,
+        target: DeleteTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.deleting.is_some() {
+            return;
         }
-        self.sidecar.delete_conversation(thread_id);
-        self.say("conversation deleted", cx);
+        let current_is_targeted = self
+            .sidecar
+            .thread_id()
+            .is_some_and(|thread_id| target.contains_thread(&thread_id));
+        if self.streaming && current_is_targeted {
+            self.say(
+                format!(
+                    "can't delete this {} while its turn is running",
+                    target.noun()
+                ),
+                cx,
+            );
+            return;
+        }
+        if current_is_targeted && self.tasks.iter().any(|task| !task.is_finished()) {
+            // A background worker can still be writing beneath the conversation directory after
+            // the foreground turn ends. Deleting that tree underneath it would recreate the
+            // folder or lose the remainder of its work; wait for the task's terminal state.
+            self.say(
+                format!(
+                    "can't delete this {} while its background work is running",
+                    target.noun()
+                ),
+                cx,
+            );
+            return;
+        }
+        self.confirming_delete = Some(target);
+        window.focus(&self.delete_focus);
+        cx.notify();
+    }
+
+    /// Carry out exactly what the modal named: durable threads first, managed files second.
+    fn confirm_delete(&mut self, cx: &mut Context<Self>) {
+        let Some(target) = self.confirming_delete.take() else {
+            return;
+        };
+        if self.deleting.is_some() {
+            return;
+        }
+        let noun = target.noun();
+        self.status = format!("deleting {noun}…");
+        self.deleting = Some(target.clone());
+        let mut deleted = self
+            .sidecar
+            .delete_conversations(target.thread_ids(), target.files());
+        cx.spawn(async move |this, cx| {
+            let result = deleted.next().await;
+            let _ = this.update(cx, |workbench, cx| {
+                workbench.deleting = None;
+                match resolve_delete(target.noun(), result) {
+                    DeleteResolution::Remove { files_error } => {
+                        let removed = target.thread_ids();
+                        workbench
+                            .conversations
+                            .retain(|conversation| !removed.contains(&conversation.thread_id));
+                        // The folder went with them, so the heading must too. Re-read rather
+                        // than removing by name: deleting a conversation can empty a project and
+                        // take its folder as well (§155), and that is the same fact (§167).
+                        workbench.folder_projects = workspace::projects();
+                        // If it was the open one, leave a genuinely ungrouped empty slate rather
+                        // than a transcript and project whose thread no longer exists (§154).
+                        let open_was_removed = workbench
+                            .sidecar
+                            .thread_id()
+                            .is_some_and(|thread_id| target.contains_thread(&thread_id));
+                        let active_project_was_removed = workbench
+                            .sidecar
+                            .project()
+                            .is_some_and(|name| !project_exists(&workbench.conversations, &name));
+                        if open_was_removed {
+                            workbench.sidecar.reset_thread();
+                            workbench.transcript.clear();
+                            workbench.provenance = provenance::Record::default();
+                            workbench
+                                .text_selection
+                                .update(|selection| selection.clear());
+                            workbench.buckets.clear();
+                            workbench.tasks.clear();
+                            workbench.jobs.clear();
+                        }
+                        if open_was_removed || active_project_was_removed {
+                            // Also covers an empty "new conversation here" slate whose thread has
+                            // not been created yet. Leaving only its project key alive would make
+                            // the next question recreate the project just deleted (§155).
+                            workbench.sidecar.set_project(None);
+                            workbench.project = None;
+                            workbench.refresh_project(cx);
+                        }
+                        match files_error {
+                            None => workbench.say(format!("{} deleted", target.noun()), cx),
+                            Some(error) => {
+                                // The irreversible server half succeeded, so restoring the row
+                                // would be another lie. Keep the recoverable folder and say where
+                                // synchronization stopped instead (§155).
+                                workbench.error = Some(format!(
+                                    "The {} was deleted, but its saved folder remains: {error}",
+                                    target.noun()
+                                ));
+                                workbench.say(
+                                    format!(
+                                        "{} deleted; its saved folder could not be removed",
+                                        target.noun()
+                                    ),
+                                    cx,
+                                );
+                            }
+                        }
+                    }
+                    DeleteResolution::Keep(error) => {
+                        // Keep the row because the backend kept the conversation. Claiming
+                        // success here is the precise defect that only restart exposed. A project
+                        // batch can have succeeded partly before one request failed, so refresh
+                        // instead of assuming our captured list is still authoritative (§155).
+                        workbench.error = Some(error);
+                        workbench.status = format!("{} was not fully deleted", target.noun());
+                        workbench.refresh_conversations(cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -3579,6 +5304,89 @@ impl Workbench {
         }
         self.restore_focus = true;
         cx.notify();
+    }
+
+    /// Re-read who wrote what, but only when the record itself has moved.
+    ///
+    /// The manifest is append-only and grows by a line per file, so parsing it on every frame of
+    /// a streaming answer would be real work for an answer that changes a few times a turn. Size
+    /// **and** mtime, because an append that lands inside one filesystem timestamp tick still
+    /// changes the length.
+    fn refresh_authorship(&mut self) {
+        let Some(dir) = self.thread_workspace() else {
+            self.authorship.clear();
+            self.authorship_stamp = None;
+            return;
+        };
+        let stamp = std::fs::metadata(dir.join(workspace::AUTHORSHIP))
+            .ok()
+            .and_then(|meta| meta.modified().ok().map(|at| (at, meta.len())));
+        if stamp == self.authorship_stamp {
+            return;
+        }
+        self.authorship_stamp = stamp;
+        self.authorship = workspace::authorship(&dir);
+    }
+
+    /// Begin editing the mission, with the current one in the field.
+    fn start_mission_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let current = self
+            .project
+            .as_ref()
+            .map(|project| project.mission.clone())
+            .unwrap_or_default();
+        self.editing_mission = true;
+        self.mission_editor.update(cx, |editor, cx| {
+            editor.set_text(&current, cx);
+        });
+        // Same reason as `start_rename`: without this the researcher presses the mission and
+        // types into the composer at the bottom of the window.
+        self.mission_editor.read(cx).focus_handle(cx).focus(window);
+        cx.notify();
+    }
+
+    /// Save a hand-edited mission, and show what the store actually kept.
+    ///
+    /// **Not optimistic**, unlike renaming a conversation. A name is ours and lives on the thread;
+    /// a mission is the backend's, which caps it at 500 characters and collapses whitespace before
+    /// storing it — and it is read back into the coordinator's system prompt on the next turn
+    /// (`backend/middleware/project.py`). Showing the typed text and letting the stored text
+    /// differ would mean the panel disagreed with what the agent is actually working to.
+    fn commit_mission(&mut self, mission: String, cx: &mut Context<Self>) {
+        if !self.editing_mission {
+            return;
+        }
+        self.editing_mission = false;
+        self.restore_focus = true;
+        let mission = mission.trim().to_string();
+        let mut saved = self.sidecar.set_mission(mission);
+        self.status = "saving the mission…".into();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            if let Some(outcome) = saved.next().await {
+                let _ = this.update(cx, |workbench, cx| {
+                    match outcome {
+                        // Only the spine's own fields: `PATCH /project` cannot return live
+                        // suggestions — its docstring says so, because they are derived from a
+                        // running thread's artifacts — and taking its empty list wholesale would
+                        // clear the advice on screen as a side effect of an unrelated edit.
+                        Ok(project) => {
+                            workbench.project =
+                                Some(merge_spine(workbench.project.as_ref(), project));
+                            workbench.status = "mission saved".into();
+                        }
+                        Err(error) => {
+                            // Said out loud, and the panel keeps the mission the backend still
+                            // holds. A silent failure here is the worst kind: the researcher
+                            // believes the agent has been redirected and it has not.
+                            workbench.status = format!("could not save the mission: {error}");
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     /// Note that a specialist produced something, now.
@@ -3757,8 +5565,118 @@ impl Workbench {
         }
     }
 
+    /// Re-read files after a writer has reported completion and evict any image decode cached
+    /// while that writer still had the file open.
+    ///
+    /// The Outputs panel scans on every paint, which made a just-created PNG visible *before* it
+    /// was necessarily complete. GPUI correctly cached that first decode failure by path, but a
+    /// later paint asked for the same path and received the same failure forever; restarting the
+    /// application was the only thing that cleared it. Two bounded follow-up passes cover the
+    /// Windows/WSL filesystem hand-off without turning the whole workspace into a permanent
+    /// polling loop (docs §158).
+    /// Compare what each answer *said* it wrote against what the folder holds.
+    ///
+    /// **The claim was never checked against the data.** An answer would list ten filenames and
+    /// the Outputs panel would show none of them; twice a turn reported plots saved after the
+    /// command that would have written them failed (§42). The prompt forbids inventing charts,
+    /// which is a rule with nothing behind it — this is the something.
+    ///
+    /// Recomputed over **every** assistant message, not just the last, and re-run as outputs
+    /// settle. The workspace only grows, so a name that was missing when the turn ended and is
+    /// present two seconds later stops being flagged on its own. That self-correction is the
+    /// reason this is cheap to be wrong about in one direction and not the other.
+    ///
+    /// Matched on basename: an answer may write `outputs/plots/a.png` for a file the workspace
+    /// holds at another depth, and the question is whether the file exists — not whether the
+    /// model recited its path correctly.
+    fn check_file_claims(&mut self) -> bool {
+        let present: std::collections::HashSet<String> = self
+            .thread_workspace()
+            .map(|dir| workspace::outputs(&dir))
+            .unwrap_or_default()
+            .into_iter()
+            .flat_map(|(_kind, items)| items)
+            .filter_map(|output| {
+                std::path::Path::new(&output.name)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.to_ascii_lowercase())
+            })
+            .collect();
+
+        // **A name the researcher introduced is not a claim the agent made.** Dropped files are
+        // read where they lie rather than copied in (§13), so an answer discussing `kiwi.csv`
+        // from the desktop would otherwise be flagged for not holding a file that was never
+        // supposed to be here.
+        let from_researcher: std::collections::HashSet<String> = self
+            .transcript
+            .iter()
+            .filter(|message| message.role == "you")
+            .flat_map(|message| named_files(&message.body))
+            .map(|name| name.to_ascii_lowercase())
+            .collect();
+
+        let mut changed = false;
+        for index in 0..self.transcript.len() {
+            if self.transcript[index].role == "you" {
+                continue;
+            }
+            let missing: Vec<String> = named_files(&self.transcript[index].body)
+                .into_iter()
+                .filter(|name| {
+                    let name = name.to_ascii_lowercase();
+                    !present.contains(&name) && !from_researcher.contains(&name)
+                })
+                .collect();
+            if self.transcript[index].unverified != missing {
+                self.transcript[index].unverified = missing;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn settle_outputs(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            for delay in [250, 1_000] {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(delay))
+                    .await;
+                if this
+                    .update(cx, |workbench, cx| {
+                        workbench.collect_plots();
+                        if workbench.check_file_claims() {
+                            // The note changes a row's height, and a virtualized list caches
+                            // heights until told otherwise (§156).
+                            workbench.invalidate_all_transcript_messages();
+                        }
+                        let figures: Vec<std::path::PathBuf> = workbench
+                            .thread_workspace()
+                            .map(|dir| workspace::outputs(&dir))
+                            .unwrap_or_default()
+                            .into_iter()
+                            .flat_map(|(_, items)| items)
+                            .filter(|output| output.kind == workspace::Kind::Figure)
+                            .map(|output| output.path)
+                            .collect();
+                        for path in figures {
+                            gpui::ImageSource::from(path).remove_asset(cx);
+                        }
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     fn finish_turn(&mut self, cx: &mut Context<Self>) {
         self.collect_plots();
+        self.check_file_claims();
+        self.settle_outputs(cx);
         // Written here, and only here, for the same reason the title is: the thread id does not
         // exist until the turn has run, so there is no directory to write into before this point.
         // A turn stopped or failed still gets recorded — what was consulted before it stopped is
@@ -3792,6 +5710,7 @@ impl Workbench {
         {
             self.transcript.pop();
         }
+        self.invalidate_all_transcript_messages();
         self.composer
             .update(cx, |composer, cx| composer.set_disabled(false, cx));
         // A turn can change the spine — the mission is derived from the first
@@ -3819,7 +5738,7 @@ impl Workbench {
             })
             .collect();
         if !query.trim().is_empty() {
-            ranked.sort_by(|a, b| b.0.cmp(&a.0));
+            ranked.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
         }
         let matched: Vec<&protocol::Conversation> = ranked
             .into_iter()
@@ -3842,6 +5761,21 @@ impl Workbench {
                     .p_2()
                     .text_color(rgb(theme::text_faint()))
                     .text_xs()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    // The mark goes where the researcher is already looking. A sentence alone
+                    // said the same thing and said it motionlessly, which is what a hung window
+                    // also looks like (§177).
+                    .when(!self.conversations_loaded, |row| {
+                        row.child(
+                            // Muted, matching the sentence beside it: this reports a state, and
+                            // the accent in this app means "act on me".
+                            ui::Spinner::new("loading-conversations")
+                                .colour(theme::text_muted()),
+                        )
+                    })
                     .child(if !self.conversations_loaded {
                         // The backend takes seconds to boot from cold, and this list is
                         // the first thing anyone looks at.
@@ -3858,10 +5792,22 @@ impl Workbench {
         //
         // A heading per project rather than an indent or a colour: the sidebar is scanned, and a
         // name is the only marker that survives being glanced at. The order is alphabetical with
-        // "No project" pinned to the bottom, so the list does not reshuffle as work moves between
-        // projects — a sidebar that reorders itself is one nobody builds a memory of (docs §106).
+        // ungrouped work pinned to the bottom, so the list does not reshuffle as work moves
+        // between projects — a sidebar that reorders itself is one nobody builds a memory of
+        // (docs §106, §154).
         let mut grouped: std::collections::BTreeMap<Option<String>, Vec<&protocol::Conversation>> =
             std::collections::BTreeMap::new();
+        // Seeded with every project that has a folder, so one nothing is filed under yet still
+        // gets a heading. Naming a project used to create the folder and show nothing at all —
+        // the sidebar could only see a project through a conversation (§167).
+        //
+        // Not while a search is running: a filter is a way to find work, and an empty project
+        // matches nothing, so leaving them in would make searching look broken.
+        if self.conversation_query.read(cx).text().trim().is_empty() {
+            for name in &self.folder_projects {
+                grouped.entry(Some(name.clone())).or_default();
+            }
+        }
         for conversation in &matched {
             grouped
                 .entry(conversation.project.clone())
@@ -3876,15 +5822,21 @@ impl Workbench {
             (_, None) => std::cmp::Ordering::Less,
             (Some(a), Some(b)) => a.cmp(b),
         });
-        // One project is not a grouping — the heading would be noise above every row a
-        // researcher owns. Headings appear once there is something to tell apart.
-        let show_headings = ordered.len() > 1;
+        // A named project always gets its heading now, even when it is the only group. The
+        // heading is no longer decoration: it owns New here, Open folder and Delete project, so
+        // hiding it would hide the only project-delete affordance (§155). Ungrouped work alone
+        // still needs no heading because it is not a project and has no project folder to delete.
+        let show_headings = ordered.len() > 1
+            || ordered
+                .iter()
+                .any(|(project, _conversations)| project.is_some());
 
         for (project, conversations) in ordered {
             if show_headings {
-                let heading = project.clone().unwrap_or_else(|| "No project".to_string());
+                let heading = project
+                    .clone()
+                    .unwrap_or_else(|| UNGROUPED_PROJECT_LABEL.to_string());
                 let opening = project.clone();
-                let starting = project.clone();
                 list = list.child(
                     div()
                         .flex()
@@ -3919,36 +5871,29 @@ impl Workbench {
                                 })
                                 .child(section_label_owned(heading.to_uppercase())),
                         )
-                        // Asked for directly: starting work in a project should not mean
-                        // starting it somewhere else and then filing it (docs §107). Revealed
-                        // on hover, like the rename and delete controls on the rows below.
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("new-in-{heading}")))
-                                .flex_none()
-                                .px_1()
-                                .rounded_md()
-                                .text_color(rgb(theme::text_faint()))
-                                .text_xs()
-                                .invisible()
-                                .group_hover(
-                                    SharedString::from(format!("head-{heading}")),
-                                    |style| style.visible(),
-                                )
-                                .hover(|style| {
-                                    style.text_color(rgb(theme::accent())).cursor_pointer()
-                                })
-                                .child("+")
-                                .tooltip(move |_window, cx| {
-                                    cx.new(|_| Hint {
-                                        text: "new conversation here".into(),
-                                    })
-                                    .into()
-                                })
-                                .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                                    workbench.new_thread_in(starting.clone(), cx);
-                                })),
-                        ),
+                        // One `⋮` where four hover-revealed characters used to be. Only a named
+                        // project gets one: "Ungrouped Conversations" is the workspace root, which
+                        // is not a project and cannot be deleted or started "in" (§165).
+                        .when_some(project.clone(), |header, name| {
+                            header.child(self.sidebar_menu_button(
+                                format!("head-menu-{name}"),
+                                SidebarMenu::Project {
+                                    // All conversations in the project, not merely the rows that
+                                    // survived the sidebar search. A filter is a way to find
+                                    // work, never a deletion boundary (§155).
+                                    conversations: self
+                                        .conversations
+                                        .iter()
+                                        .filter(|conversation| {
+                                            conversation.project.as_deref() == Some(name.as_str())
+                                        })
+                                        .cloned()
+                                        .collect(),
+                                    name,
+                                },
+                                cx,
+                            ))
+                        }),
                 );
             }
             for conversation in conversations {
@@ -3972,10 +5917,14 @@ impl Workbench {
                     continue;
                 }
 
-                // Asked once, then confirmed in place. Nothing about a row of names should be
-                // able to destroy work on one click.
-                if self.confirming_delete.as_deref() == Some(thread_id.as_str()) {
-                    let confirmed = thread_id.clone();
+                // The row stays until the backend confirms deletion. Removing it optimistically
+                // is what made a failed request look successful until launch brought both the
+                // conversation and its derived project heading back (§154).
+                if self
+                    .deleting
+                    .as_ref()
+                    .is_some_and(|target| target.contains_thread(&thread_id))
+                {
                     list = list.child(
                         div()
                             .flex()
@@ -3987,56 +5936,18 @@ impl Workbench {
                             .px_2()
                             .py_1()
                             .rounded_md()
-                            .border_1()
-                            .border_color(rgb(theme::error()))
+                            .bg(rgb(theme::elevated()))
                             .child(
-                                ui::Label::new("Delete this conversation?")
+                                ui::Label::new("Deleting this conversation…")
                                     .muted()
                                     .size(ui::Size::Compact)
                                     .ellipsis(),
-                            )
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("del-yes-{thread_id}")))
-                                    .flex_none()
-                                    .px_2()
-                                    .rounded_md()
-                                    .text_color(rgb(theme::error()))
-                                    .text_xs()
-                                    .hover(|style| {
-                                        style.bg(rgb(theme::elevated())).cursor_pointer()
-                                    })
-                                    .child("delete")
-                                    .on_click(cx.listener(
-                                        move |workbench, _event, _window, cx| {
-                                            workbench.delete_conversation(confirmed.clone(), cx);
-                                        },
-                                    )),
-                            )
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("del-no-{thread_id}")))
-                                    .flex_none()
-                                    .px_2()
-                                    .rounded_md()
-                                    .text_color(rgb(theme::text_muted()))
-                                    .text_xs()
-                                    .hover(|style| {
-                                        style.bg(rgb(theme::elevated())).cursor_pointer()
-                                    })
-                                    .child("keep")
-                                    .on_click(cx.listener(|workbench, _event, _window, cx| {
-                                        workbench.confirming_delete = None;
-                                        cx.notify();
-                                    })),
                             ),
                     );
                     continue;
                 }
 
                 let open = thread_id.clone();
-                let rename = thread_id.clone();
-                let remove = thread_id.clone();
                 list = list.child(
                     div()
                         .id(SharedString::from(format!("conv-{thread_id}")))
@@ -4053,7 +5964,7 @@ impl Workbench {
                         .when(selected, |row| row.bg(rgb(theme::accent_soft())))
                         // Every row reacts to the pointer. A list that does not respond to
                         // the cursor does not read as a list of *buttons*.
-                        .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
+                        .hover(|style| style.bg(rgb(theme::hover_over(theme::elevated()))).cursor_pointer())
                         .child(
                             ui::Label::new(conversation.title.clone())
                                 .colour(if selected {
@@ -4064,50 +5975,11 @@ impl Workbench {
                                 .size(ui::Size::Compact)
                                 .ellipsis(),
                         )
-                        .child(
-                            // Hidden until the row is hovered, so the list stays a list of
-                            // names rather than a wall of controls.
-                            div()
-                                .id(SharedString::from(format!("rename-{thread_id}")))
-                                .flex_none()
-                                .invisible()
-                                .group_hover(
-                                    SharedString::from(format!("conv-group-{thread_id}")),
-                                    |style| style.visible(),
-                                )
-                                .px_1()
-                                .text_color(rgb(theme::text_faint()))
-                                .text_xs()
-                                .hover(|style| {
-                                    style.text_color(rgb(theme::accent())).cursor_pointer()
-                                })
-                                .child("rename")
-                                .on_click(cx.listener(move |workbench, _event, window, cx| {
-                                    workbench.start_rename(rename.clone(), window, cx);
-                                })),
-                        )
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("delete-{thread_id}")))
-                                .flex_none()
-                                .invisible()
-                                .group_hover(
-                                    SharedString::from(format!("conv-group-{thread_id}")),
-                                    |style| style.visible(),
-                                )
-                                .px_1()
-                                .rounded_md()
-                                .text_color(rgb(theme::text_faint()))
-                                .text_xs()
-                                .hover(|style| {
-                                    style.text_color(rgb(theme::error())).cursor_pointer()
-                                })
-                                .child("✕")
-                                .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                                    workbench.confirming_delete = Some(remove.clone());
-                                    cx.notify();
-                                })),
-                        )
+                        .child(self.sidebar_menu_button(
+                            format!("row-menu-{thread_id}"),
+                            SidebarMenu::Conversation(conversation.clone()),
+                            cx,
+                        ))
                         .on_click(cx.listener(move |workbench, _event, _window, cx| {
                             workbench.open_conversation(open.clone(), cx);
                         })),
@@ -4149,7 +6021,7 @@ impl Workbench {
                                     .text_color(rgb(theme::accent_hover()))
                                     .cursor_pointer()
                             })
-                            .child("◎")
+                            .child(app_icon("icons/settings.svg", theme::accent()))
                             .on_click(cx.listener(|workbench, _event, _window, cx| {
                                 workbench.run_command(Command::OpenSettings, cx);
                             })),
@@ -4174,9 +6046,21 @@ impl Workbench {
                                     .cursor_pointer()
                             })
                             .child("New")
-                            .on_click(cx.listener(|workbench, _event, _window, cx| {
-                                workbench.run_command(Command::NewThread, cx);
-                            })),
+                            // A menu, because there are two kinds of new thing and a button that
+                            // silently means only one of them leaves the other with no home at
+                            // all — creating a project meant opening a conversation first and
+                            // filing it afterwards (§165).
+                            .on_click(cx.listener(
+                                |workbench, event: &gpui::ClickEvent, _window, cx| {
+                                    let at = match event {
+                                        gpui::ClickEvent::Mouse(click) => click.up.position,
+                                        _ => gpui::point(px(120.), px(60.)),
+                                    };
+                                    workbench.sidebar_menu =
+                                        Some((SidebarMenu::New, gpui::point(at.x, at.y + px(8.))));
+                                    cx.notify();
+                                },
+                            )),
                     ),
             )
             .child(
@@ -4244,6 +6128,59 @@ impl Workbench {
         cx.notify();
     }
 
+    /// Remove the JSON file behind an installed palette and keep the live theme valid.
+    ///
+    /// One Zed file can carry a whole family, so the picker removes the file rather than
+    /// pretending one palette inside it is independently installed. If the file supplied the
+    /// current palette, a built-in with the same name is revealed and reapplied; if no such name
+    /// remains, both the draft and the trigger move to the default. Leaving the deleted name in
+    /// either place would make Settings display a choice the next launch cannot load (docs §181).
+    fn uninstall_theme(&mut self, path: PathBuf, name: String, cx: &mut Context<Self>) {
+        let removed = settings::available_theme_entries()
+            .iter()
+            .filter(|entry| entry.source.as_deref() == Some(path.as_path()))
+            .count();
+
+        match settings::uninstall_theme_file(&path) {
+            Ok(()) => {
+                let survivors = settings::available_themes();
+                if theme_after_removal(&self.applied_theme, &survivors).is_some() {
+                    self.applied_theme = theme::DEFAULT_NAME.to_string();
+                    self.draft.theme = theme::DEFAULT_NAME.to_string();
+                }
+                // Also matters when the removed file overrode a built-in: the name remains, but
+                // its palette has changed back to the bundled one and the next frame must too.
+                settings::apply_theme(&self.draft);
+
+                // **And `settings.toml` too, now rather than on Save.** Everything else in this
+                // pane is a draft, and dismissing it reloads the file on the stated grounds that
+                // *"an unsaved palette was a look, not a change"*. Deleting a file is not a look.
+                // Leaving the removed name on disk meant Esc restored a palette whose JSON was
+                // gone: the dropdown read `Catppuccin Mocha` over a window painted in the
+                // default, and no restart cleared it.
+                //
+                // Checked against the stored name rather than the live one — they differ the
+                // moment somebody previews a theme before removing another — and written through
+                // a fresh load rather than by saving `self.draft`, which may be holding model or
+                // key edits they have not chosen to keep.
+                let mut stored = settings::Settings::load();
+                if let Some(replacement) = theme_after_removal(&stored.theme, &survivors) {
+                    stored.theme = replacement;
+                    if let Err(error) = stored.save() {
+                        tracing::warn!(%error, "could not write the removed theme out of settings");
+                    }
+                }
+                self.gallery_note = if removed > 1 {
+                    format!("removed {removed} palettes from the installed family")
+                } else {
+                    format!("removed {name}")
+                };
+            }
+            Err(error) => self.gallery_note = format!("could not remove {name}: {error:#}"),
+        }
+        cx.notify();
+    }
+
     /// The five providers, as pills rather than a cycle button.
     ///
     /// Five fit on one row, so there is no reason to make someone click through them —
@@ -4276,13 +6213,18 @@ impl Workbench {
                         theme::text_muted()
                     }))
                     .text_xs()
-                    .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
+                    .hover(|style| style.bg(rgb(theme::hover_over(theme::elevated()))).cursor_pointer())
                     .child(spec.label)
                     .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                        workbench.draft.provider = spec.id.to_string();
-                        // Suggest a model that exists for the provider just chosen, rather
-                        // than leaving one that does not.
-                        workbench.set_field(Field::ModelId, spec.suggested_model, cx);
+                        // **Staged, not applied.** Picking a pill used to change the provider and
+                        // the model id on the spot, silently, and the only thing that told you
+                        // which account a turn would bill was which pill happened to be lit.
+                        // Asked for after a turn ran against the wrong one: *"a modal that
+                        // confirms the user when he sets the providers"* (docs §186).
+                        if spec.id == workbench.draft.provider {
+                            return;
+                        }
+                        workbench.confirming_provider = Some(spec);
                         cx.notify();
                     })),
             );
@@ -4298,8 +6240,8 @@ impl Workbench {
     fn model_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let current = self.field_text_or(Field::ModelId, &self.draft.model_id, cx);
         let models = settings::provider(&self.draft.provider)
-            .map(|spec| spec.models)
-            .unwrap_or(&[]);
+            .map(|spec| catalogue::models_for(spec, &self.catalogue))
+            .unwrap_or_default();
 
         let mut list = div()
             .id("model-rows")
@@ -4316,8 +6258,20 @@ impl Workbench {
             .overflow_y_scroll()
             .track_scroll(&self.model_scroll);
 
-        for model in models {
-            let selected = *model == current;
+        // Fuzzy, the same scorer as every other list here, so `deepseek` finds
+        // `deepseek/deepseek-r1` and `kimi` finds `moonshotai/kimi-k2`.
+        let query = self.model_filter.read(cx).text().to_string();
+        let mut ranked: Vec<(i32, String)> = models
+            .into_iter()
+            .filter_map(|model| match_score(&query, &model).map(|score| (score, model)))
+            .collect();
+        if !query.trim().is_empty() {
+            ranked.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+        }
+        let shown = ranked.len();
+
+        for (_, model) in ranked {
+            let selected = model == current;
             list = list.child(
                 div()
                     .id(SharedString::from(format!("model-{model}")))
@@ -4331,7 +6285,7 @@ impl Workbench {
                     // Background only, no border: a border on the selected row alone made
                     // it taller than its neighbours, so the list jumped as you moved down.
                     .when(selected, |row| row.bg(rgb(theme::accent_soft())))
-                    .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
+                    .hover(|style| style.bg(rgb(theme::hover_over(theme::elevated()))).cursor_pointer())
                     .child(
                         // The label truncates, not the row. `truncate` on the flex item
                         // itself gave it zero intrinsic width, so every model rendered as
@@ -4355,20 +6309,40 @@ impl Workbench {
                         )
                     })
                     .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                        workbench.set_field(Field::ModelId, model, cx);
+                        workbench.set_field(Field::ModelId, &model, cx);
                         cx.notify();
                     })),
             );
         }
 
         div()
-            .relative()
             .flex()
             .flex_col()
             .w_full()
             .min_w_0()
-            .child(list)
-            .children(scrollbar(&self.model_scroll))
+            .gap_1()
+            // Above the rows, because a filter under the thing it filters is one nobody finds.
+            .child(self.filter_field(self.model_filter.clone(), cx))
+            .child(
+                div()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .min_w_0()
+                    .child(list)
+                    .children(scrollbar(&self.model_scroll)),
+            )
+            // **Said, not implied by an empty box.** A filter matching nothing and a provider
+            // that returned nothing look identical otherwise, and only one of them is fixed by
+            // typing less.
+            .when(shown == 0, |panel| {
+                panel.child(
+                    ui::Label::new("No model matches that.")
+                        .muted()
+                        .size(ui::Size::Compact),
+                )
+            })
     }
 
     /// Put text into one of the Settings fields.
@@ -4409,14 +6383,14 @@ impl Workbench {
     fn theme_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
         // The same fuzzy scorer as everywhere else, so `mocha` finds Catppuccin Mocha.
         let query = self.theme_filter.read(cx).text().to_string();
-        let mut matched: Vec<(i32, String, theme::Theme)> = settings::available_themes()
+        let mut matched: Vec<(i32, settings::ThemeEntry)> = settings::available_theme_entries()
             .into_iter()
-            .filter_map(|(name, palette)| {
-                match_score(&query, &name).map(|score| (score, name, palette))
+            .filter_map(|entry| {
+                match_score(&query, &entry.name).map(|score| (score, entry))
             })
             .collect();
         if !query.trim().is_empty() {
-            matched.sort_by(|a, b| b.0.cmp(&a.0));
+            matched.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
         }
 
         // Capped and scrollable: four built-ins fit, a hundred installed palettes do not,
@@ -4435,7 +6409,12 @@ impl Workbench {
             .overflow_y_scroll()
             .track_scroll(&self.theme_scroll);
 
-        for (_, name, palette) in matched {
+        for (_, entry) in matched {
+            let settings::ThemeEntry {
+                name,
+                palette,
+                source,
+            } = entry;
             let selected = name.eq_ignore_ascii_case(&self.applied_theme);
             let chosen = name.clone();
             let previewed = name.clone();
@@ -4461,6 +6440,48 @@ impl Workbench {
                 );
             }
 
+            let remove_name = name.clone();
+            let actions = div()
+                .flex()
+                .flex_row()
+                .flex_none()
+                .items_center()
+                .gap_2()
+                .child(swatch)
+                .when_some(source, |actions, path| {
+                    actions.child(
+                        div()
+                            .id(SharedString::from(format!("remove-theme-hint-{remove_name}")))
+                            .tooltip(|_window, cx| {
+                                cx.new(|_| Hint {
+                                    text: "remove this installed file and every palette in it"
+                                        .into(),
+                                })
+                                .into()
+                            })
+                            .child(
+                                ui::Button::new(
+                                    SharedString::from(format!("remove-theme-{remove_name}")),
+                                    "remove",
+                                )
+                                .size(ui::Size::Compact)
+                                .on_click(cx.listener(
+                                    move |workbench, _event, _window, cx| {
+                                        // The theme row itself selects and closes the picker.
+                                        // Removing is a second action nested inside that row, so
+                                        // it must not also select the file it just deleted.
+                                        cx.stop_propagation();
+                                        workbench.uninstall_theme(
+                                            path.clone(),
+                                            remove_name.clone(),
+                                            cx,
+                                        );
+                                    },
+                                )),
+                            ),
+                    )
+                });
+
             list = list.child(
                 div()
                     .id(SharedString::from(format!("theme-{name}")))
@@ -4481,7 +6502,7 @@ impl Workbench {
                         theme::border()
                     }))
                     .when(selected, |row| row.bg(rgb(theme::accent_soft())))
-                    .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
+                    .hover(|style| style.bg(rgb(theme::hover_over(theme::elevated()))).cursor_pointer())
                     // The live preview: pointing at a theme applies it to the whole
                     // window, and leaving puts back whatever was chosen. GPUI does have a
                     // hover *event* — `InteractiveElement::on_hover` — so this needed no
@@ -4510,7 +6531,7 @@ impl Workbench {
                             })
                             .ellipsis(),
                     )
-                    .child(swatch)
+                    .child(actions)
                     .on_click(cx.listener(move |workbench, _event, _window, cx| {
                         workbench.draft.theme = chosen.clone();
                         workbench.applied_theme = chosen.clone();
@@ -4567,7 +6588,7 @@ impl Workbench {
                     .rounded_md()
                     .border_1()
                     .border_color(rgb(theme::border()))
-                    .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
+                    .hover(|style| style.bg(rgb(theme::hover_over(theme::elevated()))).cursor_pointer())
                     .child(
                         div()
                             .flex()
@@ -4651,13 +6672,52 @@ impl Workbench {
     /// fall out of step with the sidebar (docs §106). Creating one is typing a name into the
     /// filter field and pressing the row that offers it — the same gesture as choosing an
     /// existing one, so there is no second mode to learn.
-    fn project_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn project_list(&self, starting_new: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        // The one difference between the two modes, named once. `file_in_project` moves the open
+        // conversation's folder; `new_thread_in` starts a fresh one and moves nothing — which is
+        // what "New project" has to mean when there may be no open conversation to move.
+        let choose = move |workbench: &mut Self, project: Option<String>, cx: &mut Context<Self>| {
+            if starting_new {
+                // **The folder first, and it is what makes the project real.** `new_thread_in`
+                // only sets where the *next* turn will write, and until that turn happens there
+                // is no thread, no metadata and nothing for the sidebar to show — which is
+                // exactly what naming a project used to look like: nothing (§167). Creating the
+                // directory is creating the project, because §105 made them the same thing.
+                let mut project = project;
+                if let Some(name) = project.as_deref() {
+                    match workspace::create_project(name) {
+                        // **The name the folder actually got**, not the one that was typed.
+                        // `project_folder` rewrites characters a path cannot hold, so keeping
+                        // the raw text would file conversations under `Q1/Q2` while the
+                        // directory is `Q1_Q2` — and the sidebar, which reads both, would show
+                        // the one project twice under two spellings.
+                        Ok(folder) => {
+                            project = Some(folder);
+                            workbench.folder_projects = workspace::projects();
+                        }
+                        Err(error) => {
+                            workbench.error = Some(format!("{error:#}"));
+                            workbench.open_picker = None;
+                            cx.notify();
+                            return;
+                        }
+                    }
+                }
+                workbench.new_thread_in(project, cx);
+            } else {
+                workbench.file_in_project(project, cx);
+            }
+            workbench.open_picker = None;
+        };
         let typed = self.project_query.read(cx).text().trim().to_string();
         let current = self.sidecar.project();
+        // Both sources, for the same reason the sidebar uses both: a project with a folder and
+        // no conversations yet is a project you should be able to file into (§167).
         let mut names: Vec<String> = self
             .conversations
             .iter()
             .filter_map(|conversation| conversation.project.clone())
+            .chain(self.folder_projects.iter().cloned())
             .collect();
         names.sort();
         names.dedup();
@@ -4683,14 +6743,16 @@ impl Workbench {
                     Some("creates the folder".into()),
                 )
                 .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                    workbench.file_in_project(Some(created.clone()), cx);
+                    choose(workbench, Some(created.clone()), cx);
                 })),
             );
         }
 
-        list = list.child(picker_row("No project", current.is_none(), None).on_click(
-            cx.listener(|workbench, _event, _window, cx| workbench.file_in_project(None, cx)),
-        ));
+        list = list.child(
+            picker_row(UNGROUPED_PROJECT_LABEL, current.is_none(), None).on_click(
+                cx.listener(move |workbench, _event, _window, cx| choose(workbench, None, cx)),
+            ),
+        );
 
         for name in names {
             if !typed.is_empty() && crate::match_score(&typed, &name).is_none() {
@@ -4704,7 +6766,7 @@ impl Workbench {
                     None,
                 )
                 .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                    workbench.file_in_project(Some(chosen.clone()), cx);
+                    choose(workbench, Some(chosen.clone()), cx);
                 })),
             );
         }
@@ -4750,11 +6812,10 @@ impl Workbench {
             return;
         }
         self.sidecar.set_project(project.clone());
-        self.remember_project(project.clone());
         self.say(
             match &project {
                 Some(name) => format!("filed under {name}"),
-                None => "taken out of its project".to_string(),
+                None => "filed under Ungrouped Conversations".to_string(),
             },
             cx,
         );
@@ -4777,30 +6838,34 @@ impl Workbench {
             self.say("can't start a new thread mid-turn", cx);
             return;
         }
+        self.sidecar.reset_thread();
         self.sidecar.set_project(project.clone());
-        self.remember_project(project);
         self.project = None;
         self.refresh_project(cx);
-        self.run_command(Command::NewThread, cx);
-    }
-
-    /// Remember which project the researcher is working in, across restarts.
-    ///
-    /// Written to the settings file rather than held in memory, so the first new conversation of
-    /// a morning lands where yesterday's work is. Updated by *looking* at a conversation as well
-    /// as by filing one — §107's bug was that only filing counted, so opening something already
-    /// in a project and pressing New put you back outside it.
-    fn remember_project(&mut self, project: Option<String>) {
-        let name = project.unwrap_or_default();
-        if self.draft.project == name {
-            return;
-        }
-        self.draft.project = name.clone();
-        let mut saved = settings::Settings::load();
-        saved.project = name;
-        if let Err(error) = saved.save() {
-            tracing::warn!(%error, "could not remember the current project");
-        }
+        self.transcript.clear();
+        // A new conversation is a new enquiry. The one just left keeps its own record on disk,
+        // where reopening it will find it.
+        self.provenance = provenance::Record::default();
+        self.text_selection.update(|selection| selection.clear());
+        self.buckets.clear();
+        self.tasks.clear();
+        self.jobs.clear();
+        self.plan.clear();
+        // The record of who wrote what belongs to the conversation being left. Cleared with the
+        // stamp, or the next frame would see an unchanged `None` and keep the old map.
+        self.authorship.clear();
+        self.authorship_stamp = None;
+        self.error = None;
+        // Blanket approval is scoped to the conversation, so it ends with it — together with
+        // every per-task grant, whose tasks belonged to that conversation too.
+        self.approve_conversation = false;
+        self.approve_tasks.clear();
+        self.refresh_conversations(cx);
+        self.status = match project {
+            Some(name) => format!("new conversation in {name}"),
+            None => "new conversation in Ungrouped Conversations".into(),
+        };
+        cx.notify();
     }
 
     /// A model per specialist, under the coordinator's.
@@ -4895,19 +6960,92 @@ impl Workbench {
             )),
         );
 
+        // **The same filter the coordinator's list has**, asked for after the grouped list made
+        // the problem plain: four providers' catalogues stacked under headings is more rows than
+        // before, not fewer. Only one picker is open at a time, so one field serves both — they
+        // ask the same question of the same catalogue (docs §192).
+        let query = self.model_filter.read(cx).text().to_string();
         for provider in settings::PROVIDERS {
-            for model in provider.models {
+            // The same live list the coordinator's picker uses, so a specialist can be pointed at
+            // anything the gateway actually carries rather than at four names written here.
+            let mut models: Vec<(i32, String)> = catalogue::models_for(&provider, &self.catalogue)
+                .into_iter()
+                .filter_map(|model| match_score(&query, &model).map(|score| (score, model)))
+                .collect();
+            if !query.trim().is_empty() {
+                models.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+            }
+            // A provider whose whole catalogue was filtered out contributes no heading either,
+            // or the list becomes a column of company names with nothing under them.
+            if models.is_empty() {
+                continue;
+            }
+            // **The company's name once, over its models** — the shape Mini-Me's own web panel
+            // uses (`<optgroup label={provider.name}>`) and the one Zed's provider page uses, and
+            // both are right for the same reason: repeating "OpenAI — billed separately" on every
+            // row spent the width the model id needed, to say a thing that is true of the whole
+            // group (docs §191).
+            let keyed = settings::secret(&format!("llm:{}", provider.id)).is_some();
+            let note = specialist_note(&provider, &self.draft.provider, keyed);
+            list = list.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_baseline()
+                    .gap_2()
+                    .w_full()
+                    .min_w_0()
+                    .px_2()
+                    .pt_2()
+                    .pb_1()
+                    .child(
+                        ui::Label::new(provider.label)
+                            .colour(theme::text())
+                            .size(ui::Size::Compact),
+                    )
+                    .children(note.map(|note| {
+                        ui::Label::new(note)
+                            .colour(theme::warning())
+                            .size(ui::Size::Compact)
+                    })),
+            );
+            // **A provider with no key offers nothing to press.**
+            //
+            // It used to list its whole catalogue with `— no key stored` beside the company name,
+            // and a researcher scrolling 400 models past a heading picked one and got a 429 from a
+            // billing page they had never seen, minutes later, inside a background worker. The
+            // same model is very often present *twice* — `gpt-4.1` under OpenAI and
+            // `openai/gpt-4.1` under OpenRouter — so the trap is not exotic: one of the two works,
+            // they differ by a prefix, and only one of them is paid for (§212).
+            //
+            // The heading stays, and says what to do. Hiding the provider entirely would leave a
+            // researcher who *has* an OpenAI account with no clue why it is not offered.
+            if !keyed {
+                list = list.child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .px_2()
+                        .pb_2()
+                        .text_xs()
+                        .text_color(rgb(theme::text_muted()))
+                        .child(format!(
+                            "{} {} here once a {} key is stored — add one under API key above.",
+                            models.len(),
+                            if models.len() == 1 { "model" } else { "models" },
+                            provider.label
+                        )),
+                );
+                continue;
+            }
+            for (_, model) in models {
                 let spec = format!("{}::{}", provider.id, model);
                 let selected = chosen.as_deref() == Some(spec.as_str());
-                // Named only when it would be a *second* provider to key, since that is the
-                // thing a researcher has to act on before the choice can work.
-                let missing = provider.id != self.draft.provider
-                    && settings::secret(&format!("llm:{}", provider.id)).is_none();
-                let note = missing.then(|| format!("{} — no key stored", provider.label));
+
                 let picked = name.clone();
                 let value = spec.clone();
                 list = list.child(
-                    picker_row(*model, selected, note)
+                    picker_row(model.clone(), selected, None)
                         .id(SharedString::from(format!("sa-{index}-{spec}")))
                         .on_click(cx.listener(move |workbench, _event, _window, cx| {
                             workbench
@@ -4920,7 +7058,219 @@ impl Workbench {
                 );
             }
         }
-        list.into_any_element()
+        // The filter above the rows, so it is seen before the scrolling starts.
+        div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w_0()
+            .gap_1()
+            .child(self.filter_field(self.model_filter.clone(), cx))
+            .child(list)
+            .into_any_element()
+    }
+
+    /// The irreversible scope, in the centre of the window rather than squeezed into a row.
+    ///
+    /// Conversation deletion now includes its saved outputs, and project deletion includes every
+    /// conversation plus the complete project folder. The old inline "delete / keep" row had no
+    /// room to say either fact; confirmation without the consequence is only a second click
+    /// (§155).
+    /// Confirm a provider change, and say what it will actually mean.
+    ///
+    /// **Which provider is selected decides which account gets billed**, and until §186 the only
+    /// thing that said so was which pill was lit. That was enough to lose an afternoon: a turn ran
+    /// against a provider the researcher had not chosen, and the first news of it was an
+    /// out-of-credits page belonging to somebody else's API — *"this is weird, I set OpenRouter
+    /// and I have credits."*
+    ///
+    /// So the modal states the three facts a person needs before pressing anything, and it reads
+    /// them **from the keychain and the settings**, not from what the panel happens to show:
+    ///
+    /// 1. Whether a key is stored **for the provider being moved to**. Keys are filed per
+    ///    provider (`llm:<id>`), so one pasted while another pill was selected belongs to that
+    ///    one and is invisible here — which is exactly how the key goes missing.
+    /// 2. That a custom endpoint needs its base URL, since without it the request has no address
+    ///    and the backend falls back to OpenAI's.
+    /// 3. Which model id it is about to be set to, because changing the provider changes that
+    ///    too, and doing it silently is how a valid id turns into one that does not exist.
+    fn provider_modal(
+        &self,
+        spec: &'static settings::Provider,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let leaving = settings::provider(&self.draft.provider).map_or("none", |from| from.label);
+        let has_key = settings::secret(&format!("llm:{}", spec.id)).is_some();
+        let needs_url = spec.needs_base_url && self.draft.base_url.trim().is_empty();
+
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .min_w_0()
+            .gap_3()
+            .child(ui::Label::new(format!(
+                "Turns will run on {} instead of {leaving}, and be billed to that account.",
+                spec.label
+            )));
+
+        // The two that stop a turn, said here rather than discovered several minutes into one.
+        if !has_key {
+            body = body.child(
+                ui::Label::new(format!(
+                    "No API key is stored for {}. Keys are kept per provider, so one added for \
+                     another provider does not count — paste it below after confirming, or this \
+                     one cannot run a turn.",
+                    spec.label
+                ))
+                .colour(theme::warning()),
+            );
+        }
+        if needs_url {
+            body = body.child(
+                ui::Label::new(
+                    "This provider needs its base URL — for OpenRouter that is \
+                     https://openrouter.ai/api/v1. Without it the request has no address to go to.",
+                )
+                .colour(theme::warning()),
+            );
+        }
+        if has_key && !needs_url {
+            body = body.child(
+                ui::Label::new(format!("A key for {} is already stored.", spec.label))
+                    .colour(theme::success()),
+            );
+        }
+
+        body = body.child(
+            ui::Label::new(format!("The model will be set to {}.", spec.suggested_model))
+                .muted()
+                .size(ui::Size::Compact),
+        );
+
+        ui::Modal::new("provider-confirmation", format!("Switch to {}?", spec.label))
+            .width(560.)
+            .focus(&self.delete_focus)
+            .body(body)
+            .actions(
+                ui::actions()
+                    .child(div().flex_grow())
+                    .child(ui::Button::new("provider-cancel", "Cancel").on_click(cx.listener(
+                        |workbench, _event, _window, cx| {
+                            workbench.confirming_provider = None;
+                            cx.notify();
+                        },
+                    )))
+                    .child(
+                        ui::Button::new("provider-confirm", "Switch provider")
+                            .tone(ui::Tone::Accent)
+                            .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                                workbench.confirming_provider = None;
+                                workbench.draft.provider = spec.id.to_string();
+                                // A different provider has a different catalogue, and the one on
+                                // screen a moment ago belonged to the provider being left.
+                                workbench.refresh_models(cx);
+                                // A model that exists for the provider just chosen, rather than
+                                // leaving one that does not.
+                                workbench.set_field(Field::ModelId, spec.suggested_model, cx);
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .footer(
+                ui::Label::new("Nothing is billed until you save and ask a question.")
+                    .muted()
+                    .size(ui::Size::Compact),
+            )
+    }
+
+    fn delete_modal(&self, target: &DeleteTarget, cx: &mut Context<Self>) -> impl IntoElement {
+        let (title, body, action) = match target {
+            DeleteTarget::Conversation(conversation) => {
+                let path = workspace::thread_dir_in(
+                    conversation.project.as_deref(),
+                    &conversation.thread_id,
+                );
+                let body = div()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .min_w_0()
+                    .gap_3()
+                    .child(ui::Label::new(format!(
+                        "This permanently deletes “{}”, its chat history, and every saved file it produced.",
+                        conversation.title
+                    )))
+                    .child(
+                        ui::Label::new(format!("Saved folder:\n{}", path.display()))
+                            .muted()
+                            .size(ui::Size::Compact),
+                    )
+                    .into_any_element();
+                ("Delete conversation?", body, "Delete conversation")
+            }
+            DeleteTarget::Project {
+                name,
+                conversations,
+            } => {
+                let path = workspace::project_folder(name)
+                    .map(|folder| workspace::root().join(folder))
+                    .unwrap_or_else(workspace::root);
+                let count = conversations.len();
+                let body = div()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .min_w_0()
+                    .gap_3()
+                    .child(ui::Label::new(format!(
+                        "This permanently deletes project “{name}”, {count} conversation{}, and the entire project folder.",
+                        if count == 1 { "" } else { "s" }
+                    )))
+                    .child(
+                        ui::Label::new(
+                            "Files placed directly in the project folder are deleted too — not only files Mini-Me created.",
+                        )
+                        .colour(theme::warning()),
+                    )
+                    .child(
+                        ui::Label::new(format!("Project folder:\n{}", path.display()))
+                            .muted()
+                            .size(ui::Size::Compact),
+                    )
+                    .into_any_element();
+                ("Delete project?", body, "Delete project")
+            }
+        };
+
+        ui::Modal::new("delete-confirmation", title)
+            .width(560.)
+            .focus(&self.delete_focus)
+            .body(body)
+            .actions(
+                ui::actions()
+                    .child(div().flex_grow())
+                    .child(
+                        ui::Button::new("delete-cancel", "Cancel").on_click(cx.listener(
+                            |workbench, _event, _window, cx| {
+                                workbench.confirming_delete = None;
+                                workbench.restore_focus = true;
+                                cx.notify();
+                            },
+                        )),
+                    )
+                    .child(
+                        ui::Button::new("delete-confirm", action)
+                            .tone(ui::Tone::Danger)
+                            .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                workbench.confirm_delete(cx);
+                            })),
+                    ),
+            )
+            .footer(
+                ui::Label::new("There is no undo.")
+                    .colour(theme::error())
+                    .size(ui::Size::Compact),
+            )
     }
 
     /// What this thing is, what the specialists do, and who to credit.
@@ -5046,6 +7396,28 @@ impl Workbench {
             .child(team)
             .child(section_label("WHERE THE DATA COMES FROM"))
             .child(sources)
+            .child(section_label("THIS BUILD"))
+            // **Because a tester's report is unusable without it.** The app has never shown its
+            // own version anywhere: not in the window, not in the log, not in the About page. It
+            // logged the *backend* checkout's commit as its very first line (§115) and said nothing
+            // about itself — so "it doesn't work" from a second machine could be any of 183
+            // commits, and the first question back would always be the same one (§213).
+            //
+            // Selectable, like the citation below, because the whole point is pasting it into a
+            // message.
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .child(ui::Label::new(build_stamp()).colour(theme::accent()))
+                    .child(
+                        ui::Label::new(
+                            "Include this line when reporting a problem, with the two log files                              named in Setup.",
+                        )
+                        .muted()
+                        .size(ui::Size::Compact),
+                    ),
+            )
             .child(section_label("WHERE CODE RUNS"))
             .child(
                 div()
@@ -5573,7 +7945,19 @@ impl Workbench {
             )
     }
 
-    fn preview_modal(&self, output: workspace::Output, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The file open in the centre, with the set it belongs to along the bottom.
+    ///
+    /// `at` and `count` come from the [`Preview`] rather than being recomputed, so the arrows, the
+    /// `3 / 8` counter and the highlighted filmstrip tile can never disagree about which file is
+    /// showing — the §158 rule about one calculation, applied to three affordances that all mean
+    /// "this one".
+    fn preview_modal(
+        &self,
+        output: workspace::Output,
+        set: &[workspace::Output],
+        at: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let mut body = div()
             .id("preview-body")
             .flex()
@@ -5581,16 +7965,31 @@ impl Workbench {
             .w_full()
             .min_w_0()
             .flex_grow()
+            .max_h(px(PREVIEW_BODY_HEIGHT))
             .overflow_y_scroll()
             .p_3()
             .gap_2();
 
         match output.kind {
             workspace::Kind::Figure => {
+                // **A box with both dimensions set, and `Contain` inside it.** `max_w_full` alone
+                // left the height to the natural size of the file, so a tall plot resolved larger
+                // than the space the flex row gave it and was clipped at *both* ends — the top of
+                // a stacked bar chart cut off, with dead space underneath. `Contain` in a bounded
+                // box letterboxes instead, which is the one arrangement that cannot crop.
                 body = body.child(
-                    img(output.path.clone())
-                        .max_w_full()
-                        .object_fit(gpui::ObjectFit::Contain),
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .w_full()
+                        .h(px(PREVIEW_IMAGE_HEIGHT))
+                        .child(
+                            img(output.path.clone())
+                                .w_full()
+                                .h_full()
+                                .object_fit(gpui::ObjectFit::Contain),
+                        ),
                 );
             }
             _ => {
@@ -5653,11 +8052,37 @@ impl Workbench {
             }
         }
 
+        // The body, flanked by the arrows, so a step is a click where the eye already is rather
+        // than a trip to a toolbar. Only when there is somewhere to go: a lone file gets no
+        // arrows at all, because a control that does nothing is worse than an absent one (§158).
+        let framed = if set.len() > 1 {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .w_full()
+                .min_w_0()
+                .flex_grow()
+                .overflow_hidden()
+                .child(self.preview_arrow("preview-prev", "‹", -1, cx))
+                .child(body)
+                .child(self.preview_arrow("preview-next", "›", 1, cx))
+                .into_any_element()
+        } else {
+            body.into_any_element()
+        };
+
         let opened = output.path.clone();
         div()
             .id("preview-backdrop")
             .absolute()
             .inset_0()
+            // **Painting over something is not the same as being in front of it.** Without this,
+            // the workbench under the dim stayed live: a click landed on the modal *and* on
+            // whatever happened to be beneath it, so opening a figure could also hit a button in
+            // the transcript. `occlude` blocks the mouse from everything behind this hitbox, which
+            // is what makes the dim mean what it looks like it means (docs §163).
+            .occlude()
             .flex()
             .items_center()
             .justify_center()
@@ -5673,11 +8098,16 @@ impl Workbench {
                     .id("preview")
                     .flex()
                     .flex_col()
-                    .w(px(760.))
-                    .max_h(px(620.))
+                    .w(px(PREVIEW_WIDTH))
+                    .max_h(px(PREVIEW_MAX_HEIGHT))
                     .bg(rgb(theme::overlay()))
                     .border_1()
                     .border_color(rgb(theme::border_strong()))
+                    // Clicks inside the panel are the panel's business. Click handlers fire on
+                    // the bubble phase — innermost first — so stopping here after a control has
+                    // run is what keeps the backdrop's close-on-click from firing too. Without
+                    // it every arrow press closed the modal it was trying to step through.
+                    .on_click(|_event, _window, cx| cx.stop_propagation())
                     .child(
                         div()
                             .flex()
@@ -5735,13 +8165,163 @@ impl Workbench {
                                     })),
                             ),
                     )
-                    .child(body),
+                    .child(framed)
+                    .children(self.preview_filmstrip(set, at, cx)),
             )
             .on_click(cx.listener(|workbench, _event, _window, cx| {
                 // Clicking the dimmed backdrop closes it, the way every modal does.
                 workbench.preview = None;
                 cx.notify();
             }))
+    }
+
+    /// One step-through arrow beside the previewed file.
+    fn preview_arrow(
+        &self,
+        id: &'static str,
+        glyph: &'static str,
+        by: isize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .id(id)
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .w(px(34.))
+            .h(px(34.))
+            .mx_1()
+            .rounded_full()
+            .bg(rgb(theme::elevated()))
+            .border_1()
+            .border_color(rgb(theme::border()))
+            .text_color(rgb(theme::text()))
+            .text_size(px(19.))
+            .hover(|style| {
+                style
+                    .bg(rgb(theme::accent_soft()))
+                    .border_color(rgb(theme::accent()))
+                    .cursor_pointer()
+            })
+            .child(glyph)
+            .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                if let Some(preview) = workbench.preview.as_mut() {
+                    preview.step(by);
+                    cx.notify();
+                }
+            }))
+    }
+
+    /// The set along the bottom of the modal: a counter, then a sideways strip to choose from.
+    ///
+    /// **This is the half the researcher asked for by name** — *"we can click and scroll at the
+    /// bottom so the user can select which picture to see."* `None` for a lone file: a filmstrip
+    /// of one is a decoration that implies there is somewhere to go.
+    ///
+    /// Tile ids carry the file's own index, so GPUI keeps each element's identity as the selection
+    /// moves and the strip does not lose its scroll position on every step.
+    fn preview_filmstrip(
+        &self,
+        set: &[workspace::Output],
+        at: usize,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        if set.len() < 2 {
+            return None;
+        }
+        let key = "preview-filmstrip";
+        let scroll = self.output_gallery_scroll(key);
+
+        let mut strip = div()
+            .id(SharedString::from(format!("{key}-rail")))
+            .flex()
+            .flex_row()
+            .gap_1()
+            .w_full()
+            .min_w_0()
+            .pb_3()
+            .overflow_x_scroll()
+            .track_scroll(&scroll);
+        for (index, output) in set.iter().enumerate() {
+            let selected = index == at;
+            let is_image = output.kind == workspace::Kind::Figure;
+            let (glyph, ink) = file_mark(&output.path);
+            strip = strip.child(
+                div()
+                    .id(SharedString::from(format!("{key}-{index}")))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .w(px(64.))
+                    .h(px(48.))
+                    .overflow_hidden()
+                    .rounded_md()
+                    // The outline is the whole selection signal, so it is two pixels of accent
+                    // against one of border: a one-pixel difference in colour alone did not read
+                    // at thumbnail size on the Windows pass (§158's sibling complaint).
+                    .border_2()
+                    .border_color(rgb(if selected {
+                        theme::accent()
+                    } else {
+                        theme::border()
+                    }))
+                    .bg(rgb(theme::surface()))
+                    .hover(|style| style.border_color(rgb(theme::accent_hover())).cursor_pointer())
+                    .when(is_image, |tile| {
+                        tile.child(
+                            img(output.path.clone())
+                                .w_full()
+                                .h_full()
+                                .object_fit(gpui::ObjectFit::Cover),
+                        )
+                    })
+                    // A non-image in the set still needs a tile, or the counter and the strip
+                    // disagree about how many there are.
+                    .when(!is_image, |tile| {
+                        tile.child(app_icon_at(glyph, ink, 18.))
+                    })
+                    .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                        if let Some(preview) = workbench.preview.as_mut() {
+                            preview.at = index;
+                            cx.notify();
+                        }
+                    })),
+            );
+        }
+
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .flex_none()
+                .w_full()
+                .min_w_0()
+                .px_3()
+                .pt_2()
+                .border_t_1()
+                .border_color(rgb(theme::border()))
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .flex_row()
+                        .justify_center()
+                        .text_color(rgb(theme::text_muted()))
+                        .text_xs()
+                        .child(format!("{} of {}", at + 1, set.len())),
+                )
+                .child(
+                    div()
+                        .relative()
+                        .w_full()
+                        .min_w_0()
+                        .child(strip)
+                        .children(self.horizontal_scrollbar(key.to_string(), &scroll, cx)),
+                ),
+        )
     }
 
     /// A file a turn produced, in the transcript, under the answer that produced it.
@@ -5754,10 +8334,12 @@ impl Workbench {
     ///
     /// A table shows its first rows, a figure shows itself, anything else shows its header. All
     /// three open the existing preview modal on click.
+    /// One file as a card under the answer. `by` names the worker that produced it, when one did.
     fn output_card(
         &self,
         key: usize,
         output: &workspace::Output,
+        by: Option<&str>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         /// Enough to see the shape of the table without becoming a table.
@@ -5767,6 +8349,10 @@ impl Workbench {
 
         let (glyph, ink) = file_mark(&output.path);
         let shape = self.shape_of(output);
+        let described = match by {
+            Some(who) => format!("from {who} · {}", shape.describe(output.bytes)),
+            None => shape.describe(output.bytes),
+        };
         let opened = output.path.clone();
         let revealed = output.path.parent().map(std::path::Path::to_path_buf);
         let previewed = output.clone();
@@ -5783,11 +8369,7 @@ impl Workbench {
             .border_b_1()
             .border_color(rgb(theme::border()))
             .child(
-                div()
-                    .flex_none()
-                    .text_color(rgb(ink))
-                    .text_size(px(13.))
-                    .child(glyph),
+                app_icon_at(glyph, ink, 15.),
             )
             .child(
                 ui::Label::new(output.name.clone())
@@ -5800,7 +8382,7 @@ impl Workbench {
                     .min_w_0()
                     .text_color(rgb(theme::text_faint()))
                     .text_size(px(12.))
-                    .child(shape.describe(output.bytes)),
+                    .child(described),
             )
             .child(
                 div()
@@ -5936,9 +8518,352 @@ impl Workbench {
         }
 
         card.on_click(cx.listener(move |workbench, _event, _window, cx| {
-            workbench.preview = Some(previewed.clone());
+            workbench.preview = Preview::single(previewed.clone());
             cx.notify();
         }))
+    }
+
+    fn output_gallery_scroll(&self, key: &str) -> gpui::ScrollHandle {
+        self.output_gallery_scrolls
+            .borrow_mut()
+            .entry(key.to_string())
+            .or_default()
+            .clone()
+    }
+
+    /// A visible, clickable and draggable horizontal scrollbar for one gallery rail.
+    ///
+    /// The first version only painted the thumb. That was enough to imply an interaction and
+    /// then break it: a mouse-first Windows user naturally grabbed the bar shown on screen and
+    /// nothing happened. The whole 12px track is now a hit target; clicking outside the thumb
+    /// jumps toward that position and holding the mouse continues the drag (docs §158).
+    fn horizontal_scrollbar(
+        &self,
+        id: String,
+        handle: &gpui::ScrollHandle,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        let metrics = horizontal_scroll_metrics(handle)?;
+        let track_left = handle.bounds().origin.x;
+        let thumb_left = metrics.travel * metrics.progress;
+        let dragged = handle.clone();
+
+        Some(
+            div()
+                .id(SharedString::from(format!("gallery-scrollbar-{id}")))
+                .absolute()
+                .bottom(px(0.))
+                .left(px(0.))
+                .w(metrics.viewport)
+                .h(px(12.))
+                .hover(|style| style.cursor_pointer())
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(2.))
+                        .left(thumb_left)
+                        .h(px(8.))
+                        .w(metrics.thumb)
+                        .rounded_full()
+                        .bg(rgb(theme::border_strong())),
+                )
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(move |workbench, event: &gpui::MouseDownEvent, _window, cx| {
+                        let local_x =
+                            (event.position.x - track_left).clamp(px(0.), metrics.viewport);
+                        let grab_x = if local_x >= thumb_left
+                            && local_x <= thumb_left + metrics.thumb
+                        {
+                            local_x - thumb_left
+                        } else {
+                            metrics.thumb / 2.
+                        };
+                        let offset_x = horizontal_drag_offset(
+                            event.position.x,
+                            track_left,
+                            grab_x,
+                            metrics.travel,
+                            metrics.overflow,
+                        );
+                        let offset_y = dragged.offset().y;
+                        dragged.set_offset(gpui::point(offset_x, offset_y));
+                        workbench.gallery_scroll_drag = Some(GalleryScrollDrag {
+                            handle: dragged.clone(),
+                            track_left,
+                            grab_x,
+                            travel: metrics.travel,
+                            overflow: metrics.overflow,
+                        });
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                ),
+        )
+    }
+
+    /// A capped grid of outputs, with the last visible tile counting the rest.
+    ///
+    /// **One renderer for images and for files**, because the researcher asked for the same
+    /// treatment on both and the difference is only what a tile draws inside itself. §153's
+    /// sideways strip is gone: it spanned the whole transcript, one folder of seven files claimed
+    /// a band of the conversation wider than the answer above it, and the phone gallery it was
+    /// being compared against is a compact block you flick past. Their words: *"the grouping
+    /// occupies too much space in the conversation (too wide) … less invasive and functions the
+    /// same."*
+    ///
+    /// Fixed-width tiles rather than a fraction of the container, which is what makes it narrow:
+    /// two per row means the block is exactly `2 × tile + gap` and stops there, whatever the panel
+    /// or the window is doing.
+    fn output_grid(
+        &self,
+        scope: &str,
+        heading: String,
+        items: &[workspace::Output],
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let tile = if compact {
+            GRID_TILE_COMPACT
+        } else {
+            GRID_TILE_ROOMY
+        };
+        let (shown, hidden) = image_grid_shape(items.len());
+
+        let mut grid = div().flex().flex_col().gap_2().flex_none();
+        for row_start in (0..shown).step_by(GRID_COLUMNS) {
+            let mut row = div().flex().flex_row().gap_2().flex_none();
+            for at in row_start..(row_start + GRID_COLUMNS).min(shown) {
+                // The count rides on the *last visible* tile, and only when something is behind
+                // it. Clicking it opens that file; the rest are then one arrow away, which is
+                // what makes a capped grid honest rather than lossy.
+                let more = (hidden > 0 && at + 1 == shown).then_some(hidden);
+                row = row.child(self.output_grid_tile(
+                    format!("output-tile-{scope}-{at}"),
+                    items,
+                    at,
+                    tile,
+                    more,
+                    cx,
+                ));
+            }
+            grid = grid.child(row);
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .flex_none()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .w(px(tile * GRID_COLUMNS as f32 + GRID_GAP))
+                    .child(ui::Label::new(heading).size(ui::Size::Compact))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(rgb(theme::text_faint()))
+                            .text_xs()
+                            .child(if hidden > 0 {
+                                "click to open all".to_string()
+                            } else {
+                                "click to open".to_string()
+                            }),
+                    ),
+            )
+            .child(grid)
+    }
+
+    /// One tile: a picture for a figure, a glyph and a name for anything else.
+    ///
+    /// **No filename on an image tile.** The picture identifies itself, the modal's header names
+    /// it, and a caption under every thumbnail was half of what made the old strip feel like
+    /// furniture. A data file is the opposite case — one CSV looks exactly like another — so those
+    /// tiles carry the name and the shape, which is the only thing that tells them apart.
+    ///
+    /// The name is shortened **here**, in Rust, rather than by asking the layout to truncate it.
+    /// `Label::ellipsis` needs a flex parent to grow within (§59), and a tile is a column of
+    /// fixed width — get that wrong and every name renders as a bare `…`, which is exactly what
+    /// §153's tiles did in the panel.
+    fn output_grid_tile(
+        &self,
+        id: String,
+        set: &[workspace::Output],
+        at: usize,
+        tile: f32,
+        more: Option<usize>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let output = &set[at];
+        let opening = set.to_vec();
+        let media = tile * GRID_TILE_ASPECT;
+        let (glyph, ink) = file_mark(&output.path);
+        let shape = self.shape_of(output);
+        let is_image = output.kind == workspace::Kind::Figure;
+
+        let inside = if is_image {
+            div()
+                .relative()
+                .w_full()
+                .h(px(media))
+                .flex_none()
+                .child(
+                    img(output.path.clone())
+                        .w_full()
+                        .h_full()
+                        // `Contain`, not `Cover`: a photo crops acceptably and a chart does not.
+                        // Cropping the axes off a plot makes the thumbnail useless for choosing
+                        // between seven of them, which is the only job it has.
+                        .object_fit(gpui::ObjectFit::Contain),
+                )
+                .when_some(more, |media, more| {
+                    media.child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(gpui::rgba(0x000000a6))
+                            .text_color(rgb(SCRIM_INK))
+                            .text_size(px(media_scrim_size(tile)))
+                            .child(format!("+{more}")),
+                    )
+                })
+                .into_any_element()
+        } else {
+            div()
+                .relative()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_1()
+                .w_full()
+                .h(px(media))
+                .flex_none()
+                .px_2()
+                .child(
+                    app_icon_at(glyph, ink, 24.),
+                )
+                .child(
+                    div()
+                        .text_color(rgb(theme::text()))
+                        .text_xs()
+                        .child(distinguishing_tail(
+                            &output_filename(output),
+                            name_chars(tile),
+                        )),
+                )
+                .child(
+                    div()
+                        .text_color(rgb(theme::text_faint()))
+                        .text_size(px(11.))
+                        .child(shape.describe(output.bytes)),
+                )
+                .when_some(more, |media, more| {
+                    media.child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(gpui::rgba(0x000000a6))
+                            .text_color(rgb(SCRIM_INK))
+                            .text_size(px(media_scrim_size(tile)))
+                            .child(format!("+{more}")),
+                    )
+                })
+                .into_any_element()
+        };
+
+        div()
+            .id(SharedString::from(id))
+            .flex()
+            .flex_col()
+            .flex_none()
+            .w(px(tile))
+            .overflow_hidden()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(theme::border()))
+            .bg(rgb(if theme::is_light(&theme::current()) {
+                theme::elevated()
+            } else {
+                theme::surface()
+            }))
+            .hover(|style| style.border_color(rgb(theme::accent())).cursor_pointer())
+            .child(inside)
+            .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                workbench.preview = Preview::opening(opening.clone(), at);
+                cx.notify();
+            }))
+    }
+
+    /// One file on its own row. `by` names the worker that produced it, when one did.
+    ///
+    /// A lone file gets no gallery heading to carry its attribution, so it carries it on the line
+    /// that already describes the file — otherwise a worker that wrote exactly one report would
+    /// be the one case §199 still left anonymous.
+    fn output_panel_row(
+        &self,
+        id: String,
+        output: &workspace::Output,
+        by: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let shown = output.clone();
+        let shape = self.shape_of(output).describe(output.bytes);
+        let shape = match by {
+            Some(who) => format!("from {who} · {shape}"),
+            None => shape,
+        };
+        let (glyph, ink) = file_mark(&output.path);
+        div()
+            .id(SharedString::from(id))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .w_full()
+            .min_w_0()
+            .p_2()
+            .rounded_lg()
+            .bg(rgb(theme::elevated()))
+            .hover(|style| style.bg(rgb(theme::accent_soft())).cursor_pointer())
+            .child(
+                app_icon_at(glyph, ink, 15.),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_grow()
+                    .min_w_0()
+                    // The filename is the distinguishing tail. The parent folder has its own
+                    // gallery heading, so repeating its UUID here recreates §152 exactly.
+                    .child(
+                        ui::Label::new(output_filename(output))
+                            .size(ui::Size::Compact)
+                            .ellipsis(),
+                    )
+                    .child(
+                        div()
+                            .text_color(rgb(theme::text_faint()))
+                            .text_size(px(11.))
+                            .child(shape),
+                    ),
+            )
+            .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                workbench.preview = Preview::single(shown.clone());
+                cx.notify();
+            }))
     }
 
     /// The first rows of a table, measured at most once per version of the file.
@@ -6072,7 +8997,7 @@ impl Workbench {
             .rev()
             .find(|earlier| earlier.role == "you")
             .map(|earlier| earlier.body.clone());
-        let bibtex = bibliography(&self.sources);
+        let bibtex = bibliography(&self.sources, &self.source_origins());
         let answer = message.body.clone();
 
         div()
@@ -6141,6 +9066,34 @@ impl Workbench {
     /// **Nothing here runs anything.** Every starting move loads the composer and stops, which is
     /// the rule the project suggestions already follow and is org policy besides: the human
     /// decides what is asked.
+    /// What the centre says while a conversation is being fetched.
+    ///
+    /// In the middle, because that is where the answer is about to be and where the researcher is
+    /// already looking — the status bar reports it too, at the bottom of the window, which is the
+    /// right place for a second copy and the wrong place for the only one.
+    ///
+    /// Deliberately plain: a mark and a word. A skeleton of grey bars would have to guess how many
+    /// messages are coming and how tall each is, and guessing wrong makes the real transcript jump
+    /// when it arrives.
+    fn opening_state(&self) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .w_full()
+            .flex_grow()
+            .min_h_0()
+            .child(ui::Spinner::new("opening-conversation").colour(theme::text_muted()))
+            .child(
+                div()
+                    .text_color(rgb(theme::text_muted()))
+                    .text_sm()
+                    .child("Opening this conversation…"),
+            )
+    }
+
     fn empty_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
         /// Three, because a row of them has to stay readable in a narrow pane, and because a
         /// list of recent work long enough to scroll is the sidebar's job.
@@ -6177,7 +9130,8 @@ impl Workbench {
                             .text_size(px(14.))
                             .line_height(px(21.))
                             .child(
-                                "Ask below, or drop a file on this window. Everything a turn \
+                                "Ask below, or add one of your own data files with the clip — \
+                                 dropping it on this window works too. Everything a turn \
                                  produces is saved into your Documents folder.",
                             ),
                     ),
@@ -6308,7 +9262,7 @@ impl Workbench {
                             .border_color(rgb(theme::accent()))
                     })
                     .when(!leading, |row| row.border_color(rgb(theme::border())))
-                    .hover(|style| style.bg(rgb(theme::elevated())).cursor_pointer())
+                    .hover(|style| style.bg(rgb(theme::hover_over(theme::elevated()))).cursor_pointer())
                     .child(
                         div()
                             .flex_none()
@@ -6484,6 +9438,12 @@ impl Workbench {
         /// The dot's own size, and the gutter it is centred in.
         const DOT: f32 = 9.;
         const GUTTER: f32 = 12.;
+        /// How tall a stage's row is, which is the distance the connector has to span.
+        ///
+        /// Folded, the rail is the *whole* content — no labels, so the rows close up and the dots
+        /// read as one strung line rather than as marks scattered down a margin.
+        const ROW_OPEN: f32 = 46.;
+        const ROW_FOLDED: f32 = 26.;
 
         let stages = self.provenance.road();
         // The stage still producing output. Only meaningful while a turn is in flight: after it
@@ -6507,8 +9467,11 @@ impl Workbench {
             .when(!self.road_open, |strip| strip.items_center().gap_2())
             // One step up from the pane's `background`, which is what makes it read as a rail
             // rather than as the transcript with something in the margin.
+            .m_1()
+            .rounded_lg()
+            .overflow_hidden()
             .bg(rgb(theme::surface()))
-            .border_r_1()
+            .border_1()
             .border_color(rgb(theme::border()));
 
         // Header: the name, and the chevron that folds it. Folded, the chevron is the whole
@@ -6521,6 +9484,10 @@ impl Workbench {
                 .justify_between()
                 .w_full()
                 .flex_none()
+                // Folded, the chevron is the header's only child, and `justify_between` puts a
+                // lone child at the start — so it sat against the left edge above a rail that
+                // §169 had just centred. Same one-line fix as the stage rows below it.
+                .when(!self.road_open, |header| header.justify_center())
                 .when(self.road_open, |header| {
                     header.child(
                         div()
@@ -6595,10 +9562,20 @@ impl Workbench {
             let mut row = div()
                 .flex()
                 .flex_row()
-                .items_start()
+                // **Stretch, not `items_start`.** The connector below the dot is `flex_grow`, and
+                // it can only grow inside a gutter that has a height to grow into. `items_start`
+                // aligns children to the top *and leaves them at their content height*, so the
+                // gutter stood 23px — a 9px dot plus the connector's 14px minimum — while the row
+                // beside it stood at 46px for a two-line label. The line stopped a third of the
+                // way down and every dot hung under a stub (§169).
                 .w_full()
                 .min_w_0()
-                .when(at < last, |row| row.min_h(px(46.)))
+                // Folded, the gutter is the row's only child, so a full-width row left it against
+                // the edge. The rail is the whole strip at 38px and belongs down its middle.
+                .when(!self.road_open, |row| row.justify_center())
+                .when(at < last, |row| {
+                    row.min_h(px(if self.road_open { ROW_OPEN } else { ROW_FOLDED }))
+                })
                 .child(gutter);
 
             if self.road_open {
@@ -6622,6 +9599,10 @@ impl Workbench {
                         .flex_col()
                         .flex_grow()
                         .min_w_0()
+                        // Its own, now that the row stretches: the column fills the row height and
+                        // its two lines stack at the top, where the row's `items_start` used to
+                        // put them.
+                        .items_start()
                         .pl_2()
                         // Pulls the label's cap-height level with the dot beside it.
                         .mt(px(-3.))
@@ -6699,27 +9680,261 @@ impl Workbench {
         }
     }
 
+    /// Build one row only when GPUI's variable-height list asks for it (docs §156).
+    fn transcript_message(&self, index: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Some(message) = self.transcript.get(index) else {
+            return div().into_any_element();
+        };
+        self.text_selection.begin_message(index);
+        let asked = message.role == "you";
+        let has_activity = !message.steps.is_empty() || !message.agents.is_empty();
+        // An empty assistant body means we're still waiting on the first token — unless a trace
+        // is already showing what's going on, which says more. The placeholder is not part of
+        // the body, so it is not parsed and never reaches §70's Markdown cache.
+        let waiting = message.body.is_empty() && self.streaming && !has_activity;
+        let body = message.body.clone();
+        // Side carries the role, so no label does: questions ride right in a bubble and answers
+        // run full width as prose (§86). `pb_3` replaces the eager column's old inter-row gap;
+        // list rows are independent elements and cannot inherit spacing from one another.
+        let mut block = div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w_0()
+            .gap_1()
+            .pb_3()
+            .when(asked, |block| block.items_end());
+        // The summary stays above the trace and answer: it answers who did the work without
+        // requiring the researcher to expand anything.
+        if !asked && !message.agents.is_empty() {
+            block = block.child(self.answer_chips(index, message));
+        }
+        // The trace precedes the answer because that is the order the work happened in.
+        if has_activity {
+            block = block.child(self.activity_block(index, message, cx));
+        }
+        if waiting {
+            block = block.child(div().text_color(rgb(theme::text_muted())).child("…"));
+        }
+        if !body.is_empty() {
+            // The user's text is shown as typed. Assistant text uses the already-cached Markdown
+            // blocks; virtualization must not undo §70 by parsing again when a row remounts.
+            if asked {
+                block = block.child(
+                    div()
+                        .max_w(relative(0.78))
+                        .min_w_0()
+                        .px_3()
+                        .py_2()
+                        .rounded_lg()
+                        .bg(rgb(theme::surface()))
+                        .border_1()
+                        .border_color(rgb(theme::border()))
+                        .text_color(rgb(theme::text()))
+                        .child(selection::Selectable::new(
+                            &self.text_selection,
+                            body.clone(),
+                            StyledText::new(body),
+                        )),
+                );
+            } else {
+                let mut rendered = div().flex().flex_col().w_full().min_w_0().gap_2();
+                for parsed in &message.blocks {
+                    rendered = rendered.child(markdown_block(parsed, Some(&self.text_selection)));
+                }
+                block = block.child(rendered);
+            }
+        }
+        // Marked, not hidden. A truncated answer looks exactly like a finished one, and whether
+        // it was cut off decides whether the researcher can rely on it (§63).
+        if message.stopped {
+            block = block.child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .text_color(rgb(theme::warning()))
+                    .text_xs()
+                    .child("— you stopped this turn; the answer above is incomplete"),
+            );
+        }
+        // **Named above, not in the folder.** Stated as the fact it is rather than as an
+        // accusation: a file can be missing because the command failed, because it was written
+        // somewhere outside the conversation (§160), or because the answer recited a name it
+        // never wrote. All three are worth knowing and the app cannot tell them apart, so it
+        // reports the check and not a verdict (§175).
+        if !message.unverified.is_empty() {
+            let named = message.unverified.join(", ");
+            block = block.child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .text_color(rgb(theme::warning()))
+                    .text_xs()
+                    .child(format!(
+                        "— named above but not in this conversation's folder: {named}"
+                    )),
+            );
+        }
+
+        // Files remain after the answer that explains them. Preserve §162–§164's two bounded
+        // galleries here: keeping PR #11's old per-file loop would compile and pass unit tests
+        // while silently turning seven plots back into seven full transcript cards.
+        for (band, (worker, produced)) in by_producer(&message.outputs, &self.tasks, &self.authorship)
+            .into_iter()
+            .enumerate()
+        {
+            let (images, others) = split_images(&produced);
+            if !images.is_empty() {
+                block = block.child(self.output_grid(
+                    &format!("transcript-{index}-i{band}"),
+                    images_heading(images.len(), worker.as_deref()),
+                    &images,
+                    false,
+                    cx,
+                ));
+            }
+            for (at, group) in output_folder_groups(&others).iter().enumerate() {
+                if let [output] = group.outputs.as_slice() {
+                    block = block.child(self.output_card(
+                        index * 64 + band * 16 + at,
+                        output,
+                        worker.as_deref(),
+                        cx,
+                    ));
+                } else {
+                    block = block.child(self.output_grid(
+                        &format!("transcript-{index}-{band}-{at}"),
+                        shorten_path_label(
+                            &output_folder_label(&group.folder, worker.as_deref()),
+                            TRANSCRIPT_HEADING_CHARS,
+                        ),
+                        &group
+                            .outputs
+                            .iter()
+                            .map(|output| (*output).clone())
+                            .collect::<Vec<_>>(),
+                        false,
+                        cx,
+                    ));
+                }
+            }
+        }
+
+        // Only the latest completed answer gets export actions. Repeating them under every row
+        // would make a long virtual transcript a wall of controls just as it did when eager.
+        if !asked
+            && !message.body.is_empty()
+            && index + 1 == self.transcript.len()
+            && !self.streaming
+        {
+            block = block.child(self.export_row(message, cx));
+        }
+        block.into_any_element()
+    }
+
+    fn live_turn_row(&self) -> gpui::AnyElement {
+        let elapsed = self.provenance.turns.last()
+            .map(|turn| provenance::now_ms().saturating_sub(turn.sent_at))
+            .filter(|elapsed| *elapsed >= 1_000)
+            .map(|elapsed| format!(" · {}", duration_label(elapsed))).unwrap_or_default();
+        div().flex().flex_row().items_center().w_full().min_w_0().gap_2().pb_3()
+            .text_color(rgb(theme::text_muted())).text_xs()
+            .child(format!("{}{elapsed}", self.status)).into_any_element()
+    }
+
+    fn sync_transcript_list(&self) {
+        let wanted = self.transcript.len() + usize::from(self.streaming);
+        let present = self.transcript_list.item_count();
+        if wanted > present {
+            self.transcript_list.splice(present..present, wanted - present);
+        } else if wanted < present {
+            self.transcript_list.splice(wanted..present, 0);
+        }
+        // GPUI requires a splice when a measured row changes height. Only the in-flight answer
+        // changes token by token, so finished rows stay cached (§156).
+        if self.streaming && !self.transcript.is_empty() {
+            let last = self.transcript.len() - 1;
+            self.transcript_list.splice(last..last + 1, 1);
+        }
+    }
+
+    fn invalidate_transcript_message(&self, index: usize) {
+        if index < self.transcript_list.item_count() {
+            self.transcript_list.splice(index..index + 1, 1);
+        }
+    }
+
+    fn reset_transcript_list(&self) {
+        self.transcript_list.reset(self.transcript.len());
+    }
+
+    fn invalidate_all_transcript_messages(&self) {
+        let count = self.transcript.len().min(self.transcript_list.item_count());
+        for index in 0..count {
+            self.transcript_list.splice(index..index + 1, 1);
+        }
+    }
+
+    /// Whether anything the researcher is waiting for is in flight.
+    ///
+    /// **One question, five sources.** The status bar's mark used to be shown for two of them —
+    /// a streaming turn and a running setup fix — so the app was visibly busy exactly when it was
+    /// least likely to be mistaken for stuck, and perfectly still through the fifteen-second graph
+    /// build at launch (§176) and the pause while a conversation loads. Those are the waits that
+    /// read as a hang (§177).
+    fn is_waiting(&self) -> bool {
+        self.streaming
+            || self.running_fix.as_ref().is_some_and(|fix| !fix.done)
+            || self.warming
+            || self.opening
+            || !self.conversations_loaded
+    }
+
     fn chat_pane(&self, cx: &mut Context<Self>) -> impl IntoElement {
         // `min_w_0` is what makes long assistant text *wrap* instead of running off
         // the right edge: a flex item defaults to min-width:auto, so its content
         // width becomes its floor and a long paragraph widens the pane instead of
         // flowing down.
-        // `id` + `overflow_y_scroll` is what lets a long transcript scroll; GPUI
-        // keeps the scroll offset keyed on that id across re-renders.
+        // `list` owns scrolling and cached row heights; the surrounding id belongs to pointer
+        // selection and inspection, not to a competing scroll container (§156).
         // Last frame's span rectangles go now, before this frame registers its own: the
         // transcript moves under a scroll, a resize and every streamed token, and a highlight
         // painted from stale bounds is a highlight over the wrong words.
         self.text_selection.begin_frame();
+        self.sync_transcript_list();
+        let view = cx.entity().clone();
+        let list_state = self.transcript_list.clone();
+        let rows = gpui::list(list_state.clone(), move |index, _window, cx| {
+            view.update(cx, |workbench, cx| {
+                let row = if index < workbench.transcript.len() {
+                    workbench.transcript_message(index, cx)
+                } else {
+                    workbench.live_turn_row()
+                };
+                // **The inset has to be on the row, not on the list.** GPUI's `list` applies only
+                // the *vertical* half of its padding: `prepaint_items` places each item at
+                // `bounds.origin + Point::new(px(0.), padding.top)`, so the horizontal half is
+                // computed and then never used. The eager scrolling div this replaced honoured
+                // all four sides, so §156 moved the transcript flush against its own border and
+                // nothing said so (§174).
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .px(px(TRANSCRIPT_INSET))
+                    .child(row)
+                    .into_any_element()
+            })
+        })
+        .w_full()
+        .h_full()
+        // Vertical only, which is all this ever applied.
+        .py_4();
         let mut col = div()
             .id("transcript")
             .flex()
             .flex_col()
             .flex_grow()
             .min_w_0()
-            .overflow_y_scroll()
-            .track_scroll(&self.transcript_scroll)
-            .p_4()
-            .gap_3()
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|workbench, event: &gpui::MouseDownEvent, _window, cx| {
@@ -6776,141 +9991,17 @@ impl Workbench {
                 }),
             );
 
-        if self.transcript.is_empty() {
+        if self.opening {
+            // **Not the empty state.** `open_conversation` clears the transcript before the fetch
+            // lands, so for the width of that request the centre said *"What are you working
+            // on?"* over a conversation that was already chosen — an invitation to start
+            // something, offered because the app had nothing else to draw (§178).
+            col = col.child(self.opening_state());
+        } else if self.transcript.is_empty() {
             col = col.child(self.empty_state(cx));
+        } else {
+            col = col.child(rows);
         }
-        for (index, message) in self.transcript.iter().enumerate() {
-            let asked = message.role == "you";
-            let has_activity = !message.steps.is_empty() || !message.agents.is_empty();
-            // An empty assistant body means we're still waiting on the first token —
-            // unless a trace is already showing what's going on, which says more.
-            // A placeholder while the first token is still coming, and *only* then — it is
-            // not part of the body, so it is not parsed and never reaches the cache.
-            let waiting = message.body.is_empty() && self.streaming && !has_activity;
-            let body = message.body.clone();
-            // **Side carries the role, so no label does.** Asked for by name after a side-by-side
-            // with a chat client: questions ride right in a bubble, answers run full width on the
-            // left as plain prose. The shape is doing the work a `you` / `mini-me` caption used to
-            // do, and two signals for one fact is one more than the eye needs (docs §86).
-            let mut block = div()
-                .flex()
-                .flex_col()
-                .w_full()
-                .min_w_0()
-                .gap_1()
-                .when(asked, |block| block.items_end());
-            // A one-line summary of the work, above the answer it produced. The collapsible
-            // trace stays underneath for anyone who wants the detail — this replaces nothing,
-            // it just means the common question ("who did this, and how long did it take")
-            // no longer requires expanding anything.
-            if !asked && !message.agents.is_empty() {
-                block = block.child(self.answer_chips(index, message));
-            }
-            // The trace goes *above* the answer, because that is the order it
-            // happened in and because the answer should be the last thing read.
-            if has_activity {
-                block = block.child(self.activity_block(index, message, cx));
-            }
-            if waiting {
-                block = block.child(div().text_color(rgb(theme::text_muted())).child("…"));
-            }
-            if !body.is_empty() {
-                // The user's own text is shown as typed — they wrote it, and reinterpreting
-                // their asterisks would be presumptuous. Assistant text is Markdown.
-                if asked {
-                    block = block.child(
-                        div()
-                            // Capped rather than full width: a bubble that reaches both edges is
-                            // not a bubble, and the ragged left edge is what makes a glance down
-                            // the transcript separate questions from answers.
-                            .max_w(relative(0.78))
-                            .min_w_0()
-                            .px_3()
-                            .py_2()
-                            .rounded_lg()
-                            .bg(rgb(theme::surface()))
-                            .border_1()
-                            .border_color(rgb(theme::border()))
-                            .text_color(rgb(theme::text()))
-                            // Shown as typed — they wrote it, and reinterpreting their asterisks
-                            // would be presumptuous (docs §14).
-                            .child(selection::Selectable::new(
-                                &self.text_selection,
-                                body.clone(),
-                                StyledText::new(body),
-                            )),
-                    );
-                } else {
-                    let mut rendered = div().flex().flex_col().w_full().min_w_0().gap_2();
-                    // Parsed when the text arrived, not now. See `Message::blocks`.
-                    for parsed in &message.blocks {
-                        rendered =
-                            rendered.child(markdown_block(parsed, Some(&self.text_selection)));
-                    }
-                    block = block.child(rendered);
-                }
-            }
-            // Marked, not hidden. A truncated answer looks exactly like a finished one, and
-            // whether it was cut off decides whether it can be relied on (docs §63).
-            if message.stopped {
-                block = block.child(
-                    div()
-                        .w_full()
-                        .min_w_0()
-                        .text_color(rgb(theme::warning()))
-                        .text_xs()
-                        .child("— you stopped this turn; the answer above is incomplete"),
-                );
-            }
-            // Files last: the answer explains them, so it should be read first.
-            for (at, output) in message.outputs.iter().enumerate() {
-                block = block.child(self.output_card(index * 64 + at, output, cx));
-            }
-            // What to do with the answer, under the answer. All three exist already — the first
-            // is a palette command, and a command nobody knows the name of is a feature nobody
-            // has. Only under the *last* completed one: three buttons after every answer in a
-            // twelve-turn conversation is a wall of chrome, and it is the latest answer a person
-            // exports.
-            if !asked
-                && !message.body.is_empty()
-                && index + 1 == self.transcript.len()
-                && !self.streaming
-            {
-                block = block.child(self.export_row(message, cx));
-            }
-            col = col.child(block);
-        }
-
-        // What the turn is doing, kept at the bottom of the transcript while it runs.
-        //
-        // The trace still sits above the answer it produced — that is the order it happened in and
-        // it stays with its own message. But during a two-minute delegation the trace scrolls up
-        // out of view behind the streaming answer, and the one question a person has while waiting
-        // is "is this still going". So the live line is pinned under the last message instead of
-        // being hunted for inside it.
-        if self.streaming {
-            let elapsed = self
-                .provenance
-                .turns
-                .last()
-                .map(|turn| provenance::now_ms().saturating_sub(turn.sent_at))
-                .filter(|elapsed| *elapsed >= 1_000)
-                .map(|elapsed| format!(" · {}", duration_label(elapsed)))
-                .unwrap_or_default();
-            col = col.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .w_full()
-                    .min_w_0()
-                    .gap_2()
-                    .text_color(rgb(theme::text_muted()))
-                    .text_xs()
-                    .child(format!("{}{elapsed}", self.status)),
-            );
-        }
-
         // Everything that is not the road: transcript, approval, picker, composer. Built as its
         // own column so the road can sit *beside* all of it rather than above the transcript
         // and below the composer.
@@ -6928,8 +10019,11 @@ impl Workbench {
                     .flex_grow()
                     .min_w_0()
                     .overflow_hidden()
+                    // The region the thumb belongs to, so it appears when the pointer is over
+                    // the transcript and nowhere else.
+                    .group(SCROLL_GROUP)
                     .child(col)
-                    .children(scrollbar(&self.transcript_scroll)),
+                    .children(list_scrollbar(&list_state)),
             );
         // Above the composer, so the decision sits where the user's attention already
         // is and cannot be scrolled out of view.
@@ -6953,11 +10047,6 @@ impl Workbench {
             .bg(rgb(theme::background()))
             .border_1()
             .border_color(rgb(theme::border()))
-            // Not before the first question. An empty road beside an empty transcript is a
-            // frame around nothing, and the empty state has its own things to say.
-            .when(!self.transcript.is_empty(), |pane| {
-                pane.child(self.road_strip(cx))
-            })
             .child(column)
     }
 
@@ -7302,6 +10391,10 @@ impl Workbench {
             cx.notify();
             return;
         }
+        if self.sidebar_menu.take().is_some() {
+            cx.notify();
+            return;
+        }
         if self.open_picker.take().is_some() {
             cx.notify();
             return;
@@ -7313,11 +10406,36 @@ impl Workbench {
             self.close_palette(window, cx);
             return;
         }
+        if self.confirming_delete.take().is_some() {
+            self.restore_focus = true;
+            cx.notify();
+            return;
+        }
+        if self.sources_open {
+            self.sources_open = false;
+            self.restore_focus = true;
+            cx.notify();
+            return;
+        }
+        if self.confirming_provider.take().is_some() {
+            // Escape leaves the provider as it was: this modal exists precisely so the change
+            // needs a deliberate press, and dismissing is not one.
+            cx.notify();
+            return;
+        }
         if self.preview.take().is_some() {
             cx.notify();
             return;
         }
         if self.renaming.take().is_some() {
+            self.restore_focus = true;
+            cx.notify();
+            return;
+        }
+        if self.editing_mission {
+            // Escape abandons the edit and leaves the stored mission alone — nothing was sent
+            // until Enter, so there is nothing to undo.
+            self.editing_mission = false;
             self.restore_focus = true;
             cx.notify();
             return;
@@ -7342,7 +10460,6 @@ impl Workbench {
             self.settings_open = false;
             self.restore_focus = true;
             cx.notify();
-            return;
         }
     }
 
@@ -7374,6 +10491,8 @@ impl Workbench {
         if self.settings_section == Section::Setup {
             self.settings_section = Section::Model;
         }
+        // The one moment a fresh list is worth a request: somebody is about to read it.
+        self.refresh_models(cx);
         let values: Vec<(Field, String)> = self
             .fields
             .iter()
@@ -7421,7 +10540,7 @@ impl Workbench {
         let mut stored = Vec::new();
         // Only non-empty fields are written, so a blank field means "leave it alone"
         // rather than "delete my key".
-        let key_name = self.draft.key_name();
+        let key_name = format!("llm:{}", self.key_target);
         let secrets: Vec<(String, String)> = self
             .fields
             .iter()
@@ -7630,7 +10749,6 @@ impl Workbench {
     fn settings_pane(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let provider = settings::provider(&self.draft.provider);
         let needs_base_url = provider.is_some_and(|p| p.needs_base_url);
-        let key_name = self.draft.key_name();
 
         // A centred modal, not a column. As a column it took 420px off the chat for as
         // long as it was open, and settings are something you visit and leave — the same
@@ -7689,7 +10807,7 @@ impl Workbench {
                 let name = field
                     .secret_name()
                     .map(str::to_string)
-                    .unwrap_or_else(|| key_name.clone());
+                    .unwrap_or_else(|| format!("llm:{}", self.key_target));
                 // Presence only — the value itself is never read back into the UI.
                 if settings::secret(&name).is_some() {
                     " · stored"
@@ -7699,6 +10817,74 @@ impl Workbench {
             } else {
                 ""
             };
+            // **Every provider at once, above the field.** Both references converge here: the
+            // web panel lists all providers with a Connected badge, and Zed's page gives each its
+            // own key row — because a key belongs to a *company*, not to whichever provider a
+            // conversation happens to be running on. Picking one here retargets the field and
+            // nothing else: the coordinator does not move, and no confirmation is owed (§191).
+            if *field == Field::ApiKey {
+                let mut chips = div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .gap_1()
+                    .w_full()
+                    .min_w_0();
+                for spec in settings::PROVIDERS {
+                    let chosen = spec.id == self.key_target;
+                    let has_key = settings::secret(&format!("llm:{}", spec.id)).is_some();
+                    chips = chips.child(
+                        div()
+                            .id(SharedString::from(format!("key-target-{}", spec.id)))
+                            .flex_none()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(if chosen {
+                                theme::accent()
+                            } else {
+                                theme::border()
+                            }))
+                            .when(chosen, |chip| chip.bg(rgb(theme::accent_soft())))
+                            .text_color(rgb(if chosen {
+                                theme::text()
+                            } else {
+                                theme::text_muted()
+                            }))
+                            .text_xs()
+                            .hover(|style| {
+                                let fill = theme::hover_over(theme::elevated());
+                                style
+                                    .bg(rgb(fill))
+                                    .text_color(rgb(theme::ink_on(fill)))
+                                    .cursor_pointer()
+                            })
+                            // A tick where a key is filed, so "which of these am I missing" is
+                            // one glance rather than five clicks.
+                            .child(format!("{}{}", if has_key { "✓ " } else { "" }, spec.label))
+                            .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                                workbench.key_target = spec.id.to_string();
+                                cx.notify();
+                            })),
+                    );
+                }
+                pane = pane.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .w_full()
+                        .min_w_0()
+                        .gap_1()
+                        .child(
+                            div()
+                                .text_color(rgb(theme::text_muted()))
+                                .text_xs()
+                                .child("Keys — one per company, set them in any order"),
+                        )
+                        .child(chips),
+                );
+            }
             pane = pane.child(
                 div()
                     .flex()
@@ -8048,12 +11234,50 @@ impl Workbench {
                 }))
                 .child(
                     div()
-                        .text_color(rgb(theme::text()))
-                        .text_sm()
-                        .child(if fix.done {
-                            format!("{} — {}", fix.label, if fix.ok { "done" } else { "failed" })
-                        } else {
-                            format!("{}…", fix.label)
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .w_full()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .flex_grow()
+                                .min_w_0()
+                                .text_color(rgb(theme::text()))
+                                .text_sm()
+                                .child(if fix.done {
+                                    format!(
+                                        "{} — {}",
+                                        fix.label,
+                                        if fix.ok { "done" } else { "failed" }
+                                    )
+                                } else if fix.stopping {
+                                    format!("{} — stopping…", fix.label)
+                                } else {
+                                    format!("{}…", fix.label)
+                                }),
+                        )
+                        // Beside the label rather than among the actions below: those are about
+                        // the repair's *output* — open the sign-in page, copy the command — and
+                        // this is about the repair. It exists at all because §170 measured that
+                        // the process this app spawned can be killed and takes its WSL tree with
+                        // it; §146 was right to refuse the version that could not (docs §172).
+                        .when(!fix.done, |header| {
+                            header.child(
+                                ui::Button::new("stop-fix", "Stop")
+                                    .tone(ui::Tone::Danger)
+                                    .size(ui::Size::Compact)
+                                    // Inert while there is nothing to act on: after Stop has
+                                    // been asked, and in the moment before `spawn` returns a
+                                    // pid. A live-looking button with no process behind it is
+                                    // the §146 failure in miniature.
+                                    .disabled(fix.stopping || !fix.cancel.armed())
+                                    .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                        workbench.stop_fix(cx);
+                                    })),
+                            )
                         }),
                 );
             // A sign-in page to open. Prominent, and above the log, because while this is
@@ -8177,34 +11401,15 @@ impl Workbench {
                 .composer
                 .update(cx, |composer, cx| composer.submit_now(cx)),
             Command::NewThread => {
-                if self.streaming {
-                    self.status = "can't start a new thread mid-turn".into();
-                    return;
-                }
-                self.sidecar.reset_thread();
-                // **The project is deliberately left alone.** A new conversation continues in
-                // whichever project the last one was in, and `sidecar.project()` already holds
-                // it — set by opening a conversation, by filing one, or at startup from the
-                // remembered value. Consulting the *setting* here was wrong: it is only written
-                // when something is filed, so opening a conversation already in a project and
-                // pressing New put the researcher back in "No project" (docs §107).
-                self.transcript.clear();
-                // A new conversation is a new enquiry. The one just left keeps its own record on
-                // disk, where reopening it will find it.
-                self.provenance = provenance::Record::default();
-                self.text_selection.update(|selection| selection.clear());
-                self.buckets.clear();
-                self.error = None;
-                // Blanket approval is scoped to the conversation, so it ends with it —
-                // together with every per-task grant, whose tasks belonged to that
-                // conversation too. This is the line that makes the button's wording true.
-                self.approve_conversation = false;
-                self.approve_tasks.clear();
-                // The conversation just left should appear in the list.
-                self.refresh_conversations(cx);
-                // The spine is thread-independent — the mission survives, so say so
-                // rather than letting the panel look stale.
-                self.status = "new thread — the project spine is kept".into();
+                // Ordinary New always means the root workspace. Starting within a project has
+                // its own explicit `+` beside that heading; inheriting the open/remembered project
+                // made conversations start already filed and revived deleted headings (§154).
+                //
+                // `new_thread_in` clears `tasks` and `jobs` as well, which is the §159 fix: this
+                // path used to leave the previous conversation's pending approvals on screen and
+                // clickable, and answering one then named the wrong conversation as the worker's
+                // owner. Both routes now clear the same state because there is only one route.
+                self.new_thread_in(None, cx);
             }
             Command::RefreshSpine => {
                 self.refresh_project(cx);
@@ -8280,6 +11485,7 @@ impl Workbench {
                 trace.expanded = expanded;
             }
         }
+        self.invalidate_all_transcript_messages();
     }
 
     /// The palette overlay: a query field over a filtered command list.
@@ -8347,6 +11553,10 @@ impl Workbench {
         div()
             .absolute()
             .inset_0()
+            // Same reason as the preview backdrop: an overlay that does not occlude leaves the
+            // window under it clickable, so choosing a command could also press whatever the row
+            // happened to be drawn over (docs §163).
+            .occlude()
             .flex()
             .flex_col()
             .items_center()
@@ -8383,11 +11593,17 @@ impl Workbench {
                         div()
                             .px_2()
                             .py_1()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
                             .border_t_1()
                             .border_color(rgb(theme::border()))
                             .text_color(rgb(theme::text_muted()))
                             .text_xs()
-                            .child("↑↓ select · ⏎ run · esc close"),
+                            .child("↑↓ select ·")
+                            .child(app_icon("icons/enter.svg", theme::text_muted()))
+                            .child("run · esc close"),
                     ),
             )
     }
@@ -8430,6 +11646,7 @@ impl Workbench {
                         if let Some(message) = workbench.transcript.get_mut(message_index) {
                             message.steps_expanded = !message.steps_expanded;
                         }
+                        workbench.invalidate_transcript_message(message_index);
                         cx.notify();
                     })),
             );
@@ -8481,6 +11698,7 @@ impl Workbench {
                                     trace.expanded = !trace.expanded;
                                 }
                             }
+                            workbench.invalidate_transcript_message(message_index);
                             cx.notify();
                         })),
                 );
@@ -8549,11 +11767,47 @@ impl Workbench {
             // focus is a child entity, not this box.
             .track_focus(&self.composer.focus_handle(cx))
             .in_focus(|style| style.border_color(rgb(theme::accent())))
+            // **Feedback for a gesture that had none.** A file dragged over the window changed
+            // nothing on screen, so there was no way to tell the app would take it until you
+            // let go. Lit here rather than over the whole window because this is where the
+            // file lands: it becomes part of the question, and the drop does not send it.
+            //
+            // A style refinement rather than a flag on `Workbench`, deliberately. gpui clears
+            // `active_drag` on `FileDropEvent::Exited` but dispatches that event to no element,
+            // so a flag set on enter would have no way to learn the drag left the window and
+            // would stay lit until the next drop.
+            .drag_over::<gpui::ExternalPaths>(|style, _paths, _window, _cx| {
+                style
+                    .bg(rgb(theme::accent_soft()))
+                    .border_color(rgb(theme::accent()))
+            })
             .on_mouse_down(
                 gpui::MouseButton::Right,
                 cx.listener(|workbench, event: &gpui::MouseDownEvent, _window, cx| {
                     workbench.open_context_menu(event.position, menu::Target::Composer, cx);
                 }),
+            )
+            .child(
+                div()
+                    .id("attach-file")
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .w(px(30.))
+                    .h(px(30.))
+                    .rounded_full()
+                    .tooltip(|_window, cx| {
+                        cx.new(|_| Hint {
+                            text: "add a file from this computer".into(),
+                        })
+                        .into()
+                    })
+                    .hover(|style| style.bg(rgb(theme::hover_over(theme::elevated()))).cursor_pointer())
+                    .child(app_icon_at("icons/attach.svg", theme::text_muted(), 17.))
+                    .on_click(cx.listener(|workbench, _event, _window, cx| {
+                        workbench.choose_files(cx);
+                    })),
             )
             .child(self.composer.clone())
             .child(
@@ -8601,6 +11855,19 @@ impl Workbench {
             )
     }
 
+    /// One line for the status bar: what is being worked on, and how far through.
+    ///
+    /// **An unfinished worker outranks the conversation's own plan**, because a worker is the thing
+    /// running while nobody is looking — the conversation's plan belongs to a turn the researcher
+    /// is already watching. With several workers the busiest wins; a column of them belongs in the
+    /// panel, not in a single line.
+    ///
+    /// `None` when there is nothing with a plan, which leaves the bar exactly as it was. This line
+    /// adds a denominator to a wait; it does not become another thing always on screen.
+    fn work_summary(&self) -> Option<String> {
+        summary_for(&self.tasks, &self.plan)
+    }
+
     fn status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let (status_text, status_color) = match &self.error {
             Some(error) => (error.clone(), theme::error()),
@@ -8616,25 +11883,7 @@ impl Workbench {
             // 20–40 seconds building the agent — MCP tool fetches, middleware, model
             // construction — and a still window during that reads as a hang, which is the
             // single most common reason someone kills an app that was working fine.
-            .when(self.streaming || self.running_fix.is_some(), |bar| {
-                bar.child(
-                    div()
-                        .flex_none()
-                        .text_color(rgb(theme::accent()))
-                        .text_sm()
-                        .with_animation(
-                            "working",
-                            gpui::Animation::new(std::time::Duration::from_millis(1200)).repeat(),
-                            |label, delta| {
-                                // Four frames of a braille spinner: no font dependency,
-                                // no SVG to ship, and it reads as motion at any size.
-                                const FRAMES: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
-                                let frame = (delta * FRAMES.len() as f32) as usize;
-                                label.child(FRAMES[frame.min(FRAMES.len() - 1)])
-                            },
-                        ),
-                )
-            })
+            .when(self.is_waiting(), |bar| bar.child(ui::Spinner::new("status-working")))
             .flex()
             .flex_row()
             .items_center()
@@ -8646,6 +11895,16 @@ impl Workbench {
             .border_color(rgb(theme::border()))
             .bg(rgb(theme::surface()))
             .child(ui::Label::new(status_text).colour(status_color).ellipsis())
+            // **The glance version, so the panel need not be open.** `running · execute` for six
+            // minutes was the whole complaint; this is the same fact with a denominator on it, and
+            // it appears only when there is a plan to count (§209).
+            .children(self.work_summary().map(|summary| {
+                div()
+                    .flex_none()
+                    .text_color(rgb(theme::text_faint()))
+                    .text_xs()
+                    .child(summary)
+            }))
             // A blanket grant that is in force must never be invisible — and must be
             // revocable without starting a new conversation, or "just this once" becomes
             // permanent by inconvenience. Click to hand the gate back.
@@ -8667,6 +11926,10 @@ impl Workbench {
             .child(
                 div()
                     .id("toggle-sidebar")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
                     .flex_none()
                     .text_color(rgb(if self.sidebar_open {
                         theme::accent()
@@ -8679,7 +11942,15 @@ impl Workbench {
                             .text_color(rgb(theme::accent_hover()))
                             .cursor_pointer()
                     })
-                    .child("▤ conversations")
+                    .child(app_icon(
+                        "icons/conversations.svg",
+                        if self.sidebar_open {
+                            theme::accent()
+                        } else {
+                            theme::text_faint()
+                        },
+                    ))
+                    .child("conversations")
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
                         workbench.sidebar_open = !workbench.sidebar_open;
                         workbench.remember_panels();
@@ -8704,7 +11975,22 @@ impl Workbench {
                             .text_color(rgb(theme::accent_hover()))
                             .cursor_pointer()
                     })
-                    .child("◧ road")
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .child(app_icon(
+                                "icons/road.svg",
+                                if self.road_open {
+                                    theme::accent()
+                                } else {
+                                    theme::text_faint()
+                                },
+                            ))
+                            .child("road"),
+                    )
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
                         workbench.toggle_road(cx);
                     })),
@@ -8712,6 +11998,10 @@ impl Workbench {
             .child(
                 div()
                     .id("toggle-panel")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
                     .flex_none()
                     .text_color(rgb(if self.panel_open {
                         theme::accent()
@@ -8724,7 +12014,15 @@ impl Workbench {
                             .text_color(rgb(theme::accent_hover()))
                             .cursor_pointer()
                     })
-                    .child("▥ research")
+                    .child(app_icon(
+                        "icons/research.svg",
+                        if self.panel_open {
+                            theme::accent()
+                        } else {
+                            theme::text_faint()
+                        },
+                    ))
+                    .child("research")
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
                         workbench.panel_open = !workbench.panel_open;
                         workbench.remember_panels();
@@ -8780,8 +12078,80 @@ impl Workbench {
             .bg(rgb(theme::surface()))
             .border_1()
             .border_color(rgb(theme::border()))
+            .group(SCROLL_GROUP)
             .child(self.artifacts_contents(cx))
             .children(scrollbar(&self.panel_scroll))
+    }
+
+    /// The mission, and the way to change it.
+    ///
+    /// **It had never been changeable.** The mission is seeded server-side from the first human
+    /// message of a project and then rendered here as plain text, so a researcher whose opening
+    /// question was a warm-up — or whose project turned out to be about something else — had no
+    /// way to say so: the panel showed a sentence they could not edit, and the coordinator was
+    /// reading that same sentence into its system prompt on every turn
+    /// (`backend/middleware/project.py`). Reported as *"I cannot modify the project mission"*
+    /// (§199). The route to change it had existed the whole time and this client had never
+    /// called it — see [`protocol::LangGraphClient::set_mission`].
+    ///
+    /// Editing happens in place, as renaming a conversation does, and for the same reason: the
+    /// field replaces the text it is about, so the researcher is looking at what they are
+    /// changing rather than at a copy of it in a dialog.
+    fn mission_block(&self, mission: &str, cx: &mut Context<Self>) -> Div {
+        let block = div().flex().flex_col().w_full().min_w_0().gap_1();
+
+        if self.editing_mission {
+            return block
+                .child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgb(theme::accent()))
+                        .child(self.mission_editor.clone()),
+                )
+                .child(
+                    div()
+                        .text_color(rgb(theme::text_muted()))
+                        .text_xs()
+                        // What it costs to be wrong, said before the press rather than after:
+                        // this sentence is read by the coordinator on every turn, so it is not a
+                        // label on the work — it is an instruction to it.
+                        .child(
+                            "Enter to save · Esc to cancel. Mini-Me reads this on every turn.",
+                        ),
+                );
+        }
+
+        block.child(
+            div()
+                .id("mission")
+                .w_full()
+                .min_w_0()
+                .px_2()
+                .py_1()
+                .rounded_md()
+                .hover(|style| {
+                    style
+                        .bg(rgb(theme::hover_over(theme::surface())))
+                        .cursor_pointer()
+                })
+                .on_click(cx.listener(|workbench, _event, window, cx| {
+                    workbench.start_mission_edit(window, cx)
+                }))
+                .when(mission.is_empty(), |empty| {
+                    empty
+                        .text_color(rgb(theme::text_muted()))
+                        .text_sm()
+                        .child("No mission yet — press to write one, or it comes from your first question.")
+                })
+                .when(!mission.is_empty(), |set| {
+                    set.text_color(rgb(theme::text())).child(mission.to_string())
+                }),
+        )
     }
 
     fn artifacts_contents(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -8799,34 +12169,62 @@ impl Workbench {
             // `MISSION`, not `RESEARCH PROJECT`. The panel *is* the research project — saying so
             // at the top of it spends the widest heading in the column on a word that names the
             // container rather than its first section.
-            .child(section_label("MISSION"));
+            //
+            // The heading carries the edit control rather than the mission carrying a hover-only
+            // one. Our researchers are not developers, and *"I cannot modify the project mission"*
+            // was said about a panel where the text was in fact the button — an affordance that
+            // only exists once the pointer is already on it cannot be the answer to someone who
+            // has concluded there isn't one (§199).
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .w_full()
+                    .min_w_0()
+                    .child(section_label("MISSION"))
+                    .when(!self.editing_mission, |heading| {
+                        heading.child(
+                            div()
+                                .id("edit-mission")
+                                .px_1()
+                                .rounded_sm()
+                                .text_xs()
+                                .text_color(rgb(theme::accent()))
+                                .hover(|style| {
+                                    style
+                                        .bg(rgb(theme::hover_over(theme::surface())))
+                                        .cursor_pointer()
+                                })
+                                .child("Edit")
+                                .on_click(cx.listener(|workbench, _event, window, cx| {
+                                    workbench.start_mission_edit(window, cx)
+                                })),
+                        )
+                    }),
+            );
+
+        let mission = self
+            .project
+            .as_ref()
+            .map(|project| project.mission.clone())
+            .unwrap_or_default();
+        // The same block whether or not a spine has arrived: with no project there is nothing to
+        // *read*, but there is still something to *write*, and a researcher who knows what this
+        // project is for should be able to say so before the first question rather than having
+        // one derived from it (§199).
+        panel = panel.child(self.mission_block(&mission, cx));
 
         let Some(project) = &self.project else {
             // No spine yet, but a run may already be producing outputs — still show
             // them rather than an empty panel.
             return panel
-                .child(
-                    div()
-                        .text_color(rgb(theme::text_muted()))
-                        .text_sm()
-                        .child("No project loaded yet. Run a turn — the mission is derived from your first question."),
-                )
+                .child(self.plan_section(cx))
                 .child(self.jobs_section(cx))
                 .child(self.outputs_section(cx))
-                .child(self.sources_section());
+                .child(self.sources_section(Some(SOURCES_IN_PANEL), cx));
         };
-
-        panel = panel.child(if project.mission.is_empty() {
-            div()
-                .text_color(rgb(theme::text_muted()))
-                .text_sm()
-                .child("No mission yet — it comes from your first question.")
-        } else {
-            div()
-                .w_full()
-                .text_color(rgb(theme::text()))
-                .child(project.mission.clone())
-        });
 
         if !project.completed.is_empty() {
             panel = panel.child(spine_list("COMPLETED", &project.completed, "✓"));
@@ -8906,9 +12304,10 @@ impl Workbench {
         }
 
         panel
+            .child(self.plan_section(cx))
             .child(self.jobs_section(cx))
             .child(self.outputs_section(cx))
-            .child(self.sources_section())
+            .child(self.sources_section(Some(SOURCES_IN_PANEL), cx))
     }
 
     /// Long jobs still running, and the ones that finished this session.
@@ -8916,6 +12315,120 @@ impl Workbench {
     /// The theorizer and DataVoyager return a task id immediately and finish minutes
     /// later, so without this the answer to "is it still going?" was nothing at all —
     /// and, worse, nobody was collecting the result (docs §29).
+    /// An agent's own plan, as a checklist with the step it is on marked.
+    ///
+    /// **The agent's words, its order, its statuses.** Nothing is derived and nothing is estimated:
+    /// no percentage, no bar, no remaining-time guess. §73's rule about provenance applies just as
+    /// hard to progress — a number a researcher believes is worse than no number, and the only
+    /// honest denominator is the one the agent wrote down itself.
+    ///
+    /// `busy` is what the running step is doing right now, which is the `activity` the watcher
+    /// already reads. It rides the in-progress line rather than a row of its own, because a
+    /// forty-second `execute` is a property of *that step*, not of the plan.
+    ///
+    /// Empty plan, empty element. `write_todos` is optional and the model skips it for simple
+    /// requests, so a plan is a thing that sometimes exists — not a thing to fake a skeleton for
+    /// (§178).
+    fn plan_list(&self, todos: &[protocol::Todo], busy: Option<&str>) -> Div {
+        let mut list = div().flex().flex_col().w_full().min_w_0().gap_1();
+        if todos.is_empty() {
+            return list;
+        }
+        for (at, todo) in todos.iter().enumerate() {
+            // Done recedes, doing is the one you read, still-to-come is legible but quiet. All
+            // three stay above the AA floor `theme` guarantees — "faint" is not permission to be
+            // unreadable, and a scientist scanning a plan is reading, not glancing.
+            let ink = if todo.is_done() {
+                theme::text_muted()
+            } else if todo.is_running() {
+                theme::text()
+            } else {
+                theme::text_faint()
+            };
+            let mut row = div()
+                .id(("plan-step", at))
+                .flex()
+                .flex_row()
+                .items_start()
+                .w_full()
+                .min_w_0()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(rgb(if todo.is_running() {
+                            theme::accent()
+                        } else if todo.is_done() {
+                            theme::success()
+                        } else {
+                            theme::text_faint()
+                        }))
+                        .child(todo.mark()),
+                )
+                .child(
+                    div()
+                        .flex_grow()
+                        .min_w_0()
+                        .text_xs()
+                        .text_color(rgb(ink))
+                        .child(todo.content.clone()),
+                );
+            if todo.is_running() {
+                if let Some(busy) = busy {
+                    row = row.child(
+                        div()
+                            .flex_none()
+                            .text_xs()
+                            .text_color(rgb(theme::text_faint()))
+                            .child(busy.to_string()),
+                    );
+                }
+            }
+            list = list.child(row);
+        }
+        list
+    }
+
+    /// The coordinator's plan for this conversation, when it wrote one.
+    ///
+    /// Its own section rather than a line in the spine, because the spine is the *project* —
+    /// durable, surviving every turn — and this is the working plan for the question in flight.
+    /// Filing them together would make an abandoned step look like a project commitment.
+    ///
+    /// Kept after the turn ends on purpose: a finished plan is the account of what the answer
+    /// involved, and clearing it the moment the last token arrives would delete the explanation
+    /// exactly when someone starts reading it.
+    fn plan_section(&self, _cx: &mut Context<Self>) -> Div {
+        let mut section = div().flex().flex_col().gap_2().w_full().min_w_0();
+        let Some((done, total)) = protocol::plan_progress(&self.plan) else {
+            return section;
+        };
+        section = section
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .w_full()
+                    .min_w_0()
+                    .gap_2()
+                    .child(section_label("PLAN"))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(rgb(theme::text_faint()))
+                            .text_xs()
+                            .child(format!("{done} of {total}")),
+                    ),
+            )
+            // The coordinator's plan gets no activity string: `activity` is read off a *worker's*
+            // thread, and this conversation's current tool is already the road strip's job.
+            .child(self.plan_list(&self.plan, None));
+        section
+    }
+
     fn jobs_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut section = div().flex().flex_col().gap_2().pt_2();
         if self.jobs.is_empty() && self.tasks.is_empty() {
@@ -8947,9 +12460,30 @@ impl Workbench {
                 .border_color(rgb(colour))
                 .child(
                     div()
-                        .text_color(rgb(theme::text()))
-                        .text_sm()
-                        .child(format!("{mark} {}", task.agent_name.replace('_', " "))),
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .w_full()
+                        .min_w_0()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_grow()
+                                .min_w_0()
+                                .text_color(rgb(theme::text()))
+                                .text_sm()
+                                .child(format!("{mark} {}", task.agent_name.replace('_', " "))),
+                        )
+                        // `step 4 of 7`, and nothing when the agent wrote no plan. The one number
+                        // in this panel with a real denominator (§209).
+                        .children(protocol::plan_progress(&task.todos).map(|(done, total)| {
+                            div()
+                                .flex_none()
+                                .text_xs()
+                                .text_color(rgb(theme::text_faint()))
+                                .child(format!("{done} of {total}"))
+                        })),
                 )
                 .child(
                     div()
@@ -8987,6 +12521,12 @@ impl Workbench {
                             .text_xs()
                             .child(task.description.clone()),
                     )
+                })
+                // **What turns six minutes of "running · execute" into something a person can
+                // read.** Measured on a real run: eight approval rounds and 35–43 seconds per
+                // command, with nothing on screen saying how much of it was left (§209).
+                .when(!task.todos.is_empty(), |row| {
+                    row.child(self.plan_list(&task.todos, task.activity.as_deref()))
                 });
 
             if let Some(request) = &task.pending {
@@ -9087,6 +12627,54 @@ impl Workbench {
                     );
                 }
             }
+
+            // **What it produced, one press away.** Asked for directly: *"when a background task
+            // has a success, we should see a modal button the user can press… so the user doesn't
+            // type it every time in the chatbox."* A finished worker's output is already on disk
+            // — §151 verified plots landing at `<task>/…` inside the conversation's own folder —
+            // and until now the only way to reach it was to compose a question and wait for a
+            // turn to answer it (docs §198).
+            //
+            // **Opens the folder rather than sending a turn.** No model call, nothing billed,
+            // and it is instant; the files are the result, not a description of them.
+            if task.succeeded() {
+                if let Some(dir) = self
+                    .thread_workspace()
+                    .map(|conversation| workspace::worker_dir(&conversation, &task.thread_id))
+                {
+                    row = row.child(
+                        div()
+                            .id(SharedString::from(format!("task-files-{}", task.task_id)))
+                            .flex_none()
+                            .mt_1()
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(theme::border()))
+                            .text_color(rgb(theme::text_muted()))
+                            .text_xs()
+                            .hover(|style| {
+                                let fill = theme::hover_over(theme::surface());
+                                style
+                                    .bg(rgb(fill))
+                                    .text_color(rgb(theme::ink_on(fill)))
+                                    .cursor_pointer()
+                            })
+                            // Names the specialist, because several run at once (§43) and a row
+                            // of identical buttons is one you have to count rows to use.
+                            .child(format!(
+                                "Show what {} produced",
+                                task.agent_name.replace('_', " ")
+                            ))
+                            .on_click(move |_event, _window, _cx| {
+                                if let Err(error) = workspace::open(&dir) {
+                                    tracing::warn!(%error, "could not open a worker's folder");
+                                }
+                            }),
+                    );
+                }
+            }
             section = section.child(row);
         }
         for job in &self.jobs {
@@ -9156,7 +12744,102 @@ impl Workbench {
     /// `Plant Pathology · 2021 · CIP Dataverse` would mean parsing prose into fields and being
     /// confidently wrong about some of them — a bibliography that quietly mis-attributes is worse
     /// than one that is merely plain.
-    fn sources_section(&self) -> impl IntoElement {
+    /// Where each source came from, positionally — one entry per `self.sources`.
+    ///
+    /// **One function, three readers.** The header's count, the note under a row and the `annote`
+    /// in an exported `.bib` all have to mean the same thing by "unverified", and three
+    /// re-derivations of that from two maps is three chances to drift. Positional so the export
+    /// can zip it against the same slice it is already walking.
+    fn source_origins(&self) -> Vec<references::Origin> {
+        self.sources
+            .iter()
+            .map(|source| {
+                references::origin(
+                    self.checked.get(&source.citation),
+                    self.repaired.get(&source.citation).map(Option::is_some),
+                )
+            })
+            .collect()
+    }
+
+    /// How many references nothing has confirmed — the number a subject-matter expert owns.
+    fn unverified_sources(&self) -> usize {
+        self.source_origins()
+            .into_iter()
+            .filter(|origin| origin.needs_a_human())
+            .count()
+    }
+
+    /// Every reference, in a list you scroll rather than a panel you fight.
+    ///
+    /// Asked for in these terms: *"a nice list that can scroll in y direction, like OS systems do
+    /// in file explorers"* — and pointedly **not** the slider the images got. A figure is one
+    /// thing you look at and the next is a different thing; a reference list is one object you
+    /// read down. Paging through twenty-six citations one at a time would be the wrong gesture
+    /// for the same reason paging through a folder would be (docs §194).
+    fn sources_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let unverified = self.unverified_sources();
+        ui::Modal::new("sources", format!("Sources · {}", self.sources.len()))
+            .width(720.)
+            .focus(&self.delete_focus)
+            .body(
+                div()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .min_w_0()
+                    .gap_2()
+                    // The field sits outside the scroll region, so it cannot scroll away from
+                    // the list it filters. `Modal::body` is itself a scroller, and the inner
+                    // `max_h` means its content fits — so only the list moves.
+                    .child(self.filter_field(self.sources_filter.clone(), cx))
+                    .child(
+                        div()
+                            .id("all-sources")
+                            .flex()
+                            .flex_col()
+                            .w_full()
+                            .min_w_0()
+                            .gap_1()
+                            .max_h(px(480.))
+                            .overflow_y_scroll()
+                            .child(self.sources_section(None, cx)),
+                    ),
+            )
+            .actions(
+                ui::actions().child(div().flex_grow()).child(
+                    ui::Button::new("sources-close", "Close").on_click(cx.listener(
+                        |workbench, _event, _window, cx| {
+                            workbench.sources_open = false;
+                            workbench.restore_focus = true;
+                            cx.notify();
+                        },
+                    )),
+                ),
+            )
+            .footer(
+                ui::Label::new(match unverified {
+                    // The same count the panel header carries, from the same function, so the
+                    // two cannot disagree about what "unverified" means (§185).
+                    0 => "Every reference here came from a search or was checked against a \
+                          registry."
+                        .to_string(),
+                    n => format!(
+                        "{n} of these came from the model rather than from a search — confirm \
+                         them before citing."
+                    ),
+                })
+                .muted()
+                .size(ui::Size::Compact),
+            )
+    }
+
+    /// The reference list, capped for the panel and whole for the modal.
+    ///
+    /// **One function rather than two, because they must agree.** A compact panel list and a full
+    /// one are the same rows with a different count — and the moment they are written separately,
+    /// the unverified mark or the link is in one and not the other (docs §194).
+    fn sources_section(&self, limit: Option<usize>, cx: &mut Context<Self>) -> impl IntoElement {
         let mut section = div()
             .flex()
             .flex_col()
@@ -9166,10 +12849,15 @@ impl Workbench {
                     .pt_2()
                     .border_t_1()
                     .border_color(rgb(theme::border()))
-                    .child(section_label_owned(format!(
-                        "SOURCES · {}",
-                        self.sources.len()
-                    )))
+                    .child(section_label_owned(match self.unverified_sources() {
+                        // **Counted where the eye lands, not only marked row by row.** Silence
+                        // under a reference means "nothing wrong with this one", and until §185
+                        // it also meant "nothing checked this one" — so a researcher scanning
+                        // fourteen citations had no way to know how many needed them. The header
+                        // says how many, and the rows say which (docs §185).
+                        0 => format!("SOURCES · {}", self.sources.len()),
+                        n => format!("SOURCES · {} · {n} UNVERIFIED", self.sources.len()),
+                    }))
             });
 
         // A quiet line while the registry is being asked, and nothing at all once it is done.
@@ -9186,7 +12874,23 @@ impl Workbench {
             );
         }
 
-        for (at, source) in self.sources.iter().enumerate() {
+        // Scored against the citation as written, which is what a researcher remembers: an
+        // author's name, a year, a word from the title. The same fuzzy scorer as every other
+        // filter here, so `2024 orchid` finds what you would expect it to.
+        let query = match limit {
+            Some(_) => String::new(),
+            None => self.sources_filter.read(cx).text().to_string(),
+        };
+        let matching: Vec<(usize, &protocol::Source)> = self
+            .sources
+            .iter()
+            .enumerate()
+            // **Numbered before filtering.** `[3]` has to keep meaning the third reference of
+            // the answer, or a filtered list renumbers the citations the prose points at.
+            .filter(|(_, source)| match_score(&query, &source.citation).is_some())
+            .collect();
+        let showing = limit.unwrap_or(matching.len());
+        for (at, source) in matching.into_iter().take(showing) {
             let verdict = self.checked.get(&source.citation);
             // **Three states, not two.** `None` is *not looked up yet*; `Some(None)` is *looked
             // up, and the registry has nothing*. Collapsing them with `.flatten()` — which this
@@ -9220,6 +12924,30 @@ impl Workbench {
                 .min_w_0()
                 .p_2()
                 .rounded_lg()
+                // **The whole row opens the paper, and lights up to say so.** Asked for after
+                // §194 made the list long enough to read down: *"I would like to have a hover
+                // colouring when I'm hovering a paper so when I click it I'll be redirected to
+                // the web page."* A twelve-pixel word called `link` at the end of a four-line
+                // citation is a target you aim at; the citation itself is the thing being
+                // pointed at, so it should be the thing you press (docs §195).
+                //
+                // **Only when there is somewhere to go.** A reference nothing could resolve gets
+                // no hover and no pointer, because a row that lights up and then does nothing is
+                // worse than one that never offered (§185 marks those as unverified already).
+                .when_some(link.clone(), |row, url| {
+                    row.hover(|style| {
+                        let fill = theme::hover_over(theme::surface());
+                        style
+                            .bg(rgb(fill))
+                            .text_color(rgb(theme::ink_on(fill)))
+                            .cursor_pointer()
+                    })
+                    .on_click(move |_event, _window, _cx| {
+                        if let Err(error) = workspace::browse(&url) {
+                            tracing::warn!(%error, "could not open a source");
+                        }
+                    })
+                })
                 .child(
                     div()
                         .flex_none()
@@ -9308,6 +13036,17 @@ impl Workbench {
                 )),
                 _ => None,
             };
+            // **The holes the match above leaves.** Every arm answers *is this broken*, and
+            // falling through means "nothing wrong" — which was also what a reference nothing had
+            // checked looked like. `(NoIdentifier, None)` and `(Unregistered, None)` land here,
+            // and so does a source with no verdict at all once resolution has stopped. Saying
+            // where it came from is a different question, and one that has an answer in every
+            // case (docs §185).
+            let note = note.or_else(|| {
+                references::origin(verdict, looked_up.map(Option::is_some))
+                    .note()
+                    .map(|text| (theme::warning(), text.to_string()))
+            });
             if let Some((ink, text)) = note {
                 body = body.child(
                     div()
@@ -9320,6 +13059,56 @@ impl Workbench {
 
             row = row.child(body);
             section = section.child(row);
+        }
+
+        // Said, rather than left as an empty panel: a filter matching nothing and a
+        // conversation with no references look identical otherwise, and only one of them is
+        // fixed by typing less.
+        if showing == 0 && !query.trim().is_empty() {
+            section = section.child(
+                ui::Label::new("No reference matches that.")
+                    .muted()
+                    .size(ui::Size::Compact),
+            );
+        }
+
+        // **The way in, and the count it hides.** A panel that lists twenty-six references in
+        // full is a wall a researcher scrolls past to reach the files below it — the same problem
+        // the images had before §152 grouped them behind one tile. The rest are one press away.
+        let hidden = self.sources.len().saturating_sub(showing);
+        if hidden > 0 {
+            section = section.child(
+                div()
+                    .id("open-all-sources")
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .w_full()
+                    .min_w_0()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_color(rgb(theme::accent()))
+                    .hover(|style| {
+                        let fill = theme::hover_over(theme::surface());
+                        style
+                            .bg(rgb(fill))
+                            .text_color(rgb(theme::ink_on(fill)))
+                            .cursor_pointer()
+                    })
+                    .child(ui::Label::new(format!("+{hidden} more")).inherit().size(ui::Size::Compact))
+                    .child(
+                        ui::Label::new("open all")
+                            .inherit()
+                            .size(ui::Size::Compact),
+                    )
+                    .on_click(cx.listener(|workbench, _event, _window, cx| {
+                        workbench.sources_open = true;
+                        cx.notify();
+                    })),
+            );
         }
         section
     }
@@ -9353,6 +13142,13 @@ impl Workbench {
             .map(|listing| listing.groups.as_slice())
             .unwrap_or_default();
         let count: usize = files.iter().map(|(_, items)| items.len()).sum();
+        // `output_listing` groups by file kind for ordering. The gallery's meaningful boundary
+        // is instead the directory the agent chose (§152), so restore one ordered sequence before
+        // grouping by parent. Cloning metadata only; no file is read here.
+        let ordered_outputs: Vec<workspace::Output> = files
+            .iter()
+            .flat_map(|(_, items)| items.iter().cloned())
+            .collect();
 
         let mut section = div()
             .flex()
@@ -9385,62 +13181,50 @@ impl Workbench {
             );
         }
 
-        for (_, items) in files {
-            for output in items {
-                let shown = output.clone();
-                let (glyph, ink) = file_mark(&output.path);
-                section = section.child(
-                    div()
-                        .id(SharedString::from(format!("file-{}", output.name)))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_2()
-                        .w_full()
-                        .min_w_0()
-                        .p_2()
-                        .rounded_lg()
-                        // A fill instead of a border: thirty bordered rows in a 330px column is
-                        // thirty horizontal lines, and the eye reads those as a table it is
-                        // supposed to compare across.
-                        .bg(rgb(theme::elevated()))
-                        .hover(|style| style.bg(rgb(theme::accent_soft())).cursor_pointer())
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_color(rgb(ink))
-                                .text_size(px(13.))
-                                .child(glyph),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .flex_grow()
-                                .min_w_0()
-                                .child(
-                                    ui::Label::new(output.name.clone())
-                                        .size(ui::Size::Compact)
-                                        .ellipsis(),
-                                )
-                                // The real shape of the file, not just how much of the disk it
-                                // takes: `1,204 rows · 11 cols` is what decides whether it is the
-                                // file you wanted. See `workspace::Shape` for why a PDF gets a
-                                // size and no page count.
-                                .child(
-                                    div()
-                                        .text_color(rgb(theme::text_faint()))
-                                        .text_size(px(11.))
-                                        .child(self.shape_of(output).describe(output.bytes)),
-                                ),
-                        )
-                        .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                            // In the window first. Leaving the app to look at a 4 KB CSV
-                            // is a context switch out of the work, and back is not free.
-                            workbench.preview = Some(shown.clone());
-                            cx.notify();
-                        })),
-                );
+        // Images first and together, then everything else — the two groups the researcher asked
+        // for. Images lead because they are what a person opens the panel to look at; a CSV is
+        // opened to *check* something, which is a deliberate act further down.
+        //
+        // "Together" is now bounded by who produced them (§199): one tray per body of work, not
+        // one tray for the window.
+        for (band, (worker, produced)) in by_producer(&ordered_outputs, &self.tasks, &self.authorship)
+            .into_iter()
+            .enumerate()
+        {
+            let (images, others) = split_images(&produced);
+            if !images.is_empty() {
+                section = section.child(self.output_grid(
+                    &format!("panel-{band}"),
+                    images_heading(images.len(), worker.as_deref()),
+                    &images,
+                    true,
+                    cx,
+                ));
+            }
+            for (at, group) in output_folder_groups(&others).iter().enumerate() {
+                if let [output] = group.outputs.as_slice() {
+                    // A lone file stays a row: it has the whole width for its name and shape, and
+                    // a grid of one is a tile with nothing to compare it to.
+                    section = section.child(self.output_panel_row(
+                        format!("panel-output-{}", output.name),
+                        output,
+                        worker.as_deref(),
+                        cx,
+                    ));
+                } else {
+                    // Still folder-grouped, because two runs' `results/` directories are still two
+                    // things — the image grid above is the only surface where kind outranks folder.
+                    section = section.child(self.output_grid(
+                        &format!("panel-{band}-{at}"),
+                        shorten_path_label(
+                            &output_folder_label(&group.folder, worker.as_deref()),
+                            PANEL_HEADING_CHARS,
+                        ),
+                        &group.outputs.iter().map(|o| (*o).clone()).collect::<Vec<_>>(),
+                        true,
+                        cx,
+                    ));
+                }
             }
         }
 
@@ -9529,6 +13313,10 @@ impl Render for Workbench {
             let composer = self.composer.focus_handle(cx);
             window.focus(&composer);
         }
+        // Once per frame, and only actually read when the record has changed. Both the panel and
+        // every transcript block need it, and doing it in each would be a file read per message
+        // per frame — the mistake `shape_of` is cached to avoid.
+        self.refresh_authorship();
 
         // `relative` so the palette's `absolute` overlay is positioned against the
         // window rather than the page origin.
@@ -9550,6 +13338,16 @@ impl Render for Workbench {
             .when(self.sidebar_open, |body| {
                 body.child(self.rail(cx))
                     .child(self.divider(Divider::Sidebar, cx))
+            })
+            // **Its own card, not a strip inside the conversation's.** It lived inside the chat
+            // pane's border, so the two read as one panel with a notch cut out of it while the
+            // sidebar and the research panel each sat on their own — *"the conversation panel is
+            // colliding with the road"*. Same treatment as its neighbours now (§173).
+            //
+            // Not before the first question: an empty road beside an empty transcript is a frame
+            // around nothing, and the empty state has its own things to say.
+            .when(!self.transcript.is_empty(), |body| {
+                body.child(self.road_strip(cx))
             })
             .child(self.chat_pane(cx));
 
@@ -9577,6 +13375,28 @@ impl Render for Workbench {
             .on_action(cx.listener(Self::dismiss))
             .on_mouse_move(
                 cx.listener(|workbench, event: &gpui::MouseMoveEvent, window, cx| {
+                    if let Some(drag) = workbench.gallery_scroll_drag.as_ref() {
+                        // A release outside the narrow track may not deliver its mouse-up to the
+                        // thumb. The move event still tells us the button is no longer held, so
+                        // end the drag here as well instead of letting the next click move a rail
+                        // the researcher is no longer touching (docs §158).
+                        if !event.dragging() {
+                            workbench.gallery_scroll_drag = None;
+                            cx.notify();
+                            return;
+                        }
+                        let offset_x = horizontal_drag_offset(
+                            event.position.x,
+                            drag.track_left,
+                            drag.grab_x,
+                            drag.travel,
+                            drag.overflow,
+                        );
+                        let offset_y = drag.handle.offset().y;
+                        drag.handle.set_offset(gpui::point(offset_x, offset_y));
+                        cx.notify();
+                        return;
+                    }
                     let Some(edge) = workbench.dragging else {
                         return;
                     };
@@ -9599,7 +13419,9 @@ impl Render for Workbench {
             .on_mouse_up(
                 gpui::MouseButton::Left,
                 cx.listener(|workbench, _event: &gpui::MouseUpEvent, _window, cx| {
-                    if workbench.dragging.take().is_some() {
+                    if workbench.dragging.take().is_some()
+                        || workbench.gallery_scroll_drag.take().is_some()
+                    {
                         cx.notify();
                     }
                 }),
@@ -9610,7 +13432,7 @@ impl Render for Workbench {
             // their eyes on the file, not on a target.
             .on_drop(
                 cx.listener(|workbench, paths: &gpui::ExternalPaths, _window, cx| {
-                    workbench.files_dropped(paths.paths(), cx);
+                    workbench.add_files(paths.paths(), cx);
                 }),
             )
             .child(body)
@@ -9637,10 +13459,34 @@ impl Render for Workbench {
             root
         };
 
-        // The preview floats over everything except the palette: it is a thing you open,
-        // look at, and dismiss, not a place you navigate to (docs §49).
+        // The preview floats over the workbench but under destructive confirmation and the
+        // palette: it is a thing you open, look at, and dismiss, not a place you navigate to
+        // (docs §49, §155).
         let root = match &self.preview {
-            Some(output) => root.child(self.preview_modal(output.clone(), cx)),
+            Some(preview) => root.child(self.preview_modal(
+                preview.current().clone(),
+                &preview.items,
+                preview.at,
+                cx,
+            )),
+            None => root,
+        };
+
+        let root = if self.sources_open {
+            root.child(self.sources_modal(cx))
+        } else {
+            root
+        };
+
+        let root = match &self.confirming_delete {
+            Some(target) => root.child(self.delete_modal(target, cx)),
+            None => root,
+        };
+
+        // Above Settings, and that is not cosmetic: the pill that raises it lives *inside* the
+        // Settings pane, which mounts later and would otherwise draw straight over it.
+        let root = match self.confirming_provider {
+            Some(spec) => root.child(self.provider_modal(spec, cx)),
             None => root,
         };
 
@@ -9652,8 +13498,12 @@ impl Render for Workbench {
 
         let root = root.children(self.picker_popup(cx));
 
-        // Last, and `deferred` inside, so it paints over every pane it might open across
-        // instead of being clipped by the one it opened in.
+        // Both menus last, and `deferred` inside, so they paint over every pane they might open
+        // across instead of being clipped by the one they opened in.
+        let root = match &self.sidebar_menu {
+            Some((open, at)) => root.child(self.sidebar_menu_element(open.clone(), *at, cx)),
+            None => root,
+        };
         match &self.context_menu {
             Some(open) => root.child(self.context_menu(open.clone(), cx)),
             None => root,
@@ -9747,9 +13597,756 @@ fn replay(path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+// The behavior suite stays immediately after the UI implementation it exercises, while
+// the CLI-only launch helpers remain at the bottom of the executable. Moving this large
+// module past startup code would create merge churn without changing test visibility
+// (the source-order lesson recorded in docs §118).
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn a_long_transcript_builds_only_rows_near_the_viewport(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        struct MeasuredList { state: ListState, built: Rc<Cell<usize>> }
+        impl Render for MeasuredList {
+            fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+                let built = self.built.clone();
+                gpui::list(self.state.clone(), move |index, _window, _cx| {
+                    built.set(built.get() + 1);
+                    // Variable by design: `uniform_list` is invalid for transcript rows (§156).
+                    div().h(px(if index % 7 == 0 { 180. } else { 36. })).into_any_element()
+                }).w_full().h_full()
+            }
+        }
+
+        let built = Rc::new(Cell::new(0));
+        let state = ListState::new(500, ListAlignment::Top, px(240.));
+        let cx = cx.add_empty_window();
+        cx.draw(gpui::point(px(0.), px(0.)), size(px(900.), px(600.)), |_, cx| {
+            cx.new(|_| MeasuredList { state, built: built.clone() })
+        });
+        // The removed eager loop constructed all 500. Count the same deterministic unit on both
+        // sides instead of noisy wall time from a headless debug build (docs §156).
+        println!("transcript row construction: eager 500, virtual {}", built.get());
+        assert!(built.get() < 100, "virtualization built {} rows", built.get());
+    }
+
+    #[test]
+    fn select_all_uses_rendered_words_for_an_unpainted_markdown_message() {
+        let message = Message::new(
+            "mini-me",
+            "# Result\n\nThe **measured** value is 42.\n\n```text\ncopy me\n```".into(),
+        );
+        assert_eq!(message.selection_text(), "Result\nThe measured value is 42.\ncopy me");
+    }
+
+    #[test]
+    fn outputs_in_the_same_agent_folder_become_one_gallery() {
+        let task = "019fe9f6-9126-7710-a806-35d5e09170a4";
+        let names = [
+            PathBuf::from(task).join("guinea_pig_eda_output/plots/health.png"),
+            PathBuf::from(task).join("guinea_pig_eda_output/plots/yield.png"),
+            PathBuf::from(task).join("guinea_pig_eda_output/tables/summary.csv"),
+        ];
+        let outputs: Vec<workspace::Output> = names
+            .into_iter()
+            .map(|name| workspace::Output {
+                path: name.clone(),
+                name: name.to_string_lossy().into_owned(),
+                kind: workspace::Kind::Other,
+                bytes: 1,
+                modified: std::time::SystemTime::UNIX_EPOCH,
+            })
+            .collect();
+
+        let groups = output_folder_groups(&outputs);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].outputs.len(), 2);
+        assert_eq!(groups[1].outputs.len(), 1);
+        assert_eq!(
+            output_folder_label(&groups[0].folder, None),
+            "guinea_pig_eda_output / plots"
+        );
+        // The same folder, once the app knows whose thread that UUID is: the worker takes the
+        // UUID's place rather than vanishing with it, so the heading reads as a path of work.
+        assert_eq!(
+            output_folder_label(&groups[0].folder, Some("background worker")),
+            "background worker / guinea_pig_eda_output / plots"
+        );
+        // And a specialist inside the conversation, which has no UUID to replace: the name goes
+        // ahead of the folder rather than nowhere (§201).
+        assert_eq!(
+            output_folder_label(std::path::Path::new("plots"), Some("report writer")),
+            "report writer / plots"
+        );
+    }
+
+    /// A worker with a plan, so the status-bar line can be checked without a window.
+    fn worker_with(status: &str, todos: &[(&str, &str)], activity: Option<&str>) -> protocol::AsyncTask {
+        protocol::AsyncTask {
+            task_id: "t-1".into(),
+            thread_id: "th-1".into(),
+            agent_name: "background_worker".into(),
+            status: status.into(),
+            description: String::new(),
+            pending: None,
+            error: None,
+            activity: activity.map(str::to_owned),
+            todos: todos
+                .iter()
+                .map(|(content, status)| protocol::Todo {
+                    content: (*content).to_string(),
+                    status: (*status).to_string(),
+                })
+                .collect(),
+            owner: String::new(),
+        }
+    }
+
+    /// The one-line glance version of a long run (§209).
+    #[test]
+    fn the_status_line_counts_the_step_being_worked_on() {
+        let plan = [
+            ("Generate the dataset", "completed"),
+            ("Clean the columns", "completed"),
+            ("Build the model", "in_progress"),
+            ("Write the report", "pending"),
+        ];
+
+        // Two done, so the one being worked on is the third — `done + 1`, not `done`. A researcher
+        // reading "step 2 of 4" while the third is running has been told the wrong thing.
+        let task = worker_with("running", &plan, Some("execute"));
+        assert_eq!(
+            summary_for(&[task], &[]),
+            Some("background worker · step 3 of 4 · execute".to_string())
+        );
+
+        // No activity yet: the count still stands on its own.
+        let quiet = worker_with("running", &plan, None);
+        assert_eq!(
+            summary_for(&[quiet], &[]),
+            Some("background worker · step 3 of 4".to_string())
+        );
+
+        // **A finished worker says nothing.** Its row already carries a tick and a button; keeping
+        // it in the status bar would leave a stale count there for the rest of the session.
+        let done = worker_with("success", &plan, None);
+        assert_eq!(summary_for(&[done], &[]), None);
+
+        // Nor does a worker that never wrote a plan — there is no denominator to offer.
+        let planless = worker_with("running", &[], Some("execute"));
+        assert_eq!(summary_for(&[planless], &[]), None);
+    }
+
+    #[test]
+    fn a_conversations_own_plan_is_the_fallback_and_stops_when_it_is_done() {
+        let plan: Vec<protocol::Todo> = [("Search the literature", "completed"), ("Synthesise", "pending")]
+            .iter()
+            .map(|(content, status)| protocol::Todo {
+                content: (*content).to_string(),
+                status: (*status).to_string(),
+            })
+            .collect();
+        assert_eq!(summary_for(&[], &plan), Some("step 2 of 2".to_string()));
+
+        // A worker outranks it: the worker is what runs while nobody is looking.
+        let task = worker_with("running", &[("Do the thing", "in_progress")], Some("ls"));
+        assert_eq!(
+            summary_for(&[task], &plan),
+            Some("background worker · step 1 of 1 · ls".to_string())
+        );
+
+        // Every step done: the line goes away rather than sitting at "step 3 of 2".
+        let finished: Vec<protocol::Todo> = plan
+            .iter()
+            .map(|todo| protocol::Todo {
+                content: todo.content.clone(),
+                status: "completed".into(),
+            })
+            .collect();
+        assert_eq!(summary_for(&[], &finished), None);
+        assert_eq!(summary_for(&[], &[]), None);
+    }
+
+    /// The heading that cut off the very thing §201 added (§208).
+    #[test]
+    fn a_folder_heading_gives_up_its_middle_before_either_end() {
+        // The screenshot's case, verbatim: 35 characters into a 32-character budget.
+        let real = "background worker / outputs / tables";
+        assert_eq!(
+            distinguishing_tail(real, PANEL_HEADING_CHARS),
+            "…round worker / outputs / tables",
+            "what §152's rule did: the producer's name is the part that goes"
+        );
+        assert_eq!(
+            shorten_path_label(real, PANEL_HEADING_CHARS),
+            "background worker / … / tables",
+            "both ends survive, the middle gives way"
+        );
+
+        // Already short enough: untouched, ellipsis and all.
+        assert_eq!(
+            shorten_path_label("background worker", PANEL_HEADING_CHARS),
+            "background worker"
+        );
+        assert_eq!(
+            shorten_path_label("eda / plots", PANEL_HEADING_CHARS),
+            "eda / plots"
+        );
+
+        // Two segments have no middle to drop, so the tail is trimmed and the head — the producer —
+        // is kept whole.
+        let two = "exploratory data analysis / a_very_long_output_folder";
+        let shortened = shorten_path_label(two, PANEL_HEADING_CHARS);
+        assert!(
+            shortened.starts_with("exploratory data analysis / "),
+            "{shortened}"
+        );
+        assert!(shortened.chars().count() <= PANEL_HEADING_CHARS, "{shortened}");
+
+        // A head that cannot fit on its own falls back rather than printing all punctuation.
+        let hopeless = "an_extremely_long_single_component_with_no_separators_at_all";
+        assert_eq!(
+            shorten_path_label(hopeless, 12),
+            distinguishing_tail(hopeless, 12),
+            "one segment keeps §152's rule"
+        );
+        assert!(shorten_path_label(hopeless, 12).chars().count() <= 12);
+
+        // Whatever the budget, the answer fits it. This is the only thing holding the text inside
+        // a fixed-width box, since the label has no ellipsis of its own (§193).
+        for max in 6..48 {
+            let out = shorten_path_label(real, max);
+            assert!(out.chars().count() <= max, "{max}: {out}");
+        }
+    }
+
+    /// One task, one thread, one name — the only attribution available without guessing.
+    #[test]
+    fn files_under_a_worker_thread_are_named_after_the_worker() {
+        let thread = "019fe9f6-9126-7710-a806-35d5e09170a4";
+        let outputs: Vec<workspace::Output> = [
+            PathBuf::from("summary.csv"),
+            PathBuf::from(thread).join("plots/yield.png"),
+        ]
+        .into_iter()
+        .map(|name| workspace::Output {
+            path: name.clone(),
+            name: name.to_string_lossy().into_owned(),
+            kind: workspace::Kind::Other,
+            bytes: 1,
+            modified: std::time::SystemTime::UNIX_EPOCH,
+        })
+        .collect();
+
+        let tasks = vec![protocol::AsyncTask {
+            task_id: "t-1".into(),
+            thread_id: thread.into(),
+            agent_name: "background_worker".into(),
+            status: "success".into(),
+            description: String::new(),
+            pending: None,
+            error: None,
+            activity: None,
+            todos: Vec::new(),
+            owner: String::new(),
+        }];
+
+        let groups = by_producer(&outputs, &tasks, &std::collections::HashMap::new());
+        assert_eq!(
+            groups.len(),
+            2,
+            "conversation and worker are two bodies of work"
+        );
+        assert_eq!(groups[0].0, None, "the conversation's own files lead");
+        assert_eq!(groups[1].0.as_deref(), Some("background worker"));
+
+        assert_eq!(produced_by(None, &tasks), None);
+        assert_eq!(
+            produced_by(Some(thread), &tasks).as_deref(),
+            Some("background worker"),
+        );
+        // A reload that carried no task list still knows a worker wrote these, and says only that.
+        assert_eq!(
+            produced_by(Some(thread), &[]).as_deref(),
+            Some("a background task"),
+        );
+        assert_eq!(images_heading(1, None), "1 image");
+        assert_eq!(
+            images_heading(5, Some("background worker")),
+            "5 images from background worker",
+        );
+    }
+
+    /// The half §199 could not do without the backend writing it down (§201).
+    #[test]
+    fn the_manifest_names_the_specialist_the_folder_cannot() {
+        let thread = "019fe9f6-9126-7710-a806-35d5e09170a4";
+        let outputs: Vec<workspace::Output> = [
+            PathBuf::from("plots").join("yield.png"),
+            PathBuf::from("notes.md"),
+            PathBuf::from(thread).join("worker.csv"),
+        ]
+        .into_iter()
+        .map(|name| workspace::Output {
+            path: name.clone(),
+            name: name.to_string_lossy().into_owned(),
+            kind: workspace::Kind::Other,
+            bytes: 1,
+            modified: std::time::SystemTime::UNIX_EPOCH,
+        })
+        .collect();
+
+        let tasks = vec![protocol::AsyncTask {
+            task_id: "t-1".into(),
+            thread_id: thread.into(),
+            agent_name: "background_worker".into(),
+            status: "success".into(),
+            description: String::new(),
+            pending: None,
+            error: None,
+            activity: None,
+            todos: Vec::new(),
+            owner: String::new(),
+        }];
+
+        // Forward slashes, as the backend writes them — matched against a name Windows spells
+        // with backslashes. The two must not be able to disagree.
+        let mut wrote = std::collections::HashMap::new();
+        wrote.insert(
+            "plots/yield.png".to_string(),
+            "exploratory_data_analysis".to_string(),
+        );
+        // Recorded inside the worker's own run, where the manifest sees *its* coordinator. The
+        // folder outranks it, or `background worker` would be renamed to `coordinator`.
+        wrote.insert(
+            format!("{thread}/worker.csv"),
+            "coordinator".to_string(),
+        );
+
+        let groups = by_producer(&outputs, &tasks, &wrote);
+        let named: Vec<Option<&str>> = groups.iter().map(|(by, _)| by.as_deref()).collect();
+        assert_eq!(
+            named,
+            vec![
+                None,
+                Some("exploratory data analysis"),
+                Some("background worker")
+            ],
+            "the conversation's own files lead, then one group per author"
+        );
+        assert_eq!(groups[0].1.len(), 1, "notes.md has no record and stays unlabelled");
+        assert_eq!(groups[0].1[0].name, "notes.md");
+    }
+
+    /// `n` outputs, alternating image / not, named so a failure says which one moved.
+    fn sample_outputs(kinds: &[workspace::Kind]) -> Vec<workspace::Output> {
+        kinds
+            .iter()
+            .enumerate()
+            .map(|(at, kind)| {
+                let name = format!("file-{at}");
+                workspace::Output {
+                    path: PathBuf::from(&name),
+                    name,
+                    kind: *kind,
+                    bytes: 1,
+                    modified: std::time::SystemTime::UNIX_EPOCH,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn images_and_other_files_are_two_groups_that_keep_their_order() {
+        use workspace::Kind::{Data, Document, Figure};
+        // The researcher's own boundary: "I want to group images and in another group other
+        // files." A folder of seven plots and one summary CSV used to put the CSV in the middle
+        // of the strip you flick through looking for a figure.
+        let outputs = sample_outputs(&[Figure, Data, Figure, Document, Figure]);
+        let (images, others) = split_images(&outputs);
+        assert_eq!(
+            images.iter().map(|o| o.name.as_str()).collect::<Vec<_>>(),
+            ["file-0", "file-2", "file-4"]
+        );
+        assert_eq!(
+            others.iter().map(|o| o.name.as_str()).collect::<Vec<_>>(),
+            ["file-1", "file-3"],
+            "listing order has to survive the split, or the panel reshuffles"
+        );
+
+        // Neither group is invented: a run with no figures gets no image grid at all.
+        let (none, all) = split_images(&sample_outputs(&[Data, Document]));
+        assert!(none.is_empty());
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn the_last_visible_tile_counts_exactly_the_images_it_hides() {
+        // The `+N` arithmetic, which is off-by-one bait: with four tiles and eight images the
+        // fourth tile is *shown*, so it stands in for the other five — not four, and not six.
+        // WhatsApp's own grid is the reference the researcher pointed at, and it reads `+5`.
+        // (tiles drawn, images the last one stands in for)
+        assert_eq!(image_grid_shape(8), (4, 5), "eight images, four tiles");
+        assert_eq!(image_grid_shape(5), (4, 2));
+        // Exactly the cap, and under it: nothing is hidden, so no tile carries a count.
+        assert_eq!(image_grid_shape(4), (4, 0));
+        assert_eq!(image_grid_shape(3), (3, 0));
+        assert_eq!(image_grid_shape(1), (1, 0));
+        assert_eq!(image_grid_shape(0), (0, 0));
+
+        // Every image is either visible or counted, at every size. This is the property the
+        // off-by-one broke: with `total - tiles` the fourth picture was neither.
+        for total in 0..40usize {
+            let (shown, hidden) = image_grid_shape(total);
+            let visible = if hidden > 0 { shown - 1 } else { shown };
+            assert_eq!(visible + hidden, total, "{total} images went unaccounted for");
+        }
+    }
+
+    #[test]
+    fn every_sidebar_menu_offers_what_its_control_is_about() {
+        let conversation = protocol::Conversation {
+            thread_id: "t-1".into(),
+            title: "Kiwi grading".into(),
+            project: Some("Late blight".into()),
+            updated_at: String::new(),
+        };
+        let labels = |menu: &SidebarMenu| -> Vec<String> {
+            menu.rows().into_iter().map(|row| row.label).collect()
+        };
+
+        // The `New` button names both kinds of new thing. Before this, creating a project meant
+        // opening a conversation first and filing it afterwards — a route with no button (§165).
+        assert_eq!(
+            labels(&SidebarMenu::New),
+            ["New conversation", "New project…"]
+        );
+
+        // A row offers exactly what its two hover chips did, as words.
+        assert_eq!(
+            labels(&SidebarMenu::Conversation(conversation.clone())),
+            ["Rename", "Delete"]
+        );
+
+        // A heading names the project it acts on, so a menu floating over the list still says
+        // which one it belongs to.
+        let project = SidebarMenu::Project {
+            name: "Late blight".into(),
+            conversations: vec![conversation],
+        };
+        assert_eq!(
+            labels(&project),
+            ["New conversation in Late blight", "Delete project"]
+        );
+
+        // Exactly one destructive row per menu, and never the first — the row a mis-aimed click
+        // lands on should not be the irreversible one.
+        for menu in [SidebarMenu::New, project] {
+            let rows = menu.rows();
+            assert!(!rows[0].danger, "the first row is destructive");
+            assert!(rows.iter().filter(|row| row.danger).count() <= 1);
+        }
+    }
+
+    #[test]
+    fn an_answer_naming_files_is_read_without_inventing_claims() {
+        // The real answer from the run that prompted this, trimmed. Every one of these is a
+        // claim the panel could not show (§42).
+        let answer = "EDA completed with the exploratory subagent.\n\nArtifacts:\n\
+            · hola_dummy_dataset.csv\n· hola_eda_numeric_summary.csv\n\
+            · outputs/plots/hola_eda_overview.png\n· `hola_eda_findings.txt`\n";
+        assert_eq!(
+            named_files(answer),
+            [
+                "hola_dummy_dataset.csv",
+                "hola_eda_numeric_summary.csv",
+                // The path is stripped: what matters is whether the file exists, not whether the
+                // model recited the directory correctly.
+                "hola_eda_overview.png",
+                "hola_eda_findings.txt",
+            ]
+        );
+    }
+
+    #[test]
+    fn prose_that_merely_looks_like_a_filename_is_not_a_claim() {
+        // **A false positive is worse than the bug.** It puts a correction under a sentence that
+        // was fine, and a warning that cries wolf is one nobody reads the day it is right.
+        for innocent in [
+            "Strongest numeric relationship: annual_income vs monthly_spend = 0.96",
+            "Conversion is rare: 3.1%, so the dataset is imbalanced",
+            "See https://doi.org/10.21223/P3/MO4PSJ for the dataset",
+            "Missingness in annual_income (7.81%), income_band (7.81%)",
+            "I ran it with uv, then re-ran setup-wsl.sh and main.rs compiled",
+            "e.g. the third column",
+            "version 2.7.11",
+        ] {
+            assert!(
+                named_files(innocent).is_empty(),
+                "invented a claim in: {innocent}"
+            );
+        }
+
+        // A number with a real extension is still not a name — `4.png` could be a file, but a
+        // stem of one character in running prose is noise far more often than it is an artifact.
+        assert!(named_files("figure 4.png").is_empty());
+        assert_eq!(named_files("fig4.png"), ["fig4.png"]);
+    }
+
+    #[test]
+    fn a_file_named_twice_is_reported_once_and_punctuation_is_not_part_of_its_name() {
+        assert_eq!(
+            named_files("I wrote summary.csv. Then I updated summary.csv!"),
+            ["summary.csv"]
+        );
+        assert_eq!(named_files("saved to (results.png),"), ["results.png"]);
+        assert_eq!(named_files("**plot.png**"), ["plot.png"]);
+    }
+
+    #[test]
+    fn a_grid_stays_a_block_rather_than_spanning_the_conversation() {
+        // The complaint this exists for: *"the grouping occupies too much space in the
+        // conversation (too wide)."* A grid of `flex_1` tiles is as wide as whatever holds it, so
+        // the width has to come from the tiles. Two fixed tiles plus one gap, and nothing about
+        // the window or the panel enters into it.
+        let width = |tile: f32| tile * GRID_COLUMNS as f32 + GRID_GAP;
+
+        // The panel is roughly 330px inside its padding, so the compact block has to fit that.
+        assert!(width(GRID_TILE_COMPACT) <= 320., "{}", width(GRID_TILE_COMPACT));
+        // And the transcript block is close to the phone gallery it imitates — about 415px in the
+        // screenshot the researcher sent — not the full width of the conversation.
+        let roomy = width(GRID_TILE_ROOMY);
+        assert!((400.0..=440.0).contains(&roomy), "{roomy}");
+
+        // Two columns, four tiles: the 2×2 that makes `+N` land on the bottom-right.
+        assert_eq!(IMAGE_GRID_TILES % GRID_COLUMNS, 0);
+        assert_eq!(IMAGE_GRID_TILES / GRID_COLUMNS, 2, "two rows, not three");
+
+        // A name is shortened to something that actually fits, and never to nothing — §59's bare
+        // `…` is what happens when the layout is asked to do this instead.
+        assert!(name_chars(GRID_TILE_COMPACT) >= 20, "{}", name_chars(GRID_TILE_COMPACT));
+        assert!(name_chars(GRID_TILE_ROOMY) > name_chars(GRID_TILE_COMPACT));
+        assert_eq!(name_chars(0.), 8, "a floor, so a name is never cut to nothing");
+        // The tail is what tells two summaries apart, and the result is exactly as long as the
+        // tile allows — 22 characters for a 148px one, ellipsis included.
+        let shortened = distinguishing_tail(
+            "kiwi_quality_summary_statistics.csv",
+            name_chars(GRID_TILE_COMPACT),
+        );
+        assert_eq!(shortened, "…ummary_statistics.csv");
+        assert_eq!(shortened.chars().count(), name_chars(GRID_TILE_COMPACT));
+        assert!(shortened.ends_with(".csv"), "the extension has to survive");
+    }
+
+    #[test]
+    fn stepping_through_a_preview_wraps_and_never_leaves_the_set() {
+        use workspace::Kind::Figure;
+        let outputs = sample_outputs(&[Figure, Figure, Figure]);
+        let mut preview = Preview::opening(outputs.clone(), 1).expect("three files");
+        assert_eq!(preview.current().name, "file-1");
+
+        preview.step(1);
+        assert_eq!(preview.current().name, "file-2");
+        // Past the end comes back to the start. The counter says which of how many, so wrapping
+        // cannot be mistaken for a dead button — and comparing the first plot of a series with
+        // the last should not mean travelling back through the middle.
+        preview.step(1);
+        assert_eq!(preview.current().name, "file-0");
+        preview.step(-1);
+        assert_eq!(preview.current().name, "file-2");
+
+        // An index beyond the set is clamped rather than panicking: a click can arrive after the
+        // files behind it were moved or deleted, which has happened on this project's own
+        // evidence (§159).
+        let clamped = Preview::opening(outputs, 99).expect("still three files");
+        assert_eq!(clamped.current().name, "file-2");
+
+        // Nothing to show is `None`, not an empty preview that panics on `current()`.
+        assert!(Preview::opening(Vec::new(), 0).is_none());
+
+        // A lone file has nowhere to step, and asking must not move it anywhere.
+        let mut single =
+            Preview::single(sample_outputs(&[Figure]).remove(0)).expect("one file");
+        single.step(1);
+        single.step(-1);
+        assert_eq!(single.current().name, "file-0");
+        assert_eq!(single.items.len(), 1);
+    }
+
+    #[test]
+    fn a_thumbnail_names_the_file_instead_of_its_shared_uuid_prefix() {
+        let relative = PathBuf::from("019fe9f6-9126-7710-a806-35d5e09170a4")
+            .join("guinea_pig_eda_output/plots/health_by_activity_box.png");
+        let output = workspace::Output {
+            path: relative.clone(),
+            name: relative.to_string_lossy().into_owned(),
+            kind: workspace::Kind::Figure,
+            bytes: 1,
+            modified: std::time::SystemTime::UNIX_EPOCH,
+        };
+
+        assert_eq!(output_filename(&output), "health_by_activity_box.png");
+        let long = distinguishing_tail("shared-prefix-but-the-useful-name-is-at-the-end.csv", 24);
+        assert!(long.starts_with('…'), "{long}");
+        assert!(long.ends_with("name-is-at-the-end.csv"), "{long}");
+        assert_eq!(long.chars().count(), 24);
+    }
+
+    #[test]
+    fn dragging_a_gallery_thumb_reaches_every_hidden_file() {
+        // A 200px thumb journey represents 800px of hidden content. The pointer keeps the
+        // same 20px grip inside the thumb, and positions beyond either end clamp instead of
+        // exposing blank space (docs §158).
+        let offset = |pointer| {
+            horizontal_drag_offset(px(pointer), px(100.), px(20.), px(200.), px(800.))
+        };
+        assert_eq!(offset(0.), px(0.));
+        assert_eq!(offset(120.), px(0.));
+        assert_eq!(offset(220.), px(-400.));
+        assert_eq!(offset(400.), px(-800.));
+    }
+
+    #[test]
+    fn a_gallery_thumb_never_grows_wider_than_the_rail_it_sits_in() {
+        // A wide rail: the thumb is proportional, and there is room to drag it.
+        let wide = horizontal_thumb_width(px(400.), px(800.));
+        assert!(wide > px(28.) && wide < px(400.), "{wide:?}");
+
+        // A long rail: proportional would be a few pixels, so the 28px floor applies.
+        assert_eq!(horizontal_thumb_width(px(300.), px(9_000.)), px(28.));
+
+        // A rail narrower than that floor is the case the floor alone gets wrong. The thumb has
+        // to stop at the track width, because `travel = viewport - thumb` going negative paints
+        // it outside the track and leaves it undraggable — a control that reads as broken rather
+        // than as absent.
+        for narrow in [1., 10., 27.9] {
+            let thumb = horizontal_thumb_width(px(narrow), px(500.));
+            assert_eq!(thumb, px(narrow), "a {narrow}px rail");
+            assert!(px(narrow) - thumb >= px(0.), "travel went negative at {narrow}");
+        }
+    }
+
+    #[test]
+    fn a_failed_delete_keeps_the_conversation_visible() {
+        assert!(matches!(
+            resolve_delete(
+                "conversation",
+                Some(Err(anyhow::anyhow!("backend unavailable")))
+            ),
+            DeleteResolution::Keep(message) if message.contains("backend unavailable")
+        ));
+        assert!(matches!(
+            resolve_delete("conversation", None),
+            DeleteResolution::Keep(message) if message.contains("still shown")
+        ));
+        assert!(matches!(
+            resolve_delete(
+                "conversation",
+                Some(Ok(sidecar::DeleteOutcome { files_error: None }))
+            ),
+            DeleteResolution::Remove { files_error: None }
+        ));
+    }
+
+    #[test]
+    fn a_file_cleanup_failure_does_not_resurrect_a_deleted_conversation() {
+        // HTTP succeeded, so the durable conversation is gone. A locked Explorer folder is a
+        // recoverable orphan to report, not grounds to put back a row that can no longer open.
+        assert!(matches!(
+            resolve_delete(
+                "conversation",
+                Some(Ok(sidecar::DeleteOutcome {
+                    files_error: Some("folder is open".into())
+                }))
+            ),
+            DeleteResolution::Remove {
+                files_error: Some(message)
+            } if message == "folder is open"
+        ));
+    }
+
+    #[test]
+    fn deleting_a_project_targets_every_conversation_not_only_a_filtered_row() {
+        let conversations = vec![
+            protocol::Conversation {
+                thread_id: "one".into(),
+                project: Some("Late blight".into()),
+                title: "Visible in search".into(),
+                updated_at: String::new(),
+            },
+            protocol::Conversation {
+                thread_id: "two".into(),
+                project: Some("Late blight".into()),
+                title: "Hidden by search".into(),
+                updated_at: String::new(),
+            },
+        ];
+        let target = DeleteTarget::Project {
+            name: "Late blight".into(),
+            conversations,
+        };
+        assert_eq!(target.thread_ids(), vec!["one", "two"]);
+        assert!(target.contains_thread("two"));
+    }
+
+    #[test]
+    fn deleting_a_projects_last_conversation_ends_the_active_project() {
+        let other = protocol::Conversation {
+            thread_id: "other".into(),
+            project: Some("Yield trials".into()),
+            title: "Other work".into(),
+            updated_at: String::new(),
+        };
+        assert!(project_exists(std::slice::from_ref(&other), "Yield trials"));
+        assert!(
+            !project_exists(std::slice::from_ref(&other), "Late blight"),
+            "an empty project cannot survive as an active selection"
+        );
+    }
+
+    #[test]
+    fn every_ui_icon_is_embedded_rather_than_read_from_beside_the_executable() {
+        // The half a test can actually settle: the bytes are *in* the binary, so a Windows
+        // install with no source-tree-relative assets directory resolves them exactly as
+        // `cargo run` does. `include_bytes!` makes a missing file a build failure, and this
+        // makes a path declared in `ICON_PATHS` but never wired into `load` a test failure.
+        let assets = Assets;
+        assert_eq!(assets.list("icons/").unwrap().len(), ICON_PATHS.len());
+
+        // **Every mark `file_mark` can return is a real, loadable asset.** This is the assertion
+        // worth having: the mapping is a `match` over extensions, and a new arm naming an icon
+        // nobody added would draw nothing at all — the §157 failure again, one layer along. A
+        // count would only have said the number changed.
+        for name in [
+            "a.csv", "b.png", "c.py", "d.ipynb", "e.json", "f.html", "g.md", "h.log", "i.pdf",
+            "j.zip", "k.sqlite", "l.unheard-of", "no-extension",
+        ] {
+            let (icon, _ink) = file_mark(std::path::Path::new(name));
+            assert!(ICON_PATHS.contains(&icon), "{name} draws undeclared {icon}");
+            assert!(assets.load(icon).unwrap().is_some(), "{icon} is not embedded");
+        }
+        for path in ICON_PATHS {
+            let bytes = assets.load(path).unwrap().expect("declared icon is loadable");
+            let source = std::str::from_utf8(&bytes).expect("hand-authored SVG is UTF-8");
+            assert!(source.contains("viewBox=\"0 0 24 24\""), "{path} has no common canvas");
+        }
+        assert!(assets.load("icons/missing.svg").unwrap().is_none());
+
+        // **Not asserted: that they are tintable.** The original test read `currentColor` out of
+        // the file and called that tintable. GPUI never reads it — it rasterises the SVG and
+        // multiplies by `style.text.color`, so whether an icon appears is decided entirely by
+        // the element's own colour and not by anything in these bytes. That assertion passed
+        // just as happily when all four icons rendered nothing at all, which is the state this
+        // PR arrived in. What replaces it is `app_icon` taking `ink` as an argument, so the
+        // compiler refuses a call site that forgets (docs §157).
+    }
 
     #[test]
     fn csv_columns_get_distinct_colours_from_the_live_palette() {
@@ -9942,7 +14539,7 @@ mod tests {
     /// as chosen and Enter did nothing at all (docs §69).
     #[test]
     fn the_row_drawn_as_chosen_is_the_one_enter_runs() {
-        let commands = vec![Command::OpenSettings];
+        let commands = [Command::OpenSettings];
         for stale in [0usize, 1, 8, 999] {
             let clamped = stale.min(commands.len() - 1);
             assert_eq!(
@@ -10328,15 +14925,20 @@ mod tests {
 
     #[test]
     fn bibtex_is_importable_and_invents_nothing() {
-        let entries = bibliography(&[
-            cited(
-                "Smith, J. et al. (2021). Late blight resistance. Plant Pathology 70(4). \
-                 https://doi.org/10.1111/ppa.13400",
-                None,
-            ),
-            cited("CIP Dataverse: Andean potato trials, 2019", None),
-            cited("   ", None),
-        ]);
+        // Every source verified, so the only annotations below are the ones the entries earn.
+        let verified = [references::Origin::Search; 3];
+        let entries = bibliography(
+            &[
+                cited(
+                    "Smith, J. et al. (2021). Late blight resistance. Plant Pathology 70(4). \
+                     https://doi.org/10.1111/ppa.13400",
+                    None,
+                ),
+                cited("CIP Dataverse: Andean potato trials, 2019", None),
+                cited("   ", None),
+            ],
+            &verified,
+        );
 
         // Two entries, not three: a blank source is not a reference.
         assert_eq!(entries.matches("@misc{").count(), 2);
@@ -10355,58 +14957,224 @@ mod tests {
 
         // BibTeX's own syntax cannot come out of a citation and truncate the file. A stray
         // brace ends an entry early and takes every entry after it.
-        let hostile = bibliography(&[cited("A title with {braces} and a \\command", None)]);
+        let hostile = bibliography(
+            &[cited("A title with {braces} and a \\command", None)],
+            &verified,
+        );
         assert_eq!(hostile.matches('{').count(), hostile.matches('}').count());
         assert!(!hostile.contains("{braces}"));
         assert!(hostile.contains("\\\\command"));
 
         // A doubtful reference carries its doubt into the reference manager. Somebody importing
         // forty of these should not have to come back here to find out which two to check.
-        let doubtful = bibliography(&[cited(
-            "Hijmans & Spooner (2001). https://doi.org/10.2307/3558457",
-            Some("https://doi.org/10.2307/3558433"),
-        )]);
+        let doubtful = bibliography(
+            &[cited(
+                "Hijmans & Spooner (2001). https://doi.org/10.2307/3558457",
+                Some("https://doi.org/10.2307/3558433"),
+            )],
+            &verified,
+        );
         assert!(doubtful.contains("url = {https://doi.org/10.2307/3558433}"));
         assert!(doubtful.contains("annote = {unverified:"), "{doubtful}");
 
-        assert!(bibliography(&[]).is_empty(), "nothing to copy is empty");
+        assert!(bibliography(&[], &[]).is_empty(), "nothing to copy is empty");
+
+        // **An unverified reference says so in the file that leaves the app.** The panel can be
+        // re-read; a `.bib` in somebody's Zotero is on its own, and it is the copy that ends up
+        // in a manuscript (docs §185).
+        let recalled = bibliography(
+            &[cited("Barrera et al. (2016). Andean tuber diversity.", None)],
+            &[references::Origin::Unconfirmed],
+        );
+        assert!(recalled.contains("annote = {unverified:"), "{recalled}");
+        assert!(recalled.contains("not from a search"), "{recalled}");
+
+        // A reference that came out of a search carries no such note — the whole value of the
+        // mark is that it appears on the ones that need a person.
+        let searched = bibliography(
+            &[cited("Barrera et al. (2016). Andean tuber diversity.", None)],
+            &[references::Origin::Search],
+        );
+        assert!(!searched.contains("annote ="), "{searched}");
+
+        // An origin list shorter than the sources must not annotate the wrong entry, or say
+        // nothing about one it has no answer for. `get` returning `None` means "no claim".
+        let ragged = bibliography(
+            &[
+                cited("First, unverified.", None),
+                cited("Second, no origin recorded.", None),
+            ],
+            &[references::Origin::Unconfirmed],
+        );
+        assert_eq!(ragged.matches("annote =").count(), 1, "{ragged}");
+        let second = ragged.split("@misc{minime2,").nth(1).expect("the entry");
+        assert!(!second.contains("annote ="), "{second}");
     }
 
     #[test]
-    fn a_dropped_file_becomes_a_question_the_backend_can_act_on() {
+    fn a_dropped_file_reaches_the_composer_spelled_the_way_the_agent_opens_it() {
         // The path has to be spelled the way the *agent* would open it. On Windows the
-        // agent lives inside WSL, so a prompt naming `C:\…` would send it looking for a
+        // agent lives inside WSL, so a composer naming `C:\…` would send it looking for a
         // file that does not exist there — and the researcher would have no idea why.
         let _env = backend::env_lock::hold();
-        let mut config = backend::BackendConfig::default();
-        config.wsl = Some(backend::WslTarget {
-            distro: None,
-            dir: "~/Mini-Me".into(),
-        });
+        let config = backend::BackendConfig {
+            wsl: Some(backend::WslTarget {
+                distro: None,
+                dir: "~/Mini-Me".into(),
+            }),
+            ..Default::default()
+        };
         let translated =
             config.path_for_backend(std::path::Path::new(r"C:\Users\LENOVO\Documents\yield.csv"));
         assert_eq!(translated, "/mnt/c/Users/LENOVO/Documents/yield.csv");
 
-        let prompt = prompt_for_dropped(&[translated.clone()], &[false]);
-        assert!(prompt.contains(&translated), "{prompt}");
-        assert!(!prompt.contains('\\'), "no Windows path survives: {prompt}");
+        let prepared = compose_with_dropped("", std::slice::from_ref(&translated));
+        assert!(prepared.contains(&translated), "{prepared}");
+        assert!(!prepared.contains('\\'), "no Windows path survives: {prepared}");
 
-        // A directory is a different request from a file.
-        let folder = prompt_for_dropped(&["/mnt/c/readings".into()], &[true]);
-        assert!(folder.contains("files in"), "{folder}");
+        assert!(compose_with_dropped("", &[]).is_empty());
+    }
 
-        // Several files are one question about all of them, not several questions.
-        let many = prompt_for_dropped(
-            &["/mnt/c/a.csv".into(), "/mnt/c/b.csv".into()],
-            &[false, false],
-        );
+    #[test]
+    fn adding_a_file_writes_the_path_and_never_a_question() {
+        // §28 filled the composer with "Analyse the data in …. Start by describing what it
+        // contains." — a guess about the research, written by the participant who has not
+        // seen the data. Asked to stop: *"let's avoid that so the user can have flexibility
+        // in his query."* The path is the part the app knows; the question is theirs.
+        let alone = compose_with_dropped("", &["/mnt/c/yield.csv".into()]);
+        assert_eq!(alone, "/mnt/c/yield.csv\n\n");
         assert!(
-            many.contains("/mnt/c/a.csv") && many.contains("/mnt/c/b.csv"),
-            "{many}"
+            !alone.to_ascii_lowercase().contains("analyse"),
+            "no question is invented: {alone}"
         );
-        assert_eq!(many.matches("- ").count(), 2, "{many}");
+        // The trailing blank line is load-bearing. `set_text` leaves the caret at the end,
+        // so without it the first character typed joins onto the filename.
+        assert!(alone.ends_with("\n\n"), "somewhere to type: {alone:?}");
 
-        assert!(prompt_for_dropped(&[], &[]).is_empty());
+        // The sequence a person actually performs: decide what to ask, type it, *then* go
+        // and fetch the file. §28 called `set_text` unconditionally, so the last step threw
+        // away the first — silently, because the composer just held different text.
+        let typed = "How does yield vary with altitude?";
+        let both = compose_with_dropped(typed, &["/mnt/c/yield.csv".into()]);
+        assert_eq!(both, format!("{typed}\n\n/mnt/c/yield.csv"));
+
+        // Several land on their own lines under one blank line, not one blank line each.
+        let many = compose_with_dropped(typed, &["/mnt/c/a.csv".into(), "/mnt/c/b.csv".into()]);
+        assert_eq!(many, format!("{typed}\n\n/mnt/c/a.csv\n/mnt/c/b.csv"));
+
+        // Whitespace-only counts as empty — a stray Enter in a fresh composer must not make
+        // the path look like an answer to something.
+        assert_eq!(
+            compose_with_dropped("   \n ", &["/mnt/c/yield.csv".into()]),
+            "/mnt/c/yield.csv\n\n"
+        );
+
+        // And trailing whitespace after real text must not become a blank line of its own.
+        let padded = compose_with_dropped("Look at this:\n\n", &["/mnt/c/a.csv".into()]);
+        assert_eq!(padded, "Look at this:\n\n/mnt/c/a.csv");
+
+        // A folder is not a special case any more: with no sentence to write about it, it
+        // is a path like any other and what to do with it is the researcher's to say.
+        assert_eq!(
+            compose_with_dropped("", &["/mnt/c/readings".into()]),
+            "/mnt/c/readings\n\n"
+        );
+    }
+
+    #[test]
+    fn removing_a_theme_rewrites_the_name_that_survives_pressing_escape() {
+        // The failure this guards: remove the palette you are using, press Esc, and the
+        // dismiss path reloads `settings.toml` on the stated grounds that "an unsaved palette
+        // was a look, not a change". Deleting a file is not a look — so the dropdown came back
+        // reading a theme whose JSON was gone, over a window painted in the default, and no
+        // restart cleared it.
+        let survivors: Vec<(String, theme::Theme)> = theme::THEMES
+            .iter()
+            .map(|(name, palette)| ((*name).to_string(), *palette))
+            .collect();
+
+        // A name the removal took with it has to be rewritten, wherever it was recorded.
+        assert_eq!(
+            theme_after_removal("Catppuccin Mocha", &survivors).as_deref(),
+            Some(theme::DEFAULT_NAME)
+        );
+
+        // A built-in is never rewritten — including when the deleted file was only *overriding*
+        // one, which is the case where the name survives and the palette underneath changes.
+        assert_eq!(theme_after_removal(theme::DEFAULT_NAME, &survivors), None);
+        assert_eq!(theme_after_removal("Bench", &survivors), None);
+        // Matched the way the picker matches, or a theme saved in another case is rewritten
+        // out from under someone who never removed it.
+        assert_eq!(theme_after_removal("bench", &survivors), None);
+
+        // The replacement must itself be loadable, or this trades one dead name for another.
+        let replacement = theme_after_removal("gone", &survivors).expect("a replacement");
+        assert!(
+            survivors
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case(&replacement)),
+            "{replacement} is not a theme that exists"
+        );
+    }
+
+    #[test]
+    fn a_specialist_pointed_at_another_provider_says_whose_account_pays() {
+        let openai = settings::provider("openai").expect("a shipped provider");
+        let custom = settings::provider("custom").expect("a shipped provider");
+
+        // The exact row that cost an afternoon: coordinator on `custom` (which is how OpenRouter
+        // is reached), specialist offered `gpt-4.1` from the `openai` list, and a key stored for
+        // OpenAI — so the old rule said nothing at all, and the turn ran on the wrong account.
+        let note = specialist_note(openai, "custom", true).expect("annotated");
+        assert!(note.contains("OpenAI"), "{note}");
+        assert!(note.contains("billed separately"), "{note}");
+
+        // Still said when there is no key, and the two messages are different: one is a thing to
+        // fix before it works, the other is a thing to know before it costs.
+        let unkeyed = specialist_note(openai, "custom", false).expect("annotated");
+        assert!(unkeyed.contains("no key stored"), "{unkeyed}");
+        assert_ne!(note, unkeyed);
+
+        // The provider already running the conversation needs no note — its models are billed
+        // exactly where every other turn is, and a line on every row is noise.
+        assert_eq!(specialist_note(custom, "custom", true), None);
+        assert_eq!(specialist_note(openai, "openai", true), None);
+        // Including when that provider has no key: the coordinator's own missing key is
+        // §186's problem, refused at the turn, and repeating it on twenty rows helps nobody.
+        assert_eq!(specialist_note(custom, "custom", false), None);
+    }
+
+    #[test]
+    fn a_file_on_a_network_share_is_refused_before_the_turn_rather_than_during_it() {
+        // `wsl_path` has no drive letter to work with here, so it passes the path through
+        // and the agent receives `//nas/shared/yield.csv` — which exists in no Linux
+        // filesystem. Left alone, that surfaces a minute into a turn as `FileNotFoundError`,
+        // naming neither the share nor the reason.
+        let _env = backend::env_lock::hold();
+        let wsl = backend::BackendConfig {
+            wsl: Some(backend::WslTarget {
+                distro: None,
+                dir: "~/Mini-Me".into(),
+            }),
+            ..Default::default()
+        };
+        let share = std::path::Path::new(r"\\nas\shared\yield.csv");
+        assert!(!wsl.can_open(share));
+        assert!(wsl.can_open(std::path::Path::new(r"C:\Users\LENOVO\yield.csv")));
+        // A mapped drive letter is fine: WSL mounts those under /mnt like any other.
+        assert!(wsl.can_open(std::path::Path::new(r"Z:\shared\yield.csv")));
+
+        // Only WSL can fail this. A backend on this host opens exactly the path the
+        // researcher's own file manager handed us, network share or not.
+        // Windows deliberately defaults the Python backend to WSL, so `Default` is not a host
+        // fixture on the platform this test is meant to protect. Name the boundary explicitly;
+        // otherwise the assertion depends on which OS runs the suite (§179).
+        let host = backend::BackendConfig {
+            wsl: None,
+            ..Default::default()
+        };
+        assert!(host.can_open(share));
+        assert!(host.can_open(std::path::Path::new("/home/p/yield.csv")));
     }
 
     #[test]
@@ -10549,12 +15317,96 @@ fn set_secret_from_args(args: &[String]) -> Option<i32> {
     }
 }
 
+/// What this build is, in one line a researcher can paste into a message.
+///
+/// `CARGO_PKG_VERSION` alone would not distinguish two builds a fortnight apart from the same
+/// version, and that fortnight is where this project lives. The commit is stamped at build time by
+/// the release workflow; a local `cargo run` has none, and says so rather than implying a release.
+fn build_stamp() -> String {
+    match option_env!("MINIME_BUILD_COMMIT") {
+        Some(commit) if !commit.trim().is_empty() => {
+            format!("Mini-Me Desktop {} ({})", env!("CARGO_PKG_VERSION"), commit.trim())
+        }
+        _ => format!(
+            "Mini-Me Desktop {} (built from source)",
+            env!("CARGO_PKG_VERSION")
+        ),
+    }
+}
+
+/// Where the app writes its own log, beside the one it keeps for the backend.
+///
+/// **Because for six months it kept none.** `backend.rs` has always written the sidecar's output to
+/// a file, and the app's own tracing went to stderr only — which for a windowed program means a
+/// console nobody kept. Twice in one session a diagnostic was added, the researcher was asked to
+/// grep for it, and the answer was empty because the console output had never been captured; the
+/// second time that empty answer was mistaken for evidence and sent a diagnosis down the wrong path
+/// (§206). A log a person has to remember to record is a log that is not there when it matters.
+pub fn app_log_path() -> std::path::PathBuf {
+    std::env::temp_dir().join("mini-me-desktop-app.log")
+}
+
+/// A log destination that is the console *and* a file.
+///
+/// Both, not either: the console is what a developer watches live, and the file is what survives to
+/// be read afterwards. Cloneable and shared behind a mutex because `MakeWriter` hands out a fresh
+/// writer per event.
+#[derive(Clone)]
+struct Tee(Option<std::sync::Arc<std::sync::Mutex<std::fs::File>>>);
+
+impl std::io::Write for Tee {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // The console first and its result is the one returned: a full disk or a locked file must
+        // never cost the line someone is watching arrive.
+        let written = std::io::stderr().write(buf)?;
+        if let Some(file) = &self.0 {
+            if let Ok(mut file) = file.lock() {
+                let _ = file.write_all(buf);
+            }
+        }
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let _ = std::io::stderr().flush();
+        if let Some(file) = &self.0 {
+            if let Ok(mut file) = file.lock() {
+                let _ = file.flush();
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Tee {
+    type Writer = Tee;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
 fn main() {
+    // **Truncated, not appended.** The whole point is that a researcher told to read this file is
+    // reading *this* launch. An appended log would have answered the question we actually asked
+    // with lines from a run three days earlier, which is the failure one step removed.
+    let log = std::fs::File::create(app_log_path()).ok();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
+        // No escape codes: the console is still perfectly readable without them, and the file is
+        // meant to be grepped and pasted.
+        .with_ansi(false)
+        .with_writer(Tee(log.map(|file| {
+            std::sync::Arc::new(std::sync::Mutex::new(file))
+        })))
         .init();
+    // First two lines, and they name what everything after them is about: which build this is, and
+    // where the record of it will be. The backend's own version has been logged since §115; the
+    // app's never was (§213).
+    tracing::info!(build = %build_stamp(), "starting");
+    tracing::info!(path = %app_log_path().display(), "app log");
 
     // The researcher's palette, before the first frame — so the window never opens in
     // one theme and repaints into another.
@@ -10687,7 +15539,7 @@ fn main() {
         return;
     }
 
-    Application::new().run(move |cx: &mut App| {
+    Application::new().with_assets(Assets).run(move |cx: &mut App| {
         // Without these the composer receives no editing keys at all — GPUI
         // dispatches actions, and nothing binds to them by default.
         cx.bind_keys(composer::key_bindings());

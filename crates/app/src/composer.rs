@@ -26,9 +26,9 @@ use std::ops::Range;
 use gpui::{
     actions, div, fill, point, prelude::*, px, relative, rgb, rgba, App, Bounds, ClipboardItem,
     Context, CursorStyle, ElementId, ElementInputHandler, Entity, EntityInputHandler, FocusHandle,
-    Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, SharedString, Style, TextRun,
-    UTF16Selection, UnderlineStyle, Window,
+    Focusable, GlobalElementId, KeyBinding, LayoutId, LineFragment, LineWrapper, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine,
+    SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -41,11 +41,17 @@ actions!(
         Delete,
         Left,
         Right,
+        Up,
+        Down,
         SelectLeft,
         SelectRight,
+        SelectUp,
+        SelectDown,
         SelectAll,
         Home,
         End,
+        DocumentHome,
+        DocumentEnd,
         ShowCharacterPalette,
         Paste,
         Cut,
@@ -59,15 +65,40 @@ actions!(
 /// `enter` and friends only apply while the field is focused.
 pub fn key_bindings() -> Vec<KeyBinding> {
     let ctx = Some("Composer");
+    // The extra identifier a multi-row field adds to its own key context — see `set_multiline`.
+    let rows = Some("Multiline");
     let mut bindings = vec![
         KeyBinding::new("backspace", Backspace, ctx),
         KeyBinding::new("delete", Delete, ctx),
         KeyBinding::new("left", Left, ctx),
         KeyBinding::new("right", Right, ctx),
+        // **Up and down were never bound**, which did not matter while the field was one row per
+        // typed newline and mattered the moment §200 made a long prompt several rows. With no
+        // vertical motion and a `Home` that jumped to the start of the whole text, a researcher
+        // eight rows into a paragraph had no way back to row three — reported as *"I don't have a
+        // scroll bar in the chatbox so I cannot go to the beginning"* (§204).
+        //
+        // **Scoped to `Multiline`, not to `Composer`.** The command palette binds `up`/`down` to
+        // move its highlighted command, and its query field is a `Composer` nested inside the
+        // palette — so a `Composer`-scoped binding sits *deeper* in the dispatch tree and wins,
+        // silently taking the palette's arrow keys away. Only a field that can have more than one
+        // row asks for these, and the palette's cannot.
+        KeyBinding::new("up", Up, rows),
+        KeyBinding::new("down", Down, rows),
         KeyBinding::new("shift-left", SelectLeft, ctx),
         KeyBinding::new("shift-right", SelectRight, ctx),
+        KeyBinding::new("shift-up", SelectUp, rows),
+        KeyBinding::new("shift-down", SelectDown, rows),
+        // **Home and End are the row's, not the document's.** They were the document's, which is
+        // what every other multi-line field reserves `ctrl-home` for — and it is why the caret
+        // appeared to jump rows when `End` was pressed on a wrapped line: it was doing exactly what
+        // it was told, at the far end of the text.
         KeyBinding::new("home", Home, ctx),
         KeyBinding::new("end", End, ctx),
+        KeyBinding::new("ctrl-home", DocumentHome, ctx),
+        KeyBinding::new("ctrl-end", DocumentEnd, ctx),
+        KeyBinding::new("cmd-up", DocumentHome, ctx),
+        KeyBinding::new("cmd-down", DocumentEnd, ctx),
         KeyBinding::new("enter", Submit, ctx),
         // Shift-Enter for a line break. Enter still sends, because sending is what a
         // chat field is for and rebinding it would surprise everyone — but a prompt
@@ -99,17 +130,30 @@ pub struct Composer {
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
-    /// Last shaped line + bounds, cached by the element so mouse hit-testing
-    /// and IME rect queries can map coordinates back to string offsets.
-    /// One shaped line per `\n`-separated line, with the byte offset it starts at.
+    /// One shaped line per *visual* row, with the byte range it covers — cached by the element so
+    /// mouse hit-testing and IME rect queries can map coordinates back to string offsets.
     ///
-    /// Was a single `ShapedLine`. A prompt carrying a script or a list has to be typeable,
-    /// and that means the field has to be genuinely multi-line — caret, selection and
-    /// hit-testing included, not just a `\n` the renderer swallows (docs §55).
-    last_layout: Vec<(usize, ShapedLine)>,
+    /// Was a single `ShapedLine`. A prompt carrying a script or a list has to be typeable, and that
+    /// means the field has to be genuinely multi-line — caret, selection and hit-testing included,
+    /// not just a `\n` the renderer swallows (docs §55).
+    ///
+    /// **The byte range, not just the start.** A row's end used to be derived as
+    /// `start + ShapedLine::len()`, which put one unverifiable quantity inside every screen ↔
+    /// offset conversion: the rule that decides whether a break was a wrap or a typed newline
+    /// compares a row's end against the next row's start, and it silently gave the wrong answer on
+    /// a real window while being provably right on the ranges (§203). The ranges are known
+    /// exactly, from the wrapping itself, so they are carried rather than reconstructed.
+    last_layout: Vec<(Range<usize>, ShapedLine)>,
     last_bounds: Option<Bounds<Pixels>>,
     /// The line height the last frame drew with, so mouse rows can be worked out.
     line_height: Pixels,
+    /// The topmost visual row actually painted.
+    ///
+    /// The field stops growing at [`MAX_VISIBLE_LINES`], so past that it has to *move* instead —
+    /// otherwise the caret walks off the bottom and the researcher is typing into a box that
+    /// shows them the beginning of what they wrote. Every screen ↔ offset conversion has to
+    /// subtract it, which is why it is remembered here rather than recomputed per query.
+    first_row: usize,
     is_selecting: bool,
     /// Whether Enter on an *empty* field still counts as a submission. False for the
     /// chat composer (an empty prompt is nothing to send); true for the command
@@ -120,6 +164,14 @@ pub struct Composer {
     masked: bool,
     /// While a turn is in flight the field is read-only.
     disabled: bool,
+    /// Which side of a soft wrap the caret is showing on — see [`Affinity`].
+    affinity: Affinity,
+    /// Whether this field is one a person writes *paragraphs* in.
+    ///
+    /// Adds `Multiline` to the key context, which is what the vertical-motion bindings are scoped
+    /// to. Off by default so a filter, a rename or the command palette's query keeps every key it
+    /// has today — the palette's own `up`/`down` are the ones at stake (see [`key_bindings`]).
+    multiline: bool,
 }
 
 impl gpui::EventEmitter<ComposerEvent> for Composer {}
@@ -136,11 +188,19 @@ impl Composer {
             last_layout: Vec::new(),
             last_bounds: None,
             line_height: px(20.),
+            first_row: 0,
             is_selecting: false,
             submits_empty: false,
             masked: false,
             disabled: false,
+            multiline: false,
+            affinity: Affinity::Downstream,
         }
+    }
+
+    /// Let arrow-up and arrow-down walk the rows. For fields that hold more than one.
+    pub fn set_multiline(&mut self, multiline: bool) {
+        self.multiline = multiline;
     }
 
     /// The current text. Read by the command palette to filter on every keystroke.
@@ -298,11 +358,100 @@ impl Composer {
         self.replace_text_in_range(None, &text, window, cx);
     }
 
+    /// The byte range of the visual row the caret is on, or the whole text if nothing is laid out.
+    ///
+    /// Rows come from the last painted frame, which is the only place the *visual* rows exist — a
+    /// wrapped line has no `\n` to find it by.
+    fn row_bounds(&self) -> Range<usize> {
+        if self.last_layout.is_empty() {
+            return 0..self.content.len();
+        }
+        let ranges: Vec<Range<usize>> = self
+            .last_layout
+            .iter()
+            .map(|(range, _)| range.clone())
+            .collect();
+        let row = caret_row(&ranges, self.cursor_offset(), self.affinity);
+        ranges.get(row).cloned().unwrap_or(0..self.content.len())
+    }
+
+    /// Where the caret lands after moving `rows` visual rows, keeping the column it was in.
+    ///
+    /// The x it was at, resolved against the target row's *own* shaping — which is what keeps the
+    /// caret under itself through rows of different lengths, rather than under the same byte. At the
+    /// top or the bottom it goes to the start or the end of the text, as every editor does.
+    fn offset_after_rows(&self, rows: isize) -> usize {
+        let cursor = self.cursor_offset();
+        if self.last_layout.is_empty() {
+            return cursor;
+        }
+        let ranges: Vec<Range<usize>> = self
+            .last_layout
+            .iter()
+            .map(|(range, _)| range.clone())
+            .collect();
+        let row = caret_row(&ranges, cursor, self.affinity);
+        let last = ranges.len().saturating_sub(1);
+        let target = (row as isize + rows).clamp(0, last as isize) as usize;
+        if target == row {
+            return if rows < 0 { 0 } else { self.content.len() };
+        }
+        let x = self.last_layout[row]
+            .1
+            .x_for_index(cursor.saturating_sub(ranges[row].start));
+        let (range, line) = &self.last_layout[target];
+        range.start + line.closest_index_for_x(x)
+    }
+
+    fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to_row(-1, cx);
+    }
+
+    fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to_row(1, cx);
+    }
+
+    /// Step the caret `rows` rows and keep it *on the row it was aimed at*.
+    ///
+    /// Landing exactly on a row's end offset is common when the row above is longer, and drawing
+    /// that downstream would put the caret a row past where the arrow key was pointing.
+    fn move_to_row(&mut self, rows: isize, cx: &mut Context<Self>) {
+        let target = self.offset_after_rows(rows);
+        let lands_on_a_row_end = self
+            .last_layout
+            .iter()
+            .any(|(range, _)| range.end == target && range.start != target);
+        self.move_to(target, cx);
+        if lands_on_a_row_end {
+            self.affinity = Affinity::Upstream;
+        }
+    }
+
+    fn select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.offset_after_rows(-1), cx);
+    }
+
+    fn select_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.offset_after_rows(1), cx);
+    }
+
     fn home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
-        self.move_to(0, cx);
+        self.move_to(self.row_bounds().start, cx);
     }
 
     fn end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(self.row_bounds().end, cx);
+        // **The whole reason affinity exists.** A row's end offset is also the next row's start, so
+        // without this `End` walked the caret to the beginning of the row below — reported from the
+        // first row of a wrapped prompt, where it looked like a jump to the last line (§205).
+        self.affinity = Affinity::Upstream;
+    }
+
+    fn document_home(&mut self, _: &DocumentHome, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(0, cx);
+    }
+
+    fn document_end(&mut self, _: &DocumentEnd, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(self.content.len(), cx);
     }
 
@@ -374,6 +523,10 @@ impl Composer {
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.selected_range = offset..offset;
+        // Reset here rather than in each caller, so a new affinity has to be *asked* for and no
+        // future cursor move can inherit a stale one. `end` and vertical motion set it back
+        // immediately after.
+        self.affinity = Affinity::Downstream;
         cx.notify()
     }
 
@@ -401,29 +554,28 @@ impl Composer {
         if position.y > bounds.bottom() {
             return self.content.len();
         }
-        // Which visual line the pointer is on, then where along it.
-        let row = ((position.y - bounds.top()) / self.line_height).floor() as usize;
+        // Which visual line the pointer is on, then where along it. Offset by the scroll, or a
+        // click in a field showing rows 12–19 would land in rows 0–7.
+        let row = self.first_row
+            + ((position.y - bounds.top()) / self.line_height).floor() as usize;
         let row = row.min(self.last_layout.len().saturating_sub(1));
-        let (start, line) = &self.last_layout[row];
-        start + line.closest_index_for_x(position.x - bounds.left())
+        let (range, line) = &self.last_layout[row];
+        range.start + line.closest_index_for_x(position.x - bounds.left())
     }
 
-    /// Where a byte offset sits on screen, as (line index, x within the line).
+    /// Where a byte offset sits on screen, as (row, x within that row).
     fn position_for_offset(&self, offset: usize) -> Option<(usize, Pixels)> {
-        for (row, (start, line)) in self.last_layout.iter().enumerate() {
-            let end = start + line.len();
-            // `<=` so the caret at the very end of a line lands on that line rather
-            // than falling through to the next one.
-            if offset <= end {
-                return Some((row, line.x_for_index(offset.saturating_sub(*start))));
-            }
+        if self.last_layout.is_empty() {
+            return None;
         }
-        self.last_layout.last().map(|(start, line)| {
-            (
-                self.last_layout.len() - 1,
-                line.x_for_index(offset.saturating_sub(*start)),
-            )
-        })
+        let rows: Vec<Range<usize>> = self
+            .last_layout
+            .iter()
+            .map(|(range, _)| range.clone())
+            .collect();
+        let row = caret_row(&rows, offset, self.affinity);
+        let (range, line) = self.last_layout.get(row)?;
+        Some((row, line.x_for_index(offset.saturating_sub(range.start))))
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -597,7 +749,7 @@ impl EntityInputHandler for Composer {
         let (end_row, end_x) = self.position_for_offset(range.end)?;
         // The IME panel wants one rectangle; for a marked range spanning lines the
         // sensible answer is the first line's, which is where the caret is.
-        let top = bounds.top() + self.line_height * start_row as f32;
+        let top = bounds.top() + self.line_height * (start_row as f32 - self.first_row as f32);
         let bottom = top + self.line_height;
         let end_x = if end_row == start_row { end_x } else { start_x };
         Some(Bounds::from_corners(
@@ -625,11 +777,36 @@ struct ComposerElement {
 }
 
 struct PrepaintState {
-    lines: Vec<(usize, ShapedLine)>,
+    /// Each row's byte range and its shaped line — see [`Composer::last_layout`].
+    lines: Vec<(Range<usize>, ShapedLine)>,
     cursor: Option<PaintQuad>,
     /// One rectangle per line a selection covers — a selection spanning three lines is
     /// three quads, not one box swallowing the text between them.
     selection: Vec<PaintQuad>,
+    /// The row drawn at the top of the box — see [`Composer::first_row`].
+    first_row: usize,
+}
+
+/// Room kept clear at the right edge, so the caret has somewhere to be.
+///
+/// **The caret is painted after the last glyph.** A row wrapped at exactly the box width therefore
+/// leaves it nowhere to go: it lands on the border, a couple of pixels outside the text, which
+/// reads as the text having run off the side — *"the bar is beyond the text"* (§202). Wrapping one
+/// character earlier costs nothing and keeps the thing you are typing with inside the thing you
+/// are typing in.
+const CARET_ROOM: Pixels = px(4.);
+
+/// The width text may occupy inside a box this wide, or `None` if there is no room to speak of.
+///
+/// Shared by the height calculation and the shaping, because a wrap width they disagreed about is
+/// a box whose height is measured for one layout and painted with another.
+fn wrappable(width: Pixels) -> Option<Pixels> {
+    let usable = width - CARET_ROOM;
+    if usable > px(0.) {
+        Some(usable)
+    } else {
+        None
+    }
 }
 
 /// How tall the field is allowed to grow before it simply stops.
@@ -637,6 +814,124 @@ struct PrepaintState {
 /// A pasted script should make the composer bigger, not eat the transcript. Eight lines is
 /// enough to see a short command in full and still leave the conversation on screen.
 const MAX_VISIBLE_LINES: usize = 8;
+
+/// The byte range of every **visual** row the text occupies at a given width.
+///
+/// **A line the researcher did not break still has to break.** §55 made the field multi-line by
+/// splitting on `\n` and shaping one line per segment, with no wrap width — so a long paragraph
+/// typed without pressing shift-enter was one row, shaped at its natural width and clipped at the
+/// field's right edge. The text and the caret both went out the side, and the box stayed one line
+/// tall while it happened: *"when I write a long text the box doesn't increase in height, which
+/// causes I cannot see what I'm typing"* (docs §200). Nobody writing a research question types
+/// their own line breaks, so the only line that mattered was the one case this never handled.
+///
+/// Wrapping is done in the **string** domain and each row is then shaped on its own, which keeps
+/// every existing mechanism — caret `x_for_index`, per-row hit testing, one selection quad per
+/// row — working unchanged on a longer list. `shape_text` would have returned wrapped lines with
+/// their own coordinate space and asked all four of those to be rewritten at once.
+///
+/// `breaks` is asked, per hard line, for the offsets **within that line** where a new row starts;
+/// an empty answer means the line does not wrap. Passed in rather than measured here so the part
+/// that can be wrong on its own — turning break points into ranges over the whole string — is
+/// testable without a window, and so the first frame (which has no width yet) can simply say
+/// "nowhere".
+fn row_ranges(text: &str, mut breaks: impl FnMut(&str) -> Vec<usize>) -> Vec<Range<usize>> {
+    let mut rows: Vec<Range<usize>> = Vec::new();
+    let mut offset = 0usize;
+    // Hard breaks first: they are the researcher's own, and the wrapper skips `\n` entirely.
+    for segment in text.split('\n') {
+        let end = offset + segment.len();
+        let mut start = offset;
+        for at in breaks(segment) {
+            let at = offset + at;
+            // Bounded on both sides: a boundary at or before where this row began would make an
+            // empty range, and one at the very end would give the field a blank final row it
+            // never earned.
+            if at > start && at < end {
+                rows.push(start..at);
+                start = at;
+            }
+        }
+        rows.push(start..end);
+        // +1 for the newline itself, so offsets keep matching the real string.
+        offset = end + 1;
+    }
+    rows
+}
+
+/// Ask the text system where a line has to break, at a known width.
+///
+/// `None` — or a width of zero — means "don't wrap", which is the first frame's answer: the width
+/// comes from the previous frame's bounds and there isn't one yet.
+fn wrap_at<'a>(
+    wrapper: &'a mut LineWrapper,
+    wrap_width: Option<Pixels>,
+) -> impl FnMut(&str) -> Vec<usize> + 'a {
+    move |segment: &str| match wrap_width {
+        Some(width) if width > px(0.) => {
+            // Bound to a `let`: `wrap_line` borrows the fragments for as long as the iterator
+            // lives, so a temporary built in the call expression would not outlive the collect.
+            let fragments = [LineFragment::text(segment)];
+            wrapper
+                .wrap_line(&fragments, width)
+                .map(|boundary| boundary.ix)
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Which visual row a caret at `target` belongs on.
+///
+/// **The rule that decides it is the gap between two ranges, and nothing else.** At a soft wrap,
+/// row N's end and row N+1's start are the *same* byte offset — no character was consumed to make
+/// the break. A typed newline consumes one, so the two differ. That single comparison is what tells
+/// the cases apart, and they want opposite answers: at a wrap the caret goes with the character it
+/// precedes, on the row below; at a typed break it stays on the row above, where the key was
+/// pressed.
+///
+/// `affinity` breaks the tie the shared offset creates — see [`Affinity`].
+///
+/// Taking ranges rather than shaped lines is the point. The first version derived a row's end as
+/// `start + ShapedLine::len()` inside the element, which made the comparison depend on a quantity
+/// this code cannot see — and it drew the caret at the right-hand end of the upper row on a real
+/// window while being provably right on paper (§203). Ranges are what the wrapping produced; they
+/// are exact, and the rule over them is testable without a window.
+fn caret_row(rows: &[Range<usize>], target: usize, affinity: Affinity) -> usize {
+    for (row, range) in rows.iter().enumerate() {
+        if target > range.end {
+            continue;
+        }
+        if target == range.end
+            && affinity == Affinity::Downstream
+            && rows
+                .get(row + 1)
+                .is_some_and(|next| next.start == range.end)
+        {
+            return row + 1;
+        }
+        return row;
+    }
+    rows.len().saturating_sub(1)
+}
+
+/// Which of a soft wrap's two screen positions the caret is showing at.
+///
+/// **A wrap boundary is one byte offset with two right answers.** It is the end of the upper row and
+/// the start of the lower one, and which the caret should sit at depends on how it got there.
+/// Pressing `End` means "the end of *this* row" and wants the upper; clicking the lower row's first
+/// character, or typing into the boundary, wants the lower. Editors call this affinity.
+///
+/// Without it, `End` pressed at the start of a wrapped paragraph moved the caret to the *start of
+/// the next row*: `End` correctly went to row 0's end offset, and that offset was then drawn
+/// downstream, one row down (§205). Both halves were doing what they were told.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Affinity {
+    /// The start of the lower row. The default, because it is where an inserted character lands.
+    Downstream,
+    /// The end of the upper row. Where `End` and vertical motion leave it.
+    Upstream,
+}
 
 /// Slice global text runs down to one line's byte range.
 ///
@@ -689,15 +984,37 @@ impl Element for ComposerElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        // Height follows the content, capped. Counting newlines here rather than in
-        // prepaint because layout has to know the size before anything is shaped.
-        let lines = self
-            .composer
-            .read(cx)
-            .display_content()
-            .matches('\n')
-            .count()
-            + 1;
+        // Height follows the content, capped — counted here rather than in prepaint because
+        // layout has to know the size before anything is shaped.
+        //
+        // **Measured against the previous frame's width**, which is the one thing in this
+        // function that looks like a shortcut and is not. Wrapping needs a width; the width is
+        // only known once layout has run; so a truthful height needs either last frame's number
+        // or `request_measured_layout`. The second means giving up the `width: 100%` +
+        // `flex_grow` + `min_width` triple below, and this file has paid for that combination
+        // three times over (§72, §88, §97, §99) with fields that collapsed to a 10px sliver.
+        // The cost of the first is one frame of stale height while a window is being dragged
+        // wider, which the next frame corrects — and a resize is a stream of frames.
+        let (content, wrap_width) = {
+            let composer = self.composer.read(cx);
+            let content = composer.display_content();
+            (
+                if content.is_empty() {
+                    composer.placeholder.clone()
+                } else {
+                    content
+                },
+                composer
+                    .last_bounds
+                    .and_then(|bounds| wrappable(bounds.size.width)),
+            )
+        };
+        let text_style = window.text_style();
+        let font_size = text_style.font_size.to_pixels(window.rem_size());
+        let lines = {
+            let mut wrapper = cx.text_system().line_wrapper(text_style.font(), font_size);
+            row_ranges(&content, wrap_at(&mut wrapper, wrap_width)).len()
+        };
         let mut style = Style::default();
         style.size.width = relative(1.).into();
         // **And grow, which is the half that was missing.** `width: 100%` only means anything
@@ -731,6 +1048,7 @@ impl Element for ComposerElement {
         let content = composer.display_content();
         let selected_range = composer.selected_range.clone();
         let cursor = composer.cursor_offset();
+        let affinity = composer.affinity;
         let style = window.text_style();
 
         // What the box actually measures, which nobody has ever read.
@@ -809,38 +1127,59 @@ impl Element for ComposerElement {
         let font_size = style.font_size.to_pixels(window.rem_size());
         let line_height = window.line_height();
 
-        // One shaped line per `\n`. GPUI's `shape_line` is exactly that — one line — so
-        // multi-line means doing the splitting ourselves and placing each row.
-        let mut lines: Vec<(usize, ShapedLine)> = Vec::new();
-        let mut offset = 0usize;
-        for segment in display_text.split('\n') {
-            let end = offset + segment.len();
-            let shaped = window.text_system().shape_line(
-                SharedString::from(segment.to_string()),
-                font_size,
-                &runs_for(&runs, offset, end),
-                None,
-            );
-            lines.push((offset, shaped));
-            // +1 for the newline itself, so offsets keep matching the real string.
-            offset = end + 1;
-        }
+        // One shaped line per *visual* row — the researcher's own breaks and the ones the width
+        // forced. GPUI's `shape_line` is exactly one line, so both kinds of splitting are ours.
+        //
+        // Each row keeps its byte **range**. The end is not recomputed from the shaped line: the
+        // rule that tells a soft wrap from a typed newline compares one row's end against the
+        // next's start, and deriving either from `ShapedLine::len()` put the whole decision behind
+        // a number this code cannot check (§203).
+        let ranges = {
+            let mut wrapper = cx.text_system().line_wrapper(style.font(), font_size);
+            row_ranges(&display_text, wrap_at(&mut wrapper, wrappable(bounds.size.width)))
+        };
+        let lines: Vec<(Range<usize>, ShapedLine)> = ranges
+            .iter()
+            .map(|range| {
+                let shaped = window.text_system().shape_line(
+                    SharedString::from(display_text[range.clone()].to_string()),
+                    font_size,
+                    &runs_for(&runs, range.start, range.end),
+                    None,
+                );
+                (range.clone(), shaped)
+            })
+            .collect();
 
-        let row_top = |row: usize| bounds.top() + line_height * row as f32;
         let position = |target: usize| -> (usize, Pixels) {
-            for (row, (start, line)) in lines.iter().enumerate() {
-                if target <= start + line.len() {
-                    return (row, line.x_for_index(target.saturating_sub(*start)));
+            let row = caret_row(&ranges, target, affinity);
+            match lines.get(row) {
+                Some((range, line)) => {
+                    (row, line.x_for_index(target.saturating_sub(range.start)))
                 }
-            }
-            match lines.last() {
-                Some((start, line)) => (
-                    lines.len().saturating_sub(1),
-                    line.x_for_index(target.saturating_sub(*start)),
-                ),
                 None => (0, px(0.)),
             }
         };
+
+        // Which row sits at the top of the box.
+        //
+        // The field grows to [`MAX_VISIBLE_LINES`] and then stops, so beyond that the *window*
+        // over the rows has to follow the caret or the box would show the first eight lines of
+        // something being typed on the twentieth. Clamped to the last full screenful, so the
+        // final row never floats above empty space.
+        //
+        // Read through `position` rather than worked out again, so the row the box scrolls to and
+        // the row the caret is drawn on cannot disagree at a wrap boundary.
+        let showing = position(cursor).0;
+        let first_row = if lines.len() <= MAX_VISIBLE_LINES {
+            0
+        } else {
+            showing
+                .saturating_sub(MAX_VISIBLE_LINES - 1)
+                .min(lines.len() - MAX_VISIBLE_LINES)
+        };
+
+        let row_top = |row: usize| bounds.top() + line_height * (row as f32 - first_row as f32);
 
         let (selection, cursor) = if selected_range.is_empty() {
             let (row, x) = position(cursor);
@@ -885,6 +1224,7 @@ impl Element for ComposerElement {
             lines,
             cursor,
             selection,
+            first_row,
         }
     }
 
@@ -917,9 +1257,13 @@ impl Element for ComposerElement {
         // That is why a 10px box appeared to contain a full-length placeholder. With the mask, a
         // future layout mistake becomes "text visibly cut off", which is a bug report someone
         // can act on, instead of "text floating over unrelated UI" (docs §97).
+        let first_row = prepaint.first_row;
         window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
             for (row, (_, line)) in prepaint.lines.iter().enumerate() {
-                let origin = point(bounds.origin.x, bounds.origin.y + line_height * row as f32);
+                let origin = point(
+                    bounds.origin.x,
+                    bounds.origin.y + line_height * (row as f32 - first_row as f32),
+                );
                 line.paint(origin, line_height, window, cx).unwrap();
             }
         });
@@ -936,6 +1280,10 @@ impl Element for ComposerElement {
             composer.last_layout = std::mem::take(&mut prepaint.lines);
             composer.last_bounds = Some(bounds);
             composer.line_height = line_height;
+            // Hit-testing and the IME rect both convert between rows and screen y, and a scrolled
+            // field that forgot how far it had scrolled would put the caret eight lines from
+            // where the click was.
+            composer.first_row = first_row;
         });
     }
 }
@@ -946,7 +1294,11 @@ impl Render for Composer {
             .flex()
             .flex_grow()
             .min_w_0()
-            .key_context("Composer")
+            .key_context(if self.multiline {
+                "Composer Multiline"
+            } else {
+                "Composer"
+            })
             .track_focus(&self.focus_handle(cx))
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(Self::submit))
@@ -955,11 +1307,17 @@ impl Render for Composer {
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::left))
             .on_action(cx.listener(Self::right))
+            .on_action(cx.listener(Self::up))
+            .on_action(cx.listener(Self::down))
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
+            .on_action(cx.listener(Self::select_up))
+            .on_action(cx.listener(Self::select_down))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
+            .on_action(cx.listener(Self::document_home))
+            .on_action(cx.listener(Self::document_end))
             .on_action(cx.listener(Self::show_character_palette))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::cut))
@@ -1030,14 +1388,170 @@ mod tests {
         assert!(runs_for(&runs, 2, 2).is_empty());
     }
 
+    /// Break every `every` bytes, standing in for what the text system measures.
+    ///
+    /// The pixel measurement is gpui's and needs a window; what this module can get wrong on its
+    /// own is turning break points into ranges over the whole string, and that is what is tested.
+    fn every(every: usize) -> impl FnMut(&str) -> Vec<usize> {
+        move |segment: &str| (every..segment.len()).step_by(every).collect()
+    }
+
+    #[test]
+    fn a_line_nobody_broke_still_becomes_rows() {
+        // The defect: one long line was one row, shaped past the right edge and clipped, with the
+        // caret out there with it (§200).
+        let rows = row_ranges("abcdefghij", every(4));
+        assert_eq!(rows, vec![0..4, 4..8, 8..10]);
+
+        // Offsets stay in the *whole string's* terms across a hard break, newline included, or
+        // the caret and the selection would be placed against the wrong text.
+        let rows = row_ranges("abcdef\nghi", every(4));
+        assert_eq!(rows, vec![0..4, 4..6, 7..10]);
+
+        // Nothing to wrap: unchanged from §55, which is what the first frame and every short
+        // prompt get.
+        assert_eq!(row_ranges("one\ntwo", |_| Vec::new()), vec![0..3, 4..7]);
+        assert_eq!(row_ranges("", |_| Vec::new()), vec![0..0]);
+    }
+
+    #[test]
+    fn a_wrap_point_at_the_edge_does_not_add_an_empty_row() {
+        // A break exactly at the end of the text, and one at the start: both would produce an
+        // empty range, which draws as a blank line the researcher did not type and — worse —
+        // moves every row below it down by one.
+        assert_eq!(row_ranges("abcd", |_| vec![4]), vec![0..4]);
+        assert_eq!(row_ranges("abcd", |_| vec![0]), vec![0..4]);
+        assert_eq!(row_ranges("abcd", |_| vec![2, 2]), vec![0..2, 2..4]);
+    }
+
     #[test]
     fn the_field_grows_with_its_lines_but_stops() {
-        // The rule the element's layout applies, checked here because layout itself
-        // needs a Window: a pasted script makes the composer taller, up to a point,
-        // and then stops rather than eating the transcript.
-        let rows = |text: &str| (text.matches('\n').count() + 1).min(MAX_VISIBLE_LINES);
-        assert_eq!(rows("one line"), 1);
-        assert_eq!(rows("one\ntwo\nthree"), 3);
-        assert_eq!(rows(&"x\n".repeat(40)), MAX_VISIBLE_LINES);
+        // A pasted script makes the composer taller, up to a point, and then stops rather than
+        // eating the transcript. Past the cap the *window* over the rows follows the caret —
+        // checked here because the element's own layout needs a Window.
+        let rows = |text: &str, breaks: usize| row_ranges(text, every(breaks)).len();
+        assert_eq!(rows("one line", 40), 1);
+        assert_eq!(rows("one\ntwo\nthree", 40), 3);
+        assert!(rows(&"x".repeat(400), 10) > MAX_VISIBLE_LINES);
+
+        // The scroll rule from `prepaint`, stated where it can be checked: the caret's row is
+        // always on screen, and the last screenful never floats above empty space.
+        let first_row = |caret: usize, total: usize| {
+            if total <= MAX_VISIBLE_LINES {
+                0
+            } else {
+                caret
+                    .saturating_sub(MAX_VISIBLE_LINES - 1)
+                    .min(total - MAX_VISIBLE_LINES)
+            }
+        };
+        assert_eq!(first_row(0, 3), 0, "a short field never scrolls");
+        assert_eq!(first_row(0, 20), 0, "nor does one whose caret is at the top");
+        assert_eq!(first_row(9, 20), 2, "the caret's row is the last one shown");
+        assert_eq!(first_row(19, 20), 12, "and the bottom stops at the bottom");
+    }
+
+    /// Which row `Home` and `End` act on, and which row arrow-up lands on.
+    ///
+    /// Both read the row from `caret_row`, so the case that matters is the wrap boundary: `End` on a
+    /// wrapped row must stop at that row's end, not run to the end of the text (§204).
+    #[test]
+    fn home_and_end_belong_to_a_row_not_the_document() {
+        let rows = [0..6, 6..11, 11..18];
+        // Caret mid-row: Home and End are that row's edges.
+        assert_eq!(rows[caret_row(&rows, 8, Affinity::Downstream)].start, 6);
+        assert_eq!(rows[caret_row(&rows, 8, Affinity::Downstream)].end, 11);
+        // Caret *at* a wrap: it belongs to the lower row, so End is the lower row's end. Pressing
+        // End here used to jump to byte 18 — the far end of the text, two rows away.
+        assert_eq!(rows[caret_row(&rows, 6, Affinity::Downstream)].end, 11);
+        // And on the last row, the row's end *is* the document's end. Same answer, different reason.
+        assert_eq!(rows[caret_row(&rows, 18, Affinity::Downstream)].end, 18);
+    }
+
+    /// The bug `End` had at the start of a wrapped prompt (§205), and the rule that fixes it.
+    #[test]
+    fn a_wrap_boundary_shows_on_whichever_row_asked_for_it() {
+        let rows = [0..6, 6..11, 11..18];
+
+        // Offset 6 is row 0's end *and* row 1's start. Both answers are correct; which one is
+        // wanted depends entirely on how the caret arrived.
+        assert_eq!(
+            caret_row(&rows, 6, Affinity::Downstream),
+            1,
+            "clicking the lower row's first character, or typing into the break"
+        );
+        assert_eq!(
+            caret_row(&rows, 6, Affinity::Upstream),
+            0,
+            "pressing End on row 0 — the end of *this* row, not the start of the next"
+        );
+
+        // Affinity only ever settles a tie. Everywhere else it changes nothing, which is what
+        // keeps it from becoming a second rule that can disagree with the first.
+        for affinity in [Affinity::Downstream, Affinity::Upstream] {
+            assert_eq!(caret_row(&rows, 3, affinity), 0, "mid-row: {affinity:?}");
+            assert_eq!(caret_row(&rows, 13, affinity), 2, "mid-row: {affinity:?}");
+            assert_eq!(caret_row(&rows, 18, affinity), 2, "end of text: {affinity:?}");
+        }
+
+        // A typed newline is not a tie: the offsets differ, so there is nothing to break. `End`
+        // before a shift-enter break stays put under either affinity.
+        let typed = [0..5, 6..11];
+        for affinity in [Affinity::Downstream, Affinity::Upstream] {
+            assert_eq!(caret_row(&typed, 5, affinity), 0, "typed break: {affinity:?}");
+        }
+    }
+
+    #[test]
+    fn the_caret_has_room_at_the_right_edge() {
+        // Wrapping at the full box width leaves the caret — painted *after* the last glyph —
+        // sitting on the border, which is what "the bar is beyond the text" was (§202).
+        assert_eq!(wrappable(px(800.)), Some(px(796.)));
+        // And a box too narrow to hold anything says so rather than asking for a wrap at zero,
+        // which would break after every character.
+        assert_eq!(wrappable(px(4.)), None);
+        assert_eq!(wrappable(px(0.)), None);
+    }
+
+    #[test]
+    fn the_caret_at_a_wrap_belongs_to_the_row_below() {
+        // "hello " / "world": a *wrap*, so row 1 starts at the same offset row 0 ends at.
+        let wrapped = [0..6, 6..11];
+        assert_eq!(caret_row(&wrapped, 3, Affinity::Downstream), 0, "inside the first row");
+        assert_eq!(
+            caret_row(&wrapped, 6, Affinity::Downstream),
+            1,
+            "at the break, with the character it precedes"
+        );
+        assert_eq!(caret_row(&wrapped, 11, Affinity::Downstream), 1, "at the end of the text, and stays");
+
+        // "hello" \n "world": a typed break, which consumes a byte — so the caret before the
+        // newline stays on the row above it, where the person pressed the key.
+        let typed = [0..5, 6..11];
+        assert_eq!(caret_row(&typed, 5, Affinity::Downstream), 0, "before the newline, not after it");
+        assert_eq!(caret_row(&typed, 6, Affinity::Downstream), 1);
+
+        // The case a real window failed on (§203): a wrap after a space, so the upper row keeps
+        // the space and clicking before the first letter of the lower row lands on the shared
+        // offset. `…outline row ` / `has …`.
+        let after_a_space = [0..14, 14..20];
+        assert_eq!(
+            caret_row(&after_a_space, 14, Affinity::Downstream),
+            1,
+            "the lower row's start, not the upper row's right edge"
+        );
+        assert_eq!(caret_row(&after_a_space, 13, Affinity::Downstream), 0, "the trailing space is row 0's");
+
+        // Degenerate shapes, because these reach the same rule from the panel's edges.
+        let empty_row = [Range { start: 0, end: 0 }];
+        assert_eq!(caret_row(&empty_row, 0, Affinity::Downstream), 0, "an empty field still has one row");
+        assert_eq!(caret_row(&[], 4, Affinity::Downstream), 0, "no rows is row zero, not a panic");
+        let one_row = [Range { start: 0, end: 3 }];
+        assert_eq!(caret_row(&one_row, 9, Affinity::Downstream), 0, "past the end clamps to the last row");
+        // Three rows of one wrapped line: every shared boundary steps down exactly once.
+        let three = [0..5, 5..10, 10..15];
+        assert_eq!(caret_row(&three, 5, Affinity::Downstream), 1);
+        assert_eq!(caret_row(&three, 10, Affinity::Downstream), 2);
+        assert_eq!(caret_row(&three, 15, Affinity::Downstream), 2);
     }
 }

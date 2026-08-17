@@ -287,6 +287,76 @@ def _conversation_thread(config: dict, configurable: dict) -> tuple[str, str]:
     return "", "nothing"
 
 
+def _report_what_the_worker_will_bill(forwarded: dict) -> None:
+    """Say which provider a background worker is about to spend money at, and on what.
+
+    **The keys are the half nobody was watching.** The line above catches a missing `model_config`,
+    which is the loud failure — no model at all. `__llm_keys` is the quiet one: the worker builds
+    exactly the model the researcher chose, has no key or **no `base_url`** for it, and the client
+    library falls back to its default host. On OpenRouter that means every background request goes
+    to `api.openai.com` and comes back as *"You have no credits remaining"* pointing at an OpenAI
+    billing page the researcher has never used — while the same conversation chats happily,
+    because the coordinator's own turns carry the config directly (§211).
+
+    That is §187 again, one layer down: a specialist billed to an account nobody chose, and the
+    only symptom arriving minutes later inside a worker.
+
+    **Never the key itself.** Provider names, the model spec, and whether a `base_url` came with
+    each — which is exactly enough to tell "went to the wrong host" from "had no key at all", and
+    nothing a log should not hold.
+    """
+    keys = forwarded.get("__llm_keys") or {}
+    spec = (forwarded.get("model_config") or {}).get("default")
+    if not keys:
+        logger.warning(
+            "minime_local: background work is starting with NO provider keys (model %s) — its "
+            "requests will go wherever the client library defaults to, which is not where the "
+            "conversation goes (docs §211)",
+            spec or "<none>",
+        )
+        return
+    described = ", ".join(
+        "{}{}".format(provider, "" if (entry or {}).get("base_url") else " (no base_url)")
+        for provider, entry in sorted(keys.items())
+    )
+    logger.warning(
+        "minime_local: background work will bill %s, model %s", described, spec or "<none>"
+    )
+
+    # **A provider a spec names and no key covers is a guaranteed failure, minutes early.**
+    # `§186` refuses a *turn* whose coordinator has no key; a specialist pointed at a second
+    # provider with none still saves, and the first anyone hears of it is a 429 from a billing
+    # account they never chose, raised inside a worker. The set is knowable right here, before the
+    # run starts, and it is the difference between a diagnosable failure and "the subagent
+    # encountered an error" (docs §211).
+    model_config = forwarded.get("model_config") or {}
+    referenced = {_provider_of(model_config.get("default"))}
+    referenced.update(
+        _provider_of(value) for value in (model_config.get("subagents") or {}).values()
+    )
+    missing = sorted(name for name in referenced if name and name not in keys)
+    if missing:
+        logger.warning(
+            "minime_local: background work names %s and carries no key for %s — those requests "
+            "will fail inside the worker, on whatever host the client library defaults to, which "
+            "is how a 429 arrives from a billing account nobody chose (docs §211)",
+            ", ".join(missing),
+            "it" if len(missing) == 1 else "them",
+        )
+
+
+def _provider_of(spec) -> str:
+    """The provider half of a `provider::model_id` spec, or `""`.
+
+    Tolerant of the single-colon spelling as well, because the two have both been seen on this
+    wire and a diagnostic that silently matches neither is worse than none.
+    """
+    if not isinstance(spec, str) or not spec.strip():
+        return ""
+    head = spec.split("::", 1)[0] if "::" in spec else spec.split(":", 1)[0]
+    return head.strip()
+
+
 def _forwarded_config() -> dict:
     """The run config to start background work with, taken from the live run.
 
@@ -341,6 +411,7 @@ def _forwarded_config() -> dict:
             "minime_local: starting background work with no model config — "
             "the worker will fall back to the server default and may not have a key"
         )
+    _report_what_the_worker_will_bill(forwarded)
     return {
         "recursion_limit": config.get("recursion_limit") or BACKGROUND_RECURSION_LIMIT,
         "configurable": forwarded,

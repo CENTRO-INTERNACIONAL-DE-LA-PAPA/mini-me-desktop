@@ -91,6 +91,95 @@ impl Verdict {
     // the two facts meet.
 }
 
+/// Where a reference came from — a different question from whether anything is wrong with it.
+///
+/// # Why this is not the same as [`Verdict`]
+///
+/// The panel's rule has been *"only when something is wrong"*, on the sound argument that a line
+/// under every reference saying it checked out is fourteen lines of reassurance nobody reads.
+/// But that rule answers **is this broken**, and it made silence carry a second meaning it had
+/// not earned: *nothing is wrong here* and *this came from a search* and *the model wrote this
+/// down from memory and nothing has confirmed it* all rendered identically.
+///
+/// Those are not the same fact, and for this institution the difference is the point. Barrera et
+/// al. (2016) came back real, relevant, and from a journal Semantic Scholar indexes poorly —
+/// which describes a great deal of CIP's own literature. A reference like that is not an error to
+/// be flagged; it is a citation a **subject-matter expert has to check by hand**, and the
+/// researcher cannot know which ones those are if they look exactly like the verified ones.
+/// Org policy asks for exactly this and in these words: *validate AI-generated content with
+/// subject matter experts*, and *disclose when generative AI has been used*.
+///
+/// # What each one means
+///
+/// Named for **what was done**, never for what is true — the same rule the rest of this module
+/// follows. `Unconfirmed` does not mean invented; most of these are real papers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Origin {
+    /// The paper arrived inside a search result, and its link was built from the `corpusId` in
+    /// that result. Nothing here was composed by a model.
+    Search,
+    /// A model wrote an identifier down and a registry agrees it names this paper — either its
+    /// own DOI resolved to the cited title, or Crossref matched the citation to a real work.
+    Registry,
+    /// Nothing has confirmed this one. It may be perfectly correct; the point is that saying so
+    /// would take a person.
+    Unconfirmed,
+    /// The check has not come back yet. Distinct from [`Self::Unconfirmed`] because reporting a
+    /// reference as unchecked while its lookup is in flight is the §(references) bug — a
+    /// correctly cited Magurran 1988 told it matched nothing, mid-request.
+    Pending,
+}
+
+impl Origin {
+    /// The phrase a row carries, in the researcher's terms.
+    ///
+    /// `None` for the two that need no words: a reference nothing is wrong with does not want a
+    /// badge, and one still resolving already has the section's own "checking…" line.
+    pub fn note(self) -> Option<&'static str> {
+        match self {
+            Origin::Unconfirmed => Some("unverified — from the model, not from a search"),
+            Origin::Search | Origin::Registry | Origin::Pending => None,
+        }
+    }
+
+    /// Whether this is one a person still has to look at.
+    pub fn needs_a_human(self) -> bool {
+        matches!(self, Origin::Unconfirmed)
+    }
+}
+
+/// Where a reference came from, given what the check found and whether the registry matched it.
+///
+/// Both arguments, because neither settles it alone: a citation whose own DOI named the wrong
+/// paper is [`Origin::Registry`] when Crossref then found the right one and [`Origin::Unconfirmed`]
+/// when it did not, and the [`Verdict`] is `Mismatch` either way.
+///
+/// `matched_in_registry` is `None` while the repair lookup is in flight — the same three-state
+/// distinction the panel keeps unflattened, for the same reason.
+pub fn origin(verdict: Option<&Verdict>, matched_in_registry: Option<bool>) -> Origin {
+    match verdict {
+        None => Origin::Pending,
+        Some(Verdict::FromSearch) => Origin::Search,
+        Some(Verdict::Confirmed) => Origin::Registry,
+        // A registry match is what rescues these, and until the lookup returns nothing is settled.
+        Some(Verdict::Mismatch { .. } | Verdict::Unregistered) => match matched_in_registry {
+            Some(true) => Origin::Registry,
+            Some(false) => Origin::Unconfirmed,
+            None => Origin::Pending,
+        },
+        // No identifier to check, so only a title match could confirm it.
+        Some(Verdict::NoIdentifier) => match matched_in_registry {
+            Some(true) => Origin::Registry,
+            Some(false) => Origin::Unconfirmed,
+            None => Origin::Pending,
+        },
+        // **Unconfirmed, not pending.** The check failed and is not coming back on its own, and a
+        // reference stuck on "checking…" forever reads as verified to anybody who looks away and
+        // returns. What is unknown has to say so.
+        Some(Verdict::Unreachable { .. }) => Origin::Unconfirmed,
+    }
+}
+
 /// Whether a link is the Semantic Scholar corpus-id form.
 ///
 /// That link comes from the search result itself rather than from the model, so it is the one
@@ -278,6 +367,51 @@ pub fn title_of(body: &serde_json::Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn where_a_reference_came_from_is_a_separate_question_from_whether_it_is_broken() {
+        use Origin::*;
+
+        // The two that need nobody: one built from a search result, one whose identifier a
+        // registry confirmed. Neither carries a note, which is the existing rule and stays.
+        assert_eq!(origin(Some(&Verdict::FromSearch), None), Search);
+        assert_eq!(origin(Some(&Verdict::Confirmed), Some(false)), Registry);
+        assert!(Search.note().is_none() && Registry.note().is_none());
+        assert!(!Search.needs_a_human() && !Registry.needs_a_human());
+
+        // Barrera et al. (2016): real, relevant, from a journal Semantic Scholar indexes poorly.
+        // No identifier, nothing in Crossref — not an error, but a citation only a person can
+        // settle, and until §185 it rendered exactly like the two above.
+        assert_eq!(origin(Some(&Verdict::NoIdentifier), Some(false)), Unconfirmed);
+        assert!(Unconfirmed.needs_a_human());
+        assert!(Unconfirmed.note().is_some_and(|n| n.contains("not from a search")));
+
+        // A wrong DOI is rescued by a registry match and unconfirmed without one — and the
+        // verdict is `Mismatch` either way, which is why one argument could not decide this.
+        let wrong = Verdict::Mismatch {
+            found: "a different paper".into(),
+        };
+        assert_eq!(origin(Some(&wrong), Some(true)), Registry);
+        assert_eq!(origin(Some(&wrong), Some(false)), Unconfirmed);
+        assert_eq!(origin(Some(&Verdict::Unregistered), Some(true)), Registry);
+
+        // **Mid-flight is its own answer.** Reporting a reference as unchecked while its lookup
+        // is still running is the bug that told a correctly cited Magurran 1988 it matched
+        // nothing, and `None` for the repair is exactly that state.
+        assert_eq!(origin(None, None), Pending);
+        assert_eq!(origin(Some(&Verdict::NoIdentifier), None), Pending);
+        assert_eq!(origin(Some(&wrong), None), Pending);
+        assert!(Pending.note().is_none(), "the section already says 'checking…'");
+        assert!(!Pending.needs_a_human(), "not yet — it may still come back verified");
+
+        // But a check that *failed* is not pending: nothing is going to come back, and a row
+        // stuck on "checking…" reads as verified to anyone who looks away and returns.
+        let offline = Verdict::Unreachable {
+            why: "offline".into(),
+        };
+        assert_eq!(origin(Some(&offline), None), Unconfirmed);
+        assert_eq!(origin(Some(&offline), Some(true)), Unconfirmed);
+    }
 
     #[test]
     fn a_doi_is_recognised_in_the_forms_it_arrives_in() {
@@ -1071,6 +1205,87 @@ print("ok")
         assert!(
             out.status.success(),
             "the workspace layout is wrong:
+{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// `execute` is told to keep its output where the researcher can see it.
+    ///
+    /// **Sixteen real files went to WSL's global `/tmp`** — a 46 KB dataset, seven summary CSVs,
+    /// seven figures — and the Outputs panel was empty (§160). The coordinator had asked for
+    /// relative paths and lost to deepagents' own execute description, which says *"maintain your
+    /// current working directory … by using absolute paths"*. Sound advice in a container the
+    /// agent owns; here `virtual_mode=False` means an absolute path is the researcher's real
+    /// filesystem.
+    ///
+    /// This asserts the rewrite applies **and that it is honest when it cannot**: the replacement
+    /// targets an exact sentence, so an upstream rewording must be reported rather than silently
+    /// producing a description that still argues for absolute paths.
+    #[test]
+    fn execute_is_told_to_keep_its_output_in_the_workspace() {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: python3 is not on PATH");
+            return;
+        }
+        let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
+        let script = format!(
+            r#"
+import logging, sys, types
+sys.path.insert(0, {overlay:?})
+from minime_local import execute_rule
+
+logs = []
+execute_rule.log = type("L", (), {{"warning": lambda self, m, *a: logs.append(m % a if a else m)}})()
+
+# Upstream's text, with the sentence this exists to remove.
+upstream = types.SimpleNamespace(EXECUTE_TOOL_DESCRIPTION=(
+    "Executes a shell command.\n"
+    "  - When issuing multiple commands, use the ';' or '&&' operator\n"
+    "  - Try to maintain your current working directory throughout the session by using "
+    "absolute paths and avoiding usage of cd\n"))
+execute_rule.install(upstream)
+out = upstream.EXECUTE_TOOL_DESCRIPTION
+
+assert "using absolute paths and avoiding" not in out, "the advice that caused the escape survived"
+assert "already this conversation" in out, "nothing told it where it is"
+assert "/tmp" in out, "the rule must name the directory the model actually guessed"
+# Upstream's unrelated guidance is left exactly as written — this replaces one sentence, not
+# a document somebody else maintains.
+assert "the ';' or '&&' operator" in out
+# Reading elsewhere stays allowed: a researcher attaches datasets from anywhere (§28), and a
+# rule that forbade absolute reads would fix outputs by breaking inputs.
+assert "Reading an absolute path is fine" in out
+assert not any("no longer contains" in line for line in logs), logs
+
+# Upstream reworded: the rule still ships, and the log says the contradiction may be back.
+logs.clear()
+moved = types.SimpleNamespace(EXECUTE_TOOL_DESCRIPTION="Prefer fully-qualified paths at all times.")
+execute_rule.install(moved)
+assert "Where your output goes" in moved.EXECUTE_TOOL_DESCRIPTION
+assert any("no longer contains" in line for line in logs), logs
+
+# The constant is gone entirely: say so, change nothing, and never raise — an exception here
+# would cost the whole agent to prevent files landing in the wrong folder.
+logs.clear()
+execute_rule.install(types.SimpleNamespace())
+assert any("no EXECUTE_TOOL_DESCRIPTION" in line for line in logs), logs
+print("ok")
+"#,
+            overlay = overlay.to_string_lossy()
+        );
+        let out = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("python3 runs");
+        assert!(
+            out.status.success(),
+            "the execute rule is wrong:
 {}",
             String::from_utf8_lossy(&out.stderr)
         );

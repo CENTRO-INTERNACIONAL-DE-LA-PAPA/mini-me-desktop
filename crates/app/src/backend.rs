@@ -211,6 +211,22 @@ pub(crate) fn wsl_path(path: &Path) -> String {
     }
 }
 
+/// Whether [`wsl_path`] produces a path the distro could actually open.
+///
+/// The one shape that survives translation looking perfectly fine and fails anyway is a
+/// Windows UNC path. `\\nas\shared\yield.csv` has no drive letter, so `wsl_path` falls
+/// through to its pass-through arm and hands the agent `//nas/shared/yield.csv` — a path
+/// that exists in no Linux filesystem. The turn then fails minutes later with
+/// `FileNotFoundError`, naming neither the share nor the reason, and the researcher has no
+/// way to guess that the network drive was the problem.
+///
+/// Said at the moment of the drop instead, it is a sentence they can act on: copy it to the
+/// machine first. Mapping the share inside the distro is the other fix and is not one to
+/// suggest to someone who does not code.
+pub(crate) fn wsl_can_open(path: &Path) -> bool {
+    !path.to_string_lossy().replace('\\', "/").starts_with("//")
+}
+
 /// How the client reaches the backend. Defaults to a locally spawned sidecar.
 #[derive(Clone, Debug)]
 pub struct BackendConfig {
@@ -368,6 +384,11 @@ impl Default for BackendConfig {
 /// **forks** the real server as a grandchild, so killing our direct child leaves
 /// an orphaned server holding the port (observed in P6.2). Invoking the venv
 /// binary directly keeps it a single process we actually own.
+// These inputs cross separate launch boundaries (filesystem, WSL, execution policy,
+// approval, concurrency and ownership), and the call sites deliberately spell every
+// choice out. Bundling them would hide the security-relevant defaults just to satisfy
+// a numeric style limit (the explicit-boundary rule from docs §41 and §96).
+#[allow(clippy::too_many_arguments)]
 fn launch_command_for(
     project_dir: &Path,
     port: u16,
@@ -1104,6 +1125,16 @@ impl BackendConfig {
         }
     }
 
+    /// Whether the backend could open this path at all, once spelled its way.
+    ///
+    /// Asked before a dropped file becomes part of a question, because the alternative is a
+    /// turn that runs for a minute and then reports a missing file (see [`wsl_can_open`]).
+    /// Only WSL can fail this: a backend on this host reads the path the researcher's own
+    /// file manager gave us.
+    pub fn can_open(&self, path: &Path) -> bool {
+        self.wsl.is_none() || wsl_can_open(path)
+    }
+
     /// A copy with the credentials stripped.
     ///
     /// Anything that only needs the *shape* of the configuration takes this, so the
@@ -1275,6 +1306,21 @@ impl BackendSupervisor {
     /// otherwise spawn and wait. Returns a status string for the UI.
     pub async fn ensure_running(&mut self, client: &LangGraphClient) -> Result<Started> {
         if client.is_healthy().await {
+            // **Ours, or somebody else's?** This is called once per turn, not once per launch, so
+            // after the app spawns its own sidecar every later turn finds a healthy backend — and
+            // reported it as one that "was already running". A researcher who had just killed the
+            // old server, watched this app start a new one, and then read three warnings telling
+            // them to kill it again has been told the fix did not work when it did (docs §202).
+            //
+            // `try_wait` and not just `is_some()`: a child that died leaves the handle behind, and
+            // whatever answered the health check after that is not the process we started. An
+            // error means we cannot tell, which is the same as not knowing it is ours.
+            if matches!(
+                self.child.as_mut().map(std::process::Child::try_wait),
+                Some(Ok(None))
+            ) {
+                return Ok(Started::Spawned);
+            }
             // **The one case the source mirror cannot reach.** It runs as part of the launch
             // command, so a server left over from a previous session has already imported
             // whatever it imported and nothing here can change that — and `langgraph dev`
@@ -1987,11 +2033,13 @@ mod tests {
         let _env = env_lock::hold();
         // A check that runs on the wrong side of the WSL boundary is worse than no
         // check: it reports green for a machine that cannot launch anything.
-        let mut config = BackendConfig::default();
-        config.wsl = Some(WslTarget {
-            distro: Some("Ubuntu".into()),
-            dir: "~/Mini-Me".into(),
-        });
+        let mut config = BackendConfig {
+            wsl: Some(WslTarget {
+                distro: Some("Ubuntu".into()),
+                dir: "~/Mini-Me".into(),
+            }),
+            ..Default::default()
+        };
         assert_eq!(
             config.shell_argv("echo ok"),
             vec!["wsl.exe", "-d", "Ubuntu", "--", "bash", "-lc", "echo ok"],
@@ -2007,11 +2055,13 @@ mod tests {
     #[test]
     fn the_setup_script_is_named_the_way_the_backend_shell_sees_it() {
         let _env = env_lock::hold();
-        let mut config = BackendConfig::default();
-        config.wsl = Some(WslTarget {
-            distro: None,
-            dir: "~/Mini-Me".into(),
-        });
+        let config = BackendConfig {
+            wsl: Some(WslTarget {
+                distro: None,
+                dir: "~/Mini-Me".into(),
+            }),
+            ..Default::default()
+        };
         let command = config.setup_script();
         // The source now ships in this repository (`mini-me/`), so provisioning always has one
         // to copy from and the script never reaches GitHub for it. This assertion used to be
@@ -2127,9 +2177,11 @@ mod tests {
         std::fs::write(scratch.join("langgraph.json"), "{}").expect("write");
 
         std::env::set_var("MINIME_BUNDLED_BACKEND", &scratch);
-        let mut config = BackendConfig::default();
-        config.wsl = None;
-        config.project_dir = PathBuf::from("/opt/backend");
+        let config = BackendConfig {
+            wsl: None,
+            project_dir: PathBuf::from("/opt/backend"),
+            ..Default::default()
+        };
         let command = config.setup_script();
         assert!(command.starts_with("MINIME_BUNDLED_SOURCE="), "{command}");
         assert!(command.contains("setup-wsl.sh"), "{command}");
@@ -2278,8 +2330,10 @@ mod tests {
     #[test]
     fn a_redacted_config_carries_no_credentials() {
         let _env = env_lock::hold();
-        let mut config = BackendConfig::default();
-        config.secrets = vec![("ASTA_TOKEN".into(), "super-secret".into())];
+        let config = BackendConfig {
+            secrets: vec![("ASTA_TOKEN".into(), "super-secret".into())],
+            ..Default::default()
+        };
         let redacted = config.redacted();
         assert!(redacted.secrets.is_empty());
         // Everything else has to survive, or preflight would probe the wrong machine.
@@ -2786,4 +2840,3 @@ mod source_tests {
     }
 
 }
-
