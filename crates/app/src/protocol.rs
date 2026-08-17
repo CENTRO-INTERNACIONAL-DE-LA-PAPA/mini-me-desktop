@@ -139,12 +139,93 @@ pub struct Snapshot {
     pub tasks: Vec<AsyncTask>,
     /// Reports, with their bodies. See [`Report`].
     pub reports: Vec<Report>,
+    /// The coordinator's own plan for this turn, when it wrote one. See [`Todo`].
+    pub todos: Vec<Todo>,
     /// Citations gathered so far, **whole**.
     ///
     /// Separate from the `sources` bucket, whose items are truncated to 96 characters for a
     /// side panel that has to stay scannable. A rendered report's citation list must not be —
     /// a bibliography ending in `…` is not a bibliography.
     pub sources: Vec<Source>,
+}
+
+/// One step of an agent's own plan.
+///
+/// **The agent writes these; we only read them.** `TodoListMiddleware` gives every agent a
+/// `write_todos` tool and keeps the result in state as `todos`, and a background worker calls it
+/// between commands — which is what makes a six-minute run describable rather than merely long
+/// (§209). Nothing here is derived, estimated or filled in: an empty plan renders as no plan.
+///
+/// Each agent's list is its own. `deepagents`' `_EXCLUDED_STATE_KEYS` keeps `todos` out of what a
+/// subagent inherits, so a worker's plan is the worker's, which is what lets a plan belong to
+/// exactly one row on screen.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Todo {
+    pub content: String,
+    /// `pending`, `in_progress` or `completed`, as `langchain`'s `Todo` defines them. Kept as the
+    /// string it arrived as rather than an enum: an unknown fourth value should render as "not
+    /// finished", not panic or silently count as done.
+    pub status: String,
+}
+
+impl Todo {
+    pub fn is_done(&self) -> bool {
+        self.status == "completed"
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.status == "in_progress"
+    }
+
+    /// The mark this step gets in a list: done, doing, or waiting.
+    pub fn mark(&self) -> &'static str {
+        if self.is_done() {
+            "✓"
+        } else if self.is_running() {
+            "◐"
+        } else {
+            "○"
+        }
+    }
+}
+
+/// How far through a plan the work is — `(completed, total)`.
+///
+/// `None` when there is no plan, which is not the same as nothing done: `write_todos` is optional
+/// and the model skips it for simple requests. A "0 of 0" would be a claim about work that was
+/// never planned.
+pub fn plan_progress(todos: &[Todo]) -> Option<(usize, usize)> {
+    if todos.is_empty() {
+        return None;
+    }
+    Some((todos.iter().filter(|todo| todo.is_done()).count(), todos.len()))
+}
+
+/// Read an agent's plan out of a `values`-shaped payload.
+fn decode_todos(values: &Value) -> Vec<Todo> {
+    values
+        .get("todos")
+        .and_then(Value::as_array)
+        .map(|todos| {
+            todos
+                .iter()
+                .filter_map(|todo| {
+                    let content = todo.get("content").and_then(Value::as_str)?.trim();
+                    if content.is_empty() {
+                        return None;
+                    }
+                    Some(Todo {
+                        content: content.to_string(),
+                        status: todo
+                            .get("status")
+                            .and_then(Value::as_str)
+                            .unwrap_or("pending")
+                            .to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// One work this conversation cited.
@@ -301,6 +382,11 @@ pub struct AsyncTask {
     /// The subagent or tool the worker is on right now, so "running" for ten minutes says
     /// something about *what* is running (docs §42).
     pub activity: Option<String>,
+    /// The worker's plan, so "running" for ten minutes also says *how far through* (§209).
+    ///
+    /// Filled by the watcher, never by [`decode_async_tasks`]: the `async_tasks` map records what
+    /// the coordinator asked for, and the plan lives in the worker's own state.
+    pub todos: Vec<Todo>,
     /// The conversation whose folder owns this worker's files.
     ///
     /// **Not decodable from the payload**, which is why it is filled by whoever ingests the
@@ -601,6 +687,8 @@ pub struct ThreadState {
     /// What the worker is doing right now — the subagent it delegated to, or the tool it
     /// is running. `None` when nothing has been called yet.
     pub activity: Option<String>,
+    /// The worker's own plan, from the same request. See [`Todo`].
+    pub todos: Vec<Todo>,
     /// The nodes the thread would run next — the value `status` is derived from.
     ///
     /// Carried out of this function so the *watcher* can report it, once per task rather than
@@ -712,6 +800,10 @@ fn decode_async_tasks(artifacts: &Value, root: &Value) -> Vec<AsyncTask> {
                 pending: None,
                 error: None,
                 activity: None,
+                // Empty for the same reason `activity` is: this map is what the coordinator
+                // recorded, and the worker's plan lives in the worker's own state. The watcher
+                // fills both.
+                todos: Vec::new(),
                 // Deliberately blank. This function is a pure decoder of one payload, and the
                 // payload does not say which conversation the worker belongs to; guessing —
                 // `thread_id`, say — would name the worker as its own owner and defeat the
@@ -1140,6 +1232,7 @@ impl LangGraphClient {
             error,
             activity: last_activity(&state),
             next: next_nodes,
+            todos: state.get("values").map(decode_todos).unwrap_or_default(),
         })
     }
 
@@ -1946,12 +2039,16 @@ fn decode_values(data: &str) -> Option<Snapshot> {
     let tasks = decode_async_tasks(artifacts, &value);
     let reports = decode_reports(artifacts);
     let sources = decode_sources(artifacts);
+    // Read from the top level, not from `artifacts`: `todos` is the agent's own state, written by
+    // its `write_todos` tool, and never passes through the artifacts middleware.
+    let todos = decode_todos(&value);
 
     if buckets.is_empty()
         && project.is_none()
         && jobs.is_empty()
         && tasks.is_empty()
         && reports.is_empty()
+        && todos.is_empty()
     {
         return None;
     }
@@ -1962,6 +2059,7 @@ fn decode_values(data: &str) -> Option<Snapshot> {
         tasks,
         reports,
         sources,
+        todos,
     })
 }
 
@@ -3350,6 +3448,7 @@ mod tests {
             pending: None,
             error: None,
             activity: None,
+            todos: Vec::new(),
             owner: String::new(),
         };
         assert!(!waiting.is_finished(), "interrupted is not terminal");
@@ -3386,6 +3485,7 @@ mod tests {
             pending: None,
             error: None,
             activity: None,
+            todos: Vec::new(),
             owner: String::new(),
         };
         assert_eq!(task.owning_conversation(), None);
@@ -3570,6 +3670,77 @@ mod tests {
         let project = snapshot.project.as_ref().expect("spine rides along");
         assert_eq!(project.mission, "M");
         assert_eq!(project.completed, vec!["c"]);
+    }
+
+    /// The plan the panel counts, read from the shape `TodoListMiddleware` actually writes.
+    #[test]
+    fn a_plan_is_read_from_the_agents_own_todo_list() {
+        // `langchain`'s `Todo` verbatim: `content` plus one of three statuses.
+        let values = json!({
+            "todos": [
+                {"content": "Generate the synthetic dataset", "status": "completed"},
+                {"content": "Clean and validate the columns", "status": "completed"},
+                {"content": "Build the diagnostic model", "status": "in_progress"},
+                {"content": "Write the report", "status": "pending"},
+            ]
+        });
+        let todos = decode_todos(&values);
+        assert_eq!(todos.len(), 4);
+        assert_eq!(plan_progress(&todos), Some((2, 4)));
+        let marks: Vec<&str> = todos.iter().map(Todo::mark).collect();
+        assert_eq!(marks, ["✓", "✓", "◐", "○"]);
+
+        // **No plan is not a plan of zero steps.** `write_todos` is optional and the model skips it
+        // for simple requests, so "0 of 0" would be a claim about work nobody planned.
+        assert_eq!(plan_progress(&[]), None);
+        assert!(decode_todos(&json!({})).is_empty());
+
+        // A step with no text is not a step. A status we have never seen counts as unfinished,
+        // rather than panicking or quietly counting as done.
+        let ragged = decode_todos(&json!({
+            "todos": [
+                {"content": "  ", "status": "completed"},
+                {"content": "Real step", "status": "cancelled"},
+                {"status": "pending"},
+            ]
+        }));
+        assert_eq!(ragged.len(), 1);
+        assert_eq!(ragged[0].content, "Real step");
+        assert!(!ragged[0].is_done() && !ragged[0].is_running());
+        assert_eq!(ragged[0].mark(), "○");
+        assert_eq!(plan_progress(&ragged), Some((0, 1)));
+
+        // A missing `status` defaults to pending, not to done — the safe direction for a count a
+        // researcher reads as "how much is left".
+        let bare = decode_todos(&json!({"todos": [{"content": "Step"}]}));
+        assert_eq!(bare[0].status, "pending");
+    }
+
+    /// A whole `values` frame carrying a plan, so the wire shape is pinned and not just the helper.
+    #[test]
+    fn a_turn_that_only_wrote_a_plan_is_still_a_snapshot() {
+        // `todos` sits beside `artifacts`, not inside it: it is agent state, not an artifact.
+        let data = json!({
+            "todos": [{"content": "Read the papers", "status": "in_progress"}],
+            "artifacts": {}
+        })
+        .to_string();
+        let decoded = decode(&SseEvent {
+            name: "values".into(),
+            data,
+        });
+        let [TurnEvent::Snapshot(snapshot)] = decoded.as_slice() else {
+            panic!("a plan alone is worth a snapshot, got {decoded:?}");
+        };
+        assert_eq!(snapshot.todos.len(), 1);
+        assert!(snapshot.buckets.is_empty(), "and nothing else is invented");
+
+        // An empty frame is still nothing at all.
+        assert!(decode(&SseEvent {
+            name: "values".into(),
+            data: json!({"artifacts": {}}).to_string(),
+        })
+        .is_empty());
     }
 
     /// Reading and writing the spine must name the same project, or a saved mission lands in a

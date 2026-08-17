@@ -940,11 +940,15 @@ impl Sidecar {
                         let changed = state.status != task.status
                             || state.pending != task.pending
                             || state.error != task.error
-                            || state.activity != task.activity;
+                            || state.activity != task.activity
+                            // A plan that advanced is news even when nothing else moved — it is
+                            // the only thing that changes during a 40-second command (§209).
+                            || state.todos != task.todos;
                         task.status = state.status;
                         task.pending = state.pending;
                         task.error = state.error;
                         task.activity = state.activity;
+                        task.todos = state.todos;
                         if !changed {
                             continue;
                         }

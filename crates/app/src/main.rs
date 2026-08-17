@@ -1369,6 +1369,34 @@ fn distinguishing_tail(text: &str, max_chars: usize) -> String {
     format!("…{}", text.chars().skip(count - keep).collect::<String>())
 }
 
+/// The status bar's one-line answer to "what is happening, and how far through".
+///
+/// Free of `self` so the rule can be checked without a window — the lesson §203 and §205 both cost
+/// a round trip to learn.
+///
+/// **`done + 1` is the step being worked on**, not `done`: with two of four finished, the third is
+/// the one running, and "step 2 of 4" tells a researcher the wrong thing about where the work is.
+fn summary_for(tasks: &[protocol::AsyncTask], plan: &[protocol::Todo]) -> Option<String> {
+    let worker = tasks
+        .iter()
+        .filter(|task| !task.is_finished() && !task.todos.is_empty())
+        .max_by_key(|task| protocol::plan_progress(&task.todos).map(|(done, _)| done));
+    if let Some(task) = worker {
+        let (done, total) = protocol::plan_progress(&task.todos)?;
+        let name = task.agent_name.replace('_', " ");
+        return Some(match &task.activity {
+            Some(activity) => format!("{name} · step {} of {total} · {activity}", done + 1),
+            None => format!("{name} · step {} of {total}", done + 1),
+        });
+    }
+    let (done, total) = protocol::plan_progress(plan)?;
+    // Every step done: say nothing rather than sit at "step 3 of 2" for the rest of the session.
+    if done == total {
+        return None;
+    }
+    Some(format!("step {} of {total}", done + 1))
+}
+
 /// Shorten an `a / b / c` heading to fit, giving up the middle rather than either end.
 ///
 /// **[`distinguishing_tail`] keeps the wrong end for these.** §152 chose tail-keeping because its
@@ -2908,6 +2936,8 @@ struct Workbench {
     renaming: Option<String>,
     /// Whether the mission at the top of the research panel is being edited in place.
     editing_mission: bool,
+    /// The coordinator's own plan for this conversation, when it wrote one. See [`protocol::Todo`].
+    plan: Vec<protocol::Todo>,
     /// Who wrote each file, as the backend recorded it — see [`workspace::authorship`].
     authorship: std::collections::HashMap<String, String>,
     /// The manifest's size and mtime when it was last read, so a frame that changed nothing
@@ -3169,6 +3199,7 @@ impl Workbench {
             pending_title: None,
             renaming: None,
             editing_mission: false,
+            plan: Vec::new(),
             authorship: std::collections::HashMap::new(),
             authorship_stamp: None,
             confirming_delete: None,
@@ -4799,6 +4830,14 @@ impl Workbench {
                 if !snapshot.buckets.is_empty() {
                     self.buckets = snapshot.buckets;
                 }
+                // **Replaced, not merged.** A plan is a whole statement about the current
+                // intention: the model rewrites the list to reorder or drop a step, so keeping
+                // the old items when a shorter list arrives would show work the agent has
+                // abandoned. Guarded on non-empty for the opposite reason — a frame that carries
+                // no `todos` at all is silent about the plan, not a claim there isn't one (§209).
+                if !snapshot.todos.is_empty() {
+                    self.plan = snapshot.todos;
+                }
                 for job in snapshot.jobs {
                     self.track_job(job, cx);
                 }
@@ -4986,6 +5025,7 @@ impl Workbench {
         self.buckets.clear();
         self.tasks.clear();
         self.jobs.clear();
+        self.plan.clear();
         // The record of who wrote what belongs to the conversation being left. Cleared with the
         // stamp, or the next frame would see an unchanged `None` and keep the old map.
         self.authorship.clear();
@@ -5052,6 +5092,11 @@ impl Workbench {
                         }
                         if !snapshot.reports.is_empty() {
                             workbench.reports = snapshot.reports;
+                        }
+                        // Restored with them, and for §196's reason: a conversation reopened
+                        // mid-plan showing no plan reads as the feature being broken.
+                        if !snapshot.todos.is_empty() {
+                            workbench.plan = snapshot.todos;
                         }
                         if let Some(project) = snapshot.project {
                             workbench.project =
@@ -6792,6 +6837,7 @@ impl Workbench {
         self.buckets.clear();
         self.tasks.clear();
         self.jobs.clear();
+        self.plan.clear();
         // The record of who wrote what belongs to the conversation being left. Cleared with the
         // stamp, or the next frame would see an unchanged `None` and keep the old map.
         self.authorship.clear();
@@ -11748,6 +11794,19 @@ impl Workbench {
             )
     }
 
+    /// One line for the status bar: what is being worked on, and how far through.
+    ///
+    /// **An unfinished worker outranks the conversation's own plan**, because a worker is the thing
+    /// running while nobody is looking — the conversation's plan belongs to a turn the researcher
+    /// is already watching. With several workers the busiest wins; a column of them belongs in the
+    /// panel, not in a single line.
+    ///
+    /// `None` when there is nothing with a plan, which leaves the bar exactly as it was. This line
+    /// adds a denominator to a wait; it does not become another thing always on screen.
+    fn work_summary(&self) -> Option<String> {
+        summary_for(&self.tasks, &self.plan)
+    }
+
     fn status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let (status_text, status_color) = match &self.error {
             Some(error) => (error.clone(), theme::error()),
@@ -11775,6 +11834,16 @@ impl Workbench {
             .border_color(rgb(theme::border()))
             .bg(rgb(theme::surface()))
             .child(ui::Label::new(status_text).colour(status_color).ellipsis())
+            // **The glance version, so the panel need not be open.** `running · execute` for six
+            // minutes was the whole complaint; this is the same fact with a denominator on it, and
+            // it appears only when there is a plan to count (§209).
+            .children(self.work_summary().map(|summary| {
+                div()
+                    .flex_none()
+                    .text_color(rgb(theme::text_faint()))
+                    .text_xs()
+                    .child(summary)
+            }))
             // A blanket grant that is in force must never be invisible — and must be
             // revocable without starting a new conversation, or "just this once" becomes
             // permanent by inconvenience. Click to hand the gate back.
@@ -12090,6 +12159,7 @@ impl Workbench {
             // No spine yet, but a run may already be producing outputs — still show
             // them rather than an empty panel.
             return panel
+                .child(self.plan_section(cx))
                 .child(self.jobs_section(cx))
                 .child(self.outputs_section(cx))
                 .child(self.sources_section(Some(SOURCES_IN_PANEL), cx));
@@ -12173,6 +12243,7 @@ impl Workbench {
         }
 
         panel
+            .child(self.plan_section(cx))
             .child(self.jobs_section(cx))
             .child(self.outputs_section(cx))
             .child(self.sources_section(Some(SOURCES_IN_PANEL), cx))
@@ -12183,6 +12254,120 @@ impl Workbench {
     /// The theorizer and DataVoyager return a task id immediately and finish minutes
     /// later, so without this the answer to "is it still going?" was nothing at all —
     /// and, worse, nobody was collecting the result (docs §29).
+    /// An agent's own plan, as a checklist with the step it is on marked.
+    ///
+    /// **The agent's words, its order, its statuses.** Nothing is derived and nothing is estimated:
+    /// no percentage, no bar, no remaining-time guess. §73's rule about provenance applies just as
+    /// hard to progress — a number a researcher believes is worse than no number, and the only
+    /// honest denominator is the one the agent wrote down itself.
+    ///
+    /// `busy` is what the running step is doing right now, which is the `activity` the watcher
+    /// already reads. It rides the in-progress line rather than a row of its own, because a
+    /// forty-second `execute` is a property of *that step*, not of the plan.
+    ///
+    /// Empty plan, empty element. `write_todos` is optional and the model skips it for simple
+    /// requests, so a plan is a thing that sometimes exists — not a thing to fake a skeleton for
+    /// (§178).
+    fn plan_list(&self, todos: &[protocol::Todo], busy: Option<&str>) -> Div {
+        let mut list = div().flex().flex_col().w_full().min_w_0().gap_1();
+        if todos.is_empty() {
+            return list;
+        }
+        for (at, todo) in todos.iter().enumerate() {
+            // Done recedes, doing is the one you read, still-to-come is legible but quiet. All
+            // three stay above the AA floor `theme` guarantees — "faint" is not permission to be
+            // unreadable, and a scientist scanning a plan is reading, not glancing.
+            let ink = if todo.is_done() {
+                theme::text_muted()
+            } else if todo.is_running() {
+                theme::text()
+            } else {
+                theme::text_faint()
+            };
+            let mut row = div()
+                .id(("plan-step", at))
+                .flex()
+                .flex_row()
+                .items_start()
+                .w_full()
+                .min_w_0()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(rgb(if todo.is_running() {
+                            theme::accent()
+                        } else if todo.is_done() {
+                            theme::success()
+                        } else {
+                            theme::text_faint()
+                        }))
+                        .child(todo.mark()),
+                )
+                .child(
+                    div()
+                        .flex_grow()
+                        .min_w_0()
+                        .text_xs()
+                        .text_color(rgb(ink))
+                        .child(todo.content.clone()),
+                );
+            if todo.is_running() {
+                if let Some(busy) = busy {
+                    row = row.child(
+                        div()
+                            .flex_none()
+                            .text_xs()
+                            .text_color(rgb(theme::text_faint()))
+                            .child(busy.to_string()),
+                    );
+                }
+            }
+            list = list.child(row);
+        }
+        list
+    }
+
+    /// The coordinator's plan for this conversation, when it wrote one.
+    ///
+    /// Its own section rather than a line in the spine, because the spine is the *project* —
+    /// durable, surviving every turn — and this is the working plan for the question in flight.
+    /// Filing them together would make an abandoned step look like a project commitment.
+    ///
+    /// Kept after the turn ends on purpose: a finished plan is the account of what the answer
+    /// involved, and clearing it the moment the last token arrives would delete the explanation
+    /// exactly when someone starts reading it.
+    fn plan_section(&self, _cx: &mut Context<Self>) -> Div {
+        let mut section = div().flex().flex_col().gap_2().w_full().min_w_0();
+        let Some((done, total)) = protocol::plan_progress(&self.plan) else {
+            return section;
+        };
+        section = section
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .w_full()
+                    .min_w_0()
+                    .gap_2()
+                    .child(section_label("PLAN"))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(rgb(theme::text_faint()))
+                            .text_xs()
+                            .child(format!("{done} of {total}")),
+                    ),
+            )
+            // The coordinator's plan gets no activity string: `activity` is read off a *worker's*
+            // thread, and this conversation's current tool is already the road strip's job.
+            .child(self.plan_list(&self.plan, None));
+        section
+    }
+
     fn jobs_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut section = div().flex().flex_col().gap_2().pt_2();
         if self.jobs.is_empty() && self.tasks.is_empty() {
@@ -12214,9 +12399,30 @@ impl Workbench {
                 .border_color(rgb(colour))
                 .child(
                     div()
-                        .text_color(rgb(theme::text()))
-                        .text_sm()
-                        .child(format!("{mark} {}", task.agent_name.replace('_', " "))),
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .w_full()
+                        .min_w_0()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_grow()
+                                .min_w_0()
+                                .text_color(rgb(theme::text()))
+                                .text_sm()
+                                .child(format!("{mark} {}", task.agent_name.replace('_', " "))),
+                        )
+                        // `step 4 of 7`, and nothing when the agent wrote no plan. The one number
+                        // in this panel with a real denominator (§209).
+                        .children(protocol::plan_progress(&task.todos).map(|(done, total)| {
+                            div()
+                                .flex_none()
+                                .text_xs()
+                                .text_color(rgb(theme::text_faint()))
+                                .child(format!("{done} of {total}"))
+                        })),
                 )
                 .child(
                     div()
@@ -12254,6 +12460,12 @@ impl Workbench {
                             .text_xs()
                             .child(task.description.clone()),
                     )
+                })
+                // **What turns six minutes of "running · execute" into something a person can
+                // read.** Measured on a real run: eight approval rounds and 35–43 seconds per
+                // command, with nothing on screen saying how much of it was left (§209).
+                .when(!task.todos.is_empty(), |row| {
+                    row.child(self.plan_list(&task.todos, task.activity.as_deref()))
                 });
 
             if let Some(request) = &task.pending {
@@ -13414,6 +13626,93 @@ mod tests {
         );
     }
 
+    /// A worker with a plan, so the status-bar line can be checked without a window.
+    fn worker_with(status: &str, todos: &[(&str, &str)], activity: Option<&str>) -> protocol::AsyncTask {
+        protocol::AsyncTask {
+            task_id: "t-1".into(),
+            thread_id: "th-1".into(),
+            agent_name: "background_worker".into(),
+            status: status.into(),
+            description: String::new(),
+            pending: None,
+            error: None,
+            activity: activity.map(str::to_owned),
+            todos: todos
+                .iter()
+                .map(|(content, status)| protocol::Todo {
+                    content: (*content).to_string(),
+                    status: (*status).to_string(),
+                })
+                .collect(),
+            owner: String::new(),
+        }
+    }
+
+    /// The one-line glance version of a long run (§209).
+    #[test]
+    fn the_status_line_counts_the_step_being_worked_on() {
+        let plan = [
+            ("Generate the dataset", "completed"),
+            ("Clean the columns", "completed"),
+            ("Build the model", "in_progress"),
+            ("Write the report", "pending"),
+        ];
+
+        // Two done, so the one being worked on is the third — `done + 1`, not `done`. A researcher
+        // reading "step 2 of 4" while the third is running has been told the wrong thing.
+        let task = worker_with("running", &plan, Some("execute"));
+        assert_eq!(
+            summary_for(&[task], &[]),
+            Some("background worker · step 3 of 4 · execute".to_string())
+        );
+
+        // No activity yet: the count still stands on its own.
+        let quiet = worker_with("running", &plan, None);
+        assert_eq!(
+            summary_for(&[quiet], &[]),
+            Some("background worker · step 3 of 4".to_string())
+        );
+
+        // **A finished worker says nothing.** Its row already carries a tick and a button; keeping
+        // it in the status bar would leave a stale count there for the rest of the session.
+        let done = worker_with("success", &plan, None);
+        assert_eq!(summary_for(&[done], &[]), None);
+
+        // Nor does a worker that never wrote a plan — there is no denominator to offer.
+        let planless = worker_with("running", &[], Some("execute"));
+        assert_eq!(summary_for(&[planless], &[]), None);
+    }
+
+    #[test]
+    fn a_conversations_own_plan_is_the_fallback_and_stops_when_it_is_done() {
+        let plan: Vec<protocol::Todo> = [("Search the literature", "completed"), ("Synthesise", "pending")]
+            .iter()
+            .map(|(content, status)| protocol::Todo {
+                content: (*content).to_string(),
+                status: (*status).to_string(),
+            })
+            .collect();
+        assert_eq!(summary_for(&[], &plan), Some("step 2 of 2".to_string()));
+
+        // A worker outranks it: the worker is what runs while nobody is looking.
+        let task = worker_with("running", &[("Do the thing", "in_progress")], Some("ls"));
+        assert_eq!(
+            summary_for(&[task], &plan),
+            Some("background worker · step 1 of 1 · ls".to_string())
+        );
+
+        // Every step done: the line goes away rather than sitting at "step 3 of 2".
+        let finished: Vec<protocol::Todo> = plan
+            .iter()
+            .map(|todo| protocol::Todo {
+                content: todo.content.clone(),
+                status: "completed".into(),
+            })
+            .collect();
+        assert_eq!(summary_for(&[], &finished), None);
+        assert_eq!(summary_for(&[], &[]), None);
+    }
+
     /// The heading that cut off the very thing §201 added (§208).
     #[test]
     fn a_folder_heading_gives_up_its_middle_before_either_end() {
@@ -13494,6 +13793,7 @@ mod tests {
             pending: None,
             error: None,
             activity: None,
+            todos: Vec::new(),
             owner: String::new(),
         }];
 
@@ -13551,6 +13851,7 @@ mod tests {
             pending: None,
             error: None,
             activity: None,
+            todos: Vec::new(),
             owner: String::new(),
         }];
 
