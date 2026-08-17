@@ -11657,3 +11657,47 @@ nothing has two explanations and only one of them is about the code.
 
 *Fifty-ninth: before a null result becomes evidence, prove the instrument was recording. "No hit"
 and "no data" print identically.*
+
+## 207. The poll that reported nothing (2026-08-17)
+
+> *"If I don't ask about the status the app is not checking the success or failure. If I asked, the
+> success appears even when the agent already finished his work."*
+
+Three rounds went into this without a single measurement, which is the part worth recording.
+
+**What is now established, from evidence rather than reading:**
+
+- *The poll succeeds.* The panel showed `running · data cleaning` and `running · exploratory data
+  analysis` — two different activity strings for two workers. `decode_async_tasks` sets
+  `activity: None` and `track_task` never copies it from a later snapshot, so an activity string on a
+  tracked task can **only** have come from `watch_task`'s own HTTP poll. That rules out a dead
+  watcher, which was the leading theory.
+- *`next` is present and is an array.* §204's warning fires when it is not, the app now keeps its own
+  log (§206), and the log from a real run carries exactly one `WARN` — the host-execution banner.
+
+Which leaves one conclusion: `next` is present and **non-empty** on a worker whose run has ended, so
+`next_is_empty` is the wrong test for "done". The coordinator's `check_async_task` reads the
+middleware's own record and says `success`, which is why asking works.
+
+And the two are not simply disagreeing about a bug — a turn in this very session had the coordinator
+report *"the folders `eda/`, `diagnostic/`, `reports/` and `scripts/` exist but are empty, so the
+background task only partially completed despite reporting success."* The middleware records that the
+run returned; the thread's checkpoint says the graph never reached its end. Both are telling the
+truth about different things, and the panel has been showing the more pessimistic one with no way to
+say why.
+
+**What this entry actually changes** is only the instrumentation, deliberately:
+
+- The watcher logs the state its decision is read from, **once per task** — status, `next`, activity.
+  Once, not per four-second poll, because a log that scrolls is a log nobody reads.
+- It logs again on every change, which is naturally rate-limited: the watcher only forwards changes.
+- The poll's failure path was `debug!`, below the default filter. A poll failing every four seconds
+  left the panel saying `running` for ever while saying nothing a researcher could see —
+  indistinguishable from a worker still working. Now `warn!`, once per task.
+
+The fix follows the value. Three guesses have already been spent, and §203 and §206 both say the same
+thing from opposite directions: do not reason past what is observed, and do not accept an observation
+until the instrument is known to be recording.
+
+*Sixtieth: a poll that cannot say what it saw is not an observation, it is a hope. Instrument the
+decision, not the outcome.*

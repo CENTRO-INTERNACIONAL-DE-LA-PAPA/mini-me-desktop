@@ -601,6 +601,12 @@ pub struct ThreadState {
     /// What the worker is doing right now — the subagent it delegated to, or the tool it
     /// is running. `None` when nothing has been called yet.
     pub activity: Option<String>,
+    /// The nodes the thread would run next — the value `status` is derived from.
+    ///
+    /// Carried out of this function so the *watcher* can report it, once per task rather than
+    /// once per four-second poll. Everything about the "a finished worker keeps saying running"
+    /// hunt turns on what is in here, and it was the one number nobody could see (§207).
+    pub next: Vec<String>,
 }
 
 /// What the worker is busy with, from the last tool call in its thread.
@@ -1085,6 +1091,10 @@ impl LangGraphClient {
         // the argument needs goes in the log, naming what the payload *did* carry. Fifth time in
         // this project that the missing evidence was a value the program already had (§116).
         let next = state.get("next");
+        let next_nodes: Vec<String> = next
+            .and_then(Value::as_array)
+            .map(|nodes| nodes.iter().map(ToString::to_string).collect())
+            .unwrap_or_default();
         if next.and_then(Value::as_array).is_none() {
             let carried: Vec<&str> = state
                 .as_object()
@@ -1118,6 +1128,7 @@ impl LangGraphClient {
             pending,
             error,
             activity: last_activity(&state),
+            next: next_nodes,
         })
     }
 
