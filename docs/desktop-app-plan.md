@@ -11701,3 +11701,43 @@ until the instrument is known to be recording.
 
 *Sixtieth: a poll that cannot say what it saw is not an observation, it is a hope. Instrument the
 decision, not the outcome.*
+
+### 207a. What the instrument said (2026-08-17)
+
+One run, and the poll turned out to be right all along:
+
+```
+15:43:11  status=running      next=[model]                              activity=write todos
+15:43:15  status=running      next=[model]                              activity=ls
+15:43:45  status=interrupted  next=[HumanInTheLoopMiddleware.after_model] activity=execute
+15:44:15  status=running      next=[tools]                              activity=execute
+15:44:28  status=interrupted  next=[HumanInTheLoopMiddleware.after_model] activity=execute
+15:44:32  status=running      next=[tools]                              activity=execute
+15:44:41  status=success      next=[]                                   activity=write todos
+```
+
+`next=[]` and `status=success`, ninety seconds in, with nobody asking. **The watcher works, `next` is
+the right test, and every theory in §204 and §207 was wrong** — including the one that survived two
+eliminations.
+
+The gate rounds are worth noticing too: `interrupted` twice with `next=[HumanInTheLoopMiddleware.after_model]`,
+each cleared within seconds by the standing approval. That path is doing exactly what §31 built it for.
+
+**So what was reported?** Two different things wearing one sentence.
+
+1. *The waits were real.* The earlier runs generated 500 records and ran a full EDA across two
+   workers; four minutes of that is not a stuck panel.
+2. *And in that run the middleware was the optimistic one, not the app.* The coordinator itself said
+   so: *"the folders `eda/`, `diagnostic/`, `reports/` and `scripts/` exist but are empty — so the
+   background task only partially completed despite reporting success."* `check_async_task` read the
+   middleware's record and said `success`; the thread's `next` said there was more to do. Asking did
+   not reveal a status the app had missed — **it produced a more flattering one.** The panel was
+   right and had no way to say why.
+
+That last point is the finding, and it is the opposite of the bug report. It goes on the open list
+against the backend, beside §35's theorizer reporting a guess instead of the command's real output —
+same shape, same cost: a status a researcher believes because nothing contradicts it.
+
+*Sixty-first: when the instrument finally speaks and contradicts every theory including your own
+favourite, that is the instrument working. Three rounds of guessing were the price of not having
+built it first.*

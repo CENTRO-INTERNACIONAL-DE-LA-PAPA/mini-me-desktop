@@ -1091,9 +1091,20 @@ impl LangGraphClient {
         // the argument needs goes in the log, naming what the payload *did* carry. Fifth time in
         // this project that the missing evidence was a value the program already had (§116).
         let next = state.get("next");
+        // `as_str` before `to_string`: a `Value::String` stringifies *with* its JSON quotes, so the
+        // first version of this logged `next=["\"model\""]` — readable, but every reader has to
+        // discount a layer of escaping that is an artefact of how it was printed.
         let next_nodes: Vec<String> = next
             .and_then(Value::as_array)
-            .map(|nodes| nodes.iter().map(ToString::to_string).collect())
+            .map(|nodes| {
+                nodes
+                    .iter()
+                    .map(|node| match node.as_str() {
+                        Some(name) => name.to_string(),
+                        None => node.to_string(),
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
         if next.and_then(Value::as_array).is_none() {
             let carried: Vec<&str> = state
