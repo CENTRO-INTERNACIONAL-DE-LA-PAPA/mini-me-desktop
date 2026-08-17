@@ -283,6 +283,48 @@ impl Settings {
         None
     }
 
+    /// Specialists pointed at a provider no key covers, as sentences a researcher can act on.
+    ///
+    /// **The gate §186 built reads the coordinator's settings alone.** A specialist override to a
+    /// second provider still saved, and the first anyone heard of it was a 429 from that
+    /// provider's billing page, raised inside a background worker several minutes later — with the
+    /// conversation itself chatting perfectly well the whole time, because the coordinator's own
+    /// key was fine (§187, and §212 when it finally happened to somebody).
+    ///
+    /// It is the same trap the picker sets: the same model is listed under two companies, one of
+    /// which the researcher can pay and one of which they cannot, and the names differ by a prefix.
+    ///
+    /// `has_key_for` is passed in rather than read here because the keychain is not async-safe and
+    /// this is called from wherever the caller already holds the main thread.
+    pub fn unkeyed_specialists(&self, has_key_for: impl Fn(&str) -> bool) -> Vec<String> {
+        let mut problems = Vec::new();
+        for (specialist, spec) in &self.subagents {
+            let spec = spec.trim();
+            if spec.is_empty() {
+                continue;
+            }
+            // Tolerant of both spellings for the same reason `_provider_of` is on the Python side:
+            // a check that silently matches neither is worse than no check.
+            let Some(id) = spec
+                .split_once("::")
+                .map(|(id, _)| id)
+                .or_else(|| spec.split_once(':').map(|(id, _)| id))
+            else {
+                continue;
+            };
+            if has_key_for(id) {
+                continue;
+            }
+            let label = provider(id).map(|p| p.label.to_string()).unwrap_or_else(|| id.to_string());
+            problems.push(format!(
+                "{} is set to a {label} model and no {label} key is stored — that specialist \
+                 would fail partway through a turn, on somebody else's account",
+                specialist.replace('_', " ")
+            ));
+        }
+        problems
+    }
+
     pub fn load() -> Self {
         let path = settings_path();
         let Ok(text) = std::fs::read_to_string(&path) else {
@@ -556,6 +598,51 @@ pub fn asta_env() -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The gate §186 built read the coordinator alone; this is the half it missed (§212).
+    #[test]
+    fn a_specialist_on_an_unkeyed_provider_is_refused_before_the_turn() {
+        let mut stored = Settings {
+            provider: "custom".into(),
+            base_url: "https://openrouter.ai/api/v1".into(),
+            ..Settings::default()
+        };
+        stored.subagents.insert(
+            "exploratory_data_analysis".into(),
+            "openai::gpt-4.1".into(),
+        );
+        stored
+            .subagents
+            .insert("academic_researcher".into(), "custom::openai/gpt-4.1".into());
+
+        // Only OpenRouter is paid for. The OpenAI-hosted twin of the very same model is refused,
+        // and the OpenRouter one — which differs by a prefix — is not.
+        let problems = stored.unkeyed_specialists(|id| id == "custom");
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("exploratory data analysis"), "{problems:?}");
+        assert!(problems[0].contains("OpenAI"), "{problems:?}");
+
+        // With both keys filed, nothing is in the way.
+        assert!(stored
+            .unkeyed_specialists(|id| id == "custom" || id == "openai")
+            .is_empty());
+
+        // A specialist following the coordinator is not an override and cannot be wrong.
+        let plain = Settings {
+            provider: "custom".into(),
+            ..Settings::default()
+        };
+        assert!(plain.unkeyed_specialists(|_| false).is_empty());
+
+        // The single-colon spelling is caught too, and an unparseable entry is left alone rather
+        // than blocking every turn on a string nobody can read.
+        let mut odd = Settings::default();
+        odd.subagents.insert("report_writer".into(), "anthropic:claude".into());
+        odd.subagents.insert("data_cleaner".into(), "nonsense".into());
+        let problems = odd.unkeyed_specialists(|_| false);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("report writer"), "{problems:?}");
+    }
 
     #[test]
     fn a_researchers_own_palette_can_replace_a_built_in() {
