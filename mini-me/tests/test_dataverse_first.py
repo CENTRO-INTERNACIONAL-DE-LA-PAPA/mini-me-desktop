@@ -12,6 +12,8 @@ production.
 from __future__ import annotations
 
 import asyncio
+import json
+from types import SimpleNamespace
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -20,7 +22,7 @@ from backend.middleware.dataverse_first import (
     FIXED_FILENAME,
     READ_TOOL,
     SEARCH_TOOL,
-    FixedSearchFilename,
+    SearchResultsFile,
     SearchBeforeRecommending,
 )
 
@@ -153,40 +155,73 @@ def _fixed(middleware, name, args):
     return seen["request"].tool_call["args"]
 
 
-@pytest.mark.parametrize(
-    ("tool", "argument"),
-    [(SEARCH_TOOL, "output_filename"), (READ_TOOL, "filename")],
-)
-def test_the_filename_is_set_whatever_the_model_asked_for(tool, argument):
+def test_the_search_is_told_where_to_write_whatever_the_model_asked_for():
     """Including when it asked for nothing — the argument is added, not just corrected."""
-    middleware = FixedSearchFilename()
-    assert _fixed(middleware, tool, {"query": "potato"})[argument] == FIXED_FILENAME
-    assert _fixed(middleware, tool, {argument: "results.json"})[argument] == FIXED_FILENAME
+    middleware = SearchResultsFile()
+    assert _fixed(middleware, SEARCH_TOOL, {"query": "potato"})["output_filename"] == FIXED_FILENAME
+    assert (
+        _fixed(middleware, SEARCH_TOOL, {"output_filename": "results.json"})["output_filename"]
+        == FIXED_FILENAME
+    )
 
 
-def test_the_two_tools_spell_the_argument_differently():
-    """Which is the detail a model recalls wrong three steps into an episode."""
-    middleware = FixedSearchFilename()
-    assert "output_filename" in _fixed(middleware, SEARCH_TOOL, {})
-    assert "filename" in _fixed(middleware, READ_TOOL, {})
+def test_the_read_takes_file_path_and_nothing_else(caplog):
+    """The bug this file was rewritten for.
+
+    Probed against the live MCP (docs §220): `read_search_results(filename=...)` answers
+    *'file_path' is a required property*, and passing `filename` **beside** a correct `file_path`
+    answers *Unexpected keyword argument*. The previous version injected `filename`, so every
+    read failed — including the read the gate above forces, which is why the subagent could search
+    and never recommend.
+    """
+    args = _fixed(SearchResultsFile(), READ_TOOL, {})
+    assert "filename" not in args
+    assert args["file_path"].endswith(FIXED_FILENAME)
+    assert args["file_path"].startswith("/")
+
+
+def test_a_filename_the_model_supplies_is_removed_rather_than_passed_on():
+    """It is not a harmless extra: the tool rejects the whole call."""
+    args = _fixed(
+        SearchResultsFile(),
+        READ_TOOL,
+        {"file_path": "/tmp/mcp/json_files/dataverse_search.json", "filename": "x.json"},
+    )
+    assert args == {"file_path": "/tmp/mcp/json_files/dataverse_search.json"}
+
+
+def test_the_read_looks_where_the_search_said_it_wrote():
+    """Taken from the search's own answer, so a server that moves its directory is followed."""
+    middleware = SearchResultsFile()
+    elsewhere = "/srv/results/dataverse_search.json"
+    middleware.wrap_tool_call(
+        _ToolCallRequest(SEARCH_TOOL, {"query": "potato"}),
+        lambda r: [
+            {
+                "type": "text",
+                "text": json.dumps({"status": "success", "output_file": elsewhere}),
+            }
+        ],
+    )
+    assert _fixed(middleware, READ_TOOL, {})["file_path"] == elsewhere
 
 
 def test_the_model_s_other_arguments_survive():
     """It sets one argument. Choosing the query is the model's job and stays that way."""
-    args = _fixed(FixedSearchFilename(), SEARCH_TOOL, {"query": "sweetpotato Peru", "limit": 20})
+    args = _fixed(SearchResultsFile(), SEARCH_TOOL, {"query": "sweetpotato Peru", "limit": 20})
     assert args["query"] == "sweetpotato Peru"
     assert args["limit"] == 20
 
 
 def test_any_other_tool_is_left_alone():
     """`list_dataset_files` takes a persistent id, not a filename. Touching it would be a bug."""
-    args = _fixed(FixedSearchFilename(), "list_dataset_files", {"persistent_id": "doi:10.1/x"})
+    args = _fixed(SearchResultsFile(), "list_dataset_files", {"persistent_id": "doi:10.1/x"})
     assert args == {"persistent_id": "doi:10.1/x"}
 
 
 def test_a_call_that_was_already_right_is_passed_through_unchanged():
     """Identity, not an equal copy: the middleware must not rebuild a request it has no quarrel with."""
-    middleware = FixedSearchFilename()
+    middleware = SearchResultsFile()
     request = _ToolCallRequest(SEARCH_TOOL, {"output_filename": FIXED_FILENAME})
     assert middleware._fix(request) is request
 
@@ -198,7 +233,7 @@ def test_the_async_path_fixes_the_filename_too():
         seen.update(request=request)
 
     asyncio.run(
-        FixedSearchFilename().awrap_tool_call(
+        SearchResultsFile().awrap_tool_call(
             _ToolCallRequest(SEARCH_TOOL, {"query": "q"}), handler
         )
     )
@@ -243,7 +278,7 @@ def test_the_filename_fix_works_on_a_real_ToolCallRequest():
         state={"messages": []},
         runtime=None,
     )
-    fixed = FixedSearchFilename()._fix(request)
+    fixed = SearchResultsFile()._fix(request)
 
     assert fixed.tool_call["args"]["output_filename"] == FIXED_FILENAME
     assert fixed.tool_call["args"]["query"] == "potato"
@@ -260,3 +295,75 @@ def test_the_prompt_no_longer_asks_for_what_the_middleware_sets():
     prompt = dataverse_subagent["system_prompt"]
     assert FIXED_FILENAME not in prompt
     assert "Mandatory fixed filename rule" not in prompt
+
+
+# --- the copy the researcher can open ----------------------------------------------------------
+
+class _Sandbox:
+    """The two calls the copy needs, and a record of what was written."""
+
+    def __init__(self, error=None):
+        self.written: dict[str, str] = {}
+        self.error = error
+
+    async def aget_work_dir(self):
+        return "/home/user/workspace"
+
+    async def awrite(self, path, content):
+        self.written[path] = content
+        return SimpleNamespace(error=self.error)
+
+
+def _read_returning(payload, sandbox):
+    async def handler(_request):
+        return [{"type": "text", "text": json.dumps(payload)}]
+
+    return asyncio.run(
+        SearchResultsFile(sandbox).awrap_tool_call(_ToolCallRequest(READ_TOOL, {}), handler)
+    )
+
+
+def test_what_the_read_returned_is_kept_in_the_workspace():
+    """*"I want the user to have it."*
+
+    The file the MCP wrote is at `/tmp/mcp/json_files/` on a machine at
+    `dataverse-cip.fastmcp.app`, which is nobody's workspace. What comes back through the read is
+    the only copy that can reach the researcher.
+    """
+    sandbox = _Sandbox()
+    rows = [{"global_id": "doi:10.21223/P3/0F9T62", "name": "Late blight trials"}]
+    _read_returning({"file_path": "/tmp/mcp/json_files/x.json", "content": rows}, sandbox)
+    assert list(sandbox.written) == ["/home/user/workspace/dataverse_search.json"]
+    assert json.loads(sandbox.written["/home/user/workspace/dataverse_search.json"]) == rows
+
+
+def test_the_kept_copy_is_the_file_the_claims_check_reads():
+    """Two middlewares, one filename. If they drift, the check reads nothing."""
+    from backend.middleware.claims import DATAVERSE_SEARCH
+
+    assert DATAVERSE_SEARCH == FIXED_FILENAME
+
+
+def test_a_failed_write_costs_the_copy_and_not_the_search():
+    """A convenience must not take down the tool call that produced it."""
+    sandbox = _Sandbox(error="disk full")
+    result = _read_returning({"content": [{"global_id": "doi:1/x"}]}, sandbox)
+    assert result  # the read's own answer still reaches the model
+
+
+def test_a_read_that_answered_nothing_parseable_writes_nothing():
+    """An error page is not a search result, and must not be filed as one."""
+    sandbox = _Sandbox()
+
+    async def handler(_request):
+        return [{"type": "text", "text": "<html>gateway timeout</html>"}]
+
+    asyncio.run(
+        SearchResultsFile(sandbox).awrap_tool_call(_ToolCallRequest(READ_TOOL, {}), handler)
+    )
+    assert sandbox.written == {}
+
+
+def test_without_a_sandbox_the_middleware_still_fixes_the_arguments():
+    """`_build_runtime_subagents` passes one; a test or a caller that does not must not crash."""
+    assert _fixed(SearchResultsFile(), READ_TOOL, {})["file_path"].endswith(FIXED_FILENAME)

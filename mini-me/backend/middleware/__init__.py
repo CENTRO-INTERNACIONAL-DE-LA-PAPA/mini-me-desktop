@@ -7,8 +7,8 @@ them from ``backend.middleware`` without knowing which submodule each lives in.
 from backend.middleware.artifacts import ArtifactCaptureMiddleware
 from backend.middleware.claims import ClaimsRecorder
 from backend.middleware.dataverse_first import (
-    FixedSearchFilename,
     SearchBeforeRecommending,
+    SearchResultsFile,
 )
 from backend.middleware.guardrails import (
     _build_filesystem_permissions,
@@ -16,7 +16,7 @@ from backend.middleware.guardrails import (
     _build_pii_middleware,
 )
 from backend.middleware.project import ProjectSpineMiddleware
-from backend.middleware.search_first import SearchBeforeCiting
+from backend.middleware.search_first import KeepSources, SearchBeforeCiting
 from backend.middleware.tool_gate import Step, ToolsBeforeAnswering
 from backend.middleware.sync import (
     FileSyncMiddleware,
@@ -28,10 +28,11 @@ __all__ = [
     "ArtifactCaptureMiddleware",
     "ClaimsRecorder",
     "FileSyncMiddleware",
-    "FixedSearchFilename",
+    "KeepSources",
     "ProjectSpineMiddleware",
     "SearchBeforeCiting",
     "SearchBeforeRecommending",
+    "SearchResultsFile",
     "SandboxSyncMiddleware",
     "Step",
     "ToolsBeforeAnswering",

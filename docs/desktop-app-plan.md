@@ -29,6 +29,11 @@ sidecar** that the client spawns and supervises.
 read first; the dated sections below it are the record of how each item got here.
 
 **1. Protect the researcher's work** — the only group where the cost of being wrong is unrecoverable.
+- ⬜ **Dataverse downloads land on the wrong host** (§219/§220). `download_dataset_files_by_doi`
+  writes to `/tmp/mcp/json_files`-style directories on `dataverse-cip.fastmcp.app`, so unblocking
+  it would not put a file in the researcher's workspace. The desktop answer is a direct fetch
+  against the Dataverse data-access API; it needs the CIP base URL, a token for restricted files,
+  and a size limit before it is worth building.
 - 🟡 **A subagent's claims are now written down beside what is on disk** (§219) — every path a
   structured response names, and every `persistent_id` the dataverse explorer recommends, checked
   against the workspace and against the search file. It **records and does not block**: three of the
@@ -12368,3 +12373,88 @@ same request-only handling as the model key), and dataset size.
 
 *Seventy-third: when the plan proposes a gate for behaviour nobody has observed, build the meter
 first. The rules worth enforcing are the ones the measurements hand you.*
+
+## 220. The argument that did not exist (2026-08-18)
+
+*"See what AI says about the quey of dataverse."* The screenshot: `dataverse_explorer`, nine steps,
+one minute twenty-nine, and no datasets — *"couldn't extract parseable metadata from the CIP
+Dataverse search results, so I can't give you a verified dataset shortlist without risking invented
+details."*
+
+The subagent was right, and it was our fault. **§142's middleware broke every read it forced.**
+
+### Probed rather than reasoned about
+
+There was no current backend log on this machine, so the MCP was asked directly:
+
+```
+SearchCIPDataverse(query="late blight resistance", output_filename="dataverse_search.json")
+  -> {"status":"success","message":"Successfully saved 261 items to
+      /tmp/mcp/json_files/dataverse_search.json","item_count":261}
+
+read_search_results(filename="dataverse_search.json")
+  -> ToolException: 'file_path' is a required property
+read_search_results(file_path="/tmp/mcp/json_files/dataverse_search.json", filename="…")
+  -> ToolException: Unexpected keyword argument
+read_search_results(file_path="/tmp/mcp/json_files/dataverse_search.json")
+  -> the metadata
+```
+
+`read_search_results` takes **`file_path`**, and it wants the server-side absolute path.
+`FixedSearchFilename` injected `filename`. §142's own write-up states the tools *"spell the argument
+differently — `output_filename` on the way out, `filename` on the way back"*. That sentence was
+never true.
+
+So the injection did not merely fail to help. Passing `filename` beside a correct `file_path` is a
+**hard rejection**, not a tolerated extra — the middleware turned calls that would have worked into
+calls that could not. And because `SearchBeforeRecommending` *forces* the read, the subagent was
+locked into a step that could never succeed: it could search, and it could never recommend.
+
+### Why the tests did not catch it
+
+`test_dataverse_first.py` asserted that the middleware sets `filename` on the read. It passed, on
+every run, against a version that was broken in production — because it tested **what the middleware
+writes**, never **what the tool accepts**. §128 made this point about `ast.parse` proving a file
+valid without proving a line of it runs; this is the same error one layer up. The rewritten tests
+name the real contract and quote the live rejections, and the fix is driven end to end against the
+actual MCP before being believed.
+
+### The path is taken, not assumed
+
+`SearchResultsFile` reads `output_file` out of the search's own answer and uses it as `file_path` on
+the read, so a server that moves its directory is followed rather than guessed at. It also strips
+`filename` if the model supplies one, since the previous version taught it to.
+
+### The results now exist where the researcher can reach them
+
+*"Also I noticed that we are not saving the json file with the papers inside the thread folder. I
+want the user to have it."*
+
+True of both searches, for different reasons:
+
+* the Dataverse file was written to `/tmp/mcp/json_files/` **on the MCP host**, which is nobody's
+  workspace — the §219 claims check had been reading a sandbox path that could never exist;
+* papers lived in the Sources panel and in `minime_local.sources._seen`, an in-process dict —
+  nothing on disk, nothing surviving the app closing, nothing to hand to a colleague.
+
+So `dataverse_search.json` (what the read returned) and `papers.json` (`complete_sources`) are
+written into the workspace, and both subagents joined `DISK_WRITING_SUBAGENTS` so `FileSyncMiddleware`
+surfaces them in Outputs. `papers.json` carries **everything the searches returned**, not the
+shortlist the model discussed — and `complete_sources` is now one function called by both the
+artifact renderer and the file writer, because a researcher comparing the panel against the file
+must not find them disagreeing.
+
+Measured end to end against the live MCP, with the model asking badly on purpose: search
+`output_filename="whatever.json"`, read `filename="dataverse_search.json"` → both corrected, 261
+items read, 261 rows in the workspace.
+
+### On refactoring the search
+
+Worth saying plainly: **the search is not broken.** It returned 261 datasets for "late blight
+resistance" on the first attempt. Rewriting it against the Dataverse REST API would buy one thing
+this repository actually wants — files fetched into the researcher's own sandbox instead of the MCP
+host's `/tmp` — and that is the §219 download question, not this defect. It is a separate decision
+with its own prerequisites, and it should not be justified by a failure that was ours.
+
+*Seventy-fourth: a test that asserts what our code writes, when the contract belongs to somebody
+else's tool, proves only that we are consistent. Ask the tool.*
