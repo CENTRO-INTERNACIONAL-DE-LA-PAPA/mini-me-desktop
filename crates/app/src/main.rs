@@ -42,7 +42,7 @@ use gpui::{
 };
 
 use composer::{Composer, ComposerEvent};
-use protocol::{AgentRef, ApprovalRequest, Bucket, Decision, Project, TurnEvent};
+use protocol::{AgentRef, ApprovalRequest, Bucket, Project, TurnEvent};
 use sidecar::Sidecar;
 
 // ---- Palette (placeholder; align with the web app's tokens in P6.3) --------
@@ -1367,6 +1367,17 @@ fn distinguishing_tail(text: &str, max_chars: usize) -> String {
     }
     let keep = max_chars.saturating_sub(1);
     format!("…{}", text.chars().skip(count - keep).collect::<String>())
+}
+
+/// Approve, or decline with the same sentence every time.
+fn decision_for(approve: bool) -> protocol::Decision {
+    if approve {
+        protocol::Decision::Approve
+    } else {
+        protocol::Decision::Reject {
+            message: "The researcher declined to run this command.".to_string(),
+        }
+    }
 }
 
 /// The status bar's one-line answer to "what is happening, and how far through".
@@ -3405,20 +3416,10 @@ impl Workbench {
         let Some(request) = task.pending.take() else {
             return;
         };
-        // One decision per held action, in order — the agent validates the count.
-        let decisions: Vec<Decision> = request
-            .actions
-            .iter()
-            .map(|_| {
-                if approve {
-                    Decision::Approve
-                } else {
-                    Decision::Reject {
-                        message: "The researcher declined to run this command.".to_string(),
-                    }
-                }
-            })
-            .collect();
+        // One answer per held action, in order — the agent validates the count — and each carries
+        // the id of the interrupt that raised it, which is what lets several specialists be
+        // answered at once (§215).
+        let answers = protocol::Answer::all(&request, decision_for(approve));
         let thread_id = task.thread_id.clone();
         // **The task's own owner, not the conversation on screen.** Answering an approval is the
         // moment a background worker is told where to write, and it happens whenever the
@@ -3436,7 +3437,7 @@ impl Workbench {
             );
         }
         task.status = "running".into();
-        self.sidecar.decide_task(thread_id, owner, decisions);
+        self.sidecar.decide_task(thread_id, owner, answers);
         self.status = if approve {
             "background task approved — running…"
         } else {
@@ -10055,21 +10056,9 @@ impl Workbench {
         let Some(request) = self.pending_approval.take() else {
             return;
         };
-        // Exactly one decision per held action, in the order they were presented —
-        // the agent validates the count and errors out if it disagrees.
-        let decisions: Vec<Decision> = request
-            .actions
-            .iter()
-            .map(|_| {
-                if approve {
-                    Decision::Approve
-                } else {
-                    Decision::Reject {
-                        message: "The researcher declined to run this command.".to_string(),
-                    }
-                }
-            })
-            .collect();
+        // Exactly one answer per held action, in the order they were presented — the agent
+        // validates the count and errors out if it disagrees.
+        let answers = protocol::Answer::all(&request, decision_for(approve));
         self.status = if approve {
             "approved — running…"
         } else {
@@ -10077,7 +10066,7 @@ impl Workbench {
         }
         .into();
 
-        let mut events = self.sidecar.resume(decisions);
+        let mut events = self.sidecar.resume(answers);
         cx.spawn(async move |this, cx| {
             while let Some(event) = events.next().await {
                 if this

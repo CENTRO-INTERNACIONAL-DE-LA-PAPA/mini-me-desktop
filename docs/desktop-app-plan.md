@@ -12024,3 +12024,53 @@ that skips itself is worse than one that fails: it is green.
 
 *Sixty-eighth: a test suite that has only ever run on one platform is a test suite for that
 platform. The release build is where that bill arrives, which is the worst moment to receive it.*
+
+## 215. Three specialists at one gate (2026-08-17)
+
+Found on the second machine, in the status bar, at the end of a day's testing:
+
+> *When there are multiple pending interrupts, you must specify the interrupt id when resuming.*
+
+The road above it explains itself: `data cleaning → exploratory data analysis → predictive
+analytics → exploratory data analysis`, two of them visited twice. The coordinator launched three
+subagents together, each ran `execute`, and each stopped at the approval gate. Three interrupts
+pending on one thread, and nothing the researcher pressed could answer any of them.
+
+**The contract, read rather than guessed** (`langgraph/pregel/_loop.py:727`):
+
+```python
+if resume_is_map := (isinstance(resume, dict) and all(is_xxh3_128_hexdigest(k) for k in resume)):
+    self.config[CONF][CONFIG_KEY_RESUME_MAP] = resume
+else:
+    if len(self._pending_interrupts()) > 1:
+        raise RuntimeError("When there are multiple pending interrupts, …")
+```
+
+So `resume` must be a dict whose keys are **all** interrupt ids. Ours was
+`{"decisions": [...]}` — a dict whose one key is not a digest, so it took the `else` and hit the
+guard. Correct for one interrupt, which is every case this app had ever been tested with.
+
+Note the shape of that test: `all(...)`. A half-filled map is not a partial improvement — it is the
+legacy shape with a nonsense key. So the client sends the map when **every** answer has an id and
+the legacy form otherwise, which is right for an older backend too: a version that cannot name its
+interrupts cannot have had two of them pending.
+
+**`Answer`, not two slices.** The decisions and the ids have to stay in step — one answer per held
+action, grouped under the interrupt that raised it — and this project has already paid twice for
+collections that must agree being passed separately (§187, §212). `Answer::all` builds them from the
+request itself, so the count the middleware validates cannot drift from the actions it validated
+against.
+
+*What this cost to find:* nothing, because the error text named its own contract and the library was
+on disk to be read. Worth contrasting with §204 and §207, where three rounds went into a question no
+error message was answering. **An error that says what it wants is worth more than any amount of
+instrumentation** — and the reason this one was actionable is that it reached the status bar at all.
+
+*Sixty-ninth: concurrency in the agent is concurrency in the UI. A gate built for one pending
+question will meet three the first time the model is asked to use every specialist it has.*
+
+**Cut as `v0.2.1`, not as another `v0.2.0`.** The `v0.2.0` draft was never published, so re-using the
+number would have harmed nobody — except that §213 had just finished arguing the version is the first
+question of every support conversation. Two different builds answering it the same way is the exact
+ambiguity that entry existed to remove, and the draft is deleted rather than left beside the new one
+for somebody to send by mistake.

@@ -117,6 +117,18 @@ pub struct ApprovalRequest {
 /// One tool call held at the gate.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PendingAction {
+    /// Which interrupt raised this, as `Interrupt.id` — an xxh3-128 hex digest.
+    ///
+    /// **Load-bearing when more than one specialist stops at once.** LangGraph accepts a bare
+    /// `Command(resume=…)` only while exactly one interrupt is pending; past that it refuses, in
+    /// its own words: *"When there are multiple pending interrupts, you must specify the interrupt
+    /// id when resuming"* (`pregel/_loop.py:733`). Three subagents launched together each hit the
+    /// `execute` gate, and the approval could not be delivered to any of them (§215).
+    ///
+    /// Empty when the backend did not send one, which is the older shape and still resumes the
+    /// legacy way — correct there, because a backend that cannot name its interrupts can only have
+    /// had one.
+    pub interrupt: String,
     pub tool: String,
     /// What the tool would actually do, rendered for a human. For `execute` this is
     /// the shell command verbatim — the thing the user is really deciding about.
@@ -1245,12 +1257,12 @@ impl LangGraphClient {
         &self,
         thread_id: &str,
         workspace_thread: Option<&str>,
-        decisions: &[Decision],
+        answers: &[Answer],
     ) -> Result<()> {
         // The same body a foreground resume sends — one definition, so a change to the
         // decision shape cannot fix one path and leave the other broken.
         let payload = resume_request_body(
-            decisions,
+            answers,
             self.model.as_ref(),
             self.project.as_deref(),
             workspace_thread,
@@ -1631,13 +1643,13 @@ impl LangGraphClient {
     pub async fn resume_turn(
         &self,
         thread_id: &str,
-        decisions: &[Decision],
+        answers: &[Answer],
         on_event: impl FnMut(TurnEvent),
     ) -> Result<TurnOutcome> {
         self.stream(
             thread_id,
             resume_request_body(
-                decisions,
+                answers,
                 self.model.as_ref(),
                 self.project.as_deref(),
                 Some(thread_id),
@@ -1763,19 +1775,42 @@ fn graph_warm_up_assistant() -> Value {
 /// `decisions = interrupt(hitl_request)["decisions"]`): exactly one decision per
 /// held action, in the order they were presented.
 fn resume_request_body(
-    decisions: &[Decision],
+    answers: &[Answer],
     model: Option<&ModelChoice>,
     project: Option<&str>,
     workspace_thread: Option<&str>,
 ) -> Value {
-    let decisions: Vec<Value> = decisions
-        .iter()
-        .map(|decision| match decision {
-            Decision::Approve => json!({ "type": "approve" }),
-            Decision::Reject { message } => json!({ "type": "reject", "message": message }),
-        })
-        .collect();
+    let wire = |decision: &Decision| match decision {
+        Decision::Approve => json!({ "type": "approve" }),
+        Decision::Reject { message } => json!({ "type": "reject", "message": message }),
+    };
     let mut body = stream_request_body(model, project, workspace_thread);
+
+    // **Keyed by interrupt id when every answer has one.** LangGraph decides which shape it is
+    // looking at by testing whether *all* the map's keys are xxh3-128 digests
+    // (`pregel/_loop.py:727`), so a half-filled map is not a partial improvement — it is the legacy
+    // shape with a nonsense key. All or nothing, therefore.
+    //
+    // The legacy shape stays for a backend that sends no ids, where it is not merely acceptable but
+    // correct: a version that cannot name its interrupts cannot have had two of them pending.
+    if !answers.is_empty() && answers.iter().all(|answer| !answer.interrupt.is_empty()) {
+        // Grouped, in the order the actions were presented, because the middleware reads each
+        // interrupt's `decisions` positionally against its own `action_requests`.
+        let mut grouped: serde_json::Map<String, Value> = serde_json::Map::new();
+        for answer in answers {
+            let slot = grouped
+                .entry(answer.interrupt.clone())
+                .or_insert_with(|| json!({ "decisions": [] }));
+            slot["decisions"]
+                .as_array_mut()
+                .expect("decisions is an array")
+                .push(wire(&answer.decision));
+        }
+        body["command"] = json!({ "resume": Value::Object(grouped) });
+        return body;
+    }
+
+    let decisions: Vec<Value> = answers.iter().map(|a| wire(&a.decision)).collect();
     body["command"] = json!({ "resume": { "decisions": decisions } });
     body
 }
@@ -1785,6 +1820,36 @@ fn resume_request_body(
 pub enum Decision {
     Approve,
     Reject { message: String },
+}
+
+/// One decision, and the interrupt it answers.
+///
+/// **A struct rather than two parallel slices.** The decisions and their interrupt ids have to stay
+/// in step — one answer per held action, grouped by the interrupt that held it — and this project
+/// has already paid for the version where two collections that must agree were passed separately:
+/// the providers derived from the specs and the keys sent beside them (§187, §212).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Answer {
+    /// `Interrupt.id`, or empty when the backend did not send one.
+    pub interrupt: String,
+    pub decision: Decision,
+}
+
+impl Answer {
+    /// Answer every held action of a request the same way, in the order presented.
+    ///
+    /// The order is the contract: the middleware reads `decisions` positionally against its own
+    /// `action_requests`, and validates the count.
+    pub fn all(request: &ApprovalRequest, decision: Decision) -> Vec<Self> {
+        request
+            .actions
+            .iter()
+            .map(|action| Answer {
+                interrupt: action.interrupt.clone(),
+                decision: decision.clone(),
+            })
+            .collect()
+    }
 }
 
 /// How a stream ended: finished, or stopped at the approval gate.
@@ -1963,6 +2028,14 @@ fn decode_interrupt(value: &Value) -> Option<ApprovalRequest> {
     let interrupts = value.get("__interrupt__")?.as_array()?;
     let mut actions = Vec::new();
     for interrupt in interrupts {
+        // `id` since langgraph 0.6; `interrupt_id` is its deprecated spelling. Both are read
+        // because the version that matters is whichever is installed on a researcher's machine.
+        let id = interrupt
+            .get("id")
+            .or_else(|| interrupt.get("interrupt_id"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
         let payload = interrupt.get("value")?;
         let requests = payload.get("action_requests")?.as_array()?;
         let configs = payload.get("review_configs").and_then(Value::as_array);
@@ -1994,6 +2067,7 @@ fn decode_interrupt(value: &Value) -> Option<ApprovalRequest> {
                 })
                 .unwrap_or_else(|| vec!["approve".to_string(), "reject".to_string()]);
             actions.push(PendingAction {
+                interrupt: id.clone(),
                 tool,
                 detail,
                 description: request
@@ -2642,6 +2716,14 @@ fn summarize_error(data: &str) -> String {
 mod tests {
     use super::*;
 
+    /// One approval for one interrupt. `""` is the older backend that sends no id.
+    fn approve_of(interrupt: &str) -> Answer {
+        Answer {
+            interrupt: interrupt.to_string(),
+            decision: Decision::Approve,
+        }
+    }
+
     #[test]
     fn an_iso_stamp_becomes_seconds_and_then_something_a_person_reads() {
         // Known anchors. The epoch itself, and a date past 2000 so the era arithmetic is
@@ -2840,7 +2922,7 @@ mod tests {
 
         // A resume carries the same routing: the continuation must not silently switch
         // model or lose the key mid-turn.
-        let resumed = resume_request_body(&[Decision::Approve], Some(&model), None, None);
+        let resumed = resume_request_body(&[approve_of("")], Some(&model), None, None);
         assert_eq!(
             resumed["config"]["configurable"]["__llm_keys"],
             configurable["__llm_keys"]
@@ -3197,7 +3279,7 @@ mod tests {
         // Resumes carry the owner too. In particular, a background task may wait across a backend
         // restart, which clears the backend's in-memory worker→conversation map; the decision
         // request must restore the owner before the worker writes anything else.
-        let resumed = resume_request_body(&[Decision::Approve], None, None, Some("conversation-1"));
+        let resumed = resume_request_body(&[approve_of("")], None, None, Some("conversation-1"));
         assert_eq!(
             resumed["config"]["configurable"][WORKSPACE_THREAD_KEY],
             "conversation-1"
@@ -3741,6 +3823,108 @@ mod tests {
             data: json!({"artifacts": {}}).to_string(),
         })
         .is_empty());
+    }
+
+    /// Three specialists stopping at once, and one resume that can answer all of them (§215).
+    #[test]
+    fn several_pending_interrupts_are_answered_by_id() {
+        // Two interrupts, the first holding two commands. LangGraph decides which shape it is
+        // looking at by testing that *every* key is an xxh3-128 digest, so the map is all-or-nothing.
+        let first = "0f1e2d3c4b5a69788796a5b4c3d2e1f0";
+        let second = "112233445566778899aabbccddeeff00";
+        let answers = vec![
+            approve_of(first),
+            approve_of(first),
+            Answer {
+                interrupt: second.to_string(),
+                decision: Decision::Reject {
+                    message: "no".into(),
+                },
+            },
+        ];
+        let body = resume_request_body(&answers, None, None, None);
+        let resume = &body["command"]["resume"];
+
+        assert!(resume.get("decisions").is_none(), "not the legacy shape: {resume}");
+        assert_eq!(
+            resume[first]["decisions"].as_array().map(Vec::len),
+            Some(2),
+            "both of the first interrupt's commands, in order: {resume}"
+        );
+        assert_eq!(resume[first]["decisions"][0]["type"], "approve");
+        assert_eq!(resume[second]["decisions"][0]["type"], "reject");
+        assert_eq!(resume[second]["decisions"][0]["message"], "no");
+
+        // **One interrupt still uses the map**, because there is nothing to lose by it and the
+        // shape a researcher meets should not depend on how many specialists happened to run.
+        let one = resume_request_body(&[approve_of(first)], None, None, None);
+        assert_eq!(one["command"]["resume"][first]["decisions"][0]["type"], "approve");
+
+        // A backend that sends no ids gets the legacy shape — correct there, because a version
+        // that cannot name its interrupts cannot have had two pending.
+        let legacy = resume_request_body(&[approve_of("")], None, None, None);
+        assert_eq!(legacy["command"]["resume"]["decisions"][0]["type"], "approve");
+
+        // Mixed is treated as legacy on purpose: a half-filled map is not a partial improvement,
+        // it is the old shape with a nonsense key, and LangGraph would read it as such.
+        let mixed = resume_request_body(&[approve_of(first), approve_of("")], None, None, None);
+        assert_eq!(
+            mixed["command"]["resume"]["decisions"].as_array().map(Vec::len),
+            Some(2),
+            "{}",
+            mixed["command"]["resume"]
+        );
+    }
+
+    /// The id has to survive the decode, or nothing above it can use it.
+    #[test]
+    fn an_interrupt_carries_its_id_into_every_action_it_holds() {
+        let id = "0f1e2d3c4b5a69788796a5b4c3d2e1f0";
+        let request = decode_interrupt(&json!({
+            "__interrupt__": [{
+                "id": id,
+                "value": {
+                    "action_requests": [
+                        {"name": "execute", "args": {"command": "python a.py"}},
+                        {"name": "execute", "args": {"command": "python b.py"}},
+                    ]
+                }
+            }]
+        }))
+        .expect("an approval request");
+        assert_eq!(request.actions.len(), 2);
+        assert!(request.actions.iter().all(|a| a.interrupt == id));
+
+        // `interrupt_id` is the deprecated spelling and still read, because the version installed
+        // on a researcher's machine is the one that matters.
+        let older = decode_interrupt(&json!({
+            "__interrupt__": [{
+                "interrupt_id": id,
+                "value": {"action_requests": [{"name": "execute", "args": {}}]}
+            }]
+        }))
+        .expect("an approval request");
+        assert_eq!(older.actions[0].interrupt, id);
+
+        // And no id at all is empty rather than invented — that is what selects the legacy resume.
+        let none = decode_interrupt(&json!({
+            "__interrupt__": [{"value": {"action_requests": [{"name": "execute", "args": {}}]}}]
+        }))
+        .expect("an approval request");
+        assert!(none.actions[0].interrupt.is_empty());
+
+        // Every held action of every interrupt, keyed correctly across both.
+        let second = "112233445566778899aabbccddeeff00";
+        let both = decode_interrupt(&json!({
+            "__interrupt__": [
+                {"id": id, "value": {"action_requests": [{"name": "execute", "args": {}}]}},
+                {"id": second, "value": {"action_requests": [{"name": "execute", "args": {}}]}},
+            ]
+        }))
+        .expect("an approval request");
+        assert_eq!(both.actions.len(), 2);
+        assert_eq!(both.actions[0].interrupt, id);
+        assert_eq!(both.actions[1].interrupt, second);
     }
 
     /// Reading and writing the spine must name the same project, or a saved mission lands in a
