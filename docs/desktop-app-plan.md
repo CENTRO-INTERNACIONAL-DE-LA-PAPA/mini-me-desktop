@@ -10665,8 +10665,8 @@ name a fill — with a count, so a filter that quietly matched nothing could not
 Verified by pointing a potato hover back at `elevated` and watching it fail with *"changes it by
 1.000"*.
 
-- ⬜ **Four older palettes cannot show a hover** — Bench, Bench Night, Mini-Me Dark and Slate.
-  Fixing them means retuning their inks for headroom, which is their own job and a bigger one.
+- ✅ **Four older palettes cannot show a hover** — Bench, Bench Night, Mini-Me Dark and Slate.
+  Done in §217: the block was searching one dimension. Six ink nudges of 2–8%, no hue moved.
 
 *Thirty-seventh: two jobs sharing one colour is not a saving, it is a coincidence waiting to be
 noticed. Elevation and hover were the same value here for as long as the file has existed, and
@@ -12102,3 +12102,42 @@ yet, which is the point of instrumenting rather than theorising.
 
 *Seventieth: ship the observation with the fix, not after it. The round trip you save is the one
 where you cannot tell whether your own change is installed.*
+
+## 217. The answer was sideways (2026-08-18)
+
+§184 recorded that Bench, Bench Night, Mini-Me Dark and Slate could not have a visible hover:
+*"inks so near the 4.5 floor that every lift large enough to see drops one of them under AA. There
+is no fraction that satisfies both."*
+
+Every word of that is true about a **lift**, and a lift is the only move it tried. The elevation
+ladder runs `background → surface → elevated → overlay`, and a hover borrowed from it inherits steps
+built to be subtle — 1.06 to 1.10 in contrast, where 1.12 is the floor for a change an eye can find.
+On Bench there is not even room to try: `elevated` is already `0xfcfcfa` and `overlay` is white.
+
+The potato palettes had solved it in §189 without the connection being drawn: their hover is not a
+rung, it is a **tint** — a few percent of a second palette colour, sitting off the end of the ladder
+entirely. Hue and chroma carry the difference, so lightness barely moves and the inks barely notice.
+
+Applied to all four, measured rather than eyeballed:
+
+| | hover | off the ladder by | inks that moved |
+| --- | --- | --- | --- |
+| Bench | accent 10% into **background** | 1.139 | `text_muted` −3%, `text_faint` −8% |
+| Bench Night | accent 7% above `overlay` | 1.131 | `text_muted` +2%, `text_faint` +6% |
+| Mini-Me Dark | accent 10% above `overlay` | 1.142 | `text_faint` +2% |
+| Slate | accent 7% above `overlay` | 1.136 | `text_faint` +6% |
+
+A light theme leaves the ladder **downward** and a dark one upward, which is the whole reason Bench
+looked hopeless: it was the only one whose ladder ends at white.
+
+**`text_faint` was the entire blocker.** `text` clears the new fills at 7.5–10.6:1 and never moved;
+`text_muted` needed nothing in two of the four. Every change is lightness only — no hue, no
+saturation — which is the same rule §184 itself applied when it darkened two of Bench's inks.
+
+**And the guard earned its keep.** The test ends `assert_eq!(checked, 8)` because a filter that
+quietly matched nothing would make every assertion above it vacuous. It was `4`, and it failed the
+moment four new hovers appeared — catching a change that would otherwise have shipped four palettes
+whose hovers no test was checking.
+
+*Seventy-first: "there is no fraction that satisfies both" is a statement about the axis you
+searched. Two of these palettes needed one ink moved by two percent.*
