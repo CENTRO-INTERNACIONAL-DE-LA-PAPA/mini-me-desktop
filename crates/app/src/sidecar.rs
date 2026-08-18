@@ -20,7 +20,8 @@ use crate::preflight::Cancel;
 use crate::protocol::urlencode;
 use crate::references;
 use crate::protocol::{
-    AgentRef, AsyncTask, Conversation, Decision, Job, LangGraphClient, ModelChoice, Project,
+    AgentRef, Answer, AsyncTask, Conversation, Decision, Job, LangGraphClient, ModelChoice,
+    Project,
     TurnEvent, TurnOutcome,
 };
 
@@ -326,7 +327,7 @@ impl Sidecar {
     ///
     /// Runs on the conversation's existing thread, so the continuation lands in the
     /// same turn rather than starting a new one.
-    pub fn resume(&self, decisions: Vec<Decision>) -> mpsc::UnboundedReceiver<TurnEvent> {
+    pub fn resume(&self, answers: Vec<Answer>) -> mpsc::UnboundedReceiver<TurnEvent> {
         let (tx, rx) = mpsc::unbounded();
         let thread = self.thread.clone();
         let base_url = self.base_url.clone();
@@ -358,7 +359,7 @@ impl Sidecar {
                 ));
                 return;
             };
-            match client.resume_turn(&thread_id, &decisions, &mut emit).await {
+            match client.resume_turn(&thread_id, &answers, &mut emit).await {
                 // A second gate in the same turn is normal: an agent often runs several
                 // commands, and each one stops here.
                 Ok(TurnOutcome::AwaitingApproval) => {}
@@ -1002,7 +1003,7 @@ impl Sidecar {
     /// `None` means the caller does not know. It is sent as no key at all, so the backend falls
     /// back to its own inference — at worst a visible sibling folder, which is the failure this
     /// project already knows how to spot.
-    pub fn decide_task(&self, thread_id: String, owner: Option<String>, decisions: Vec<Decision>) {
+    pub fn decide_task(&self, thread_id: String, owner: Option<String>, answers: Vec<Answer>) {
         let base_url = self.base_url.clone();
         let model = self.model.lock().expect("model mutex").clone();
         let project = self.project();
@@ -1011,7 +1012,7 @@ impl Sidecar {
                 .with_model(model)
                 .with_project(project);
             if let Err(error) = client
-                .resume_background(&thread_id, owner.as_deref(), &decisions)
+                .resume_background(&thread_id, owner.as_deref(), &answers)
                 .await
             {
                 tracing::error!(%thread_id, %error, "could not answer a background task");
@@ -1166,7 +1167,7 @@ impl Sidecar {
 
                 // A `RefCell` because the event handler and the resume loop both need
                 // it, and the handler holds its borrow for as long as it lives.
-                let pending: std::cell::RefCell<Vec<Decision>> = Default::default();
+                let pending: std::cell::RefCell<Vec<Answer>> = Default::default();
                 let mut handle = |event: TurnEvent| match event {
                     TurnEvent::Token(token) => {
                         chunks += 1;
@@ -1212,7 +1213,12 @@ impl Sidecar {
                                 action.tool,
                                 action.detail.replace('\n', " ⏎ ")
                             );
-                            pending.borrow_mut().push(Decision::Approve);
+                            // The interrupt id travels with the answer here too, so the
+                            // headless check exercises the same resume shape a window does.
+                            pending.borrow_mut().push(Answer {
+                                interrupt: action.interrupt.clone(),
+                                decision: Decision::Approve,
+                            });
                         }
                     }
                     TurnEvent::Error(error) => println!("error    : {error}"),
@@ -1222,9 +1228,9 @@ impl Sidecar {
                 let mut outcome =
                     run_turn(&client, &supervisor, &thread, prompt, &mut handle).await?;
                 while outcome == TurnOutcome::AwaitingApproval {
-                    let decisions: Vec<Decision> = pending.borrow_mut().drain(..).collect();
+                    let answers: Vec<Answer> = pending.borrow_mut().drain(..).collect();
                     anyhow::ensure!(
-                        !decisions.is_empty(),
+                        !answers.is_empty(),
                         "the run paused but no approval request was decoded"
                     );
                     // The thread was created (or reused) by `run_turn` above.
@@ -1234,7 +1240,7 @@ impl Sidecar {
                         .clone()
                         .context("the run paused but no thread was recorded")?;
                     outcome = client
-                        .resume_turn(&thread_id, &decisions, &mut handle)
+                        .resume_turn(&thread_id, &answers, &mut handle)
                         .await?;
                 }
 
