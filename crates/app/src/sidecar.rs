@@ -462,6 +462,45 @@ impl Sidecar {
         rx
     }
 
+    /// Ask CIP Dataverse which files a dataset holds, and whether any are restricted.
+    ///
+    /// On the sidecar's runtime for the same reason `search_themes` is: this is the app's own
+    /// HTTP, and has nothing to do with the backend, which may not be running.
+    pub fn dataset_access(
+        &self,
+        persistent_id: String,
+    ) -> mpsc::UnboundedReceiver<Result<crate::dataverse::Access, String>> {
+        let (tx, rx) = mpsc::unbounded();
+        self.runtime.spawn(async move {
+            let client = reqwest::Client::new();
+            let outcome = crate::dataverse::Access::of(&client, &persistent_id)
+                .await
+                .map_err(|error| format!("{error:#}"));
+            let _ = tx.unbounded_send(outcome);
+        });
+        rx
+    }
+
+    /// Fetch a dataset into the thread's folder, which is also the sandbox's working directory.
+    ///
+    /// So the file is downloadable *and* immediately analysable — the reason this is a button in
+    /// the app rather than a tool the model calls (`crate::dataverse`).
+    pub fn download_dataset(
+        &self,
+        persistent_id: String,
+        folder: std::path::PathBuf,
+    ) -> mpsc::UnboundedReceiver<Result<std::path::PathBuf, String>> {
+        let (tx, rx) = mpsc::unbounded();
+        self.runtime.spawn(async move {
+            let client = reqwest::Client::new();
+            let outcome = crate::dataverse::download(&client, &persistent_id, &folder)
+                .await
+                .map_err(|error| format!("{error:#}"));
+            let _ = tx.unbounded_send(outcome);
+        });
+        rx
+    }
+
     /// Ask one provider what models it offers, and cache the answer.
     ///
     /// Returns how many came back. The key is read on the **main thread** by the caller and

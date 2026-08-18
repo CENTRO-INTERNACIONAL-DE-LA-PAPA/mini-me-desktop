@@ -12495,3 +12495,68 @@ legitimate outcome; an empty search nobody wrote down is the thing that cost wee
 *Seventy-fifth: an end-to-end test that reaches around a layer is a unit test wearing a costume.
 Name the seams it crossed, and check that the list is the same one production crosses.*
 
+## 223. Five rows that were the same row (2026-08-18)
+
+*"we can search the datasets in a modal and click to be redirected to the pages. and maybe a button
+to download data or not. we should only be able to download open datasets not restricted."*
+
+The Dataverse explorer worked for the first time this week, and the panel it filled looked broken:
+four entries reading *"Replication data for: Qualification of a Plant Disease Simulation Model;
+performance of the…"*, indistinguishable from one another.
+
+They were four different datasets. `Bucket { items: Vec<String> }` keeps **one truncated title** per
+artifact, and these came from one multi-site study whose titles diverge only at the site name — past
+the 96-character cut. The field that tells them apart is `persistent_id`, and the client had never
+carried it.
+
+### `Dataset`, beside `Source`
+
+Same shape as §194's fix for references and the same reason: the bucket is for a count and a glance,
+and anything a researcher acts on needs the whole record. Keyed on `persistent_id` — required by the
+schema, unique, and the thing both access APIs take. A finding without one is dropped: it cannot be
+opened, cited or checked, so offering it would be offering a row that does nothing.
+
+The modal mirrors `sources_modal` exactly — filter outside the scroll region, one
+`datasets_section(limit)` shared by panel and modal so the download gate cannot end up in only one
+of them.
+
+### The gate is the server's answer, not the model's
+
+`DataVerseFindings` carries `file_access_summary` — *"Short summary of file accessibility or
+restriction status"* — and it would have been the obvious thing to gate on. It is prose a model
+wrote. The search results are no better: twenty-six fields per row, measured, **none of them about
+access**.
+
+The trustworthy signal needs a second call. `/api/datasets/:persistentId/versions/:latest/files`
+answers `restricted` per file as a boolean, with `size` and `contentType` beside it — so the refusal
+and the size warning both come from numbers the server owns. Checked when the list is opened rather
+than when a turn produces datasets: a search can recommend dozens, and asking CIP about records
+nobody has looked at is a burst of requests for nothing.
+
+**`restricted` sits on the outer entry, not inside `dataFile`.** Verified against the live instance,
+and it is the one mistake this module could not afford — a parser reading only the nested object
+would call every dataset open. Both levels are read, and either saying so is enough.
+
+### Downloading, and why it is a button
+
+The MCP's own download tool takes an `output_dir` that defaults to *"a server-managed directory"* —
+on `dataverse-cip.fastmcp.app`. It fetches a dataset onto somebody else's machine and reports
+success. Un-blocking it was never the answer.
+
+What makes the desktop different is a fact that took until now to connect: **the thread's folder is
+the sandbox's working directory.** §—'s decision to put outputs at `Documents\Mini-Me\<thread>` on
+the Windows side, with the backend writing there through `MINIME_LOCAL_WORKSPACE`, means a file the
+app downloads is one `data_cleaning`, EDA and DataVoyager can already open. The loop closes without
+handing the model a network tool.
+
+So: a button, not a tool. It runs when the researcher presses it, on a dataset the server has said
+is entirely public, with the size in its own label. No new secret — public datasets need no token —
+and no prompt anywhere in the path.
+
+A restricted dataset keeps its row, its page link and a line saying how many of its files are closed.
+Hiding it would take away the knowledge that the data exists and can be requested; downloading the
+open half would produce a partial dataset that looks like the whole one.
+
+*Seventy-seventh: when a list renders as repeated rows, suspect the field you dropped before the
+data. The bucket was never lying — it was answering a different question.*
+

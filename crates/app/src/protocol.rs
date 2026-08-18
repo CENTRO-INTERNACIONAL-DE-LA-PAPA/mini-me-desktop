@@ -153,6 +153,8 @@ pub struct Snapshot {
     pub reports: Vec<Report>,
     /// The coordinator's own plan for this turn, when it wrote one. See [`Todo`].
     pub todos: Vec<Todo>,
+    /// Datasets the explorer recommended, **whole**. See [`Dataset`].
+    pub datasets: Vec<Dataset>,
     /// Citations gathered so far, **whole**.
     ///
     /// Separate from the `sources` bucket, whose items are truncated to 96 characters for a
@@ -266,6 +268,53 @@ pub struct Source {
     pub citation: String,
     /// The stable link the backend supplied, if it supplied one.
     pub link: Option<String>,
+}
+
+/// A dataset CIP Dataverse holds, as the explorer reported it.
+///
+/// **Separate from the `datasets` bucket, and for a sharper reason than `sources` had.** That
+/// bucket keeps one truncated *title* per dataset and nothing else — which is why five distinct
+/// datasets from one multi-site study rendered as five identical rows reading *"Replication data
+/// for: Qualification of a Plant Disease Simulation Model; performance of the…"*. The thing that
+/// tells them apart is the `persistent_id`, and the bucket never carried it.
+///
+/// Every field comes from `DataVerseFindings` (`backend/schemas.py:692`) and is optional except
+/// the two the schema requires, so a sparser payload renders less rather than nothing.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Dataset {
+    pub title: String,
+    /// `doi:10.21223/P3/0F9T62` — the identifier a researcher pastes into a citation, and the one
+    /// the access and file-listing APIs take.
+    pub persistent_id: String,
+    /// Where the dataset's page lives, when the payload carried a resolvable one.
+    pub link: Option<String>,
+    pub description: String,
+    pub authors: Vec<String>,
+    /// How many files the dataset holds, when the search reported it. Not a promise about how
+    /// many are *downloadable* — that needs the files API, which reports `restricted` per file.
+    pub file_count: Option<u64>,
+    pub repository: Option<String>,
+}
+
+impl Dataset {
+    /// The identifier without its `doi:` scheme, for building a URL.
+    pub fn bare_doi(&self) -> Option<&str> {
+        self.persistent_id.strip_prefix("doi:").map(str::trim)
+    }
+
+    /// The page to open when the row is pressed.
+    ///
+    /// The payload's own link first, because it is what the backend resolved; a DOI resolver
+    /// second, because `persistent_id` is required by the schema and a link is not — so a row
+    /// that reports a dataset can always be opened, even when the model omitted the URL.
+    pub fn page(&self) -> Option<String> {
+        if let Some(link) = &self.link {
+            return Some(link.clone());
+        }
+        self.bare_doi()
+            .filter(|doi| !doi.is_empty())
+            .map(|doi| format!("https://doi.org/{doi}"))
+    }
 }
 
 /// A written report, whole.
@@ -2130,6 +2179,7 @@ fn decode_values(data: &str) -> Option<Snapshot> {
     let tasks = decode_async_tasks(artifacts, &value);
     let reports = decode_reports(artifacts);
     let sources = decode_sources(artifacts);
+    let datasets = decode_datasets(artifacts);
     // Read from the top level, not from `artifacts`: `todos` is the agent's own state, written by
     // its `write_todos` tool, and never passes through the artifacts middleware.
     let todos = decode_todos(&value);
@@ -2150,6 +2200,7 @@ fn decode_values(data: &str) -> Option<Snapshot> {
         tasks,
         reports,
         sources,
+        datasets,
         todos,
     })
 }
@@ -2217,6 +2268,75 @@ fn decode_sources(artifacts: &Value) -> Vec<Source> {
             })
         })
         .collect()
+}
+
+/// Every dataset the explorer recommended, whole.
+///
+/// Keyed on `persistent_id` rather than `title`: the run that prompted this returned five
+/// datasets from one multi-site study whose titles differ only past the 96th character, and a
+/// list that dropped or merged them on title would be losing exactly the rows a researcher needs
+/// to tell apart. A finding with no identifier is dropped — it is the required field, the thing
+/// the access APIs take, and a dataset that cannot be opened or checked is not one we can offer.
+fn decode_datasets(artifacts: &Value) -> Vec<Dataset> {
+    let Some(entries) = artifacts.get("datasets").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut seen: Vec<String> = Vec::new();
+    let mut found = Vec::new();
+    for entry in entries {
+        let persistent_id = entry
+            .get("persistent_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if persistent_id.is_empty() || seen.contains(&persistent_id) {
+            continue;
+        }
+        let text = |key: &str| {
+            entry
+                .get(key)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        };
+        let title = match text("title") {
+            title if title.is_empty() => persistent_id.clone(),
+            title => title,
+        };
+        seen.push(persistent_id.clone());
+        found.push(Dataset {
+            title,
+            persistent_id,
+            // `doi_url` first: `DataVerseFindings` carries it beside the id, and `stable_link`
+            // already knows the three shapes a link arrives in.
+            link: stable_link(entry).or_else(|| {
+                entry
+                    .get("doi_url")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|url| url.starts_with("http"))
+                    .map(str::to_string)
+            }),
+            description: text("description"),
+            authors: entry
+                .get("authors")
+                .and_then(Value::as_array)
+                .map(|list| {
+                    list.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            file_count: entry.get("file_count").and_then(Value::as_u64),
+            repository: Some(text("repository")).filter(|name| !name.is_empty()),
+        });
+    }
+    found
 }
 
 /// The trustworthy link on an artifact, whichever shape it arrived in.
@@ -4271,4 +4391,100 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(decode(&events[0]), vec![TurnEvent::Token("crlf".into())]);
     }
+
+    /// The run that prompted all of this: five records of one multi-site study whose titles are
+    /// identical past the truncation the bucket applies.
+    #[test]
+    fn datasets_that_share_a_title_prefix_stay_five_rows() {
+        let long = "Replication data for: Qualification of a Plant Disease Simulation Model; \
+                    performance of the LATEBLIGHT Model for";
+        let artifacts = json!({"datasets": [
+            {"title": format!("{long} New York, USA, 2001"), "persistent_id": "doi:10.21223/P3/0F9T62"},
+            {"title": format!("{long} Elbaz, Israel, 2000"), "persistent_id": "doi:10.21223/P3/XKKVJS"},
+            {"title": format!("{long} Nir-Eliyahu, Israel, 2000"), "persistent_id": "doi:10.21223/P3/XIF8Q9"},
+            {"title": format!("{long} Sde-Varburg, Israel, 2000"), "persistent_id": "doi:10.21223/P3/DNJKC3"},
+        ]});
+        let decoded = decode_datasets(&artifacts);
+        assert_eq!(decoded.len(), 4);
+        let ids: Vec<&str> = decoded.iter().map(|d| d.persistent_id.as_str()).collect();
+        assert_eq!(ids[0], "doi:10.21223/P3/0F9T62");
+        assert_eq!(ids[3], "doi:10.21223/P3/DNJKC3");
+    }
+
+    /// A dataset with no identifier cannot be opened, cited or access-checked.
+    #[test]
+    fn a_finding_with_no_persistent_id_is_dropped() {
+        let decoded = decode_datasets(&json!({"datasets": [
+            {"title": "Nameless"},
+            {"title": "Real", "persistent_id": "doi:10.21223/P3/AAA"},
+        ]}));
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].title, "Real");
+    }
+
+    /// The same dataset recommended twice is one row.
+    #[test]
+    fn a_repeated_identifier_appears_once() {
+        let decoded = decode_datasets(&json!({"datasets": [
+            {"title": "First wording", "persistent_id": "doi:10.21223/P3/AAA"},
+            {"title": "Second wording", "persistent_id": "doi:10.21223/P3/AAA"},
+        ]}));
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].title, "First wording");
+    }
+
+    /// Every row must open somewhere: `persistent_id` is required by the schema, a link is not.
+    #[test]
+    fn a_dataset_without_a_link_still_opens_through_its_doi() {
+        let decoded = decode_datasets(&json!({"datasets": [
+            {"title": "No link", "persistent_id": "doi:10.21223/P3/0F9T62"},
+        ]}));
+        assert_eq!(
+            decoded[0].page().as_deref(),
+            Some("https://doi.org/10.21223/P3/0F9T62")
+        );
+    }
+
+    /// The payload's own link leads, because it is the one the backend resolved.
+    #[test]
+    fn a_supplied_link_is_preferred_over_a_built_one() {
+        let decoded = decode_datasets(&json!({"datasets": [{
+            "title": "Linked",
+            "persistent_id": "doi:10.21223/P3/0F9T62",
+            "doi_url": "https://data.cipotato.org/dataset.xhtml?persistentId=doi:10.21223/P3/0F9T62"
+        }]}));
+        assert!(decoded[0].page().expect("a page").contains("cipotato.org"));
+    }
+
+    /// A record whose title the model omitted still says which dataset it is.
+    #[test]
+    fn a_missing_title_falls_back_to_the_identifier() {
+        let decoded = decode_datasets(&json!({"datasets": [
+            {"persistent_id": "doi:10.21223/P3/AAA"},
+        ]}));
+        assert_eq!(decoded[0].title, "doi:10.21223/P3/AAA");
+    }
+
+    #[test]
+    fn the_fuller_fields_are_carried_when_the_payload_has_them() {
+        let decoded = decode_datasets(&json!({"datasets": [{
+            "title": "Trials",
+            "persistent_id": "doi:10.21223/P3/AAA",
+            "authors": ["Andrade-Piedra, Jorge", "", "Forbes, Gregory"],
+            "description": "Late blight epidemics.",
+            "file_count": 6,
+            "repository": "CIP Dataverse"
+        }]}));
+        let dataset = &decoded[0];
+        assert_eq!(dataset.authors, vec!["Andrade-Piedra, Jorge", "Forbes, Gregory"]);
+        assert_eq!(dataset.file_count, Some(6));
+        assert_eq!(dataset.repository.as_deref(), Some("CIP Dataverse"));
+        assert_eq!(dataset.description, "Late blight epidemics.");
+    }
+
+    #[test]
+    fn no_datasets_key_is_an_empty_list_rather_than_a_panic() {
+        assert!(decode_datasets(&json!({"sources": []})).is_empty());
+    }
 }
+
