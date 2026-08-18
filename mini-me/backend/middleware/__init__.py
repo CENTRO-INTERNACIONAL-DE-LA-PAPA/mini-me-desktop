@@ -5,6 +5,7 @@ them from ``backend.middleware`` without knowing which submodule each lives in.
 """
 
 from backend.middleware.artifacts import ArtifactCaptureMiddleware
+from backend.middleware.claims import ClaimsRecorder
 from backend.middleware.dataverse_first import (
     FixedSearchFilename,
     SearchBeforeRecommending,
@@ -25,6 +26,7 @@ from backend.middleware.sync import (
 
 __all__ = [
     "ArtifactCaptureMiddleware",
+    "ClaimsRecorder",
     "FileSyncMiddleware",
     "FixedSearchFilename",
     "ProjectSpineMiddleware",

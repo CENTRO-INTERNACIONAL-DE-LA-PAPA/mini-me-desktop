@@ -29,11 +29,11 @@ sidecar** that the client spawns and supervises.
 read first; the dated sections below it are the record of how each item got here.
 
 **1. Protect the researcher's work** — the only group where the cost of being wrong is unrecoverable.
-- ⬜ **Nothing checks that a subagent produced what it claims.** §207a: a worker returned `success`
-  while `eda/`, `diagnostic/`, `reports/` and `scripts/` were empty, and only the coordinator
-  happening to look caught it. Eleven subagents, eight declaring a `response_format`, and **no test
-  or gate verifies any of them did its job**. Claims-versus-disk is cheap, needs no model call, and
-  would have caught that exact failure.
+- 🟡 **A subagent's claims are now written down beside what is on disk** (§219) — every path a
+  structured response names, and every `persistent_id` the dataverse explorer recommends, checked
+  against the workspace and against the search file. It **records and does not block**: three of the
+  eleven subagents have never been run end to end, and the rules worth enforcing are the ones that
+  come from failures actually seen. Read the record, then decide what to gate.
 - ⬜ **Seven subagents still hold their invariants in prompts** (§140) — instructions to a model
   rather than something enforced. `middleware/tool_gate.py` is the mechanism; the conversion stopped
   after a few.
@@ -12286,3 +12286,85 @@ making:
 
 *Seventy-second: "no backup" is a design decision somebody made quickly, and it is always in the
 error path — the one place nobody tests. Read the recovery branch before trusting the happy one.*
+
+## 219. What the subagents say they did (2026-08-18)
+
+*"I also have doubts about how the subagents works. We did a great job with the paper research but
+not sure if dataverse is working well (not all datasets have asociated papers) and till now dataverse
+canno download data because on the web was a huge deal but in a desktop app it seems a correct way to
+do it. also we didnt test data voyager neither pdf librarian."*
+
+Four doubts, and reading the definitions confirmed all four. Two of them had a cause already written
+down in this repository, which is worth saying plainly: the answers were not missing, they were
+unread.
+
+### The recommendation this replaced
+
+The item proposed first was a **gate** — verify claims, refuse the ones that fail. That was
+half-wrong and the researcher's message is what showed it. `data_voyager`, `pdf_librarian` and a
+paperless Dataverse search have never been run end to end, so a gate built now would be guarding
+guesses. But the *recording* half is exactly what makes those three runs worth their wall-clock:
+DataVoyager takes twenty to forty minutes, and §207a stayed hidden for weeks because nothing was
+watching while it ran.
+
+So `middleware/claims.py` measures and blocks nothing. `aafter_agent` returns `None` on every path
+and the whole body is wrapped, because a record that can cost a researcher their subagent's work is
+worse than no record.
+
+### The two checks, which fail differently
+
+**A file that was never written.** `DataAnalysisResults.charts`, `LibraryArtifact.papers[].path`,
+`dataset_paths`, and the `![caption](./eda_dist.png)` refs inside a report are all *paths the model
+typed*. Nothing had ever opened one. A report embedding a figure that is not there renders as a hole
+in the PDF, and the researcher finds out at the end.
+
+**A dataset that was never in the search.** `SearchBeforeRecommending` (§142) already forces the
+search and then the read, so the subagent has demonstrably seen the file. What it cannot do is check
+that the ids coming *out* are the ids that went *in* — and a composed `persistent_id` is a citation
+someone pastes into a paper. The check is deliberately shape-blind: it collects the leaf strings of
+`dataverse_search.json` and asks whether each recommended id is among them. The MCP owns that file's
+layout; a reader that walked named keys would report every dataset as fabricated the day the layout
+changed, which is the one failure a record like this cannot afford.
+
+The fields are **declared**, not discovered. A walk that collected every string "looking like a path"
+would flag citations and prose, and a false missing-file is how a reader stops believing the record.
+The cost is that a new schema must be classified by hand — so a test fails if a `response_format`
+appears in neither table, rather than producing a quiet "no paths claimed" for the rest of the
+project's life. `IndexedPaper.path` is documented as *"sandbox path **or URL**"*, and a URL there is
+correct, not missing.
+
+### §132, nearly repeated on the way out
+
+The first version logged clean runs at `INFO`. §132 had already established that **nothing in this
+backend configures logging** and that every line ever *seen* to reach the backend log arrived at
+`WARNING` — which there cost a diagnosis, because the absence of a line was read as "the tool did not
+run" when it may only have meant "INFO does not reach this file".
+
+A recorder that shows its failures and swallows its successes cannot tell *"checked, nothing wrong"*
+from *"never ran"*. For three subagents nobody has watched, that is the entire question. So the level
+is not left to chance: one handler on stderr — which `crates/app/src/backend.rs:1207` hands straight
+to the log file — and `propagate` off so a server that does configure `INFO` prints each line once.
+The test that guards it sets the root logger to `CRITICAL` and asserts the line still arrives.
+
+### What "dataverse cannot download data" turned out to mean
+
+Not a policy that can be lifted. `download_dataset_files_by_doi` is blocklisted in the skill
+(`skills/dataverse/SKILL.md:78`) and filtered out by an allowlist of three
+(`backend/mcp_tools.py:417-430`), but the reason is in the skill's own reference:
+
+> The Dataverse MCP download tool writes files to MCP host-managed directories. Those files do not
+> automatically appear inside the sandbox.
+
+That MCP server is remote — `https://dataverse-cip.fastmcp.app/mcp`. A download through it lands on
+**somebody else's machine**, on the web and on the desktop alike. Un-blocking the tool would not put
+a file where cleaning or EDA could open it.
+
+What the desktop *does* change is real, and the researcher's instinct was right for a different
+reason than the one given: the sandbox is now their own WSL, and the subagent already holds
+`execute`. So the desktop version of "download" is a direct fetch into the working directory — a new
+tool, not a lifted restriction. Three things to settle before building it: the CIP Dataverse base URL
+(recorded nowhere in this repository), an API token for restricted files (a second secret, under the
+same request-only handling as the model key), and dataset size.
+
+*Seventy-third: when the plan proposes a gate for behaviour nobody has observed, build the meter
+first. The rules worth enforcing are the ones the measurements hand you.*
