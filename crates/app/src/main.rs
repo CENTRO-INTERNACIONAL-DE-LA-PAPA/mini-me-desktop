@@ -12,6 +12,7 @@
 mod backend;
 mod catalogue;
 mod composer;
+mod dataverse;
 mod gallery;
 mod markdown;
 mod menu;
@@ -28,7 +29,7 @@ mod ui;
 mod workspace;
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -2741,6 +2742,8 @@ struct Workbench {
     reports: Vec<protocol::Report>,
     /// Whole citations, for a rendered report's bibliography. Not the panel's truncated ones.
     sources: Vec<protocol::Source>,
+    /// Datasets the explorer recommended, whole. See [`protocol::Dataset`].
+    datasets: Vec<protocol::Dataset>,
     /// What checking each reference against Crossref found, keyed by its citation text.
     ///
     /// **Keyed by the citation, not by position and not by DOI.** Not by position because a turn
@@ -2976,10 +2979,26 @@ struct Workbench {
     key_target: String,
     /// Whether the whole reference list is open over the workbench.
     sources_open: bool,
+    /// The datasets modal, which the Outputs heading opens.
+    datasets_open: bool,
     /// Narrows the open reference list. Only the modal reads it — the panel's four are a
     /// preview, and filtering something that shows four of seventeen would be a filter whose
     /// result you cannot see (§197).
     sources_filter: Entity<Composer>,
+    datasets_filter: Entity<Composer>,
+    /// What the files API said about each dataset, by `persistent_id`.
+    ///
+    /// Absent means *not asked yet*, and the same three-state distinction `repaired` needs
+    /// applies: a dataset still being checked must not render the message meant for one that came
+    /// back restricted. `Err` carries the reason so a row can say why it has no button rather
+    /// than quietly having none.
+    dataset_access: HashMap<String, Result<dataverse::Access, String>>,
+    /// Datasets whose access is in flight, so the check is not started twice.
+    checking_access: HashSet<String>,
+    /// Downloads in flight, by `persistent_id`.
+    downloading: HashSet<String>,
+    /// Where a finished download landed, so the row can say so instead of offering again.
+    downloaded: HashMap<String, String>,
     /// The confirmed target awaiting its backend and filesystem results.
     ///
     /// Optimistically removing the row made a failed or interrupted request look successful
@@ -3036,6 +3055,9 @@ impl Workbench {
         // is free.
         let theme_filter = cx.new(|cx| Composer::new(cx, "Filter themes"));
         let model_filter = cx.new(|cx| Composer::new(cx, "Filter models"));
+        let datasets_filter = cx.new(|cx| Composer::new(cx, "Filter by title, author or DOI"));
+        cx.observe(&datasets_filter, |_workbench, _field, cx| cx.notify())
+            .detach();
         let sources_filter = cx.new(|cx| Composer::new(cx, "Filter by author, title or year"));
         cx.observe(&sources_filter, |_workbench, _field, cx| cx.notify())
             .detach();
@@ -3140,6 +3162,7 @@ impl Workbench {
             saved_reports: std::collections::HashSet::new(),
             reports: Vec::new(),
             sources: Vec::new(),
+            datasets: Vec::new(),
             checked: HashMap::new(),
             repaired: HashMap::new(),
             resolving: 0,
@@ -3218,7 +3241,13 @@ impl Workbench {
             catalogue: catalogue::load(),
             key_target: stored.provider.clone(),
             sources_open: false,
+            datasets_open: false,
             sources_filter,
+            datasets_filter,
+            dataset_access: HashMap::new(),
+            checking_access: HashSet::new(),
+            downloading: HashSet::new(),
+            downloaded: HashMap::new(),
             deleting: None,
             rename_editor,
             mission_editor,
@@ -4838,6 +4867,9 @@ impl Workbench {
                     // Verified as it arrives, not when someone thinks to ask.
                     self.resolve_sources(cx);
                 }
+                if !snapshot.datasets.is_empty() {
+                    self.datasets = snapshot.datasets.clone();
+                }
                 if let Some(project) = snapshot.project {
                     self.project = Some(merge_spine(self.project.as_ref(), project));
                 }
@@ -5103,6 +5135,9 @@ impl Workbench {
                             // Checked on reopen as on arrival, or a conversation returned to is
                             // a conversation whose citations are all silently unverified.
                             workbench.resolve_sources(cx);
+                        }
+                        if !snapshot.datasets.is_empty() {
+                            workbench.datasets = snapshot.datasets;
                         }
                         if !snapshot.reports.is_empty() {
                             workbench.reports = snapshot.reports;
@@ -10406,6 +10441,12 @@ impl Workbench {
             cx.notify();
             return;
         }
+        if self.datasets_open {
+            self.datasets_open = false;
+            self.restore_focus = true;
+            cx.notify();
+            return;
+        }
         if self.confirming_provider.take().is_some() {
             // Escape leaves the provider as it was: this modal exists precisely so the change
             // needs a deliberate press, and dismissing is not one.
@@ -12759,6 +12800,286 @@ impl Workbench {
             .count()
     }
 
+    /// Open the dataset list, and start asking the server about each one.
+    ///
+    /// Checked on open rather than on arrival: a turn can recommend dozens, and asking about
+    /// datasets nobody has looked at would be a burst of requests to CIP for nothing. Opening the
+    /// list is the moment the answers become worth having.
+    fn open_datasets(&mut self, cx: &mut Context<Self>) {
+        self.datasets_open = true;
+        for id in self
+            .datasets
+            .iter()
+            .map(|dataset| dataset.persistent_id.clone())
+            .collect::<Vec<_>>()
+        {
+            self.check_access(id, cx);
+        }
+        cx.notify();
+    }
+
+    /// Ask the server what a dataset holds, once, when the row first needs to know.
+    ///
+    /// **Not from `file_access_summary`.** That field exists on `DataVerseFindings` and is prose a
+    /// model wrote; the search results carry no access field at all. Whether a researcher may
+    /// have these files is the server's answer, and gating a download on a sentence would be the
+    /// same mistake as trusting a citation nobody checked (docs §223).
+    fn check_access(&mut self, persistent_id: String, cx: &mut Context<Self>) {
+        if self.dataset_access.contains_key(&persistent_id)
+            || !self.checking_access.insert(persistent_id.clone())
+        {
+            return;
+        }
+        let mut answer = self.sidecar.dataset_access(persistent_id.clone());
+        cx.spawn(async move |this, cx| {
+            if let Some(outcome) = answer.next().await {
+                let _ = this.update(cx, |workbench, cx| {
+                    workbench.checking_access.remove(&persistent_id);
+                    workbench.dataset_access.insert(persistent_id, outcome);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Fetch a dataset into this conversation's folder.
+    ///
+    /// Which is the sandbox's working directory as well, so the archive is both something the
+    /// researcher can open in Explorer and something the analysis subagents can read — the whole
+    /// reason this is a button rather than a tool the model calls.
+    fn download_dataset(&mut self, dataset: protocol::Dataset, cx: &mut Context<Self>) {
+        let Some(folder) = self.thread_workspace() else {
+            self.status = "Start a conversation before downloading — the file needs a folder to \
+                           land in."
+                .to_string();
+            cx.notify();
+            return;
+        };
+        let id = dataset.persistent_id.clone();
+        if !self.downloading.insert(id.clone()) {
+            return;
+        }
+        self.status = format!("Downloading {}…", dataset.title);
+        let mut answer = self.sidecar.download_dataset(id.clone(), folder);
+        cx.spawn(async move |this, cx| {
+            if let Some(outcome) = answer.next().await {
+                let _ = this.update(cx, |workbench, cx| {
+                    workbench.downloading.remove(&id);
+                    match outcome {
+                        Ok(path) => {
+                            let name = path
+                                .file_name()
+                                .map(|name| name.to_string_lossy().to_string())
+                                .unwrap_or_else(|| path.display().to_string());
+                            workbench.status =
+                                format!("{name} is in this conversation's folder");
+                            workbench.downloaded.insert(id, name);
+                            // So Outputs shows it beside everything else the turn produced.
+                            workbench.refresh_project(cx);
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "a dataset download failed");
+                            workbench.status = format!("Could not download: {error}");
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Every dataset, in a list you scroll and search — the treatment the references got.
+    ///
+    /// *"we can search the datasets in a modal and click to be redirected to the pages."* The
+    /// panel could not do this before because the client kept datasets as bare truncated titles,
+    /// which is how five distinct records from one multi-site study rendered as five identical
+    /// rows (see [`protocol::Dataset`]).
+    fn datasets_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        ui::Modal::new("datasets", format!("Datasets · {}", self.datasets.len()))
+            .width(720.)
+            .focus(&self.delete_focus)
+            .body(
+                div()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .min_w_0()
+                    .gap_2()
+                    // Outside the scroll region, so it cannot scroll away from what it filters.
+                    .child(self.filter_field(self.datasets_filter.clone(), cx))
+                    .child(
+                        div()
+                            .id("all-datasets")
+                            .flex()
+                            .flex_col()
+                            .w_full()
+                            .min_w_0()
+                            .gap_1()
+                            .max_h(px(480.))
+                            .overflow_y_scroll()
+                            .child(self.datasets_section(None, cx)),
+                    ),
+            )
+            .actions(
+                ui::actions().child(div().flex_grow()).child(
+                    ui::Button::new("datasets-close", "Close").on_click(cx.listener(
+                        |workbench, _event, _window, cx| {
+                            workbench.datasets_open = false;
+                            workbench.restore_focus = true;
+                            cx.notify();
+                        },
+                    )),
+                ),
+            )
+            .footer(
+                ui::Label::new(
+                    "Only datasets whose files are all public can be downloaded. Restricted ones \
+                     stay listed — open the page to request access from CIP.",
+                )
+                .muted()
+                .size(ui::Size::Compact),
+            )
+    }
+
+    /// The dataset list, capped for the panel and whole for the modal.
+    ///
+    /// One function rather than two, for the reason `sources_section` is one: a compact list and
+    /// a full one are the same rows with a different count, and written separately the download
+    /// gate ends up in one of them (docs §194).
+    fn datasets_section(&self, limit: Option<usize>, cx: &mut Context<Self>) -> impl IntoElement {
+        let query = match limit {
+            Some(_) => String::new(),
+            None => self.datasets_filter.read(cx).text().to_string(),
+        };
+        // Scored over title, authors and identifier together, so `andrade 0F9T62` and `israel`
+        // both find what a researcher would expect them to.
+        let matching: Vec<&protocol::Dataset> = self
+            .datasets
+            .iter()
+            .filter(|dataset| {
+                let haystack = format!(
+                    "{} {} {}",
+                    dataset.title,
+                    dataset.authors.join(" "),
+                    dataset.persistent_id
+                );
+                match_score(&query, &haystack).is_some()
+            })
+            .collect();
+
+        let mut section = div().flex().flex_col().gap_2();
+        for dataset in matching.into_iter().take(limit.unwrap_or(usize::MAX)) {
+            section = section.child(self.dataset_row(dataset, cx));
+        }
+        section
+    }
+
+    /// One dataset: what it is, where it came from, and whether it can be had.
+    fn dataset_row(&self, dataset: &protocol::Dataset, cx: &mut Context<Self>) -> impl IntoElement {
+        let page = dataset.page();
+        let id = dataset.persistent_id.clone();
+        let access = self.dataset_access.get(&id);
+        let downloading = self.downloading.contains(&id);
+        let downloaded = self.downloaded.get(&id).cloned();
+
+        let mut row = div()
+            .id(SharedString::from(format!("dataset-{id}")))
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w_0()
+            .gap_1()
+            .p_2()
+            .rounded_lg();
+
+        // The whole row opens the dataset's page, the way a reference row opens its paper — and
+        // only when there is somewhere to go, so a row never lights up and then does nothing.
+        if let Some(url) = page.clone() {
+            row = row
+                .hover(|style| {
+                    let fill = theme::hover_over(theme::surface());
+                    style
+                        .bg(rgb(fill))
+                        .text_color(rgb(theme::ink_on(fill)))
+                        .cursor_pointer()
+                })
+                .on_click(move |_event, _window, _cx| {
+                    if let Err(error) = workspace::browse(&url) {
+                        tracing::warn!(%error, "could not open a dataset");
+                    }
+                });
+        }
+
+        row = row
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .text_color(rgb(theme::text()))
+                    .text_size(px(13.))
+                    .line_height(px(18.))
+                    .child(dataset.title.clone()),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .text_color(rgb(theme::text_muted()))
+                    .text_xs()
+                    // The identifier, always: it is what tells two records of one study apart,
+                    // and what a researcher pastes into a citation.
+                    .child(match dataset.authors.first() {
+                        Some(author) if dataset.authors.len() > 1 => {
+                            format!("{} et al. · {}", author, dataset.persistent_id)
+                        }
+                        Some(author) => format!("{author} · {}", dataset.persistent_id),
+                        None => dataset.persistent_id.clone(),
+                    }),
+            );
+
+        let note = match (&downloaded, downloading, access) {
+            (Some(name), _, _) => Some(format!("Downloaded · {name}")),
+            (None, true, _) => Some("Downloading…".to_string()),
+            (None, false, None) => Some("Checking what this dataset holds…".to_string()),
+            (None, false, Some(Err(error))) => {
+                Some(format!("Could not check whether this is public: {error}"))
+            }
+            (None, false, Some(Ok(access))) => access.refusal().map(|refusal| refusal.reason()),
+        };
+        if let Some(note) = note {
+            row = row.child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .text_color(rgb(theme::text_faint()))
+                    .text_size(px(11.))
+                    .child(note),
+            );
+        }
+
+        // The button appears only for a dataset the server says is entirely public, and its label
+        // carries the size — so pressing it is never a surprise.
+        if downloaded.is_none() && !downloading {
+            if let Some(Ok(access)) = access {
+                if access.refusal().is_none() {
+                    let offer = access.offer();
+                    let wanted = dataset.clone();
+                    row = row.child(
+                        div().pt_1().child(
+                            ui::Button::new(SharedString::from(format!("get-{id}")), offer)
+                                .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                                    workbench.download_dataset(wanted.clone(), cx);
+                                })),
+                        ),
+                    );
+                }
+            }
+        }
+        row
+    }
+
     /// Every reference, in a list you scroll rather than a panel you fight.
     ///
     /// Asked for in these terms: *"a nice list that can scroll in y direction, like OS systems do
@@ -13264,12 +13585,32 @@ impl Workbench {
             // Show a bounded number of titles — a literature search can return
             // dozens, and the count already conveys the scale.
             const MAX_SHOWN: usize = 4;
-            let mut group = div().flex().flex_col().gap_1().child(
-                div()
-                    .text_color(rgb(theme::text()))
-                    .text_sm()
-                    .child(format!("{} · {}", bucket.name, bucket.items.len())),
-            );
+            // **Datasets get a way in.** Their bucket items are titles truncated to 96
+            // characters, which for five records of one multi-site study is five identical rows;
+            // the modal has the identifier that tells them apart, the page link and the download
+            // (docs §223). Only when the structured list actually arrived, so a bucket from an
+            // older backend still renders as plain text rather than as a heading that does
+            // nothing.
+            let openable = bucket.name == "datasets" && !self.datasets.is_empty();
+            let mut heading = div()
+                .id("datasets-heading")
+                .text_color(rgb(theme::text()))
+                .text_sm()
+                .child(format!("{} · {}", bucket.name, bucket.items.len()));
+            if openable {
+                heading = heading
+                    .hover(|style| {
+                        let fill = theme::hover_over(theme::surface());
+                        style
+                            .bg(rgb(fill))
+                            .text_color(rgb(theme::ink_on(fill)))
+                            .cursor_pointer()
+                    })
+                    .on_click(cx.listener(|workbench, _event, _window, cx| {
+                        workbench.open_datasets(cx);
+                    }));
+            }
+            let mut group = div().flex().flex_col().gap_1().child(heading);
             for item in bucket.items.iter().take(MAX_SHOWN) {
                 group = group.child(
                     div()
@@ -13463,6 +13804,12 @@ impl Render for Workbench {
 
         let root = if self.sources_open {
             root.child(self.sources_modal(cx))
+        } else {
+            root
+        };
+
+        let root = if self.datasets_open {
+            root.child(self.datasets_modal(cx))
         } else {
             root
         };
