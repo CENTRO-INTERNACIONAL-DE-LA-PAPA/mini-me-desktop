@@ -5771,9 +5771,11 @@ firing but both live for anyone running `langgraph dev`:
   There is also a latent bug in the recovery attempt itself: `os.remove(self.filename)` at lines 88
   and 94 is given the *prefix* `.langgraph_api/.langgraph_checkpoint.` with no `N.pckl` suffix, so
   it always raises and is always swallowed — dead code that hides how bad the outcome is.
-- ⬜ **The conversation index is deleted outright on any load exception.**
+- 🟡 **The conversation index is deleted outright on any load exception.**
   `database.py:167-184` has a bare `except Exception` whose remedy is `os.remove(OPS_FILENAME)`,
-  with no existence check and no backup.
+  with no existence check and no backup. **Survivable since §218**: the overlay copies the file
+  aside before every load and keeps the copy when the server deletes it. Still upstream's bug —
+  we hold the evidence, we do not stop the delete.
 
 Both would be fixed by the same principle: **a persistence layer that cannot read its file must
 refuse to write it**, not carry on with an empty copy and flush.
@@ -12130,3 +12132,51 @@ Two things the trace says that were not obvious:
 `v0.2.2` ships those two log lines. `v0.2.1` was already built and carries the fix, but a tester's
 report is worth much more with them — and a build sent to somebody else is exactly the situation
 where the observation cannot be added afterwards.
+
+## 218. The remedy for an unreadable file was to delete it (2026-08-18)
+
+Asked what to do before another person starts pulling updates, and this was the answer: of everything
+open, one item can destroy something a researcher cannot get back.
+
+`langgraph_runtime_inmem/database.py:start_pool` loads `.langgraph_api/.langgraph_ops.pckl` — the
+index of every thread, run and assistant on the machine — and on **any** exception deletes it:
+
+```python
+except Exception as e:
+    logger.error("Failed to load cached data: %s", str(e))
+    await asyncio.to_thread(os.remove, OPS_FILENAME)
+```
+
+No existence check, no backup. And the `ModuleNotFoundError` branch above it names the trigger in its
+own message: *"Pulled updates that modified class definitions in a way that's incompatible with the
+cache."*
+
+**On this product that is the update path, not an edge case.** §135/§139 made `git pull` on the app
+*be* the backend update — the launch mirrors the bundled source into the checkout — so a pickle
+written by last week's classes is exactly what the next launch reads. We are about to hand this to a
+second person and ask them to update it repeatedly.
+
+§95 had already removed the worse twin: conversations live in SQLite now, so a failed load cannot
+take thirty threads with it. But that replaced the **checkpointer**. This is the **ops index** — a
+different store, still a `PersistentDict`, and still flushed over its own file every ten seconds by
+`_persistence.py:57`, so merely preventing the delete would not have been enough either.
+
+**What the guard does and refuses to do.** It copies the file aside before `start_pool` runs and
+removes the copy when the load succeeded. It does *not* prevent the delete. Refusing to write would
+leave a server that cannot start, and a researcher with an unreadable index needs a working app more
+than they need that file in place — what they must not have is it silently gone. The file's *absence*
+after `start_pool` is the signal, which needs no access to an exception the function has already
+swallowed.
+
+Two flaws found by testing the thing rather than reasoning about it, both in claims the comments were
+making:
+
+- **The stamp did not make the name unique.** Second resolution, and two failures inside one second
+  produced one file — silently, for exactly the case the stamp was written to protect. Launches are
+  minutes apart, so it would never have been noticed.
+- **The cap kept the wrong five.** `sorted()` on the stamped names looked equivalent to age and is
+  not: the collision suffix sorts `…-101533` before `…-101533-1`, and at two digits it stops tracking
+  age at all. Measured: the cap held at five and they were the five *oldest*. It sorts by mtime now.
+
+*Seventy-second: "no backup" is a design decision somebody made quickly, and it is always in the
+error path — the one place nobody tests. Read the recovery branch before trusting the happy one.*
