@@ -1793,7 +1793,13 @@ fn resume_request_body(
     //
     // The legacy shape stays for a backend that sends no ids, where it is not merely acceptable but
     // correct: a version that cannot name its interrupts cannot have had two of them pending.
-    if !answers.is_empty() && answers.iter().all(|answer| !answer.interrupt.is_empty()) {
+    let keyed = !answers.is_empty() && answers.iter().all(|answer| !answer.interrupt.is_empty());
+    tracing::info!(
+        answers = answers.len(),
+        keyed,
+        "resuming"
+    );
+    if keyed {
         // Grouped, in the order the actions were presented, because the middleware reads each
         // interrupt's `decisions` positionally against its own `action_requests`.
         let mut grouped: serde_json::Map<String, Value> = serde_json::Map::new();
@@ -2082,6 +2088,17 @@ fn decode_interrupt(value: &Value) -> Option<ApprovalRequest> {
     if actions.is_empty() {
         return None;
     }
+    // **The precondition for §215's fix, said out loud.** The keyed resume is only sent when every
+    // action carries an interrupt id, and if the payload does not have them this silently falls
+    // back to the shape that fails on more than one pending interrupt — which is indistinguishable,
+    // from outside, from the fix not being installed at all (§216).
+    let named = actions.iter().filter(|a| !a.interrupt.is_empty()).count();
+    tracing::info!(
+        interrupts = interrupts.len(),
+        actions = actions.len(),
+        with_id = named,
+        "an approval request arrived"
+    );
     Some(ApprovalRequest { actions })
 }
 
