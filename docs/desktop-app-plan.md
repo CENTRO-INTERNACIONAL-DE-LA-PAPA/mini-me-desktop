@@ -5771,9 +5771,11 @@ firing but both live for anyone running `langgraph dev`:
   There is also a latent bug in the recovery attempt itself: `os.remove(self.filename)` at lines 88
   and 94 is given the *prefix* `.langgraph_api/.langgraph_checkpoint.` with no `N.pckl` suffix, so
   it always raises and is always swallowed — dead code that hides how bad the outcome is.
-- ⬜ **The conversation index is deleted outright on any load exception.**
+- 🟡 **The conversation index is deleted outright on any load exception.**
   `database.py:167-184` has a bare `except Exception` whose remedy is `os.remove(OPS_FILENAME)`,
-  with no existence check and no backup.
+  with no existence check and no backup. **Survivable since §218**: the overlay copies the file
+  aside before every load and keeps the copy when the server deletes it. Still upstream's bug —
+  we hold the evidence, we do not stop the delete.
 
 Both would be fixed by the same principle: **a persistence layer that cannot read its file must
 refuse to write it**, not carry on with an empty copy and flush.
@@ -10665,8 +10667,8 @@ name a fill — with a count, so a filter that quietly matched nothing could not
 Verified by pointing a potato hover back at `elevated` and watching it fail with *"changes it by
 1.000"*.
 
-- ⬜ **Four older palettes cannot show a hover** — Bench, Bench Night, Mini-Me Dark and Slate.
-  Fixing them means retuning their inks for headroom, which is their own job and a bigger one.
+- ✅ **Four older palettes cannot show a hover** — Bench, Bench Night, Mini-Me Dark and Slate.
+  Done in §217: the block was searching one dimension. Six ink nudges of 2–8%, no hue moved.
 
 *Thirty-seventh: two jobs sharing one colour is not a saving, it is a coincidence waiting to be
 noticed. Elevation and hover were the same value here for as long as the file has existed, and
@@ -12130,3 +12132,89 @@ Two things the trace says that were not obvious:
 `v0.2.2` ships those two log lines. `v0.2.1` was already built and carries the fix, but a tester's
 report is worth much more with them — and a build sent to somebody else is exactly the situation
 where the observation cannot be added afterwards.
+## 217. The answer was sideways (2026-08-18)
+
+§184 recorded that Bench, Bench Night, Mini-Me Dark and Slate could not have a visible hover:
+*"inks so near the 4.5 floor that every lift large enough to see drops one of them under AA. There
+is no fraction that satisfies both."*
+
+Every word of that is true about a **lift**, and a lift is the only move it tried. The elevation
+ladder runs `background → surface → elevated → overlay`, and a hover borrowed from it inherits steps
+built to be subtle — 1.06 to 1.10 in contrast, where 1.12 is the floor for a change an eye can find.
+On Bench there is not even room to try: `elevated` is already `0xfcfcfa` and `overlay` is white.
+
+The potato palettes had solved it in §189 without the connection being drawn: their hover is not a
+rung, it is a **tint** — a few percent of a second palette colour, sitting off the end of the ladder
+entirely. Hue and chroma carry the difference, so lightness barely moves and the inks barely notice.
+
+Applied to all four, measured rather than eyeballed:
+
+| | hover | off the ladder by | inks that moved |
+| --- | --- | --- | --- |
+| Bench | accent 10% into **background** | 1.139 | `text_muted` −3%, `text_faint` −8% |
+| Bench Night | accent 7% above `overlay` | 1.131 | `text_muted` +2%, `text_faint` +6% |
+| Mini-Me Dark | accent 10% above `overlay` | 1.142 | `text_faint` +2% |
+| Slate | accent 7% above `overlay` | 1.136 | `text_faint` +6% |
+
+A light theme leaves the ladder **downward** and a dark one upward, which is the whole reason Bench
+looked hopeless: it was the only one whose ladder ends at white.
+
+**`text_faint` was the entire blocker.** `text` clears the new fills at 7.5–10.6:1 and never moved;
+`text_muted` needed nothing in two of the four. Every change is lightness only — no hue, no
+saturation — which is the same rule §184 itself applied when it darkened two of Bench's inks.
+
+**And the guard earned its keep.** The test ends `assert_eq!(checked, 8)` because a filter that
+quietly matched nothing would make every assertion above it vacuous. It was `4`, and it failed the
+moment four new hovers appeared — catching a change that would otherwise have shipped four palettes
+whose hovers no test was checking.
+
+*Seventy-first: "there is no fraction that satisfies both" is a statement about the axis you
+searched. Two of these palettes needed one ink moved by two percent.*
+
+## 218. The remedy for an unreadable file was to delete it (2026-08-18)
+
+Asked what to do before another person starts pulling updates, and this was the answer: of everything
+open, one item can destroy something a researcher cannot get back.
+
+`langgraph_runtime_inmem/database.py:start_pool` loads `.langgraph_api/.langgraph_ops.pckl` — the
+index of every thread, run and assistant on the machine — and on **any** exception deletes it:
+
+```python
+except Exception as e:
+    logger.error("Failed to load cached data: %s", str(e))
+    await asyncio.to_thread(os.remove, OPS_FILENAME)
+```
+
+No existence check, no backup. And the `ModuleNotFoundError` branch above it names the trigger in its
+own message: *"Pulled updates that modified class definitions in a way that's incompatible with the
+cache."*
+
+**On this product that is the update path, not an edge case.** §135/§139 made `git pull` on the app
+*be* the backend update — the launch mirrors the bundled source into the checkout — so a pickle
+written by last week's classes is exactly what the next launch reads. We are about to hand this to a
+second person and ask them to update it repeatedly.
+
+§95 had already removed the worse twin: conversations live in SQLite now, so a failed load cannot
+take thirty threads with it. But that replaced the **checkpointer**. This is the **ops index** — a
+different store, still a `PersistentDict`, and still flushed over its own file every ten seconds by
+`_persistence.py:57`, so merely preventing the delete would not have been enough either.
+
+**What the guard does and refuses to do.** It copies the file aside before `start_pool` runs and
+removes the copy when the load succeeded. It does *not* prevent the delete. Refusing to write would
+leave a server that cannot start, and a researcher with an unreadable index needs a working app more
+than they need that file in place — what they must not have is it silently gone. The file's *absence*
+after `start_pool` is the signal, which needs no access to an exception the function has already
+swallowed.
+
+Two flaws found by testing the thing rather than reasoning about it, both in claims the comments were
+making:
+
+- **The stamp did not make the name unique.** Second resolution, and two failures inside one second
+  produced one file — silently, for exactly the case the stamp was written to protect. Launches are
+  minutes apart, so it would never have been noticed.
+- **The cap kept the wrong five.** `sorted()` on the stamped names looked equivalent to age and is
+  not: the collision suffix sorts `…-101533` before `…-101533-1`, and at two digits it stops tracking
+  age at all. Measured: the cap held at five and they were the five *oldest*. It sorts by mtime now.
+
+*Seventy-second: "no backup" is a design decision somebody made quickly, and it is always in the
+error path — the one place nobody tests. Read the recovery branch before trusting the happy one.*
