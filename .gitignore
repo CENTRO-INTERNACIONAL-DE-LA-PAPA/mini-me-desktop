@@ -29,3 +29,9 @@ Cargo.lock.orig
 __pycache__/
 *.py[cod]
 /dist/
+
+# The LangGraph server's own state directory, written into whatever checkout the backend runs
+# from. It holds the conversation index (`.langgraph_ops.pckl`) and the copies `index_guard`
+# keeps beside it, which are runtime data for one machine and mean nothing on another. Five of
+# those copies reached `main` in #76 because this line was missing.
+.langgraph_api/
