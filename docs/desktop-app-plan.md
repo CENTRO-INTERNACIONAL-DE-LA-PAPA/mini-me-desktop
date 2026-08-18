@@ -23,6 +23,62 @@ sidecar** that the client spawns and supervises.
 | **P6.6** — outputs the researcher can see | ✅ **done** — files land in `Documents\Mini-Me\<thread>`, figures render in the chat, and OUTPUTS opens the folder. §42 |
 | **P6.7** — the UI itself | ✅ **done, verified on Windows** — a role-based palette with four built-ins **and Zed's whole theme gallery** installable in-app; conversation sidebar with fuzzy search and rename; collapsible panels; a file preview modal; visible scrollbars; rainbow CSV; a three-state send button; rounded panels and a window-wide status bar. §43/§47–§53 |
 
+### The roadmap now (2026-08-18)
+
+**Every milestone P6.0–P6.7 is closed** and the MVP acceptance is met. What follows is the list to
+read first; the dated sections below it are the record of how each item got here.
+
+**1. Protect the researcher's work** — the only group where the cost of being wrong is unrecoverable.
+- ⬜ **Nothing checks that a subagent produced what it claims.** §207a: a worker returned `success`
+  while `eda/`, `diagnostic/`, `reports/` and `scripts/` were empty, and only the coordinator
+  happening to look caught it. Eleven subagents, eight declaring a `response_format`, and **no test
+  or gate verifies any of them did its job**. Claims-versus-disk is cheap, needs no model call, and
+  would have caught that exact failure.
+- ⬜ **Seven subagents still hold their invariants in prompts** (§140) — instructions to a model
+  rather than something enforced. `middleware/tool_gate.py` is the mechanism; the conversion stopped
+  after a few.
+- ⬜ **Contract tests between each `response_format` and the client's decoder.** Static and fast.
+  Catches §138's class, where producer and consumer quietly disagree about a shape.
+- ⬜ **`execute` can still write anywhere** (§160/§161). The rewrite changed what the model is
+  *told*; nothing enforces it. Sixteen files went to `/tmp` once already.
+- 🟡 **The conversation index** is copied aside before every load (§218), but upstream still deletes
+  it on any read failure. We hold the evidence; we do not stop the delete.
+
+**2. Finish the roadmap** — two items, both in P6.4b.
+- ⬜ **OS notifications when a background run finishes.** The plan display (§209) says where a
+  seven-minute run has got to *if you are looking*; nothing reaches someone who switched windows.
+  The clearest remaining "the web app cannot do this" affordance, which is the MVP's own stated
+  differentiator. Needs a Windows toast API — a new dependency, and a new way for the packaged build
+  to fail on the machines §57–§60 fought.
+- ⬜ **Multi-window.** Listed since the beginning, never started, and the least valuable thing here
+  for someone working on one study at a time.
+
+**3. Ship it to somebody else.**
+- ⬜ **Code signing.** SmartScreen is where a non-developer install ends. An organisational decision
+  about a certificate, not an engineering one.
+- ⬜ **Publish a release.** `v0.2.3` is drafted and built. A decision about who may have it.
+
+**4. Debt that keeps causing the same bug.**
+- ⬜ **`start_async_task` accepts only `background_worker`** (§114), so "run *X* in the background"
+  cannot route a named specialist.
+- ⬜ **Two renderers for one collection** — sources drawn from `buckets` in one path and
+  `self.sources` in another; §196 was one symptom.
+- ⬜ **Per-step elapsed time** in the plan display — deliberately left out of §209; needs a
+  first-seen stamp per todo.
+- ⬜ **Old workspaces are not migrated** (§42) — pre-§51 threads appear, their files do not.
+- ⬜ **`setup-wsl.sh` rewrites every line ending**, which breaks git operations on the checkout.
+- ⬜ **The warm-up sometimes fails** — `GET /assistants/{id}/schemas` returned a non-2xx on one
+  launch and built the graph fine on the next, so the first turn pays the ten seconds §176 meant to
+  absorb. Timing-dependent; measured 2026-08-18, not yet explained.
+
+**5. Upstream** — nine reports written in `docs/upstream/`, none of them ours to fix.
+
+*A note on this list.* It replaced three markers that were lying: P6.2.5 sat at 🔴 "critical path"
+for weeks after its acceptance passed, P6.3 read "in progress" with all six children done, and the
+shipping items still named `v0.1.0`. A plan that misdescribes its own project is worse than no plan,
+because it is believed — the same argument §73 makes about provenance, applied to the document that
+sets the work.
+
 ### What is left (updated 2026-08-09)
 
 Every milestone P6.0–P6.7 is closed and the app is in daily use by its first researcher.
@@ -35,10 +91,11 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   green without anyone typing a command. Took three rounds: §57 fixed elevation, §60 made the
   elevated output readable and stopped the app claiming "done" over a red row, §61 reverted a
   `--no-launch` flag that could have unregistered the distro.
-- 🟡 **The download link.** `v0.1.0` is tagged, built green, and attached as
-  `mini-me-desktop-v0.1.0-windows-x64.zip`. The release is a **draft** — deliberately, since
-  a draft can be deleted where a published release cannot. **Remaining: someone decides to
-  publish it**, which is a call about who is allowed to have this, not an engineering step.
+- 🟡 **The download link.** `v0.2.3` is tagged and built, carrying every fix through §218. Each
+  release is a **draft** deliberately — a draft can be deleted where a published one cannot — so
+  **remaining: someone decides to publish it**, which is a call about who may have this rather than
+  an engineering step. Note the repository is private, so a release link only works for someone with
+  access; sending the zip directly is usually what is wanted for one colleague.
 - ⬜ **Code signing.** SmartScreen shows "Windows protected your PC" and most researchers
   stop there. An organizational decision on a certificate; the release notes and README
   say which two words to click in the meantime.
@@ -265,7 +322,8 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   rather than once a launch. **Awaiting a stopwatch**, which is the only thing that settles it.
 - ⬜ **`setup-wsl.sh` leaves a checkout with every file modified** from line endings, which breaks
   any git operation on it.
-- ⬜ **Publish `v0.1.0`** — tagged and built; the draft needs a decision about who may have it.
+- ⬜ **Publish a release** — `v0.2.3` is drafted and built; it needs a decision about who may have
+  it. See the download-link note above.
 - ⬜ **A custom store** (§93) — deliberately after the checkpointer, and only with numbers:
   alpha API, and replacing it means owning semantic search and TTL.
 - ⬜ **A native Windows backend?** (§95) — the case is the WSL install, not storage. Its own
@@ -456,7 +514,9 @@ the backend), `ui` (reusable GPUI components), `sidecar` (packaging).
   sidecar, health-checks it, and streams **one real coordinator turn** end to end,
   rendering assistant text as it arrives. *Verified on Windows 2026-07-30 — the
   coordinator answered in the chat pane, status `done`.*
-- 🔴 **P6.2.5 — Local-first backend** *(new; critical path — §10/§11).* Replace the
+- ✅ **P6.2.5 — Local-first backend** *(§10/§11).* **Done** — carried 🔴 "critical path" until
+  2026-08-18 while its acceptance had been passing for weeks, which is the kind of thing that makes
+  a plan stop being read. Replace the
   remote LangSmith sandbox with host execution (`LocalShellBackend`) behind
   `MINIME_EXECUTION_BACKEND`, add the ~6 bespoke methods deepagents lacks
   (`aget_work_dir`, `aexecute_untruncated`, the lifecycle quartet,
@@ -465,7 +525,8 @@ the backend), `ui` (reusable GPUI components), `sidecar` (packaging).
   assumption), and gate `execute` with human approval.
   *Acceptance:* a real turn — including an `asta` subagent call — completes with
   **no `LANGSMITH_API_KEY` and no `WORKOS_*`**, executing on the host.
-- 🟡 **P6.3 — Port the core panels.** In progress, in this order:
+- ✅ **P6.3 — Port the core panels.** All six done; the list is kept for the order they landed in
+  and what each one cost.
   1. ✅ **Composer + transcript scroll** — a real text field (type, Enter sends)
      and a scrollable transcript. §12.
   2. ✅ **Project spine** — the right panel now renders live `GET /project` data
@@ -502,7 +563,11 @@ the backend), `ui` (reusable GPUI components), `sidecar` (packaging).
   (`settings.toml` for settings, the OS keychain for keys), secrets delivered to the
   sidecar as environment variables so the checkout's `.env` becomes optional, and a
   first-run panel instead of a failed turn. *Gates the installable.*
-- ⬜ **P6.4b — Native affordances + shipping.** Local file → analysis,
+- 🟡 **P6.4b — Native affordances + shipping.** Done: local file → analysis (§179),
+  keychain-stored keys, the provisioned checkout + venv (§57–§61), Job Object teardown (verified
+  2026-08-01), and click-to-update answered by making it unnecessary (§135/§139). **Left: OS
+  notifications when a background run finishes, and multi-window.** Original scope below.
+  Local file → analysis,
   background-run tray + notifications, **keychain-stored keys**, multi-window.
   Plus what "installable" now means: a **pinned Mini-Me checkout + venv the app
   provisions**, a **"click to update"** button, a **setup tutorial**, and Windows
@@ -10850,7 +10915,10 @@ for different things:
 `None` only for the coordinator's own provider, where the models are billed exactly where every
 other turn is and a note on every row would be noise.
 
-- ⬜ **Nothing stops a specialist being pointed at an unkeyed provider.** §186 refuses a *turn*
+- ✅ **Nothing stops a specialist being pointed at an unkeyed provider** — closed in §212, after it
+  happened. The picker no longer offers a provider with no key, and the turn gate reads the
+  specialists as well as the coordinator. Original note kept below.
+- ⬜ *(was)* **Nothing stops a specialist being pointed at an unkeyed provider.** §186 refuses a *turn*
   whose coordinator has no key; an override to a provider with none still saves, and fails inside
   the subagent minutes later. The gate reads the coordinator's settings alone. Recorded because
   the fix is the same shape and the failure is slower and harder to read.
