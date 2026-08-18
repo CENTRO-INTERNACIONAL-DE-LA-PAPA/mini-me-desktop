@@ -332,3 +332,52 @@ def test_claimed_paths_reports_whether_it_recognised_the_schema():
         True,
     )
     assert claimed_paths(object()) == ([], False)
+
+
+# ---------------------------------------------------------------------------
+# It is actually attached
+# ---------------------------------------------------------------------------
+
+def test_the_recorder_is_attached_to_every_subagent_that_returns_a_schema():
+    """§128's rule: a wiring that only executes in production is one nobody tests.
+
+    `_build_runtime_subagents` is called once, at graph assembly, on a path no test reached — so a
+    wrong keyword or a missing import here would surface as "An internal error occurred" on the
+    researcher's first turn rather than in this file.
+    """
+    from backend.subagents import _build_runtime_subagents, subagents
+
+    class Resolver:
+        def for_subagent(self, name, overrides):
+            return "openai::gpt-4o-mini"
+
+    built = _build_runtime_subagents(
+        academic_research_tools=[],
+        dataverse_tools=[],
+        data_cleaning_tools=[],
+        diagnostic_tools=[],
+        theory_tools=[],
+        datavoyager_tools=[],
+        file_sync=object(),
+        sandbox_backend=FakeSandbox(),
+        model_resolver=Resolver(),
+        subagent_overrides={},
+    )
+
+    expected = {s["name"] for s in subagents if s.get("response_format") is not None}
+    recorded_by = {
+        built_subagent["name"]
+        for built_subagent in built
+        if any(isinstance(m, ClaimsRecorder) for m in built_subagent["middleware"])
+    }
+    assert recorded_by == expected
+    # The four that answer in prose are deliberately uncovered — claims.py says why.
+    assert "data_cleaning" not in recorded_by
+    assert "exploratory_data_analysis" not in recorded_by
+
+    # Each recorder must know which subagent it speaks for, or every line in the log says the
+    # wrong name and the record is worse than useless.
+    for built_subagent in built:
+        for middleware in built_subagent["middleware"]:
+            if isinstance(middleware, ClaimsRecorder):
+                assert middleware.source == built_subagent["name"]
