@@ -25,6 +25,7 @@ from backend.schemas import (
 )
 from backend.middleware import (
     ArtifactCaptureMiddleware,
+    ClaimsRecorder,
     FixedSearchFilename,
     SearchBeforeCiting,
     SearchBeforeRecommending,
@@ -34,6 +35,7 @@ from backend.theory_tools import generate_theories
 if TYPE_CHECKING:
     from backend.middleware import FileSyncMiddleware
     from backend.models import _ModelResolver
+    from backend.sandbox import LazyLangsmithSandbox
 
 
 academic_subagent = {
@@ -535,6 +537,7 @@ def _build_runtime_subagents(
     theory_tools: list[Any],
     datavoyager_tools: list[Any],
     file_sync: "FileSyncMiddleware",
+    sandbox_backend: "LazyLangsmithSandbox",
     model_resolver: "_ModelResolver",
     subagent_overrides: dict[str, str],
 ) -> list[dict[str, Any]]:
@@ -574,6 +577,16 @@ def _build_runtime_subagents(
 
         if name in DISK_WRITING_SUBAGENTS:
             extra_middleware.append(file_sync)
+
+        # Attached wherever there is a structured response to read, which is where a claim is
+        # written down in a field rather than in prose. The four subagents without a
+        # `response_format` (cleaning, EDA, diagnostic, predictive) are not covered: what they
+        # assert lives in a sentence, and checking that needs a reader, not a comparison.
+        #
+        # Last in the list, and it only records — see `middleware/claims.py` for why this measures
+        # rather than enforces.
+        if subagent.get("response_format") is not None:
+            extra_middleware.append(ClaimsRecorder(name, sandbox_backend))
 
         extra_tools: list[Any] = []
         if name == "academic_researcher":

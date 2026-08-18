@@ -147,6 +147,7 @@ async def agent(config: RunnableConfig):
         theory_tools=[generate_theories],
         datavoyager_tools=[analyze_data],
         file_sync=file_sync,
+        sandbox_backend=sandbox_backend,
         model_resolver=model_resolver,
         subagent_overrides=subagent_overrides,
     )
