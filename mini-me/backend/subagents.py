@@ -25,15 +25,18 @@ from backend.schemas import (
 )
 from backend.middleware import (
     ArtifactCaptureMiddleware,
-    FixedSearchFilename,
+    ClaimsRecorder,
+    KeepSources,
     SearchBeforeCiting,
     SearchBeforeRecommending,
+    SearchResultsFile,
 )
 from backend.theory_tools import generate_theories
 
 if TYPE_CHECKING:
     from backend.middleware import FileSyncMiddleware
     from backend.models import _ModelResolver
+    from backend.sandbox import LazyLangsmithSandbox
 
 
 academic_subagent = {
@@ -80,9 +83,9 @@ dataverse_subagent = {
         researcher will paste it into a citation, and one you reconstructed
         will look no different from one you read.
     """,
-    # The fixed-filename paragraph that stood here is now `FixedSearchFilename`: the two tools
-    # spell the argument differently (`output_filename` / `filename`) and have to agree on one
-    # string, which is a mechanical fact, not a judgement. It is set in the call rather than asked
+    # The fixed-filename paragraph that stood here is now `SearchResultsFile`: the two tools
+    # take different arguments (`output_filename` out, `file_path` back) and have to agree on one
+    # file, which is a mechanical fact, not a judgement. It is set in the call rather than asked
     # for in capitals — see `middleware/dataverse_first.py`.
     "skills": ["/skills/"],
     "middleware": [],
@@ -514,6 +517,11 @@ subagents = [
 
 DISK_WRITING_SUBAGENTS = frozenset(
     {
+        # Not because the model writes anything — it is forbidden to — but because
+        # `SearchResultsFile` and `KeepSources` keep the search results in the workspace on
+        # their behalf, and a file nothing surfaces is a file the researcher does not have.
+        "academic_researcher",
+        "dataverse_explorer",
         "data_cleaning",
         "exploratory_data_analysis",
         "diagnostic_analytics",
@@ -535,6 +543,7 @@ def _build_runtime_subagents(
     theory_tools: list[Any],
     datavoyager_tools: list[Any],
     file_sync: "FileSyncMiddleware",
+    sandbox_backend: "LazyLangsmithSandbox",
     model_resolver: "_ModelResolver",
     subagent_overrides: dict[str, str],
 ) -> list[dict[str, Any]]:
@@ -548,6 +557,9 @@ def _build_runtime_subagents(
             # answering from memory in one step is the cheapest move it has. This withholds that
             # move until a search has actually returned — see `middleware/search_first.py`.
             extra_middleware.append(SearchBeforeCiting())
+            # The papers the searches returned, written where the researcher can take them —
+            # `middleware/search_first.KeepSources`.
+            extra_middleware.append(KeepSources(sandbox_backend))
         elif name == "dataverse_explorer":
             extra_middleware.append(ArtifactCaptureMiddleware("dataverse_explorer"))
             # Same exit as `academic_researcher`, and a worse thing to come out of it: every
@@ -560,7 +572,7 @@ def _build_runtime_subagents(
             # `wrap_model_call`, the filename is `wrap_tool_call`, so neither composes around the
             # other. (Checked, not assumed — a comment here first claimed a composition order that
             # does not exist.)
-            extra_middleware.append(FixedSearchFilename())
+            extra_middleware.append(SearchResultsFile(sandbox_backend))
         elif name == "report_writer":
             extra_middleware.append(ArtifactCaptureMiddleware("report_writer"))
         elif name == "hypothesis_generator":
@@ -574,6 +586,16 @@ def _build_runtime_subagents(
 
         if name in DISK_WRITING_SUBAGENTS:
             extra_middleware.append(file_sync)
+
+        # Attached wherever there is a structured response to read, which is where a claim is
+        # written down in a field rather than in prose. The four subagents without a
+        # `response_format` (cleaning, EDA, diagnostic, predictive) are not covered: what they
+        # assert lives in a sentence, and checking that needs a reader, not a comparison.
+        #
+        # Last in the list, and it only records — see `middleware/claims.py` for why this measures
+        # rather than enforces.
+        if subagent.get("response_format") is not None:
+            extra_middleware.append(ClaimsRecorder(name, sandbox_backend))
 
         extra_tools: list[Any] = []
         if name == "academic_researcher":

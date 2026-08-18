@@ -23,6 +23,67 @@ sidecar** that the client spawns and supervises.
 | **P6.6** — outputs the researcher can see | ✅ **done** — files land in `Documents\Mini-Me\<thread>`, figures render in the chat, and OUTPUTS opens the folder. §42 |
 | **P6.7** — the UI itself | ✅ **done, verified on Windows** — a role-based palette with four built-ins **and Zed's whole theme gallery** installable in-app; conversation sidebar with fuzzy search and rename; collapsible panels; a file preview modal; visible scrollbars; rainbow CSV; a three-state send button; rounded panels and a window-wide status bar. §43/§47–§53 |
 
+### The roadmap now (2026-08-18)
+
+**Every milestone P6.0–P6.7 is closed** and the MVP acceptance is met. What follows is the list to
+read first; the dated sections below it are the record of how each item got here.
+
+**1. Protect the researcher's work** — the only group where the cost of being wrong is unrecoverable.
+- ⬜ **Dataverse downloads land on the wrong host** (§219/§220). `download_dataset_files_by_doi`
+  writes to `/tmp/mcp/json_files`-style directories on `dataverse-cip.fastmcp.app`, so unblocking
+  it would not put a file in the researcher's workspace. The desktop answer is a direct fetch
+  against the Dataverse data-access API; it needs the CIP base URL, a token for restricted files,
+  and a size limit before it is worth building.
+- 🟡 **A subagent's claims are now written down beside what is on disk** (§219) — every path a
+  structured response names, and every `persistent_id` the dataverse explorer recommends, checked
+  against the workspace and against the search file. It **records and does not block**: three of the
+  eleven subagents have never been run end to end, and the rules worth enforcing are the ones that
+  come from failures actually seen. Read the record, then decide what to gate.
+- ⬜ **Seven subagents still hold their invariants in prompts** (§140) — instructions to a model
+  rather than something enforced. `middleware/tool_gate.py` is the mechanism; the conversion stopped
+  after a few.
+- ⬜ **Contract tests between each `response_format` and the client's decoder.** Static and fast.
+  Catches §138's class, where producer and consumer quietly disagree about a shape.
+- ⬜ **`execute` can still write anywhere** (§160/§161). The rewrite changed what the model is
+  *told*; nothing enforces it. Sixteen files went to `/tmp` once already.
+- 🟡 **The conversation index** is copied aside before every load (§218), but upstream still deletes
+  it on any read failure. We hold the evidence; we do not stop the delete.
+
+**2. Finish the roadmap** — two items, both in P6.4b.
+- ⬜ **OS notifications when a background run finishes.** The plan display (§209) says where a
+  seven-minute run has got to *if you are looking*; nothing reaches someone who switched windows.
+  The clearest remaining "the web app cannot do this" affordance, which is the MVP's own stated
+  differentiator. Needs a Windows toast API — a new dependency, and a new way for the packaged build
+  to fail on the machines §57–§60 fought.
+- ⬜ **Multi-window.** Listed since the beginning, never started, and the least valuable thing here
+  for someone working on one study at a time.
+
+**3. Ship it to somebody else.**
+- ⬜ **Code signing.** SmartScreen is where a non-developer install ends. An organisational decision
+  about a certificate, not an engineering one.
+- ⬜ **Publish a release.** `v0.2.3` is drafted and built. A decision about who may have it.
+
+**4. Debt that keeps causing the same bug.**
+- ⬜ **`start_async_task` accepts only `background_worker`** (§114), so "run *X* in the background"
+  cannot route a named specialist.
+- ⬜ **Two renderers for one collection** — sources drawn from `buckets` in one path and
+  `self.sources` in another; §196 was one symptom.
+- ⬜ **Per-step elapsed time** in the plan display — deliberately left out of §209; needs a
+  first-seen stamp per todo.
+- ⬜ **Old workspaces are not migrated** (§42) — pre-§51 threads appear, their files do not.
+- ⬜ **`setup-wsl.sh` rewrites every line ending**, which breaks git operations on the checkout.
+- ⬜ **The warm-up sometimes fails** — `GET /assistants/{id}/schemas` returned a non-2xx on one
+  launch and built the graph fine on the next, so the first turn pays the ten seconds §176 meant to
+  absorb. Timing-dependent; measured 2026-08-18, not yet explained.
+
+**5. Upstream** — nine reports written in `docs/upstream/`, none of them ours to fix.
+
+*A note on this list.* It replaced three markers that were lying: P6.2.5 sat at 🔴 "critical path"
+for weeks after its acceptance passed, P6.3 read "in progress" with all six children done, and the
+shipping items still named `v0.1.0`. A plan that misdescribes its own project is worse than no plan,
+because it is believed — the same argument §73 makes about provenance, applied to the document that
+sets the work.
+
 ### What is left (updated 2026-08-09)
 
 Every milestone P6.0–P6.7 is closed and the app is in daily use by its first researcher.
@@ -35,10 +96,11 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   green without anyone typing a command. Took three rounds: §57 fixed elevation, §60 made the
   elevated output readable and stopped the app claiming "done" over a red row, §61 reverted a
   `--no-launch` flag that could have unregistered the distro.
-- 🟡 **The download link.** `v0.1.0` is tagged, built green, and attached as
-  `mini-me-desktop-v0.1.0-windows-x64.zip`. The release is a **draft** — deliberately, since
-  a draft can be deleted where a published release cannot. **Remaining: someone decides to
-  publish it**, which is a call about who is allowed to have this, not an engineering step.
+- 🟡 **The download link.** `v0.2.3` is tagged and built, carrying every fix through §218. Each
+  release is a **draft** deliberately — a draft can be deleted where a published one cannot — so
+  **remaining: someone decides to publish it**, which is a call about who may have this rather than
+  an engineering step. Note the repository is private, so a release link only works for someone with
+  access; sending the zip directly is usually what is wanted for one colleague.
 - ⬜ **Code signing.** SmartScreen shows "Windows protected your PC" and most researchers
   stop there. An organizational decision on a certificate; the release notes and README
   say which two words to click in the meantime.
@@ -265,7 +327,8 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   rather than once a launch. **Awaiting a stopwatch**, which is the only thing that settles it.
 - ⬜ **`setup-wsl.sh` leaves a checkout with every file modified** from line endings, which breaks
   any git operation on it.
-- ⬜ **Publish `v0.1.0`** — tagged and built; the draft needs a decision about who may have it.
+- ⬜ **Publish a release** — `v0.2.3` is drafted and built; it needs a decision about who may have
+  it. See the download-link note above.
 - ⬜ **A custom store** (§93) — deliberately after the checkpointer, and only with numbers:
   alpha API, and replacing it means owning semantic search and TTL.
 - ⬜ **A native Windows backend?** (§95) — the case is the WSL install, not storage. Its own
@@ -456,7 +519,9 @@ the backend), `ui` (reusable GPUI components), `sidecar` (packaging).
   sidecar, health-checks it, and streams **one real coordinator turn** end to end,
   rendering assistant text as it arrives. *Verified on Windows 2026-07-30 — the
   coordinator answered in the chat pane, status `done`.*
-- 🔴 **P6.2.5 — Local-first backend** *(new; critical path — §10/§11).* Replace the
+- ✅ **P6.2.5 — Local-first backend** *(§10/§11).* **Done** — carried 🔴 "critical path" until
+  2026-08-18 while its acceptance had been passing for weeks, which is the kind of thing that makes
+  a plan stop being read. Replace the
   remote LangSmith sandbox with host execution (`LocalShellBackend`) behind
   `MINIME_EXECUTION_BACKEND`, add the ~6 bespoke methods deepagents lacks
   (`aget_work_dir`, `aexecute_untruncated`, the lifecycle quartet,
@@ -465,7 +530,8 @@ the backend), `ui` (reusable GPUI components), `sidecar` (packaging).
   assumption), and gate `execute` with human approval.
   *Acceptance:* a real turn — including an `asta` subagent call — completes with
   **no `LANGSMITH_API_KEY` and no `WORKOS_*`**, executing on the host.
-- 🟡 **P6.3 — Port the core panels.** In progress, in this order:
+- ✅ **P6.3 — Port the core panels.** All six done; the list is kept for the order they landed in
+  and what each one cost.
   1. ✅ **Composer + transcript scroll** — a real text field (type, Enter sends)
      and a scrollable transcript. §12.
   2. ✅ **Project spine** — the right panel now renders live `GET /project` data
@@ -502,7 +568,11 @@ the backend), `ui` (reusable GPUI components), `sidecar` (packaging).
   (`settings.toml` for settings, the OS keychain for keys), secrets delivered to the
   sidecar as environment variables so the checkout's `.env` becomes optional, and a
   first-run panel instead of a failed turn. *Gates the installable.*
-- ⬜ **P6.4b — Native affordances + shipping.** Local file → analysis,
+- 🟡 **P6.4b — Native affordances + shipping.** Done: local file → analysis (§179),
+  keychain-stored keys, the provisioned checkout + venv (§57–§61), Job Object teardown (verified
+  2026-08-01), and click-to-update answered by making it unnecessary (§135/§139). **Left: OS
+  notifications when a background run finishes, and multi-window.** Original scope below.
+  Local file → analysis,
   background-run tray + notifications, **keychain-stored keys**, multi-window.
   Plus what "installable" now means: a **pinned Mini-Me checkout + venv the app
   provisions**, a **"click to update"** button, a **setup tutorial**, and Windows
@@ -10850,7 +10920,10 @@ for different things:
 `None` only for the coordinator's own provider, where the models are billed exactly where every
 other turn is and a note on every row would be noise.
 
-- ⬜ **Nothing stops a specialist being pointed at an unkeyed provider.** §186 refuses a *turn*
+- ✅ **Nothing stops a specialist being pointed at an unkeyed provider** — closed in §212, after it
+  happened. The picker no longer offers a provider with no key, and the turn gate reads the
+  specialists as well as the coordinator. Original note kept below.
+- ⬜ *(was)* **Nothing stops a specialist being pointed at an unkeyed provider.** §186 refuses a *turn*
   whose coordinator has no key; an override to a provider with none still saves, and fails inside
   the subagent minutes later. The gate reads the coordinator's settings alone. Recorded because
   the fix is the same shape and the failure is slower and harder to read.
@@ -12218,3 +12291,207 @@ making:
 
 *Seventy-second: "no backup" is a design decision somebody made quickly, and it is always in the
 error path — the one place nobody tests. Read the recovery branch before trusting the happy one.*
+
+## 219. What the subagents say they did (2026-08-18)
+
+*"I also have doubts about how the subagents works. We did a great job with the paper research but
+not sure if dataverse is working well (not all datasets have asociated papers) and till now dataverse
+canno download data because on the web was a huge deal but in a desktop app it seems a correct way to
+do it. also we didnt test data voyager neither pdf librarian."*
+
+Four doubts, and reading the definitions confirmed all four. Two of them had a cause already written
+down in this repository, which is worth saying plainly: the answers were not missing, they were
+unread.
+
+### The recommendation this replaced
+
+The item proposed first was a **gate** — verify claims, refuse the ones that fail. That was
+half-wrong and the researcher's message is what showed it. `data_voyager`, `pdf_librarian` and a
+paperless Dataverse search have never been run end to end, so a gate built now would be guarding
+guesses. But the *recording* half is exactly what makes those three runs worth their wall-clock:
+DataVoyager takes twenty to forty minutes, and §207a stayed hidden for weeks because nothing was
+watching while it ran.
+
+So `middleware/claims.py` measures and blocks nothing. `aafter_agent` returns `None` on every path
+and the whole body is wrapped, because a record that can cost a researcher their subagent's work is
+worse than no record.
+
+### The two checks, which fail differently
+
+**A file that was never written.** `DataAnalysisResults.charts`, `LibraryArtifact.papers[].path`,
+`dataset_paths`, and the `![caption](./eda_dist.png)` refs inside a report are all *paths the model
+typed*. Nothing had ever opened one. A report embedding a figure that is not there renders as a hole
+in the PDF, and the researcher finds out at the end.
+
+**A dataset that was never in the search.** `SearchBeforeRecommending` (§142) already forces the
+search and then the read, so the subagent has demonstrably seen the file. What it cannot do is check
+that the ids coming *out* are the ids that went *in* — and a composed `persistent_id` is a citation
+someone pastes into a paper. The check is deliberately shape-blind: it collects the leaf strings of
+`dataverse_search.json` and asks whether each recommended id is among them. The MCP owns that file's
+layout; a reader that walked named keys would report every dataset as fabricated the day the layout
+changed, which is the one failure a record like this cannot afford.
+
+The fields are **declared**, not discovered. A walk that collected every string "looking like a path"
+would flag citations and prose, and a false missing-file is how a reader stops believing the record.
+The cost is that a new schema must be classified by hand — so a test fails if a `response_format`
+appears in neither table, rather than producing a quiet "no paths claimed" for the rest of the
+project's life. `IndexedPaper.path` is documented as *"sandbox path **or URL**"*, and a URL there is
+correct, not missing.
+
+### §132, nearly repeated on the way out
+
+The first version logged clean runs at `INFO`. §132 had already established that **nothing in this
+backend configures logging** and that every line ever *seen* to reach the backend log arrived at
+`WARNING` — which there cost a diagnosis, because the absence of a line was read as "the tool did not
+run" when it may only have meant "INFO does not reach this file".
+
+A recorder that shows its failures and swallows its successes cannot tell *"checked, nothing wrong"*
+from *"never ran"*. For three subagents nobody has watched, that is the entire question. So the level
+is not left to chance: one handler on stderr — which `crates/app/src/backend.rs:1207` hands straight
+to the log file — and `propagate` off so a server that does configure `INFO` prints each line once.
+The test that guards it sets the root logger to `CRITICAL` and asserts the line still arrives.
+
+### What "dataverse cannot download data" turned out to mean
+
+Not a policy that can be lifted. `download_dataset_files_by_doi` is blocklisted in the skill
+(`skills/dataverse/SKILL.md:78`) and filtered out by an allowlist of three
+(`backend/mcp_tools.py:417-430`), but the reason is in the skill's own reference:
+
+> The Dataverse MCP download tool writes files to MCP host-managed directories. Those files do not
+> automatically appear inside the sandbox.
+
+That MCP server is remote — `https://dataverse-cip.fastmcp.app/mcp`. A download through it lands on
+**somebody else's machine**, on the web and on the desktop alike. Un-blocking the tool would not put
+a file where cleaning or EDA could open it.
+
+What the desktop *does* change is real, and the researcher's instinct was right for a different
+reason than the one given: the sandbox is now their own WSL, and the subagent already holds
+`execute`. So the desktop version of "download" is a direct fetch into the working directory — a new
+tool, not a lifted restriction. Three things to settle before building it: the CIP Dataverse base URL
+(recorded nowhere in this repository), an API token for restricted files (a second secret, under the
+same request-only handling as the model key), and dataset size.
+
+*Seventy-third: when the plan proposes a gate for behaviour nobody has observed, build the meter
+first. The rules worth enforcing are the ones the measurements hand you.*
+
+## 220. The argument that did not exist (2026-08-18)
+
+*"See what AI says about the quey of dataverse."* The screenshot: `dataverse_explorer`, nine steps,
+one minute twenty-nine, and no datasets — *"couldn't extract parseable metadata from the CIP
+Dataverse search results, so I can't give you a verified dataset shortlist without risking invented
+details."*
+
+The subagent was right, and it was our fault. **§142's middleware broke every read it forced.**
+
+### Probed rather than reasoned about
+
+There was no current backend log on this machine, so the MCP was asked directly:
+
+```
+SearchCIPDataverse(query="late blight resistance", output_filename="dataverse_search.json")
+  -> {"status":"success","message":"Successfully saved 261 items to
+      /tmp/mcp/json_files/dataverse_search.json","item_count":261}
+
+read_search_results(filename="dataverse_search.json")
+  -> ToolException: 'file_path' is a required property
+read_search_results(file_path="/tmp/mcp/json_files/dataverse_search.json", filename="…")
+  -> ToolException: Unexpected keyword argument
+read_search_results(file_path="/tmp/mcp/json_files/dataverse_search.json")
+  -> the metadata
+```
+
+`read_search_results` takes **`file_path`**, and it wants the server-side absolute path.
+`FixedSearchFilename` injected `filename`. §142's own write-up states the tools *"spell the argument
+differently — `output_filename` on the way out, `filename` on the way back"*. That sentence was
+never true.
+
+So the injection did not merely fail to help. Passing `filename` beside a correct `file_path` is a
+**hard rejection**, not a tolerated extra — the middleware turned calls that would have worked into
+calls that could not. And because `SearchBeforeRecommending` *forces* the read, the subagent was
+locked into a step that could never succeed: it could search, and it could never recommend.
+
+### Why the tests did not catch it
+
+`test_dataverse_first.py` asserted that the middleware sets `filename` on the read. It passed, on
+every run, against a version that was broken in production — because it tested **what the middleware
+writes**, never **what the tool accepts**. §128 made this point about `ast.parse` proving a file
+valid without proving a line of it runs; this is the same error one layer up. The rewritten tests
+name the real contract and quote the live rejections, and the fix is driven end to end against the
+actual MCP before being believed.
+
+### The path is taken, not assumed
+
+`SearchResultsFile` reads `output_file` out of the search's own answer and uses it as `file_path` on
+the read, so a server that moves its directory is followed rather than guessed at. It also strips
+`filename` if the model supplies one, since the previous version taught it to.
+
+### The results now exist where the researcher can reach them
+
+*"Also I noticed that we are not saving the json file with the papers inside the thread folder. I
+want the user to have it."*
+
+True of both searches, for different reasons:
+
+* the Dataverse file was written to `/tmp/mcp/json_files/` **on the MCP host**, which is nobody's
+  workspace — the §219 claims check had been reading a sandbox path that could never exist;
+* papers lived in the Sources panel and in `minime_local.sources._seen`, an in-process dict —
+  nothing on disk, nothing surviving the app closing, nothing to hand to a colleague.
+
+So `dataverse_search.json` (what the read returned) and `papers.json` (`complete_sources`) are
+written into the workspace, and both subagents joined `DISK_WRITING_SUBAGENTS` so `FileSyncMiddleware`
+surfaces them in Outputs. `papers.json` carries **everything the searches returned**, not the
+shortlist the model discussed — and `complete_sources` is now one function called by both the
+artifact renderer and the file writer, because a researcher comparing the panel against the file
+must not find them disagreeing.
+
+Measured end to end against the live MCP, with the model asking badly on purpose: search
+`output_filename="whatever.json"`, read `filename="dataverse_search.json"` → both corrected, 261
+items read, 261 rows in the workspace.
+
+### On refactoring the search
+
+Worth saying plainly: **the search is not broken.** It returned 261 datasets for "late blight
+resistance" on the first attempt. Rewriting it against the Dataverse REST API would buy one thing
+this repository actually wants — files fetched into the researcher's own sandbox instead of the MCP
+host's `/tmp` — and that is the §219 download question, not this defect. It is a separate decision
+with its own prerequisites, and it should not be justified by a failure that was ours.
+
+*Seventy-fourth: a test that asserts what our code writes, when the contract belongs to somebody
+else's tool, proves only that we are consistent. Ask the tool.*
+
+## 221. The end-to-end check that skipped the end (2026-08-18)
+
+§220 closed with *"measured end to end against the live MCP"* and a transcript showing 261 rows
+written to the workspace. The measurement was real and it proved the wrong thing.
+
+`wrap_tool_call`'s handler is typed **`ToolMessage | Command`**
+(`langchain/agents/middleware/types.py:652`). The probe called `tools[name].ainvoke(args)` — the MCP
+tool directly — so what came back was the raw content blocks, which is a shape the middleware never
+sees in production. `_payload` read those blocks and nothing else. In the running agent it would
+have been handed a `ToolMessage`, found no text, and returned `None`, so:
+
+* `output_file` was never captured, and the read fell back to the hardcoded
+  `/tmp/mcp/json_files/dataverse_search.json` — correct today, and correct by luck;
+* **`dataverse_search.json` was never written to the workspace at all** — the half of §220 that
+  exists because the researcher asked for it.
+
+Both `ToolMessage.content` shapes are read now (a bare string and a list of blocks), plus a
+`Command`'s messages, and the tests drive LangChain's own objects rather than a hand-written double.
+
+This is §220's own lesson, one layer up: *ask the tool* correctly meant asking it **through the
+seam the code actually runs on**. A probe that skips a wrapper tests the wrapper's absence.
+
+### The failure was never going to be loud
+
+`mcp_tools._make_mcp_error_handler` turns a failed tool call into an ordinary message —
+*"Tool 'read_search_results' failed: … Consider retrying with different arguments"* — so the run
+completes, the model narrates a graceful apology, and no exception is raised anywhere. That is why a
+wrong argument name survived from §142 to §220 without one alarming line: **the system was designed
+to make this exact failure polite.**
+
+So `middleware/claims.py` now records an empty shortlist as its own finding. An empty search is a
+legitimate outcome; an empty search nobody wrote down is the thing that cost weeks.
+
+*Seventy-fifth: an end-to-end test that reaches around a layer is a unit test wearing a costume.
+Name the seams it crossed, and check that the list is the same one production crosses.*
+
