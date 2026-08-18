@@ -230,16 +230,23 @@ pub const BENCH: Theme = Theme {
     surface: 0xf6f5f1,
     elevated: 0xfcfcfa,
     overlay: 0xffffff,
-    hover: 0,
+    // The teal at 10% into the *background*, not the surface. §184 concluded these four palettes
+    // could not have a hover and was right about the one dimension it searched: `elevated` is
+    // already 0xfcfcfa and `overlay` is white, so on a light theme there is no room to lift. The
+    // hover has to leave the ladder downward, and in hue rather than in grey (§217).
+    hover: 0xd8dfd9,
     accent_soft: 0xddede7,
     text: 0x2f343a,
-    text_muted: 0x5e656b,
     // Two inks sit a shade darker than the design named them: `text_faint` came as 0x666d73
     // and `running` as 0x2f6fa8, which measure 4.41:1 and 4.45:1 on the background — under the
     // 4.5 floor `every_shipped_theme_is_readable` enforces, and under it again on `accent_soft`.
     // Hue and saturation are the designer's; only lightness moved, by two or three points per
     // channel, which is the smallest change that clears AA.
-    text_faint: 0x646a70,
+    // Three and eight points darker again, by the same rule as the note above: the new hover is
+    // darker than every rung, and these two were the inks with no margin left on it. `text` had
+    // 9.25:1 to spare and did not move.
+    text_muted: 0x5b6268,
+    text_faint: 0x5c6267,
     border: 0xdfddd6,
     border_strong: 0xc3c1b8,
     accent: 0x1f6f63,
@@ -256,11 +263,13 @@ pub const BENCH_NIGHT: Theme = Theme {
     surface: 0x2a2e33,
     elevated: 0x333840,
     overlay: 0x383e46,
-    hover: 0,
+    // The teal at 7% above `overlay`. A dark theme leaves the ladder upward, so the hover is
+    // lighter than every rung and the inks lose a little contrast rather than gaining it.
+    hover: 0x3c474d,
     accent_soft: 0x284840,
     text: 0xe3e5e2,
-    text_muted: 0xaeb3b0,
-    text_faint: 0xaab0ad,
+    text_muted: 0xb0b5b2,
+    text_faint: 0xafb5b2,
     border: 0x383d42,
     border_strong: 0x495057,
     accent: 0x6fc3ae,
@@ -281,11 +290,13 @@ pub const MINI_ME_DARK: Theme = Theme {
     surface: 0x1c1c21,
     elevated: 0x232329,
     overlay: 0x2a2a31,
-    hover: 0,
+    // The orange at 10% above `overlay`. Only `text_faint` needed anything; `text` and
+    // `text_muted` clear it at 10.6:1 and 5.8:1 untouched.
+    hover: 0x3d3132,
     accent_soft: 0x3a2419,
     text: 0xececf0,
     text_muted: 0xb0b0ba,
-    text_faint: 0x9a9aa5,
+    text_faint: 0x9c9ca7,
     border: 0x2f2f37,
     border_strong: 0x3f3f49,
     accent: 0xe8703a,
@@ -302,11 +313,12 @@ pub const SLATE: Theme = Theme {
     surface: 0x1a1e24,
     elevated: 0x222731,
     overlay: 0x2a303b,
-    hover: 0,
+    // The blue at 7% above `overlay`. Same as Mini-Me Dark: `text_faint` alone moved.
+    hover: 0x2f3948,
     accent_soft: 0x1c3048,
     text: 0xe6eaf0,
     text_muted: 0xacb4c0,
-    text_faint: 0x949dab,
+    text_faint: 0x9aa3b0,
     border: 0x2b313b,
     border_strong: 0x3b434f,
     accent: 0x6cb0f5,
@@ -440,10 +452,11 @@ const HOVER_FLOOR: f64 = 1.12;
 ///
 /// **Where no theme names one, this returns `elevated` — the old behaviour, deliberately.** A
 /// derived step was tried and abandoned on measurement: Bench, Bench Night, Mini-Me Dark and
-/// Slate carry inks so near the 4.5 floor that *every* lift large enough to see drops one of
-/// them under AA. There is no fraction that satisfies both, so those six palettes keep a hover
-/// that is weak rather than gaining one that is unreadable. Fixing them means retuning their
-/// inks, which is a separate job and is recorded as one (§184).
+/// Slate had inks so near the 4.5 floor that *every* lift large enough to see dropped one of them
+/// under AA — true of a *lift*, which is the only move §184 tried. §217 moved sideways instead: a
+/// few percent of the theme's own accent, applied off the end of the ladder, is visible at a
+/// lightness the inks barely notice. All eight palettes now name a hover, and the fallback below
+/// exists for a Zed theme imported without one.
 pub fn hover_over(base: u32) -> u32 {
     let named = hover();
     if named != 0 && contrast(named, base) >= HOVER_FLOOR {
@@ -637,11 +650,11 @@ mod tests {
         // colour, in every theme since this file was written. Where it did differ it borrowed
         // the elevation ladder, which is built to be subtle: the light potato's steps are 0.012
         // apart in OKLCH lightness, a third of what an eye can find.
-        // Only the palettes that name a hover fill, because that is the only place the promise
-        // is kept. Bench, Bench Night, Mini-Me Dark and Slate carry inks so near the 4.5 floor
-        // that every step large enough to see drops one of them under AA — measured, not
-        // assumed — so they keep `elevated` and a weak hover rather than an unreadable one.
-        // Sweeping them in here would assert something `hover_over` does not do.
+        // Only the palettes that name a hover fill, because that is the only place the promise is
+        // kept — which since §217 is every palette this app ships. The four that could not are the
+        // ones this test was written to exclude, and what unblocked them was leaving the elevation
+        // ladder in *hue* instead of trying to find another rung on it: the fill moves off the
+        // ladder entirely and only `text_faint` had to give a few points to allow it.
         let mut checked = 0;
         for (name, theme) in THEMES.iter().filter(|(_, t)| names_its_own_hover(t)) {
             apply(theme);
@@ -677,7 +690,9 @@ mod tests {
             }
         }
         // A filter that quietly matched nothing would make every assertion above vacuous.
-        assert_eq!(checked, 4, "the four potato palettes name their own hover fill");
+        // A filter that quietly matched nothing would make every assertion above vacuous — which
+        // is exactly what caught §217 shipping four new hovers without revisiting this number.
+        assert_eq!(checked, 8, "every shipped palette names its own hover fill");
         apply(&DEFAULT);
     }
 
