@@ -131,13 +131,40 @@ class SearchResultsFile(AgentMiddleware):
     # -- reading what a tool answered ------------------------------------------------------
 
     @staticmethod
-    def _payload(result: Any) -> dict[str, Any] | None:
-        """The JSON object an MCP tool answered with, out of its content blocks."""
-        blocks = result if isinstance(result, list) else [result]
-        for block in blocks:
-            text = block.get("text") if isinstance(block, dict) else None
-            if not isinstance(text, str):
-                continue
+    def _texts(result: Any) -> list[str]:
+        """Every string a tool answer carries, whatever wrapper it arrived in.
+
+        **The handler does not return what the tool returned.** Its contract is
+        ``ToolMessage | Command`` (`langchain/agents/middleware/types.py:652`), so calling the MCP
+        tool directly — which is how the first version of this was checked — exercises a shape the
+        middleware never sees in production. `ToolMessage.content` is then itself either a string
+        or a list of content blocks, depending on the tool.
+        """
+        found: list[str] = []
+
+        def collect(node: Any) -> None:
+            if isinstance(node, str):
+                found.append(node)
+            elif isinstance(node, dict):
+                text = node.get("text")
+                if isinstance(text, str):
+                    found.append(text)
+            elif isinstance(node, list):
+                for item in node:
+                    collect(item)
+
+        # A `Command` carries its messages in `update`; a `ToolMessage` carries `content`.
+        update = getattr(result, "update", None)
+        if isinstance(update, dict):
+            for message in update.get("messages") or []:
+                collect(getattr(message, "content", message))
+        collect(getattr(result, "content", result))
+        return found
+
+    @classmethod
+    def _payload(cls, result: Any) -> dict[str, Any] | None:
+        """The JSON object an MCP tool answered with."""
+        for text in cls._texts(result):
             try:
                 parsed = json.loads(text)
             except (ValueError, TypeError):

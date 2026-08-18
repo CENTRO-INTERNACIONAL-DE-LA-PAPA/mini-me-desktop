@@ -367,3 +367,88 @@ def test_a_read_that_answered_nothing_parseable_writes_nothing():
 def test_without_a_sandbox_the_middleware_still_fixes_the_arguments():
     """`_build_runtime_subagents` passes one; a test or a caller that does not must not crash."""
     assert _fixed(SearchResultsFile(), READ_TOOL, {})["file_path"].endswith(FIXED_FILENAME)
+
+
+def test_the_search_path_is_read_out_of_a_real_ToolMessage():
+    """The shape the handler actually returns, which the first version of this could not read.
+
+    `wrap_tool_call`'s handler is typed `ToolMessage | Command`
+    (`langchain/agents/middleware/types.py:652`) — so the end-to-end check that called the MCP
+    tool directly proved the *tool's* contract and never the *middleware's*. With the wrapper
+    unread, `output_file` was never captured and the workspace copy was never written.
+    """
+    from langchain_core.messages import ToolMessage
+
+    middleware = SearchResultsFile()
+    elsewhere = "/srv/results/dataverse_search.json"
+    middleware.wrap_tool_call(
+        _ToolCallRequest(SEARCH_TOOL, {"query": "potato"}),
+        lambda _r: ToolMessage(
+            content=json.dumps({"status": "success", "output_file": elsewhere}),
+            tool_call_id="call_1",
+            name=SEARCH_TOOL,
+        ),
+    )
+    assert middleware._server_path == elsewhere
+    assert _fixed(middleware, READ_TOOL, {})["file_path"] == elsewhere
+
+
+def test_a_ToolMessage_carrying_content_blocks_is_read_too():
+    """MCP tools answer with blocks as often as with a bare string."""
+    from langchain_core.messages import ToolMessage
+
+    middleware = SearchResultsFile()
+    middleware.wrap_tool_call(
+        _ToolCallRequest(SEARCH_TOOL, {"query": "potato"}),
+        lambda _r: ToolMessage(
+            content=[
+                {"type": "text", "text": json.dumps({"output_file": "/blocks/x.json"})}
+            ],
+            tool_call_id="call_1",
+            name=SEARCH_TOOL,
+        ),
+    )
+    assert middleware._server_path == "/blocks/x.json"
+
+
+def test_the_copy_is_written_from_a_real_ToolMessage():
+    """The half that was silently doing nothing: `papers.json`'s Dataverse twin."""
+    from langchain_core.messages import ToolMessage
+
+    sandbox = _Sandbox()
+    rows = [{"global_id": "doi:10.21223/P3/0F9T62", "name": "Late blight trials"}]
+
+    async def handler(_request):
+        return ToolMessage(
+            content=json.dumps({"file_path": "/tmp/mcp/json_files/x.json", "content": rows}),
+            tool_call_id="call_1",
+            name=READ_TOOL,
+        )
+
+    asyncio.run(
+        SearchResultsFile(sandbox).awrap_tool_call(_ToolCallRequest(READ_TOOL, {}), handler)
+    )
+    assert json.loads(sandbox.written["/home/user/workspace/dataverse_search.json"]) == rows
+
+
+def test_a_Command_wrapping_the_answer_is_read_as_well():
+    """`wrap_tool_call` may hand back a Command instead; its messages carry the same text."""
+    from langchain_core.messages import ToolMessage
+    from langgraph.types import Command
+
+    middleware = SearchResultsFile()
+    middleware.wrap_tool_call(
+        _ToolCallRequest(SEARCH_TOOL, {"query": "potato"}),
+        lambda _r: Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content=json.dumps({"output_file": "/cmd/x.json"}),
+                        tool_call_id="call_1",
+                        name=SEARCH_TOOL,
+                    )
+                ]
+            }
+        ),
+    )
+    assert middleware._server_path == "/cmd/x.json"
