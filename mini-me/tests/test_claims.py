@@ -229,6 +229,17 @@ def test_a_search_file_that_is_not_json_accuses_nobody():
     assert unsearched(["doi:10.21223/A"], "<html>gateway timeout</html>") == []
 
 
+def test_a_search_that_recommended_nothing_is_written_down(recorded):
+    """What the researcher saw twice, and what nothing recorded.
+
+    `mcp_tools._make_mcp_error_handler` turns a failed tool call into an ordinary message, so a
+    Dataverse turn whose read never succeeded completes quietly with an empty shortlist. An empty
+    search is a legitimate outcome; an unrecorded one is how a wrong argument name survived weeks.
+    """
+    record("dataverse_explorer", _recommendation(), FakeSandbox())
+    assert "recommended no datasets at all" in "\n".join(recorded)
+
+
 def test_an_unreadable_search_file_says_so_instead_of_passing(recorded):
     sandbox = FakeSandbox(entries=[], search=None)
     record("dataverse_explorer", _recommendation("doi:10.21223/A"), sandbox)

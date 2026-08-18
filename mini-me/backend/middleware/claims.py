@@ -286,6 +286,16 @@ class ClaimsRecorder(AgentMiddleware[ArtifactState, Any, Any]):
         """Check the recommended `persistent_id`s against the file the search wrote."""
         ids = _resolve(structured, "datasets[].persistent_id")
         if not ids:
+            # Recorded rather than passed over. A `DataVerseSearchResults` with no datasets is what
+            # the researcher saw twice (§220), and it reaches them as a polite paragraph: the MCP
+            # error handler turns a failed tool call into an ordinary message
+            # (`mcp_tools._make_mcp_error_handler`), so the turn completes and nothing is raised.
+            # An empty search is a legitimate outcome; an empty search that nobody wrote down is
+            # how a broken tool argument survived for weeks.
+            logger.warning(
+                "claims: dataverse_explorer recommended no datasets at all — "
+                "check the log above for a failed SearchCIPDataverse or read_search_results"
+            )
             return
         result = await self.sandbox_backend.aread(
             str(work_dir / DATAVERSE_SEARCH), limit=0

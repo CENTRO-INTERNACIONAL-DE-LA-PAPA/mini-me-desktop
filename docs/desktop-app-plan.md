@@ -12458,3 +12458,40 @@ with its own prerequisites, and it should not be justified by a failure that was
 
 *Seventy-fourth: a test that asserts what our code writes, when the contract belongs to somebody
 else's tool, proves only that we are consistent. Ask the tool.*
+
+## 221. The end-to-end check that skipped the end (2026-08-18)
+
+§220 closed with *"measured end to end against the live MCP"* and a transcript showing 261 rows
+written to the workspace. The measurement was real and it proved the wrong thing.
+
+`wrap_tool_call`'s handler is typed **`ToolMessage | Command`**
+(`langchain/agents/middleware/types.py:652`). The probe called `tools[name].ainvoke(args)` — the MCP
+tool directly — so what came back was the raw content blocks, which is a shape the middleware never
+sees in production. `_payload` read those blocks and nothing else. In the running agent it would
+have been handed a `ToolMessage`, found no text, and returned `None`, so:
+
+* `output_file` was never captured, and the read fell back to the hardcoded
+  `/tmp/mcp/json_files/dataverse_search.json` — correct today, and correct by luck;
+* **`dataverse_search.json` was never written to the workspace at all** — the half of §220 that
+  exists because the researcher asked for it.
+
+Both `ToolMessage.content` shapes are read now (a bare string and a list of blocks), plus a
+`Command`'s messages, and the tests drive LangChain's own objects rather than a hand-written double.
+
+This is §220's own lesson, one layer up: *ask the tool* correctly meant asking it **through the
+seam the code actually runs on**. A probe that skips a wrapper tests the wrapper's absence.
+
+### The failure was never going to be loud
+
+`mcp_tools._make_mcp_error_handler` turns a failed tool call into an ordinary message —
+*"Tool 'read_search_results' failed: … Consider retrying with different arguments"* — so the run
+completes, the model narrates a graceful apology, and no exception is raised anywhere. That is why a
+wrong argument name survived from §142 to §220 without one alarming line: **the system was designed
+to make this exact failure polite.**
+
+So `middleware/claims.py` now records an empty shortlist as its own finding. An empty search is a
+legitimate outcome; an empty search nobody wrote down is the thing that cost weeks.
+
+*Seventy-fifth: an end-to-end test that reaches around a layer is a unit test wearing a costume.
+Name the seams it crossed, and check that the list is the same one production crosses.*
+
