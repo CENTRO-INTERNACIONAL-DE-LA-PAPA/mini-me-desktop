@@ -12074,3 +12074,31 @@ number would have harmed nobody — except that §213 had just finished arguing 
 question of every support conversation. Two different builds answering it the same way is the exact
 ambiguity that entry existed to remove, and the draft is deleted rather than left beside the new one
 for somebody to send by mistake.
+
+## 216. Fixed blind, reported unchanged (2026-08-18)
+
+§215 shipped and the same message came back:
+
+> *When there are multiple pending interrupts, you must specify the interrupt id when resuming.*
+
+The app log had nothing to say about it, because §215 added no instrumentation to the path it
+changed. That is §206 and §207's lesson unlearned inside a day: a fix with no way to observe its own
+precondition is a fix you cannot tell from an absent one.
+
+Two things can produce this symptom and they look identical from the status bar:
+
+1. **The binary predates the fix.** #68 merged at 13:47:50 UTC, #69 carried it to `main` at 13:48:14,
+   and the app started at 13:50:27 — two minutes, against a release rebuild that takes about one.
+   Possible, and not confirmable from here. The About page settles it: the fix and the `0.2.1` bump
+   are the same commit, so a window reading `0.2.0` has neither.
+2. **The ids are not in the payload.** The keyed resume is sent only when *every* action carries one,
+   and falls back otherwise — silently, to precisely the shape that fails. `Interrupt` is a
+   `@dataclass(slots=True)` with `value` and `id`, and `id` is an `xxh3_128_hexdigest` of the
+   checkpoint namespace, so it *should* serialise. Should is not a measurement.
+
+So both ends now say what they saw: how many interrupts arrived and how many carried an id, and
+which shape went back. One run distinguishes every case — including a third nobody has considered
+yet, which is the point of instrumenting rather than theorising.
+
+*Seventieth: ship the observation with the fix, not after it. The round trip you save is the one
+where you cannot tell whether your own change is installed.*
