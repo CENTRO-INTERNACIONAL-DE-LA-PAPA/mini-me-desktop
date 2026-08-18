@@ -12102,3 +12102,31 @@ yet, which is the point of instrumenting rather than theorising.
 
 *Seventieth: ship the observation with the fix, not after it. The round trip you save is the one
 where you cannot tell whether your own change is installed.*
+
+### 216a. What the instrument said (2026-08-18)
+
+```
+14:16:43  an approval request arrived  interrupts=1 actions=1 with_id=1
+14:16:43  resuming                     answers=1 keyed=true
+14:16:44  an approval request arrived  interrupts=1 actions=1 with_id=1
+14:16:44  resuming                     answers=1 keyed=true
+```
+
+Five gates in five seconds, every one keyed, no error. §215's fix works, and the earlier report was
+the binary predating it after all — the timing had left that open and only the About page could have
+settled it. Which is the argument for §213 in a sentence: the version was the fastest way to
+eliminate half the hypothesis space, and it had not existed until the day before.
+
+Two things the trace says that were not obvious:
+
+- **The interrupts arrive one at a time**, not three at once, even for three concurrent specialists.
+  So the keyed resume matters not because a batch arrives together but because *several remain
+  pending* while each is answered — which is exactly the guard's wording, and not how anyone
+  described the bug.
+- **A single interrupt is keyed too.** Deliberate in §215, and now visibly right: the shape a
+  researcher meets does not depend on how many specialists happened to run, so the tested path and
+  the rare path are the same path.
+
+`v0.2.2` ships those two log lines. `v0.2.1` was already built and carries the fix, but a tester's
+report is worth much more with them — and a build sent to somebody else is exactly the situation
+where the observation cannot be added afterwards.
