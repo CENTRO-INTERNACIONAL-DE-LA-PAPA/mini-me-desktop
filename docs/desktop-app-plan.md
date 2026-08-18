@@ -12068,3 +12068,9 @@ instrumentation** — and the reason this one was actionable is that it reached 
 
 *Sixty-ninth: concurrency in the agent is concurrency in the UI. A gate built for one pending
 question will meet three the first time the model is asked to use every specialist it has.*
+
+**Cut as `v0.2.1`, not as another `v0.2.0`.** The `v0.2.0` draft was never published, so re-using the
+number would have harmed nobody — except that §213 had just finished arguing the version is the first
+question of every support conversation. Two different builds answering it the same way is the exact
+ambiguity that entry existed to remove, and the draft is deleted rather than left beside the new one
+for somebody to send by mistake.
