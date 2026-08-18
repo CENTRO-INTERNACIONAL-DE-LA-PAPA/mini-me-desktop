@@ -240,6 +240,38 @@ def unreported(papers: list[dict[str, str]], sources: list[dict[str, Any]]) -> l
     return missing
 
 
+def complete_sources(structured: Any, messages: list[Any]) -> list[dict[str, str]]:
+    """Every paper the searches returned, with the subagent's own ranking still leading.
+
+    **Everything the search returned reaches the reader.** *"We should get all the papers that
+    asta finds and is up to the scietinst to selct and drop the ones they want."* The subagent is
+    asked for exactly that and still returns a shortlist — 9 of 24 on the run that prompted it —
+    so the papers it left out are added back, after its own list rather than merged into it: its
+    ranking is genuinely useful, it just must not be subtractive.
+
+    One definition, because two would drift: `middleware/artifacts.py` renders this into artifacts
+    and `middleware/search_first.KeepSources` writes it to a file, and a researcher comparing the
+    Sources panel against `papers.json` must not find them disagreeing.
+    """
+    sources: list[dict[str, str]] = [
+        {
+            "citation": source.citation,
+            "relevance": source.relevance,
+            "link": source.link,
+        }
+        for source in getattr(structured, "sources", [])
+    ]
+    sources.extend(
+        {
+            "citation": paper.get("citation") or paper.get("title", ""),
+            "relevance": "Returned by the search; not discussed in the summary.",
+            "link": paper.get("link", ""),
+        }
+        for paper in unreported(papers_in(messages), sources)
+    )
+    return sources
+
+
 async def get_paper_tools() -> list[Any]:
     """The paper tools the academic researcher should have."""
     return [find_papers]

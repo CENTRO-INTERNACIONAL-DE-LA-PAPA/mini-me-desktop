@@ -220,32 +220,9 @@ class ArtifactCaptureMiddleware(AgentMiddleware[ArtifactState, Any, Any]):
             return None
 
         if self.source == "academic_researcher":
-            sources = [
-                {
-                    "citation": source.citation,
-                    "relevance": source.relevance,
-                    "link": source.link,
-                }
-                for source in getattr(structured, "sources", [])
-            ]
-            # **Everything the search returned reaches the reader.** *"We should get all the
-            # papers that asta finds and is up to the scietinst to selct and drop the ones they
-            # want."* The subagent is asked for exactly that and still returns a shortlist — 9 of
-            # 24 on the run that prompted this — so the papers it left out are added back here,
-            # where the list leaves the backend and no model gets a further say.
-            #
-            # Appended rather than merged in, so the order the subagent chose still leads: its
-            # ranking is genuinely useful, it just must not be subtractive.
-            sources.extend(
-                {
-                    "citation": paper.get("citation") or paper.get("title", ""),
-                    "relevance": "Returned by the search; not discussed in the summary.",
-                    "link": paper.get("link", ""),
-                }
-                for paper in paper_tools.unreported(
-                    paper_tools.papers_in(state.get("messages", [])), sources
-                )
-            )
+            # `paper_tools.complete_sources` holds the "nothing the search returned is dropped"
+            # rule, so the Sources panel and the `papers.json` written beside it cannot disagree.
+            sources = paper_tools.complete_sources(structured, state.get("messages", []))
             return {
                 "artifacts": {
                     "datasets": [],
