@@ -29,6 +29,8 @@ drift is caught in CI rather than in a live run — the same discipline that
 
 import json
 import logging
+
+from backend import diagnostics
 import re
 import shlex
 from typing import Any
@@ -37,7 +39,8 @@ from langchain_core.tools import tool
 
 from backend.runtime import _active_sandbox
 
-logger = logging.getLogger(__name__)
+#: Reaches the log at INFO — see `backend/diagnostics.py` for why that needs saying.
+logger = diagnostics.arriving(__name__)
 
 _SUBMIT_TIMEOUT_S = 180
 _STATUS_TIMEOUT_S = 90
@@ -563,6 +566,15 @@ async def analyze_data(
             }
         )
 
+    # **Said on the way out, not only on the way down.** Every log line this module had was a
+    # failure path, so a run that submitted correctly and a run that never submitted looked
+    # identical from the log (§235).
+    logger.info(
+        "analyze-data submitted task=%s context=%s over %d dataset(s)",
+        submitted["task_id"],
+        submitted["context_id"],
+        len(paths),
+    )
     return json.dumps(
         {
             "status": "running",

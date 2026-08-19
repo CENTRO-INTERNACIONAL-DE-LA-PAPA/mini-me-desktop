@@ -13089,3 +13089,45 @@ about two.
 *Eighty-ninth: when a fix costs less than the test it protects, build it first. Half an hour against
 forty minutes is arithmetic, not judgement.*
 
+## 235. A submit that said nothing (2026-08-19)
+
+**DataVoyager ran.** The third of the three subagents the researcher named as untested on Monday, and
+the last:
+
+```
+Submitted. The DataVoyager analysis is running in the background.
+  Task ID: 4ee871fd-64cc-48a7-947b-6baca0e95e4c
+```
+
+The turn also shows §231's blockquote arriving for the first time — *"> Attached files (already
+saved in the sandbox working directory): `/mnt/c/…/SOC_Covariables_TESTV5.csv`, …"* — and the export
+artifacts (`manifest.json`, `index.md`, `task.json`) landed in the conversation's folder.
+
+### What went wrong in between
+
+Asked *"I launch it now so I must assume I should wait"*, the log was the obvious place to check
+progress. It held one line: the gate firing. Nothing about a submission, no task id, no poll.
+
+That reads as a failed run, and it was not. **A successful submit logged nothing.**
+`datavoyager_tools` had four `logger.warning` calls and every one was a failure path, so a run that
+submitted correctly and a run that never submitted produced identical output.
+
+Exactly §219's defect in another module — *a record that shows failures and swallows successes cannot
+tell "working" from "never ran"* — and exactly the trap §132 named. Written down twice, and the
+second module still had to be caught by somebody grepping.
+
+### The channel, shared
+
+`middleware/claims.py` had solved this for itself with one stderr handler, since nothing here
+configures logging and only WARNING has ever been seen to reach the file. That is now
+`backend/diagnostics.arriving(name)`, used by both, marking each logger it fits so repeated imports
+do not stack handlers and print every line twice.
+
+`analyze_data` now says what it did on the way out:
+
+    INFO analyze-data submitted task=4ee871fd… context=… over 2 dataset(s)
+
+*Ninetieth: a module that only logs its failures is telling you half a story, and the half it keeps
+is the half you need while waiting. Log the success with the identifier — that is the line somebody
+greps for.*
+

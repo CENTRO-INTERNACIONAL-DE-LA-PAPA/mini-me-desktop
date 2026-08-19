@@ -26,6 +26,9 @@ subagent's work. That is deliberate rather than timid: the enforcement rules wor
 ones that come from failures actually observed, and three of the eleven subagents have never been
 run end to end. Measure first.
 
+Its log reaches the file through `backend/diagnostics.arriving` — see there for why that needs
+saying at all.
+
 Read the result in the backend log the app already writes — `%TEMP%\\mini-me-desktop-backend.log`
 on Windows, `$TMPDIR/mini-me-desktop-backend.log` elsewhere — by searching for `claims:`.
 """
@@ -33,52 +36,22 @@ on Windows, `$TMPDIR/mini-me-desktop-backend.log` elsewhere — by searching for
 from __future__ import annotations
 
 import json
-import logging
 import re
-import sys
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from langgraph.runtime import Runtime
 from langchain.agents.middleware import AgentMiddleware
 
+from backend import diagnostics
 from backend.schemas import ArtifactState
 
 if TYPE_CHECKING:
     from backend.sandbox import LazyLangsmithSandbox
 
-logger = logging.getLogger(__name__)
-
-
-def _make_the_record_arrive() -> None:
-    """Give this module's log a channel that is known to reach the file.
-
-    Nothing in the backend configures logging, so the level is whatever the LangGraph server
-    happens to set, and docs §132 records what that turned out to be: *every line this overlay has
-    ever been seen to produce in the backend log arrived at WARNING*. An `INFO` that never lands
-    cost a diagnosis once already, because the absence of a line was read as "the tool did not
-    run" when it may only have meant "INFO does not reach this file".
-
-    That distinction is this whole module. A record that shows the failures and swallows the
-    clean runs cannot tell "checked, nothing wrong" apart from "never ran" — which is precisely
-    the question being asked of three subagents nobody has watched end to end.
-
-    So the level is not left to chance: one handler on stderr, which `crates/app/src/backend.rs`
-    hands straight to the log file. `propagate` is off so a server that *does* configure INFO
-    prints each line once rather than twice.
-    """
-    if getattr(logger, "_minime_claims_handler", False):
-        return
-    handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
-    logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
-    logger.propagate = False
-    logger._minime_claims_handler = True  # type: ignore[attr-defined]
-
-
-_make_the_record_arrive()
-
+#: Its own channel, because an INFO that never lands cannot tell "checked, nothing wrong" from
+#: "never ran" — which is the entire question this module answers. See `backend/diagnostics.py`.
+logger = diagnostics.arriving(__name__)
 
 #: Which fields of each `response_format` carry a path the model typed, by schema class name.
 #:
