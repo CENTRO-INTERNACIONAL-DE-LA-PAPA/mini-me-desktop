@@ -2238,6 +2238,10 @@ fn markdown_block(
 struct Attachment {
     /// The file's own name, which is what a person recognises.
     label: String,
+    /// Where it came from, kept so a file that could not be copied yet can be copied later.
+    source: std::path::PathBuf,
+    /// Whether it is already inside the conversation's folder.
+    adopted: bool,
     /// What the agent is told. `./name` for a file copied into the conversation — the workspace
     /// *is* the agent's working directory — and the absolute path for one that had to stay put.
     reference: String,
@@ -2268,6 +2272,18 @@ fn attached_blockquote(attachments: &[Attachment]) -> Option<String> {
     Some(format!(
         "> Attached files (already saved in the sandbox working directory): {listed}"
     ))
+}
+
+/// The sources of every attachment that is not yet inside the conversation's folder.
+///
+/// Pure so the rule is testable without a window: a file already copied in must not be copied
+/// again, and one that was not must not be forgotten.
+fn awaiting_adoption(attachments: &[Attachment]) -> Vec<std::path::PathBuf> {
+    attachments
+        .iter()
+        .filter(|attachment| !attachment.adopted)
+        .map(|attachment| attachment.source.clone())
+        .collect()
 }
 
 /// The turn to send: the blockquote, then what they typed.
@@ -3032,6 +3048,8 @@ struct Workbench {
     documents_open: bool,
     /// Files chosen or dropped, waiting to go with the next question.
     attachments: Vec<Attachment>,
+    /// Attachments sent before this conversation had a folder, to copy in once it does.
+    pending_adoption: Vec<std::path::PathBuf>,
     /// Narrows the open reference list. Only the modal reads it — the panel's four are a
     /// preview, and filtering something that shows four of seventeen would be a filter whose
     /// result you cannot see (§197).
@@ -3300,6 +3318,7 @@ impl Workbench {
             datasets_open: false,
             documents_open: false,
             attachments: Vec::new(),
+            pending_adoption: Vec::new(),
             sources_filter,
             datasets_filter,
             documents_filter,
@@ -3676,7 +3695,12 @@ impl Workbench {
             {
                 continue;
             }
-            self.attachments.push(Attachment { label, reference });
+            self.attachments.push(Attachment {
+                label,
+                source: path.to_path_buf(),
+                adopted: inside,
+                reference,
+            });
         }
         self.restore_focus = true;
         // Says what to do next, because the composer no longer does. With the prepared
@@ -4650,6 +4674,13 @@ impl Workbench {
         // taking the list before them would drop a researcher's attachments on a turn that never
         // ran. They are cleared here, where the turn is certain to go.
         let prompt = with_attachments(&prompt, &self.attachments);
+        // **A file attached before the conversation existed is copied in afterwards.**
+        // `thread_workspace()` is `None` until the backend assigns a thread id on the first turn,
+        // so "new conversation, attach, ask" — the ordinary flow, and the one §228 was written for
+        // — silently skipped the copy. The turn that follows carries the absolute path, which the
+        // agent reads perfectly well; what was missing is the file being *kept* (docs §236).
+        self.pending_adoption
+            .extend(awaiting_adoption(&self.attachments));
         self.attachments.clear();
         self.streaming = true;
         self.error = None;
@@ -4798,6 +4829,36 @@ impl Workbench {
             .update(cx, |composer, cx| composer.set_text(filled, cx));
         self.subagent_selected = 0;
         cx.notify();
+    }
+
+    /// Copy in the files that were attached before this conversation had a folder.
+    ///
+    /// Runs once the turn has finished, which is the first moment `thread_workspace()` can answer.
+    /// Failures are logged and dropped: the turn already ran and the agent already read the file
+    /// from where it was, so nothing here is worth interrupting a researcher over.
+    fn adopt_pending(&mut self, cx: &mut Context<Self>) {
+        if self.pending_adoption.is_empty() {
+            return;
+        }
+        let Some(folder) = self.thread_workspace() else {
+            return;
+        };
+        let mut kept = 0usize;
+        for source in std::mem::take(&mut self.pending_adoption) {
+            let size = std::fs::metadata(&source).map(|meta| meta.len()).unwrap_or(0);
+            if size > workspace::ADOPT_LIMIT {
+                continue;
+            }
+            match workspace::adopt(&folder, &source) {
+                Ok(_) => kept += 1,
+                Err(error) => tracing::warn!(%error, "could not copy an attachment in later"),
+            }
+        }
+        if kept > 0 {
+            tracing::info!(kept, "copied attachments into the conversation");
+            // So Outputs shows them beside everything else the turn produced.
+            self.refresh_project(cx);
+        }
     }
 
     /// The files going with the next question, each removable.
@@ -5937,6 +5998,9 @@ impl Workbench {
         {
             self.sidecar.rename_conversation(thread_id, title);
         }
+        // And the same reason attachments wait: the folder they belong in did not exist when they
+        // were chosen. Now it does.
+        self.adopt_pending(cx);
         self.refresh_conversations(cx);
         self.pending_approval = None;
         // Blanket approval expires with the turn it was given for. Carrying it into the
@@ -14442,6 +14506,37 @@ fn replay(path: &str) -> anyhow::Result<()> {
 #[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
+    /// §236: `thread_workspace()` is `None` until the backend assigns a thread id on the first
+    /// turn, so "new conversation, attach, ask" — the ordinary flow — copied nothing.
+    #[test]
+    fn a_file_attached_before_the_conversation_existed_is_copied_in_later() {
+        let waiting = awaiting_adoption(&[
+            attached("SOC_Covariables_TrainValV5.csv", "/mnt/c/Users/x/Downloads/SOC_Covariables_TrainValV5.csv"),
+            attached("SOC_Covariables_TESTV5.csv", "/mnt/c/Users/x/Downloads/SOC_Covariables_TESTV5.csv"),
+        ]);
+        assert_eq!(waiting.len(), 2, "both were sent from outside the folder");
+    }
+
+    #[test]
+    fn a_file_already_inside_the_conversation_is_not_copied_twice() {
+        assert!(awaiting_adoption(&[attached("yield.csv", "./yield.csv")]).is_empty());
+    }
+
+    #[test]
+    fn a_mixed_batch_queues_only_the_ones_that_are_outside() {
+        let waiting = awaiting_adoption(&[
+            attached("copied.csv", "./copied.csv"),
+            attached("huge.tab", "/mnt/d/genomes/huge.tab"),
+        ]);
+        assert_eq!(waiting.len(), 1);
+        assert!(waiting[0].ends_with("huge.tab"));
+    }
+
+    #[test]
+    fn nothing_attached_queues_nothing() {
+        assert!(awaiting_adoption(&[]).is_empty());
+    }
+
 
     /// The search records stay on disk and out of the conversation.
     #[test]
@@ -15891,6 +15986,8 @@ mod tests {
     fn attached(label: &str, reference: &str) -> Attachment {
         Attachment {
             label: label.to_string(),
+            source: std::path::PathBuf::from(format!("/downloads/{label}")),
+            adopted: reference.starts_with("./"),
             reference: reference.to_string(),
         }
     }
@@ -16443,6 +16540,4 @@ fn main() {
 
         cx.activate(true);
     });
-
 }
-
