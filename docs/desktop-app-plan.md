@@ -12879,3 +12879,103 @@ Six of §140's seven remain.
 *Eighty-fifth: when a tool is installed, ask it. Three commands of `--help` and one scratch
 directory settled what two days of inference had not.*
 
+## 231. The path in the box, and the blockquote nobody sent (2026-08-19)
+
+*"Something interesting in the ui is that we are shoing a raw path in the chatbox when we upload a
+file. We need to create a UI for uploaded files."*
+
+The composer read:
+
+```
+/mnt/c/Users/LENOVO/Documents/Mini-Me
+/01a01ae5-27e8-7492-aa20-a590e91be762/New Phytologist - 2013 -
+Těšitelová - Ploidy-specific symbiotic interactions  divergence of
+mycorrhizal fungi between.pdf
+
+please also index this paper
+```
+
+Three wrapped lines of path where a filename would do — and §228 had just made it *worse*, because
+an adopted attachment lives under a thread UUID and the path grew. Worse than ugly: the only way to
+remove one was to edit text the researcher had not typed, and a stray keystroke inside it produced a
+path that resolved to nothing.
+
+Attachments are now state, not text. `Attachment` holds two strings because the reader and the agent
+want different ones — a filename for the chip, a path for the turn — and the chips sit above the
+composer where the picker and the approval card already are (§40). Pressing a chip takes the file
+back off the question; the copy in the conversation's folder stays, because deleting somebody's data
+over a changed mind is a far worse surprise than a file they can delete themselves.
+
+### What the raw path was hiding
+
+Four backend prompts describe a format this client has never produced:
+
+    backend/prompts.py:188        "> Attached files (already saved in the sandbox working
+                                   directory): `./<name>`"
+    backend/subagents.py:325      pdf_librarian — "the relative paths in the user's
+                                   'Attached files' blockquote"
+    backend/subagents.py:384      data_voyager — same
+    backend/project.py:114        _strip_attached_files_blockquote — drops it before the
+                                   mission seed
+
+All of it written for the web frontend. The desktop app put bare absolute paths on their own lines,
+so every one of those instructions referred to something that never arrived — and because
+`first_user_goal` only strips lines beginning with `>`, **the project mission for every desktop
+conversation that began with a file started with a path.**
+
+Sending the documented blockquote costs one line here and repairs four prompts and the mission seed.
+`./name` is now correct rather than aspirational, because §228 puts the file in the working directory
+the sentence claims it is in.
+
+### The ordering bug this nearly shipped with
+
+The first version prepended the blockquote at the top of `start_turn_as`. `subagent::parse` requires
+the prompt to *begin* with `/name`, so `/pdf_librarian index it` with a file attached would have been
+sent as prose — §55 and §76's ten-minute never-delegated turn, newly reachable by attaching a file.
+It also took the attachment list before `provider_blocker` and `resolve_subagent`, both of which
+refuse and return, so a rejected turn silently ate the researcher's files. Both fixed by doing it in
+one place: after the specialist is resolved, past every early return. There is a test that asserts
+the broken order *is* broken.
+
+*Eighty-sixth: an ugly UI is sometimes a protocol that was never implemented. Ask what the other side
+was told to expect before designing what to show.*
+
+## 232. `libraries · 1` beside two papers (2026-08-19)
+
+First: **the gate worked.**
+
+```
+$ ls -la /mnt/c/Users/LENOVO/Documents/Mini-Me/*/.asta/documents
+-rwxrwxrwx 1 piero_linux piero_linux 1269 Aug 19 13:55 index.yaml
+```
+
+§230's `RunBeforeReporting` was merged, the librarian ran, and the index it had previously only
+described exists. That is the first fabricated artifact this project has caught and closed inside a
+day, and it was caught by a recorder written two days before, from a subagent nobody had ever run.
+
+Then: *"I indexed a second paper but the ui at the right say only one."*
+
+`libraries` carries **one artifact per turn**, each holding a `papers` list. So the bucket's length is
+the number of envelopes, and the panel rendered `libraries · 1` — which beside two indexed papers
+reads as the app having lost one. `datasets` happens to be one entry per dataset, so the same code was
+right there and wrong here, which is why it survived §223.
+
+The heading now counts the structured list: `library · N` over document titles, `datasets · N` over
+identifiers, the bucket's own length for everything else. `+N more` counts the same thing, or the
+overflow line contradicts the header it sits under.
+
+### The other half is the librarian's, not the app's
+
+Its own message said it:
+
+> The earlier GNN paper had extraction succeed but library indexing failed at that time due to
+> backend setup issues, so this library count likely reflects only this newly indexed paper.
+
+Which is honest, and is a run from **before** the gate existed. `asta documents list --json` is the
+authority on what the library holds; the app now reports whatever that is instead of counting
+wrappers. Whether the GNN paper is in there is a question for the library, and re-indexing it is one
+sentence to the librarian.
+
+*Eighty-seventh: two collections shaped differently answered the same `len()`, and one of the answers
+was to a question nobody asked. A count is a claim about a noun — name the noun.*
+

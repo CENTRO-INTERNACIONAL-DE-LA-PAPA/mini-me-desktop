@@ -2228,20 +2228,54 @@ fn markdown_block(
 /// Directories need no special case now that no sentence is written about them. The agent
 /// can list one itself, and "analyse this folder of readings" is the researcher's sentence
 /// to write.
-fn compose_with_dropped(typed: &str, paths: &[String]) -> String {
-    let typed = typed.trim_end();
-    if paths.is_empty() {
-        return typed.to_string();
+/// One file the researcher attached, waiting to go with the next question.
+///
+/// **Two strings, because the reader and the agent need different ones.** The chip shows a
+/// filename; the turn carries a path. Writing the path into the composer served both badly — the
+/// researcher saw three wrapped lines of `/mnt/c/Users/LENOVO/Documents/Mini-Me/01a01ae5-27e8-…/`
+/// where a name would do, and could not remove one without editing text they had not typed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Attachment {
+    /// The file's own name, which is what a person recognises.
+    label: String,
+    /// What the agent is told. `./name` for a file copied into the conversation — the workspace
+    /// *is* the agent's working directory — and the absolute path for one that had to stay put.
+    reference: String,
+}
+
+/// The blockquote the backend has always described and this app never sent.
+///
+/// `backend/prompts.py:188` tells the coordinator that a message may begin with
+///
+/// > Attached files (already saved in the sandbox working directory): `./<name>`
+///
+/// three subagent prompts tell their specialists to read the paths out of it, and
+/// `backend/project.py:_strip_attached_files_blockquote` drops it before seeding the mission. All
+/// of that was written for the web frontend. The desktop app put bare paths on their own lines, so
+/// the format four prompts agree on arrived from one client only — and the mission seed for every
+/// desktop conversation that began with a file started with a path (docs §231).
+///
+/// `None` when nothing is attached, so a plain question stays a plain question.
+fn attached_blockquote(attachments: &[Attachment]) -> Option<String> {
+    if attachments.is_empty() {
+        return None;
     }
-    let paths = paths.join("\n");
-    if typed.is_empty() {
-        // The trailing blank line is where they type. Without it the caret sits flush
-        // against the path and the first character typed joins onto the filename.
-        return format!("{paths}\n\n");
+    let listed = attachments
+        .iter()
+        .map(|attachment| format!("`{}`", attachment.reference))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "> Attached files (already saved in the sandbox working directory): {listed}"
+    ))
+}
+
+/// The turn to send: the blockquote, then what they typed.
+fn with_attachments(typed: &str, attachments: &[Attachment]) -> String {
+    match attached_blockquote(attachments) {
+        None => typed.trim().to_string(),
+        Some(quote) => format!("{quote}\n\n{}", typed.trim()),
     }
-    // One blank line, then the paths on consecutive lines: they read as an attachment to
-    // the question rather than as the end of its last sentence.
-    format!("{typed}\n\n{paths}")
 }
 
 /// What a per-specialist model row has to say about the provider it would actually run on.
@@ -2996,6 +3030,8 @@ struct Workbench {
     datasets_open: bool,
     /// The library modal, which the Outputs heading opens.
     documents_open: bool,
+    /// Files chosen or dropped, waiting to go with the next question.
+    attachments: Vec<Attachment>,
     /// Narrows the open reference list. Only the modal reads it — the panel's four are a
     /// preview, and filtering something that shows four of seventeen would be a filter whose
     /// result you cannot see (§197).
@@ -3263,6 +3299,7 @@ impl Workbench {
             sources_open: false,
             datasets_open: false,
             documents_open: false,
+            attachments: Vec::new(),
             sources_filter,
             datasets_filter,
             documents_filter,
@@ -3613,20 +3650,34 @@ impl Workbench {
             }
         }
 
-        // Translated to the backend's view of the filesystem — on Windows the agent runs
-        // inside WSL, where `C:\…` is `/mnt/c/…`.
-        let translated: Vec<String> = adopted
-            .iter()
-            .map(|path| self.sidecar.path_for_backend(path))
-            .collect();
-
-        // **Never overwrites what they typed.** `set_text` was unconditional, so a question
-        // written first and a file dropped second lost the question — and dropping is exactly
-        // the gesture people reach for *after* deciding what to ask (§179).
-        let typed = self.composer.read(cx).text().to_string();
-        let prompt = compose_with_dropped(&typed, &translated);
-        self.composer
-            .update(cx, |composer, cx| composer.set_text(prompt, cx));
+        // **Beside the composer, not inside it.** The path used to be written into the text, which
+        // meant a researcher looking at three wrapped lines of
+        // `/mnt/c/Users/…/Mini-Me/01a01ae5-27e8-…/New Phytologist - 2013 - …pdf` where a filename
+        // would do, and no way to drop one without editing something they had not typed (§231).
+        //
+        // `./name` for a file that was copied in, because the conversation's folder *is* the
+        // agent's working directory and that is the form four backend prompts ask for. The
+        // absolute path for one that had to stay put — it is outside the workspace, so a relative
+        // reference would resolve to nothing.
+        for path in &adopted {
+            let label = file_label(path);
+            let inside = folder
+                .as_ref()
+                .is_some_and(|dir| path.parent() == Some(dir.as_path()));
+            let reference = if inside {
+                format!("./{label}")
+            } else {
+                self.sidecar.path_for_backend(path)
+            };
+            if self
+                .attachments
+                .iter()
+                .any(|held| held.reference == reference)
+            {
+                continue;
+            }
+            self.attachments.push(Attachment { label, reference });
+        }
         self.restore_focus = true;
         // Says what to do next, because the composer no longer does. With the prepared
         // question gone (§180) there is a path sitting in the field and nothing asking
@@ -4563,6 +4614,7 @@ impl Workbench {
         if self.streaming || prompt.trim().is_empty() {
             return;
         }
+
         // **Refuse rather than fall through to somebody else's account.** `problems()` has always
         // been computed and, in `main`'s own words, *"warned, not fatal"* — logged at launch and
         // shown in the pane. A turn ran regardless, and the consequence was not a clear failure:
@@ -4588,6 +4640,17 @@ impl Workbench {
                 None => return,
             },
         };
+        // **After the specialist is resolved, and after every early return.**
+        //
+        // Order first: `subagent::parse` needs the prompt to *begin* with `/name`, so a blockquote
+        // prepended above would hide the command and send it as prose — the ten-minute
+        // never-delegated turn of §55 and §76, reachable by attaching a file.
+        //
+        // Placement second: `provider_blocker` and `resolve_subagent` both refuse and return, and
+        // taking the list before them would drop a researcher's attachments on a turn that never
+        // ran. They are cleared here, where the turn is certain to go.
+        let prompt = with_attachments(&prompt, &self.attachments);
+        self.attachments.clear();
         self.streaming = true;
         self.error = None;
         self.status = "starting…".into();
@@ -4735,6 +4798,79 @@ impl Workbench {
             .update(cx, |composer, cx| composer.set_text(filled, cx));
         self.subagent_selected = 0;
         cx.notify();
+    }
+
+    /// The files going with the next question, each removable.
+    ///
+    /// Above the composer, where the picker and the approval card already are (§40): that is where
+    /// attention is, and it cannot be scrolled away from.
+    ///
+    /// Each chip is its own remove button rather than the row carrying one action — §225a's rule.
+    /// There is exactly one thing to do to an attachment you can see, and it is take it back.
+    fn attachment_chips(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if self.attachments.is_empty() {
+            return None;
+        }
+        let mut row = div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .flex_none()
+            .w_full()
+            .min_w_0()
+            .gap_1()
+            .pb_1();
+        for (at, attachment) in self.attachments.iter().enumerate() {
+            let label = attachment.label.clone();
+            row = row.child(
+                div()
+                    .id(SharedString::from(format!("attached-{at}")))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .flex_none()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(theme::border()))
+                    .bg(rgb(theme::surface()))
+                    .text_color(rgb(theme::text_muted()))
+                    .text_xs()
+                    .hover(|style| {
+                        let fill = theme::hover_over(theme::surface());
+                        style
+                            .bg(rgb(fill))
+                            .text_color(rgb(theme::ink_on(fill)))
+                            .cursor_pointer()
+                    })
+                    // The whole chip removes it, so the target is the chip and not a four-pixel
+                    // glyph at the end of a filename.
+                    .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                        if at < workbench.attachments.len() {
+                            let gone = workbench.attachments.remove(at);
+                            // The copy in the conversation's folder stays. It is the researcher's
+                            // file now, it appears in Outputs, and deleting somebody's data
+                            // because they changed their mind about one question would be a much
+                            // worse surprise than a file they can delete themselves.
+                            workbench.status =
+                                format!("{} will not go with this question", gone.label);
+                        }
+                        cx.notify();
+                    }))
+                    // `ellipsis` rather than the whole name: a chip row has to stay a row, and the
+                    // full path is not information anybody wanted here anyway.
+                    .child(ui::Label::new(label).inherit().size(ui::Size::Compact).ellipsis())
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(rgb(theme::text_faint()))
+                            .child("×"),
+                    ),
+            );
+        }
+        Some(row.into_any_element())
     }
 
     /// The `/name` picker, shown above the composer.
@@ -10155,6 +10291,7 @@ impl Workbench {
             column = column.child(self.approval_card(request, cx));
         }
         let column = column
+            .children(self.attachment_chips(cx))
             .children(self.subagent_picker(cx))
             .child(self.composer_row(cx));
 
@@ -13282,13 +13419,13 @@ impl Workbench {
             );
         }
         for document in matching {
-            section = section.child(self.document_row(document, cx));
+            section = section.child(self.document_row(document));
         }
         section
     }
 
     /// One indexed document: what it is, what it is about, and where it lives.
-    fn document_row(&self, document: &protocol::Document, cx: &mut Context<Self>) -> impl IntoElement {
+    fn document_row(&self, document: &protocol::Document) -> impl IntoElement {
         // The whole row opens the file, because unlike a dataset there is no second action to
         // confuse it with (§225a) — and only when there is a file to open, so a URL-only entry
         // does not light up and then do nothing.
@@ -13882,6 +14019,42 @@ impl Workbench {
             // nothing.
             let openable = matches!(bucket.name, "datasets" | "libraries")
                 && !bucket.items.is_empty();
+            // **What the researcher is counting, not what the payload wrapped.** `libraries` holds
+            // one artifact per turn and `datasets` one entry per recommendation, so the bucket's
+            // own length answered *how many envelopes* for the first and *how many datasets* for
+            // the second — and `libraries · 1` beside two indexed papers read as the app losing
+            // one (§232). The structured lists are what a person means by these words.
+            let (label, count, rows) = match bucket.name {
+                "libraries" if !self.documents.is_empty() => (
+                    "library",
+                    self.documents.len(),
+                    self.documents
+                        .iter()
+                        .take(MAX_SHOWN)
+                        .map(|document| document.title.clone())
+                        .collect::<Vec<String>>(),
+                ),
+                "datasets" if !self.datasets.is_empty() => (
+                    bucket.name,
+                    self.datasets.len(),
+                    self.datasets
+                        .iter()
+                        .take(MAX_SHOWN)
+                        .map(|dataset| {
+                            dataset
+                                .persistent_id
+                                .strip_prefix("doi:")
+                                .unwrap_or(&dataset.persistent_id)
+                                .to_string()
+                        })
+                        .collect(),
+                ),
+                _ => (
+                    bucket.name,
+                    bucket.items.len(),
+                    bucket.items.iter().take(MAX_SHOWN).cloned().collect(),
+                ),
+            };
             let mut heading = div()
                 // **Per bucket, not one id for all of them.** Every heading in this loop carried
                 // `"datasets-heading"`, so with two buckets on screen two sibling elements shared
@@ -13905,7 +14078,7 @@ impl Workbench {
                 .rounded_md()
                 .text_color(rgb(theme::text()))
                 .text_sm()
-                .child(format!("{} · {}", bucket.name, bucket.items.len()));
+                .child(format!("{label} · {count}"));
             if openable {
                 heading = heading
                     // Said as well as coloured. A hover-only affordance is one a researcher finds
@@ -13934,26 +14107,6 @@ impl Workbench {
                     });
             }
             let mut group = div().flex().flex_col().gap_1().child(heading);
-            // **The identifier, for datasets.** Their bucket items are titles cut at 96
-            // characters, and the four records of one multi-site study are identical up to that
-            // point — so the panel showed the same line four times. Opening the modal is one fix;
-            // the other is that a glance should already tell them apart, which is what the DOI
-            // does. Falls back to the bucket titles when the structured records are absent.
-            let rows: Vec<String> = if openable && !self.datasets.is_empty() {
-                self.datasets
-                    .iter()
-                    .take(MAX_SHOWN)
-                    .map(|dataset| {
-                        dataset
-                            .persistent_id
-                            .strip_prefix("doi:")
-                            .unwrap_or(&dataset.persistent_id)
-                            .to_string()
-                    })
-                    .collect()
-            } else {
-                bucket.items.iter().take(MAX_SHOWN).cloned().collect()
-            };
             for item in rows {
                 group = group.child(
                     div()
@@ -13964,12 +14117,12 @@ impl Workbench {
                         .child(item),
                 );
             }
-            if bucket.items.len() > MAX_SHOWN {
+            if count > MAX_SHOWN {
                 group = group.child(
                     div()
                         .text_color(rgb(theme::text_muted()))
                         .text_xs()
-                        .child(format!("+{} more", bucket.items.len() - MAX_SHOWN)),
+                        .child(format!("+{} more", count - MAX_SHOWN)),
                 );
             }
             section = section.child(group);
@@ -15717,10 +15870,10 @@ mod tests {
     }
 
     #[test]
-    fn a_dropped_file_reaches_the_composer_spelled_the_way_the_agent_opens_it() {
-        // The path has to be spelled the way the *agent* would open it. On Windows the
-        // agent lives inside WSL, so a composer naming `C:\…` would send it looking for a
-        // file that does not exist there — and the researcher would have no idea why.
+    fn a_dropped_file_is_named_the_way_the_agent_opens_it() {
+        // The path has to be spelled the way the *agent* would open it. On Windows the agent lives
+        // inside WSL, so a reference naming `C:\…` would send it looking for a file that does not
+        // exist there — and the researcher would have no idea why.
         let _env = backend::env_lock::hold();
         let config = backend::BackendConfig {
             wsl: Some(backend::WslTarget {
@@ -15732,57 +15885,76 @@ mod tests {
         let translated =
             config.path_for_backend(std::path::Path::new(r"C:\Users\LENOVO\Documents\yield.csv"));
         assert_eq!(translated, "/mnt/c/Users/LENOVO/Documents/yield.csv");
+        assert!(!translated.contains('\\'), "no Windows path survives: {translated}");
+    }
 
-        let prepared = compose_with_dropped("", std::slice::from_ref(&translated));
-        assert!(prepared.contains(&translated), "{prepared}");
-        assert!(!prepared.contains('\\'), "no Windows path survives: {prepared}");
+    fn attached(label: &str, reference: &str) -> Attachment {
+        Attachment {
+            label: label.to_string(),
+            reference: reference.to_string(),
+        }
+    }
 
-        assert!(compose_with_dropped("", &[]).is_empty());
+    /// §231: the format four backend prompts agree on, which this client never sent.
+    #[test]
+    fn attachments_reach_the_agent_as_the_blockquote_the_prompts_describe() {
+        let one = with_attachments(
+            "please also index this paper",
+            &[attached("Tesitelova-2013.pdf", "./Tesitelova-2013.pdf")],
+        );
+        assert_eq!(
+            one,
+            "> Attached files (already saved in the sandbox working directory): \
+             `./Tesitelova-2013.pdf`\n\nplease also index this paper"
+        );
+        // `backend/project.py` seeds the mission by dropping every line starting with `>`, so the
+        // question has to survive that on its own line.
+        let kept: Vec<&str> = one.lines().filter(|line| !line.starts_with('>')).collect();
+        assert_eq!(kept.join("").trim(), "please also index this paper");
     }
 
     #[test]
-    fn adding_a_file_writes_the_path_and_never_a_question() {
-        // §28 filled the composer with "Analyse the data in …. Start by describing what it
-        // contains." — a guess about the research, written by the participant who has not
-        // seen the data. Asked to stop: *"let's avoid that so the user can have flexibility
-        // in his query."* The path is the part the app knows; the question is theirs.
-        let alone = compose_with_dropped("", &["/mnt/c/yield.csv".into()]);
-        assert_eq!(alone, "/mnt/c/yield.csv\n\n");
+    fn several_files_are_one_blockquote_and_not_one_each() {
+        let many = with_attachments(
+            "compare these",
+            &[attached("a.csv", "./a.csv"), attached("b.csv", "./b.csv")],
+        );
+        assert_eq!(many.lines().filter(|l| l.starts_with('>')).count(), 1);
+        assert!(many.contains("`./a.csv`, `./b.csv`"));
+    }
+
+    /// A file too large to copy in, or one whose copy failed, is outside the workspace — so a
+    /// relative reference would resolve to nothing.
+    #[test]
+    fn a_file_left_where_it_lies_is_named_absolutely() {
+        let out = with_attachments(
+            "profile this",
+            &[attached("huge.tab", "/mnt/d/genomes/huge.tab")],
+        );
+        assert!(out.contains("`/mnt/d/genomes/huge.tab`"), "{out}");
+    }
+
+    #[test]
+    fn a_question_with_nothing_attached_is_sent_unchanged() {
+        assert_eq!(with_attachments("what is late blight?", &[]), "what is late blight?");
+        assert!(attached_blockquote(&[]).is_none());
+        // §28's rule survives: no question is invented on the researcher's behalf.
+        assert!(!with_attachments("", &[attached("a.csv", "./a.csv")])
+            .to_ascii_lowercase()
+            .contains("analyse"));
+    }
+
+    /// **The order that matters.** `subagent::parse` needs the prompt to *begin* with `/name`, so
+    /// the blockquote must be prepended after the command is resolved — otherwise attaching a file
+    /// turns a delegated turn into prose, which is §55 and §76's ten-minute silent failure.
+    #[test]
+    fn a_specialist_command_would_not_survive_the_blockquote_going_first() {
+        let typed = "/pdf_librarian index it";
+        assert!(subagent::parse(typed).is_some(), "a command on its own");
+        let quoted = with_attachments(typed, &[attached("a.pdf", "./a.pdf")]);
         assert!(
-            !alone.to_ascii_lowercase().contains("analyse"),
-            "no question is invented: {alone}"
-        );
-        // The trailing blank line is load-bearing. `set_text` leaves the caret at the end,
-        // so without it the first character typed joins onto the filename.
-        assert!(alone.ends_with("\n\n"), "somewhere to type: {alone:?}");
-
-        // The sequence a person actually performs: decide what to ask, type it, *then* go
-        // and fetch the file. §28 called `set_text` unconditionally, so the last step threw
-        // away the first — silently, because the composer just held different text.
-        let typed = "How does yield vary with altitude?";
-        let both = compose_with_dropped(typed, &["/mnt/c/yield.csv".into()]);
-        assert_eq!(both, format!("{typed}\n\n/mnt/c/yield.csv"));
-
-        // Several land on their own lines under one blank line, not one blank line each.
-        let many = compose_with_dropped(typed, &["/mnt/c/a.csv".into(), "/mnt/c/b.csv".into()]);
-        assert_eq!(many, format!("{typed}\n\n/mnt/c/a.csv\n/mnt/c/b.csv"));
-
-        // Whitespace-only counts as empty — a stray Enter in a fresh composer must not make
-        // the path look like an answer to something.
-        assert_eq!(
-            compose_with_dropped("   \n ", &["/mnt/c/yield.csv".into()]),
-            "/mnt/c/yield.csv\n\n"
-        );
-
-        // And trailing whitespace after real text must not become a blank line of its own.
-        let padded = compose_with_dropped("Look at this:\n\n", &["/mnt/c/a.csv".into()]);
-        assert_eq!(padded, "Look at this:\n\n/mnt/c/a.csv");
-
-        // A folder is not a special case any more: with no sentence to write about it, it
-        // is a path like any other and what to do with it is the researcher's to say.
-        assert_eq!(
-            compose_with_dropped("", &["/mnt/c/readings".into()]),
-            "/mnt/c/readings\n\n"
+            subagent::parse(&quoted).is_none(),
+            "which is why `start_turn_as` resolves the specialist first: {quoted}"
         );
     }
 
