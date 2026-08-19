@@ -224,6 +224,29 @@ def _ids_in(text: str) -> set[str]:
     return found
 
 
+def content_of(result: Any) -> str | None:
+    """The text a backend read returned, out of whichever shape carries it.
+
+    **`ReadResult.file_data` is a `FileData`, and `FileData` is a `TypedDict`** — so it is a plain
+    dict and `.content` on it raises `AttributeError`. The first version of this file did exactly
+    that, and the test beside it passed because its fake used `SimpleNamespace(content=...)`: a
+    double more permissive than the real type, which is the mistake §222 was written about. It cost
+    the whole dataverse check, which failed on every turn (§224).
+
+    Attribute access is kept as a fallback rather than removed, because two backends answer this
+    call — `LazyLangsmithSandbox` and the overlay's `LocalWorkspaceBackend` under host execution —
+    and a reader that only handled one shape is what got us here.
+    """
+    data = getattr(result, "file_data", None)
+    if data is None:
+        return None
+    if isinstance(data, dict):
+        text = data.get("content")
+    else:
+        text = getattr(data, "content", None)
+    return text if isinstance(text, str) else None
+
+
 def unsearched(ids: list[str], text: str) -> list[str]:
     """Recommended dataset ids that do not appear anywhere in what the search returned."""
     try:
@@ -297,10 +320,15 @@ class ClaimsRecorder(AgentMiddleware[ArtifactState, Any, Any]):
                 "check the log above for a failed SearchCIPDataverse or read_search_results"
             )
             return
+        # An explicit line count rather than `limit=0`. The sandbox reads "everything" for a
+        # falsy limit; deepagents' local backend slices `lines[offset:offset + limit]`, where zero
+        # is an empty read — the same call meaning opposite things on the two backends that serve
+        # it. `dataverse_search.json` is one JSON array on few lines; this is a ceiling, not a size.
         result = await self.sandbox_backend.aread(
-            str(work_dir / DATAVERSE_SEARCH), limit=0
+            str(work_dir / DATAVERSE_SEARCH), limit=1_000_000
         )
-        if getattr(result, "error", None) or getattr(result, "file_data", None) is None:
+        text = content_of(result)
+        if getattr(result, "error", None) or text is None:
             logger.warning(
                 "claims: dataverse_explorer recommended %d datasets and %s could not be read (%s)",
                 len(ids),
@@ -308,7 +336,7 @@ class ClaimsRecorder(AgentMiddleware[ArtifactState, Any, Any]):
                 getattr(result, "error", "no content"),
             )
             return
-        unmatched = unsearched(ids, result.file_data.content)
+        unmatched = unsearched(ids, text)
         if unmatched:
             logger.warning(
                 "claims: dataverse_explorer recommended %d datasets, %d absent from %s: %s",

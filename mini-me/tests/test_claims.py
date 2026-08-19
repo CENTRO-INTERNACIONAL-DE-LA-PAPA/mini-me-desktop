@@ -15,8 +15,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from deepagents.backends.protocol import FileData, GlobResult, ReadResult
+
 from backend.middleware.claims import (
     CLAIMED_PATHS,
+    content_of,
     DATAVERSE_SEARCH,
     NO_PATHS,
     ClaimsRecorder,
@@ -53,20 +56,28 @@ class FakeSandbox:
             raise RuntimeError("sandbox is gone")
         return WORK
 
-    async def aglob(self, pattern, path):
+    async def aglob(self, pattern, path="/"):
         self.globs += 1
-        return SimpleNamespace(
+        # `GlobResult.matches` is a list of dicts, per the protocol — so a reader that used
+        # attribute access on an entry would fail here as well.
+        return GlobResult(
             error=None,
             matches=[{"path": f"{WORK}/{e}", "is_dir": False} for e in self.entries],
         )
 
-    async def aread(self, file_path, limit=2000):
+    async def aread(self, file_path, offset=0, limit=2000):
+        """The real return types, not a friendlier stand-in for them.
+
+        `ReadResult` is a dataclass, so attribute access is right for `error`; `FileData` is a
+        **TypedDict**, so `file_data` is a plain dict and `.content` on it raises. The first version
+        of this fake used `SimpleNamespace(content=...)` for both, which accepted the very call that
+        failed on every turn in production (§224). `offset` is here because the protocol has it.
+        """
         self.reads += 1
+        self.read_limit = limit
         if self.search is None:
-            return SimpleNamespace(error="not found", file_data=None)
-        return SimpleNamespace(
-            error=None, file_data=SimpleNamespace(content=self.search)
-        )
+            return ReadResult(error="not found", file_data=None)
+        return ReadResult(error=None, file_data=FileData(content=self.search, encoding="utf-8"))
 
 
 def record(source, structured, sandbox):
@@ -392,3 +403,39 @@ def test_the_recorder_is_attached_to_every_subagent_that_returns_a_schema():
         for middleware in built_subagent["middleware"]:
             if isinstance(middleware, ClaimsRecorder):
                 assert middleware.source == built_subagent["name"]
+
+
+# ---------------------------------------------------------------------------
+# The wrapper the backends actually return
+# ---------------------------------------------------------------------------
+
+def test_the_content_is_read_out_of_a_real_FileData():
+    """§224: `FileData` is a TypedDict, so `.content` on it raises `AttributeError`.
+
+    This is the whole defect. The dataverse check failed on every single turn, and the suite stayed
+    green because its fake handed back an object where production hands back a dict.
+    """
+    result = ReadResult(file_data=FileData(content='[{"global_id": "doi:1/x"}]', encoding="utf-8"))
+    assert content_of(result) == '[{"global_id": "doi:1/x"}]'
+
+
+def test_attribute_style_content_is_still_read():
+    """Two backends answer this call; a reader that handled one shape is what got us here."""
+    assert content_of(SimpleNamespace(file_data=SimpleNamespace(content="hi"))) == "hi"
+
+
+def test_a_read_that_failed_yields_no_content_rather_than_raising():
+    assert content_of(ReadResult(error="not found", file_data=None)) is None
+    assert content_of(SimpleNamespace()) is None
+    # A dict with no `content` key, which is what a partial payload looks like.
+    assert content_of(SimpleNamespace(file_data={"encoding": "utf-8"})) is None
+
+
+def test_the_read_asks_for_more_than_zero_lines():
+    """`limit=0` means "everything" to the sandbox and "nothing" to deepagents' local backend.
+
+    Same call, opposite meanings, and host execution is the one the researcher runs.
+    """
+    sandbox = FakeSandbox(entries=[DATAVERSE_SEARCH], search='[{"global_id": "doi:1/x"}]')
+    record("dataverse_explorer", _recommendation("doi:1/x"), sandbox)
+    assert sandbox.read_limit > 0
