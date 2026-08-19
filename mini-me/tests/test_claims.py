@@ -128,7 +128,7 @@ def test_a_chart_that_was_never_written_is_named(recorded):
     sandbox = FakeSandbox(entries=["data/trials.csv", "analysis/corr.png"])
     assert record("data_voyager", analysis, sandbox) is None
     line = "\n".join(recorded)
-    assert "2 missing" in line
+    assert "2 not in the workspace" in line
     assert "analysis/resid.png" in line
     assert "analysis/scatter.png" in line
     # The two that are there must not be named, or the record stops being readable.
@@ -162,10 +162,53 @@ def test_a_url_in_the_librarians_path_field_is_not_a_missing_file(recorded):
 
 def test_the_index_directory_resolves_through_what_is_inside_it():
     """`.asta/documents` is a directory; the listing may only carry its contents."""
-    assert missing_from([".asta/documents"], {".asta/documents/index.json"}) == []
-    assert missing_from([".asta/documents"], {".asta/other/index.json"}) == [
-        ".asta/documents"
-    ]
+    assert missing_from([".asta/documents"], {".asta/documents/index.json"}) == ([], [])
+    assert missing_from([".asta/documents"], {".asta/other/index.json"}) == (
+        [".asta/documents"],
+        [],
+    )
+
+
+def test_a_file_outside_the_workspace_is_not_called_missing():
+    """The first real finding this recorder produced, and half of it was wrong.
+
+    `/mnt/c/Users/LENOVO/Downloads/Graph-neural-networks.pdf` is the PDF the researcher attached.
+    It exists. Reporting it as *missing* reads as *this file does not exist*, and a record that
+    cries wolf once is one nobody reads the second time. It is still worth saying — a file there
+    does not travel with the conversation — but in its own words.
+    """
+    missing, outside = missing_from(
+        [".asta/documents", "/mnt/c/Users/LENOVO/Downloads/Graph-neural-networks.pdf"],
+        set(),
+        work_dir="/home/user/workspace",
+    )
+    assert missing == [".asta/documents"]
+    assert outside == ["/mnt/c/Users/LENOVO/Downloads/Graph-neural-networks.pdf"]
+
+
+def test_an_absolute_path_inside_the_workspace_is_judged_on_whether_it_is_there():
+    """Under the work dir, absolute or not, the question is simply existence."""
+    missing, outside = missing_from(
+        ["/home/user/workspace/papers/a.pdf"], set(), work_dir="/home/user/workspace"
+    )
+    assert missing == ["/home/user/workspace/papers/a.pdf"]
+    assert outside == []
+
+
+def test_the_outside_case_is_reported_in_its_own_words(recorded):
+    library = LibraryArtifact(
+        summary="indexed one",
+        index_path=".asta/documents",
+        papers=[
+            IndexedPaper(title="Attached", path="/mnt/c/Users/LENOVO/Downloads/gnn.pdf")
+        ],
+    )
+    record("pdf_librarian", library, FakeSandbox(entries=[".asta/documents/index.json"]))
+    line = "\n".join(recorded)
+    assert "will not travel with it" in line
+    assert "/mnt/c/Users/LENOVO/Downloads/gnn.pdf" in line
+    # And the index that *is* there is not named as a problem.
+    assert "not in the workspace" not in line
 
 
 def test_a_report_embedding_a_figure_that_is_not_there_is_recorded(recorded):
@@ -181,11 +224,11 @@ def test_a_report_embedding_a_figure_that_is_not_there_is_recorded(recorded):
     sandbox = FakeSandbox(entries=["eda_dist.png"])
     record("report_writer", report, sandbox)
     line = "\n".join(recorded)
-    assert "1 missing" in line and "analysis/resid.png" in line
+    assert "1 not in the workspace" in line and "analysis/resid.png" in line
 
 
 def test_the_same_missing_path_claimed_twice_is_named_once():
-    assert missing_from(["a.png", "./a.png", "a.png"], set()) == ["a.png"]
+    assert missing_from(["a.png", "./a.png", "a.png"], set()) == (["a.png"], [])
 
 
 # ---------------------------------------------------------------------------
