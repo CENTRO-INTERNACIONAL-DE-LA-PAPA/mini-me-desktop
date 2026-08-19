@@ -27,6 +27,7 @@ from backend.middleware import (
     ArtifactCaptureMiddleware,
     ClaimsRecorder,
     KeepSources,
+    RunBeforeReporting,
     SearchBeforeCiting,
     SearchBeforeRecommending,
     SearchResultsFile,
@@ -579,6 +580,9 @@ def _build_runtime_subagents(
             extra_middleware.append(ArtifactCaptureMiddleware("hypothesis_generator"))
         elif name == "pdf_librarian":
             extra_middleware.append(ArtifactCaptureMiddleware("pdf_librarian"))
+            # Its first run reported an index that was never created (§230). Same exit as the
+            # other two, closed the same way — see `middleware/library_first.py`.
+            extra_middleware.append(RunBeforeReporting())
         elif name == "data_voyager":
             extra_middleware.append(ArtifactCaptureMiddleware("data_voyager"))
         elif name == "research_planner":
