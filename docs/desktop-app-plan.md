@@ -12940,3 +12940,42 @@ the broken order *is* broken.
 *Eighty-sixth: an ugly UI is sometimes a protocol that was never implemented. Ask what the other side
 was told to expect before designing what to show.*
 
+## 232. `libraries · 1` beside two papers (2026-08-19)
+
+First: **the gate worked.**
+
+```
+$ ls -la /mnt/c/Users/LENOVO/Documents/Mini-Me/*/.asta/documents
+-rwxrwxrwx 1 piero_linux piero_linux 1269 Aug 19 13:55 index.yaml
+```
+
+§230's `RunBeforeReporting` was merged, the librarian ran, and the index it had previously only
+described exists. That is the first fabricated artifact this project has caught and closed inside a
+day, and it was caught by a recorder written two days before, from a subagent nobody had ever run.
+
+Then: *"I indexed a second paper but the ui at the right say only one."*
+
+`libraries` carries **one artifact per turn**, each holding a `papers` list. So the bucket's length is
+the number of envelopes, and the panel rendered `libraries · 1` — which beside two indexed papers
+reads as the app having lost one. `datasets` happens to be one entry per dataset, so the same code was
+right there and wrong here, which is why it survived §223.
+
+The heading now counts the structured list: `library · N` over document titles, `datasets · N` over
+identifiers, the bucket's own length for everything else. `+N more` counts the same thing, or the
+overflow line contradicts the header it sits under.
+
+### The other half is the librarian's, not the app's
+
+Its own message said it:
+
+> The earlier GNN paper had extraction succeed but library indexing failed at that time due to
+> backend setup issues, so this library count likely reflects only this newly indexed paper.
+
+Which is honest, and is a run from **before** the gate existed. `asta documents list --json` is the
+authority on what the library holds; the app now reports whatever that is instead of counting
+wrappers. Whether the GNN paper is in there is a question for the library, and re-indexing it is one
+sentence to the librarian.
+
+*Eighty-seventh: two collections shaped differently answered the same `len()`, and one of the answers
+was to a question nobody asked. A count is a claim about a noun — name the noun.*
+

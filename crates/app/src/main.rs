@@ -14019,6 +14019,42 @@ impl Workbench {
             // nothing.
             let openable = matches!(bucket.name, "datasets" | "libraries")
                 && !bucket.items.is_empty();
+            // **What the researcher is counting, not what the payload wrapped.** `libraries` holds
+            // one artifact per turn and `datasets` one entry per recommendation, so the bucket's
+            // own length answered *how many envelopes* for the first and *how many datasets* for
+            // the second — and `libraries · 1` beside two indexed papers read as the app losing
+            // one (§232). The structured lists are what a person means by these words.
+            let (label, count, rows) = match bucket.name {
+                "libraries" if !self.documents.is_empty() => (
+                    "library",
+                    self.documents.len(),
+                    self.documents
+                        .iter()
+                        .take(MAX_SHOWN)
+                        .map(|document| document.title.clone())
+                        .collect::<Vec<String>>(),
+                ),
+                "datasets" if !self.datasets.is_empty() => (
+                    bucket.name,
+                    self.datasets.len(),
+                    self.datasets
+                        .iter()
+                        .take(MAX_SHOWN)
+                        .map(|dataset| {
+                            dataset
+                                .persistent_id
+                                .strip_prefix("doi:")
+                                .unwrap_or(&dataset.persistent_id)
+                                .to_string()
+                        })
+                        .collect(),
+                ),
+                _ => (
+                    bucket.name,
+                    bucket.items.len(),
+                    bucket.items.iter().take(MAX_SHOWN).cloned().collect(),
+                ),
+            };
             let mut heading = div()
                 // **Per bucket, not one id for all of them.** Every heading in this loop carried
                 // `"datasets-heading"`, so with two buckets on screen two sibling elements shared
@@ -14042,7 +14078,7 @@ impl Workbench {
                 .rounded_md()
                 .text_color(rgb(theme::text()))
                 .text_sm()
-                .child(format!("{} · {}", bucket.name, bucket.items.len()));
+                .child(format!("{label} · {count}"));
             if openable {
                 heading = heading
                     // Said as well as coloured. A hover-only affordance is one a researcher finds
@@ -14071,26 +14107,6 @@ impl Workbench {
                     });
             }
             let mut group = div().flex().flex_col().gap_1().child(heading);
-            // **The identifier, for datasets.** Their bucket items are titles cut at 96
-            // characters, and the four records of one multi-site study are identical up to that
-            // point — so the panel showed the same line four times. Opening the modal is one fix;
-            // the other is that a glance should already tell them apart, which is what the DOI
-            // does. Falls back to the bucket titles when the structured records are absent.
-            let rows: Vec<String> = if openable && !self.datasets.is_empty() {
-                self.datasets
-                    .iter()
-                    .take(MAX_SHOWN)
-                    .map(|dataset| {
-                        dataset
-                            .persistent_id
-                            .strip_prefix("doi:")
-                            .unwrap_or(&dataset.persistent_id)
-                            .to_string()
-                    })
-                    .collect()
-            } else {
-                bucket.items.iter().take(MAX_SHOWN).cloned().collect()
-            };
             for item in rows {
                 group = group.child(
                     div()
@@ -14101,12 +14117,12 @@ impl Workbench {
                         .child(item),
                 );
             }
-            if bucket.items.len() > MAX_SHOWN {
+            if count > MAX_SHOWN {
                 group = group.child(
                     div()
                         .text_color(rgb(theme::text_muted()))
                         .text_xs()
-                        .child(format!("+{} more", bucket.items.len() - MAX_SHOWN)),
+                        .child(format!("+{} more", count - MAX_SHOWN)),
                 );
             }
             section = section.child(group);
