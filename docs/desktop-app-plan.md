@@ -12607,3 +12607,35 @@ implement this surface, the tests only ever saw a hand-written third, and nothin
 *Seventy-eighth: when two implementations satisfy one interface, a hand-written fake is a third
 implementation, and it is the only one with no user. Build test doubles out of the real types.*
 
+## 225. A target the width of the words (2026-08-19)
+
+The modal worked — `opening the dataset list datasets=4` in the app log, which is how it was
+established rather than argued about. The complaint was different and better:
+
+*"from a user experience perspective if I not hover datasets thin rectangle I will never know that
+there is a modal there. check the example of sources. a whole rectangle use the hover colour so I
+know that I can click there."*
+
+Correct. The heading was a bare text `div` with a hover fill, so the pressable area was exactly as
+wide as `datasets · 4` and nothing said it was pressable. `open-all-sources` — the row this was meant
+to mirror — is `w_full` + `min_w_0` + `px_2` + `py_1` + `rounded_md`, a shape a pointer crosses on
+its way past, and it carries the words *open all*. Copying the click handler without copying the box
+produced an affordance only somebody who already knew would find.
+
+It now uses the same box and says `open all`, because a hover-only affordance is one found by
+accident and this is the panel's only route into the list.
+
+### And the rows underneath, which were still four of the same line
+
+Fixing discoverability left the actual annoyance in place: `datasets · 4` above four entries reading
+*"Replication data for: Qualification of a Plant Disease Simulation Model; performance of the…"*.
+The bucket truncates titles at 96 characters and these four diverge at the site name, well past it.
+
+So the datasets bucket now lists the **identifier** — `10.21223/P3/0F9T62` and its three siblings —
+which is what tells them apart at a glance, and is what a researcher pastes into a citation anyway.
+The bucket titles remain the fallback when the structured records are absent, so an older backend
+degrades to what it always showed.
+
+*Seventy-ninth: copying the interaction and not the shape ships an affordance only its author can
+find. When mirroring an existing control, mirror the box first.*
+
