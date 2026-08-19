@@ -12779,3 +12779,41 @@ error.
 *Eighty-third: a record that keeps what it produced and not what it consumed is half a record. The
 input is the part that cannot be regenerated.*
 
+## 229. The library the client threw away (2026-08-19)
+
+Third of the same shape, after references (§194) and datasets (§223), and by now the pattern is the
+diagnosis rather than the fix: **`LibraryArtifact` reached the client carrying titles, paths, DOIs,
+summaries, tags and page counts, and the client kept a truncated title.**
+
+`pdf_librarian` exists to answer *"what do I have on this"*. That question is a search over
+summaries and tags, and neither survived the trip. The Outputs panel could say `libraries · 1` and
+nothing else — no way to see what was indexed, no way to open it.
+
+So `protocol::Document` carries the record, and `libraries · N` opens a modal that filters over
+title, tags **and summary** together. Summary is the field that matters here and is the one a
+filename search cannot reach: a paper about message-passing expressivity is not called
+*expressivity.pdf*.
+
+### Opening a document meant going back across WSL
+
+`backend::wsl_path` turns `C:\Users\x` into `/mnt/c/Users/x`, and nothing went the other way. A
+document the librarian recorded is written however it saw it — relative to its working directory, or
+absolute as `/mnt/c/…` — and neither opens in Explorer as written. `workspace::local_path` is that
+reverse, and it returns `None` rather than a guess for the two cases that are not files: a URL,
+which `IndexedPaper.path` explicitly allows, and a relative path with no conversation to resolve
+against. A row that lights up and opens nothing is worse than one that never offered (§185).
+
+The whole row opens the file, unlike a dataset row — there is no second action here to confuse it
+with, which is what §225a's split was for.
+
+### What is still not known
+
+Whether `.asta/documents` exists at all. §227's finding survives this work untouched: the recorder
+said the index the librarian reported was not in the workspace, and nothing since has explained it.
+This modal will show whatever the librarian claims it indexed — which is exactly the point, because
+a list of documents whose files are not there is a visible failure rather than a silent one.
+
+*Eighty-fourth: three features have now lost the same way — the backend sent a record and the client
+kept a label. The bucket is a count, not a model. Anything a researcher will act on needs its own
+type.*
+

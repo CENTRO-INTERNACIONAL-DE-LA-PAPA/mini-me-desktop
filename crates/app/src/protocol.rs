@@ -155,6 +155,8 @@ pub struct Snapshot {
     pub todos: Vec<Todo>,
     /// Datasets the explorer recommended, **whole**. See [`Dataset`].
     pub datasets: Vec<Dataset>,
+    /// Documents the PDF librarian indexed, whole. See [`Document`].
+    pub documents: Vec<Document>,
     /// Citations gathered so far, **whole**.
     ///
     /// Separate from the `sources` bucket, whose items are truncated to 96 characters for a
@@ -315,6 +317,23 @@ impl Dataset {
             .filter(|doi| !doi.is_empty())
             .map(|doi| format!("https://doi.org/{doi}"))
     }
+}
+
+/// One document in the researcher's own library, as `pdf_librarian` indexed it.
+///
+/// Flattened out of `libraries[].papers[]`: the payload carries one library artifact per turn and
+/// the library is cumulative, so what a reader wants is the documents, not the envelopes. Keyed on
+/// `path`, which is what makes two indexings of one paper one row.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Document {
+    pub title: String,
+    /// Where the librarian recorded it — relative to the workspace, absolute, or a URL. Turned
+    /// into something openable by [`crate::workspace::local_path`].
+    pub path: String,
+    pub doi: Option<String>,
+    pub summary: String,
+    pub tags: Vec<String>,
+    pub page_count: Option<u64>,
 }
 
 /// A written report, whole.
@@ -2180,6 +2199,7 @@ fn decode_values(data: &str) -> Option<Snapshot> {
     let reports = decode_reports(artifacts);
     let sources = decode_sources(artifacts);
     let datasets = decode_datasets(artifacts);
+    let documents = decode_documents(artifacts);
     // Read from the top level, not from `artifacts`: `todos` is the agent's own state, written by
     // its `write_todos` tool, and never passes through the artifacts middleware.
     let todos = decode_todos(&value);
@@ -2201,6 +2221,7 @@ fn decode_values(data: &str) -> Option<Snapshot> {
         reports,
         sources,
         datasets,
+        documents,
         todos,
     })
 }
@@ -2335,6 +2356,62 @@ fn decode_datasets(artifacts: &Value) -> Vec<Dataset> {
             file_count: entry.get("file_count").and_then(Value::as_u64),
             repository: Some(text("repository")).filter(|name| !name.is_empty()),
         });
+    }
+    found
+}
+
+/// Every document the librarian has indexed, across the turn's library artifacts.
+///
+/// Deduped on `path` rather than title: re-indexing a paper is the ordinary way the library grows,
+/// and two entries for one file would make `paper_count` and this list disagree in the one place a
+/// researcher would notice.
+fn decode_documents(artifacts: &Value) -> Vec<Document> {
+    let Some(libraries) = artifacts.get("libraries").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut seen: Vec<String> = Vec::new();
+    let mut found = Vec::new();
+    for library in libraries {
+        let Some(papers) = library.get("papers").and_then(Value::as_array) else {
+            continue;
+        };
+        for paper in papers {
+            let text = |key: &str| {
+                paper
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string()
+            };
+            let path = text("path");
+            if path.is_empty() || seen.contains(&path) {
+                continue;
+            }
+            seen.push(path.clone());
+            found.push(Document {
+                title: match text("title") {
+                    title if title.is_empty() => path.clone(),
+                    title => title,
+                },
+                path,
+                doi: Some(text("doi")).filter(|doi| !doi.is_empty()),
+                summary: text("summary"),
+                tags: paper
+                    .get("tags")
+                    .and_then(Value::as_array)
+                    .map(|list| {
+                        list.iter()
+                            .filter_map(Value::as_str)
+                            .map(str::trim)
+                            .filter(|tag| !tag.is_empty())
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                page_count: paper.get("page_count").and_then(Value::as_u64),
+            });
+        }
     }
     found
 }
@@ -4485,6 +4562,52 @@ mod tests {
     #[test]
     fn no_datasets_key_is_an_empty_list_rather_than_a_panic() {
         assert!(decode_datasets(&json!({"sources": []})).is_empty());
+    }
+
+    /// The library is cumulative, and its documents are what a reader wants — not the envelopes.
+    #[test]
+    fn the_documents_are_flattened_out_of_the_library_artifacts() {
+        let decoded = decode_documents(&json!({"libraries": [
+            {"index_path": ".asta/documents", "paper_count": 2, "papers": [
+                {"title": "Graph neural networks", "path": "Graph-neural-networks.pdf",
+                 "doi": "10.1000/gnn", "summary": "Expressivity of message passing.",
+                 "tags": ["gnn", "expressivity"], "page_count": 24},
+                {"title": "Late blight", "path": "papers/blight.pdf"}]},
+        ]}));
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[0].tags, vec!["gnn", "expressivity"]);
+        assert_eq!(decoded[0].page_count, Some(24));
+        assert_eq!(decoded[0].doi.as_deref(), Some("10.1000/gnn"));
+        // The sparse one still renders rather than being dropped.
+        assert_eq!(decoded[1].title, "Late blight");
+        assert!(decoded[1].tags.is_empty());
+    }
+
+    /// Re-indexing a paper is how a library grows; two rows for one file would make the list and
+    /// `paper_count` disagree in the one place a researcher would notice.
+    #[test]
+    fn the_same_document_indexed_twice_is_one_row() {
+        let decoded = decode_documents(&json!({"libraries": [
+            {"papers": [{"title": "First pass", "path": "a.pdf"}]},
+            {"papers": [{"title": "Re-indexed", "path": "a.pdf"}]},
+        ]}));
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].title, "First pass");
+    }
+
+    #[test]
+    fn a_document_with_no_path_is_dropped_and_one_with_no_title_keeps_its_path() {
+        let decoded = decode_documents(&json!({"libraries": [{"papers": [
+            {"title": "Nowhere"},
+            {"path": "untitled.pdf"},
+        ]}]}));
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].title, "untitled.pdf");
+    }
+
+    #[test]
+    fn no_libraries_key_is_an_empty_list() {
+        assert!(decode_documents(&json!({"datasets": []})).is_empty());
     }
 }
 
