@@ -10,6 +10,7 @@ from backend.middleware.dataverse_first import (
     SearchBeforeRecommending,
     SearchResultsFile,
 )
+from backend.middleware.library_first import RunBeforeReporting
 from backend.middleware.guardrails import (
     _build_filesystem_permissions,
     _build_guardrail_middleware,
@@ -30,6 +31,7 @@ __all__ = [
     "FileSyncMiddleware",
     "KeepSources",
     "ProjectSpineMiddleware",
+    "RunBeforeReporting",
     "SearchBeforeCiting",
     "SearchBeforeRecommending",
     "SearchResultsFile",

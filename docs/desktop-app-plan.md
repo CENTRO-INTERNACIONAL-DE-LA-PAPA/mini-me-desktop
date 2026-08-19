@@ -12817,3 +12817,65 @@ a list of documents whose files are not there is a visible failure rather than a
 kept a label. The bucket is a count, not a model. Anything a researcher will act on needs its own
 type.*
 
+## 230. The index that was never written (2026-08-19)
+
+*"maybe you can use the cli to get help params and investigate"*
+
+The right instinct, and it closed §227's open half in three commands. `asta` is installed on the
+workstation, so it could simply be asked:
+
+```
+$ asta documents --help
+  --root ROOT   Root directory containing index.yaml (default: .asta/documents)
+
+$ asta documents add ./paper.pdf --name "GNN expressivity" --summary "…" --tags gnn
+✓ Document added: HuVxZq9ntt
+$ find .
+./paper.pdf
+./.asta/documents/index.yaml
+./.asta/documents/.cache/search.db
+```
+
+`.asta/documents/index.yaml`, **relative to the working directory** — and the overlay already runs
+every command with the conversation's workspace as that directory (`minime_local/workspace.py`, the
+`[cwd]` note). So the index would have been in the thread's folder if the command had run.
+
+**It had not.** `pdf_librarian` reported an index path, a document title, a page count and a summary,
+having executed nothing.
+
+### The exit was open, and we knew which one
+
+`response_format=LibraryArtifact` is bound as a tool with the first model call forced, so composing
+the whole artifact in one step is the cheapest legal move — `middleware/tool_gate.py` describes this
+exactly. `academic_researcher` got a gate in §133 and `dataverse_explorer` in §142.
+`pdf_librarian` was on §140's list of seven subagents still holding their invariant in prose:
+
+    NEVER claim you extracted or read a paper whose PDF is not actually on disk
+
+A request, addressed to the party with a reason to decline. This is what that item costs, stated in
+one screenshot.
+
+### The gate
+
+`RunBeforeReporting` forces one `execute` before `LibraryArtifact` becomes reachable. All four moves
+the skill documents are shell commands — download, extract, index, search — so there is no library
+operation that is not an `execute`, and the claim being enforced is narrow: **a librarian that has
+run nothing has neither built nor searched a library.**
+
+Reading is deliberately not enough. `ls` and `read_file` are how a model checks whether a file
+arrived; that is useful, it is not the work, and a gate satisfiable by looking is one a fabricating
+model would satisfy by looking.
+
+### What this validates
+
+§219 argued for recording before gating: *"the rules worth enforcing are the ones that come from
+failures actually seen."* Two days later the recorder produced a failure nobody suspected, in a
+subagent nobody had run, and the gate is written from it rather than guessed at. The alternative
+history is a `pdf_librarian` that reports a library on every turn and a researcher who finds out when
+they go looking for a paper.
+
+Six of §140's seven remain.
+
+*Eighty-fifth: when a tool is installed, ask it. Three commands of `--help` and one scratch
+directory settled what two days of inference had not.*
+
