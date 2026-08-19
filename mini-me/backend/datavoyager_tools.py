@@ -51,6 +51,10 @@ _UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]
 # Fixed name — successive submits overwrite it; transient CLI scratch.
 _SUBMIT_OUT = "/tmp/asta-analyze-data-submit.json"
 
+#: Shorter than this is not an analytical question. Set from the shape the subagent is asked for —
+#: a dataset named, a decision stated, and something answerable with code — not from a sample.
+MIN_QUESTION_CHARS = 25
+
 # Cap on how much analysis narrative we forward from a status poll. The full task
 # record embeds the notebook + tables and is large; the durable export + the
 # persisted file carry the detail, so a bounded blob is enough for the card.
@@ -513,6 +517,39 @@ async def analyze_data(
         Explicit check -> completed/running/failed/input-required per
         `poll_analysis_status`. Errors -> {status:"error", message}.
     """
+    # **Arguments before infrastructure.** A question too short to be one is wrong whether or not
+    # a sandbox exists, and checking the sandbox first reported it as "No active sandbox" — an
+    # answer to a question nobody asked. Only for a fresh run: a `resume_task_id` check carries no
+    # question and must not be refused for the shape of one.
+    question = question.strip()
+    if not resume_task_id.strip():
+        if not question:
+            return json.dumps(
+                {"status": "error", "message": "An analytical question is required to start a run."}
+            )
+        # **A greeting is not a question, and DataVoyager will spend twenty minutes proving it.**
+        # A run submitted with `question="hiiiiiiii"` completed successfully: it loaded two tables,
+        # summarised them, and answered *"I'm sorry, but I can't yet answer that… no predictive models
+        # have been built"* (docs §237). Nothing rejected it, because the only check was emptiness.
+        #
+        # Length rather than cleverness: the subagent's own prompt asks it to name the datasets, state
+        # the decision being made, and phrase it as something DataVoyager can answer with code. Nothing
+        # meeting that description is nine characters long, and a threshold cannot be argued with the
+        # way a heuristic can.
+        if len(question) < MIN_QUESTION_CHARS:
+            return json.dumps(
+                {
+                    "status": "error",
+                    "message": (
+                        f"{question!r} is too short to be an analytical question. Name the dataset, "
+                        "say what decision or insight the analysis is for, and phrase it as something "
+                        "DataVoyager can answer with code — e.g. 'Using SOC_Covariables_TrainValV5.csv, "
+                        "compare candidate models predicting SOC_MgHa from the covariables and report "
+                        "held-out metrics on SOC_Covariables_TESTV5.csv'."
+                    ),
+                }
+            )
+
     try:
         sandbox = _active_sandbox.get()
     except LookupError:
@@ -533,10 +570,6 @@ async def analyze_data(
         except Exception as exc:  # noqa: BLE001
             return json.dumps({"status": "error", "message": f"poll failed: {exc}"})
 
-    if not question.strip():
-        return json.dumps(
-            {"status": "error", "message": "An analytical question is required to start a run."}
-        )
     paths = _split_paths(dataset_paths)
     ctx = context_id.strip() or None
     if not paths and not ctx:
@@ -550,7 +583,7 @@ async def analyze_data(
             }
         )
     try:
-        submitted = await _submit(sandbox, question.strip(), paths, ctx)
+        submitted = await _submit(sandbox, question, paths, ctx)
     except Exception as exc:  # noqa: BLE001
         return json.dumps({"status": "error", "message": f"submit failed: {exc}"})
     if not submitted:
@@ -569,11 +602,15 @@ async def analyze_data(
     # **Said on the way out, not only on the way down.** Every log line this module had was a
     # failure path, so a run that submitted correctly and a run that never submitted looked
     # identical from the log (§235).
+    # **The question, not only the ids.** A run submitted with a greeting looked identical in the
+    # log to one submitted with a real analytical question, so the line that was supposed to answer
+    # "did it run" could not answer "what did it ask" (§237).
     logger.info(
-        "analyze-data submitted task=%s context=%s over %d dataset(s)",
+        "analyze-data submitted task=%s context=%s over %d dataset(s): %.160s",
         submitted["task_id"],
         submitted["context_id"],
         len(paths),
+        question,
     )
     return json.dumps(
         {

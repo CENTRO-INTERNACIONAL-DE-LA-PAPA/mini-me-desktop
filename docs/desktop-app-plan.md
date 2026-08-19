@@ -13177,3 +13177,51 @@ test module is not the end of the file.**
 that does not. The empty case is a different code path, and on a new conversation everything is the
 empty case.*
 
+## 237. Twenty minutes spent on "hiiiiiiii" (2026-08-19)
+
+*"can you check data voyager?"* — asked because the app's own log had nothing to say and the panel
+had not filled. The `asta` CLI is installed on the workstation, so the service could be asked
+directly:
+
+```
+$ asta analyze-data task 4ee871fd-64cc-48a7-947b-6baca0e95e4c
+state: "completed"
+USER cell 0: 'hiiiiiiii'
+dv_answer: "I'm sorry, but I can't yet answer that. We have loaded and summarized the
+            datasets, but no predictive models have been built or evaluated."
+```
+
+The run **succeeded**. It uploaded a 297×116 table and a 54×116 table, loaded both, produced
+summary statistics, and then correctly reported that it had been asked nothing it could answer.
+
+`hiiiiiiii` appears nowhere in this repository. The subagent passed it as the `question`.
+
+### Two gaps, both one line wide
+
+**The tool accepted it.** `analyze_data` checked that a question was non-empty and nothing else, so
+a greeting bought a full submission. `MIN_QUESTION_CHARS = 25` now refuses it — length rather than
+cleverness, because the subagent's own prompt asks for a named dataset, a stated decision and
+something answerable with code, and nothing meeting that description is nine characters long. The
+refusal carries an example, since a refusal without a remedy is just a wall.
+
+**The log could not have caught it either.** §235's line — added ninety minutes earlier, in response
+to a question about this very run — recorded task, context and file count. Not the question. So a
+submission with a greeting and a submission with a real analytical question produced identical
+output, which is the same defect §235 was written to fix, one field short. The question is in the
+line now.
+
+The guard also moved above the sandbox lookup. A question too short to be one is wrong whether or
+not a sandbox exists, and checking infrastructure first reported it as *"No active sandbox"* — an
+answer to a question nobody asked. Arguments before infrastructure.
+
+### What this says about the gate
+
+§234's `SubmitBeforeReporting` did its job exactly as specified: it forced a real submission, and the
+task id in the chat was real. **A gate proves a tool ran, not that it was given something sensible.**
+That is the honest boundary of the whole mechanism, and it is worth writing down beside the three
+gates now relying on it: forcing the call closes fabrication, and says nothing about the arguments.
+Argument quality is the tool's own job, which is where this fix went.
+
+*Ninety-second: a run that completes is not a run that did anything. Check what was asked, not only
+what came back.*
+
