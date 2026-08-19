@@ -12979,3 +12979,55 @@ sentence to the librarian.
 *Eighty-seventh: two collections shaped differently answered the same `len()`, and one of the answers
 was to a question nobody asked. A count is a claim about a noun — name the noun.*
 
+## 233. The library that could only hold one turn (2026-08-19)
+
+*"after indexing, the first paper dissapeared thats weird"*
+
+It was. `index.yaml` on the researcher's machine held both:
+
+```yaml
+- uuid: cH9VFLRBtI
+  name: 'Ploidy-specific symbiotic interactions: divergence of mycorrhizal fungi…'
+  created_at: '2026-08-19T18:55:30…'
+- uuid: 1YuVSnKGN1
+  name: Graph neural networks
+  created_at: '2026-08-19T19:10:25…'
+```
+
+Two papers on disk, one in the panel — and not the one indexed last time either, which is what made
+it read as random.
+
+### The container that was treated as an item
+
+`_merge_artifacts` dedupes every collection with `_dedupe_artifacts`, whose merge is
+`merged[key] = {**old, **new}`. That is right for the others: a dataset artifact **is** a dataset, an
+analysis **is** an analysis, and a re-emit of one should replace it in place.
+
+A library artifact is not. It is a **slice of one growing thing** — `LibraryArtifact.papers` says so
+in its own field description: *"Documents relevant to this turn: the ones just indexed, or the search
+matches for a query."* And every library artifact carries the same `index_path`, because
+`.asta/documents` is the default and nothing changes it. So they all collide on one key, and a
+shallow merge replaces `papers` wholesale.
+
+The library had exactly one slot, holding the last turn's slice. Indexing a second paper erased the
+first; **searching** would have erased both and left the matches.
+
+`_merge_libraries` unions `papers` by path — first occurrence winning, so the order a researcher
+watched them arrive in is the order they keep — and takes scalars from the newest turn.
+`paper_count` deliberately follows the newest rather than the maximum: it is a statement about the
+index *now*, and taking the max would be tidier and would lie the moment a document is removed.
+
+### Why this was invisible until today
+
+`pdf_librarian` had never successfully indexed anything. §230's gate is three hours old; before it,
+the librarian reported libraries it had not built, so no second slice ever arrived to overwrite a
+first. **The bug needed the fix above it to become reachable** — which is the ordinary shape of a
+queue of defects behind one blocker, and worth saying out loud before the next one is called a
+regression.
+
+Reverted the merge to check: the second-indexing test fails and the other seven pass, which is the
+right shape — only the accumulate-across-turns claim was broken.
+
+*Eighty-eighth: ask whether a collection's entries are things or slices of one thing. The same
+dedupe is correct for the first and lossy for the second.*
+
