@@ -482,3 +482,20 @@ def test_the_read_asks_for_more_than_zero_lines():
     sandbox = FakeSandbox(entries=[DATAVERSE_SEARCH], search='[{"global_id": "doi:1/x"}]')
     record("dataverse_explorer", _recommendation("doi:1/x"), sandbox)
     assert sandbox.read_limit > 0
+
+
+def test_the_channel_is_shared_rather_than_copied():
+    """§235: a second module needed the same trick, so it lives in one place now.
+
+    Attaching a handler per import would print each line as many times as the module was loaded,
+    which is why `arriving` marks the logger it has already fitted.
+    """
+    from backend import diagnostics
+
+    first = diagnostics.arriving("minime.test.channel")
+    before = len(first.handlers)
+    again = diagnostics.arriving("minime.test.channel")
+    assert again is first
+    assert len(again.handlers) == before, "fitting twice must not stack handlers"
+    assert again.level == logging.INFO
+    assert not again.propagate
