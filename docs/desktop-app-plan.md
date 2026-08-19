@@ -29,21 +29,29 @@ sidecar** that the client spawns and supervises.
 read first; the dated sections below it are the record of how each item got here.
 
 **1. Protect the researcher's work** — the only group where the cost of being wrong is unrecoverable.
-- ⬜ **Dataverse downloads land on the wrong host** (§219/§220). `download_dataset_files_by_doi`
-  writes to `/tmp/mcp/json_files`-style directories on `dataverse-cip.fastmcp.app`, so unblocking
-  it would not put a file in the researcher's workspace. The desktop answer is a direct fetch
-  against the Dataverse data-access API; it needs the CIP base URL, a token for restricted files,
-  and a size limit before it is worth building.
-- 🟡 **A subagent's claims are now written down beside what is on disk** (§219) — every path a
-  structured response names, and every `persistent_id` the dataverse explorer recommends, checked
-  against the workspace and against the search file. It **records and does not block**: three of the
-  eleven subagents have never been run end to end, and the rules worth enforcing are the ones that
-  come from failures actually seen. Read the record, then decide what to gate.
+- ✅ **The dataverse explorer works, and its datasets can be had** (§220–§225). The read argument was
+  wrong from §142 onward, so the subagent could search and never recommend; the search results and
+  papers are now written into the workspace; datasets carry their identifiers into a searchable
+  modal; and open datasets download straight into the thread's folder, which is also the sandbox's
+  working directory. The MCP's own download tool stays blocked — it writes to a directory on
+  `dataverse-cip.fastmcp.app`, which is nobody's workspace.
+- 🟡 **A subagent's claims are written down beside what is on disk** (§219, fixed §224) — every path
+  a structured response names, and every `persistent_id` the dataverse explorer recommends. It
+  **records and does not block**, deliberately: the rules worth enforcing are the ones that come
+  from failures actually seen. It read `ReadResult.file_data.content` for two days against a
+  `TypedDict`, so the dataverse half never ran until §224. **Nothing has been read off it yet.**
+- ⬜ **`data_voyager` and `pdf_librarian` have still never been run end to end.** The two subagents
+  the researcher named as untested on 2026-08-18, and the largest unknown in the product: both
+  submit-and-poll, both take tens of minutes, and no run of either is recorded anywhere. The
+  recorder now works, so the next attempt at each produces evidence either way.
 - ⬜ **Seven subagents still hold their invariants in prompts** (§140) — instructions to a model
   rather than something enforced. `middleware/tool_gate.py` is the mechanism; the conversion stopped
   after a few.
-- ⬜ **Contract tests between each `response_format` and the client's decoder.** Static and fast.
-  Catches §138's class, where producer and consumer quietly disagree about a shape.
+- ⬜ **Contract tests between each `response_format` and the client's decoder.** Static and fast,
+  and no longer hypothetical: §223 *was* this bug. `DatasetArtifactPayload` carried nine fields and
+  the client kept one truncated title, so four distinct datasets rendered as four identical rows for
+  as long as the feature existed. §222 built the pattern for the MCP boundary — capture the
+  producer's shape, assert the consumer reads it — and this is the same discipline one layer in.
 - ⬜ **`execute` can still write anywhere** (§160/§161). The rewrite changed what the model is
   *told*; nothing enforces it. Sixteen files went to `/tmp` once already.
 - 🟡 **The conversation index** is copied aside before every load (§218), but upstream still deletes
