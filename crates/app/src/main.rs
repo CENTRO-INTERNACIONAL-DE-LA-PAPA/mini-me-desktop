@@ -2755,6 +2755,8 @@ struct Workbench {
     sources: Vec<protocol::Source>,
     /// Datasets the explorer recommended, whole. See [`protocol::Dataset`].
     datasets: Vec<protocol::Dataset>,
+    /// Documents the librarian indexed. See [`protocol::Document`].
+    documents: Vec<protocol::Document>,
     /// What checking each reference against Crossref found, keyed by its citation text.
     ///
     /// **Keyed by the citation, not by position and not by DOI.** Not by position because a turn
@@ -2992,11 +2994,14 @@ struct Workbench {
     sources_open: bool,
     /// The datasets modal, which the Outputs heading opens.
     datasets_open: bool,
+    /// The library modal, which the Outputs heading opens.
+    documents_open: bool,
     /// Narrows the open reference list. Only the modal reads it — the panel's four are a
     /// preview, and filtering something that shows four of seventeen would be a filter whose
     /// result you cannot see (§197).
     sources_filter: Entity<Composer>,
     datasets_filter: Entity<Composer>,
+    documents_filter: Entity<Composer>,
     /// What the files API said about each dataset, by `persistent_id`.
     ///
     /// Absent means *not asked yet*, and the same three-state distinction `repaired` needs
@@ -3066,6 +3071,9 @@ impl Workbench {
         // is free.
         let theme_filter = cx.new(|cx| Composer::new(cx, "Filter themes"));
         let model_filter = cx.new(|cx| Composer::new(cx, "Filter models"));
+        let documents_filter = cx.new(|cx| Composer::new(cx, "Filter by title, tag or summary"));
+        cx.observe(&documents_filter, |_workbench, _field, cx| cx.notify())
+            .detach();
         let datasets_filter = cx.new(|cx| Composer::new(cx, "Filter by title, author or DOI"));
         cx.observe(&datasets_filter, |_workbench, _field, cx| cx.notify())
             .detach();
@@ -3174,6 +3182,7 @@ impl Workbench {
             reports: Vec::new(),
             sources: Vec::new(),
             datasets: Vec::new(),
+            documents: Vec::new(),
             checked: HashMap::new(),
             repaired: HashMap::new(),
             resolving: 0,
@@ -3253,8 +3262,10 @@ impl Workbench {
             key_target: stored.provider.clone(),
             sources_open: false,
             datasets_open: false,
+            documents_open: false,
             sources_filter,
             datasets_filter,
+            documents_filter,
             dataset_access: HashMap::new(),
             checking_access: HashSet::new(),
             downloading: HashSet::new(),
@@ -4929,6 +4940,9 @@ impl Workbench {
                 if !snapshot.datasets.is_empty() {
                     self.datasets = snapshot.datasets.clone();
                 }
+                if !snapshot.documents.is_empty() {
+                    self.documents = snapshot.documents.clone();
+                }
                 if let Some(project) = snapshot.project {
                     self.project = Some(merge_spine(self.project.as_ref(), project));
                 }
@@ -5197,6 +5211,9 @@ impl Workbench {
                         }
                         if !snapshot.datasets.is_empty() {
                             workbench.datasets = snapshot.datasets;
+                        }
+                        if !snapshot.documents.is_empty() {
+                            workbench.documents = snapshot.documents;
                         }
                         if !snapshot.reports.is_empty() {
                             workbench.reports = snapshot.reports;
@@ -10518,6 +10535,12 @@ impl Workbench {
             cx.notify();
             return;
         }
+        if self.documents_open {
+            self.documents_open = false;
+            self.restore_focus = true;
+            cx.notify();
+            return;
+        }
         if self.confirming_provider.take().is_some() {
             // Escape leaves the provider as it was: this modal exists precisely so the change
             // needs a deliberate press, and dismissing is not one.
@@ -13177,6 +13200,175 @@ impl Workbench {
         row
     }
 
+    /// The researcher's own library, in a list you can search.
+    ///
+    /// The third of these, after references (§194) and datasets (§223), and deliberately the same
+    /// shape: a filter outside the scroll region and one section function serving both the panel
+    /// and the modal. A library is the case that most wants searching — its whole purpose is to
+    /// answer *"what do I have on this"* — and until now `LibraryArtifact` reached the client
+    /// carrying titles, paths, summaries and tags, and the client kept none of it.
+    fn documents_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        ui::Modal::new("documents", format!("Library · {}", self.documents.len()))
+            .width(720.)
+            .focus(&self.delete_focus)
+            .body(
+                div()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .min_w_0()
+                    .gap_2()
+                    .child(self.filter_field(self.documents_filter.clone(), cx))
+                    .child(
+                        div()
+                            .id("all-documents")
+                            .flex()
+                            .flex_col()
+                            .w_full()
+                            .min_w_0()
+                            .gap_1()
+                            .max_h(px(480.))
+                            .overflow_y_scroll()
+                            .child(self.documents_section(cx)),
+                    ),
+            )
+            .actions(
+                ui::actions().child(div().flex_grow()).child(
+                    ui::Button::new("documents-close", "Close").on_click(cx.listener(
+                        |workbench, _event, _window, cx| {
+                            workbench.documents_open = false;
+                            workbench.restore_focus = true;
+                            cx.notify();
+                        },
+                    )),
+                ),
+            )
+            .footer(
+                ui::Label::new(
+                    "Press a document to open it. Ask the pdf_librarian subagent to search this \
+                     library by meaning rather than by filename.",
+                )
+                .muted()
+                .size(ui::Size::Compact),
+            )
+    }
+
+    fn documents_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let query = self.documents_filter.read(cx).text().to_string();
+        // Title, tags and summary together: a library is searched by what a paper is *about*, and
+        // the summary is the only field that carries that.
+        let matching: Vec<&protocol::Document> = self
+            .documents
+            .iter()
+            .filter(|document| {
+                let haystack = format!(
+                    "{} {} {}",
+                    document.title,
+                    document.tags.join(" "),
+                    document.summary
+                );
+                match_score(&query, &haystack).is_some()
+            })
+            .collect();
+
+        let mut section = div().flex().flex_col().gap_1();
+        if matching.is_empty() && !query.trim().is_empty() {
+            // Said, rather than left blank: a filter matching nothing and an empty library look
+            // identical otherwise, and only one of them is fixed by typing less.
+            return section.child(
+                ui::Label::new("No document matches that.")
+                    .muted()
+                    .size(ui::Size::Compact),
+            );
+        }
+        for document in matching {
+            section = section.child(self.document_row(document, cx));
+        }
+        section
+    }
+
+    /// One indexed document: what it is, what it is about, and where it lives.
+    fn document_row(&self, document: &protocol::Document, cx: &mut Context<Self>) -> impl IntoElement {
+        // The whole row opens the file, because unlike a dataset there is no second action to
+        // confuse it with (§225a) — and only when there is a file to open, so a URL-only entry
+        // does not light up and then do nothing.
+        let openable = workspace::local_path(
+            &document.path,
+            self.thread_workspace().as_deref(),
+        );
+        let mut row = div()
+            .id(SharedString::from(format!("doc-{}", document.path)))
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w_0()
+            .gap_1()
+            .p_2()
+            .rounded_lg()
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .text_color(rgb(theme::text()))
+                    .text_size(px(13.))
+                    .line_height(px(18.))
+                    .child(document.title.clone()),
+            );
+
+        if !document.tags.is_empty() {
+            row = row.child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .text_color(rgb(theme::accent()))
+                    .text_xs()
+                    .child(document.tags.join(" · ")),
+            );
+        }
+        if !document.summary.is_empty() {
+            row = row.child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .text_color(rgb(theme::text_muted()))
+                    .text_xs()
+                    .child(document.summary.clone()),
+            );
+        }
+        // What the librarian recorded, verbatim. A researcher chasing a document the recorder
+        // called missing needs the string it was looking for, not a prettier version of it.
+        row = row.child(
+            div()
+                .w_full()
+                .min_w_0()
+                .text_color(rgb(theme::text_faint()))
+                .text_size(px(11.))
+                .child(match (&document.doi, document.page_count) {
+                    (Some(doi), Some(pages)) => format!("{doi} · {pages} pages · {}", document.path),
+                    (Some(doi), None) => format!("{doi} · {}", document.path),
+                    (None, Some(pages)) => format!("{pages} pages · {}", document.path),
+                    (None, None) => document.path.clone(),
+                }),
+        );
+
+        if let Some(file) = openable {
+            row = row
+                .hover(|style| {
+                    let fill = theme::hover_over(theme::surface());
+                    style
+                        .bg(rgb(fill))
+                        .text_color(rgb(theme::ink_on(fill)))
+                        .cursor_pointer()
+                })
+                .on_click(move |_event, _window, _cx| {
+                    if let Err(error) = workspace::open(&file) {
+                        tracing::warn!(%error, "could not open a document");
+                    }
+                });
+        }
+        row
+    }
+
     /// Every reference, in a list you scroll rather than a panel you fight.
     ///
     /// Asked for in these terms: *"a nice list that can scroll in y direction, like OS systems do
@@ -13688,7 +13880,8 @@ impl Workbench {
             // (docs §223). Only when the structured list actually arrived, so a bucket from an
             // older backend still renders as plain text rather than as a heading that does
             // nothing.
-            let openable = bucket.name == "datasets" && !bucket.items.is_empty();
+            let openable = matches!(bucket.name, "datasets" | "libraries")
+                && !bucket.items.is_empty();
             let mut heading = div()
                 // **Per bucket, not one id for all of them.** Every heading in this loop carried
                 // `"datasets-heading"`, so with two buckets on screen two sibling elements shared
@@ -13729,9 +13922,16 @@ impl Workbench {
                             .text_color(rgb(theme::ink_on(fill)))
                             .cursor_pointer()
                     })
-                    .on_click(cx.listener(|workbench, _event, _window, cx| {
-                        workbench.open_datasets(cx);
-                    }));
+                    .on_click({
+                        let which = bucket.name;
+                        cx.listener(move |workbench, _event, _window, cx| match which {
+                            "libraries" => {
+                                workbench.documents_open = true;
+                                cx.notify();
+                            }
+                            _ => workbench.open_datasets(cx),
+                        })
+                    });
             }
             let mut group = div().flex().flex_col().gap_1().child(heading);
             // **The identifier, for datasets.** Their bucket items are titles cut at 96
@@ -13953,6 +14153,12 @@ impl Render for Workbench {
 
         let root = if self.datasets_open {
             root.child(self.datasets_modal(cx))
+        } else {
+            root
+        };
+
+        let root = if self.documents_open {
+            root.child(self.documents_modal(cx))
         } else {
             root
         };

@@ -522,6 +522,43 @@ pub fn adopt(folder: &Path, source: &Path) -> Result<PathBuf> {
     anyhow::bail!("{name} already exists a hundred times over in this conversation")
 }
 
+/// The path this app can open, for a path the *agent* wrote down.
+///
+/// The two live on opposite sides of WSL, and `backend::wsl_path` only goes one way. A document
+/// the librarian indexed is recorded however it saw it — relative to its working directory, or
+/// absolute as `/mnt/c/…` — and neither opens in Explorer as written.
+///
+/// Returns `None` for anything that is not a local file, so a URL in `IndexedPaper.path` (which
+/// its schema explicitly allows) does not become a launch of a file that is not there.
+pub fn local_path(recorded: &str, thread: Option<&Path>) -> Option<PathBuf> {
+    let recorded = recorded.trim();
+    if recorded.is_empty() || recorded.contains("://") || recorded.starts_with("doi:") {
+        return None;
+    }
+    // `/mnt/c/Users/x` came from `C:\Users\x`, and on Windows has to go back.
+    if cfg!(windows) {
+        if let Some(rest) = recorded.strip_prefix("/mnt/") {
+            let mut chars = rest.chars();
+            if let (Some(drive), Some('/')) = (chars.next(), chars.next()) {
+                if drive.is_ascii_alphabetic() {
+                    return Some(PathBuf::from(format!(
+                        "{}:\\{}",
+                        drive.to_ascii_uppercase(),
+                        rest[2..].replace('/', "\\")
+                    )));
+                }
+            }
+        }
+    }
+    let path = PathBuf::from(recorded);
+    if path.is_absolute() {
+        return Some(path);
+    }
+    // Relative, which is what the skills ask for and what an adopted attachment produces: it is
+    // relative to the conversation's own folder.
+    thread.map(|dir| dir.join(recorded))
+}
+
 /// A bounded view of everything a conversation wrote.
 ///
 /// `truncated` is deliberately part of the result rather than a log line. The person looking at
@@ -2199,4 +2236,38 @@ mod tests {
         std::fs::write(&source, b"a longer, different thing").expect("source");
         assert_eq!(adopt(&thread, &source).expect("adopted"), thread.join("README-2"));
     }
+
+    /// A path the agent wrote has to come back across WSL before this app can open it.
+    #[test]
+    fn a_relative_document_resolves_against_the_conversation() {
+        let thread = std::path::Path::new("/w/Mini-Me/thread-1");
+        assert_eq!(
+            local_path("Graph-neural-networks.pdf", Some(thread)),
+            Some(thread.join("Graph-neural-networks.pdf"))
+        );
+        assert_eq!(local_path("papers/blight.pdf", Some(thread)),
+            Some(thread.join("papers/blight.pdf")));
+        // With no conversation there is nothing to resolve against, and guessing would open
+        // whatever happens to sit beside the executable.
+        assert_eq!(local_path("a.pdf", None), None);
+    }
+
+    /// `IndexedPaper.path` is documented as "sandbox path **or URL**".
+    #[test]
+    fn a_url_is_not_a_file_to_open() {
+        let thread = std::path::Path::new("/w/thread");
+        assert_eq!(local_path("https://example.org/paper.pdf", Some(thread)), None);
+        assert_eq!(local_path("asta://doc/1", Some(thread)), None);
+        assert_eq!(local_path("doi:10.1000/x", Some(thread)), None);
+        assert_eq!(local_path("   ", Some(thread)), None);
+    }
+
+    #[test]
+    fn an_absolute_path_is_taken_as_it_stands() {
+        assert_eq!(
+            local_path("/home/piero/papers/a.pdf", None),
+            Some(std::path::PathBuf::from("/home/piero/papers/a.pdf"))
+        );
+    }
 }
+
