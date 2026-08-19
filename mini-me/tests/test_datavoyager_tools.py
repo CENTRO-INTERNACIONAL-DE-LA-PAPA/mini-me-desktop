@@ -381,3 +381,40 @@ def test_persist_failed_writes_error_log_and_skips_export() -> None:
 def test_persist_is_noop_without_awrite() -> None:
     written = asyncio.run(persist_analysis_outputs(object(), _TID, "Q", _COMPLETED_RESULT))
     assert written == []
+
+
+# --- a greeting is not a question (§237) --------------------------------------------------------
+
+def test_a_greeting_is_refused_before_a_run_is_spent_on_it():
+    """The run this comes from completed successfully and produced nothing.
+
+    `question="hiiiiiiii"` loaded two tables, summarised them, and answered *"I'm sorry, but I
+    can't yet answer that"*. Twenty minutes and a submission, spent because the only check was
+    emptiness.
+    """
+    import asyncio
+    import json as _json
+
+    from backend.datavoyager_tools import MIN_QUESTION_CHARS, analyze_data
+
+    for greeting in ["hiiiiiiii", "hi", "analyze", "do it", "?" * (MIN_QUESTION_CHARS - 1)]:
+        answer = _json.loads(
+            asyncio.run(analyze_data.ainvoke({"question": greeting, "dataset_paths": "a.csv"}))
+        )
+        assert answer["status"] == "error", greeting
+        assert "too short" in answer["message"], greeting
+        # The message has to say what a real one looks like, or it is a refusal without a remedy.
+        assert "Name the dataset" in answer["message"]
+
+
+def test_a_real_question_is_not_refused_for_its_length():
+    """The threshold must not stand between a researcher and a legitimate run."""
+    from backend.datavoyager_tools import MIN_QUESTION_CHARS
+
+    real = (
+        "Using SOC_Covariables_TrainValV5.csv, compare candidate models predicting SOC_MgHa "
+        "from the covariables and report held-out metrics on SOC_Covariables_TESTV5.csv"
+    )
+    assert len(real) >= MIN_QUESTION_CHARS
+    # And the threshold is low enough that a terse but genuine question survives it.
+    assert len("Does yield vary with cultivar in trials.csv?") >= MIN_QUESTION_CHARS
