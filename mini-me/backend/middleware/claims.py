@@ -178,26 +178,49 @@ def _normalise(claim: str) -> str:
     return text.rstrip("/") or text
 
 
-def missing_from(claims: list[str], present: set[str]) -> list[str]:
-    """The claims that name nothing in the workspace, in the order they were claimed, deduped.
+def missing_from(
+    claims: list[str], present: set[str], work_dir: str = ""
+) -> tuple[list[str], list[str]]:
+    """Claims that name nothing in the workspace, and claims that point outside it.
 
-    A claim matches if it names an entry outright or is a parent of one. The parent case is what
-    makes `index_path=".asta/documents"` resolve: the librarian's index is a directory whose
-    contents are listed, and depending on the sandbox the directory itself may not be.
+    **Two answers, because they are two different facts and only one is an accusation.** The first
+    real finding this recorder produced said:
+
+        pdf_librarian named 2 paths, 2 missing from the workspace:
+          .asta/documents, /mnt/c/Users/LENOVO/Downloads/Graph-neural-networks.pdf
+
+    The second of those exists — it is the PDF the researcher attached, sitting in their Downloads
+    folder. Calling it *missing* is true only in the sense that it is not in the thread's directory,
+    and it reads as *this file does not exist*, which is false. A record that cries wolf once is a
+    record nobody reads the second time, so the two cases now get their own words.
+
+    Pointing outside is still worth saying: files there do not travel with the conversation and are
+    invisible in Outputs, which is what the librarian's own prompt tells it to avoid.
+
+    A claim matches if it names an entry outright or is a parent of one — the parent case is what
+    makes `index_path=".asta/documents"` resolve when only its contents were listed.
     """
-    unresolved: list[str] = []
+    base = work_dir.rstrip("/")
+    missing: list[str] = []
+    outside: list[str] = []
+    seen: list[str] = []
     for claim in claims:
         if claim.lower().startswith(NOT_LOCAL):
             continue
         path = _normalise(claim)
-        if not path or path in unresolved:
+        if not path or path in seen:
             continue
+        seen.append(path)
         if path in present:
             continue
         if any(entry.startswith(path + "/") for entry in present):
             continue
-        unresolved.append(path)
-    return unresolved
+        # Absolute, and not under the working directory: a real place we cannot vouch for.
+        if path.startswith("/") and base and not path.startswith(base + "/"):
+            outside.append(path)
+        else:
+            missing.append(path)
+    return missing, outside
 
 
 def _ids_in(text: str) -> set[str]:
@@ -363,16 +386,28 @@ class ClaimsRecorder(AgentMiddleware[ArtifactState, Any, Any]):
             return
         if not claims:
             return
-        unresolved = missing_from(claims, await self._present(work_dir))
-        if unresolved:
+        missing, outside = missing_from(
+            claims, await self._present(work_dir), work_dir.as_posix()
+        )
+        if missing:
             logger.warning(
-                "claims: %s named %d paths, %d missing from the workspace: %s",
+                "claims: %s named %d paths, %d not in the workspace: %s",
                 self.source,
                 len(claims),
-                len(unresolved),
-                ", ".join(unresolved),
+                len(missing),
+                ", ".join(missing),
             )
-        else:
+        if outside:
+            # Not a warning about honesty — those files are real. A warning about durability: they
+            # sit outside the conversation's folder, so they will not travel with it.
+            logger.warning(
+                "claims: %s used %d file(s) from outside this conversation's folder, which will "
+                "not travel with it: %s",
+                self.source,
+                len(outside),
+                ", ".join(outside),
+            )
+        if not missing and not outside:
             logger.info(
                 "claims: %s named %d paths, all present", self.source, len(claims)
             )

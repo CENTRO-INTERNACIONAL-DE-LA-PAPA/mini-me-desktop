@@ -12705,3 +12705,43 @@ went on failures that completed successfully.
 *Eighty-first: a prefix is not a grammar. If a token can arrive from somewhere other than the
 keyboard, say what the token is allowed to contain.*
 
+## 227. The recorder's first finding, half of it wrong (2026-08-19)
+
+`pdf_librarian` ran for the first time, and §219's recorder produced its first real line:
+
+```
+claims: pdf_librarian named 2 paths, 2 missing from the workspace:
+  .asta/documents, /mnt/c/Users/LENOVO/Downloads/Graph-neural-networks.pdf
+```
+
+The second path **exists.** It is the PDF the researcher attached, sitting in their Downloads
+folder. Calling it *missing* is true only in the narrow sense that it is not in the thread's
+directory, and it reads as *this file does not exist* — which is false, and is the single thing
+§219 said this module could not afford: *"a false missing-file is how a reader stops believing the
+record."* Written down, then done anyway, on the first run that mattered.
+
+`missing_from` now answers two questions instead of one:
+
+* **not in the workspace** — a relative claim, or an absolute one under the working directory,
+  that nothing backs. This is the accusation, and `.asta/documents` is still in it.
+* **outside this conversation's folder** — an absolute claim somewhere real that we cannot vouch
+  for. Still worth a line, because a file there does not travel with the conversation and is
+  invisible in Outputs, which is exactly what the librarian's prompt tells it to avoid. But it is a
+  remark about durability, not about honesty.
+
+### What the surviving half suggests
+
+`.asta/documents` is the library index, and the librarian's prompt tells it to leave the index at
+that default — relative to the sandbox's working directory. If it is genuinely absent after a run
+that reported indexing a paper, then either the index was written somewhere else or nothing was
+indexed. That is the recorder doing its job, and it is the first question worth putting to
+`pdf_librarian` rather than to the code.
+
+Also true, and not a defect: the attached PDF never enters the workspace. The librarian is handed an
+absolute path into Downloads, so a conversation reopened after the file moves has an index pointing
+at nothing. Whether attachments should be copied into the thread's folder is a product question
+this finding is the first evidence for.
+
+*Eighty-second: the first time a monitor fires is the test of the monitor. Read its output as
+carefully as the thing it is watching.*
+
