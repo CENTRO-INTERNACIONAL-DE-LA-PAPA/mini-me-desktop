@@ -13131,3 +13131,49 @@ do not stack handlers and print every line twice.
 is the half you need while waiting. Log the success with the identifier — that is the line somebody
 greps for.*
 
+## 236. The copy that never ran on a new conversation (2026-08-19)
+
+The claims recorder said `data_voyager` used two files from outside the conversation's folder. Both
+were 68 KB and 371 KB — nowhere near `ADOPT_LIMIT`. So §228's copy should have run, and had not.
+
+`thread_workspace()` reads `sidecar.thread_id()`, and **the backend does not assign a thread id until
+the first turn has run.** `add_files` asks for the folder at the moment a file is chosen, gets
+`None`, and takes the branch that references the file where it lies:
+
+```rust
+let Some(folder) = folder.as_ref() else {
+    adopted.push(path.to_path_buf());
+    continue;
+};
+```
+
+Silently — that branch adds nothing to `left_where_they_are`, so not even the line about a file
+staying put appeared.
+
+**So §228 worked in exactly the case it was not written for.** A file attached to an *existing*
+conversation was copied; a file attached to a *new* one was not — and "new conversation, attach a
+CSV, ask a question" is the ordinary flow, and the one this session had just told the researcher to
+use as a clean test bed.
+
+The comment two hundred lines away had already said why:
+
+    // The thread id does not exist until the turn has run, which is why the title
+    // waits until here rather than being set when the prompt was typed.
+
+The title waits for that moment. Attachments now wait for it too: their sources are queued at send
+time and copied in when the turn ends, which is the first instant the folder can be named. The turn
+itself still carries the absolute path, which the agent reads perfectly well — what was missing was
+never the *reading*, it was the *keeping*.
+
+### Two mistakes in the writing of it, both mine and both familiar
+
+The test for it first landed outside `mod tests` — the same slip as §—, where a `#[test]` inside
+`fn main()` is legal Rust and never collected. Caught the same way, by the count not moving. Then
+removing it took `fn main`'s closing brace with it. Both cheap, both compile-time; noted because the
+pattern is now three for three: **appending to the end of a Rust file is the wrong instinct, and the
+test module is not the end of the file.**
+
+*Ninety-first: a feature verified on the state that already exists has not been verified on the state
+that does not. The empty case is a different code path, and on a new conversation everything is the
+empty case.*
+
