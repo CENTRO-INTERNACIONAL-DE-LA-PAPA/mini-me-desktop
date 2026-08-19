@@ -12560,3 +12560,50 @@ open half would produce a partial dataset that looks like the whole one.
 *Seventy-seventh: when a list renders as repeated rows, suspect the field you dropped before the
 data. The bucket was never lying — it was answering a different question.*
 
+## 224. The fake that was kinder than the type (2026-08-19)
+
+`ERROR claims: recording dataverse_explorer failed`, on every turn since §219 shipped. The recorder
+swallowed it and the turn completed, so the only trace was one line with no timestamp.
+
+```python
+unmatched = unsearched(ids, result.file_data.content)
+```
+
+`ReadResult.file_data` is a `FileData`, and **`FileData` is a `TypedDict`** — a plain dict.
+`.content` on it raises `AttributeError`. The dataverse claims check has never once run.
+
+### Why the suite did not care
+
+Its fake answered with `SimpleNamespace(error=None, file_data=SimpleNamespace(content=…))`.
+Attribute access on both, so attribute access passed.
+
+This is §222's lesson, written two days ago, about a stand-in built with
+`StructuredTool.from_function` that filtered away the argument the real tool rejects: *a double more
+forgiving than the real thing certifies the bug.* The fix there was to generate the double from the
+captured contract. The same discipline applies to a return type, and it is cheaper — `ReadResult`,
+`FileData` and `GlobResult` are importable, so the fake now constructs the real ones and cannot be
+kinder than production.
+
+Reverted the fix to check: 5 tests fail, three of them the ones that passed against the broken
+version for two days.
+
+### The second bug in the same call
+
+`aread(..., limit=0)` meant *everything* to `LazyLangsmithSandbox`
+(`end = offset + limit if limit and limit > 0 else None`) and *nothing* to deepagents' local backend
+(`lines[offset:offset + limit]`). One call, opposite meanings, on two backends that both serve it —
+and **host execution, the one the researcher actually runs, is the second.** So even with the
+attribute error fixed, the read would have returned an empty string. An explicit ceiling now.
+
+### What made this findable
+
+Not a traceback — the log had rotated. It was one line of the startup banner:
+
+> `minime_local: host execution is ON — the agent runs commands on this machine`
+
+which said the object answering `aread` was not the one `backend/sandbox.py` describes. Two backends
+implement this surface, the tests only ever saw a hand-written third, and nothing had compared them.
+
+*Seventy-eighth: when two implementations satisfy one interface, a hand-written fake is a third
+implementation, and it is the only one with no user. Build test doubles out of the real types.*
+
