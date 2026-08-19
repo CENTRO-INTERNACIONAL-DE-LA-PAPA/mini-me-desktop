@@ -3568,9 +3568,43 @@ impl Workbench {
             return;
         }
 
+        // **Copied into the conversation first.** An attachment used to be referenced where it
+        // lay, so `pdf_librarian` indexed `…/Downloads/Graph-neural-networks.pdf` and the claims
+        // recorder said so (§227). Downloads is a folder people empty; a conversation reopened
+        // next month would hold a library index, a citation and an analysis all naming a path
+        // that resolves to nothing. Copying makes the input part of the conversation the same way
+        // its outputs are.
+        //
+        // Falls back to referencing in place — with the reason said out loud — rather than
+        // refusing. A researcher who dropped a file wants to ask about it, and an attachment that
+        // does not persist is far better than one that does not arrive.
+        let folder = self.thread_workspace();
+        let mut adopted: Vec<std::path::PathBuf> = Vec::new();
+        let mut left_where_they_are: Vec<String> = Vec::new();
+        for path in &usable {
+            let Some(folder) = folder.as_ref() else {
+                adopted.push(path.to_path_buf());
+                continue;
+            };
+            let size = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
+            if size > workspace::ADOPT_LIMIT {
+                left_where_they_are.push(file_label(path));
+                adopted.push(path.to_path_buf());
+                continue;
+            }
+            match workspace::adopt(folder, path) {
+                Ok(copy) => adopted.push(copy),
+                Err(error) => {
+                    tracing::warn!(%error, "could not copy an attachment in");
+                    left_where_they_are.push(file_label(path));
+                    adopted.push(path.to_path_buf());
+                }
+            }
+        }
+
         // Translated to the backend's view of the filesystem — on Windows the agent runs
         // inside WSL, where `C:\…` is `/mnt/c/…`.
-        let translated: Vec<String> = usable
+        let translated: Vec<String> = adopted
             .iter()
             .map(|path| self.sidecar.path_for_backend(path))
             .collect();
@@ -3596,8 +3630,22 @@ impl Workbench {
         // Assigned rather than only set, so a second add clears the first one's warning. A
         // stale "left out yield.csv" beside a composer that no longer mentions it is worse
         // than the older, already-seen error this replaces.
-        self.error = (!unreachable.is_empty())
-            .then(|| format!("left out {skipped} — on a network share the agent cannot open"));
+        self.error = if !unreachable.is_empty() {
+            Some(format!(
+                "left out {skipped} — on a network share the agent cannot open"
+            ))
+        } else if !left_where_they_are.is_empty() {
+            // Not a failure, and said anyway: the file is in the turn either way, but it will
+            // not travel with the conversation, and the researcher is the only one who can
+            // decide whether that matters.
+            Some(format!(
+                "{} stayed where it is rather than being copied in — move or delete it and this \
+                 conversation loses it",
+                left_where_they_are.join(", ")
+            ))
+        } else {
+            None
+        };
         cx.notify();
     }
 

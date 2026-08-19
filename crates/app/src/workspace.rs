@@ -457,6 +457,71 @@ pub struct Output {
     pub modified: std::time::SystemTime,
 }
 
+/// Above this, an attached file is referenced where it lies rather than copied.
+///
+/// A researcher's PDF is a megabyte and belongs with the conversation; their genome table is forty
+/// gigabytes and does not. The copy also happens on the thread that paints the window, so an
+/// unbounded one is a frozen app as much as a full disk.
+pub const ADOPT_LIMIT: u64 = 512 * 1024 * 1024;
+
+/// Copy an attached file into the conversation's own folder, and say where it landed.
+///
+/// # Why attachments are copied at all
+///
+/// They were not, until `pdf_librarian` ran for the first time and the claims recorder said its
+/// index pointed at `/mnt/c/Users/…/Downloads/Graph-neural-networks.pdf` (§227). That file is real
+/// today. It is in a folder people empty. A conversation reopened next month has a library index,
+/// a citation and an analysis all naming a path that resolves to nothing, and no way to tell that
+/// from a paper nobody read.
+///
+/// Copying makes the attachment part of the conversation the same way its outputs are: it travels
+/// with the folder, it appears in Outputs, and `execute` can reach it without leaving the
+/// workspace — which is what §160's rule asks for and could not deliver while the input lived
+/// somewhere else.
+///
+/// # What it will not do
+///
+/// **Never overwrite.** A name already taken by identical bytes is reused — attaching the same
+/// paper twice should not litter — and a name taken by *different* bytes gets a suffix. Silently
+/// replacing a file a previous turn produced would be the worst outcome available here.
+pub fn adopt(folder: &Path, source: &Path) -> Result<PathBuf> {
+    let name = source
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "attachment".to_string());
+    std::fs::create_dir_all(folder)
+        .with_context(|| format!("creating {}", folder.display()))?;
+
+    let (stem, extension) = match name.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() => (stem.to_string(), format!(".{extension}")),
+        _ => (name.clone(), String::new()),
+    };
+    let wanted = std::fs::metadata(source)
+        .with_context(|| format!("reading {}", source.display()))?
+        .len();
+
+    for attempt in 0..100 {
+        let candidate = folder.join(match attempt {
+            0 => name.clone(),
+            n => format!("{stem}-{}{extension}", n + 1),
+        });
+        match std::fs::metadata(&candidate) {
+            // Free.
+            Err(_) => {
+                std::fs::copy(source, &candidate)
+                    .with_context(|| format!("copying {} in", source.display()))?;
+                return Ok(candidate);
+            }
+            // Taken. Same size is treated as the same file: a byte comparison of two large
+            // tables costs more than the collision it would avoid, and the suffix is harmless
+            // when it is wrong.
+            Ok(existing) if existing.len() == wanted => return Ok(candidate),
+            Ok(_) => continue,
+        }
+    }
+    anyhow::bail!("{name} already exists a hundred times over in this conversation")
+}
+
 /// A bounded view of everything a conversation wrote.
 ///
 /// `truncated` is deliberately part of the result rather than a log line. The person looking at
@@ -2057,5 +2122,81 @@ mod tests {
             Some(value) => unsafe { std::env::set_var(WORKSPACE_ENV, value) },
             None => unsafe { std::env::remove_var(WORKSPACE_ENV) },
         }
+    }
+
+    /// A directory of this test's own. `adopt` reads no environment, so no lock is needed.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let base = std::env::temp_dir().join(format!(
+            "mini-me-adopt-{name}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).expect("scratch");
+        base
+    }
+
+    /// §227: an attachment must become part of the conversation, not a pointer into Downloads.
+    #[test]
+    fn an_attachment_is_copied_into_the_conversation() {
+        let home = scratch("copied");
+        let downloads = home.join("Downloads");
+        std::fs::create_dir_all(&downloads).expect("downloads");
+        let source = downloads.join("Graph-neural-networks.pdf");
+        std::fs::write(&source, b"%PDF-1.7 a paper").expect("the paper");
+
+        let thread = home.join("Mini-Me").join("thread-1");
+        let landed = adopt(&thread, &source).expect("adopted");
+
+        assert_eq!(landed, thread.join("Graph-neural-networks.pdf"));
+        assert_eq!(std::fs::read(&landed).expect("readable"), b"%PDF-1.7 a paper");
+        // The original is untouched — this copies, it does not move somebody's file.
+        assert!(source.exists());
+    }
+
+    /// Attaching the same paper twice should not litter the folder.
+    #[test]
+    fn the_same_file_attached_twice_is_the_same_copy() {
+        let home = scratch("twice");
+        let source = home.join("paper.pdf");
+        std::fs::write(&source, b"same bytes").expect("write");
+        let thread = home.join("thread");
+
+        let first = adopt(&thread, &source).expect("first");
+        let second = adopt(&thread, &source).expect("second");
+        assert_eq!(first, second);
+        assert_eq!(std::fs::read_dir(&thread).expect("listing").count(), 1);
+    }
+
+    /// **Never overwrite.** A different file with a name a turn already used gets a suffix.
+    #[test]
+    fn a_different_file_with_a_taken_name_does_not_replace_it() {
+        let home = scratch("collision");
+        let thread = home.join("thread");
+        std::fs::create_dir_all(&thread).expect("thread");
+        std::fs::write(thread.join("results.csv"), b"what a turn produced").expect("existing");
+
+        let source = home.join("results.csv");
+        std::fs::write(&source, b"a completely different table").expect("source");
+        let landed = adopt(&thread, &source).expect("adopted");
+
+        assert_eq!(landed, thread.join("results-2.csv"));
+        assert_eq!(
+            std::fs::read(thread.join("results.csv")).expect("readable"),
+            b"what a turn produced",
+            "the turn's own output must survive an attachment that shares its name"
+        );
+    }
+
+    /// A name with no extension still gets a usable suffix rather than one inside the stem.
+    #[test]
+    fn a_file_without_an_extension_is_suffixed_too() {
+        let home = scratch("noext");
+        let thread = home.join("thread");
+        std::fs::create_dir_all(&thread).expect("thread");
+        std::fs::write(thread.join("README"), b"one").expect("existing");
+        let source = home.join("README");
+        std::fs::write(&source, b"a longer, different thing").expect("source");
+        assert_eq!(adopt(&thread, &source).expect("adopted"), thread.join("README-2"));
     }
 }
