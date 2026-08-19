@@ -28,6 +28,8 @@ from backend.middleware import (
     ClaimsRecorder,
     KeepSources,
     RunBeforeReporting,
+    SubmitBeforeReporting,
+    TheorizeBeforeReporting,
     SearchBeforeCiting,
     SearchBeforeRecommending,
     SearchResultsFile,
@@ -578,6 +580,8 @@ def _build_runtime_subagents(
             extra_middleware.append(ArtifactCaptureMiddleware("report_writer"))
         elif name == "hypothesis_generator":
             extra_middleware.append(ArtifactCaptureMiddleware("hypothesis_generator"))
+            # You cannot report a run you did not start — `middleware/submit_first.py`.
+            extra_middleware.append(TheorizeBeforeReporting())
         elif name == "pdf_librarian":
             extra_middleware.append(ArtifactCaptureMiddleware("pdf_librarian"))
             # Its first run reported an index that was never created (§230). Same exit as the
@@ -585,6 +589,9 @@ def _build_runtime_subagents(
             extra_middleware.append(RunBeforeReporting())
         elif name == "data_voyager":
             extra_middleware.append(ArtifactCaptureMiddleware("data_voyager"))
+            # The most expensive one to have fabricate: a composed `DataAnalysisResults` looks
+            # exactly like a twenty-minute analysis and costs nothing.
+            extra_middleware.append(SubmitBeforeReporting())
         elif name == "research_planner":
             extra_middleware.append(ArtifactCaptureMiddleware("research_planner"))
 

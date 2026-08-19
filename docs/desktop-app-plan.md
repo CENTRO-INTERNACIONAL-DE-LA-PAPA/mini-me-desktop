@@ -44,9 +44,10 @@ read first; the dated sections below it are the record of how each item got here
   the researcher named as untested on 2026-08-18, and the largest unknown in the product: both
   submit-and-poll, both take tens of minutes, and no run of either is recorded anywhere. The
   recorder now works, so the next attempt at each produces evidence either way.
-- ⬜ **Seven subagents still hold their invariants in prompts** (§140) — instructions to a model
-  rather than something enforced. `middleware/tool_gate.py` is the mechanism; the conversion stopped
-  after a few.
+- ✅ **Every subagent that can be gated, is** (§133, §142, §230, §234). §140 counted seven; five
+  admit a gate and all five now have one. `report_writer` and `research_planner` are deliberately
+  left out — the planner runs nothing by design and the writer synthesises from the conversation, so
+  neither has a tool a gate could force without inventing a requirement.
 - ⬜ **Contract tests between each `response_format` and the client's decoder.** Static and fast,
   and no longer hypothetical: §223 *was* this bug. `DatasetArtifactPayload` carried nine fields and
   the client kept one truncated title, so four distinct datasets rendered as four identical rows for
@@ -13030,4 +13031,61 @@ right shape — only the accumulate-across-turns claim was broken.
 
 *Eighty-eighth: ask whether a collection's entries are things or slices of one thing. The same
 dedupe is correct for the first and lossy for the second.*
+
+## 234. You cannot report a run you did not start (2026-08-19)
+
+*"lets try datavoyager, what you recommend? to test it or you want to build something before I try
+it"*
+
+Build first, and the argument is three hours old rather than theoretical: `pdf_librarian` returned a
+complete `LibraryArtifact` having executed nothing (§230). `data_voyager` has the same shape and one
+difference that matters — **it submits a job and then reports on it.** A composed
+`DataAnalysisResults` carries findings, charts and hypotheses-tested, looks exactly like a
+twenty-minute analysis, and costs nothing. The researcher waits for a panel that will never fill,
+because no task was ever submitted.
+
+Half an hour of gate against forty minutes of somebody's afternoon is not a close call.
+
+### The pre-flight that mattered more
+
+Before writing anything: **the composed CLI invocation was checked against the real CLI**, which is
+the one thing this week has repeatedly shown nobody had done.
+
+```
+$ asta analyze-data submit --help
+Usage: asta analyze-data submit [OPTIONS] QUERY [FILES]...
+  --context-id TEXT  Continue an existing session…
+  -o, --output FILE  Write the A2A response JSON to PATH
+```
+
+`_build_submit_command` composes `submit --output <path> [--context-id <id>] <question>
+<paths…>` — matching, including the positional order. `task TASK_ID` matches too. Had a flag moved
+the way `read_search_results`' argument had (§220), it would have surfaced forty minutes into a run
+rather than in one `--help`.
+
+The tool's own guards are sound as well: an empty question, no paths without a `context_id`, a failed
+submit, and a missing task id each return a named error, and the last two name the Asta token as the
+likely cause. Nothing here will waste a run on a broken command.
+
+### The gates
+
+`SubmitBeforeReporting` forces `analyze_data`; `TheorizeBeforeReporting` forces
+`generate_theories`. Both tools double as their own status check via `resume_task_id`, and
+satisfying the gate that way is correct — a subagent asked to check a specific run has engaged with
+a real task id, which is the thing being insisted on. Reading the workspace is not: a finished
+analysis on disk is documented and useful and is not a run.
+
+### §140, closed honestly
+
+The item said *"seven subagents still hold their invariants in prompts"*. Five admit a gate, and all
+five now have one. `report_writer` and `research_planner` are deliberately left alone: the planner
+runs nothing by design, and the writer synthesises from the conversation it was handed. Forcing an
+unnecessary call on either would make this mechanism decoration, and the next reader would treat it
+as such.
+
+Closing an item at five of seven and saying why is better than closing it at seven and being wrong
+about two.
+
+*Eighty-ninth: when a fix costs less than the test it protects, build it first. Half an hour against
+forty minutes is arithmetic, not judgement.*
 
