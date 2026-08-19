@@ -12745,3 +12745,37 @@ this finding is the first evidence for.
 *Eighty-second: the first time a monitor fires is the test of the monitor. Read its output as
 carefully as the thing it is watching.*
 
+## 228. An attachment becomes part of the conversation (2026-08-19)
+
+§227's finding, acted on. `pdf_librarian` indexed
+`/mnt/c/Users/LENOVO/Downloads/Graph-neural-networks.pdf` — a real file, in a folder people empty.
+
+Until now an attachment was **referenced where it lay**. `add_files` translated the path for WSL and
+wrote it into the composer, and that was the whole of it. So a conversation reopened next month
+could hold a library index, a citation and an analysis all naming a path that resolves to nothing —
+and nothing distinguishes that from a paper nobody read.
+
+The asymmetry is the tell: everything a turn *produces* lands in `Documents\Mini-Me\<thread>` and
+travels with the conversation (§42, §51), while everything a turn *consumes* stayed wherever the
+researcher happened to have it. The inputs are as much a part of the record as the outputs — more
+so for reproducibility, since a report can be regenerated from its data and not the reverse.
+
+So `workspace::adopt` copies an attachment in before the path is composed. Three rules:
+
+* **Never overwrite.** A taken name whose bytes match is reused, because attaching the same paper
+  twice should not litter; a taken name with different bytes gets `-2`. Replacing a file an earlier
+  turn produced is the worst outcome available in this function, and it is the one a naive copy
+  gives you.
+* **Falls back rather than refuses.** A copy that fails, or a conversation that has no folder yet,
+  leaves the path as it was and says so. Somebody who dropped a file wants to ask about it; an
+  attachment that does not persist beats one that does not arrive.
+* **A ceiling** (`ADOPT_LIMIT`, 512 MB). A PDF belongs with the conversation; a forty-gigabyte
+  genome table does not, and the copy runs on the thread that paints the window.
+
+The line above the composer says which files stayed put, because that is a decision only the
+researcher can make — *"move or delete it and this conversation loses it"* is information, not an
+error.
+
+*Eighty-third: a record that keeps what it produced and not what it consumed is half a record. The
+input is the part that cannot be regenerated.*
+
