@@ -12639,3 +12639,24 @@ degrades to what it always showed.
 *Seventy-ninth: copying the interaction and not the shape ships an affordance only its author can
 find. When mirroring an existing control, mirror the box first.*
 
+### 225a. One highlight, two actions
+
+Reported in the same breath as the heading:
+
+*"the download click redirects me to the dataverse web page which its okay but the hover colour both
+the doi redirect and the download data button. There must be a distinction there."*
+
+Both halves were one mistake. The whole row carried the page link and the download button sat
+**inside** it, so the hover fill spanned both and a press on the button opened the browser as well.
+
+The tempting fix is `cx.stop_propagation()` on the button. It would stop the browser opening and
+leave the lie in place: **a highlight is a promise about what a press will do, and one that covers
+two different actions is a wrong promise however the events are routed.** So the row is now a column
+of siblings — an `opener` holding the title and byline, which is the only part that lights up, and
+the button beside it with `Tone::Accent` so it reads as a control rather than as more of the row.
+`stop_propagation` is there too, as a guard against a future nesting quietly restoring the old
+behaviour rather than as the mechanism.
+
+*Eightieth: when one hover covers two actions, move the elements apart. Routing the event only hides
+the part the researcher can see.*
+

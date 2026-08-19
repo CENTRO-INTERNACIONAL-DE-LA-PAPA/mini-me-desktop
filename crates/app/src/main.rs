@@ -13032,7 +13032,23 @@ impl Workbench {
         let downloading = self.downloading.contains(&id);
         let downloaded = self.downloaded.get(&id).cloned();
 
+        // **Two targets, so two shapes.** The whole row used to carry the page link, with the
+        // download button sitting inside it — so the hover fill covered both, and pressing the
+        // button opened the browser as well as downloading. *"the hover colour both the doi
+        // redirect and the download data button. There must be a distinction there."*
+        //
+        // Right, and the fix is structural rather than a `stop_propagation`: a highlight is a
+        // promise about what a press will do, and one that spans two different actions is a
+        // wrong promise however the events are routed. Only the title and byline open the page,
+        // and they are the only part that lights up.
         let mut row = div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w_0()
+            .gap_1();
+
+        let mut opener = div()
             .id(SharedString::from(format!("dataset-{id}")))
             .flex()
             .flex_col()
@@ -13040,27 +13056,7 @@ impl Workbench {
             .min_w_0()
             .gap_1()
             .p_2()
-            .rounded_lg();
-
-        // The whole row opens the dataset's page, the way a reference row opens its paper — and
-        // only when there is somewhere to go, so a row never lights up and then does nothing.
-        if let Some(url) = page.clone() {
-            row = row
-                .hover(|style| {
-                    let fill = theme::hover_over(theme::surface());
-                    style
-                        .bg(rgb(fill))
-                        .text_color(rgb(theme::ink_on(fill)))
-                        .cursor_pointer()
-                })
-                .on_click(move |_event, _window, _cx| {
-                    if let Err(error) = workspace::browse(&url) {
-                        tracing::warn!(%error, "could not open a dataset");
-                    }
-                });
-        }
-
-        row = row
+            .rounded_lg()
             .child(
                 div()
                     .w_full()
@@ -13087,25 +13083,23 @@ impl Workbench {
                     }),
             );
 
-        let note = match (&downloaded, downloading, access) {
-            (Some(name), _, _) => Some(format!("Downloaded · {name}")),
-            (None, true, _) => Some("Downloading…".to_string()),
-            (None, false, None) => Some("Checking what this dataset holds…".to_string()),
-            (None, false, Some(Err(error))) => {
-                Some(format!("Could not check whether this is public: {error}"))
-            }
-            (None, false, Some(Ok(access))) => access.refusal().map(|refusal| refusal.reason()),
-        };
-        if let Some(note) = note {
-            row = row.child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .text_color(rgb(theme::text_faint()))
-                    .text_size(px(11.))
-                    .child(note),
-            );
+        // Only when there is somewhere to go, so a row never lights up and then does nothing.
+        if let Some(url) = page.clone() {
+            opener = opener
+                .hover(|style| {
+                    let fill = theme::hover_over(theme::surface());
+                    style
+                        .bg(rgb(fill))
+                        .text_color(rgb(theme::ink_on(fill)))
+                        .cursor_pointer()
+                })
+                .on_click(move |_event, _window, _cx| {
+                    if let Err(error) = workspace::browse(&url) {
+                        tracing::warn!(%error, "could not open a dataset");
+                    }
+                });
         }
+        row = row.child(opener);
 
         // The button appears only for a dataset the server says is entirely public, and its label
         // carries the size — so pressing it is never a surprise.
@@ -13115,9 +13109,16 @@ impl Workbench {
                     let offer = access.offer();
                     let wanted = dataset.clone();
                     row = row.child(
-                        div().pt_1().child(
+                        div().px_2().pb_1().child(
                             ui::Button::new(SharedString::from(format!("get-{id}")), offer)
+                                // Accent, because this is the action the list exists for and it
+                                // must read as a control rather than as more of the row.
+                                .tone(ui::Tone::Accent)
                                 .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                                    // Belt as well as braces: the opener is a sibling now, so
+                                    // nothing is behind this — but a future nesting must not
+                                    // silently reintroduce "download also opens the browser".
+                                    cx.stop_propagation();
                                     workbench.download_dataset(wanted.clone(), cx);
                                 })),
                         ),
