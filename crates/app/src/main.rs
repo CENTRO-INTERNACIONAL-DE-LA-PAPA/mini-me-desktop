@@ -1300,6 +1300,17 @@ fn producing_thread(output: &workspace::Output) -> Option<&str> {
 /// The folder wins where both speak, because inside a worker's run the manifest records that
 /// worker's *own* coordinator and would rename `background worker` to `coordinator` — technically
 /// true of the inner graph and useless to the person reading the panel.
+/// A file that records what a search returned, rather than a result of the research.
+///
+/// Kept out of the transcript's file cards only. Both are real outputs a researcher may want —
+/// they are just not things to read mid-conversation.
+fn is_search_record(output: &workspace::Output) -> bool {
+    matches!(
+        output.path.file_name().and_then(|name| name.to_str()),
+        Some("papers.json") | Some("dataverse_search.json")
+    )
+}
+
 fn by_producer(
     outputs: &[workspace::Output],
     tasks: &[protocol::AsyncTask],
@@ -9815,7 +9826,19 @@ impl Workbench {
         // Files remain after the answer that explains them. Preserve §162–§164's two bounded
         // galleries here: keeping PR #11's old per-file loop would compile and pass unit tests
         // while silently turning seven plots back into seven full transcript cards.
-        for (band, (worker, produced)) in by_producer(&message.outputs, &self.tasks, &self.authorship)
+        //
+        // **Minus the search records.** *"Papers is working, but I think its not necesary to show
+        // it in the ui."* `papers.json` and `dataverse_search.json` exist so a researcher can take
+        // the search away with them (§220) — they are not results to read in the conversation, and
+        // the Sources and Datasets panels already say what is in them. Filtered here rather than
+        // in `workspace::outputs`, so the Outputs panel and the thread's folder still list them.
+        let shown: Vec<workspace::Output> = message
+            .outputs
+            .iter()
+            .filter(|output| !is_search_record(output))
+            .cloned()
+            .collect();
+        for (band, (worker, produced)) in by_producer(&shown, &self.tasks, &self.authorship)
             .into_iter()
             .enumerate()
         {
@@ -12806,6 +12829,12 @@ impl Workbench {
     /// datasets nobody has looked at would be a burst of requests to CIP for nothing. Opening the
     /// list is the moment the answers become worth having.
     fn open_datasets(&mut self, cx: &mut Context<Self>) {
+        // Both halves, because "the modal is not working" has two causes and they need telling
+        // apart: the press never arriving, and the press arriving with nothing to show.
+        tracing::info!(
+            datasets = self.datasets.len(),
+            "opening the dataset list"
+        );
         self.datasets_open = true;
         for id in self
             .datasets
@@ -12919,7 +12948,26 @@ impl Workbench {
                             .gap_1()
                             .max_h(px(480.))
                             .overflow_y_scroll()
-                            .child(self.datasets_section(None, cx)),
+                            .child(self.datasets_section(None, cx))
+                            // A heading that opens onto nothing is indistinguishable from a
+                            // heading that does nothing. If the bucket has titles but the
+                            // structured records did not decode, say so here instead.
+                            .when(self.datasets.is_empty(), |list| {
+                                list.child(
+                                    div()
+                                        .w_full()
+                                        .min_w_0()
+                                        .p_2()
+                                        .text_color(rgb(theme::warning()))
+                                        .text_xs()
+                                        .child(
+                                            "This turn's datasets arrived without the identifiers \
+                                             needed to open or check them. The titles are in the \
+                                             Outputs panel, and dataverse_search.json in this \
+                                             conversation's folder has the full records.",
+                                        ),
+                                )
+                            }),
                     ),
             )
             .actions(
@@ -13591,9 +13639,13 @@ impl Workbench {
             // (docs §223). Only when the structured list actually arrived, so a bucket from an
             // older backend still renders as plain text rather than as a heading that does
             // nothing.
-            let openable = bucket.name == "datasets" && !self.datasets.is_empty();
+            let openable = bucket.name == "datasets" && !bucket.items.is_empty();
             let mut heading = div()
-                .id("datasets-heading")
+                // **Per bucket, not one id for all of them.** Every heading in this loop carried
+                // `"datasets-heading"`, so with two buckets on screen two sibling elements shared
+                // an element id — and gpui resolves interaction against that path. Whatever it
+                // did with the collision, it was not "call the listener on the datasets one".
+                .id(SharedString::from(format!("bucket-{}", bucket.name)))
                 .text_color(rgb(theme::text()))
                 .text_sm()
                 .child(format!("{} · {}", bucket.name, bucket.items.len()));
@@ -13940,6 +13992,26 @@ fn replay(path: &str) -> anyhow::Result<()> {
 #[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
+
+    /// The search records stay on disk and out of the conversation.
+    #[test]
+    fn a_search_record_is_not_a_transcript_card() {
+        let record = |name: &str| workspace::Output {
+            path: std::path::PathBuf::from("/w/thread").join(name),
+            name: name.to_string(),
+            kind: workspace::Kind::Data,
+            bytes: 0,
+            modified: std::time::SystemTime::UNIX_EPOCH,
+        };
+        assert!(is_search_record(&record("papers.json")));
+        assert!(is_search_record(&record("dataverse_search.json")));
+        // Everything the research actually produced still shows.
+        assert!(!is_search_record(&record("eda_distributions.png")));
+        assert!(!is_search_record(&record("cleaned.csv")));
+        assert!(!is_search_record(&record("final_report.md")));
+        // Not by extension, and not by a name that merely contains one of them.
+        assert!(!is_search_record(&record("my_papers.json")));
+    }
     use super::*;
 
     #[gpui::test]
@@ -15902,4 +15974,6 @@ fn main() {
 
         cx.activate(true);
     });
+
 }
+
