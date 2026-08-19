@@ -490,6 +490,50 @@ def _dedupe_artifacts(
     return [*merged.values(), *passthrough]
 
 
+def _merge_libraries(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge library artifacts by index, keeping every document rather than the latest slice.
+
+    **Why this one cannot use `_dedupe_artifacts`.** Every library artifact carries the same
+    ``index_path`` — ``.asta/documents`` is the default and nothing changes it — so they all collide
+    on that key, and the shallow ``{**old, **new}`` merge replaces ``papers`` wholesale. The library
+    is a *container*, and the other collections are not: a dataset artifact is one dataset, an
+    analysis is one analysis, but a library artifact is a **slice of one growing thing**.
+    ``LibraryArtifact.papers`` says so — *"Documents relevant to this turn: the ones just indexed,
+    or the search matches for a query"*.
+
+    So indexing a second paper made the first disappear from the client, while
+    ``.asta/documents/index.yaml`` held both. Reported as *"after indexing, the first paper
+    dissapeared thats weird"*, and it was: two papers on disk, one in the panel (docs §233).
+
+    ``papers`` is unioned by ``path``, first occurrence winning so the order a researcher watched
+    them arrive in is the order they keep. Scalars take the newest value — ``summary`` and
+    ``action`` describe the latest turn, and ``paper_count`` is a statement about the index *now*,
+    which is the one number that should be allowed to go down when a document is removed.
+    """
+    by_index: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for item in items:
+        index_path = str(item.get("index_path") or "")
+        if not index_path:
+            continue
+        if index_path not in by_index:
+            by_index[index_path] = {**item, "papers": []}
+            order.append(index_path)
+        held = by_index[index_path]
+        papers = list(held["papers"])
+        seen = {str(paper.get("path") or "") for paper in papers}
+        for paper in item.get("papers") or []:
+            path = str(paper.get("path") or "")
+            if path and path in seen:
+                continue
+            if path:
+                seen.add(path)
+            papers.append(paper)
+        # Scalars from the newest, the accumulated documents from all of them.
+        by_index[index_path] = {**held, **item, "papers": papers}
+    return [by_index[index_path] for index_path in order]
+
+
 def _merge_artifacts(
     left: ArtifactBundle | None,
     right: ArtifactBundle | None,
@@ -518,9 +562,10 @@ def _merge_artifacts(
             [*left.get("hypotheses", []), *right.get("hypotheses", [])],
             keys=("question",),
         ),
-        "libraries": _dedupe_artifacts(
-            [*left.get("libraries", []), *right.get("libraries", [])],
-            keys=("index_path",),
+        # Not `_dedupe_artifacts`: a library artifact is a slice of one growing thing, and every
+        # one of them keys on the same `index_path`. See `_merge_libraries`.
+        "libraries": _merge_libraries(
+            [*left.get("libraries", []), *right.get("libraries", [])]
         ),
         "analyses": _dedupe_artifacts(
             [*left.get("analyses", []), *right.get("analyses", [])],
