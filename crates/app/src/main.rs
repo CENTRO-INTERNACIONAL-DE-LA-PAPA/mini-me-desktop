@@ -13646,11 +13646,33 @@ impl Workbench {
                 // an element id — and gpui resolves interaction against that path. Whatever it
                 // did with the collision, it was not "call the listener on the datasets one".
                 .id(SharedString::from(format!("bucket-{}", bucket.name)))
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                // **A block, not a strip.** The first version hovered a bare text div, so the
+                // target was the width of the words and nothing announced it: *"if I not hover
+                // datasets thin rectangle I will never know that there is a modal there."* The
+                // same box `open-all-sources` uses — full width, padded, rounded — so the fill
+                // lands on a shape a pointer will cross on its way past.
+                .w_full()
+                .min_w_0()
+                .px_2()
+                .py_1()
+                .rounded_md()
                 .text_color(rgb(theme::text()))
                 .text_sm()
                 .child(format!("{} · {}", bucket.name, bucket.items.len()));
             if openable {
                 heading = heading
+                    // Said as well as coloured. A hover-only affordance is one a researcher finds
+                    // by accident, and this is the panel's only way into the dataset list.
+                    .child(
+                        ui::Label::new("open all")
+                            .inherit()
+                            .size(ui::Size::Compact),
+                    )
                     .hover(|style| {
                         let fill = theme::hover_over(theme::surface());
                         style
@@ -13663,14 +13685,34 @@ impl Workbench {
                     }));
             }
             let mut group = div().flex().flex_col().gap_1().child(heading);
-            for item in bucket.items.iter().take(MAX_SHOWN) {
+            // **The identifier, for datasets.** Their bucket items are titles cut at 96
+            // characters, and the four records of one multi-site study are identical up to that
+            // point — so the panel showed the same line four times. Opening the modal is one fix;
+            // the other is that a glance should already tell them apart, which is what the DOI
+            // does. Falls back to the bucket titles when the structured records are absent.
+            let rows: Vec<String> = if openable && !self.datasets.is_empty() {
+                self.datasets
+                    .iter()
+                    .take(MAX_SHOWN)
+                    .map(|dataset| {
+                        dataset
+                            .persistent_id
+                            .strip_prefix("doi:")
+                            .unwrap_or(&dataset.persistent_id)
+                            .to_string()
+                    })
+                    .collect()
+            } else {
+                bucket.items.iter().take(MAX_SHOWN).cloned().collect()
+            };
+            for item in rows {
                 group = group.child(
                     div()
                         .w_full()
                         .min_w_0()
                         .text_color(rgb(theme::text_muted()))
                         .text_xs()
-                        .child(item.clone()),
+                        .child(item),
                 );
             }
             if bucket.items.len() > MAX_SHOWN {
