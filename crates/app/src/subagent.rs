@@ -44,6 +44,26 @@ pub struct Command {
     pub prompt: String,
 }
 
+/// The characters a specialist name is made of.
+///
+/// Every name the backend registers is snake_case ASCII — `academic_researcher`,
+/// `pdf_librarian`, `data_voyager`. Hyphens are allowed because refusing them would turn a near
+/// miss into "this is not a command at all", and the picker's "did you mean" is the better answer.
+fn is_name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '-'
+}
+
+/// Whether what follows the slash could be a specialist name at all.
+///
+/// **A path is not a command.** Attaching a file puts its absolute path in the composer, and on
+/// Windows that is a WSL path — `/mnt/c/Users/…/Graph-neural-networks.pdf`. It begins with a slash
+/// and contains no whitespace, so the parser read the entire path as a name and the researcher was
+/// told *no specialist called "mnt/c/Users/LENOVO/Downloads/Graph-neural-networks.pdf"* for a turn
+/// that never mentioned a specialist by slash at all (docs §226).
+fn could_be_a_name(name: &str) -> bool {
+    name.chars().all(is_name_char)
+}
+
 /// Split `/name rest` if that is what this is.
 ///
 /// A leading slash and nothing else is still a command — that is the moment the picker should
@@ -56,6 +76,9 @@ pub fn parse(input: &str) -> Option<Command> {
         Some(at) => (&rest[..at], rest[at..].trim_start()),
         None => (rest, ""),
     };
+    if !could_be_a_name(name) {
+        return None;
+    }
     Some(Command {
         name: name.to_string(),
         prompt: prompt.to_string(),
@@ -67,7 +90,12 @@ pub fn parse(input: &str) -> Option<Command> {
 /// Only while the *name* is being typed. The first space settles it, and a picker that stayed
 /// open over the prompt would cover the transcript for the rest of the sentence.
 pub fn completing(text: &str) -> bool {
-    text.starts_with('/') && !text.contains(char::is_whitespace)
+    match text.strip_prefix('/') {
+        // Same rule as `parse`, or the picker opens over the transcript for the length of a
+        // pasted path and the two disagree about what a command is.
+        Some(rest) => !rest.contains(char::is_whitespace) && could_be_a_name(rest),
+        None => false,
+    }
 }
 
 /// The specialists worth showing for a partly-typed name, best first.
@@ -267,4 +295,54 @@ mod tests {
             "the two modes must ask for different things"
         );
     }
+
+    /// The turn the researcher actually sent, verbatim from the report.
+    #[test]
+    fn an_attached_file_is_not_a_specialist() {
+        let turn = "/mnt/c/Users/LENOVO/Downloads/Graph-neural-networks.pdf\n\
+                    Use the pdf_librarian subagent to search GNN expressivity";
+        assert!(
+            parse(turn).is_none(),
+            "a path must reach the agent as a path, not be rejected as a specialist name"
+        );
+        // And the picker must not open over the transcript while it sits there.
+        assert!(!completing("/mnt/c/Users/LENOVO/Downloads/Graph-neural-networks.pdf"));
+    }
+
+    #[test]
+    fn a_windows_path_is_not_one_either() {
+        assert!(parse("/C:\\Users\\LENOVO\\paper.pdf ask about it").is_none());
+        assert!(parse("/home/piero/data.csv").is_none());
+    }
+
+    #[test]
+    fn the_names_that_are_real_still_parse() {
+        for name in ["pdf_librarian", "data_voyager", "academic_researcher", "eda2", "a-b"] {
+            let command = parse(&format!("/{name} do the thing")).expect("a command");
+            assert_eq!(command.name, name);
+            assert_eq!(command.prompt, "do the thing");
+        }
+    }
+
+    /// The picker opens on the bare slash, which is the whole point of it opening early.
+    #[test]
+    fn a_bare_slash_is_still_a_command() {
+        let command = parse("/").expect("a command");
+        assert_eq!(command.name, "");
+        assert!(completing("/"));
+    }
+
+    /// A half-typed name keeps working — the guard must not fire on a prefix.
+    #[test]
+    fn a_partly_typed_name_still_completes() {
+        assert!(completing("/pdf_l"));
+        assert_eq!(parse("/pdf_l").expect("a command").name, "pdf_l");
+    }
+
+    /// A wrong name still reaches "did you mean", which is a better answer than silence.
+    #[test]
+    fn a_misspelled_name_is_still_a_command() {
+        assert_eq!(parse("/pdflibrarain find it").expect("a command").name, "pdflibrarain");
+    }
 }
+

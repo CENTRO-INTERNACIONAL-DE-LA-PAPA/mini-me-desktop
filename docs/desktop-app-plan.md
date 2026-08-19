@@ -12668,3 +12668,40 @@ behaviour rather than as the mechanism.
 *Eightieth: when one hover covers two actions, move the elements apart. Routing the event only hides
 the part the researcher can see.*
 
+## 226. A path is not a command (2026-08-19)
+
+*"this happens when I select a paper and ask for pdf librarian to search GNN expresivity"*
+
+> no specialist called "mnt/c/Users/LENOVO/Downloads/Graph-neural-networks.pdf"
+
+Attaching a file puts its absolute path in the composer, and on Windows that path is a **WSL** path:
+`/mnt/c/Users/LENOVO/Downloads/Graph-neural-networks.pdf`. It begins with a slash and contains no
+whitespace, which is precisely `subagent::parse`'s definition of a slash command:
+
+```rust
+let rest = input.strip_prefix('/')?;
+let (name, prompt) = match rest.find(char::is_whitespace) { … };
+```
+
+So the whole path became `command.name`, the registry had no such specialist, and the turn was
+refused — for a request that never invoked one by slash. The researcher had typed *"Use the
+pdf_librarian subagent to…"* in prose, which is the ordinary way and works fine; the attachment
+alone was enough to make the message look like a command.
+
+The fix is to say what a name is made of. Every specialist the backend registers is snake_case
+ASCII, so a candidate containing `/`, `\`, `.` or `:` is not one, and `parse` returns `None` rather
+than a `Command` nobody can satisfy. `completing` shares the rule — otherwise the picker would open
+over the transcript for the length of a pasted path while the parser had already given up on it.
+
+Hyphens stay allowed. Refusing them would turn a near miss into *"this is not a command at all"*,
+and the picker's *did you mean* is the more useful answer.
+
+### Worth noting about the failure
+
+It was **loud**, and that is why it took one screenshot rather than three days. The message named
+the exact string it choked on, so the cause was legible from the report alone. Most of this week
+went on failures that completed successfully.
+
+*Eighty-first: a prefix is not a grammar. If a token can arrive from somewhere other than the
+keyboard, say what the token is allowed to contain.*
+
