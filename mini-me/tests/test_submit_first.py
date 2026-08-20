@@ -147,3 +147,72 @@ def test_the_gates_are_attached_to_exactly_the_two_subagents():
     }
     assert holding(SubmitBeforeReporting) == {"data_voyager"}
     assert holding(TheorizeBeforeReporting) == {"hypothesis_generator"}
+
+
+# --- the guidance the working run produced (§239) ------------------------------------------------
+
+def test_the_prompt_asks_for_the_four_things_that_changed_the_outcome():
+    """Measured, not asserted. A question meeting these four fitted models; one missing the last
+    came back as a preprocessing plan with nothing fitted.
+
+    Pinned as a test because prompt text is the easiest thing in this repository to lose in an
+    edit, and the cost of losing it is a twenty-minute run that answers in prose.
+    """
+    from backend.subagents import DATA_VOYAGER_SYSTEM_PROMPT as prompt
+
+    assert "NAME THE DATASETS" in prompt
+    assert "NAME THE METHODS" in prompt
+    assert "ASK FOR THE NUMBERS" in prompt
+    assert "SAY TO RUN IT" in prompt
+    # And the example, because a rule with no instance is a rule people interpret.
+    assert "Actually run the code and report the numbers" in prompt
+
+
+def test_the_prompt_defaults_to_a_fresh_session():
+    """DataVoyager reasons over a context's whole history, so a question asked inside a session
+    about something else is answered in the light of that other thing — which is how one run
+    declined to fit anything at all."""
+    from backend.subagents import DATA_VOYAGER_SYSTEM_PROMPT as prompt
+
+    assert "pass NO `context_id`" in prompt
+    assert "ONLY when the user is explicitly continuing" in prompt
+
+
+def test_the_log_says_whether_the_session_was_reused():
+    """Requested in the prompt, recorded in the log — so a run that ignored the request is visible
+    rather than merely disappointing."""
+    import asyncio
+    import json as _json
+    from types import SimpleNamespace
+
+    from backend.datavoyager_tools import analyze_data
+
+    record = {"id": "4ee871fd-64cc-48a7-947b-6baca0e95e4c", "contextId": "ctx-9"}
+    seen: list[str] = []
+
+    class Sandbox:
+        async def aexecute(self, command, timeout=None):
+            seen.append(command)
+            return SimpleNamespace(exit_code=0, output=_json.dumps(record))
+
+    question = "Fit and compare ridge and random forest predicting y from x.csv, report R2."
+    from backend.runtime import _active_sandbox
+
+    token = _active_sandbox.set(Sandbox())
+    try:
+        fresh = _json.loads(
+            asyncio.run(analyze_data.ainvoke({"question": question, "dataset_paths": "x.csv"}))
+        )
+        assert fresh["status"] == "running"
+        # A reused session still works; the point is that it is distinguishable.
+        again = _json.loads(
+            asyncio.run(
+                analyze_data.ainvoke(
+                    {"question": question, "dataset_paths": "x.csv", "context_id": "ctx-9"}
+                )
+            )
+        )
+        assert again["status"] == "running"
+        assert "--context-id" in seen[-1] and "--context-id" not in seen[0]
+    finally:
+        _active_sandbox.reset(token)

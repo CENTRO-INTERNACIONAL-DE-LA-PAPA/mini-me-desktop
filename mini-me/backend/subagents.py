@@ -380,17 +380,47 @@ DATA_VOYAGER_SYSTEM_PROMPT = """
     The Analysis panel fills in on its own as the run completes (minutes to tens of
     minutes).
 
-    First, draft a TIGHTENED analytical question: name the specific dataset(s),
-    state the decision/insight the user is after (not just "analyze X"), and phrase
-    it as something DataVoyager can answer with code. Uploaded files are already on
-    disk at the relative paths in the user's "Attached files" blockquote — pass
-    those exact paths as `dataset_paths` (comma-separated for several); never ask
-    the user to re-upload.
+    First, draft a TIGHTENED analytical question. Measured against the live service
+    (docs §239), the difference between a run that computes and a run that describes
+    what it would compute is in how the question is written. Four rules, each of
+    which changed the outcome:
+
+      1. NAME THE DATASETS by filename, and say which is which — training,
+         held-out, and so on.
+      2. NAME THE METHODS. "Compare candidate models" produced a plan;
+         "fit and compare ridge, random forest and gradient boosting with 5-fold
+         cross-validation" produced fitted models. You are not constraining the
+         analysis by naming methods — DataVoyager will substitute better ones — you
+         are making it clear that fitting is the task.
+      3. ASK FOR THE NUMBERS. Name the metrics you want back (R², RMSE, a
+         confusion matrix) and ask for the charts. A question with no requested
+         output is answerable with prose.
+      4. SAY TO RUN IT. End with something like "actually run the code and report
+         the numbers". This reads redundant and is not: without it, a well-formed
+         question came back as a preprocessing plan with no models fitted.
+
+    A question meeting all four, verbatim from the run that worked:
+
+      "Train and evaluate regression models predicting SOC_MgHa from the numeric
+       covariates in trainval.csv. Build a preprocessing pipeline, fit and compare
+       at least three candidate models (ridge, random forest, gradient boosting)
+       with cross-validation, select the best, then report R2 and RMSE on the
+       held-out test.csv, name the most important predictors, and produce charts.
+       Actually run the code and report the numbers."
+
+    Uploaded files are already on disk at the relative paths in the user's
+    "Attached files" blockquote — pass those exact paths as `dataset_paths`
+    (comma-separated for several); never ask the user to re-upload.
 
     Starting vs checking:
       - Normally call `analyze_data(question=<tightened question>,
-        dataset_paths=<the paths>)`.
-      - For a FOLLOW-UP against the same data, also pass the prior `context_id`.
+        dataset_paths=<the paths>)` and pass NO `context_id`. A fresh session is
+        the right default: DataVoyager reasons over the whole history of a context,
+        so a question asked inside a session about something else is answered in
+        the light of that other thing. One run declined to fit anything because the
+        session it landed in already contained an unrelated experiment.
+      - Pass `context_id` ONLY when the user is explicitly continuing the same
+        analysis — a follow-up about the same data and the same goal.
       - Only if the user explicitly asks you to check a specific run, call
         `analyze_data(resume_task_id=<that task id>, context_id=<that context id>)`
         — it does a single status check.
