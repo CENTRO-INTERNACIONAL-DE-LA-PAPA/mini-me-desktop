@@ -3050,6 +3050,8 @@ struct Workbench {
     attachments: Vec<Attachment>,
     /// Attachments sent before this conversation had a folder, to copy in once it does.
     pending_adoption: Vec<std::path::PathBuf>,
+    /// Whether this launch has already collected runs that finished unattended (§243).
+    swept: bool,
     /// Narrows the open reference list. Only the modal reads it — the panel's four are a
     /// preview, and filtering something that shows four of seventeen would be a filter whose
     /// result you cannot see (§197).
@@ -3319,6 +3321,7 @@ impl Workbench {
             documents_open: false,
             attachments: Vec::new(),
             pending_adoption: Vec::new(),
+            swept: false,
             sources_filter,
             datasets_filter,
             documents_filter,
@@ -5268,6 +5271,45 @@ impl Workbench {
         self.refresh_conversations(cx);
     }
 
+    /// Ask the backend once per launch whether any background run finished unattended.
+    ///
+    /// Polling a run's route is what makes `routes/artifacts.py` write its charts and metrics into
+    /// the conversation's folder, so this *is* the collection — not a notification about it.
+    fn sweep_finished_jobs(&mut self, cx: &mut Context<Self>) {
+        if self.swept {
+            return;
+        }
+        let mut answer = self.sidecar.sweep_finished_jobs();
+        cx.spawn(async move |this, cx| {
+            if let Some(outcome) = answer.next().await {
+                let _ = this.update(cx, |workbench, cx| {
+                    match outcome {
+                        // Could not ask. Leave `swept` false so the next refresh tries again.
+                        None => {}
+                        Some(collected) => {
+                            workbench.swept = true;
+                            if collected > 0 {
+                                workbench.status = match collected {
+                                    1 => "a background run finished while you were away — its \
+                                          results are in its conversation"
+                                        .to_string(),
+                                    n => format!(
+                                        "{n} background runs finished while you were away — their \
+                                         results are in their conversations"
+                                    ),
+                                };
+                                // Their outputs just landed on disk.
+                                workbench.refresh_project(cx);
+                            }
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
     fn refresh_conversations(&mut self, cx: &mut Context<Self>) {
         // Read from disk rather than from `self.draft`, which is the Settings pane's editing
         // buffer — the same argument `remember_panels` makes. The migration must be decided by
@@ -5280,6 +5322,11 @@ impl Workbench {
         // later refresh happened to succeed. An empty project would simply not be there on the
         // launch after it was created (§167).
         self.folder_projects = workspace::projects();
+        // **Collected here because this is the call that already runs at launch and keeps
+        // retrying.** A run finishing unattended is not collected by anything else (§243), and the
+        // first attempt reliably loses the race with the starting server — so it is tried again on
+        // each refresh until the search actually answers, then never again this launch.
+        self.sweep_finished_jobs(cx);
         let mut updates = self.sidecar.list_conversations(adopt);
         cx.spawn(async move |this, cx| {
             if let Some(answer) = updates.next().await {
@@ -14527,6 +14574,26 @@ fn replay(path: &str) -> anyhow::Result<()> {
 #[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
+    /// Only unfinished ones are worth a request; a terminal job has already been collected.
+    #[test]
+    fn a_finished_run_is_not_swept_again() {
+        let base = protocol::Job {
+            kind: protocol::JobKind::Analysis,
+            task_id: "t".into(),
+            question: "q".into(),
+            context_id: None,
+            status: String::new(),
+        };
+        for status in ["completed", "failed", "canceled", "error"] {
+            let job = protocol::Job { status: status.into(), ..base.clone() };
+            assert!(job.is_finished(), "{status} must not be swept");
+        }
+        for status in ["working", "submitted", "running", "input-required"] {
+            let job = protocol::Job { status: status.into(), ..base.clone() };
+            assert!(!job.is_finished(), "{status} must be swept");
+        }
+    }
+
     /// §240: the answer explained the file was forthcoming and was flagged for not holding it.
     #[test]
     fn a_file_a_running_job_has_not_written_yet_is_not_missing() {

@@ -640,6 +640,62 @@ impl Sidecar {
     /// everything re-tagged whatever threads were left, background workers included, and the
     /// deleted rows came back (docs §166). Emptiness is a symptom; whether the migration has run
     /// is a fact, and it belongs in the settings file.
+    /// Collect any background run that finished while nobody was watching its conversation.
+    ///
+    /// One search for unfinished jobs, then one poll of each — and the poll is the whole point:
+    /// `routes/artifacts.py` persists a run's charts and metrics into the workspace when it *sees*
+    /// a terminal state, so asking is what collects them (§243).
+    ///
+    /// `Some(n)` once the search succeeded, `None` if the backend could not be asked at all —
+    /// which happens on every launch, because the first attempt races the server coming up. Errors
+    /// on an individual job are swallowed: one unreachable run must not stop the others being
+    /// collected, and none of this is worth interrupting a researcher over.
+    pub fn sweep_finished_jobs(&self) -> mpsc::UnboundedReceiver<Option<usize>> {
+        let (tx, rx) = mpsc::unbounded();
+        let base_url = self.base_url.clone();
+        self.runtime.spawn(async move {
+            let client = LangGraphClient::new(base_url);
+            //: Enough to cover anything a researcher is plausibly still waiting on.
+            const RECENT: usize = 25;
+            let jobs = match client.unfinished_jobs(RECENT).await {
+                Ok(jobs) => jobs,
+                // `debug`: the first sweep fires while the backend is still starting, so this
+                // fails once on every launch — the same argument `list_conversations` makes.
+                // `None`, not zero: the first sweep fires while the backend is still starting,
+                // and "could not ask" has to be distinguishable from "nothing to collect" or the
+                // one attempt this gets per launch is spent on a server that was not up.
+                Err(error) => {
+                    tracing::debug!(%error, "could not sweep background runs yet");
+                    let _ = tx.unbounded_send(None);
+                    return;
+                }
+            };
+            let mut collected = 0usize;
+            for (thread_id, job) in jobs {
+                match client.poll_job(&thread_id, &job).await {
+                    Ok(status) => {
+                        let mut settled = job.clone();
+                        settled.status = status;
+                        if settled.is_finished() {
+                            collected += 1;
+                            tracing::info!(
+                                thread = %thread_id,
+                                task = %job.task_id,
+                                kind = job.kind.label(),
+                                "collected a background run that finished unattended"
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        tracing::debug!(%error, task = %job.task_id, "could not poll a run")
+                    }
+                }
+            }
+            let _ = tx.unbounded_send(Some(collected));
+        });
+        rx
+    }
+
     pub fn list_conversations(&self, adopt: bool) -> mpsc::UnboundedReceiver<Adopted> {
         let (tx, rx) = mpsc::unbounded();
         let base_url = self.base_url.clone();

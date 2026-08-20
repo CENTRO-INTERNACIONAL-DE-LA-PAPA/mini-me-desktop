@@ -1191,6 +1191,75 @@ impl LangGraphClient {
             .to_string())
     }
 
+    /// Every unfinished background run across recent conversations, with the thread that owns it.
+    ///
+    /// # Why this exists
+    ///
+    /// A run's outputs are collected by `routes/artifacts.py` **only when something polls its
+    /// route and sees a terminal state** — and the only poller was `sidecar::watch_job`, which
+    /// ticks every twenty seconds *while the app is open on that conversation* and returns the
+    /// moment the open thread changes. So a forty-minute analysis that finished while the
+    /// researcher was reading something else was never collected, and its charts and metrics sat
+    /// on Asta's side indefinitely (docs §242, §243).
+    ///
+    /// For a feature whose whole premise is *"you can keep working"*, that had it backwards: the
+    /// longer the run, the likelier they had moved on, and the likelier its results were lost.
+    ///
+    /// # Why it is one request
+    ///
+    /// `values` is a selectable column on `POST /threads/search`
+    /// (`langgraph_api.schema.THREAD_FIELDS`), and a thread's `values.artifacts` is exactly what
+    /// [`decode_jobs`] already reads. So the sweep needs no per-thread fetch — one search, asking
+    /// only for the id and the state.
+    ///
+    /// Bounded deliberately. `limit` is small and the sort is most-recently-updated: a run old
+    /// enough to fall off that list is one nobody is waiting for, and paying for two hundred
+    /// threads' full artifact bundles at every launch to find it would be the wrong trade.
+    pub async fn unfinished_jobs(&self, limit: usize) -> Result<Vec<(String, Job)>> {
+        let resp = self
+            .http
+            .post(format!("{}/threads/search", self.base_url))
+            .json(&json!({
+                "limit": limit,
+                "sort_by": "updated_at",
+                "sort_order": "desc",
+                "metadata": { CONVERSATION_TAG: true },
+                // Only what the sweep reads. The sidebar's own search asks for the metadata it
+                // needs and deliberately does not ask for this, because `values` carries every
+                // artifact a conversation ever produced.
+                "select": ["thread_id", "values"],
+            }))
+            .send()
+            .await
+            .context("searching for unfinished background runs failed")?
+            .error_for_status()
+            .context("the thread-search route returned an error status")?;
+        let threads: Value = resp
+            .json()
+            .await
+            .context("could not decode the background-run search")?;
+        let mut found = Vec::new();
+        for thread in threads.as_array().map(Vec::as_slice).unwrap_or_default() {
+            let Some(thread_id) = thread
+                .get("thread_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+            else {
+                continue;
+            };
+            let Some(artifacts) = thread.get("values").and_then(|v| v.get("artifacts")) else {
+                continue;
+            };
+            for job in decode_jobs(artifacts) {
+                if !job.is_finished() {
+                    found.push((thread_id.to_string(), job));
+                }
+            }
+        }
+        Ok(found)
+    }
+
     /// Read a background worker's thread: is it running, finished, or waiting on a person?
     ///
     /// `GET /threads/{id}/state` answers all three at once. Its `tasks[].interrupts[]`
@@ -4609,5 +4678,25 @@ mod tests {
     fn no_libraries_key_is_an_empty_list() {
         assert!(decode_documents(&json!({"datasets": []})).is_empty());
     }
-}
 
+    /// §243: the sweep asks about a thread other than the open one, which is the whole point.
+    #[test]
+    fn an_unfinished_run_is_collected_from_whichever_thread_owns_it() {
+        let running = Job {
+            kind: JobKind::Analysis,
+            task_id: "4c290c71-be43-421a-8273-2f98dcc7b331".into(),
+            question: "SOC modelling".into(),
+            context_id: Some("eb663608-04c1-4140-a673-ac8dc98a2507".into()),
+            status: "working".into(),
+        };
+        // The route is built from the thread id it is asked about, not from whatever is open —
+        // `watch_job` reads the current thread and returns when it changes, which is exactly why
+        // an unattended run was never collected.
+        let mine = running.route("01a02077-afba-7c41-8b13-6a1a8553a20b");
+        let other = running.route("01a02025-13df-7f80-8de0-2df11585ab3e");
+        assert_ne!(mine, other);
+        assert!(mine.contains("01a02077-afba-7c41-8b13-6a1a8553a20b"), "{mine}");
+        assert!(mine.contains(&running.task_id), "{mine}");
+    }
+
+}
