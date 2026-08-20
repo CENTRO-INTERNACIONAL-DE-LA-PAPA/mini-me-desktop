@@ -48,7 +48,8 @@ _EXPORT_TIMEOUT_S = 120
 _UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 # Sandbox path the submit response JSON (task id + context id) is written to.
-# Fixed name — successive submits overwrite it; transient CLI scratch.
+# Fixed name, and therefore cleared before every submit: a failed run used to leave the previous
+# run's response here to be read as its own (§238). See `_submit_shell`.
 _SUBMIT_OUT = "/tmp/asta-analyze-data-submit.json"
 
 #: Shorter than this is not an analytical question. Set from the shape the subagent is asked for —
@@ -158,10 +159,21 @@ print(json.dumps(out))
 def _submit_shell(
     question: str, dataset_paths: list[str], context_id: str | None
 ) -> str:
-    """Shell: submit, discard the progress stream, cat the response JSON back."""
+    """Shell: clear last run's response, submit, then cat this run's back.
+
+    **The `rm -f` is the point.** `--output` names one fixed path, reused by every submission, and
+    the command discards stdout and stderr because `asta` streams progress there. So a submission
+    that *failed* left the previous run's JSON sitting in that file, and `cat` handed it back as
+    though it were this run's answer — a stale task id, or a live one belonging to somebody else's
+    question (docs §238).
+
+    Clearing it first makes the failure legible: nothing to read means nothing was submitted, which
+    is what `_submit` now reports instead of guessing.
+    """
     argv = _build_submit_command(question, dataset_paths, context_id=context_id)
     cmd = " ".join(shlex.quote(a) for a in argv)
-    return f"{cmd} >/dev/null 2>&1; cat {shlex.quote(_SUBMIT_OUT)}"
+    out = shlex.quote(_SUBMIT_OUT)
+    return f"rm -f {out}; {cmd} >/dev/null 2>&1; cat {out} 2>/dev/null"
 
 
 def _task_shell(task_id: str) -> str:
@@ -308,6 +320,12 @@ async def _run(sandbox: Any, command: str, timeout: int) -> str:
     # back to `aexecute` for stubs/sandboxes lacking the untruncated method.
     runner = getattr(sandbox, "aexecute_untruncated", None) or sandbox.aexecute
     resp = await runner(command, timeout=timeout)
+    # Either shape, for the reason `_exit_and_output` two functions down already says: the sandbox
+    # protocol returns both, and this one read only attributes — so a dict-shaped response became an
+    # empty string, indistinguishable from a command that printed nothing. §224 was this exact
+    # mistake one module over, where `ReadResult.file_data` is a TypedDict.
+    if isinstance(resp, dict):
+        return resp.get("output") or ""
     return getattr(resp, "output", "") or ""
 
 
@@ -317,16 +335,31 @@ async def _submit(
     """Submit a run; return the task id + context id, or None on failure."""
     out = await _run(sandbox, _submit_shell(question, dataset_paths, context_id), _SUBMIT_TIMEOUT_S)
     record = _extract_json(out)
-    task_id = ""
-    ctx = context_id or ""
-    if isinstance(record, dict):
-        task_id = str(record.get("id") or "")
-        ctx = str(record.get("contextId") or ctx)
+    if not isinstance(record, dict):
+        # **No response, no task.** The old code fell back to `_UUID_RE.search(out)` over the whole
+        # output, which will match *any* UUID that happens to be there — and did: a run reported
+        # task `01a01fda-41b2-7d01-…`, a UUIDv7 in the shape of this app's own thread ids, which
+        # Asta answered with `{"error": {"code": -32001, "message": "Task not found"}}`. The
+        # researcher then waited on a run that did not exist (§238).
+        logger.warning(
+            "analyze-data submit produced no readable response; %d char(s) of output",
+            len(out or ""),
+        )
+        return None
+    task_id = str(record.get("id") or "")
+    ctx = str(record.get("contextId") or context_id or "")
     if not is_valid_task_id(task_id):
-        match = _UUID_RE.search(out)
+        # Narrowed to the record: a response we *did* parse may carry the id under a key this
+        # version does not know, and searching inside it cannot pick up an unrelated one.
+        match = _UUID_RE.search(json.dumps(record))
         task_id = match.group(0) if match else ""
     if not is_valid_task_id(task_id):
+        logger.warning("analyze-data submit response carried no task id: %.200s", record)
         return None
+    if not ctx:
+        # Not fatal — polling needs only the task id — but a follow-up against the same workspace
+        # needs the context, so a missing one is worth a line rather than a silent limitation.
+        logger.warning("analyze-data submitted task=%s with no context id", task_id)
     return {"task_id": task_id, "context_id": ctx}
 
 

@@ -13225,3 +13225,52 @@ Argument quality is the tool's own job, which is where this fix went.
 *Ninety-second: a run that completes is not a run that did anything. Check what was asked, not only
 what came back.*
 
+## 238. The task that did not exist (2026-08-19)
+
+§237's log line worked. The re-run recorded exactly what was asked:
+
+```
+INFO analyze-data submitted task=01a01fda-41b2-7d01-80e6-db886bfbcdbb context= over 2 dataset(s):
+  Using the uploaded tabular datasets `…SOC_Covariables_TrainValV5.csv` (training/validation) and …
+```
+
+A real analytical question. And two details in that line were wrong in a way worth reading: **the
+context was empty**, and the task id was a **UUIDv7** — the shape of this app's own thread ids
+(`01a01b9d-31dc-7d31-…`), where the previous real task had been `4ee871fd-64cc-48a7-…`, a v4.
+
+```
+$ asta analyze-data task 01a01fda-41b2-7d01-80e6-db886bfbcdbb
+{"error": {"code": -32001, "message": "Task not found"}}
+```
+
+The researcher was waiting on a run that did not exist.
+
+### Three compounding flaws in eleven characters of shell
+
+```
+asta … submit --output /tmp/asta-analyze-data-submit.json >/dev/null 2>&1; cat …
+```
+
+1. **`>/dev/null 2>&1` discards the error.** Justified — `asta` streams progress there — and it means
+   a failed submit is indistinguishable from a successful one at the shell level.
+2. **`--output` names one fixed path, reused by every submission.** So a failed run left the
+   *previous* run's response to be `cat` back as its own.
+3. **`_UUID_RE.search(out)` over the whole output.** When the JSON did not parse, this took any
+   UUID it could find — and the output carries plenty that are not task ids.
+
+Each is survivable; together they manufacture a plausible task id out of ambient text. `rm -f`
+before the submit makes an absent response absent, and the fallback is narrowed to the parsed record
+— an id under an unfamiliar key is recoverable, noise beside the JSON is not. A missing context id
+now gets its own line, since polling does not need it but a follow-up does.
+
+### And the same shape mistake as §224, two functions apart
+
+`_run` read `getattr(resp, "output", "")`. Immediately below it, `_exit_and_output` handles *both*
+shapes with a docstring saying the protocol returns both. So a dict-shaped response made `_run`
+return `""` — indistinguishable from a command that printed nothing, which is precisely how this
+class of bug stays hidden. Found by a test fake built to the wrong shape, which is the fourth time
+this week a double and its subject have disagreed and the third time the double was right to.
+
+*Ninety-third: a fallback that guesses from surrounding text will eventually guess. Prefer failing
+where the answer should have been to succeeding with something that was merely nearby.*
+

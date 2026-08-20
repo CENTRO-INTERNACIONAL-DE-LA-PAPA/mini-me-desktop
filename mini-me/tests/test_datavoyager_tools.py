@@ -13,6 +13,8 @@ the blocking `poll`), and terminal states persist + export to the sandbox.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import asyncio
 import json
 import subprocess
@@ -418,3 +420,95 @@ def test_a_real_question_is_not_refused_for_its_length():
     assert len(real) >= MIN_QUESTION_CHARS
     # And the threshold is low enough that a terse but genuine question survives it.
     assert len("Does yield vary with cultivar in trials.csv?") >= MIN_QUESTION_CHARS
+
+
+# --- a task id is read, never scavenged (§238) --------------------------------------------------
+
+def test_the_previous_response_is_cleared_before_a_submit():
+    """`--output` names one path for every run, so a failed submit left the last one's JSON there.
+
+    A run reported task `01a01fda-41b2-7d01-…` — a UUIDv7 in the shape of this app's own thread ids
+    — and Asta answered `{"error": {"code": -32001, "message": "Task not found"}}`. The researcher
+    waited on a run that did not exist.
+    """
+    from backend.datavoyager_tools import _SUBMIT_OUT, _submit_shell
+
+    shell = _submit_shell("a real analytical question about x.csv", ["x.csv"], None)
+    assert shell.startswith(f"rm -f {_SUBMIT_OUT}"), shell
+    # And the clear must come before the submit, or it deletes the answer it just wrote.
+    assert shell.index("rm -f") < shell.index("analyze-data")
+    assert shell.rstrip().endswith(f"cat {_SUBMIT_OUT} 2>/dev/null")
+
+
+def test_no_readable_response_is_a_failure_and_not_a_guess():
+    """The old fallback searched the whole output for any UUID, and found one that was not a task."""
+    import asyncio
+
+    from backend.datavoyager_tools import _submit
+
+    class Sandbox:
+        async def aexecute(self, command, timeout=None):
+            # No JSON, and a UUID sitting in the noise — exactly the shape that produced a
+            # phantom task id.
+            # The production shape: an object with `.output`, as the overlay's ExecuteResponse is.
+            return SimpleNamespace(
+                exit_code=1,
+                output="cat: /tmp/asta-analyze-data-submit.json: No such file\n"
+                "[cwd] /w run_id=01a01fda-41b2-7d01-80e6-db886bfbcdbb",
+            )
+
+    assert asyncio.run(_submit(Sandbox(), "a real analytical question", ["x.csv"], None)) is None
+
+
+def test_a_parsed_response_still_yields_its_ids():
+    """The working path has to keep working."""
+    import asyncio
+    import json as _json
+
+    from backend.datavoyager_tools import _submit
+
+    record = {"id": "4ee871fd-64cc-48a7-947b-6baca0e95e4c", "contextId": "a755964b-8cad-4078-9d8c-df8a3d0ea1c2"}
+
+    class Sandbox:
+        async def aexecute(self, command, timeout=None):
+            return SimpleNamespace(exit_code=0, output=_json.dumps(record))
+
+    got = asyncio.run(_submit(Sandbox(), "a real analytical question", ["x.csv"], None))
+    assert got == {"task_id": record["id"], "context_id": record["contextId"]}
+
+
+def test_a_uuid_outside_the_record_is_not_promoted_to_a_task_id():
+    """Narrowed to the parsed record: an id under an unknown key is recoverable, ambient noise is not."""
+    import asyncio
+    import json as _json
+
+    from backend.datavoyager_tools import _submit
+
+    class Sandbox:
+        async def aexecute(self, command, timeout=None):
+            # Valid JSON, no usable id inside it, and a UUID in the trailing noise.
+            return SimpleNamespace(
+                exit_code=0,
+                output=_json.dumps({"status": "accepted"})
+                + "\n[cwd] /w run_id=01a01fda-41b2-7d01-80e6-db886bfbcdbb",
+            )
+
+    assert asyncio.run(_submit(Sandbox(), "a real analytical question", ["x.csv"], None)) is None
+
+
+def test_a_dict_shaped_response_is_read_too():
+    """`_exit_and_output` handles both shapes and `_run` handled one, so a dict became "" —
+    indistinguishable from a command that printed nothing. §224, one module over."""
+    import asyncio
+    import json as _json
+
+    from backend.datavoyager_tools import _submit
+
+    record = {"id": "4ee871fd-64cc-48a7-947b-6baca0e95e4c", "contextId": "ctx-1"}
+
+    class Sandbox:
+        async def aexecute(self, command, timeout=None):
+            return {"exit_code": 0, "output": _json.dumps(record)}
+
+    got = asyncio.run(_submit(Sandbox(), "a real analytical question", ["x.csv"], None))
+    assert got == {"task_id": record["id"], "context_id": "ctx-1"}
