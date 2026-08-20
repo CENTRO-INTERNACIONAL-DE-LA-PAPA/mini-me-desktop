@@ -638,10 +638,15 @@ async def analyze_data(
     # **The question, not only the ids.** A run submitted with a greeting looked identical in the
     # log to one submitted with a real analytical question, so the line that was supposed to answer
     # "did it run" could not answer "what did it ask" (§237).
+    # `reused` because a context is history DataVoyager reasons over: a question asked inside a
+    # session about something else gets answered in the light of that other thing, which is how one
+    # run came back declining to fit anything (§239). Requested in the prompt, recorded here — so
+    # a run that ignored the request is visible rather than merely disappointing.
     logger.info(
-        "analyze-data submitted task=%s context=%s over %d dataset(s): %.160s",
+        "analyze-data submitted task=%s context=%s%s over %d dataset(s): %.160s",
         submitted["task_id"],
         submitted["context_id"],
+        " (reused)" if ctx else " (fresh)",
         len(paths),
         question,
     )

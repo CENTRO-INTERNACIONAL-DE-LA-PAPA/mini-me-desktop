@@ -40,10 +40,10 @@ read first; the dated sections below it are the record of how each item got here
   **records and does not block**, deliberately: the rules worth enforcing are the ones that come
   from failures actually seen. It read `ReadResult.file_data.content` for two days against a
   `TypedDict`, so the dataverse half never ran until §224. **Nothing has been read off it yet.**
-- ⬜ **`data_voyager` and `pdf_librarian` have still never been run end to end.** The two subagents
-  the researcher named as untested on 2026-08-18, and the largest unknown in the product: both
-  submit-and-poll, both take tens of minutes, and no run of either is recorded anywhere. The
-  recorder now works, so the next attempt at each produces evidence either way.
+- ✅ **All eleven subagents have now been run** (§230, §235–§239). `pdf_librarian` was fabricating
+  its library and is gated; `data_voyager` submits, fits models and returns metrics and charts —
+  measured against the live service on a dataset of the researcher's shape, recovering a planted
+  signal in the correct order.
 - ✅ **Every subagent that can be gated, is** (§133, §142, §230, §234). §140 counted seven; five
   admit a gate and all five now have one. `report_writer` and `research_planner` are deliberately
   left out — the planner runs nothing by design and the writer synthesises from the conversation, so
@@ -13273,4 +13273,65 @@ this week a double and its subject have disagreed and the third time the double 
 
 *Ninety-third: a fallback that guesses from surrounding text will eventually guess. Prefer failing
 where the answer should have been to succeeding with something that was merely nearby.*
+
+## 239. Proving it works is not making it work (2026-08-19)
+
+*"so did you make a code change, pull request or something to we are SURE that this will work?"*
+
+No. The experiment was diagnostic and shipped nothing, so the next in-app run had exactly the
+guarantee the last one did. Fair hit, and the gap is this section.
+
+### What the experiment established
+
+DataVoyager was handed a synthetic dataset of the researcher's shape — 297×116 train, 54×116
+held-out, 114 float columns and two string columns — with a real signal planted in four covariates
+at weights 40, 25, −18 and 9. Clean context, explicit modelling instruction:
+
+```
+figures: 3        code: 4,379 chars     two full planner→programmer→data_expert cycles
+Ridge / Random Forest / Gradient Boosting, preprocessing pipeline, 5-fold CV
+Ridge (α=10) selected — CV R²=0.878, RMSE=17.43
+Held-out:                R²=0.927, RMSE=13.42
+Top predictors: cov_000, cov_005, cov_011
+```
+
+It recovered the top three planted covariates by magnitude, in order. That is the difference between
+a plausible answer and a correct one, and it is why the synthetic data carried a known signal.
+
+So **DataVoyager is not broken**, and the three failures before it were §237's garbage question,
+§238's phantom task id, and a context already holding an unrelated experiment.
+
+### What actually shipped
+
+Two changes, and it is worth being exact about which is enforced and which is requested — the
+distinction this project has spent the week drawing.
+
+**Requested.** `DATA_VOYAGER_SYSTEM_PROMPT` now carries the four rules that changed the outcome,
+each one measured rather than reasoned about: name the datasets and their roles; **name the
+methods** ("compare candidate models" produced a plan, "fit and compare ridge, random forest and
+gradient boosting" produced fitted models); ask for the metrics and charts by name; and end by
+saying to run it — which reads redundant and is not, because a well-formed question without it came
+back as a preprocessing plan. The example is the verbatim question from the run above, because a
+rule with no instance is a rule people interpret.
+
+It also now defaults to **no `context_id`**. DataVoyager reasons over a context's whole history, so a
+question asked inside a session about something else is answered in the light of that other thing —
+which is precisely how a correctly-worded question got declined.
+
+**Enforced.** Nothing new, and saying so matters. `MIN_QUESTION_CHARS` (§237) already stops the
+degenerate case that poisoned that context in the first place, and §234's gate already stops a
+fabricated run. What cannot be enforced is the *quality* of a well-formed question — so the submit
+line records ` (fresh)` or ` (reused)`, making a run that ignored the guidance visible in the record
+rather than merely disappointing. The four rules are pinned by a test, because prompt text is the
+easiest thing here to lose in an edit and the cost of losing it is a twenty-minute run answered in
+prose.
+
+### The honest caveat
+
+The working run changed two variables at once: a fresh context *and* a more explicit question. Which
+mattered more is not established. Both are addressed, and if the next in-app run still describes
+instead of computing, the log line now says which of the two was in play.
+
+*Ninety-fourth: a diagnostic that ends in understanding ends too early. The question is not "do I
+know why" but "what did I change so it cannot happen again".*
 
