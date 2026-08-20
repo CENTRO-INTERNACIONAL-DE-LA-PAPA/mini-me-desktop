@@ -512,3 +512,159 @@ def test_a_dict_shaped_response_is_read_too():
 
     got = asyncio.run(_submit(Sandbox(), "a real analytical question", ["x.csv"], None))
     assert got == {"task_id": record["id"], "context_id": "ctx-1"}
+
+
+# --- the charts asta artifacts leaves encoded (§242) ---------------------------------------------
+
+def test_the_export_also_decodes_the_figures():
+    from backend.datavoyager_tools import _export_shell
+
+    shell = _export_shell("4c290c71-be43-421a-8273-2f98dcc7b331", "/w/analysis")
+    assert "asta artifacts" in shell
+    assert "python3 -c" in shell
+    # `;` not `&&` before the figures step: losing the charts because upstream's exporter
+    # returned non-zero would be the wrong trade.
+    assert shell.index("asta artifacts") < shell.index("python3 -c")
+    assert "&& python3" not in shell
+
+
+def test_the_extractor_survives_shell_quoting():
+    """Single-quoted into a shell command, so an apostrophe would end the string early."""
+    from backend.datavoyager_tools import _FIGURES_PY
+
+    assert "'" not in _FIGURES_PY
+
+
+def _run_extractor(tmp, task):
+    """Execute `_FIGURES_PY` the way the sandbox does: a real subprocess over a real file."""
+    import json as _json
+    import subprocess
+    import sys
+
+    from backend.datavoyager_tools import _FIGURES_PY
+
+    run = tmp / "run"
+    run.mkdir(parents=True, exist_ok=True)
+    (run / "task.json").write_text(_json.dumps(task))
+    script = tmp / "extract.py"
+    script.write_text(_FIGURES_PY)
+    out = subprocess.run(
+        [sys.executable, str(script), str(run), str(run)], capture_output=True, text=True
+    )
+    return run, out
+
+
+def _figure(caption, png=b"\x89PNG\r\n\x1a\nDATA"):
+    import base64
+
+    return {"caption": caption, "imageb64": base64.b64encode(png).decode()}
+
+
+def test_figures_inside_the_dv_answer_cell_are_written_as_png(tmp_path):
+    """Where they actually live — measured against a completed run (6 of them, 790x590)."""
+    import json as _json
+
+    task = {
+        "artifacts": [
+            {
+                "parts": [
+                    {
+                        "data": {
+                            "logs": [
+                                {"source": "planner", "content": "objective"},
+                                {
+                                    "source": "dv_answer",
+                                    "content": _json.dumps(
+                                        {
+                                            "final_answer": "done",
+                                            "figures": [
+                                                _figure("Ridge importances"),
+                                                _figure("CV performance"),
+                                            ],
+                                        }
+                                    ),
+                                },
+                            ]
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+    run, out = _run_extractor(tmp_path, task)
+    assert out.stdout.strip() == "2", out.stderr
+    assert (run / "figure-01.png").read_bytes().startswith(b"\x89PNG")
+    assert (run / "figure-02.png").exists()
+    # Captioned, so the markdown is readable beside the images.
+    md = (run / "figures.md").read_text()
+    assert "![Ridge importances](figure-01.png)" in md
+    assert "![CV performance](figure-02.png)" in md
+
+
+def test_figures_on_the_part_itself_are_written_too(tmp_path):
+    """Two shapes, because a reader that handled one shape is how §224 and §238 happened."""
+    task = {"artifacts": [{"parts": [{"data": {"figures": [_figure("On the part")]}}]}]}
+    run, out = _run_extractor(tmp_path, task)
+    assert out.stdout.strip() == "1", out.stderr
+    assert (run / "figure-01.png").exists()
+
+
+def test_a_run_with_no_figures_writes_nothing_and_does_not_fail(tmp_path):
+    task = {"artifacts": [{"parts": [{"data": {"logs": []}}]}]}
+    run, out = _run_extractor(tmp_path, task)
+    assert out.returncode == 0
+    assert out.stdout.strip() == "0"
+    assert not (run / "figures.md").exists()
+    assert not list(run.glob("figure-*.png"))
+
+
+def test_a_corrupt_figure_costs_only_itself(tmp_path):
+    """One bad base64 blob must not take the other five with it."""
+    import json as _json
+
+    task = {
+        "artifacts": [
+            {
+                "parts": [
+                    {
+                        "data": {
+                            "logs": [
+                                {
+                                    "source": "dv_answer",
+                                    "content": _json.dumps(
+                                        {
+                                            "figures": [
+                                                {"caption": "bad", "imageb64": "!!!not base64!!!"},
+                                                _figure("good"),
+                                            ]
+                                        }
+                                    ),
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+    run, out = _run_extractor(tmp_path, task)
+    assert out.returncode == 0
+    assert (run / "figures.md").read_text().count("![") == 1
+    assert "good" in (run / "figures.md").read_text()
+
+
+def test_a_missing_task_record_is_not_an_error(tmp_path):
+    """The export step runs with `;`, so this is reachable whenever `asta artifacts` failed."""
+    import subprocess
+    import sys
+
+    from backend.datavoyager_tools import _FIGURES_PY
+
+    script = tmp_path / "extract.py"
+    script.write_text(_FIGURES_PY)
+    empty = tmp_path / "nothing"
+    empty.mkdir()
+    out = subprocess.run(
+        [sys.executable, str(script), str(empty), str(empty)], capture_output=True, text=True
+    )
+    assert out.returncode == 0, out.stderr
