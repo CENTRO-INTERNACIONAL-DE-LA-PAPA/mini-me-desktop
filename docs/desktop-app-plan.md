@@ -13394,3 +13394,54 @@ the upstream notes rather than being forgotten because it scrolled past.
 *Ninety-fifth: "this needs a careful branch" is a guess about risk. Enumerate the surfaces, check
 each one, and the careful branch is often an afternoon.*
 
+## 242. Six charts nobody could see (2026-08-20)
+
+The SOC run finished. *"But I dont see anythin in the ui. nor images, code nor code files related to
+data voyager."*
+
+Two separate causes, one already known and one not.
+
+### The export never ran, because nobody polled
+
+`routes/artifacts.py` exports only on observing a terminal state:
+
+```python
+if result.get("status") in ("completed", "failed", "canceled"):
+    await persist_analysis_outputs(adapter, task_id, question, result)
+```
+
+and the only thing that calls that route is `sidecar::watch_job`, which polls every twenty seconds
+**while the app is open on that conversation** — it re-reads the current thread each tick and returns
+if it changed. The run completed at 18:44 with nobody watching, so the outputs sat on Asta's side.
+
+Reopening the conversation fixed it (`track_job` runs again on load, the watcher restarts, the route
+fires): *"Data analysis finished — its results are in the sandbox"*, FILES · 8.
+
+**Which means the collection depends on the researcher being on the right screen at the right
+minute** — for a feature whose entire premise is *"you can keep working"* during a forty-minute run.
+The longer the run, the likelier they have moved on. Nothing sweeps unfinished jobs at launch. Named
+here and not fixed here; it is the next thing.
+
+### `asta artifacts` does not write the images
+
+Even with the export run, no charts. Measured against a completed record:
+
+```
+--format md    manifest.json 279 B    index.md 129 B     data/<id>.json 406 KB
+--format html  manifest.json 279 B    index.html 2.7 KB  data/<id>.json 406 KB
+```
+
+Neither emits a single image. The six figures the answer described — and *captioned* — existed only
+as base64 inside that JSON. The researcher's own read was exactly right: *"I think all the images
+code etc are in task.json encoded."*
+
+So `_FIGURES_PY` decodes them in-sandbox, beside the export rather than inside it, because the export
+directory is upstream output and this is ours. Verified against the real record: six PNGs, 790×590
+and smaller, plus a `figures.md` carrying upstream's captions. Both shapes are read — figures on the
+part and figures inside the `dv_answer` cell — because a reader that handled one shape is how §224
+and §238 happened. A corrupt blob costs only itself, and the step runs after `;` rather than `&&`:
+losing the charts because upstream's exporter returned non-zero would be the wrong trade.
+
+*Ninety-sixth: "the artifacts were exported" is a claim about a directory, not about what is in it.
+Look in the directory.*
+

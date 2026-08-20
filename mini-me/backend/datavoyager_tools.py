@@ -186,22 +186,91 @@ def _task_shell(task_id: str) -> str:
     return f"{fetch} 2>/dev/null | python3 -c {shlex.quote(_REDUCE_TASK_PY)}"
 
 
+# In-sandbox extractor for the figures DataVoyager produced.
+#
+# **`asta artifacts` does not write them.** Measured against a completed run: with `--format md` it
+# produces `manifest.json` (279 B), a 129-byte `index.md` and one `data/<id>.json` of 406 KB;
+# `--format html` swaps in a 2.7 KB `index.html` and is otherwise identical. Neither emits an
+# image. Six charts a researcher had been told were saved existed only as base64 inside that JSON
+# (docs §242).
+#
+# So they are decoded here, beside the export rather than inside it, because the export directory
+# is upstream output and this is ours. Reads the record from disk so the blob never crosses back to
+# the server, same argument as `_REDUCE_TASK_PY`. Apostrophe-free so it survives shell quoting.
+_FIGURES_PY = """
+import sys, json, base64, os
+run_dir, out_dir = sys.argv[1], sys.argv[2]
+try:
+    t = json.load(open(os.path.join(run_dir, "task.json")))
+except Exception:
+    sys.exit(0)
+found = []
+for a in t.get("artifacts") or []:
+    for p in a.get("parts") or []:
+        d = p.get("data") or {}
+        # Either shape: figures on the part, or inside the dv_answer log cell.
+        for f in d.get("figures") or []:
+            found.append(f)
+        for l in d.get("logs") or []:
+            if l.get("source") != "dv_answer":
+                continue
+            try:
+                ans = json.loads(l.get("content") or "")
+            except Exception:
+                continue
+            for f in ans.get("figures") or []:
+                found.append(f)
+try:
+    os.makedirs(out_dir, exist_ok=True)
+except Exception:
+    sys.exit(0)
+captions, n = [], 0
+for f in found:
+    b = f.get("imageb64")
+    if not isinstance(b, str) or not b:
+        continue
+    try:
+        raw = base64.b64decode(b)
+    except Exception:
+        continue
+    n += 1
+    name = "figure-%02d.png" % n
+    try:
+        open(os.path.join(out_dir, name), "wb").write(raw)
+    except Exception:
+        continue
+    cap = str(f.get("caption") or "").strip().replace(chr(10), " ")
+    captions.append("![%s](%s)" % (cap or name, name))
+if captions:
+    try:
+        open(os.path.join(out_dir, "figures.md"), "w").write("\\n\\n".join(captions) + "\\n")
+    except Exception:
+        pass
+print(n)
+"""
+
+
 def _export_shell(task_id: str, base_dir: str) -> str:
-    """Shell: fetch the FULL task record in-sandbox and export its artifacts.
+    """Shell: fetch the FULL task record in-sandbox, export it, and decode its figures.
 
     Keeps the large record entirely inside the sandbox (never pulled back to the
     server): dump `asta analyze-data task` to ``<base>/<id>/task.json``, then
-    ``asta artifacts`` renders the charts/notebook/tables to
-    ``<base>/<id>/export`` as markdown. Those files (non-hidden) are picked up by
-    ``FileSyncMiddleware``.
+    ``asta artifacts`` renders what it can to ``<base>/<id>/export``, then
+    `_FIGURES_PY` writes the charts `asta artifacts` leaves encoded — as
+    ``<base>/<id>/figure-NN.png`` plus a ``figures.md`` that captions them. Those
+    files (non-hidden) are picked up by ``FileSyncMiddleware``.
     """
     tid = shlex.quote(task_id)
     run_dir = shlex.quote(f"{base_dir}/{task_id}")
     export_dir = shlex.quote(f"{base_dir}/{task_id}/export")
+    figures = shlex.quote(_FIGURES_PY)
     return (
         f"mkdir -p {run_dir} && "
         f"asta analyze-data task {tid} > {run_dir}/task.json 2>/dev/null && "
-        f"asta artifacts --input {run_dir} --output {export_dir} --format md 2>/dev/null"
+        f"asta artifacts --input {run_dir} --output {export_dir} --format md 2>/dev/null; "
+        # `;` not `&&`: the charts are the part a researcher looks at, and losing them because
+        # upstream's exporter returned non-zero would be the wrong trade.
+        f"python3 -c {figures} {run_dir} {run_dir} 2>/dev/null"
     )
 
 
