@@ -5925,6 +5925,25 @@ impl Workbench {
             .map(|name| name.to_ascii_lowercase())
             .collect();
 
+        // **A file a run has not finished writing is not a file that is missing.** DataVoyager and
+        // the theorizer submit and return immediately; their outputs land at
+        // `analysis/<task_id>.md` when the run reaches a terminal state, twenty to forty minutes
+        // later. So the answer that says *"the results will appear in the Analysis panel when the
+        // run completes"* was flagged for not holding a file it had just explained was forthcoming
+        // — the one shape of false alarm this note cannot afford, since §175's whole argument is
+        // that it reports a check rather than a verdict (docs §240).
+        //
+        // Matched on the task id, which is what the filename is built from, and only while the job
+        // is unfinished: once it completes the file must be there, and if it is not, that is worth
+        // exactly the warning this note gives.
+        let awaited: Vec<String> = self
+            .jobs
+            .iter()
+            .filter(|job| !job.is_finished())
+            .map(|job| job.task_id.to_ascii_lowercase())
+            .filter(|id| !id.is_empty())
+            .collect();
+
         let mut changed = false;
         for index in 0..self.transcript.len() {
             if self.transcript[index].role == "you" {
@@ -5934,7 +5953,9 @@ impl Workbench {
                 .into_iter()
                 .filter(|name| {
                     let name = name.to_ascii_lowercase();
-                    !present.contains(&name) && !from_researcher.contains(&name)
+                    !present.contains(&name)
+                        && !from_researcher.contains(&name)
+                        && !awaited.iter().any(|id| name.contains(id.as_str()))
                 })
                 .collect();
             if self.transcript[index].unverified != missing {
@@ -14506,6 +14527,50 @@ fn replay(path: &str) -> anyhow::Result<()> {
 #[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
+    /// §240: the answer explained the file was forthcoming and was flagged for not holding it.
+    #[test]
+    fn a_file_a_running_job_has_not_written_yet_is_not_missing() {
+        let task = "4c290c71-be43-421a-8273-2f98dcc7b331";
+        let named = format!("analysis/{task}.md");
+
+        let running = protocol::Job {
+            kind: protocol::JobKind::Analysis,
+            task_id: task.to_string(),
+            question: "SOC modelling".into(),
+            context_id: None,
+            status: "working".into(),
+        };
+        assert!(!running.is_finished());
+        // The rule the filter applies: the filename carries the task id of an unfinished job.
+        assert!(named.to_ascii_lowercase().contains(&running.task_id.to_ascii_lowercase()));
+
+        // And once it finishes, the exemption lapses — a file that should be there and is not is
+        // exactly what §175's note is for.
+        let done = protocol::Job {
+            status: "completed".into(),
+            ..running.clone()
+        };
+        assert!(done.is_finished());
+    }
+
+    /// A file named after some *other* run is still checked.
+    #[test]
+    fn an_unrelated_filename_is_not_exempted_by_a_running_job() {
+        let running = protocol::Job {
+            kind: protocol::JobKind::Analysis,
+            task_id: "4c290c71-be43-421a-8273-2f98dcc7b331".into(),
+            question: "q".into(),
+            context_id: None,
+            status: "working".into(),
+        };
+        for other in ["eda_distributions.png", "analysis/deadbeef-0000.md", "final_report.md"] {
+            assert!(
+                !other.to_ascii_lowercase().contains(&running.task_id.to_ascii_lowercase()),
+                "{other} must still be checked"
+            );
+        }
+    }
+
     /// §236: `thread_workspace()` is `None` until the backend assigns a thread id on the first
     /// turn, so "new conversation, attach, ask" — the ordinary flow — copied nothing.
     #[test]

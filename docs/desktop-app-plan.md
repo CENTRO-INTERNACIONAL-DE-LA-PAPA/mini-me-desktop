@@ -81,6 +81,7 @@ read first; the dated sections below it are the record of how each item got here
   first-seen stamp per todo.
 - ⬜ **Old workspaces are not migrated** (§42) — pre-§51 threads appear, their files do not.
 - ⬜ **`setup-wsl.sh` rewrites every line ending**, which breaks git operations on the checkout.
+- ✅ **langgraph-api is current** (§241) — 0.9.0 was End of Life and said so on every launch.
 - ⬜ **The warm-up sometimes fails** — `GET /assistants/{id}/schemas` returned a non-2xx on one
   launch and built the graph fine on the next, so the first turn pays the ten seconds §176 meant to
   absorb. Timing-dependent; measured 2026-08-18, not yet explained.
@@ -13334,4 +13335,62 @@ instead of computing, the log line now says which of the two was in play.
 
 *Ninety-fourth: a diagnostic that ends in understanding ends too early. The question is not "do I
 know why" but "what did I change so it cannot happen again".*
+
+## 240. A file the run has not written yet (2026-08-20)
+
+The §239 guidance worked on the first try. The subagent's question named both datasets and their
+roles, all three model families, and ended *"actually run code to train and evaluate"*; the log line
+read `(fresh)` with a v4 task id.
+
+And under the answer, in orange:
+
+> — named above but not in this conversation's folder: 4c290c71-be43-421a-8273-2f98dcc7b331.md
+
+§175's check, firing on a file the same message had just explained was forthcoming: *"When the run
+finishes, the results will appear in the Analysis panel automatically."* DataVoyager writes
+`analysis/<task_id>.md` at the end of a twenty-to-forty-minute run, so of course it was not there.
+
+This is the one shape of false alarm that note cannot afford, because §175's entire argument is that
+it reports **a check, not a verdict** — and a check that fires on the expected case teaches the
+reader to stop reading it. `check_file_claims` now exempts a filename carrying the task id of a job
+that has not finished, matched on the id because that is what the filename is built from. The
+exemption lapses the moment the job reaches a terminal state: a file that *should* be there and is
+not is exactly what the note exists for.
+
+## 241. Upgrading the thing that said it was End of Life (2026-08-20)
+
+*"I dont like that warning so please update langgraph api version."*
+
+`langgraph-api` 0.9.0, two minor versions behind, printing an End-of-Life notice on every launch.
+Earlier in the week I said this needed its own branch and a full overlay re-test. That was
+over-cautious, and the reason is worth writing down: **the overlay patches exactly one upstream
+module**, `langgraph_runtime_inmem.database`. Everything else in `_TARGETS` is our own `backend.*`.
+
+So the risk was checkable rather than speculative, and each surface was checked:
+
+| Surface | How | Result |
+|---|---|---|
+| `start_pool`, which `index_guard` wraps | signature + source across both versions | identical, and it still deletes the ops file, so the guard is still needed |
+| The keyed-resume contract (§multiple-interrupts) | `Interrupt` fields + `_loop.py` resume lines | identical |
+| Every `langgraph*` symbol the backend imports | 11 of them, imported under the new version | all resolve |
+| `langgraph_api.store.get_store` | bare import, then with config | fails on **both** — 0.9.0 wants `DATABASE_URI`, 0.12.6 wants `REDIS_URI`. A config-gated import, not a regression; it is a local import in our code for that reason |
+| The backend test suite | 325 tests against a venv synced from the new lock | all pass |
+| The server | `langgraph dev` → `GET /ok` | **200 in ~10s** |
+
+The lock was moved with `uv lock --upgrade-package langgraph-api`, so fourteen packages shifted and
+**deepagents stayed at 0.6.1** — a fresh resolve had wanted 0.7.8, which is a jump nobody asked for
+and which moves the `ReadResult`/`FileData` types §224 was about. `langgraph` itself stayed at 1.2.0.
+`starlette` went 1.0.0 → 1.6.0, and the three docstring `ScannerError`s it logs are the same three
+0.9.0 logged, still caught by `langgraph_api/utils` and reported as *"Using as description"*.
+
+No manual step for the researcher: `backend.rs` re-runs `uv sync` when `uv.lock` differs from the
+`.mini-me-lock` stamp, so the next launch installs it.
+
+One thing the boot surfaced that is not ours and is worth knowing: 0.12.6 warns that custom auth has
+no handler for `crons.*` and `threads.create_run`, *"a common source of cross-user data leaks"*. On a
+single-user desktop app bound to localhost that is not urgent. It is still a real gap and belongs in
+the upstream notes rather than being forgotten because it scrolled past.
+
+*Ninety-fifth: "this needs a careful branch" is a guess about risk. Enumerate the surfaces, check
+each one, and the careful branch is often an afternoon.*
 
