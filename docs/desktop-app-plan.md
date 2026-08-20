@@ -13419,8 +13419,7 @@ fires): *"Data analysis finished — its results are in the sandbox"*, FILES · 
 
 **Which means the collection depends on the researcher being on the right screen at the right
 minute** — for a feature whose entire premise is *"you can keep working"* during a forty-minute run.
-The longer the run, the likelier they have moved on. Nothing sweeps unfinished jobs at launch. Named
-here and not fixed here; it is the next thing.
+The longer the run, the likelier they have moved on. Fixed in §243.
 
 ### `asta artifacts` does not write the images
 
@@ -13444,4 +13443,46 @@ losing the charts because upstream's exporter returned non-zero would be the wro
 
 *Ninety-sixth: "the artifacts were exported" is a claim about a directory, not about what is in it.
 Look in the directory.*
+
+## 243. Collecting a run nobody watched (2026-08-20)
+
+§242 named it and left it: a background run's outputs are written only when something polls its
+route and sees a terminal state, and the only poller was `watch_job` — twenty-second ticks, *while
+the app is open on that conversation*, returning the moment the open thread changes.
+
+So the guarantee was: **your results are collected if you happen to be looking at the right
+conversation in the right twenty seconds.** For a forty-minute run whose selling point is *"you can
+keep working"*, the incentives point the wrong way — the longer it takes, the likelier you moved on,
+and the likelier you lost it.
+
+### One request, because `values` is selectable
+
+`langgraph_api.schema.THREAD_FIELDS` includes `values`, so `POST /threads/search` can return each
+thread's state — and a thread's `values.artifacts` is exactly what `decode_jobs` already reads. No
+per-thread fetch, no new route: one search asking for `thread_id` and `values`, then one poll per
+unfinished job.
+
+`poll_job` already took the thread id as a parameter rather than reading the open one, so collecting
+another conversation's run needed no change at all. The reason it never happened is that nobody
+asked.
+
+Bounded on purpose: 25 threads, most-recently-updated. A run old enough to fall off that list is one
+nobody is waiting for, and asking two hundred conversations for their full artifact bundles at every
+launch to find it would be the wrong trade. The sidebar's own search deliberately does *not* select
+`values` for that reason.
+
+### Once per launch, but only once it worked
+
+The sweep answers `Some(n)` or `None`, and the distinction is load-bearing: the first attempt
+reliably loses the race with the starting server, and a flag set on that failure would spend the one
+attempt per launch on a backend that was not up. `None` leaves the flag clear so the next
+conversation-refresh tries again; `Some` sets it and the sweep never runs again that session. Same
+argument `list_conversations` makes about logging its first failure at `debug`.
+
+When something is collected the researcher is told, because a file appearing in a folder they are
+not looking at is not communication.
+
+*Ninety-seventh: an asynchronous result needs a collector that does not depend on attention. "It
+works if you are watching" is the same as "it works sometimes", and the feature existed to let
+somebody stop watching.*
 
