@@ -768,6 +768,33 @@ async def update_metadata(
     return updated
 
 
+async def already_submitted(sandbox: Any, run_id: str) -> bool | None:
+    """Whether this run has been started, as the *service* sees it. `None` if it would not say.
+
+    **The service is the authority and our artifact is a cache.** A discovery artifact is written by
+    a turn, and approval happens through a route outside any turn, so an approved run's artifact can
+    sit at `awaiting_approval` indefinitely — and re-offering the budget gate for a run that is
+    already finished is worse than not offering it at all (§258).
+
+    `CREATED` is the one status that means "drafted, never submitted"; it is also the status the
+    CLI's own icon table has no case for, which is how §247 learned the vocabulary is open. Anything
+    else — `PENDING`, `RUNNING`, `SUCCEEDED`, `FAILED`, a word nobody has seen — means the run has
+    been started, so an unfamiliar status errs toward *not* asking for money again.
+    """
+    if not is_valid_run_id(run_id):
+        return None
+    out = await _run(sandbox, _json_shell(_build_status_command(run_id)), _STATUS_TIMEOUT_S)
+    payload = _extract_json(out)
+    if not isinstance(payload, dict):
+        logger.warning("could not read run=%s status to check for approval: %.200s", run_id, out)
+        return None
+    details = payload.get("run_details")
+    status = str((details or {}).get("status") or "").strip().upper()
+    if not status:
+        return None
+    return status != "CREATED"
+
+
 async def submit_run(sandbox: Any, run_id: str, *, approved: int | None = None) -> dict[str, Any]:
     """Spend the credits and start the run. **Only ever called for an approved draft.**
 
