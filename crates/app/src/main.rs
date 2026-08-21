@@ -3052,6 +3052,9 @@ struct Workbench {
     pending_adoption: Vec<std::path::PathBuf>,
     /// Whether this launch has already collected runs that finished unattended (§243).
     swept: bool,
+    /// Runs collected this launch, still to be told about. Cleared when the researcher opens one
+    /// or dismisses the banner.
+    collected_runs: Vec<(String, protocol::Job)>,
     /// Narrows the open reference list. Only the modal reads it — the panel's four are a
     /// preview, and filtering something that shows four of seventeen would be a filter whose
     /// result you cannot see (§197).
@@ -3322,6 +3325,7 @@ impl Workbench {
             attachments: Vec::new(),
             pending_adoption: Vec::new(),
             swept: false,
+            collected_runs: Vec::new(),
             sources_filter,
             datasets_filter,
             documents_filter,
@@ -4864,6 +4868,87 @@ impl Workbench {
         }
     }
 
+    /// What finished while the researcher was away, and a press to go and look at it.
+    ///
+    /// **Above the composer rather than in a modal.** §40 settled where a thing that needs
+    /// attention goes: there, because that is where attention already is and it cannot be scrolled
+    /// away. A modal on launch is the first thing somebody fights before they can work, and worse
+    /// when two runs finished — while a banner can do the thing a modal cannot, which is *take you
+    /// there*. The status line it replaces is a strip at the bottom that the next message
+    /// overwrites, and this is the one thing the app knows that the researcher has no other way to
+    /// discover (§244).
+    fn collected_banner(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if self.collected_runs.is_empty() {
+            return None;
+        }
+        let label = match self.collected_runs.as_slice() {
+            [(_, job)] => format!(
+                "{} finished while you were away — its results are in its conversation",
+                job.kind.label()
+            ),
+            runs => format!(
+                "{} background runs finished while you were away",
+                runs.len()
+            ),
+        };
+        // The first one, because a single press has to mean something definite. With several, the
+        // sidebar is the right place to choose and this only says to look.
+        let opens = match self.collected_runs.as_slice() {
+            [(thread_id, _)] => Some(thread_id.clone()),
+            _ => None,
+        };
+        let mut row = div()
+            .id("collected-runs")
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .flex_none()
+            .w_full()
+            .min_w_0()
+            .px_2()
+            .py_1()
+            .mb_1()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(theme::accent()))
+            .text_color(rgb(theme::text()))
+            .text_xs()
+            .child(ui::Label::new(label).inherit().size(ui::Size::Compact).ellipsis());
+
+        if let Some(thread_id) = opens {
+            row = row
+                .hover(|style| {
+                    let fill = theme::hover_over(theme::surface());
+                    style
+                        .bg(rgb(fill))
+                        .text_color(rgb(theme::ink_on(fill)))
+                        .cursor_pointer()
+                })
+                .child(
+                    ui::Label::new("open it")
+                        .inherit()
+                        .size(ui::Size::Compact),
+                )
+                .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                    workbench.collected_runs.clear();
+                    workbench.open_conversation(thread_id.clone(), cx);
+                }));
+        } else {
+            // Nothing to open definitively, so the press dismisses — a banner that stays after
+            // being read is the thing people learn to ignore.
+            row = row
+                .hover(|style| style.cursor_pointer())
+                .child(div().flex_none().text_color(rgb(theme::text_faint())).child("×"))
+                .on_click(cx.listener(|workbench, _event, _window, cx| {
+                    workbench.collected_runs.clear();
+                    cx.notify();
+                }));
+        }
+        Some(row.into_any_element())
+    }
+
     /// The files going with the next question, each removable.
     ///
     /// Above the composer, where the picker and the approval card already are (§40): that is where
@@ -5288,16 +5373,12 @@ impl Workbench {
                         None => {}
                         Some(collected) => {
                             workbench.swept = true;
-                            if collected > 0 {
-                                workbench.status = match collected {
-                                    1 => "a background run finished while you were away — its \
-                                          results are in its conversation"
-                                        .to_string(),
-                                    n => format!(
-                                        "{n} background runs finished while you were away — their \
-                                         results are in their conversations"
-                                    ),
-                                };
+                            if !collected.is_empty() {
+                                // Kept rather than only announced: the status line is a strip at
+                                // the bottom of the window that the next thing to happen
+                                // overwrites, and this is the one message the app has that the
+                                // researcher cannot arrive at any other way (§244).
+                                workbench.collected_runs = collected;
                                 // Their outputs just landed on disk.
                                 workbench.refresh_project(cx);
                             }
@@ -10423,6 +10504,7 @@ impl Workbench {
             column = column.child(self.approval_card(request, cx));
         }
         let column = column
+            .children(self.collected_banner(cx))
             .children(self.attachment_chips(cx))
             .children(self.subagent_picker(cx))
             .child(self.composer_row(cx));
@@ -14574,6 +14656,49 @@ fn replay(path: &str) -> anyhow::Result<()> {
 #[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
+    fn collected(kind: protocol::JobKind, thread: &str) -> (String, protocol::Job) {
+        (
+            thread.to_string(),
+            protocol::Job {
+                kind,
+                task_id: "20840df8-a8e8-4ab0-a65c-1b1824961955".into(),
+                question: "SOC modelling".into(),
+                context_id: None,
+                status: "completed".into(),
+            },
+        )
+    }
+
+    /// §244: one run gets a definite press, because a single action has to mean something.
+    #[test]
+    fn one_collected_run_is_named_and_openable() {
+        let runs = vec![collected(protocol::JobKind::Analysis, "01a0215f-c66b-7461-96f2-595a168fa8f8")];
+        // The label names what finished rather than counting it.
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].1.kind.label(), "Data analysis");
+        assert_eq!(runs[0].0, "01a0215f-c66b-7461-96f2-595a168fa8f8");
+    }
+
+    /// With several, no single thread is the right destination — the sidebar is.
+    #[test]
+    fn several_collected_runs_are_counted_rather_than_opened() {
+        let runs = vec![
+            collected(protocol::JobKind::Analysis, "aaa"),
+            collected(protocol::JobKind::Theorizer, "bbb"),
+        ];
+        assert!(runs.len() > 1);
+        // Two different threads, so "open it" would have to pick one arbitrarily.
+        assert_ne!(runs[0].0, runs[1].0);
+    }
+
+    /// The theorizer goes through the identical path, so its label has to work too.
+    #[test]
+    fn a_collected_theorizer_run_is_named_by_its_own_kind() {
+        let (_, job) = collected(protocol::JobKind::Theorizer, "ccc");
+        assert_eq!(job.kind.label(), "Theorizer");
+        assert!(job.is_finished());
+    }
+
     /// Only unfinished ones are worth a request; a terminal job has already been collected.
     #[test]
     fn a_finished_run_is_not_swept_again() {

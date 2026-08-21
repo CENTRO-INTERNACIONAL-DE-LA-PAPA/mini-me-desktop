@@ -13486,3 +13486,39 @@ not looking at is not communication.
 works if you are watching" is the same as "it works sometimes", and the feature existed to let
 somebody stop watching.*
 
+## 244. Where a message nobody can arrive at goes (2026-08-21)
+
+§243 worked, and the log is the whole proof:
+
+```
+INFO collected a background run that finished unattended
+     thread=01a0215f-c66b-7461-96f2-595a168fa8f8
+     task=20840df8-a8e8-4ab0-a65c-1b1824961955 kind="Data analysis"
+```
+
+Three figures landed in a conversation the researcher never opened. Then:
+
+*"Maybe that notification must be a modal."*
+
+Half agreed. The status line is a strip at the bottom of the window that the next thing to happen
+overwrites, and this is the **one message the app has that the researcher cannot arrive at any other
+way** — every other status is a report on something they just did.
+
+But not a modal, and §40 already settled why: a thing that needs attention goes above the composer,
+because that is where attention already is and it cannot be scrolled away. A modal on launch is the
+first thing somebody fights before they can work, and worse when two runs finished.
+
+The stronger argument is what a modal *cannot* do. A modal tells you; a banner can take you there.
+So it carries `open it` and a press opens the conversation — one run gets a definite destination,
+several get a count and no press, because with two threads finished "open it" would have to choose
+one arbitrarily and the sidebar is the right place for that. Either way it clears when read: a
+banner that persists after being acted on is the thing people learn to ignore.
+
+Recorded because it is a design decision taken *against* a direct suggestion, and the reasoning
+should be available to whoever revisits it: the goal was unmissable-and-actionable, and the
+disagreement was only about which of those a modal actually delivers.
+
+*Ninety-eighth: prefer the notification that can complete the errand. "You have something waiting"
+plus a way to reach it is one interaction; a modal saying the same thing is two, and the second one
+is a hunt.*
+
