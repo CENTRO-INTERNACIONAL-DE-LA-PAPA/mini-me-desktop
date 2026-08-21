@@ -1250,6 +1250,10 @@ impl LangGraphClient {
             .context("could not decode the discovery draft response")?;
         let credits = value.get("credits");
         Ok(DraftCost {
+            submitted: value
+                .get("submitted")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
             approval: value
                 .get("approval")
                 .and_then(Value::as_str)
@@ -1314,6 +1318,54 @@ impl LangGraphClient {
                     .collect()
             })
             .unwrap_or_default())
+    }
+
+    /// Record that a drafted run has been approved and started.
+    ///
+    /// # Why the artifact has to be told
+    ///
+    /// A discovery artifact is written by `ArtifactCaptureMiddleware` when a *turn* runs the
+    /// subagent, and approval happens through a route, outside any turn. So after a press the
+    /// artifact still said `awaiting_approval` — forever. In the session that approved it the row
+    /// existed anyway, because `approve_discovery` calls `track_job` directly; but a reload rebuilds
+    /// the job list from the snapshot, `decode_jobs` skips `awaiting_approval` by design, and the
+    /// run vanished from `BACKGROUND JOBS` while quite happily running on Asta (§258).
+    ///
+    /// `POST /threads/{id}/state` applies the update through the graph's own reducers, so this
+    /// sends only the fields that changed: `_merge_artifacts` dedupes `discoveries` on `run_id` and
+    /// merges the partial row over the stored one, keeping the name, the datasets and the intent.
+    ///
+    /// The budget goes too, because the researcher may have changed it in the modal and the
+    /// artifact should say what was actually bought.
+    pub async fn discovery_started(
+        &self,
+        thread_id: &str,
+        run_id: &str,
+        experiments: u32,
+    ) -> Result<()> {
+        self.http
+            .post(format!(
+                "{}/threads/{}/state",
+                self.base_url,
+                urlencode(thread_id)
+            ))
+            .json(&serde_json::json!({
+                "values": {
+                    "artifacts": {
+                        "discoveries": [{
+                            "run_id": run_id,
+                            "status": "running",
+                            "n_experiments": experiments,
+                        }]
+                    }
+                }
+            }))
+            .send()
+            .await
+            .context("recording that the discovery run started failed")?
+            .error_for_status()
+            .context("the thread state update returned an error status")?;
+        Ok(())
     }
 
     /// A discovery run's experiments, whole.
@@ -2769,6 +2821,12 @@ pub struct Draft {
 /// What a drafted run will cost, against what is left to spend.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DraftCost {
+    /// Whether the service says this run has already been started.
+    ///
+    /// Our own artifact cannot answer this: it is written by a turn, and approving is not a turn, so
+    /// an approved run's record can sit at `awaiting_approval` indefinitely. Asking the service is
+    /// what stops the gate being offered a second time for a run that is already finished (§258).
+    pub submitted: bool,
     /// The one-shot token that authorises submitting this run.
     ///
     /// Issued when the modal opens, because opening it is the only thing that legitimately precedes

@@ -13261,6 +13261,30 @@ impl Workbench {
     /// **Two call sites, one per frame.** `artifacts_contents` renders this either from its
     /// no-spine early return or from the full panel, never both, so the fixed element ids below
     /// cannot collide the way two sibling `datasets-heading`s once did.
+    /// Tell the conversation's own record that an approved run is now running.
+    ///
+    /// Fire-and-forget with a warning on failure: the run is already paying for itself on Asta and
+    /// nothing here can undo that, so a state update that does not land must not look like a failed
+    /// submit. The cost of losing it is a row missing after a reload, which is what §258 was.
+    fn record_discovery_started(
+        &mut self,
+        run_id: String,
+        experiments: u32,
+        cx: &mut Context<Self>,
+    ) {
+        let mut answer = self.sidecar.discovery_started(run_id.clone(), experiments);
+        cx.spawn(async move |_workbench, _cx| {
+            if let Some(Err(error)) = answer.next().await {
+                tracing::warn!(
+                    %error,
+                    run = %run_id,
+                    "could not record that a discovery run started; it is running regardless"
+                );
+            }
+        })
+        .detach();
+    }
+
     /// Open a finished discovery run and fetch its experiments.
     ///
     /// One request for the whole tree — §247 established that the experiments endpoint returns
@@ -13925,27 +13949,86 @@ impl Workbench {
         else {
             return;
         };
-        tracing::info!(
-            run = %draft.run_id,
-            experiments = draft.experiments,
-            "asking the researcher to approve a discovery budget"
-        );
-        // Whatever the agent drafted, clamped into what the service will accept — so the number
-        // on screen is always one that can actually be submitted.
-        let experiments = opening_budget(draft.experiments);
-        self.intent_field.update(cx, |field, cx| {
-            field.set_text(draft.intent.clone(), cx);
-        });
-        self.approving = Some(Approval {
-            draft: draft.clone(),
-            experiments,
-            cost: None,
-            error: None,
-            submitting: false,
-        });
+        // **Ask the service before asking the researcher.** The gate used to open immediately and
+        // fill in the cost when it arrived, which was fine until a run could already have been
+        // approved — and one can, because the artifact saying `awaiting_approval` is a turn's
+        // record and approving is not a turn. Offering to spend credits on a finished run is worse
+        // than a second of delay, and the answer brings the cost and the token with it, so the
+        // modal now opens complete or not at all (§258).
+        let draft = draft.clone();
+        let mut answer = self.sidecar.discovery_draft(draft.run_id.clone());
+        cx.spawn(async move |workbench, cx| {
+            let Some(outcome) = answer.next().await else {
+                return;
+            };
+            let _ = workbench.update(cx, |workbench, cx| {
+                // Something else may have opened a gate while this was in flight.
+                if workbench.approving.is_some() {
+                    return;
+                }
+                let cost = match outcome {
+                    Ok(cost) => cost,
+                    Err(error) => {
+                        // Cannot tell whether it was approved, so do not ask for money. The draft
+                        // keeps its status and the next snapshot tries again.
+                        tracing::warn!(
+                            %error,
+                            run = %draft.run_id,
+                            "could not check a drafted run; not offering the gate"
+                        );
+                        return;
+                    }
+                };
+                if cost.submitted {
+                    // Already running or finished. Adopt it as a job so it appears where a
+                    // researcher expects, and never ask about its budget again.
+                    tracing::info!(
+                        run = %draft.run_id,
+                        "a drafted run had already been approved; tracking it instead of asking"
+                    );
+                    workbench.declined.insert(draft.run_id.clone());
+                    workbench.track_job(
+                        protocol::Job {
+                            kind: protocol::JobKind::Discovery,
+                            task_id: draft.run_id.clone(),
+                            question: draft.name.clone(),
+                            context_id: None,
+                            status: "running".to_string(),
+                        },
+                        cx,
+                    );
+                    // And correct the record, so the next launch does not have to ask again.
+                    workbench.record_discovery_started(
+                        draft.run_id.clone(),
+                        cost.experiments.max(1),
+                        cx,
+                    );
+                    cx.notify();
+                    return;
+                }
 
-        self.refresh_approval(draft.run_id.clone(), cx);
-        cx.notify();
+                tracing::info!(
+                    run = %draft.run_id,
+                    experiments = draft.experiments,
+                    "asking the researcher to approve a discovery budget"
+                );
+                // Whatever the agent drafted, clamped into what the service will accept — so the
+                // number on screen is always one that can actually be submitted.
+                let experiments = opening_budget(draft.experiments);
+                workbench.intent_field.update(cx, |field, cx| {
+                    field.set_text(draft.intent.clone(), cx);
+                });
+                workbench.approving = Some(Approval {
+                    draft: draft.clone(),
+                    experiments,
+                    cost: Some(cost),
+                    error: None,
+                    submitting: false,
+                });
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Ask the backend what this run costs, and for the token that authorises submitting it.
@@ -14035,6 +14118,12 @@ impl Workbench {
                                 },
                                 cx,
                             );
+                            // **And write it down.** The line above is why the row appears in
+                            // *this* session; this is why it is still there after a reload. The
+                            // artifact is written by a turn and approval is not a turn, so without
+                            // this it says `awaiting_approval` forever and `decode_jobs` — which
+                            // skips that by design — drops a run that is genuinely working (§258).
+                            workbench.record_discovery_started(run_id.clone(), experiments, cx);
                         }
                         Err(error) => {
                             tracing::warn!(%error, run = %run_id, "a discovery submit failed");
@@ -18146,6 +18235,7 @@ mod tests {
         assert!(!ready_to_submit(None), "no lookup has answered yet");
 
         let mut cost = protocol::DraftCost {
+            submitted: false,
             approval: String::new(),
             experiments: 15,
             available: Some(495),
@@ -18160,6 +18250,17 @@ mod tests {
         // The token is orthogonal to affordability: both have to hold.
         assert!(affordable(15, cost.available));
         assert!(!affordable(500, cost.available));
+
+        // §258: a run the service says is already started issues no token at all, so the gate
+        // cannot be pressed for it even if something managed to open one.
+        let started = protocol::DraftCost {
+            submitted: true,
+            approval: String::new(),
+            experiments: 5,
+            available: Some(495),
+            intent: String::new(),
+        };
+        assert!(!ready_to_submit(Some(&started)));
     }
 
     /// §257: "asking", "none" and "not asked" are three different things, and the tempting
