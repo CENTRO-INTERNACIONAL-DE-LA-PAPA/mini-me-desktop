@@ -941,6 +941,29 @@ const JOBS_BODY_HEIGHT: f32 = 260.;
 /// analyst, which belong to the turn that sent them.
 const JOB_QUESTION_CHARS: usize = 120;
 
+/// A finished discovery run, open for reading.
+///
+/// Holds the experiments rather than re-reading them each frame: the fetch is a request to the
+/// service through the sandbox, and a modal that re-issued it on every notify would hammer a
+/// route to redraw a picture that has not changed.
+#[derive(Clone, Debug)]
+struct DiscoveryView {
+    run_id: String,
+    name: String,
+    experiments: Vec<discovery::Experiment>,
+    /// Which experiment is open, as an index into `experiments`. `None` shows the ranked list.
+    selected: Option<usize>,
+    /// True while the fetch is in flight, so an empty tree reads as "loading" and not "nothing".
+    loading: bool,
+    /// Whether the run has stopped producing experiments, from `has_job_completed`.
+    ///
+    /// Read rather than inferred from the count: `n_experiments` is what was *requested*, and a
+    /// run that failed early has fewer without still being in progress. The service's own flag is
+    /// the only thing that knows the difference.
+    complete: bool,
+    error: Option<String>,
+}
+
 /// A discovery run waiting for its budget to be approved, and what the researcher has changed.
 ///
 /// Held rather than read from the snapshot each frame because two of its fields are *being edited*.
@@ -3224,6 +3247,8 @@ struct Workbench {
     /// Runs collected this launch, still to be told about. Cleared when the researcher opens one
     /// or dismisses the banner.
     collected_runs: Vec<(String, protocol::Job)>,
+    /// A finished discovery run being read. See [`DiscoveryView`].
+    discovery_open: Option<DiscoveryView>,
     /// A discovery run whose budget is waiting on the researcher. See [`Approval`].
     ///
     /// The one modal in this app that guards money, which is why it is a modal at all: §244 argued
@@ -3521,6 +3546,7 @@ impl Workbench {
             pending_adoption: Vec::new(),
             swept: false,
             collected_runs: Vec::new(),
+            discovery_open: None,
             approving: None,
             declined: std::collections::HashSet::new(),
             intent_field,
@@ -13136,6 +13162,512 @@ impl Workbench {
     /// **Two call sites, one per frame.** `artifacts_contents` renders this either from its
     /// no-spine early return or from the full panel, never both, so the fixed element ids below
     /// cannot collide the way two sibling `datasets-heading`s once did.
+    /// Open a finished discovery run and fetch its experiments.
+    ///
+    /// One request for the whole tree — §247 established that the experiments endpoint returns
+    /// every node complete, so the graph does not cost a call per node. Figures are not fetched
+    /// here; they live only in the per-experiment response and are worth ~458KB each.
+    fn open_discovery(&mut self, run_id: String, name: String, cx: &mut Context<Self>) {
+        tracing::info!(run = %run_id, "opening a discovery run");
+        self.discovery_open = Some(DiscoveryView {
+            run_id: run_id.clone(),
+            name,
+            experiments: Vec::new(),
+            selected: None,
+            loading: true,
+            complete: false,
+            error: None,
+        });
+        let mut answer = self.sidecar.discovery_run(run_id.clone());
+        cx.spawn(async move |workbench, cx| {
+            if let Some(outcome) = answer.next().await {
+                let _ = workbench.update(cx, |workbench, cx| {
+                    let Some(view) = workbench.discovery_open.as_mut() else {
+                        return;
+                    };
+                    // A different run may have been opened while this was in flight.
+                    if view.run_id != run_id {
+                        return;
+                    }
+                    view.loading = false;
+                    match outcome {
+                        Ok(payload) => {
+                            view.experiments = discovery::decode_experiments(&payload);
+                            view.complete = discovery::finished(&payload);
+                            tracing::info!(
+                                run = %run_id,
+                                experiments = view.experiments.len(),
+                                "read a discovery run"
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, run = %run_id, "could not read a discovery run");
+                            view.error = Some(error);
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// The colours a node is drawn in, from how far it moved a belief.
+    ///
+    /// Returns `(fill, ink, border)`. Three bands rather than a ramp, because the scale of
+    /// `surprise` is not documented and a gradient over it would imply precision nobody has.
+    fn node_colours(&self, experiment: &discovery::Experiment) -> (u32, u32, u32) {
+        // A pure mapping from the band to three colours. The *decision* — that status outranks the
+        // score — lives in `discovery::loudness`, where it can be tested without a window.
+        match discovery::loudness(experiment) {
+            discovery::Loudness::Running => {
+                (theme::surface(), theme::text_muted(), theme::running())
+            }
+            discovery::Loudness::Failed => {
+                (theme::surface(), theme::text_muted(), theme::error())
+            }
+            discovery::Loudness::Loud => {
+                let fill = theme::accent();
+                (fill, theme::ink_on(fill), fill)
+            }
+            discovery::Loudness::Middling => (
+                theme::surface(),
+                theme::text(),
+                theme::border_strong(),
+            ),
+            discovery::Loudness::Quiet => {
+                (theme::surface(), theme::text_faint(), theme::border())
+            }
+        }
+    }
+
+    /// The search, drawn as the tree it is.
+    ///
+    /// **A tree and not the force-directed graph the service's own view shows.** Same data, and
+    /// the reasons are in `discovery.rs`: a spring layout settles differently every frame in a
+    /// panel that is rebuilt on every stream event, and depth is the one thing a blob cannot
+    /// show — how far the search kept refining one line of enquiry.
+    ///
+    /// Edges are three axis-aligned pieces each. gpui draws rectangles, and elbows are exact
+    /// where a rotated div would be approximate.
+    fn discovery_tree(&self, view: &DiscoveryView, cx: &mut Context<Self>) -> impl IntoElement {
+        let placed = discovery::layout(&view.experiments);
+        let (width, height) = discovery::canvas(&placed);
+        let mut canvas = div()
+            .relative()
+            .flex_none()
+            .w(px(width))
+            .h(px(height));
+
+        // Connectors first, so a node is never drawn under its own edge.
+        for (parent, child) in discovery::edges(&view.experiments) {
+            let Some(from) = placed.iter().find(|node| node.at == parent) else {
+                continue;
+            };
+            let Some(to) = placed.iter().find(|node| node.at == child) else {
+                continue;
+            };
+            for segment in discovery::elbow(from, to) {
+                canvas = canvas.child(
+                    div()
+                        .absolute()
+                        .left(px(segment.left))
+                        .top(px(segment.top))
+                        .w(px(segment.width.max(1.0)))
+                        .h(px(segment.height.max(1.0)))
+                        .bg(rgb(theme::border_strong())),
+                );
+            }
+        }
+
+        for node in &placed {
+            let Some(experiment) = view.experiments.get(node.at) else {
+                continue;
+            };
+            let (x, y) = discovery::centre(node);
+            let (fill, ink, border) = self.node_colours(experiment);
+            let chosen = view.selected == Some(node.at);
+            let at = node.at;
+            canvas = canvas.child(
+                div()
+                    .id(SharedString::from(format!("exp-node-{}", experiment.id)))
+                    .absolute()
+                    .left(px(x - discovery::NODE / 2.0))
+                    .top(px(y - discovery::NODE / 2.0))
+                    .w(px(discovery::NODE))
+                    .h(px(discovery::NODE))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(rgb(fill))
+                    // The server's own `is_surprising` gets its own mark rather than being folded
+                    // into the colour: loudness is a number we banded, and that flag is the
+                    // service's judgment. Two different claims, drawn differently.
+                    .border_2()
+                    .border_color(rgb(if chosen {
+                        theme::accent()
+                    } else if experiment.surprising {
+                        theme::warning()
+                    } else {
+                        border
+                    }))
+                    .text_color(rgb(ink))
+                    .text_xs()
+                    .child(experiment.number.to_string())
+                    .hover(|style| style.cursor_pointer())
+                    .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                        if let Some(view) = workbench.discovery_open.as_mut() {
+                            // Pressing the open one closes it, back to the ranked list.
+                            view.selected = if view.selected == Some(at) { None } else { Some(at) };
+                        }
+                        cx.notify();
+                    })),
+            );
+        }
+
+        div()
+            .id("discovery-tree")
+            .w_full()
+            .min_w_0()
+            .max_h(px(300.))
+            .overflow_scroll()
+            .child(canvas)
+    }
+
+    /// How much of an experiment's hypothesis a list row shows.
+    ///
+    /// The hypothesis is a sentence the service wrote to be read whole, so the row shows enough to
+    /// tell two apart and the detail below shows all of it.
+    const HYPOTHESIS_CHARS: usize = 90;
+
+    /// Every experiment, ranked by how far it moved a belief.
+    ///
+    /// The order is the reason to read this at all: the point of a discovery run is the handful of
+    /// results that changed the picture, and creation order buries them among the ones that did
+    /// not. Ranked on `|surprise|`, so an experiment that moved a belief hard *against* its
+    /// hypothesis ranks as high as one that confirmed it — which is the interesting case.
+    fn discovery_list(&self, view: &DiscoveryView, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut order: Vec<usize> = (0..view.experiments.len()).collect();
+        order.sort_by(|&a, &b| {
+            view.experiments[b]
+                .magnitude()
+                .total_cmp(&view.experiments[a].magnitude())
+        });
+
+        let mut list = div()
+            .id("discovery-list")
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w_0()
+            .gap_px()
+            .max_h(px(240.))
+            .overflow_y_scroll();
+
+        for at in order {
+            let experiment = &view.experiments[at];
+            let (_, _, accent) = self.node_colours(experiment);
+            let belief = match (experiment.prior, experiment.posterior) {
+                (Some(prior), Some(posterior)) => format!(
+                    "{} → {}",
+                    prior.label.label(),
+                    posterior.label.label()
+                ),
+                _ => String::new(),
+            };
+            let score = match experiment.surprise {
+                // Magnitude and direction as separate columns, the way the service's own table
+                // does it — the sign lives in `surprise` and is not derived from the beliefs.
+                Some(_) => format!(
+                    "{:.3} {}",
+                    experiment.magnitude(),
+                    experiment.direction().label()
+                ),
+                None => "—".to_string(),
+            };
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("exp-row-{}", experiment.id)))
+                    .flex()
+                    .flex_row()
+                    .items_start()
+                    .w_full()
+                    .min_w_0()
+                    .flex_none()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .when(view.selected == Some(at), |row| {
+                        row.bg(rgb(theme::hover_over(theme::surface())))
+                    })
+                    .hover(|style| {
+                        let fill = theme::hover_over(theme::surface());
+                        style
+                            .bg(rgb(fill))
+                            .text_color(rgb(theme::ink_on(fill)))
+                            .cursor_pointer()
+                    })
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(24.))
+                            .text_xs()
+                            .text_color(rgb(accent))
+                            .child(experiment.number.to_string()),
+                    )
+                    .child(
+                        div()
+                            .flex_grow()
+                            .min_w_0()
+                            .text_xs()
+                            .text_color(rgb(theme::text()))
+                            .child(protocol::clip(&experiment.hypothesis, Self::HYPOTHESIS_CHARS)),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_xs()
+                            .text_color(rgb(theme::text_muted()))
+                            .child(belief),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_xs()
+                            .text_color(rgb(theme::text_muted()))
+                            .child(score),
+                    )
+                    .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                        if let Some(view) = workbench.discovery_open.as_mut() {
+                            view.selected = Some(at);
+                        }
+                        cx.notify();
+                    })),
+            );
+        }
+        list
+    }
+
+    /// One experiment, opened.
+    ///
+    /// The order is the service's own and `interpreting-results.md` asks for it: the belief shift,
+    /// the hypothesis, the analysis, then the review. Code is not shown — it is in the persisted
+    /// `.json`, and a researcher reading results is not reading Python.
+    fn discovery_detail(
+        &self,
+        experiment: &discovery::Experiment,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mut detail = div()
+            .id("discovery-detail")
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w_0()
+            .gap_2()
+            .max_h(px(240.))
+            .overflow_y_scroll();
+
+        let shift = match (experiment.prior, experiment.posterior) {
+            (Some(prior), Some(posterior)) => format!(
+                "{} ({:.3}) → {} ({:.3})",
+                prior.label.label(),
+                prior.mean,
+                posterior.label.label(),
+                posterior.mean
+            ),
+            _ => "no belief recorded".to_string(),
+        };
+        detail = detail.child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .w_full()
+                .min_w_0()
+                .gap_2()
+                .flex_none()
+                .child(
+                    ui::Label::new(format!("Experiment {}", experiment.number))
+                        .colour(theme::text()),
+                )
+                .child(div().flex_grow())
+                .child(
+                    ui::Label::new(match experiment.surprise {
+                        Some(_) => format!(
+                            "{} {:.3}",
+                            experiment.direction().label(),
+                            experiment.magnitude()
+                        ),
+                        None => "not scored".to_string(),
+                    })
+                    .colour(if experiment.surprising {
+                        theme::warning()
+                    } else {
+                        theme::text_muted()
+                    })
+                    .size(ui::Size::Compact),
+                )
+                .child(
+                    ui::Button::new("discovery-back", "All experiments")
+                        .size(ui::Size::Compact)
+                        .on_click(cx.listener(|workbench, _event, _window, cx| {
+                            if let Some(view) = workbench.discovery_open.as_mut() {
+                                view.selected = None;
+                            }
+                            cx.notify();
+                        })),
+                ),
+        );
+        detail = detail.child(
+            ui::Label::new(shift)
+                .muted()
+                .size(ui::Size::Compact),
+        );
+        // The service's own flag, said in words. It is not a threshold on the number above it —
+        // the probe had a 0.67 shift the service called unsurprising — so the two are reported
+        // side by side rather than one derived from the other.
+        if experiment.surprising {
+            detail = detail.child(
+                ui::Label::new("The service flagged this one as surprising.")
+                    .colour(theme::warning())
+                    .size(ui::Size::Compact),
+            );
+        }
+
+        for (heading, body) in [
+            ("HYPOTHESIS", &experiment.hypothesis),
+            ("ANALYSIS", &experiment.analysis),
+            ("REVIEW", &experiment.review),
+        ] {
+            if body.trim().is_empty() {
+                continue;
+            }
+            detail = detail.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .min_w_0()
+                    .flex_none()
+                    .gap_1()
+                    .child(section_label(heading))
+                    .child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .text_xs()
+                            .text_color(rgb(theme::text()))
+                            .child(body.clone()),
+                    ),
+            );
+        }
+        detail
+    }
+
+    /// A finished discovery run: the search as a tree, and its experiments ranked.
+    fn discovery_modal(&self, view: &DiscoveryView, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut body = div().flex().flex_col().w_full().min_w_0().gap_3();
+
+        let scored = view
+            .experiments
+            .iter()
+            .filter(|experiment| experiment.surprise.is_some())
+            .count();
+        let flagged = view
+            .experiments
+            .iter()
+            .filter(|experiment| experiment.surprising)
+            .count();
+        let failed = view
+            .experiments
+            .iter()
+            .filter(|experiment| experiment.is_finished() && !experiment.succeeded())
+            .count();
+        body = body.child(
+            ui::Label::new(if view.loading {
+                "Reading the run…".to_string()
+            } else {
+                let mut parts = vec![format!(
+                    "{} experiment{}",
+                    view.experiments.len(),
+                    if view.experiments.len() == 1 { "" } else { "s" }
+                )];
+                if !view.complete {
+                    // Said out loud, because a tree that grows between two openings is otherwise
+                    // indistinguishable from one that was drawn wrong.
+                    parts.push("still running".to_string());
+                }
+                if failed > 0 {
+                    parts.push(format!("{failed} failed"));
+                }
+                parts.push(format!("{scored} scored"));
+                parts.push(format!("{flagged} flagged surprising by the service"));
+                parts.join(" · ")
+            })
+            .muted()
+            .size(ui::Size::Compact),
+        );
+
+        if let Some(error) = &view.error {
+            body = body.child(
+                ui::Label::new(error.clone())
+                    .colour(theme::error())
+                    .size(ui::Size::Compact),
+            );
+        }
+
+        if !view.experiments.is_empty() {
+            body = body
+                .child(self.discovery_tree(view, cx))
+                .child(match view.selected.and_then(|at| view.experiments.get(at)) {
+                    Some(experiment) => self.discovery_detail(experiment, cx).into_any_element(),
+                    None => self.discovery_list(view, cx).into_any_element(),
+                });
+        } else if !view.loading && view.error.is_none() {
+            body = body.child(
+                ui::Label::new(
+                    "This run recorded no experiments. Its status and any failure are in its own \
+                     folder, under `discovery/`.",
+                )
+                .muted()
+                .size(ui::Size::Compact),
+            );
+        }
+
+        ui::Modal::new("discovery-results", if view.name.is_empty() {
+            "Discovery run".to_string()
+        } else {
+            view.name.clone()
+        })
+        .width(760.)
+        .focus(&self.delete_focus)
+        .body(body)
+        .actions(
+            ui::actions()
+                .child(div().flex_grow())
+                .child(
+                    ui::Button::new("discovery-close", "Close").on_click(cx.listener(
+                        |workbench, _event, _window, cx| {
+                            workbench.discovery_open = None;
+                            cx.notify();
+                        },
+                    )),
+                ),
+        )
+        .footer(
+            ui::Label::new(
+                "Every hypothesis and number here was produced by an AI system. Have a \
+                 subject-matter expert check anything you intend to rely on.",
+            )
+            .muted()
+            .size(ui::Size::Compact),
+        )
+    }
+
     /// Open the budget gate for a run that is drafted and unspent.
     ///
     /// Called from a snapshot rather than from a press, because the researcher never asked for
@@ -13549,7 +14081,7 @@ impl Workbench {
             body = body.child(self.task_row(task, cx));
         }
         for job in &self.jobs {
-            body = body.child(self.job_row(job));
+            body = body.child(self.job_row(job, cx));
         }
 
         section.child(
@@ -13818,7 +14350,7 @@ impl Workbench {
     ///
     /// No `cx` and no controls — a job is something this client polls, not a gate it can answer.
     /// What the row owes a reader is whether it is still going and roughly how long that takes.
-    fn job_row(&self, job: &protocol::Job) -> Div {
+    fn job_row(&self, job: &protocol::Job, cx: &mut Context<Self>) -> gpui::Stateful<Div> {
         let (mark, colour) = if !job.is_finished() {
             ("◐", theme::running())
         } else if job.succeeded() {
@@ -13833,7 +14365,14 @@ impl Workbench {
             // is indistinguishable from a hang.
             format!("running · usually {}", job.kind.expected())
         };
-        div()
+        // A finished discovery run is the one job row with something to open: its results are a
+        // tree of experiments, and the alternative is composing a question to ask about work the
+        // app already has (the argument §198 made for the worker-files button).
+        let readable = job.kind == protocol::JobKind::Discovery && job.succeeded();
+        let mut row = div()
+            // Always identified, whether or not it is pressable: `.id()` changes the element's
+            // type, and branching on it would mean two incompatible return values for one row.
+            .id(SharedString::from(format!("job-row-{}", job.task_id)))
             .flex()
             .flex_col()
             .w_full()
@@ -13869,7 +14408,32 @@ impl Workbench {
                         // telling two concurrent analyses apart, and the first clause does that.
                         .child(protocol::clip(&job.question, JOB_QUESTION_CHARS)),
                 )
-            })
+            });
+
+        if readable {
+            let run_id = job.task_id.clone();
+            let name = job.question.clone();
+            row = row
+                // Said as well as coloured, because a hover-only affordance is one a researcher
+                // finds by accident — and this is the only way into a run they paid for.
+                .child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .text_color(rgb(theme::accent()))
+                        .text_xs()
+                        .child("Show what it found"),
+                )
+                .rounded_md()
+                .hover(|style| {
+                    let fill = theme::hover_over(theme::surface());
+                    style.bg(rgb(fill)).cursor_pointer()
+                })
+                .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                    workbench.open_discovery(run_id.clone(), name.clone(), cx);
+                }));
+        }
+        row
     }
 
     /// Research outputs from the current run, grouped by kind.
@@ -15200,6 +15764,11 @@ impl Render for Workbench {
 
         // The budget gate, mounted before the confirmations below it. Nothing else in this app
         // guards money, and the researcher did not ask for it — a drafted run did.
+        let root = match self.discovery_open.clone() {
+            Some(view) => root.child(self.discovery_modal(&view, cx)),
+            None => root,
+        };
+
         let root = match self.approving.clone() {
             Some(approval) => root.child(self.approval_modal(&approval, cx)),
             None => root,

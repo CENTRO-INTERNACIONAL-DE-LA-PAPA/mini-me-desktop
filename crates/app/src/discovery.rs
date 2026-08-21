@@ -26,10 +26,6 @@
 //! 6. **Three identifiers, not interchangeable.** `experiment_id` (`node_2_0`) is what edges
 //!    reference, `id_in_run` is what a human is shown, `creation_idx` is the order things happened.
 
-// Decoded, laid out and tested against the frozen probe response, and not yet read by the panel —
-// the tree it draws is the next commit. The allow comes off with the drawing.
-#![allow(dead_code)]
-
 use serde_json::Value;
 
 /// How confident the model is that a hypothesis holds.
@@ -390,6 +386,133 @@ pub fn layout(experiments: &[Experiment]) -> Vec<Placed> {
     nodes
 }
 
+/// How wide one column of the tree is, in pixels.
+///
+/// A node is 26px, so this leaves 18 between siblings — enough that two circles read as two
+/// things rather than a bar.
+pub const COLUMN: f32 = 44.;
+
+/// How tall one generation is.
+///
+/// Taller than the column is wide, because depth is the axis that carries meaning here and a
+/// squarer grid makes a three-deep search look like a row.
+pub const ROW: f32 = 56.;
+
+/// A node's diameter.
+pub const NODE: f32 = 26.;
+
+/// Where a placed node's centre sits, in pixels from the top-left of the canvas.
+pub fn centre(node: &Placed) -> (f32, f32) {
+    (
+        node.across as f32 * COLUMN + COLUMN / 2.0,
+        node.depth as f32 * ROW + NODE / 2.0,
+    )
+}
+
+/// How big the canvas has to be to hold every node with a margin for the last one's radius.
+pub fn canvas(nodes: &[Placed]) -> (f32, f32) {
+    let width = nodes
+        .iter()
+        .map(|node| centre(node).0 + COLUMN / 2.0)
+        .fold(COLUMN, f32::max);
+    let height = nodes
+        .iter()
+        .map(|node| centre(node).1 + NODE)
+        .fold(ROW, f32::max);
+    (width, height)
+}
+
+/// One axis-aligned segment of an edge: left, top, width, height, all in pixels.
+///
+/// **Elbows, not diagonals.** gpui draws rectangles, and a sloped line would have to be a rotated
+/// div or a custom element; three axis-aligned pieces are exact, cheap, and read as a tree the way
+/// an org chart or a git graph does. Any renderer that can place a box can draw this.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Segment {
+    pub left: f32,
+    pub top: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// How thick a connector is drawn.
+const STROKE: f32 = 1.;
+
+/// The segments joining a parent to a child: down out of the parent, across, down into the child.
+///
+/// Middle piece omitted when the two are in the same column, so a single-child chain is one
+/// straight line rather than three pieces with two of them zero-length.
+pub fn elbow(parent: &Placed, child: &Placed) -> Vec<Segment> {
+    let (parent_x, parent_y) = centre(parent);
+    let (child_x, child_y) = centre(child);
+    let waist = (parent_y + child_y) / 2.0;
+    let mut segments = vec![Segment {
+        left: parent_x - STROKE / 2.0,
+        top: parent_y,
+        width: STROKE,
+        height: (waist - parent_y).max(0.0),
+    }];
+    if (child_x - parent_x).abs() > f32::EPSILON {
+        segments.push(Segment {
+            left: parent_x.min(child_x),
+            top: waist - STROKE / 2.0,
+            width: (child_x - parent_x).abs(),
+            height: STROKE,
+        });
+    }
+    segments.push(Segment {
+        left: child_x - STROKE / 2.0,
+        top: waist,
+        width: STROKE,
+        height: (child_y - waist).max(0.0),
+    });
+    segments
+}
+
+/// How to draw a node: what happened to it, or failing that, how far it moved a belief.
+///
+/// **Status outranks loudness, and that ordering is the point.** An experiment that failed has no
+/// meaningful `surprise`, so banding it by magnitude would draw a hole in the search as a quiet
+/// result — the reader would see a node that ran and found nothing, when nothing ran.
+///
+/// Below that, three bands rather than a gradient. The service's own view uses two colours —
+/// orange for high surprisal, grey for low — and a continuous ramp over a number whose scale
+/// nobody has documented would imply precision we do not have.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Loudness {
+    /// Still going. Not scored yet, and not a result.
+    Running,
+    /// Stopped without succeeding. Not a result either, and it must not look like one.
+    Failed,
+    /// Moved the belief a long way.
+    Loud,
+    /// Moved it some.
+    Middling,
+    /// Barely moved it.
+    Quiet,
+}
+
+/// Where the bands sit, on `|surprise|`.
+///
+/// Chosen against the probe's five, which ran 0.06, 0.25, 0.39, 0.53 and 0.67 — so a third of them
+/// land in each band and the picture has contrast on a real run rather than on a hoped-for one.
+const LOUD_AT: f64 = 0.5;
+const MIDDLING_AT: f64 = 0.2;
+
+pub fn loudness(experiment: &Experiment) -> Loudness {
+    if !experiment.is_finished() {
+        return Loudness::Running;
+    }
+    if !experiment.succeeded() {
+        return Loudness::Failed;
+    }
+    match experiment.magnitude() {
+        m if m >= LOUD_AT => Loudness::Loud,
+        m if m >= MIDDLING_AT => Loudness::Middling,
+        _ => Loudness::Quiet,
+    }
+}
+
 /// The parent→child pairs to draw, as indices into the slice that was laid out.
 ///
 /// Derived from the same `parent` field the layout uses, so an edge can never point somewhere the
@@ -650,6 +773,96 @@ mod tests {
         let mut columns = [left, right, across("node_3_1")];
         columns.sort_by(f64::total_cmp);
         assert_eq!(columns, [0.0, 1.0, 2.0]);
+    }
+
+    /// The connectors are three axis-aligned pieces, and they actually meet the nodes.
+    #[test]
+    fn an_elbow_joins_a_parent_to_a_child_without_a_gap() {
+        let experiments = decode_experiments(&probe());
+        let placed = layout(&experiments);
+        let node = |id: &str| {
+            let at = experiments.iter().position(|e| e.id == id).expect(id);
+            *placed.iter().find(|node| node.at == at).expect(id)
+        };
+        let parent = node("node_2_0");
+        let child = node("node_3_0");
+        let segments = elbow(&parent, &child);
+        assert_eq!(segments.len(), 3, "down, across, down");
+
+        // The first piece starts at the parent's centre and the last ends at the child's.
+        let (px, py) = centre(&parent);
+        let (cx, cy) = centre(&child);
+        assert!((segments[0].top - py).abs() < 0.01);
+        assert!((segments[0].left + segments[0].width / 2.0 - px).abs() < 0.01);
+        let last = segments[2];
+        assert!((last.top + last.height - cy).abs() < 0.01);
+        assert!((last.left + last.width / 2.0 - cx).abs() < 0.01);
+
+        // Vertically contiguous: no gap between the pieces for a hairline to show through.
+        assert!((segments[0].top + segments[0].height - segments[1].top - STROKE / 2.0).abs() < 0.01);
+        assert!((segments[1].top + STROKE / 2.0 - last.top).abs() < 0.01);
+
+        // A single child directly below its parent is one straight line, not three pieces.
+        let straight = elbow(&node("node_2_1"), &node("node_3_1"));
+        assert_eq!(straight.len(), 2, "no horizontal piece when the columns match");
+    }
+
+    /// Every node fits inside the canvas the view sizes itself to.
+    #[test]
+    fn the_canvas_holds_every_node() {
+        let experiments = decode_experiments(&probe());
+        let placed = layout(&experiments);
+        let (width, height) = canvas(&placed);
+        for node in &placed {
+            let (x, y) = centre(node);
+            assert!(x + NODE / 2.0 <= width, "{x} past {width}");
+            assert!(y + NODE / 2.0 <= height, "{y} past {height}");
+        }
+        // An empty run still has a canvas rather than a zero-sized box.
+        let (empty_width, empty_height) = canvas(&[]);
+        assert!(empty_width > 0.0 && empty_height > 0.0);
+    }
+
+    /// Three bands, and the probe's real spread lands across all of them.
+    #[test]
+    fn loudness_has_contrast_on_a_real_run() {
+        let experiments = decode_experiments(&probe());
+        let bands: Vec<Loudness> = experiments.iter().map(loudness).collect();
+        assert!(bands.contains(&Loudness::Loud), "{bands:?}");
+        assert!(bands.contains(&Loudness::Middling), "{bands:?}");
+        assert!(bands.contains(&Loudness::Quiet), "{bands:?}");
+        // Read off the magnitude, so the sign does not change how loud something looks: an
+        // experiment that moved a belief hard the other way is just as interesting.
+        let down = experiments.iter().find(|e| e.id == "node_2_0").expect("node_2_0");
+        assert!(down.surprise.expect("a score") < 0.0);
+        assert_eq!(loudness(down), Loudness::Loud);
+        // An experiment with no score yet is quiet rather than panicking.
+        let mut pending = down.clone();
+        pending.surprise = None;
+        assert_eq!(loudness(&pending), Loudness::Quiet);
+    }
+
+    /// Status outranks the score, because a failed experiment is a hole in the search and drawing
+    /// it by magnitude would present it as a node that ran and found nothing.
+    #[test]
+    fn a_node_that_did_not_run_is_never_banded_by_its_score() {
+        let loud = decode_experiments(&probe())
+            .into_iter()
+            .find(|e| e.id == "node_2_0")
+            .expect("node_2_0");
+        assert_eq!(loudness(&loud), Loudness::Loud, "it is loud while it succeeded");
+
+        // Same score, still running.
+        let mut running = loud.clone();
+        running.status = "RUNNING".into();
+        assert_eq!(loudness(&running), Loudness::Running);
+
+        // Same score, failed. Two spellings, because the service uses both.
+        for stopped in ["FAILED", "ERROR", "CANCELLED"] {
+            let mut broken = loud.clone();
+            broken.status = stopped.to_string();
+            assert_eq!(loudness(&broken), Loudness::Failed, "{stopped}");
+        }
     }
 
     /// Nothing in the payload promises the parent chain is acyclic, and a hung window is a worse
