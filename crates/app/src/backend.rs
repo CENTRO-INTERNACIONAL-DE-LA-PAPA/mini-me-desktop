@@ -1712,6 +1712,51 @@ pub(crate) mod env_lock {
 
 #[cfg(test)]
 mod tests {
+    /// Every test that redirects the environment must hold [`env_lock`].
+    ///
+    /// The lock only works if everyone takes it. One test set `MINIME_LOCAL_WORKSPACE` without
+    /// it, and for the microseconds it held that value *every other test running concurrently*
+    /// saw the workspace pointing at `/tmp/somewhere-else`. The result was a single failure with
+    /// a different name each time, roughly once in fifty runs — twice observed, never reproduced
+    /// on demand, and it took a release build to force the issue (§267).
+    ///
+    /// So this reads the sources rather than trusting a comment: the offending test carried
+    /// "SAFETY: single-threaded test setup", which is simply not what `cargo test` does. Chunks
+    /// are split on `#[test]`, which is not exactly a function boundary but is close enough to
+    /// catch the mistake and never fires on correct code.
+    #[test]
+    fn a_test_that_moves_the_environment_holds_the_lock() {
+        let sources: [(&str, &str); 6] = [
+            ("workspace.rs", include_str!("workspace.rs")),
+            ("backend.rs", include_str!("backend.rs")),
+            ("preflight.rs", include_str!("preflight.rs")),
+            ("settings.rs", include_str!("settings.rs")),
+            ("sidecar.rs", include_str!("sidecar.rs")),
+            ("main.rs", include_str!("main.rs")),
+        ];
+        let mut unguarded = Vec::new();
+        for (name, source) in sources {
+            for chunk in source.split("#[test]").skip(1) {
+                let moves = chunk.contains("std::env::set_var")
+                    || chunk.contains("std::env::remove_var");
+                if moves && !chunk.contains("env_lock::hold()") {
+                    let signature = chunk
+                        .lines()
+                        .find(|line| line.trim_start().starts_with("fn "))
+                        .unwrap_or("<unnamed>")
+                        .trim();
+                    unguarded.push(format!("{name}: {signature}"));
+                }
+            }
+        }
+        assert!(
+            unguarded.is_empty(),
+            "these tests move process-global environment without env_lock::hold(), so they \
+             corrupt whatever runs beside them:\n  {}",
+            unguarded.join("\n  ")
+        );
+    }
+
 
     /// The generated config must be written by the copy the server imports, not the other one.
     ///
