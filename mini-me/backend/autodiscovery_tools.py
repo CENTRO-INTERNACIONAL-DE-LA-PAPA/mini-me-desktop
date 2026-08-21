@@ -346,6 +346,17 @@ def _json_shell(argv: list[str]) -> str:
     return " ".join(shlex.quote(part) for part in argv) + " 2>/dev/null"
 
 
+def _loud_shell(argv: list[str]) -> str:
+    """Run a command and keep stderr, for the ones whose *failure* is the interesting part.
+
+    `2>/dev/null` is right for a JSON parse and wrong here. The metadata read and save are the two
+    calls that stand between a researcher's press and their run, and when one failed the app said
+    "your changes did not save" while the reason — a `Usage:` line, an auth error, a path — went to
+    /dev/null. That is §249's paraphrased-away failure in a different costume (§255).
+    """
+    return " ".join(shlex.quote(part) for part in argv) + " 2>&1"
+
+
 #: In-sandbox decoder for one experiment's figures.
 #:
 #: `rich_outputs` is a list of Jupyter display bundles, each carrying the *same* figure under
@@ -630,7 +641,7 @@ async def read_metadata(sandbox: Any, run_id: str) -> dict[str, Any]:
     """
     if not is_valid_run_id(run_id):
         return {}
-    out = await _run(sandbox, _json_shell(_build_metadata_get_command(run_id)), _STATUS_TIMEOUT_S)
+    out = await _run(sandbox, _loud_shell(_build_metadata_get_command(run_id)), _STATUS_TIMEOUT_S)
     payload = _extract_json(out)
     if isinstance(payload, dict):
         # The run listing nests this under `run_metadata`; `metadata-get` returns it bare. Accept
@@ -639,6 +650,16 @@ async def read_metadata(sandbox: Any, run_id: str) -> dict[str, Any]:
         return inner if isinstance(inner, dict) else payload
     logger.warning("autodiscovery metadata-get run=%s unreadable: %.200s", run_id, out)
     return {}
+
+
+class MetadataNotSaved(RuntimeError):
+    """A drafted run's configuration could not be changed, with the service's own words attached.
+
+    An exception rather than a falsy return so the reason cannot be dropped on the way out. The
+    first version returned `{}` and the route turned that into "your changes did not save", which
+    is true and useless — the researcher cannot act on it and neither can anyone reading a bug
+    report (§255).
+    """
 
 
 async def update_metadata(
@@ -654,6 +675,8 @@ async def update_metadata(
     survives the round trip instead of being erased by a rewrite.
     """
     allowed = {"intent", "n_experiments"}
+    if not is_valid_run_id(run_id):
+        raise MetadataNotSaved("not a run id")
     rejected = sorted(set(changes) - allowed)
     if rejected:
         logger.warning("ignoring unapproved discovery metadata edits: %s", ", ".join(rejected))
@@ -663,7 +686,17 @@ async def update_metadata(
 
     current = await read_metadata(sandbox, run_id)
     if not current:
-        return {}
+        raise MetadataNotSaved(
+            "could not read this run's configuration back from the service, so nothing was changed"
+        )
+
+    # **Nothing to do is not a failure.** If the stored configuration already matches what was
+    # approved — the common case when the researcher changes nothing — there is no write and no CLI
+    # call, so the two things most likely to fail simply do not happen.
+    if all(current.get(key) == value for key, value in patch.items()):
+        logger.info("discovery run=%s already configured as approved", run_id)
+        return current
+
     updated = {**current, **patch}
     if "n_experiments" in patch:
         budget = patch["n_experiments"]
@@ -682,13 +715,14 @@ async def update_metadata(
     written = await awrite(staged, json.dumps(updated, indent=2, ensure_ascii=False))
     if getattr(written, "error", None):
         logger.warning("could not stage edited metadata for %s: %s", run_id, written.error)
-        return {}
+        raise MetadataNotSaved(f"could not write the run's configuration: {written.error}")
     out = await _run(
-        sandbox, _json_shell(_build_metadata_command(run_id, staged)), _STATUS_TIMEOUT_S
+        sandbox, _loud_shell(_build_metadata_command(run_id, staged)), _STATUS_TIMEOUT_S
     )
     if "Metadata saved" not in (out or ""):
-        logger.warning("edited metadata for %s did not save: %.200s", run_id, out)
-        return {}
+        logger.warning("edited metadata for %s did not save: %.400s", run_id, out)
+        detail = " ".join((out or "").split())[:300] or "the command printed nothing"
+        raise MetadataNotSaved(f"the service did not save the change: {detail}")
     logger.info(
         "updated a drafted discovery run=%s experiments=%s", run_id, updated.get("n_experiments")
     )
