@@ -5128,12 +5128,10 @@ impl Workbench {
             [(thread_id, _)] => Some(thread_id.clone()),
             _ => None,
         };
-        let mut row = div()
-            .id("collected-runs")
+        let row = div()
             .flex()
             .flex_row()
             .items_center()
-            .justify_between()
             .gap_2()
             .flex_none()
             .w_full()
@@ -5146,37 +5144,62 @@ impl Workbench {
             .border_color(rgb(theme::accent()))
             .text_color(rgb(theme::text()))
             .text_xs()
-            .child(ui::Label::new(label).inherit().size(ui::Size::Compact).ellipsis());
-
-        if let Some(thread_id) = opens {
-            row = row
-                .hover(|style| {
-                    let fill = theme::hover_over(theme::surface());
-                    style
-                        .bg(rgb(fill))
-                        .text_color(rgb(theme::ink_on(fill)))
-                        .cursor_pointer()
-                })
-                .child(
-                    ui::Label::new("open it")
-                        .inherit()
-                        .size(ui::Size::Compact),
-                )
-                .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                    workbench.collected_runs.clear();
-                    workbench.open_conversation(thread_id.clone(), cx);
-                }));
-        } else {
-            // Nothing to open definitively, so the press dismisses — a banner that stays after
-            // being read is the thing people learn to ignore.
-            row = row
-                .hover(|style| style.cursor_pointer())
-                .child(div().flex_none().text_color(rgb(theme::text_faint())).child("×"))
-                .on_click(cx.listener(|workbench, _event, _window, cx| {
-                    workbench.collected_runs.clear();
-                    cx.notify();
-                }));
-        }
+            .child(
+                ui::Label::new(label)
+                    .inherit()
+                    .size(ui::Size::Compact)
+                    .ellipsis(),
+            )
+            // **Two targets, not one.** The first version made the whole strip the press and gave
+            // the single-run case no dismiss at all: *"I cannot dismiss the modal."* Opening a
+            // conversation and deciding not to are different answers, so they are different
+            // buttons — and the one that means "I have read this" has to exist in both cases,
+            // because a notice you can only clear by going somewhere is a notice that holds the
+            // window hostage (§250).
+            .children(opens.map(|thread_id| {
+                div()
+                    .id("collected-open")
+                    .flex_none()
+                    .px_2()
+                    .py_px()
+                    .rounded_md()
+                    .text_color(rgb(theme::accent()))
+                    .hover(|style| {
+                        let fill = theme::hover_over(theme::surface());
+                        style
+                            .bg(rgb(fill))
+                            .text_color(rgb(theme::ink_on(fill)))
+                            .cursor_pointer()
+                    })
+                    .child("open it")
+                    .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                        workbench.collected_runs.clear();
+                        workbench.open_conversation(thread_id.clone(), cx);
+                    }))
+            }))
+            .child(
+                div()
+                    .id("collected-dismiss")
+                    .flex_none()
+                    .px_1()
+                    .rounded_md()
+                    .text_color(rgb(theme::text_faint()))
+                    .hover(|style| {
+                        let fill = theme::hover_over(theme::surface());
+                        style
+                            .bg(rgb(fill))
+                            .text_color(rgb(theme::ink_on(fill)))
+                            .cursor_pointer()
+                    })
+                    .child("×")
+                    .on_click(cx.listener(|workbench, _event, _window, cx| {
+                        // Only the banner goes. The runs were recorded as announced when they were
+                        // collected, so dismissing does not make them come back next launch — and
+                        // their results are on disk either way.
+                        workbench.collected_runs.clear();
+                        cx.notify();
+                    })),
+            );
         Some(row.into_any_element())
     }
 
@@ -5607,12 +5630,26 @@ impl Workbench {
                         None => {}
                         Some(collected) => {
                             workbench.swept = true;
-                            if !collected.is_empty() {
+                            // **Announced once, ever.** "Finished" stays true forever, so the
+                            // sweep re-collects the same completed run on every launch — and
+                            // without this it re-announced it too, every time (§250).
+                            let announced = workspace::announced_runs();
+                            let fresh: Vec<(String, protocol::Job)> = collected
+                                .into_iter()
+                                .filter(|(_, job)| !announced.contains(&job.task_id))
+                                .collect();
+                            if !fresh.is_empty() {
+                                workspace::remember_announced(
+                                    &fresh
+                                        .iter()
+                                        .map(|(_, job)| job.task_id.clone())
+                                        .collect::<Vec<_>>(),
+                                );
                                 // Kept rather than only announced: the status line is a strip at
                                 // the bottom of the window that the next thing to happen
                                 // overwrites, and this is the one message the app has that the
                                 // researcher cannot arrive at any other way (§244).
-                                workbench.collected_runs = collected;
+                                workbench.collected_runs = fresh;
                                 // Their outputs just landed on disk.
                                 workbench.refresh_project(cx);
                             }
@@ -12093,6 +12130,11 @@ impl Workbench {
             pane = pane.child(log);
         }
 
+        // **Both logs, named.** The pane listed the sidecar's and not the app's, and §206 already
+        // records what that costs: a diagnostic gets added, somebody is asked to grep for it, and
+        // the answer comes back empty from the wrong file. It happened again on 2026-08-21 with a
+        // `/tmp/...` path handed to a researcher whose app writes to `%TEMP%` — two of the three
+        // filesystems this app spans, and the path was for the wrong one (§250).
         pane.child(
             div()
                 .w_full()
@@ -12100,6 +12142,14 @@ impl Workbench {
                 .text_color(rgb(theme::text_muted()))
                 .text_xs()
                 .child(format!("Sidecar log: {}", self.sidecar.log_path())),
+        )
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .text_color(rgb(theme::text_muted()))
+                .text_xs()
+                .child(format!("App log: {}", app_log_path().display())),
         )
     }
 
