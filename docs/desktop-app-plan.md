@@ -13589,3 +13589,122 @@ takes for its thumb.
 *Ninety-ninth: every list in a panel needs a bound, and the one that gets away with not having one
 is the one whose contents you have not made good yet. Making DataVoyager ask a real question is what
 made its row too big to show.*
+
+## 246. AutoDiscovery: planning it before building it (2026-08-21)
+
+*"ok now we need autodiscovery, planify it before coding it so we can iterate faster."*
+
+AutoDiscovery is Asta's fourth long service and the first one that is **not** shaped like the three
+already wired in. The theorizer, DataVoyager and the paper search are all *ask a question, get an
+answer*. AutoDiscovery is *hand over a dataset and a budget, and it decides what to ask* — iterative
+experiments guided by Bayesian surprise and MCTS. That difference is the whole plan.
+
+### What was verified, and how
+
+Not from the docs. `asta autodiscovery --help` gives the subcommands, and the installed CLI's own
+client (`asta/autodiscovery/client.py`, `commands.py`) gives the exact request paths and response
+field names without touching the account — which is the §220 lesson applied before the fact rather
+than after: every middleware test passed for weeks against an argument name the live tool rejected.
+
+Endpoints, on `autodiscovery.allen.ai`, authenticated with the same Asta access token the sandbox
+already has (user id read from the JWT's `sub` claim):
+
+| Command | Request | Response fields that matter |
+|---|---|---|
+| `create` | `POST /api/runs/create` | `runid` |
+| `upload` | `POST /api/runs/{id}/generate-upload-url` then `PUT` to GCS | `upload_url`, `gcs_path` |
+| `metadata` | `POST /api/runs/{id}/metadata` | — |
+| `submit` | `POST /api/runs/submit` | `execution_id`, `run_details.status` |
+| `status` | `GET /api/runs/{user}/{id}/status` | `run_details.{status,status_checked_at,created_at,finished_at}` |
+| `runs` | `GET /api/runs/{user}/list` | `runs[].{runid,name,status,run_stats.{completed_experiments,requested_experiments}}` |
+| `experiments` | `POST /api/runs/{user}/{id}/experiments` | `has_job_completed`, `experiments[].{id_in_run,creation_idx,status,hypothesis,surprise,prior,posterior,is_surprising}` |
+| `experiment` | `GET …/experiments/{exp}` | adds `analysis`, `review`, `code`, `code_output`, `rich_outputs`, `runtime_ms`, `parent_id`, `child_ids` |
+| `credits` | `GET /api/user/me/credits` | `granted`, `consumed`, `pending`, `available` |
+
+Live, read-only, on this account: **500 credits granted, 0 consumed, 0 runs.**
+
+### Four things that make it unlike DataVoyager
+
+**1. Starting a run is four calls, not one.** `create` → `upload` → `metadata` → `submit`. A partial
+sequence leaves a real object on the server: an empty run, or a configured run never submitted.
+Costs nothing, but the app has to be able to say what those are rather than orphaning them.
+
+**2. It spends the researcher's money, and the CLI's own guard is unusable.** 1 credit = 1
+experiment, 1–500 per run. `asta autodiscovery submit` asks `click.confirm` unless given `-y`, and a
+sandbox has no TTY — so the backend must pass `-y`, and **the credit gate has to live in the app**.
+This is the single hard requirement of the feature: nothing may spend a credit without a human
+press that says how many.
+
+**3. Statuses are UPPERCASE.** `PENDING`, `RUNNING`/`IN_PROGRESS`, `SUCCEEDED`/`COMPLETED`,
+`FAILED`/`ERROR`, `CANCELLED`/`DELETED`. `protocol::Job::is_finished` matches lowercase A2A states
+today, so a finished run would poll forever. Two spellings per state, both real.
+
+**4. The service remembers your runs.** `asta autodiscovery runs` lists them server-side, which no
+other Asta service here does. §243 sweeps unattended runs by asking *our* backend what threads it
+has; for AutoDiscovery the service itself is the register, so a run can be reconciled even if the
+conversation that started it is gone.
+
+### The decisions worth taking now
+
+**Run it through the sandbox CLI, not a new Rust HTTP client.** `asta_token_scope` already binds the
+user's token for out-of-agent polls, the CLI is installed and pinned there, and the datasets are
+already mirrored into the sandbox by `workspace::adopt`. A second implementation of this contract in
+Rust is a second thing to drift.
+
+**The agent drafts the metadata; the researcher approves the budget.** The four descriptive fields
+(`name`, `description`, `domain`, `intent`) are exactly what a coordinator with the conversation and
+the CSV headers is good at. `n_experiments` is exactly what it should not be choosing — it is 1 to
+500 credits of somebody else's grant. So: subagent drafts, app shows the draft with the cost in
+credits, researcher presses. One gate, and the metadata is readable in it.
+
+**Remote only.** The skill also offers a local `asta-autodiscovery` that runs on the researcher's
+machine with their own LLM keys. That is a direct conflict with this project's locked decision that
+the model API key is request-only and never on the environment of a long-lived process. Written down
+so nobody adds it later by accident.
+
+**A new artifact type, not a reused one.** An experiment is a hypothesis with a measured belief
+shift — `prior`, `posterior`, `surprise`. The closest existing artifact is `hypotheses` (theories
+with supporting papers), and folding these into it would lose the only numbers that make an
+AutoDiscovery result worth reading. New `discoveries` artifact, ranked by surprise.
+
+### Phases, each ending somewhere testable
+
+**Phase 0 — freeze the contract.** One `create` (free) plus one deliberately small real run: 5
+experiments on the SOC dataset, 5 credits of 500. Capture every response verbatim as test fixtures.
+This also measures the one number nobody has: how long an experiment takes, which is what
+`JobKind::expected()` has to say out loud. §222's lesson — build the doubles from a captured
+contract, never from a reading of the docs.
+
+**Phase 1 — `backend/autodiscovery_tools.py`.** Pure argv builders for all six subcommands, the
+metadata builder, `poll_discovery_status`, `persist_discovery_outputs` writing
+`discovery/<runid>.md` + `.json`. Unit-tested against Phase 0's fixtures. Two traps to test
+explicitly: `metadata.datasets[].name` must match the uploaded filename exactly, and `submit` must
+carry `-y`.
+
+**Phase 2 — the subagent and its gates.** An `autodiscovery` subagent alongside `data_voyager`, plus
+the tool-gate discipline §219–§234 established: a `DraftBeforeSubmitting` step so the model cannot
+compose a run report it never launched, an entry in the claims recorder, and membership in
+`DISK_WRITING_SUBAGENTS`.
+
+**Phase 3 — the credit gate.** Above the composer, per §40. Names the run, the experiment count, the
+cost and the balance; the drafted metadata readable and `n_experiments` editable before the press.
+Nothing in phases 1–2 may reach `submit` until this exists.
+
+**Phase 4 — `JobKind::Discovery`.** The uppercase statuses, the poll route, a jobs-panel row, and
+§243's sweep from day one rather than as the repair it was last time. A run measured in hours is a
+run nobody will be watching when it lands.
+
+**Phase 5 — the results.** An experiments modal ranked by surprise, in the shape the datasets and
+library modals already have; `rich_outputs` decoded to files, because §242 is the standing lesson
+that Asta hands back figures encoded and something has to unpack them.
+
+### Open, and the researcher's call rather than mine
+
+- **How many experiments is a normal run?** The skill suggests 10–20 to explore and 50–100 to
+  investigate. With 500 credits that is between 5 and 50 runs, ever. Worth deciding what the app
+  offers as a default before it offers one.
+- **Whose credits are these?** One grant, and an app that may be used by more than one researcher.
+  Nothing in the current design tracks who spent what.
+
+*Hundredth: the service that decides its own questions needs the tightest gate, not the loosest.
+Everything else here asks what you told it to ask.*
