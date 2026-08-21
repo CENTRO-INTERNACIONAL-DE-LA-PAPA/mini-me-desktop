@@ -13781,3 +13781,72 @@ Everything else here asks what you told it to ask.*
 
 *Hundred-and-first: a banner is for something already true; a modal is for something that cannot
 happen without you. §244 and §246 disagree about the widget and agree about the rule.*
+
+### Agreed, 2026-08-21
+
+Four questions, four answers, so the plan above is now settled rather than proposed:
+
+- **Phase 0 runs on the synthetic control** — the file with a planted signal in `cov_000`, `cov_005`
+  and `cov_011` that §239 used to prove DataVoyager worked. It has the property Phase 0 needs and
+  nothing else does: a *known right answer*. On real data a thin result is ambiguous — broken
+  plumbing, or honest science? — and disambiguating that is what cost §239 a whole round.
+- **Runs start through the coordinator**, like DataVoyager. The agent drafts `name`, `domain`,
+  `description` and `intent` from the conversation and the file's own headers, which is the half it
+  is good at; the modal gates the half it is not. It also means the research planner can list
+  AutoDiscovery as a step.
+- **Vertical slice first.** One run end to end with a rough list, then polish — because the thing
+  worth judging early is whether a discovery run lands in the app at all. Phase 0's submit stays
+  manual, so no credit is ever spent through an ungated path.
+- **The table is ours, the graph is theirs.** Ranked experiments and the experiment detail in
+  Mini-Me; the interactive graph opens in `autodiscovery.allen.ai`, which already has a good one.
+  Which makes the run URL shape a Phase 0 blocker rather than a curiosity — without it there is no
+  link to offer.
+
+## 247. Phase 0: what the probe run actually returned (2026-08-21)
+
+One free `create`, one 5-experiment run on the synthetic control. §246 listed five unknowns; the
+first three answered themselves before a single experiment finished, and two of them contradict the
+plan that was written from the docs.
+
+### `CREATED` and `PENDING` are statuses too
+
+An unsubmitted run reports `status: "CREATED"`. Submitted, it reports `PENDING`, then `RUNNING`. The
+CLI's own `_status_icon` — the closest thing to a documented vocabulary — handles `PENDING`,
+`RUNNING`, `IN_PROGRESS`, `SUCCEEDED`, `COMPLETED`, `FAILED`, `ERROR`, `CANCELLED` and `DELETED`,
+and has no case for `CREATED`. It renders it `[CR]`. So the state list is **open**, and
+`Job::is_finished` must be written as "terminal unless proven otherwise" rather than as a match
+against a list somebody believes is complete.
+
+**And two sources disagree in the same breath.** `submit` printed `Status: RUNNING` while the
+`status` call one second later returned `run_details.status: "PENDING"`. Both are true: the run
+record and the Cloud Run execution are separate objects, and `status` returns both —
+`run_details.status` (the run's own) and `execution_status.phase` (the infrastructure's). The app
+reads `run_details.status` and ignores the other, or it will report a run as pending while it works
+and running while it queues.
+
+### Credits move to `pending`, not `consumed`
+
+Before: `granted 500, consumed 0, pending 0, available 500`.
+One second after submitting a 5-experiment run: `granted 500, consumed 0, pending 5, available 495`.
+
+So **`available` is the only number the gate should show**, because it is the only one that already
+accounts for runs in flight. A modal that said "5 experiments, 500 credits available" while three
+other runs held 60 in `pending` would be off by sixty.
+
+### The server keeps more metadata than the docs describe
+
+`metadata-get` returns seven fields the skill's schema never mentions: `is_shared`,
+`is_bookmarked`, `bookmarked_experiment_ids`, `n_warmstart`, `warmstart_experiments`,
+`parent_run_id`, `parent_run_name`, plus a per-dataset `url`. Two matter:
+
+- **`is_shared`** is very likely the answer to §246's run-URL question. The sample in the web view
+  lives at `/shared/samples/nls_bmi`, and a run carrying an `is_shared` flag suggests the shareable
+  address is a *property the researcher grants*, not one every run has. If so, `open in
+  AutoDiscovery` cannot be an unconditional link, and the plan's Phase 5a needs a share step or a
+  different destination.
+- **`n_warmstart` / `warmstart_experiments`** is an undocumented capability: a run can apparently be
+  seeded with experiments. Noted, not planned.
+
+Nothing was guessed here. This is the §222 discipline — build the doubles from a captured contract —
+applied *before* writing the code rather than after a middleware's tests passed for weeks against an
+argument the live tool rejected.
