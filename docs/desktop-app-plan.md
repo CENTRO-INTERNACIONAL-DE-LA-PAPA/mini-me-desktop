@@ -14575,3 +14575,57 @@ the figures were.
 *Hundred-and-twelfth: a route is not a feature until something calls it. Two sections in a row shipped
 a correct component with no caller, and both times the tests passed because they tested the
 component.*
+
+## 258. The record said awaiting_approval forever (2026-08-21)
+
+*"now I dont see the ui of the background completed task"*
+
+The run was approved, ran, and its results opened. And there was no row for it in `BACKGROUND
+JOBS` — while the transcript above still read `Status: awaiting_approval`.
+
+Both symptoms are one cause. **A discovery artifact is written by `ArtifactCaptureMiddleware` when a
+turn runs the subagent, and approving is not a turn.** So the artifact recorded the state at drafting
+time and nothing ever moved it. In the session that pressed the button the row existed anyway,
+because `approve_discovery` calls `track_job` directly — but a reload rebuilds the job list from the
+snapshot, `decode_jobs` skips `awaiting_approval` **by design** (§253's whole point: a draft is not a
+job), and a run happily working on Asta vanished from the panel.
+
+Worse, quietly: `decode_drafts` still found it, so reopening that conversation would offer to spend
+credits on a run that had already finished.
+
+### Two halves, and the second is the one that matters
+
+**Write it down.** On a successful submit the app now posts a state update —
+`POST /threads/{id}/state` applies it through the graph's own reducers, so it sends only
+`{run_id, status: "running", n_experiments}` and `_merge_artifacts` merges that partial row over the
+stored one, keeping the name, the datasets and the intent. Verified against the real reducer rather
+than assumed. The budget goes too, because the researcher may have changed it and the record should
+say what was actually bought.
+
+**And ask the service before asking the researcher.** Writing it down fixes runs approved from now
+on and does nothing for the one already sitting in a conversation. The service is the authority here
+and our artifact is a cache: `asta autodiscovery status` distinguishes `CREATED` — drafted, never
+submitted — from everything else. So `already_submitted` asks, and the gate now opens *complete or
+not at all*:
+
+- **`CREATED`** → open the modal, with the cost and the token already in hand.
+- **anything else** → adopt it as a running job, correct the record, and never ask about its budget
+  again. An unfamiliar status counts as started, because erring toward not charging twice is the
+  safe direction.
+- **no readable answer** → do not ask for money. The draft keeps its status and the next snapshot
+  tries again.
+
+That also removed a wart: the modal used to open immediately and fill in the cost when it arrived,
+which is why `ready_to_submit` existed to stop a press landing before the token. The gate is now
+never open without one. The guard stays anyway — it costs nothing and its test documents the rule.
+
+### The general shape of the last five sections
+
+§254 built an artifact nothing filed. §257 built a route nothing called. This one wrote a record
+nothing updated. Three consecutive defects of the same kind: a correct component, complete tests, and
+no writer for the thing downstream of it. What they have in common is that every test constructed its
+subject directly and none followed a value from one end of the path to the other.
+
+*Hundred-and-thirteenth: a status written once is a status that is wrong from the second event
+onward. If the thing that changes state is not the thing that records it, say out loud which one the
+reader is trusting.*

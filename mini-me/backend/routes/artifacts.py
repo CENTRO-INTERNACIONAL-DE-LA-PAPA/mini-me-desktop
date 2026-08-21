@@ -14,6 +14,7 @@ from backend.sandbox import LazyLangsmithSandbox
 from backend.schemas import _is_supported_artifact_file
 from backend.autodiscovery_tools import (
     MetadataNotSaved,
+    already_submitted,
     cost_of,
     fetch_experiment_figures,
     is_valid_experiment_id,
@@ -354,6 +355,10 @@ async def discovery_draft(request: Request) -> Response:
     async with asta_token_scope(_request_user_id(request)):
         metadata = await read_metadata(adapter, run_id)
         credits = await read_credits(adapter)
+        # Asked of the service, not of our own record: an approved run's artifact can sit at
+        # `awaiting_approval` indefinitely, and re-offering the gate for a run already finished is
+        # worse than not offering it (§258).
+        started = await already_submitted(adapter, run_id)
     if not metadata:
         return JSONResponse({"error": "no such drafted run"}, status_code=404)
     # `available` already nets off runs in flight; the others are for context only.
@@ -364,9 +369,13 @@ async def discovery_draft(request: Request) -> Response:
             "metadata": metadata,
             "credits": credits,
             "cost": cost,
+            # `true` when the service says this run is past `CREATED`. The gate must not be offered
+            # for it, and the caller adopts it as a running job instead.
+            "submitted": bool(started),
             # The token the modal must hand back. Issued here because opening the modal is the only
-            # thing in this app that legitimately precedes a press.
-            "approval": _issue_approval(thread_id, run_id, cost),
+            # thing in this app that legitimately precedes a press. Not issued at all for a run that
+            # has already started — there is nothing left to authorise.
+            "approval": "" if started else _issue_approval(thread_id, run_id, cost),
         }
     )
 

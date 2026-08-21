@@ -1003,6 +1003,30 @@ impl Sidecar {
         rx
     }
 
+    /// Record an approved run as started, so it survives a reload as a job.
+    pub fn discovery_started(
+        &self,
+        run_id: String,
+        experiments: u32,
+    ) -> mpsc::UnboundedReceiver<Result<(), String>> {
+        let (tx, rx) = mpsc::unbounded();
+        let base_url = self.base_url.clone();
+        let thread = self.thread.clone();
+        self.runtime.spawn(async move {
+            let Some(thread_id) = thread.lock().expect("thread id mutex").clone() else {
+                let _ = tx.unbounded_send(Err("this conversation has no thread yet".into()));
+                return;
+            };
+            let client = LangGraphClient::new(base_url);
+            let outcome = client
+                .discovery_started(&thread_id, &run_id, experiments)
+                .await
+                .map_err(|error| format!("{error:#}"));
+            let _ = tx.unbounded_send(outcome);
+        });
+        rx
+    }
+
     /// Read a discovery run's experiments for the results view.
     pub fn discovery_run(
         &self,

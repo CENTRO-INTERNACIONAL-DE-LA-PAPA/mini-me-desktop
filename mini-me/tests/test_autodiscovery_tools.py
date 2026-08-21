@@ -980,3 +980,47 @@ def test_two_runs_stage_their_metadata_in_different_files():
     other = "11111111-2222-3333-4444-555555555555"
     assert metadata_path("/workspace", _RUN) != metadata_path("/workspace", other)
     assert _RUN in metadata_path("/workspace", _RUN)
+
+
+# ---------------------------------------------------------------------------
+# §258: the service knows whether a run was approved; our artifact may not
+# ---------------------------------------------------------------------------
+
+
+def test_only_created_means_a_run_was_never_submitted():
+    """A discovery artifact is written by a turn and approving is not a turn, so an approved run's
+    record can sit at `awaiting_approval` indefinitely. Re-offering the budget gate for a run that
+    is already finished is worse than not offering it, so the service is asked."""
+    from backend.autodiscovery_tools import already_submitted
+
+    def answering(status):
+        return _Sandbox(
+            [("autodiscovery status", json.dumps({"run_details": {"status": status}}))]
+        )
+
+    # The one status that means drafted-and-never-started.
+    assert asyncio.run(already_submitted(answering("CREATED"), _RUN)) is False
+    assert asyncio.run(already_submitted(answering("created"), _RUN)) is False
+
+    # Everything else means it has been started — including a word nobody has seen, because the
+    # vocabulary is open (§247) and erring toward *not* asking for money twice is the safe side.
+    for started in ("PENDING", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED", "REHYDRATING"):
+        assert asyncio.run(already_submitted(answering(started), _RUN)) is True, started
+
+
+def test_an_unreadable_status_says_nothing_rather_than_guessing():
+    """`None` is a third answer, and the caller must not treat it as either: it does not know
+    whether a press would be a second charge."""
+    from backend.autodiscovery_tools import already_submitted
+
+    assert asyncio.run(already_submitted(_Sandbox([("autodiscovery status", "boom")]), _RUN)) is None
+    assert (
+        asyncio.run(
+            already_submitted(
+                _Sandbox([("autodiscovery status", json.dumps({"run_details": {}}))]), _RUN
+            )
+        )
+        is None
+    )
+    # And an id it will not touch.
+    assert asyncio.run(already_submitted(_Sandbox([]), "not-a-run")) is None
