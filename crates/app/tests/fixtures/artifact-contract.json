@@ -1,0 +1,207 @@
+{
+  "artifacts": {
+    "analyses": [
+      {
+        "charts": [
+          "contract-analyses-charts-0",
+          "contract-analyses-charts-1"
+        ],
+        "context_id": "contract-analyses-context_id",
+        "dataset_paths": [
+          "contract-analyses-dataset_paths-0",
+          "contract-analyses-dataset_paths-1"
+        ],
+        "findings": [
+          {
+            "chart_path": "./contract-analyses-findings-0-chart_path.txt",
+            "detail": "contract-analyses-findings-0-detail",
+            "title": "contract-analyses-findings-0-title"
+          },
+          {
+            "chart_path": "./contract-analyses-findings-1-chart_path.txt",
+            "detail": "contract-analyses-findings-1-detail",
+            "title": "contract-analyses-findings-1-title"
+          }
+        ],
+        "hypotheses_tested": [
+          "contract-analyses-hypotheses_tested-0",
+          "contract-analyses-hypotheses_tested-1"
+        ],
+        "question": "contract-analyses-question",
+        "status": "contract-analyses-status",
+        "summary": "contract-analyses-summary",
+        "task_id": "contract-analyses-task_id"
+      }
+    ],
+    "datasets": [
+      {
+        "authors": [
+          "contract-datasets-authors-0",
+          "contract-datasets-authors-1"
+        ],
+        "description": "contract-datasets-description",
+        "doi_url": "https://example.invalid/contract-datasets-doi_url",
+        "file_access_summary": "contract-datasets-file_access_summary",
+        "file_count": 466,
+        "persistent_id": "contract-datasets-persistent_id",
+        "recommendation_reason": "contract-datasets-recommendation_reason",
+        "repository": "contract-datasets-repository",
+        "title": "contract-datasets-title"
+      }
+    ],
+    "discoveries": [
+      {
+        "dataset_paths": [
+          "contract-discoveries-dataset_paths-0",
+          "contract-discoveries-dataset_paths-1"
+        ],
+        "domain": "contract-discoveries-domain",
+        "intent": "contract-discoveries-intent",
+        "n_experiments": 338,
+        "name": "contract-discoveries-name",
+        "note": "contract-discoveries-note",
+        "run_id": "contract-discoveries-run_id",
+        "status": "contract-discoveries-status"
+      }
+    ],
+    "files": [
+      {
+        "description": "contract-files-description",
+        "media_type": "contract-files-media_type",
+        "name": "contract-files-name",
+        "path": "./contract-files-path.txt",
+        "relative_path": "./contract-files-relative_path.txt"
+      }
+    ],
+    "hypotheses": [
+      {
+        "knowledge_gaps": [
+          "contract-hypotheses-knowledge_gaps-0",
+          "contract-hypotheses-knowledge_gaps-1"
+        ],
+        "papers_reviewed": 450,
+        "question": "contract-hypotheses-question",
+        "status": "contract-hypotheses-status",
+        "task_id": "contract-hypotheses-task_id",
+        "theories": [
+          {
+            "conflicting_papers": [
+              {
+                "citation": "contract-hypotheses-theories-0-conflicting_papers-0-citation",
+                "corpus_id": "contract-hypotheses-theories-0-conflicting_papers-0-corpus_id",
+                "doi": "10.5555/contract-hypotheses-theories-0-conflicting_papers-0-doi",
+                "url": "https://example.invalid/contract-hypotheses-theories-0-conflicting_papers-0-url"
+              },
+              {
+                "citation": "contract-hypotheses-theories-0-conflicting_papers-1-citation",
+                "corpus_id": "contract-hypotheses-theories-0-conflicting_papers-1-corpus_id",
+                "doi": "10.5555/contract-hypotheses-theories-0-conflicting_papers-1-doi",
+                "url": "https://example.invalid/contract-hypotheses-theories-0-conflicting_papers-1-url"
+              }
+            ],
+            "laws": [
+              "contract-hypotheses-theories-0-laws-0",
+              "contract-hypotheses-theories-0-laws-1"
+            ],
+            "novelty_score": 0.471,
+            "supporting_papers": [
+              {
+                "citation": "contract-hypotheses-theories-0-supporting_papers-0-citation",
+                "corpus_id": "contract-hypotheses-theories-0-supporting_papers-0-corpus_id",
+                "doi": "10.5555/contract-hypotheses-theories-0-supporting_papers-0-doi",
+                "url": "https://example.invalid/contract-hypotheses-theories-0-supporting_papers-0-url"
+              },
+              {
+                "citation": "contract-hypotheses-theories-0-supporting_papers-1-citation",
+                "corpus_id": "contract-hypotheses-theories-0-supporting_papers-1-corpus_id",
+                "doi": "10.5555/contract-hypotheses-theories-0-supporting_papers-1-doi",
+                "url": "https://example.invalid/contract-hypotheses-theories-0-supporting_papers-1-url"
+              }
+            ]
+          },
+          {
+            "conflicting_papers": [
+              {
+                "citation": "contract-hypotheses-theories-1-conflicting_papers-0-citation",
+                "corpus_id": "contract-hypotheses-theories-1-conflicting_papers-0-corpus_id",
+                "doi": "10.5555/contract-hypotheses-theories-1-conflicting_papers-0-doi",
+                "url": "https://example.invalid/contract-hypotheses-theories-1-conflicting_papers-0-url"
+              },
+              {
+                "citation": "contract-hypotheses-theories-1-conflicting_papers-1-citation",
+                "corpus_id": "contract-hypotheses-theories-1-conflicting_papers-1-corpus_id",
+                "doi": "10.5555/contract-hypotheses-theories-1-conflicting_papers-1-doi",
+                "url": "https://example.invalid/contract-hypotheses-theories-1-conflicting_papers-1-url"
+              }
+            ],
+            "laws": [
+              "contract-hypotheses-theories-1-laws-0",
+              "contract-hypotheses-theories-1-laws-1"
+            ],
+            "novelty_score": 0.472,
+            "supporting_papers": [
+              {
+                "citation": "contract-hypotheses-theories-1-supporting_papers-0-citation",
+                "corpus_id": "contract-hypotheses-theories-1-supporting_papers-0-corpus_id",
+                "doi": "10.5555/contract-hypotheses-theories-1-supporting_papers-0-doi",
+                "url": "https://example.invalid/contract-hypotheses-theories-1-supporting_papers-0-url"
+              },
+              {
+                "citation": "contract-hypotheses-theories-1-supporting_papers-1-citation",
+                "corpus_id": "contract-hypotheses-theories-1-supporting_papers-1-corpus_id",
+                "doi": "10.5555/contract-hypotheses-theories-1-supporting_papers-1-doi",
+                "url": "https://example.invalid/contract-hypotheses-theories-1-supporting_papers-1-url"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "libraries": [
+      {
+        "action": "contract-libraries-action",
+        "index_path": "./contract-libraries-index_path.txt",
+        "paper_count": 686,
+        "papers": [
+          {
+            "doi": "10.5555/contract-libraries-papers-0-doi",
+            "page_count": 552,
+            "path": "./contract-libraries-papers-0-path.txt",
+            "summary": "contract-libraries-papers-0-summary",
+            "tags": [
+              "contract-libraries-papers-0-tags-0",
+              "contract-libraries-papers-0-tags-1"
+            ],
+            "title": "contract-libraries-papers-0-title"
+          },
+          {
+            "doi": "10.5555/contract-libraries-papers-1-doi",
+            "page_count": 553,
+            "path": "./contract-libraries-papers-1-path.txt",
+            "summary": "contract-libraries-papers-1-summary",
+            "tags": [
+              "contract-libraries-papers-1-tags-0",
+              "contract-libraries-papers-1-tags-1"
+            ],
+            "title": "contract-libraries-papers-1-title"
+          }
+        ],
+        "query_hint": "contract-libraries-query_hint",
+        "summary": "contract-libraries-summary"
+      }
+    ],
+    "reports": [
+      {
+        "markdown": "contract-reports-markdown",
+        "title": "contract-reports-title"
+      }
+    ],
+    "sources": [
+      {
+        "citation": "contract-sources-citation",
+        "link": "https://example.invalid/contract-sources-link",
+        "relevance": "contract-sources-relevance"
+      }
+    ]
+  }
+}
