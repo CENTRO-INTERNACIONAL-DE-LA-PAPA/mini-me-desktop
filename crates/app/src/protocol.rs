@@ -1250,6 +1250,12 @@ impl LangGraphClient {
             .context("could not decode the discovery draft response")?;
         let credits = value.get("credits");
         Ok(DraftCost {
+            status: value
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
             submitted: value
                 .get("submitted")
                 .and_then(Value::as_bool)
@@ -1307,6 +1313,12 @@ impl LangGraphClient {
             .json()
             .await
             .context("could not decode the discovery figures response")?;
+        if let Some(error) = value.get("error").and_then(Value::as_str) {
+            // A failed fetch is not an experiment without plots. The caller caches the second and
+            // retries the first, so returning an empty list here would turn a transient error into
+            // a permanent "this one drew none" (§260).
+            anyhow::bail!(error.to_string());
+        }
         Ok(value
             .get("figures")
             .and_then(Value::as_array)
@@ -1342,6 +1354,7 @@ impl LangGraphClient {
         thread_id: &str,
         run_id: &str,
         experiments: u32,
+        status: &str,
     ) -> Result<()> {
         self.http
             .post(format!(
@@ -1354,7 +1367,10 @@ impl LangGraphClient {
                     "artifacts": {
                         "discoveries": [{
                             "run_id": run_id,
-                            "status": "running",
+                            // Whatever it actually is. Writing "running" for a run that has
+                            // finished means the next launch shows a spinner for a completed job
+                            // until a poll corrects it (§260).
+                            "status": status,
                             "n_experiments": experiments,
                         }]
                     }
@@ -2821,6 +2837,13 @@ pub struct Draft {
 /// What a drafted run will cost, against what is left to spend.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DraftCost {
+    /// The run's state as the service reports it, normalised: `running`, `completed`, `failed`,
+    /// `canceled` — or empty when it has not been started.
+    ///
+    /// Used instead of assuming `running` when adopting an already-approved run. Assuming showed a
+    /// finished run as "running · usually 25–40 min" until the first poll came back and corrected
+    /// it, which is a flicker on a row a researcher is reading (§260).
+    pub status: String,
     /// Whether the service says this run has already been started.
     ///
     /// Our own artifact cannot answer this: it is written by a turn, and approving is not a turn, so

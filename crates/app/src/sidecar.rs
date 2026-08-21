@@ -1008,6 +1008,7 @@ impl Sidecar {
         &self,
         run_id: String,
         experiments: u32,
+        status: String,
     ) -> mpsc::UnboundedReceiver<Result<(), String>> {
         let (tx, rx) = mpsc::unbounded();
         let base_url = self.base_url.clone();
@@ -1019,7 +1020,7 @@ impl Sidecar {
             };
             let client = LangGraphClient::new(base_url);
             let outcome = client
-                .discovery_started(&thread_id, &run_id, experiments)
+                .discovery_started(&thread_id, &run_id, experiments, &status)
                 .await
                 .map_err(|error| format!("{error:#}"));
             let _ = tx.unbounded_send(outcome);

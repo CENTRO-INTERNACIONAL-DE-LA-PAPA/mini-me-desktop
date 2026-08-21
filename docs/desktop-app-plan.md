@@ -14672,3 +14672,59 @@ a component. Each tests a **join**.
 
 *Hundred-and-fourteenth: when the same defect arrives four times, the bug is in how the code is being
 tested, not in the code. Write the test that walks the path, not the one that inspects the part.*
+
+## 260. A status assumed, and a failure that looked like an absence (2026-08-21)
+
+§259 worked, and the log is the proof:
+
+```
+INFO a drafted run had already been approved; tracking it instead of asking
+     run=3c41f569-afb4-4662-adc3-e4f72c45e185
+```
+
+Two things left, and both are shapes this session has already been bitten by.
+
+### The row said running, then completed
+
+*"first I saw running and now after the code check I see completed. This is the same behaviour as
+data voyager. We need to cache the status."*
+
+§258's adoption hard-coded `status: "running"`, because at the time the only question was *has this
+been submitted*. So a finished run was adopted as running, drawn as `running · usually 25–40 min`,
+and corrected on the first poll — a flicker on a row somebody is reading, and then the same flicker
+again on the next launch, because `running` is what got written down.
+
+The `/draft` route now reports the run's real state alongside `submitted`, adoption uses it, and the
+state update records **that** rather than an assumption. `n_experiments` was already being written
+honestly; the status was the one field still being guessed.
+
+### And "no figures" meant three different things
+
+*"the image fetching is failing..."*
+
+The pane said *"No figures — this experiment drew none"* for an experiment whose scree plot is
+visible in the service's own view. The decoder was fine — verified against a real shell — and the
+fetch was not: `_json_shell` put `2>/dev/null` on it, so a CLI that printed `Usage:` or an auth error
+produced an empty payload, `json.loads("")` failed, `record = {}`, `bundles = []`, and the honest
+output for "I could not read this" was byte-identical to the honest output for "there is nothing
+here".
+
+Worse, the app **cached** it. §257 deliberately records an empty list so `Nothing` is distinguishable
+from `Unread` — which is right, and turns one failed fetch into a permanent absence.
+
+So: stderr is kept, the decoder skips to the first brace (a warning before the JSON still parses),
+and it answers `{"ok": false, "reason": …}` when there is no response at all. The route returns 502
+for that, the client raises rather than returning an empty list, and the pane leaves the key absent
+so the next open asks again.
+
+This is §255 exactly — `2>/dev/null` on the one call whose failure is the interesting part — and I
+wrote §255 about a different call four sections ago. The two are now the only two `_loud_shell`-style
+calls in the module, and every other `2>/dev/null` is on something whose output is parsed JSON and
+whose failure is visible another way.
+
+One more thing found while looking: the old shell piped the payload into `python3` *and* read
+`"$(cat)"` as an argument in the same command, so two readers raced for one stdin. It worked. That is
+the worst way for something like that to behave, and it is now a plain argument.
+
+*Hundred-and-fifteenth: caching is a claim that the answer is final. Before caching an empty result,
+be certain the emptiness was an answer and not a silence.*
