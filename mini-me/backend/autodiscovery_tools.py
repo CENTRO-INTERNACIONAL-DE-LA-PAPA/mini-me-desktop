@@ -328,17 +328,51 @@ def _sizes_shell(dataset_paths: list[str], work_dir: str = ".") -> str:
     return f"python3 -c {script} {args}"
 
 
-def _draft_shell(run_id: str, dataset_paths: list[str], staged: str) -> str:
-    """Upload the datasets, then save the metadata already staged at `staged`.
+def _configure_shell(run_id: str, staged: str, metadata: dict[str, Any]) -> str:
+    """Write the metadata, hand it to the CLI, and delete it — in one command.
 
-    Chained with `&&`: metadata that names a file the upload did not deliver would configure a run
-    against data that is not there, and the service validates the two against each other.
+    **Staged through the shell rather than through `awrite`, and each clause is a bug it fixes.**
+
+    `awrite` is create-only. The draft wrote this path; the edit wrote it again and the deepagents
+    filesystem refused:
+
+        Cannot write to …/.asta-autodiscovery-metadata.<run>.json because it already exists.
+        Read and then make an edit, or write to a new path.
+
+    So the researcher pressed "Run 5 and spend 5", the budget change could not be staged, and
+    nothing ran (§256). `>` truncates, which is the semantics this actually needs — the file is
+    transient, written and read seconds apart, and never wanted again.
+
+    It also removes §251's whole failure mode at the root: `_resolve_for_write` silently relocates a
+    write outside the work dir, and the process that writes the file here is the one that reads it,
+    so there is nothing left to disagree.
+
+    And it cleans up. The staging file lands in the conversation's own folder — in local execution
+    that is a directory the researcher browses — so it is removed after use rather than left as a
+    dotfile nobody can explain. `;` not `&&` before the `rm`, so a failed save is still tidied.
     """
-    upload = " ".join(shlex.quote(part) for part in _build_upload_command(run_id, dataset_paths))
-    metadata = " ".join(
+    payload = shlex.quote(json.dumps(metadata, indent=2, ensure_ascii=False))
+    target = shlex.quote(staged)
+    configure = " ".join(
         shlex.quote(part) for part in _build_metadata_command(run_id, staged)
     )
-    return f"{upload} && {metadata}"
+    return (
+        f"printf %s {payload} > {target} "
+        f"|| echo 'could not stage the configuration file'; "
+        f"{configure} 2>&1; rm -f {target}"
+    )
+
+
+def _upload_shell(run_id: str, dataset_paths: list[str]) -> str:
+    """Upload the datasets, keeping stderr so a failure says why.
+
+    Separate from the configure step now that staging is a shell write too. They used to be chained
+    with `&&` — metadata naming a file the upload did not deliver would configure a run against data
+    that is not there — and the ordering is preserved by the caller instead, which also gets to tell
+    the two failures apart.
+    """
+    upload = " ".join(shlex.quote(part) for part in _build_upload_command(run_id, dataset_paths))
+    return f"{upload} 2>&1"
 
 
 def _json_shell(argv: list[str]) -> str:
@@ -585,20 +619,32 @@ async def draft_run(
         logger.warning("autodiscovery create returned no run id in %d char(s)", len(created or ""))
         return {"error": "could not create a discovery run; the service returned no id"}
 
-    awrite = getattr(sandbox, "awrite", None)
-    if awrite is None:
-        return {"error": "this sandbox cannot write the metadata file"}
-    staged = metadata_path(work_dir, run_id)
-    written = await awrite(staged, json.dumps(metadata, indent=2, ensure_ascii=False))
-    if getattr(written, "error", None):
-        return {"error": f"could not write the run metadata: {written.error}"}
-
     uploads = [actual for _, actual, _ in present]
-    out = await _run(sandbox, _draft_shell(run_id, uploads, staged), _DRAFT_TIMEOUT_S)
-    if "Metadata saved" not in out:
-        logger.warning("autodiscovery draft run=%s did not confirm metadata: %.300s", run_id, out)
+    # Upload first: metadata naming a file the upload did not deliver configures a run against data
+    # that is not there, and the service validates the two against each other.
+    uploaded = await _run(sandbox, _upload_shell(run_id, uploads), _DRAFT_TIMEOUT_S)
+    if "done" not in (uploaded or "").lower():
+        logger.warning("autodiscovery upload run=%s did not confirm: %.300s", run_id, uploaded)
         return {
-            "error": "the datasets uploaded but the run metadata did not save; nothing was spent",
+            "error": (
+                "the datasets did not upload, so nothing was configured and nothing was spent: "
+                + (" ".join((uploaded or "").split())[:300] or "the command printed nothing")
+            ),
+            "run_id": run_id,
+        }
+
+    staged = metadata_path(work_dir, run_id)
+    out = await _run(
+        sandbox, _configure_shell(run_id, staged, metadata), _STATUS_TIMEOUT_S
+    )
+    if "Metadata saved" not in (out or ""):
+        logger.warning("autodiscovery draft run=%s did not confirm metadata: %.400s", run_id, out)
+        return {
+            "error": (
+                "the datasets uploaded but the run configuration did not save, so nothing was "
+                "spent: "
+                + (" ".join((out or "").split())[:300] or "the command printed nothing")
+            ),
             "run_id": run_id,
         }
 
@@ -708,16 +754,9 @@ async def update_metadata(
                 f"(1 credit each); got {budget}"
             )
 
-    awrite = getattr(sandbox, "awrite", None)
-    if awrite is None:
-        return {}
     staged = metadata_path(await _work_dir(sandbox), run_id)
-    written = await awrite(staged, json.dumps(updated, indent=2, ensure_ascii=False))
-    if getattr(written, "error", None):
-        logger.warning("could not stage edited metadata for %s: %s", run_id, written.error)
-        raise MetadataNotSaved(f"could not write the run's configuration: {written.error}")
     out = await _run(
-        sandbox, _loud_shell(_build_metadata_command(run_id, staged)), _STATUS_TIMEOUT_S
+        sandbox, _configure_shell(run_id, staged, updated), _STATUS_TIMEOUT_S
     )
     if "Metadata saved" not in (out or ""):
         logger.warning("edited metadata for %s did not save: %.400s", run_id, out)

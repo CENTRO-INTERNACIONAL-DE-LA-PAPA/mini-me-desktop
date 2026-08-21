@@ -14462,3 +14462,59 @@ opportunity for it.
 
 *Hundred-and-tenth: a single-use token consumed before the work it authorises turns every downstream
 failure into a permanent one. Check on arrival, spend at the point of no return.*
+
+## 256. `awrite` will not overwrite, and never said so until now (2026-08-21)
+
+§255 made the failure speak, and on the next press it said exactly what was wrong:
+
+```
+could not write the run's configuration: Cannot write to
+/mnt/c/…/Mini-Me/01a02513-…/.asta-autodiscovery-metadata.7bd972b5-….json
+because it already exists. Read and then make an edit, or write to a new path.
+```
+
+**deepagents' `awrite` is create-only.** The draft wrote that staging file; the budget edit tried to
+write the same path and was refused. So pressing "Run 5 and spend 5" could never work, and until
+§255 stopped discarding stderr it could never say why either — which is the whole argument for that
+section in one screenshot.
+
+### Staging through the shell instead
+
+Both remaining fixes are the same move: `_configure_shell` writes the file, hands it to the CLI, and
+deletes it, in one command.
+
+```
+printf %s <json> > <staged> || echo 'could not stage…'; asta autodiscovery metadata … 2>&1; rm -f <staged>
+```
+
+Three properties, each one a bug it retires:
+
+- **`>` truncates**, which is what a transient file actually needs. §256 gone.
+- **The process that writes it is the process that reads it**, so `_resolve_for_write` has nothing to
+  silently relocate and there is no second path to disagree with. §251's whole failure mode gone at
+  the root rather than worked around.
+- **It cleans up.** The staging file lands in the conversation's own folder — in local execution, a
+  directory the researcher browses — so it is removed after use instead of left as a dotfile nobody
+  can account for. `;` rather than `&&` before the `rm`, so a *failed* save is tidied too.
+
+Verified against a real shell rather than asserted about: the same run staged twice, budget 15 then
+5, both reading back correctly and neither leaving the file behind. That is the exact sequence
+`awrite` refused.
+
+### And the upload was decoupled
+
+The draft used to chain `upload && metadata`. With staging now a shell write of its own, the caller
+sequences the two, which is better anyway: the ordering still holds — metadata naming a file the
+upload did not deliver would configure a run against data that is not there — but a failed upload and
+a failed configure now produce different messages instead of one.
+
+### Housekeeping worth admitting
+
+Rewriting the tests, I twice appended a new version of a test while an older copy sat further down
+the file, and pytest ran both. Three scripts in a row also aborted on an assertion *before writing
+the file*, so an edit I believed was applied was not — and I diagnosed the resulting error twice
+before noticing the cause was my own tooling. Cheap mistakes, but the sort that turn one fix into
+four rounds.
+
+*Hundred-and-eleventh: when a virtual filesystem and a shell both claim to write files, they do not
+agree about what writing means. Pick one, and pick the one whose reader is the same process.*
