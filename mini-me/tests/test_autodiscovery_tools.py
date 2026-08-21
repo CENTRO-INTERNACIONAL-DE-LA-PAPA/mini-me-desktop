@@ -1117,3 +1117,68 @@ def test_an_unreadable_status_says_nothing_rather_than_guessing():
     )
     # And an id it will not touch.
     assert asyncio.run(already_submitted(_Sandbox([]), "not-a-run")) is None
+
+
+def test_every_experiments_figures_are_decoded_when_the_run_finishes():
+    """§263: fetching on click meant a wait on every first open and nothing on disk until then."""
+    from backend.autodiscovery_tools import persist_all_figures
+
+    ok = json.dumps({"ok": True, "figures": ["figure-01.png"]})
+    sandbox = _Sandbox([("autodiscovery experiment", ok)])
+    counted = asyncio.run(
+        persist_all_figures(
+            sandbox,
+            _RUN,
+            [
+                {"experiment_id": "node_2_0"},
+                {"experiment_id": "node_2_1"},
+                # Neither of these is an experiment id, and neither may reach a shell.
+                {"experiment_id": "node_2_0; rm -rf /"},
+                {"experiment_id": ""},
+                "not a dict",
+            ],
+        )
+    )
+    assert counted == {"node_2_0": 1, "node_2_1": 1}
+    assert not any("rm -rf" in command for command in sandbox.commands), sandbox.commands
+
+
+def test_one_experiment_that_will_not_decode_does_not_lose_the_others():
+    """A run's results must not be lost because one plot failed."""
+    from backend.autodiscovery_tools import persist_all_figures
+
+    class Flaky(_Sandbox):
+        async def aexecute(self, command, timeout=None):
+            self.commands.append(command)
+            if "node_2_1" in command:
+                raise RuntimeError("sandbox went away")
+            return SimpleNamespace(
+                output=json.dumps({"ok": True, "figures": ["figure-01.png"]}), exit_code=0
+            )
+
+    counted = asyncio.run(
+        persist_all_figures(
+            Flaky([]),
+            _RUN,
+            [{"experiment_id": "node_2_0"}, {"experiment_id": "node_2_1"}, {"experiment_id": "node_3_0"}],
+        )
+    )
+    assert counted == {"node_2_0": 1, "node_3_0": 1}
+
+
+def test_a_failed_run_is_not_asked_for_figures():
+    """A failed run's experiments have nothing to draw, so asking is one request per node for
+    nothing."""
+    sandbox = _Sandbox([])
+    metadata = build_metadata(
+        name="run", description="", domain="", intent="",
+        datasets=[{"path": "/w/a.csv", "size": 5}],
+    )
+    asyncio.run(
+        persist_discovery_outputs(
+            sandbox, _RUN, metadata,
+            {"status": "failed", "completed": 1,
+             "experiments": [{"experiment_id": "node_2_0"}]},
+        )
+    )
+    assert not any("autodiscovery experiment" in c for c in sandbox.commands), sandbox.commands

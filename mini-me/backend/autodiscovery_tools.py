@@ -1050,6 +1050,62 @@ async def persist_discovery_outputs(
                 written.append(path)
     except Exception as exc:  # noqa: BLE001
         logger.warning("persist_discovery_outputs failed for %s: %s", run_id, exc)
+
+    # The plots, once, now that nobody is waiting on them (§263). Only for a run that finished
+    # successfully: a failed run's experiments have nothing to draw, and asking anyway would be
+    # one request per node for nothing.
+    if status == "completed":
+        try:
+            await persist_all_figures(
+                sandbox, run_id, [item for item in (result.get("experiments") or [])]
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("figures for %s could not be decoded: %s", run_id, exc)
+    return written
+
+
+async def persist_all_figures(
+    sandbox: Any, run_id: str, experiments: list[dict[str, Any]]
+) -> dict[str, int]:
+    """Decode every experiment's figures once, when the run finishes.
+
+    **Asked for.** Figures were fetched when a researcher opened an experiment, which meant a wait
+    on every first click and nothing on disk until they clicked: *"Only when I click a node the imgae
+    is downloaded … maybe we can improve this logic."* (§263.)
+
+    Doing it here costs the same requests, at a moment nobody is waiting — the poll that observed the
+    run finish — and it is the same place `persist_discovery_outputs` already writes the `.md` and
+    the `.json`, for the same reason: uploaded datasets expire in seven days and the service is not
+    an archive (§247).
+
+    Sequential rather than concurrent. Each response is ~458KB and this runs inside the researcher's
+    sandbox; five of them at once to save a few seconds on work nobody is watching is the wrong
+    trade. Returns `{experiment_id: figures_written}` for the log, and never raises — a run's
+    results must not be lost because one plot would not decode.
+    """
+    written: dict[str, int] = {}
+    for item in experiments:
+        if not isinstance(item, dict):
+            continue
+        experiment_id = str(item.get("experiment_id") or "")
+        if not is_valid_experiment_id(experiment_id):
+            continue
+        try:
+            outcome = await fetch_experiment_figures(sandbox, run_id, experiment_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("figures for %s/%s failed: %s", run_id, experiment_id, exc)
+            continue
+        if outcome.get("error"):
+            # Logged by `fetch_experiment_figures` already; recorded as zero so the caller's
+            # summary line is honest about what it got.
+            written[experiment_id] = 0
+            continue
+        written[experiment_id] = len(outcome.get("figures") or [])
+    logger.info(
+        "decoded figures for run=%s: %s",
+        run_id,
+        ", ".join(f"{key}={value}" for key, value in written.items()) or "none",
+    )
     return written
 
 
