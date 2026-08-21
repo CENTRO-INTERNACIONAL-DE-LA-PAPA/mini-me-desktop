@@ -17,6 +17,7 @@ mod discovery;
 mod gallery;
 mod markdown;
 mod menu;
+mod notify;
 mod preflight;
 mod protocol;
 mod provenance;
@@ -3296,6 +3297,12 @@ struct Workbench {
     /// Runs collected this launch, still to be told about. Cleared when the researcher opens one
     /// or dismisses the banner.
     collected_runs: Vec<(String, protocol::Job)>,
+    /// Whether this window is the one the researcher is looking at.
+    ///
+    /// Read by `notify_if_away`, and the whole reason a toast is not noise: the banner (§244) and
+    /// the jobs row already speak to somebody with the window open. Starts `true`, because a window
+    /// that has just been opened is the one in front of them.
+    window_active: bool,
     /// A finished discovery run being read. See [`DiscoveryView`].
     discovery_open: Option<DiscoveryView>,
     /// A discovery run whose budget is waiting on the researcher. See [`Approval`].
@@ -3364,7 +3371,7 @@ struct Workbench {
 }
 
 impl Workbench {
-    fn new(sidecar: Arc<Sidecar>, cx: &mut Context<Self>) -> Self {
+    fn new(sidecar: Arc<Sidecar>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         // Opens empty. The placeholder says what to do, which is all a first launch needs.
         let composer = cx.new(|cx| {
             let mut composer = Composer::new(
@@ -3406,6 +3413,14 @@ impl Workbench {
         });
         cx.observe(&intent_field, |_workbench, _field, cx| cx.notify())
             .detach();
+
+        // Told rather than sampled. Reading `is_window_active()` inside `render` would work and
+        // would tie a fact about the OS to how often we happen to draw; this fires exactly when it
+        // changes, which is what a notification decision needs.
+        cx.observe_window_activation(window, |workbench, window, _cx| {
+            workbench.window_active = window.is_window_active();
+        })
+        .detach();
         cx.observe(&sources_filter, |_workbench, _field, cx| cx.notify())
             .detach();
         cx.observe(&model_filter, |_workbench, _field, cx| cx.notify())
@@ -3595,6 +3610,7 @@ impl Workbench {
             pending_adoption: Vec::new(),
             swept: false,
             collected_runs: Vec::new(),
+            window_active: true,
             discovery_open: None,
             approving: None,
             declined: std::collections::HashSet::new(),
@@ -3714,6 +3730,21 @@ impl Workbench {
                                 cx,
                             );
                         }
+                        // The one message that can reach somebody who left. A forty-minute run
+                        // that ends while they are in Excel is exactly what the roadmap's
+                        // notification item was for.
+                        workbench.notify_if_away(
+                            &if succeeded {
+                                format!("{label} finished")
+                            } else {
+                                format!("{label} stopped")
+                            },
+                            &if update.question.is_empty() {
+                                "Its results are in its conversation.".to_string()
+                            } else {
+                                update.question.clone()
+                            },
+                        );
                         // The route wrote the outcome into the sandbox as it reported it,
                         // so the spine and outputs have something new to show.
                         workbench.refresh_project(cx);
@@ -3767,6 +3798,8 @@ impl Workbench {
                     let waiting = update.needs_approval();
                     let succeeded = update.succeeded();
                     let task_id = update.task_id.clone();
+                    // Read before `update` is moved into the tracked slot below.
+                    let worker = update.agent_name.replace('_', " ");
                     if let Some(tracked) = workbench
                         .tasks
                         .iter_mut()
@@ -3788,6 +3821,14 @@ impl Workbench {
                     }
                     if waiting {
                         workbench.status = "a background task is waiting for your approval".into();
+                        // **More deserving of a toast than a finished run.** This one is stopped
+                        // and cannot continue: §31 is the record of such a task hanging with
+                        // nothing on screen able to answer it, and a researcher who stepped away
+                        // has no way to learn it is their turn.
+                        workbench.notify_if_away(
+                            "A background task needs your approval",
+                            &worker,
+                        );
                         // Unfold the panel section that holds the Approve button. The fold is the
                         // researcher's to set, but a folded section is the one state in which a
                         // question addressed to them is invisible — so the gate appearing opens
@@ -3799,6 +3840,14 @@ impl Workbench {
                         } else {
                             "a background task stopped".into()
                         };
+                        workbench.notify_if_away(
+                            if succeeded {
+                                "A background task finished"
+                            } else {
+                                "A background task stopped"
+                            },
+                            &worker,
+                        );
                         workbench.collect_plots();
                         workbench.settle_outputs(cx);
                         workbench.refresh_project(cx);
@@ -13264,6 +13313,19 @@ impl Workbench {
     /// **Two call sites, one per frame.** `artifacts_contents` renders this either from its
     /// no-spine early return or from the full panel, never both, so the fixed element ids below
     /// cannot collide the way two sibling `datasets-heading`s once did.
+    /// Raise a desktop notification, but only for somebody who is not looking.
+    ///
+    /// The one thing in this app that can reach a researcher who switched to Excel. Three callers,
+    /// all of them the same kind of event: long work that ended, and long work that stopped needing
+    /// a decision. Suppressed when the window is active, because the banner and the jobs row are
+    /// already saying it there and a toast on top would be the third voice.
+    fn notify_if_away(&self, title: &str, body: &str) {
+        if !notify::worth_interrupting(self.window_active) {
+            return;
+        }
+        notify::toast(title, body);
+    }
+
     /// Record a discovery run's status when a poll observes it changing.
     ///
     /// Sends no budget: `n_experiments` was written at approval and is not this call's business —
@@ -18486,6 +18548,32 @@ mod tests {
             figure_state(none, false)
         );
     }
+
+    /// §265: the notification exists for three events, and a helper called from two of them is a
+    /// toast that arrives depending on which kind of work you left running.
+    ///
+    /// A join test, not a component test — which is the whole lesson of §264 and the six defects
+    /// before it. The needle is assembled at runtime so this does not match itself.
+    #[test]
+    fn every_kind_of_finished_background_work_can_reach_somebody_who_left() {
+        let source = include_str!("main.rs");
+        let call = concat!("notify", "_if_away(");
+
+        // Three call sites: a long job ending, a worker ending, a worker asking for a decision.
+        let sites = source.matches(call).count();
+        assert!(
+            sites >= 3,
+            "expected a call for a finished job, a finished worker and a worker at the gate; \
+             found {sites}"
+        );
+
+        // And the decision lives in one place rather than being re-derived per site.
+        assert_eq!(
+            source.matches(concat!("worth", "_interrupting(")).count(),
+            1,
+            "the suppress-when-looking rule belongs in `notify_if_away` alone"
+        );
+    }
 }
 
 /// Assemble the model routing the backend expects from settings plus the keychain.
@@ -18798,7 +18886,7 @@ fn main() {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     ..Default::default()
                 },
-                |_window, cx| cx.new(|cx| Workbench::new(sidecar.clone(), cx)),
+                |window, cx| cx.new(|cx| Workbench::new(sidecar.clone(), window, cx)),
             )
             .expect("failed to open window");
 

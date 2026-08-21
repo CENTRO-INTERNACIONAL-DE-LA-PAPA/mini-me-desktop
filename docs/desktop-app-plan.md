@@ -14928,3 +14928,67 @@ fail is a guard nobody should trust.
 *Hundred-and-nineteenth: a fixture generated from one side's types and read by the other side's code
 is the only test that can fail for the right reason. Two suites agreeing with themselves is what a
 year-long silent bug looks like from the inside.*
+
+## 265. A message that reaches somebody who left (2026-08-21)
+
+The second of the two remaining P6.4b items, and the roadmap's own case for it:
+
+> The plan display (§209) says where a seven-minute run has got to *if you are looking*; nothing
+> reaches someone who switched windows. The clearest remaining "the web app cannot do this"
+> affordance, which is the MVP's own stated differentiator.
+
+Now more true than when that was written: a discovery run is 25–40 minutes, and §244's banner speaks
+only to somebody with the window open.
+
+### PowerShell, not a crate — and the reason is the same entry
+
+The roadmap names the cost in the same breath: *"a new dependency, and a new way for the packaged
+build to fail on the machines §57–§60 fought."* That decided it. A WinRT crate would be a real
+dependency, `cfg`-gated to Windows, **impossible to compile or test on the machine this is written
+on**, and a fresh build failure mode on a colleague's laptop.
+
+Spawning PowerShell adds nothing to the build. It cannot fail at compile time, it fails at runtime
+into a log line, and the app already spawns processes for WSL and git. Most importantly it fits the
+pattern `theory_tools`, `datavoyager_tools` and `autodiscovery_tools` all use: **a pure argv builder,
+unit-tested, so the contract is checked here rather than in a live run.** What stays untestable is
+one `Command::spawn`.
+
+The toast uses PowerShell's own `AppUserModelID`, which is what makes it work with no installer and
+no Start Menu entry — attributed to PowerShell, which is honest, and which a real registration would
+fix later. No icon, no buttons, no click-to-open: those need a COM activator, and none of it is worth
+anything until a plain toast is confirmed to appear.
+
+### Escaped twice, because it is a researcher's own text
+
+A run name reaches two parsers — PowerShell's single-quoted literal and the toast's XML. A run called
+`Bactericera & "spp." <trial> it's` breaks both, and the failure mode is *no toast at all*, which is
+indistinguishable from the feature being absent. So the XML entities are applied first and the
+PowerShell escape after, and a test asserts an apostrophe cannot end the literal early. Newlines are
+collapsed by the same clip the panel uses, because a line break would end the statement.
+
+### Only for somebody who is not looking
+
+`observe_window_activation` — told, not sampled. Reading `is_window_active()` inside `render` would
+work and would tie a fact about the OS to how often we happen to draw.
+
+Three events, and the third is the one worth having:
+
+- a long job ends (theorizer, analysis, discovery)
+- a background worker ends
+- **a background worker stops for approval.** Stopped is worse than finished: §31 is the record of
+  such a task hanging with nothing on screen able to answer it, and §250 of a notice nobody could
+  reach. A researcher who stepped away had no way to learn it was their turn.
+
+Suppressed when the window is active, because the banner and the jobs row are already saying it and a
+toast on top is the third voice.
+
+### The honest limitation
+
+**The `#[cfg(windows)]` block is the one thing here nobody has run.** It cannot be compiled on this
+machine, let alone executed. Everything around it — the argv, the escaping, the clipping, the
+suppress rule, and the fact that all three events call it — is tested; the spawn itself is a first
+run on their laptop. Said plainly because this session already spent four rounds on fixes that
+"verified against a real shell" with a fixture that could not fail (§262).
+
+*Hundred-and-twentieth: when a platform call cannot be tested where the code is written, make it one
+line and test everything that decides to make it.*
