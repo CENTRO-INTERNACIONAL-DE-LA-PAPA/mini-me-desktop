@@ -942,7 +942,7 @@ pub struct Bucket {
 /// `datasets, sources, reports, files, hypotheses, libraries, analyses, edges,
 /// project`. `edges` is graph wiring rather than a user-facing output, and
 /// `project` is the spine, so neither is listed here.
-const ARTIFACT_BUCKETS: [&str; 7] = [
+const ARTIFACT_BUCKETS: [&str; 8] = [
     "datasets",
     "sources",
     "reports",
@@ -950,6 +950,11 @@ const ARTIFACT_BUCKETS: [&str; 7] = [
     "hypotheses",
     "libraries",
     "analyses",
+    // Added with AutoDiscovery. It earns a bucket for the case the others do not have: a *failed*
+    // draft is neither a `Draft` (nothing to approve) nor a `Job` (nothing to poll), so without a
+    // bucket it existed in the artifact bundle and nowhere on screen — which is how §249's
+    // failure reached the researcher as "the subagent did not return the failure reason".
+    "discoveries",
 ];
 
 /// The research project "spine": the durable mission plus what has been done and

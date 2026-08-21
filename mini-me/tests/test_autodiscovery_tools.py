@@ -28,6 +28,7 @@ from backend.autodiscovery_tools import (
     DEFAULT_EXPERIMENTS,
     MAX_EXPERIMENTS,
     _FIGURES_PY,
+    _RESOLVE_PY,
     _build_create_command,
     _build_credits_command,
     _build_experiment_command,
@@ -179,7 +180,7 @@ def test_the_model_facing_surface_cannot_submit():
 def test_a_drafted_run_reports_the_cost_against_the_balance_and_does_not_start():
     sandbox = _Sandbox(
         [
-            ("os.path.getsize", json.dumps({"/w/soc.csv": 665894})),
+            ("_RESOLVE", json.dumps({"/w/soc.csv": {"path": "/w/soc.csv", "size": 665894}})),
             ("autodiscovery create", _RUN),
             ("autodiscovery upload", "Uploading soc.csv... done\nMetadata saved: gs://x"),
             ("autodiscovery credits", json.dumps({"credits": {"available": 495, "granted": 500}})),
@@ -246,7 +247,7 @@ def test_a_dataset_name_is_derived_from_its_path_so_the_two_cannot_disagree():
 
 
 def test_a_missing_dataset_stops_the_draft_rather_than_configuring_an_empty_run():
-    sandbox = _Sandbox([("os.path.getsize", json.dumps({}))])
+    sandbox = _Sandbox([("_RESOLVE", json.dumps({}))])
     drafted = asyncio.run(
         draft_run(
             sandbox,
@@ -265,7 +266,7 @@ def test_a_missing_dataset_stops_the_draft_rather_than_configuring_an_empty_run(
 def test_a_failed_metadata_save_says_nothing_was_spent():
     sandbox = _Sandbox(
         [
-            ("os.path.getsize", json.dumps({"/w/a.csv": 5})),
+            ("_RESOLVE", json.dumps({"/w/a.csv": {"path": "/w/a.csv", "size": 5}})),
             ("autodiscovery create", _RUN),
             ("autodiscovery upload", "Uploading a.csv... done"),  # no "Metadata saved"
         ]
@@ -567,3 +568,113 @@ def test_only_available_credits_are_reported_as_spendable():
     credits = asyncio.run(read_credits(sandbox))
     assert credits["available"] == 435
     assert credits["granted"] == 500 and credits["pending"] == 60
+
+
+# ---------------------------------------------------------------------------
+# The sandbox is a container, not a view of the researcher's machine (§249)
+# ---------------------------------------------------------------------------
+
+
+def test_a_path_only_the_researchers_laptop_has_resolves_by_filename():
+    """The failure that actually happened.
+
+    The app hands the model an absolute host path whenever the attachment has not been copied into
+    the conversation folder yet — the normal state of a new conversation's first turn. Inside the
+    sandbox that path is nothing, and the run failed on its first step. The resolver looks for the
+    filename in the working directory, which is where the file actually is.
+    """
+    import subprocess
+    import sys
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as work:
+        real = os.path.join(work, "SOC_Covariables_TrainValV5.csv")
+        with open(real, "w") as handle:
+            handle.write("a,b\n1,2\n")
+        host_path = "/mnt/c/Users/LENOVO/Downloads/SOC_Covariables_TrainValV5.csv"
+        assert not os.path.exists(host_path), "the point is that this path is not here"
+
+        out = subprocess.run(
+            [sys.executable, "-c", _RESOLVE_PY, work, host_path],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert out.returncode == 0, out.stderr
+        resolved = json.loads(out.stdout)
+        # Keyed by what it was given, valued by what it found — so the caller can say it substituted.
+        assert resolved[host_path]["path"] == real
+        assert resolved[host_path]["size"] == 8
+
+        # A path that resolves nowhere is simply absent, not an error.
+        missing = subprocess.run(
+            [sys.executable, "-c", _RESOLVE_PY, work, "/mnt/c/nope/absent.csv"],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert json.loads(missing.stdout) == {}
+
+
+def test_a_path_that_is_already_right_is_left_alone():
+    import subprocess
+    import sys
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as work:
+        real = os.path.join(work, "soc.csv")
+        with open(real, "w") as handle:
+            handle.write("x\n")
+        out = subprocess.run(
+            [sys.executable, "-c", _RESOLVE_PY, work, real],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert json.loads(out.stdout)[real]["path"] == real
+
+
+def test_the_upload_reads_the_resolved_path_not_the_one_the_model_named():
+    """Uploading the path the model gave would upload nothing; the metadata name comes from the
+    resolved one, which is also what the service validates the upload against."""
+    host = "/mnt/c/Users/LENOVO/Downloads/soc.csv"
+    sandbox = _Sandbox(
+        [
+            ("_RESOLVE", json.dumps({host: {"path": "/workspace/soc.csv", "size": 12}})),
+            ("autodiscovery create", _RUN),
+            ("autodiscovery upload", "Uploading soc.csv... done\nMetadata saved: gs://x"),
+        ]
+    )
+    drafted = asyncio.run(
+        draft_run(
+            sandbox,
+            name="run",
+            description="d",
+            domain="soil",
+            intent="i",
+            dataset_paths=[host],
+            dataset_description="cols",
+        )
+    )
+    assert "error" not in drafted, drafted
+    assert drafted["metadata"]["datasets"][0]["name"] == "soc.csv"
+    assert drafted["metadata"]["datasets"][0]["file_size_bytes"] == 12
+    upload = next(c for c in sandbox.commands if "autodiscovery upload" in c)
+    assert "/workspace/soc.csv" in upload
+    assert "/mnt/c" not in upload, upload
+
+
+def test_a_file_the_run_cannot_see_says_what_to_do_about_it():
+    """The message a researcher reads. It has to name the cause, not just the symptom."""
+    sandbox = _Sandbox([("_RESOLVE", json.dumps({}))])
+    drafted = asyncio.run(
+        draft_run(
+            sandbox,
+            name="run",
+            description="d",
+            domain="soil",
+            intent="i",
+            dataset_paths=["/mnt/c/Users/LENOVO/Downloads/soc.csv"],
+            dataset_description="cols",
+        )
+    )
+    error = drafted["error"]
+    assert "/mnt/c" in error, "it names the path that failed"
+    assert "not visible to a run" in error, "and why"
+    assert "attach the file" in error, "and what to do"
+    # Nothing was created, so nothing needs cleaning up.
+    assert not any("autodiscovery create" in c for c in sandbox.commands)

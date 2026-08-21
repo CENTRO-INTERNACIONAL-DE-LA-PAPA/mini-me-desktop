@@ -253,3 +253,24 @@ def test_autodiscovery_is_told_the_difference_from_data_voyager():
 
     assert "data_voyager" in prompt
     assert "decides its own questions" in prompt
+
+
+def test_the_autodiscovery_prompt_says_the_run_cannot_see_the_researchers_machine():
+    """§249: the first real run failed because the model was handed `/mnt/c/...` paths and the
+    sandbox is a container. The prompt has to say so, and has to say what to do instead."""
+    from backend.subagents import AUTODISCOVERY_SYSTEM_PROMPT as prompt
+
+    assert "CANNOT SEE THE RESEARCHER" in prompt
+    assert "/mnt/c/" in prompt
+    assert "./name" in prompt
+    # And it must not retry: a missing file does not become present on a second attempt.
+    assert "Do NOT retry" in prompt
+
+
+def test_the_autodiscovery_prompt_forbids_paraphrasing_a_failure():
+    """The failure reached the researcher as "the subagent did not return the failure reason",
+    which is what a summary of an actionable error looks like."""
+    from backend.subagents import AUTODISCOVERY_SYSTEM_PROMPT as prompt
+
+    assert "QUOTED VERBATIM" in prompt
+    assert "Do not paraphrase" in prompt
