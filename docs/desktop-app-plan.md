@@ -13686,25 +13686,98 @@ the tool-gate discipline §219–§234 established: a `DraftBeforeSubmitting` st
 compose a run report it never launched, an entry in the claims recorder, and membership in
 `DISK_WRITING_SUBAGENTS`.
 
-**Phase 3 — the credit gate.** Above the composer, per §40. Names the run, the experiment count, the
-cost and the balance; the drafted metadata readable and `n_experiments` editable before the press.
-Nothing in phases 1–2 may reach `submit` until this exists.
+**Phase 3 — the credit gate, and it is a modal.** Asked for directly: *"the user must see a center ui
+modal where the usar can accept, reject or modify the budget."* Named here because it is the second
+half of §244's argument and not a reversal of it. §244 refused a modal for a run that had *already
+finished* — nothing was pending, the researcher had somewhere to go, and a modal would have been a
+toll booth in front of work they could otherwise get on with. This is the opposite object: nothing
+proceeds until it is answered, it has three outcomes rather than one, and the wrong answer spends
+credits that do not come back. **A banner is for something already true that you may want to act on;
+a modal is for something that cannot happen without you.** `ui::Modal` is already there, and the
+datasets and library modals are the shape.
+
+What it holds: the drafted `name`, `domain` and `description` readable, the **`intent` editable**
+because that is what steers the exploration, `n_experiments` editable with the cost stated in the
+same breath as the balance (`15 experiments · 15 of 500 credits`), and three ways out — accept,
+reject, or change it first. Nothing in phases 1–2 may reach `submit` until this exists.
 
 **Phase 4 — `JobKind::Discovery`.** The uppercase statuses, the poll route, a jobs-panel row, and
 §243's sweep from day one rather than as the repair it was last time. A run measured in hours is a
 run nobody will be watching when it lands.
 
-**Phase 5 — the results.** An experiments modal ranked by surprise, in the shape the datasets and
-library modals already have; `rich_outputs` decoded to files, because §242 is the standing lesson
-that Asta hands back figures encoded and something has to unpack them.
+**Phase 5a — the results as a table.** Ranked by surprise, in the shape the datasets and library
+modals already have. AutoDiscovery's own web view is the reference and its columns are the right
+ones: id, hypothesis, surprise, belief before, belief after, direction. Three decoding notes, all
+readable off that view:
 
-### Open, and the researcher's call rather than mine
+- **`surprise` is not `posterior - prior`.** Experiment 72 reports prior 0.823, posterior 0.313 — a
+  move of 0.510 — and a surprise of 0.611. It is a normalised surprisal score in its own right, so
+  computing it as a difference would produce a number that is wrong and looks plausible, which is
+  the §73 failure mode exactly.
+- **Direction is the sign of the belief move**, and it is what the web view puts in its own column.
+  That one *is* derived, and honestly so.
+- **The verbal labels are buckets of the probability**: 0.823 reads as `Likely True`, 0.313 as
+  `Maybe False`, so quarters — `Likely False`, `Maybe False`, `Maybe True`, `Likely True`. Worth
+  confirming against a real payload rather than inferring from two points.
 
-- **How many experiments is a normal run?** The skill suggests 10–20 to explore and 50–100 to
-  investigate. With 500 credits that is between 5 and 50 runs, ever. Worth deciding what the app
-  offers as a default before it offers one.
-- **Whose credits are these?** One grant, and an app that may be used by more than one researcher.
-  Nothing in the current design tracks who spent what.
+An experiment opens to its own detail: the belief shift on an axis, then `hypothesis`, `analysis`,
+`review`, and only then code — the order the service's own view uses, and the order
+`interpreting-results.md` asks for. `rich_outputs` holds the plots and tables and has to be decoded
+to files, because §242 is the standing lesson that Asta hands figures back encoded and something has
+to unpack them.
+
+**Phase 5b — the tree.** *"Allen ai have a interactive graph for the experiments. When click a node
+the experiment opens."* Buildable from the contract already captured: `parent_id` and `child_ids`
+are the MCTS tree, and `surprise` colours the node the way the web view's orange/grey does.
+
+**Draw the tree, not a spring layout.** Allen's view is a force-directed blob of the same data; a
+deterministic tree layout is cheaper (no physics, no animation loop, reproducible positions across
+frames — which matters in a UI rebuilt on every stream event) and it *says* more, because depth is
+how far the search refined that line of enquiry and a blob hides it. Two things to settle first:
+
+- **Does `experiments` return the tree, or only the nodes?** The CLI's list renderer never prints
+  `parent_id`, so whether the payload carries it is unverified. If it does not, a hundred-node graph
+  is a hundred requests, and that changes the phase from a view into a fetch strategy.
+- **What URL does one of *our* runs live at?** The sample in the web view is
+  `/shared/samples/nls_bmi?exp=1`; a user's own run's address is unknown, and without it there is no
+  honest `open in AutoDiscovery` link. Both are Phase 0 capture items.
+
+### Answered
+
+- **A normal run is 15 experiments.** So that is the default the modal opens with — inside the
+  skill's 10–20 "explore" band, and 33 runs' worth of the 500-credit grant rather than 10.
+- **Intent is the knob that matters.** *"we can modify the intent or guide the expriments with an
+  intent."* So of the nine metadata fields the modal makes exactly one freely editable besides the
+  budget. The five numeric knobs (`exploration_weight`, `mcts_selection`, `surprisal_width`,
+  `evidence_weight`) stay at the defaults the skill documents until there is a reason from a real
+  run to expose them — a form with six tuning fields is a form nobody fills in correctly.
+- **Credits belong to the Asta account, not to a person** — *"for the moment"*. So no per-user
+  ledger: show the balance, spend against it, and revisit if the account is ever shared.
+
+### Not planned, and why: a graph for the PDF librarian
+
+Raised in the same breath — *"not sure if we can have one for pdf librarian"* — and the honest answer
+is not yet, for a reason worth writing down. AutoDiscovery's graph is drawable because the service
+*hands over the edges*: `parent_id` and `child_ids` are the search's own record of which experiment
+came from which. `index.yaml` records documents and no relations at all, so a librarian graph would
+have to invent its own edges — citation overlap, shared authors, embedding similarity — and every one
+of those is a claim about the papers rather than a fact from them. That is the §73 line: a
+made-up structure a researcher believes is worse than no structure.
+
+It becomes real the moment there are edges worth drawing. Citations are the obvious candidate, and
+`references.rs` already resolves them; a librarian graph built on *actual* reference lists would be
+honest. Filed as a want, not a plan.
+
+### Phase 0, restated with what it now has to capture
+
+One free `create`, then one 5-experiment run. What comes back has to answer, verbatim rather than by
+inference: whether `experiments` carries `parent_id`/`child_ids`, what the four verbal belief
+buckets actually are, what a run of ours is addressable as, how long one experiment takes, and what
+`rich_outputs` holds for an experiment with a plot in it. Five unknowns, one run, and every one of
+them is a thing a later phase would otherwise guess.
 
 *Hundredth: the service that decides its own questions needs the tightest gate, not the loosest.
 Everything else here asks what you told it to ask.*
+
+*Hundred-and-first: a banner is for something already true; a modal is for something that cannot
+happen without you. §244 and §246 disagree about the widget and agree about the rule.*
