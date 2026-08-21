@@ -1,0 +1,66 @@
+{
+  "experiment": {
+    "analysis": "The experiment successfully executed the comparison between LassoCV and ElasticNetCV models. Lasso selected 11 features, while Elastic Net selected 13 features (with a high l1_ratio of 0.99, making it behave very similarly to Lasso). The two additional features selected by Elastic Net were 'cov_040' and 'cov_004'. However, the hypothesis that the planted signal features exhibit high multicollinearity was refuted. The correlation analysis and heatmap revealed no strong correlations among the selected features; the highest absolute Pearson correlation coefficient off-diagonal was only 0.14. This indicates that the selected features are highly independent and multicollinearity is not present among them.",
+    "child_ids": [],
+    "code": "import pandas as pd\nimport numpy as np\nimport matplotlib.pyplot as plt\nimport seaborn as sns\nfrom sklearn.linear_model import LassoCV, ElasticNetCV\nfrom sklearn.preprocessing import StandardScaler\n\n# Load dataset\ntry:\n    df = pd.read_csv('../synthetic_soc.csv')\nexcept FileNotFoundError:\n    df = pd.read_csv('synthetic_soc.csv')\n\ntarget = 'SOC_MgHa'\ncovariates = [col for col in df.columns if col.startswith('cov_')]\n\nX = df[covariates]\ny = df[target]\n\n# Scale features\nscaler = StandardScaler()\nX_scaled = scaler.fit_transform(X)\nX_scaled = pd.DataFrame(X_scaled, columns=covariates)\n\n# Train LassoCV\nlasso = LassoCV(cv=5, random_state=42, n_jobs=-1)\nlasso.fit(X_scaled, y)\nlasso_selected = np.array(covariates)[lasso.coef_ != 0]\n\n# Train ElasticNetCV\nenet = ElasticNetCV(cv=5, l1_ratio=[0.1, 0.5, 0.7, 0.9, 0.95, 0.99], random_state=42, n_jobs=-1)\nenet.fit(X_scaled, y)\nenet_selected = np.array(covariates)[enet.coef_ != 0]\n\nprint(f\"LassoCV best alpha: {lasso.alpha_:.4f}\")\nprint(f\"ElasticNetCV best l1_ratio: {enet.l1_ratio_}, best alpha: {enet.alpha_:.4f}\\n\")\n\nprint(f\"Lasso selected {len(lasso_selected)} features.\")\nfor f in lasso_selected:\n    idx = covariates.index(f)\n    print(f\"  {f}: {lasso.coef_[idx]:.4f}\")\n\nprint(f\"\\nElastic Net selected {len(enet_selected)} features.\")\nfor f in enet_selected:\n    idx = covariates.index(f)\n    print(f\"  {f}: {enet.coef_[idx]:.4f}\")\n\nenet_only = list(set(enet_selected) - set(lasso_selected))\nprint(f\"\\nFeatures selected by Elastic Net but not by Lasso ({len(enet_only)}): {enet_only}\")\n\nif len(enet_selected) > 1:\n    corr_matrix = X_scaled[list(enet_selected)].corr()\n    \n    print(\"\\nPairs of Elastic Net selected features with |Pearson r| > 0.6:\")\n    pairs_found = False\n    for i in range(len(corr_matrix.columns)):\n        for j in range(i+1, len(corr_matrix.columns)):\n            col1 = corr_matrix.columns[i]\n            col2 = corr_matrix.columns[j]\n            r = corr_matrix.iloc[i, j]\n            if abs(r) > 0.6:\n                print(f\"  {col1} <-> {col2}: {r:.3f}\")\n                pairs_found = True\n    if not pairs_found:\n        print(\"  None found.\")\n\n    plt.figure(figsize=(10, 8))\n    sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', fmt=\".2f\", vmin=-1, vmax=1, square=True)\n    plt.title('Correlation Heatmap of Elastic Net Selected Features')\n    plt.tight_layout()\n    plt.show()\nelse:\n    print(\"\\nNot enough features selected by Elastic Net to compute correlation matrix.\")\n",
+    "code_output": "exitcode: 0 (execution succeeded)\nCode output: LassoCV best alpha: 1.1487\nElasticNetCV best l1_ratio: 0.99, best alpha: 1.0821\n\nLasso selected 11 features.\n  cov_000: 37.5034\n  cov_005: 23.5403\n  cov_011: -17.1239\n  cov_019: -0.0845\n  cov_030: 6.0672\n  cov_045: -0.4215\n  cov_049: 0.0455\n  cov_075: -0.9495\n  cov_077: -0.4009\n  cov_087: 0.0475\n  cov_101: -0.1412\n\nElastic Net selected 13 features.\n  cov_000: 37.1515\n  cov_004: -0.0016\n  cov_005: 23.3227\n  cov_011: -17.0110\n  cov_019: -0.1522\n  cov_030: 6.0822\n  cov_040: -0.0288\n  cov_045: -0.4701\n  cov_049: 0.1298\n  cov_075: -1.0203\n  cov_077: -0.4356\n  cov_087: 0.1714\n  cov_101: -0.2529\n\nFeatures selected by Elastic Net but not by Lasso (2): [np.str_('cov_040'), np.str_('cov_004')]\n\nPairs of Elastic Net selected features with |Pearson r| > 0.6:\n  None found.\n\n\n=== Plot Analysis (figure 1) ===\nBased on the provided image, here is a detailed analysis from a research scientist's perspective:\n\n### 1. Plot Type\n*   **Type:** Correlation Heatmap.\n*   **Purpose:** To visualize the pairwise linear relationships (correlation coefficients) between a specific subset of variables. In this case, as indicated by the title, it displays the correlations among features that have been selected by an Elastic Net regularization model.\n\n### 2. Axes\n*   **Titles and Labels:**\n    *   Both the X-axis (bottom) and Y-axis (left) lack formal overarching titles, but they are clearly labeled with the names of the features being analyzed.\n    *   The labels on both axes are identical, containing 13 distinct feature names: `cov_000`, `cov_004`, `cov_005`, `cov_011`, `cov_019`, `cov_030`, `cov_040`, `cov_045`, `cov_049`, `cov_075`, `cov_077`, `cov_087`, and `cov_101`.\n*   **Value Ranges:** Because this is a symmetric correlation matrix, the axes do not represent continuous numerical ranges. Instead, they represent categorical discrete items (the 13 features).\n\n### 3. Data Trends\n*   **Diagonal Pattern:** As expected in a correlation matrix, the main diagonal from top-left to bottom-right is a solid dark red with values of `1.00`, representing the perfect positive correlation of each feature with itself.\n*   **Off-Diagonal Trends (Areas of High/Low Values):**\n    *   The most striking trend is the **lack of strong correlations**. Almost all off-diagonal cells are colored in a very pale grey/blue/pink, indicating values very close to `0.00`.\n    *   **Highest Positive Correlations (Weak):**\n        *   `cov_030` and `cov_040` ($r = 0.14$)\n        *   `cov_004` and `cov_075` ($r = 0.11$)\n        *   `cov_045` and `cov_077` ($r = 0.11$)\n    *   **Highest Negative Correlations (Weak):**\n        *   `cov_030` and `cov_045` ($r = -0.14$)\n        *   `cov_000` and `cov_101` ($r = -0.12$)\n        *   `cov_004` and `cov_005` ($r = -0.12$)\n*   **Overall Sparsity:** There are absolutely no moderate or strong correlations (e.g., $|r| > 0.5$) present between any two distinct features in this grid.\n\n### 4. Annotations and Legends\n*   **Title:** \"Correlation Heatmap of Elastic Net Selected Features\" provides crucial context regarding how these specific variables were chosen.\n*   **In-cell Annotations:** Every single cell in the heatmap is annotated with the exact correlation coefficient rounded to two decimal places, allowing for precise reading rather than just estimating from the color.\n*   **Color Bar Legend (Right):** A diverging colormap legend is provided.\n    *   It ranges from `-1.00` (perfect negative correlation) to `1.00` (perfect positive correlation).\n    *   The color gradient goes from dark blue (negative) through white/light grey (near zero) to dark red (positive).\n\n### 5. Statistical Insights\n*   **Confirmation of Elastic Net Behavior:** The most significant insight derived from this plot relates to the title. Elastic Net is a regularization algorithm that combines L1 (Lasso) and L2 (Ridge) penalties. A key characteristic of the L1 penalty is that it performs feature selection, often forcing the coefficients of highly correlated (redundant) variables to zero, effectively dropping them from the model. This heatmap visually confirms that the Elastic Net model worked perfectly: it selected a subset of features that are highly independent of one another.\n*   **Absence of Multicollinearity:** For downstream statistical modeling or interpretation, multicollinearity (high correlation between predictor variables) is a major issue that causes coefficient instability. This plot demonstrates that multicollinearity has been successfully eliminated among this feature set. The maximum absolute correlation observed off the diagonal is only 0.14, meaning these variables capture largely distinct aspects of the variance in the dataset.\n==================================================",
+    "created_at": "2026-08-21T12:57:29.922625+00:00",
+    "creation_idx": 2,
+    "experiment_id": "node_2_0",
+    "experiment_plan": {
+      "deliverables": "Lists of features selected by Elastic Net vs. Lasso, coefficients for both models, and a correlation matrix/heatmap of the selected covariates.",
+      "objective": "Investigate potential multicollinearity in the planted signal by comparing feature selection behavior between Elastic Net (L1+L2) and Lasso (L1) regression.",
+      "steps": "1. Train an ElasticNetCV model and a LassoCV model on the dataset to predict SOC_MgHa, optimizing hyperparameters via cross-validation. 2. Extract the covariates with non-zero coefficients from both models. 3. Compare the sizes and overlaps of the selected feature sets. 4. If Elastic Net selects more features, compute the pairwise correlation matrix specifically among the features selected by Elastic Net but dropped by Lasso to test for high multicollinearity (e.g., Pearson r > 0.6)."
+    },
+    "hypothesis": "Elastic Net regression will select a broader set of signal covariates compared to pure Lasso, revealing that the planted signal features exhibit high multicollinearity among themselves.",
+    "id_in_run": 1,
+    "is_surprising": false,
+    "parent_id": "node_1_0",
+    "posterior": 0.4318181818181818,
+    "posterior_belief": {
+      "_empirical_mean": 0.0,
+      "_type": "boolean_cat",
+      "definitely_false": 5.0,
+      "definitely_true": 0.0,
+      "maybe_false": 0.0,
+      "maybe_true": 0.0,
+      "mean": 0.4318181818181818,
+      "n": 5.0,
+      "prior_params": [
+        4.75,
+        1.25
+      ],
+      "uncertain": 0.0
+    },
+    "prior": 0.7916666666666666,
+    "prior_belief": {
+      "_empirical_mean": 0.85,
+      "_type": "boolean_cat",
+      "definitely_false": 0.0,
+      "definitely_true": 2.0,
+      "maybe_false": 0.0,
+      "maybe_true": 3.0,
+      "mean": 0.7916666666666666,
+      "n": 5.0,
+      "prior_params": [
+        0.5,
+        0.5
+      ],
+      "uncertain": 0.0
+    },
+    "review": "The experiment was successfully implemented and followed the plan. The models were trained and the selected feature sets were extracted and compared. Although the correlation matrix included all features selected by Elastic Net rather than exclusively those dropped by Lasso, this is a more comprehensive approach that fully satisfies the intent of testing for multicollinearity.",
+    "rich_outputs": [
+      {
+        "image/jpeg": "/9j/4AAQSkZJRgABAQEAZABkAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcp...CLIPPED",
+        "image/png": "iVBORw0KGgoAAAANSUhEUgAAA4MAAAMWCAYAAABLPFMKAAAAOnRFWHRTb2Z0d2FyZQBNYXRwbG90bGliIHZlcnNpb24zLjEw...CLIPPED",
+        "image/svg+xml": "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"no\"?>\n<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1...CLIPPED",
+        "text/plain": "<Figure size 1000x800 with 2 Axes>"
+      }
+    ],
+    "runtime_ms": 128220.0,
+    "status": "SUCCEEDED",
+    "surprise": -0.6705146629422446
+  },
+  "experiment_id": "node_2_0",
+  "runid": "8e5d2eaa-f067-4193-9400-d555e4607c41"
+}

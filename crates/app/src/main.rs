@@ -13,6 +13,7 @@ mod backend;
 mod catalogue;
 mod composer;
 mod dataverse;
+mod discovery;
 mod gallery;
 mod markdown;
 mod menu;
@@ -14930,7 +14931,7 @@ mod tests {
     /// §244: one run gets a definite press, because a single action has to mean something.
     #[test]
     fn one_collected_run_is_named_and_openable() {
-        let runs = vec![collected(protocol::JobKind::Analysis, "01a0215f-c66b-7461-96f2-595a168fa8f8")];
+        let runs = [collected(protocol::JobKind::Analysis, "01a0215f-c66b-7461-96f2-595a168fa8f8")];
         // The label names what finished rather than counting it.
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].1.kind.label(), "Data analysis");
@@ -14940,7 +14941,7 @@ mod tests {
     /// With several, no single thread is the right destination — the sidebar is.
     #[test]
     fn several_collected_runs_are_counted_rather_than_opened() {
-        let runs = vec![
+        let runs = [
             collected(protocol::JobKind::Analysis, "aaa"),
             collected(protocol::JobKind::Theorizer, "bbb"),
         ];

@@ -1,0 +1,49 @@
+{
+  "execution_status": {
+    "cancelled_count": 0,
+    "completion_time": "Fri, 21 Aug 2026 13:08:13 GMT",
+    "conditions": [
+      {
+        "last_transition_time": "Fri, 21 Aug 2026 12:56:09 GMT",
+        "message": "Started deployed execution in 8.29s.",
+        "state": "CONDITION_SUCCEEDED",
+        "type": "Started"
+      },
+      {
+        "last_transition_time": "Fri, 21 Aug 2026 13:08:13 GMT",
+        "message": "Execution completed successfully in 12m10.43s.",
+        "state": "CONDITION_SUCCEEDED",
+        "type": "Completed"
+      },
+      {
+        "last_transition_time": "Fri, 21 Aug 2026 12:56:00 GMT",
+        "message": "Imported container image.",
+        "state": "CONDITION_SUCCEEDED",
+        "type": "ContainerReady"
+      },
+      {
+        "last_transition_time": "Fri, 21 Aug 2026 12:56:00 GMT",
+        "message": "Provisioned imported containers.",
+        "state": "CONDITION_SUCCEEDED",
+        "type": "ResourcesAvailable"
+      }
+    ],
+    "create_time": "Fri, 21 Aug 2026 12:56:00 GMT",
+    "failed_count": 0,
+    "name": "projects/ai2-skiff2-autodiscovery/locations/us-west1/jobs/autodiscovery-job-prod/executions/autodiscovery-job-prod-56p2j",
+    "phase": "SUCCEEDED",
+    "reconciling": false,
+    "running_count": 0,
+    "start_time": "Fri, 21 Aug 2026 12:56:02 GMT",
+    "succeeded_count": 1,
+    "uid": "12b39d06-3856-436c-890b-1a788f9183ec"
+  },
+  "run_details": {
+    "created_at": "2026-08-21T12:56:00.055133+00:00",
+    "execution_id": "autodiscovery-job-prod-56p2j",
+    "finished_at": "2026-08-21T13:08:13.358109+00:00",
+    "status": "SUCCEEDED",
+    "status_checked_at": "2026-08-21T13:09:29.540742+00:00"
+  },
+  "runid": "8e5d2eaa-f067-4193-9400-d555e4607c41"
+}

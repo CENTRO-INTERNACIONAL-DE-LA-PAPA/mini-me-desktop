@@ -1,0 +1,60 @@
+{
+  "runs": [
+    {
+      "can_explore_with_asta": false,
+      "can_view_datasets": false,
+      "dataset_expires_at": "2026-08-28T12:56:00.055133+00:00",
+      "description": "Synthetic dataset built to validate an analysis pipeline, not a field survey. 297 observations, 113 covariates named cov_000 through cov_112 drawn from standard normal distributions, and a target SOC_MgHa (soil organic carbon, megagrams per hectare). A small number of the covariates carry a deliberately planted linear relationship with the target; the remainder are pure noise. Which ones is not recorded here. Two GEE export artifact columns (a row index and a constant empty geometry) were dropped before upload.",
+      "execution_status": {},
+      "max_file_size": null,
+      "name": "Synthetic SOC control - contract probe",
+      "parent_run_id": null,
+      "parent_run_name": null,
+      "path": null,
+      "run_details": {
+        "created_at": "2026-08-21T12:56:00.055133+00:00",
+        "execution_id": "autodiscovery-job-prod-56p2j",
+        "finished_at": "2026-08-21T13:08:13.358109+00:00",
+        "status": "SUCCEEDED",
+        "status_checked_at": "2026-08-21T13:09:31.208968+00:00"
+      },
+      "run_metadata": {
+        "bookmarked_experiment_ids": null,
+        "datasets": [
+          {
+            "content_type": "text/csv",
+            "description": "One row per observation. cov_000..cov_112 are unitless standardised covariates. SOC_MgHa is the response, soil organic carbon in Mg/ha, roughly 50-200.",
+            "file_size_bytes": 665894,
+            "is_preloaded": false,
+            "name": "synthetic_soc.csv",
+            "url": null
+          }
+        ],
+        "description": "Synthetic dataset built to validate an analysis pipeline, not a field survey. 297 observations, 113 covariates named cov_000 through cov_112 drawn from standard normal distributions, and a target SOC_MgHa (soil organic carbon, megagrams per hectare). A small number of the covariates carry a deliberately planted linear relationship with the target; the remainder are pure noise. Which ones is not recorded here. Two GEE export artifact columns (a row index and a constant empty geometry) were dropped before upload.",
+        "domain": "Soil science / statistical methodology",
+        "evidence_weight": 1.0,
+        "exploration_weight": 1.0,
+        "intent": "Identify which covariates carry a real relationship with SOC_MgHa and which are noise. Prefer hypotheses that can distinguish signal from chance at this sample size.",
+        "is_bookmarked": null,
+        "is_shared": null,
+        "mcts_selection": "ucb1_recursive",
+        "n_experiments": 5,
+        "n_warmstart": null,
+        "name": "Synthetic SOC control - contract probe",
+        "parent_run_id": null,
+        "parent_run_name": null,
+        "surprisal_width": 0.5,
+        "warmstart_experiments": null
+      },
+      "run_stats": {
+        "completed_experiments": 5,
+        "num_surprising_experiments": 0,
+        "pending_experiments": 0,
+        "requested_experiments": 5
+      },
+      "runid": "8e5d2eaa-f067-4193-9400-d555e4607c41",
+      "status": "SUCCEEDED",
+      "userid": "google-oauth2|REDACTED"
+    }
+  ]
+}
