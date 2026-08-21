@@ -926,6 +926,105 @@ const TRANSCRIPT_INSET: f32 = 16.;
 /// work this is; few enough that the files below stay on screen.
 const SOURCES_IN_PANEL: usize = 4;
 
+/// How tall the background-jobs list grows before it scrolls inside itself.
+///
+/// The number the model picker, the theme rows and the approval card already use, so the app has
+/// one scroller height rather than four — §100's argument about stating a measurement once,
+/// applied to heights instead of gutters.
+const JOBS_BODY_HEIGHT: f32 = 260.;
+
+/// How much of a job's question the panel prints.
+///
+/// Roughly three lines at the panel's width. The question's job in this row is to tell two
+/// concurrent analyses apart, and a first clause does that; the rest of it is instructions to the
+/// analyst, which belong to the turn that sent them.
+const JOB_QUESTION_CHARS: usize = 120;
+
+/// How many background things are in each state.
+///
+/// Exists for the folded heading, which is the whole reason folding is safe: collapsed, this
+/// summary is the *only* thing on screen about work that is still moving, and a fold that hid a
+/// worker stopped at an approval gate without saying so would put back the hang §31 removed.
+///
+/// Counted over both lists because a researcher does not have two mental categories here. A
+/// LangGraph background subagent and an Asta task are different objects to this client — different
+/// endpoints, different polls, different rows — and identical to the person waiting on them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct JobTally {
+    waiting: usize,
+    running: usize,
+    failed: usize,
+    done: usize,
+}
+
+impl JobTally {
+    fn of(tasks: &[protocol::AsyncTask], jobs: &[protocol::Job]) -> Self {
+        let mut tally = Self::default();
+        for task in tasks {
+            // Approval first: a task at the gate is `interrupted`, which is *not* terminal and
+            // not running either — it is stopped, waiting for a person.
+            if task.needs_approval() {
+                tally.waiting += 1;
+            } else if !task.is_finished() {
+                tally.running += 1;
+            } else if task.succeeded() {
+                tally.done += 1;
+            } else {
+                tally.failed += 1;
+            }
+        }
+        for job in jobs {
+            if !job.is_finished() {
+                tally.running += 1;
+            } else if job.succeeded() {
+                tally.done += 1;
+            } else {
+                tally.failed += 1;
+            }
+        }
+        tally
+    }
+
+    /// `1 waiting for you · 2 running`, most urgent first, silent about states that are empty.
+    ///
+    /// States are named rather than totalled. `3 jobs` tells a folded reader nothing they can act
+    /// on, and the reason to fold is not having to unfold.
+    fn summary(self) -> String {
+        let mut parts = Vec::new();
+        // "for you", not "for approval". The panel is read by researchers who do not write code,
+        // and the sentence has to say whose move it is.
+        if self.waiting > 0 {
+            parts.push(format!("{} waiting for you", self.waiting));
+        }
+        if self.running > 0 {
+            parts.push(format!("{} running", self.running));
+        }
+        if self.failed > 0 {
+            parts.push(format!("{} failed", self.failed));
+        }
+        if self.done > 0 {
+            parts.push(format!("{} done", self.done));
+        }
+        parts.join(" · ")
+    }
+
+    /// The colour of the most urgent state in it.
+    ///
+    /// The accent for a gate, because the accent is this app's one signal that something is
+    /// yours to act on (§199) — and a summary is the only thing a folded section can signal with.
+    fn colour(self) -> u32 {
+        if self.waiting > 0 {
+            theme::accent()
+        } else if self.running > 0 {
+            theme::running()
+        } else if self.failed > 0 {
+            theme::error()
+        } else {
+            theme::text_faint()
+        }
+    }
+}
+
 fn scrollbar(handle: &gpui::ScrollHandle) -> Option<impl IntoElement> {
     let overflow = handle.max_offset().height;
     let viewport = handle.bounds().size.height;
@@ -3055,6 +3154,13 @@ struct Workbench {
     /// Runs collected this launch, still to be told about. Cleared when the researcher opens one
     /// or dismisses the banner.
     collected_runs: Vec<(String, protocol::Job)>,
+    /// Whether `BACKGROUND JOBS` is unfolded. Starts open, and reopens by itself the moment a
+    /// worker stops at the approval gate — the researcher's press is respected everywhere except
+    /// where it would hide a question addressed to them (§245).
+    jobs_expanded: bool,
+    /// Where the jobs list is scrolled to, so the offset survives the rebuild every stream event
+    /// causes. Without a handle of its own the list would jump back to the top on each tick.
+    jobs_scroll: gpui::ScrollHandle,
     /// Narrows the open reference list. Only the modal reads it — the panel's four are a
     /// preview, and filtering something that shows four of seventeen would be a filter whose
     /// result you cannot see (§197).
@@ -3326,6 +3432,8 @@ impl Workbench {
             pending_adoption: Vec::new(),
             swept: false,
             collected_runs: Vec::new(),
+            jobs_expanded: true,
+            jobs_scroll: gpui::ScrollHandle::new(),
             sources_filter,
             datasets_filter,
             documents_filter,
@@ -3501,6 +3609,11 @@ impl Workbench {
                     }
                     if waiting {
                         workbench.status = "a background task is waiting for your approval".into();
+                        // Unfold the panel section that holds the Approve button. The fold is the
+                        // researcher's to set, but a folded section is the one state in which a
+                        // question addressed to them is invisible — so the gate appearing opens
+                        // it, and a press after that is respected (§245).
+                        workbench.jobs_expanded = true;
                     } else if finished {
                         workbench.status = if succeeded {
                             "a background task finished".into()
@@ -12904,304 +13017,449 @@ impl Workbench {
         section
     }
 
-    fn jobs_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Long jobs still running, and the ones that finished this session.
+    ///
+    /// The theorizer and DataVoyager return a task id immediately and finish minutes
+    /// later, so without this the answer to "is it still going?" was nothing at all —
+    /// and, worse, nobody was collecting the result (docs §29).
+    ///
+    /// **Foldable, and bounded when open.** Asked for directly: *"we need to make the ui of
+    /// background jobs plegable and scrolable. when we have a lot of text like for data voyager
+    /// its disruptive at sight."* A job row carries the question it was launched with, and a
+    /// DataVoyager question is a paragraph *by design* — the four rules in `subagents.py` make it
+    /// name the datasets, name the methods and ask for the numbers — so one row could fill the
+    /// column and push `OUTPUTS` and `SOURCES` off the bottom of it. Three bounds, cheapest
+    /// first: the question is clipped to [`JOB_QUESTION_CHARS`], the list scrolls within
+    /// [`JOBS_BODY_HEIGHT`], and the section folds to a single line.
+    ///
+    /// **What folds is the noise, not the question being asked of you.** A worker stopped at the
+    /// approval gate is pinned above the scroller, because its Approve button is the one control
+    /// in this section that something is *waiting on* — the rule the card itself follows (§40),
+    /// one level out. The gate also opens the section when it appears, so a fold can hide it only
+    /// by a deliberate press; folded, the heading still reads `1 waiting for you`.
+    ///
+    /// **Two call sites, one per frame.** `artifacts_contents` renders this either from its
+    /// no-spine early return or from the full panel, never both, so the fixed element ids below
+    /// cannot collide the way two sibling `datasets-heading`s once did.
+    fn jobs_section(&self, cx: &mut Context<Self>) -> Div {
         let mut section = div().flex().flex_col().gap_2().pt_2();
         if self.jobs.is_empty() && self.tasks.is_empty() {
             return section;
         }
-        section = section.child(section_label("BACKGROUND JOBS"));
+
+        let tally = JobTally::of(&self.tasks, &self.jobs);
+        section = section.child(
+            div()
+                .id("jobs-heading")
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .w_full()
+                .min_w_0()
+                .gap_2()
+                .py_1()
+                .rounded_md()
+                // **No horizontal padding**, so `BACKGROUND JOBS` starts on the same x as `PLAN`
+                // and `OUTPUTS` above and below it; the fill runs the width of the section
+                // instead. Which is the shape that was asked for the last time a heading here
+                // became pressable: *"a whole rectangle use the hover colour so I know that I can
+                // click there."*
+                .hover(|style| {
+                    let fill = theme::hover_over(theme::surface());
+                    style
+                        .bg(rgb(fill))
+                        .text_color(rgb(theme::ink_on(fill)))
+                        .cursor_pointer()
+                })
+                .text_color(rgb(theme::text_faint()))
+                .text_xs()
+                // Drawn whether or not a pointer is near it. A disclosure whose only sign is a
+                // hover is one a researcher concludes does not exist (§199) — and this is the
+                // same `▾`/`▸` the transcript's step groups have used all along, so the fold in
+                // the panel and the fold in the conversation are one gesture.
+                .child(format!(
+                    "{} BACKGROUND JOBS",
+                    if self.jobs_expanded { "▾" } else { "▸" }
+                ))
+                .child(
+                    // Named states, not a total. `3 jobs` folded is a number you have to unfold
+                    // to act on, and not having to is the entire point of the fold.
+                    div()
+                        .flex_none()
+                        .text_xs()
+                        .text_color(rgb(tally.colour()))
+                        .child(tally.summary()),
+                )
+                .on_click(cx.listener(|workbench, _event, _window, cx| {
+                    workbench.jobs_expanded = !workbench.jobs_expanded;
+                    cx.notify();
+                })),
+        );
+        if !self.jobs_expanded {
+            return section;
+        }
 
         // Background workers first, because one of them may be *stopped waiting for you* —
         // and until this existed that task simply hung, since the gate it hit runs on its
         // own thread and nothing in the UI could answer it (docs §31).
-        for task in &self.tasks {
-            let (mark, colour) = if task.needs_approval() {
-                ("⏸", theme::accent())
-            } else if !task.is_finished() {
-                ("◐", theme::running())
-            } else if task.succeeded() {
-                ("✓", theme::success())
-            } else {
-                ("✗", theme::error())
-            };
-            let mut row = div()
+        let (waiting, working): (Vec<_>, Vec<_>) =
+            self.tasks.iter().partition(|task| task.needs_approval());
+        for task in waiting {
+            section = section.child(self.task_row(task, cx));
+        }
+
+        let mut body = div()
+            .id("jobs-body")
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w_0()
+            .gap_2()
+            // Room for the thumb painted over this by the wrapper below (docs §100).
+            .pr(px(SCROLL_GUTTER))
+            .max_h(px(JOBS_BODY_HEIGHT))
+            .overflow_y_scroll()
+            .track_scroll(&self.jobs_scroll)
+            // **The wheel drives one list at a time.** gpui's own scroll handler does not stop
+            // propagation and `should_handle_scroll` is true for every hitbox under the pointer,
+            // so an inner scroller and the panel it sits in both take the same delta from the
+            // same event and slide together — twice the speed, in two places. The offset handler
+            // is registered after this one and the bubble phase runs in reverse, so this fires
+            // second and stops the panel without stopping the list.
+            //
+            // Only attached when there is something here to scroll, so a two-row section leaves
+            // the wheel to the panel rather than swallowing it. `max_offset` is meaningless until
+            // the first paint, which costs one frame's worth of double-scroll and no more — the
+            // same deal [`scrollbar`] already takes for the thumb.
+            .when(self.jobs_scroll.max_offset().height > px(0.), |body| {
+                body.on_scroll_wheel(|_event, _window, cx| cx.stop_propagation())
+            });
+        for task in working {
+            body = body.child(self.task_row(task, cx));
+        }
+        for job in &self.jobs {
+            body = body.child(self.job_row(job));
+        }
+
+        section.child(
+            // The bar sits *outside* the element it measures; inside, it would scroll along with
+            // the thing it is reporting on.
+            div()
+                .relative()
                 .flex()
                 .flex_col()
                 .w_full()
                 .min_w_0()
-                .gap_1()
-                .pl_2()
-                .border_l_1()
-                .border_color(rgb(colour))
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .w_full()
-                        .min_w_0()
-                        .gap_2()
-                        .child(
-                            div()
-                                .flex_grow()
-                                .min_w_0()
-                                .text_color(rgb(theme::text()))
-                                .text_sm()
-                                .child(format!("{mark} {}", task.agent_name.replace('_', " "))),
-                        )
-                        // `step 4 of 7`, and nothing when the agent wrote no plan. The one number
-                        // in this panel with a real denominator (§209).
-                        .children(protocol::plan_progress(&task.todos).map(|(done, total)| {
-                            div()
-                                .flex_none()
-                                .text_xs()
-                                .text_color(rgb(theme::text_faint()))
-                                .child(format!("{done} of {total}"))
-                        })),
-                )
-                .child(
-                    div()
-                        .w_full()
-                        .min_w_0()
-                        // The failure the server recorded, in place of the bare word
-                        // "error" — which is all this said while two rounds went into
-                        // guessing what had actually happened (docs §38).
-                        .text_color(rgb(if task.error.is_some() {
-                            theme::error()
-                        } else if task.needs_approval() {
-                            theme::warning()
-                        } else {
-                            theme::text_muted()
-                        }))
-                        .text_xs()
-                        .child(match (&task.error, task.needs_approval()) {
-                            (Some(error), _) => error.clone(),
-                            (None, true) => "waiting for your approval".to_string(),
-                            // What it is *doing*, not just that it is doing something —
-                            // "running" for ten minutes tells a researcher nothing about
-                            // whether to wait (docs §42).
-                            (None, false) => match (&task.activity, task.is_finished()) {
-                                (Some(activity), false) => format!("{} · {activity}", task.status),
-                                _ => task.status.clone(),
-                            },
-                        }),
-                )
-                .when(!task.description.is_empty(), |row| {
-                    row.child(
-                        div()
-                            .w_full()
-                            .min_w_0()
-                            .text_color(rgb(theme::text_muted()))
-                            .text_xs()
-                            .child(task.description.clone()),
-                    )
-                })
-                // **What turns six minutes of "running · execute" into something a person can
-                // read.** Measured on a real run: eight approval rounds and 35–43 seconds per
-                // command, with nothing on screen saying how much of it was left (§209).
-                .when(!task.todos.is_empty(), |row| {
-                    row.child(self.plan_list(&task.todos, task.activity.as_deref()))
-                });
+                .child(body)
+                .children(scrollbar(&self.jobs_scroll)),
+        )
+    }
 
-            if let Some(request) = &task.pending {
-                let task_id = task.task_id.clone();
-                // Capped and scrollable, for the same reason the foreground card is: a
-                // background worker writes long scripts, and a command tall enough to push
-                // Approve out of the panel is a gate the researcher cannot answer.
-                let mut commands = div()
-                    .id(SharedString::from(format!("bg-commands-{task_id}")))
+    /// One background worker: what it is, what it is doing, its plan, its gate, its files.
+    ///
+    /// Split out of [`Self::jobs_section`] because a worker waiting for approval is rendered from
+    /// a different place in the tree than one merely running — pinned above the scroller rather
+    /// than inside it — and two copies of this would be two places for the Approve button to
+    /// drift apart.
+    fn task_row(&self, task: &protocol::AsyncTask, cx: &mut Context<Self>) -> Div {
+        let (mark, colour) = if task.needs_approval() {
+            ("⏸", theme::accent())
+        } else if !task.is_finished() {
+            ("◐", theme::running())
+        } else if task.succeeded() {
+            ("✓", theme::success())
+        } else {
+            ("✗", theme::error())
+        };
+        let mut row = div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w_0()
+            // A child of a `max_h` flex column shrinks to fit it by default, which would squash
+            // a worker's whole plan into the height of a line rather than letting it scroll.
+            .flex_none()
+            .gap_1()
+            .pl_2()
+            .border_l_1()
+            .border_color(rgb(colour))
+            .child(
+                div()
                     .flex()
-                    .flex_col()
-                    .gap_1()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
                     .w_full()
                     .min_w_0()
-                    .max_h(px(200.))
-                    .overflow_y_scroll();
-                for action in &request.actions {
-                    // The command verbatim, exactly as the foreground card shows it: this
-                    // runs on the researcher's own machine, and the only meaningful review
-                    // is of the actual text (docs §19).
-                    commands = commands.child(
+                    .gap_2()
+                    .child(
                         div()
-                            .w_full()
+                            .flex_grow()
                             .min_w_0()
-                            .flex_none()
-                            .p_2()
-                            .border_1()
-                            .border_color(rgb(theme::border()))
                             .text_color(rgb(theme::text()))
+                            .text_sm()
+                            .child(format!("{mark} {}", task.agent_name.replace('_', " "))),
+                    )
+                    // `step 4 of 7`, and nothing when the agent wrote no plan. The one number
+                    // in this panel with a real denominator (§209).
+                    .children(protocol::plan_progress(&task.todos).map(|(done, total)| {
+                        div()
+                            .flex_none()
                             .text_xs()
-                            .child(action.detail.clone()),
-                    );
-                }
-                row = row.child(commands);
-                row = row.child(
+                            .text_color(rgb(theme::text_faint()))
+                            .child(format!("{done} of {total}"))
+                    })),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    // The failure the server recorded, in place of the bare word
+                    // "error" — which is all this said while two rounds went into
+                    // guessing what had actually happened (docs §38).
+                    .text_color(rgb(if task.error.is_some() {
+                        theme::error()
+                    } else if task.needs_approval() {
+                        theme::warning()
+                    } else {
+                        theme::text_muted()
+                    }))
+                    .text_xs()
+                    .child(match (&task.error, task.needs_approval()) {
+                        (Some(error), _) => error.clone(),
+                        (None, true) => "waiting for your approval".to_string(),
+                        // What it is *doing*, not just that it is doing something —
+                        // "running" for ten minutes tells a researcher nothing about
+                        // whether to wait (docs §42).
+                        (None, false) => match (&task.activity, task.is_finished()) {
+                            (Some(activity), false) => format!("{} · {activity}", task.status),
+                            _ => task.status.clone(),
+                        },
+                    }),
+            )
+            .when(!task.description.is_empty(), |row| {
+                row.child(
                     div()
-                        .flex()
-                        .flex_row()
-                        .gap_2()
-                        .child(
-                            ui::Button::new(
-                                SharedString::from(format!("bg-approve-{task_id}")),
-                                "Approve",
-                            )
-                            .tone(ui::Tone::Accent)
-                            .on_click(cx.listener({
-                                let task_id = task_id.clone();
-                                move |workbench, _event, _window, cx| {
-                                    workbench.decide_task(task_id.clone(), true, cx);
-                                }
-                            })),
-                        )
-                        .child(
-                            ui::Button::new(
-                                SharedString::from(format!("bg-reject-{task_id}")),
-                                "Reject",
-                            )
-                            .on_click(cx.listener({
-                                let task_id = task_id.clone();
-                                move |workbench, _event, _window, cx| {
-                                    workbench.decide_task(task_id.clone(), false, cx);
-                                }
-                            })),
-                        ),
+                        .w_full()
+                        .min_w_0()
+                        .text_color(rgb(theme::text_muted()))
+                        .text_xs()
+                        .child(task.description.clone()),
+                )
+            })
+            // **What turns six minutes of "running · execute" into something a person can
+            // read.** Measured on a real run: eight approval rounds and 35–43 seconds per
+            // command, with nothing on screen saying how much of it was left (§209).
+            .when(!task.todos.is_empty(), |row| {
+                row.child(self.plan_list(&task.todos, task.activity.as_deref()))
+            });
+
+        if let Some(request) = &task.pending {
+            let task_id = task.task_id.clone();
+            // Capped and scrollable, for the same reason the foreground card is: a
+            // background worker writes long scripts, and a command tall enough to push
+            // Approve out of the panel is a gate the researcher cannot answer.
+            let mut commands = div()
+                .id(SharedString::from(format!("bg-commands-{task_id}")))
+                .flex()
+                .flex_col()
+                .gap_1()
+                .w_full()
+                .min_w_0()
+                .max_h(px(200.))
+                .overflow_y_scroll();
+            for action in &request.actions {
+                // The command verbatim, exactly as the foreground card shows it: this
+                // runs on the researcher's own machine, and the only meaningful review
+                // is of the actual text (docs §19).
+                commands = commands.child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .flex_none()
+                        .p_2()
+                        .border_1()
+                        .border_color(rgb(theme::border()))
+                        .text_color(rgb(theme::text()))
+                        .text_xs()
+                        .child(action.detail.clone()),
                 );
-                // A background worker asks once per command over several minutes. Without
-                // this the researcher has to sit on the panel and answer each one, which
-                // defeats the entire point of handing the work to the background.
-                //
-                // Both blanket grants appear here, and the conversation-wide one is worded
-                // *identically* to the chat's. They are two gates — the coordinator asks
-                // below the composer, a worker asks in this panel — and which one appears
-                // depends on who happened to need permission. A grant offered in one place
-                // and not the other reads as the button moving around at random (docs §44).
-                for (suffix, label, conversation_wide) in [
-                    ("task", "Approve the rest of this task", false),
-                    ("conv", "Approve everything in this conversation", true),
-                ] {
-                    row = row.child(
+            }
+            row = row.child(commands);
+            row = row.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .child(
                         ui::Button::new(
-                            SharedString::from(format!("bg-approve-{suffix}-{task_id}")),
-                            label,
+                            SharedString::from(format!("bg-approve-{task_id}")),
+                            "Approve",
                         )
-                        // `text_xs` in the original: these sit under the pair above and
-                        // are the wider-scope variants of it, not peers.
-                        .size(ui::Size::Compact)
+                        .tone(ui::Tone::Accent)
                         .on_click(cx.listener({
                             let task_id = task_id.clone();
                             move |workbench, _event, _window, cx| {
-                                if conversation_wide {
-                                    workbench.approve_conversation = true;
-                                } else {
-                                    workbench.approve_tasks.insert(task_id.clone());
-                                }
                                 workbench.decide_task(task_id.clone(), true, cx);
                             }
                         })),
-                    );
-                }
-            }
-
-            // **What it produced, one press away.** Asked for directly: *"when a background task
-            // has a success, we should see a modal button the user can press… so the user doesn't
-            // type it every time in the chatbox."* A finished worker's output is already on disk
-            // — §151 verified plots landing at `<task>/…` inside the conversation's own folder —
-            // and until now the only way to reach it was to compose a question and wait for a
-            // turn to answer it (docs §198).
-            //
-            // **Opens the folder rather than sending a turn.** No model call, nothing billed,
-            // and it is instant; the files are the result, not a description of them.
-            if task.succeeded() {
-                if let Some(dir) = self
-                    .thread_workspace()
-                    .map(|conversation| workspace::worker_dir(&conversation, &task.thread_id))
-                {
-                    row = row.child(
-                        div()
-                            .id(SharedString::from(format!("task-files-{}", task.task_id)))
-                            .flex_none()
-                            .mt_1()
-                            .px_2()
-                            .py_1()
-                            .rounded_md()
-                            .border_1()
-                            .border_color(rgb(theme::border()))
-                            .text_color(rgb(theme::text_muted()))
-                            .text_xs()
-                            .hover(|style| {
-                                let fill = theme::hover_over(theme::surface());
-                                style
-                                    .bg(rgb(fill))
-                                    .text_color(rgb(theme::ink_on(fill)))
-                                    .cursor_pointer()
-                            })
-                            // Names the specialist, because several run at once (§43) and a row
-                            // of identical buttons is one you have to count rows to use.
-                            .child(format!(
-                                "Show what {} produced",
-                                task.agent_name.replace('_', " ")
-                            ))
-                            .on_click(move |_event, _window, _cx| {
-                                if let Err(error) = workspace::open(&dir) {
-                                    tracing::warn!(%error, "could not open a worker's folder");
-                                }
-                            }),
-                    );
-                }
-            }
-            section = section.child(row);
-        }
-        for job in &self.jobs {
-            let (mark, colour) = if !job.is_finished() {
-                ("◐", theme::running())
-            } else if job.succeeded() {
-                ("✓", theme::success())
-            } else {
-                ("✗", theme::error())
-            };
-            let detail = if job.is_finished() {
-                job.status.clone()
-            } else {
-                // Say how long it usually takes. A spinner with no expectation attached
-                // is indistinguishable from a hang.
-                format!("running · usually {}", job.kind.expected())
-            };
-            section = section.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .w_full()
-                    .min_w_0()
-                    .gap_1()
-                    .pl_2()
-                    .border_l_1()
-                    .border_color(rgb(colour))
-                    .child(
-                        div()
-                            .text_color(rgb(theme::text()))
-                            .text_sm()
-                            .child(format!("{mark} {}", job.kind.label())),
                     )
                     .child(
-                        div()
-                            .text_color(rgb(theme::text_muted()))
-                            .text_xs()
-                            .child(detail),
-                    )
-                    .when(!job.question.is_empty(), |row| {
-                        row.child(
-                            div()
-                                .w_full()
-                                .min_w_0()
-                                .text_color(rgb(theme::text_muted()))
-                                .text_xs()
-                                .child(job.question.clone()),
+                        ui::Button::new(
+                            SharedString::from(format!("bg-reject-{task_id}")),
+                            "Reject",
                         )
-                    }),
+                        .on_click(cx.listener({
+                            let task_id = task_id.clone();
+                            move |workbench, _event, _window, cx| {
+                                workbench.decide_task(task_id.clone(), false, cx);
+                            }
+                        })),
+                    ),
             );
+            // A background worker asks once per command over several minutes. Without
+            // this the researcher has to sit on the panel and answer each one, which
+            // defeats the entire point of handing the work to the background.
+            //
+            // Both blanket grants appear here, and the conversation-wide one is worded
+            // *identically* to the chat's. They are two gates — the coordinator asks
+            // below the composer, a worker asks in this panel — and which one appears
+            // depends on who happened to need permission. A grant offered in one place
+            // and not the other reads as the button moving around at random (docs §44).
+            for (suffix, label, conversation_wide) in [
+                ("task", "Approve the rest of this task", false),
+                ("conv", "Approve everything in this conversation", true),
+            ] {
+                row = row.child(
+                    ui::Button::new(
+                        SharedString::from(format!("bg-approve-{suffix}-{task_id}")),
+                        label,
+                    )
+                    // `text_xs` in the original: these sit under the pair above and
+                    // are the wider-scope variants of it, not peers.
+                    .size(ui::Size::Compact)
+                    .on_click(cx.listener({
+                        let task_id = task_id.clone();
+                        move |workbench, _event, _window, cx| {
+                            if conversation_wide {
+                                workbench.approve_conversation = true;
+                            } else {
+                                workbench.approve_tasks.insert(task_id.clone());
+                            }
+                            workbench.decide_task(task_id.clone(), true, cx);
+                        }
+                    })),
+                );
+            }
         }
-        section
+
+        // **What it produced, one press away.** Asked for directly: *"when a background task
+        // has a success, we should see a modal button the user can press… so the user doesn't
+        // type it every time in the chatbox."* A finished worker's output is already on disk
+        // — §151 verified plots landing at `<task>/…` inside the conversation's own folder —
+        // and until now the only way to reach it was to compose a question and wait for a
+        // turn to answer it (docs §198).
+        //
+        // **Opens the folder rather than sending a turn.** No model call, nothing billed,
+        // and it is instant; the files are the result, not a description of them.
+        if task.succeeded() {
+            if let Some(dir) = self
+                .thread_workspace()
+                .map(|conversation| workspace::worker_dir(&conversation, &task.thread_id))
+            {
+                row = row.child(
+                    div()
+                        .id(SharedString::from(format!("task-files-{}", task.task_id)))
+                        .flex_none()
+                        .mt_1()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgb(theme::border()))
+                        .text_color(rgb(theme::text_muted()))
+                        .text_xs()
+                        .hover(|style| {
+                            let fill = theme::hover_over(theme::surface());
+                            style
+                                .bg(rgb(fill))
+                                .text_color(rgb(theme::ink_on(fill)))
+                                .cursor_pointer()
+                        })
+                        // Names the specialist, because several run at once (§43) and a row
+                        // of identical buttons is one you have to count rows to use.
+                        .child(format!(
+                            "Show what {} produced",
+                            task.agent_name.replace('_', " ")
+                        ))
+                        .on_click(move |_event, _window, _cx| {
+                            if let Err(error) = workspace::open(&dir) {
+                                tracing::warn!(%error, "could not open a worker's folder");
+                            }
+                        }),
+                );
+            }
+        }
+        row
+    }
+
+    /// One long-running job: the theorizer, or a DataVoyager analysis.
+    ///
+    /// No `cx` and no controls — a job is something this client polls, not a gate it can answer.
+    /// What the row owes a reader is whether it is still going and roughly how long that takes.
+    fn job_row(&self, job: &protocol::Job) -> Div {
+        let (mark, colour) = if !job.is_finished() {
+            ("◐", theme::running())
+        } else if job.succeeded() {
+            ("✓", theme::success())
+        } else {
+            ("✗", theme::error())
+        };
+        let detail = if job.is_finished() {
+            job.status.clone()
+        } else {
+            // Say how long it usually takes. A spinner with no expectation attached
+            // is indistinguishable from a hang.
+            format!("running · usually {}", job.kind.expected())
+        };
+        div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w_0()
+            // A child of a `max_h` flex column shrinks to fit it by default, which would squash
+            // three rows into the height of one rather than letting them scroll.
+            .flex_none()
+            .gap_1()
+            .pl_2()
+            .border_l_1()
+            .border_color(rgb(colour))
+            .child(
+                div()
+                    .text_color(rgb(theme::text()))
+                    .text_sm()
+                    .child(format!("{mark} {}", job.kind.label())),
+            )
+            .child(
+                div()
+                    .text_color(rgb(theme::text_muted()))
+                    .text_xs()
+                    .child(detail),
+            )
+            .when(!job.question.is_empty(), |row| {
+                row.child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .text_color(rgb(theme::text_muted()))
+                        .text_xs()
+                        // Clipped rather than wrapped whole. The full question is a paragraph the
+                        // turn that launched it already holds; what this row needs it for is
+                        // telling two concurrent analyses apart, and the first clause does that.
+                        .child(protocol::clip(&job.question, JOB_QUESTION_CHARS)),
+                )
+            })
     }
 
     /// Research outputs from the current run, grouped by kind.
@@ -16470,6 +16728,111 @@ mod tests {
         assert!(trace.text.ends_with("tail"));
         assert!(trace.text.starts_with('…'));
         assert!(trace.text.chars().count() <= MAX_TRACE_CHARS + 1);
+    }
+
+    /// §245: what the heading says when the section is folded shut.
+    ///
+    /// Both lists at once, because a LangGraph worker and an Asta task are one category to the
+    /// person waiting and two objects to this client.
+    #[test]
+    fn the_folded_heading_names_every_state_that_has_something_in_it() {
+        let mut gated = worker_with("interrupted", &[], None);
+        gated.pending = Some(protocol::ApprovalRequest { actions: Vec::new() });
+        let tasks = vec![
+            gated,
+            worker_with("running", &[], None),
+            worker_with("success", &[], None),
+            worker_with("error", &[], None),
+        ];
+        let analysis = protocol::Job {
+            kind: protocol::JobKind::Analysis,
+            task_id: "t".into(),
+            question: "q".into(),
+            context_id: None,
+            status: "working".into(),
+        };
+        let jobs = vec![
+            analysis.clone(),
+            protocol::Job { status: "completed".into(), ..analysis.clone() },
+            protocol::Job { status: "failed".into(), ..analysis },
+        ];
+
+        let tally = JobTally::of(&tasks, &jobs);
+        assert_eq!(
+            tally,
+            JobTally { waiting: 1, running: 2, failed: 2, done: 2 }
+        );
+        assert_eq!(
+            tally.summary(),
+            "1 waiting for you · 2 running · 2 failed · 2 done"
+        );
+        // A gate outranks everything else for the colour, because it is the only state that is
+        // the researcher's move.
+        assert_eq!(tally.colour(), theme::accent());
+    }
+
+    /// An `interrupted` worker is neither finished nor running — it is stopped, waiting.
+    #[test]
+    fn a_worker_at_the_gate_counts_as_waiting_not_running() {
+        let mut gated = worker_with("interrupted", &[], None);
+        gated.pending = Some(protocol::ApprovalRequest { actions: Vec::new() });
+        assert!(!gated.is_finished(), "interrupted is not terminal");
+        let tally = JobTally::of(std::slice::from_ref(&gated), &[]);
+        assert_eq!(tally.waiting, 1);
+        assert_eq!(tally.running, 0);
+        assert_eq!(tally.summary(), "1 waiting for you");
+    }
+
+    /// Nothing to say, and the heading says nothing — rather than `0 running`.
+    #[test]
+    fn an_empty_tally_has_an_empty_summary() {
+        let tally = JobTally::default();
+        assert_eq!(tally.summary(), "");
+        assert_eq!(tally.colour(), theme::text_faint());
+    }
+
+    /// Running beats failed and done for the colour: it is the state that is still changing.
+    #[test]
+    fn the_heading_colour_follows_the_most_urgent_state() {
+        let running = JobTally { running: 1, failed: 3, done: 9, ..Default::default() };
+        assert_eq!(running.colour(), theme::running());
+        let failed = JobTally { failed: 1, done: 9, ..Default::default() };
+        assert_eq!(failed.colour(), theme::error());
+        let done = JobTally { done: 1, ..Default::default() };
+        assert_eq!(done.colour(), theme::text_faint());
+    }
+
+    /// §245: a DataVoyager question is a paragraph by design, and the row is one column wide.
+    #[test]
+    fn a_long_job_question_is_clipped_for_the_panel() {
+        // The shape `subagents.py` asks the coordinator to write: datasets, methods, numbers.
+        let question = "Using SOC_MgHa as the response and the 113 covariate columns as \
+             predictors, fit random forest, gradient boosting and ridge regression, report \
+             cross-validated and held-out R², RMSE and the ten most important covariates, and \
+             run it.";
+        assert!(question.chars().count() > JOB_QUESTION_CHARS, "{question}");
+
+        let shown = protocol::clip(question, JOB_QUESTION_CHARS);
+        assert!(shown.chars().count() <= JOB_QUESTION_CHARS + 1, "{shown}");
+        assert!(shown.ends_with('…'), "{shown}");
+        // Cut between words, not through one.
+        assert!(!shown.contains(" …"), "{shown}");
+        assert!(question.starts_with(shown.trim_end_matches('…')), "{shown}");
+
+        // Short enough to say in full is said in full, with no ellipsis to imply otherwise.
+        let short = "Does rainfall predict yield?";
+        assert_eq!(protocol::clip(short, JOB_QUESTION_CHARS), short);
+
+        // And the stored question is untouched — it is also a query parameter the theorizer's
+        // poll route sends back.
+        let job = protocol::Job {
+            kind: protocol::JobKind::Analysis,
+            task_id: "t".into(),
+            question: question.to_string(),
+            context_id: None,
+            status: "working".into(),
+        };
+        assert_eq!(job.question, question);
     }
 }
 

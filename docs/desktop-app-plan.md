@@ -13522,3 +13522,70 @@ disagreement was only about which of those a modal actually delivers.
 plus a way to reach it is one interaction; a modal saying the same thing is two, and the second one
 is a hunt.*
 
+
+## 245. Folding the part of the panel that grew without asking (2026-08-21)
+
+*"we need to make the ui of background jobs plegable and scrolable. when we have a lot of text like
+for data voyager its disruptive at sight."*
+
+`BACKGROUND JOBS` was the one section of the research panel with no bound on it at all. `PLAN` is as
+long as the agent's plan, `SOURCES` shows four and offers the rest in one press, `OUTPUTS` groups
+into buckets — and this one printed every row in full, forever.
+
+That was survivable until §239 taught DataVoyager to be asked properly. The four rules in
+`subagents.py` make a question *name the datasets, name the methods, ask for the numbers and say to
+run it*, which is why the analysis works and also why one row is now a paragraph. A single job could
+fill the column and push `OUTPUTS` and `SOURCES` off the bottom of it.
+
+### Three bounds, cheapest first
+
+1. **The question is clipped** to 120 characters — about three lines at the panel's width. Its job
+   in this row is telling two concurrent analyses apart, and a first clause does that; the rest is
+   instructions to the analyst and belongs to the turn that sent them. `protocol::clip` is
+   `truncate_label` with the limit as a parameter, because an artifact label and a job question are
+   the same problem at two widths and the ellipsis has to look identical in both. Never applied to
+   what is stored: `Job::question` is also a query parameter the theorizer's poll route sends back.
+2. **The list scrolls** inside 260px — the height the model picker, the theme rows and the approval
+   card already use, so the app has one scroller height rather than four.
+3. **The section folds** to a single line, `▾`/`▸`, the same disclosure the transcript's step groups
+   have always used.
+
+### What folding must not hide
+
+A folded section is the one state in which a question addressed to the researcher is invisible, and
+this section exists because a background worker at the approval gate used to hang with nothing on
+screen able to answer it (§31). So:
+
+- **A worker waiting for approval is pinned above the scroller**, never inside it. Its Approve
+  button is the one control here that something is *waiting on*, and putting it in a 260px box
+  behind its own 200px command scroller would recreate, one level out, exactly the unreachable
+  button §40 was about.
+- **The gate opens the section when it appears.** Folding is the researcher's to set, and it is
+  respected everywhere except where it would swallow a question — so the fold survives a press and
+  reopens on a gate.
+- **The folded heading counts states rather than rows**: `1 waiting for you · 2 running`. `3 jobs`
+  tells a folded reader nothing they can act on, and not having to unfold is the whole point.
+  Coloured by the most urgent of them, accent for a gate, because a summary is the only thing a
+  folded section can signal with.
+
+LangGraph workers and Asta jobs are counted into one tally on purpose. They are different objects to
+this client — different endpoints, different polls, different rows — and the same thing entirely to
+the person waiting on them.
+
+### The wheel, which gpui hands to everybody
+
+`should_handle_scroll` is true for every hitbox under the pointer and gpui's scroll handler does not
+stop propagation, so an inner scroller and the panel around it both take the same delta from the
+same event and slide together — twice the speed, in two places. The fix is one listener that stops
+propagation, and it works because of dispatch order: the offset handler is registered *after* the
+user's scroll listeners and the bubble phase runs in reverse, so the list moves first and the panel
+is stopped second.
+
+Attached only while `max_offset` says there is something here to scroll, so a two-row section leaves
+the wheel to the panel instead of swallowing it. That reading is meaningless until the first paint,
+which costs one frame of double-scroll and nothing after — the same deal the scrollbar already
+takes for its thumb.
+
+*Ninety-ninth: every list in a panel needs a bound, and the one that gets away with not having one
+is the one whose contents you have not made good yet. Making DataVoyager ask a real question is what
+made its row too big to show.*
