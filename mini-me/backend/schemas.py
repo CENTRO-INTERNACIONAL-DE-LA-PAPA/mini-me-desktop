@@ -702,6 +702,10 @@ _NODE_ID_FIELDS: dict[str, tuple[str, ...]] = {
     "hypothesis": ("question",),
     "library": ("index_path",),
     "analysis": ("question",),
+    # Keyed on the run id the service issued, matching the `discoveries` reducer. Missing it meant
+    # `artifact_node_id("discovery", …)` returned a bare `discovery:` and every provenance edge for
+    # a run was silently dropped — the same "unknown kind" fallthrough this map's comment warns of.
+    "discovery": ("run_id",),
 }
 
 

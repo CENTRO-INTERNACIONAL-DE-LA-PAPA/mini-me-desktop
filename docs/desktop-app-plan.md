@@ -14369,3 +14369,52 @@ falls back to the whole message when that leaves nothing.
 *Hundred-and-eighth: a unit test of a rule is not a test that the rule is installed. The bug was not
 in anything the tests examined — it was in the wiring they all bypassed by constructing the thing
 themselves.*
+
+## 254. Everything built, nothing wired (2026-08-21)
+
+*"I dont see any approval"*
+
+The draft worked this time — §251's staging fix held, and the subagent reported:
+
+```
+Proposed experiment budget: 15
+Status: awaiting approval
+```
+
+And no modal. Nothing on screen at all.
+
+`ArtifactCaptureMiddleware.after_agent` is a chain of `if self.source == "<name>"` branches, one per
+subagent, each assembling that subagent's artifact payload. **There was no branch for
+`autodiscovery`.** So the structured result was produced, matched nothing, and was dropped.
+
+What had been built and correctly wired, all of it useless without that one branch: the
+`DiscoveryRunResults` schema, the `DiscoveryRunArtifactPayload` TypedDict, the `discoveries` slice on
+`ArtifactBundle`, the reducer key that dedupes on `run_id`, `decode_drafts` on the Rust side, the
+`Draft` type, `open_approval`, the modal itself, and `discoveries` in `ARTIFACT_BUCKETS`. Nine pieces
+of a path with a gap in the middle of it, and the gap was in the one file I never opened.
+
+Two smaller things fell out of fixing it:
+
+- **`_NODE_ID_FIELDS` had no `discovery` entry**, so `artifact_node_id("discovery", …)` returned a
+  bare `discovery:` — every run's provenance edges would have collapsed onto one phantom node. The
+  map's own docstring warns about the unknown-kind fallthrough; it just does not shout.
+- **A failed draft has no `run_id`**, because it never got one. My first version returned `None` for
+  that case, which would have undone §249's third fix — the whole reason `discoveries` became a
+  bucket was so a failure is visible somewhere other than prose a model might compress. Now a
+  failure is emitted (with its `note`) and only its *edges* are suppressed.
+
+### The test that was missing, and the one that replaces it
+
+Every existing artifact test checks the subagent it is about. None could see a subagent with no
+branch, because there was nothing to assert against. So the new guard is the general one: **every
+subagent carrying a `response_format` must be named in the chain that files it**, and every name the
+chain mentions must be a real subagent.
+
+Read off `inspect.getsource` rather than by constructing each schema and invoking the method — the
+branches read fields with `getattr(structured, "x", default)`, so a half-built pydantic instance
+raises for reasons unrelated to the property. A narrow, exact assertion beats a broad one that fails
+for the wrong reason.
+
+*Hundred-and-ninth: nine correct pieces and one missing connector is indistinguishable, from the
+outside, from having built nothing. Every one of those pieces had a test; the path between them did
+not.*
