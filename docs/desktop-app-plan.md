@@ -14629,3 +14629,46 @@ subject directly and none followed a value from one end of the path to the other
 *Hundred-and-thirteenth: a status written once is a status that is wrong from the second event
 onward. If the thing that changes state is not the thing that records it, say out loud which one the
 reader is trusting.*
+
+## 259. Two places a snapshot arrives, and one ignored half of it (2026-08-21)
+
+*"I still cant see the ui for the background job..."*
+
+§258 was correct and unreachable. The repair it added — ask the service, adopt an already-approved
+run as a job, correct the record — lives in `open_approval`, and `open_approval` was called from
+**one** of the two places a snapshot is applied.
+
+- The **streaming** path, a live turn's `values` event, called it.
+- The **conversation-opening** path, reading stored thread state, did not. It handled `snapshot.jobs`
+  and `snapshot.tasks` and never looked at `snapshot.drafts` at all.
+
+So reopening the conversation decoded the drafted run, dropped it from the job list because
+`awaiting_approval` is not a job (§253, and still right), and adopted it nowhere. Which also explains
+something neither of us had remarked on: the budget modal had only ever appeared immediately after
+asking, never on reopening. Same missing call, and I read that as normal.
+
+### One method, and a test that says so
+
+Both sites now call `adopt_background_work(drafts, jobs, tasks, owner)`. The point is not tidiness —
+it is that a second reader of a snapshot is a second chance to forget a field, and this one forgot
+the field that was added last.
+
+The test asserts the property against the source: nothing walks `snapshot.jobs` or `snapshot.tasks`
+itself, and **every place that reads one reads all three**. Its needles are assembled at runtime so
+it does not match itself.
+
+### Four in a row, and what they share
+
+§254 an artifact nothing filed. §257 a route nothing called. §258 a record nothing updated. §259 a
+field one of two readers ignored. Every one: a correct component, passing tests, and a gap in the
+path between it and the thing that needed it.
+
+The tests were the common factor. Each constructed its subject directly and asserted on its output —
+which is how a decoder, a route and a middleware all came to be individually perfect and jointly
+inert. The three guards that would have caught these are all of the same shape, and all written after
+the fact: *every subagent with a schema is named in the capture chain*; *every reader of a snapshot
+reads every field of it*; *every middleware the builder returns is registerable*. None of them tests
+a component. Each tests a **join**.
+
+*Hundred-and-fourteenth: when the same defect arrives four times, the bug is in how the code is being
+tested, not in the code. Write the test that walks the path, not the one that inspects the part.*
