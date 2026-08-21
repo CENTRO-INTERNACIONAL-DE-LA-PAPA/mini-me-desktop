@@ -953,6 +953,15 @@ struct DiscoveryView {
     experiments: Vec<discovery::Experiment>,
     /// Which experiment is open, as an index into `experiments`. `None` shows the ranked list.
     selected: Option<usize>,
+    /// Figures decoded to disk, keyed by `experiment_id`.
+    ///
+    /// Per experiment and fetched on open, because `rich_outputs` is `null` in the listing and
+    /// ~458KB in the per-experiment response (§247). An absent key means "not asked yet"; an empty
+    /// vec means "asked, and this one has none" — a distinction the panel has to draw, or an
+    /// experiment with no plot looks like one still loading.
+    figures: std::collections::HashMap<String, Vec<std::path::PathBuf>>,
+    /// The experiment whose figures are in flight, so the pane can say so once.
+    fetching: Option<String>,
     /// True while the fetch is in flight, so an empty tree reads as "loading" and not "nothing".
     loading: bool,
     /// Whether the run has stopped producing experiments, from `has_job_completed`.
@@ -1014,6 +1023,37 @@ fn affordable(experiments: u32, available: Option<u32>) -> bool {
     match available {
         Some(left) => experiments <= left,
         None => true,
+    }
+}
+
+/// What the detail pane knows about one experiment's figures.
+///
+/// Four states, and the reason they are four is that three of them look identical if you collapse
+/// them. `rich_outputs` is absent from the experiments listing and only arrives per experiment, so
+/// "not asked", "asking" and "asked, there are none" are genuinely different things — and an
+/// experiment that drew no plot must not read as a pane still loading (§257).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Figures {
+    /// Decoded and on disk.
+    Ready,
+    /// Fetched, and this experiment produced none.
+    Nothing,
+    /// The request is in flight.
+    Fetching,
+    /// Nobody has asked yet.
+    Unread,
+}
+
+/// Which of the four states applies, from what the view holds.
+///
+/// Pure, so the distinction is testable without a window — it is the part that regresses, because
+/// the tempting simplification is `if paths.is_empty()`.
+fn figure_state(known: Option<&Vec<std::path::PathBuf>>, fetching: bool) -> Figures {
+    match known {
+        Some(paths) if !paths.is_empty() => Figures::Ready,
+        Some(_) => Figures::Nothing,
+        None if fetching => Figures::Fetching,
+        None => Figures::Unread,
     }
 }
 
@@ -13233,6 +13273,8 @@ impl Workbench {
             name,
             experiments: Vec::new(),
             selected: None,
+            figures: std::collections::HashMap::new(),
+            fetching: None,
             loading: true,
             complete: false,
             error: None,
@@ -13262,6 +13304,80 @@ impl Workbench {
                         Err(error) => {
                             tracing::warn!(%error, run = %run_id, "could not read a discovery run");
                             view.error = Some(error);
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Open an experiment, or go back to the list.
+    ///
+    /// One path for the node, the row and the back button, so opening an experiment always fetches
+    /// its figures — the first version had three call sites and only text to show, which is how the
+    /// figures route came to exist without a caller (§257).
+    fn select_experiment(&mut self, at: Option<usize>, cx: &mut Context<Self>) {
+        let wanted = self.discovery_open.as_mut().and_then(|view| {
+            view.selected = at;
+            at.and_then(|at| view.experiments.get(at))
+                .map(|experiment| experiment.id.clone())
+        });
+        if let Some(experiment_id) = wanted {
+            self.fetch_figures(experiment_id, cx);
+        }
+        cx.notify();
+    }
+
+    /// Fetch one experiment's figures, once.
+    ///
+    /// Called when an experiment is opened rather than when the run is read: this is the expensive
+    /// endpoint, and fetching all of them up front would be megabytes for plots nobody looked at.
+    fn fetch_figures(&mut self, experiment_id: String, cx: &mut Context<Self>) {
+        let Some(view) = self.discovery_open.as_mut() else {
+            return;
+        };
+        // Already have them, or already asking. An empty vec counts as having them.
+        if view.figures.contains_key(&experiment_id) || view.fetching.as_deref() == Some(&experiment_id) {
+            return;
+        }
+        let run_id = view.run_id.clone();
+        view.fetching = Some(experiment_id.clone());
+
+        let mut answer = self
+            .sidecar
+            .discovery_figures(run_id.clone(), experiment_id.clone());
+        cx.spawn(async move |workbench, cx| {
+            if let Some(outcome) = answer.next().await {
+                let _ = workbench.update(cx, |workbench, cx| {
+                    let Some(view) = workbench.discovery_open.as_mut() else {
+                        return;
+                    };
+                    if view.run_id != run_id {
+                        return; // a different run was opened while this was in flight
+                    }
+                    if view.fetching.as_deref() == Some(experiment_id.as_str()) {
+                        view.fetching = None;
+                    }
+                    match outcome {
+                        Ok(paths) => {
+                            tracing::info!(
+                                run = %run_id,
+                                experiment = %experiment_id,
+                                figures = paths.len(),
+                                "decoded an experiment's figures"
+                            );
+                            // Recorded even when empty, so "none" stops looking like "loading".
+                            view.figures.insert(experiment_id.clone(), paths);
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                experiment = %experiment_id,
+                                "could not decode an experiment's figures"
+                            );
                         }
                     }
                     cx.notify();
@@ -13377,11 +13493,12 @@ impl Workbench {
                     .child(experiment.number.to_string())
                     .hover(|style| style.cursor_pointer())
                     .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                        if let Some(view) = workbench.discovery_open.as_mut() {
-                            // Pressing the open one closes it, back to the ranked list.
-                            view.selected = if view.selected == Some(at) { None } else { Some(at) };
-                        }
-                        cx.notify();
+                        // Pressing the open one closes it, back to the ranked list.
+                        let closing = workbench
+                            .discovery_open
+                            .as_ref()
+                            .is_some_and(|view| view.selected == Some(at));
+                        workbench.select_experiment(if closing { None } else { Some(at) }, cx);
                     })),
             );
         }
@@ -13498,10 +13615,7 @@ impl Workbench {
                             .child(score),
                     )
                     .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                        if let Some(view) = workbench.discovery_open.as_mut() {
-                            view.selected = Some(at);
-                        }
-                        cx.notify();
+                        workbench.select_experiment(Some(at), cx);
                     })),
             );
         }
@@ -13515,6 +13629,7 @@ impl Workbench {
     /// `.json`, and a researcher reading results is not reading Python.
     fn discovery_detail(
         &self,
+        view: &DiscoveryView,
         experiment: &discovery::Experiment,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -13568,10 +13683,7 @@ impl Workbench {
                     ui::Button::new("discovery-back", "All experiments")
                         .size(ui::Size::Compact)
                         .on_click(cx.listener(|workbench, _event, _window, cx| {
-                            if let Some(view) = workbench.discovery_open.as_mut() {
-                                view.selected = None;
-                            }
-                            cx.notify();
+                            workbench.select_experiment(None, cx);
                         })),
                 ),
         );
@@ -13617,6 +13729,80 @@ impl Workbench {
                             .child(body.clone()),
                     ),
             );
+        }
+
+        // **The plots the experiment actually drew.** They exist only in the per-experiment
+        // response, so they arrive after the text and the pane has to distinguish three states:
+        // asking, none, and here. Conflating the first two makes an experiment with no figure look
+        // permanently stuck (§257).
+        let known = view.figures.get(&experiment.id);
+        match figure_state(known, view.fetching.as_deref() == Some(experiment.id.as_str())) {
+            Figures::Ready => {
+                let paths = known.expect("Ready means the paths are there");
+                detail = detail.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .w_full()
+                        .min_w_0()
+                        .flex_none()
+                        .gap_1()
+                        .child(section_label("FIGURES"))
+                        .children(paths.iter().enumerate().map(|(at, path)| {
+                            let opening = path.clone();
+                            div()
+                                .id(SharedString::from(format!("fig-{}-{at}", experiment.id)))
+                                .w_full()
+                                .min_w_0()
+                                .flex_none()
+                                // A fixed height with `Contain`: a scree plot cropped to a square
+                                // is a scree plot you cannot read, and §152 already settled that
+                                // for the output gallery.
+                                .h(px(260.))
+                                .rounded_md()
+                                .overflow_hidden()
+                                .border_1()
+                                .border_color(rgb(theme::border()))
+                                .child(
+                                    img(path.clone())
+                                        .w_full()
+                                        .h_full()
+                                        .object_fit(gpui::ObjectFit::Contain),
+                                )
+                                .hover(|style| style.cursor_pointer())
+                                // Opens it full size in the researcher's own viewer, because a
+                                // 260px band is for recognising a plot and not for reading one.
+                                .on_click(move |_event, _window, _cx| {
+                                    if let Err(error) = workspace::open(&opening) {
+                                        tracing::warn!(%error, "could not open a figure");
+                                    }
+                                })
+                        })),
+                );
+            }
+            Figures::Nothing => {
+                // Asked, and this experiment genuinely produced none. Said out loud so it does not
+                // read as a pane that failed to finish loading.
+                detail = detail.child(
+                    ui::Label::new("No figures — this experiment drew none.")
+                        .muted()
+                        .size(ui::Size::Compact),
+                );
+            }
+            Figures::Fetching => {
+                detail = detail.child(
+                    ui::Label::new("Fetching this experiment's figures…")
+                        .muted()
+                        .size(ui::Size::Compact),
+                );
+            }
+            Figures::Unread => {
+                detail = detail.child(
+                    ui::Label::new("Figures have not been read for this experiment.")
+                        .muted()
+                        .size(ui::Size::Compact),
+                );
+            }
         }
         detail
     }
@@ -13677,7 +13863,9 @@ impl Workbench {
             body = body
                 .child(self.discovery_tree(view, cx))
                 .child(match view.selected.and_then(|at| view.experiments.get(at)) {
-                    Some(experiment) => self.discovery_detail(experiment, cx).into_any_element(),
+                    Some(experiment) => {
+                        self.discovery_detail(view, experiment, cx).into_any_element()
+                    }
                     None => self.discovery_list(view, cx).into_any_element(),
                 });
         } else if !view.loading && view.error.is_none() {
@@ -17972,6 +18160,27 @@ mod tests {
         // The token is orthogonal to affordability: both have to hold.
         assert!(affordable(15, cost.available));
         assert!(!affordable(500, cost.available));
+    }
+
+    /// §257: "asking", "none" and "not asked" are three different things, and the tempting
+    /// simplification — `if paths.is_empty()` — collapses them into one.
+    #[test]
+    fn an_experiment_with_no_figure_does_not_look_like_one_still_loading() {
+        let one = vec![std::path::PathBuf::from("/w/discovery/r/node_2_0/figure-01.png")];
+
+        // Decoded and on disk.
+        assert_eq!(figure_state(Some(&one), false), Figures::Ready);
+        // Fetched, and this one drew nothing. Recorded as an empty vec on purpose.
+        assert_eq!(figure_state(Some(&Vec::new()), false), Figures::Nothing);
+        // In flight.
+        assert_eq!(figure_state(None, true), Figures::Fetching);
+        // Nobody asked. Distinct from `Fetching`, because a failed fetch lands here and a pane
+        // that still said "fetching…" would be lying.
+        assert_eq!(figure_state(None, false), Figures::Unread);
+
+        // A present answer wins over a stale in-flight flag: the paths are what matters.
+        assert_eq!(figure_state(Some(&one), true), Figures::Ready);
+        assert_eq!(figure_state(Some(&Vec::new()), true), Figures::Nothing);
     }
 }
 

@@ -14518,3 +14518,60 @@ four rounds.
 
 *Hundred-and-eleventh: when a virtual filesystem and a shell both claim to write files, they do not
 agree about what writing means. Pick one, and pick the one whose reader is the same process.*
+
+## 257. A route with no caller (2026-08-21)
+
+The run went through. Budget 5, approved, submitted, `[..] 0/5` on the service, and the results view
+opened on its own tree with the ranked table and the analysis and the review. Then:
+
+*"I selected node one but I dont see any plot or results in our local ui. But it ran."*
+
+Right, because `POST /discovery/{thread}/{run}/experiments/{exp}/figures` had **no caller**. §253
+built it, documented why it was separate — the figures live only in the per-experiment response at
+~458KB a node, so a poll must never touch it — and then nothing ever asked. The same shape as §254:
+a correct piece with nothing wired to it, one layer along.
+
+Fetched when an experiment is *opened*, which is what the separate route was for. Three call sites
+opened one before — the node, the table row and the back button — so they now go through one
+`select_experiment`, because a fetch attached to two of three is a figure that appears depending on
+how you got there.
+
+### Four states, not two
+
+The tempting shape is `if paths.is_empty()`. It is wrong, because "not asked", "asking" and "asked,
+and this one drew nothing" are genuinely different and only the last is `is_empty`. An experiment
+that produced no plot would otherwise read as a pane that never finished loading — and three of the
+five in this run did produce one, so the difference is visible immediately.
+
+So `figure_state` is a pure function over `(Option<&Vec<PathBuf>>, bool)` returning `Ready`,
+`Nothing`, `Fetching` or `Unread`, tested without a window. An empty vec is *recorded* rather than
+skipped, which is what makes `Nothing` distinguishable from `Unread` at all.
+
+A figure is drawn in a 260px band with `ObjectFit::Contain` — §152's argument, that a chart cropped
+to a square is a chart you cannot read — and a press opens it full size in the researcher's own
+viewer, because that band is for recognising a plot and not for reading one.
+
+### What the run confirmed, beyond the figures
+
+Two things this session had built on faith:
+
+- **The belief labels come from vote counts, and the empty case renders.** Experiment 3 shows
+  `— → Likely False`. That is Codex's §252 finding working on real data: an empty prior distribution
+  reports no label rather than inventing one from the mean.
+- **`is_surprising` fires.** All five were flagged, where the §247 probe flagged none. Two runs, two
+  answers, and the flag read rather than recomputed either way.
+
+### Still different from the service's own view, and left alone for now
+
+AutoDiscovery's graph joins these five through a grey hub — the node every one of them descends from.
+Ours draws three roots instead, because that parent is `parent_id`-referenced and absent from the
+experiments listing (§247's fourth finding), and `layout` treats an absent parent as a root.
+
+Honest, and lossy: the shared ancestry is real and we are not drawing it. Synthesising a placeholder
+node for a referenced-but-absent parent would show the same shape and say something true — "a node
+exists here that this response does not describe". Not done, because it was not what was asked and
+the figures were.
+
+*Hundred-and-twelfth: a route is not a feature until something calls it. Two sections in a row shipped
+a correct component with no caller, and both times the tests passed because they tested the
+component.*

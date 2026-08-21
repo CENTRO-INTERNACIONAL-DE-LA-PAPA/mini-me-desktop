@@ -979,6 +979,30 @@ impl Sidecar {
         rx
     }
 
+    /// Decode one experiment's figures, on demand.
+    pub fn discovery_figures(
+        &self,
+        run_id: String,
+        experiment_id: String,
+    ) -> mpsc::UnboundedReceiver<Result<Vec<std::path::PathBuf>, String>> {
+        let (tx, rx) = mpsc::unbounded();
+        let base_url = self.base_url.clone();
+        let thread = self.thread.clone();
+        self.runtime.spawn(async move {
+            let Some(thread_id) = thread.lock().expect("thread id mutex").clone() else {
+                let _ = tx.unbounded_send(Err("this conversation has no thread yet".into()));
+                return;
+            };
+            let client = LangGraphClient::new(base_url);
+            let outcome = client
+                .discovery_figures(&thread_id, &run_id, &experiment_id)
+                .await
+                .map_err(|error| format!("{error:#}"));
+            let _ = tx.unbounded_send(outcome);
+        });
+        rx
+    }
+
     /// Read a discovery run's experiments for the results view.
     pub fn discovery_run(
         &self,
