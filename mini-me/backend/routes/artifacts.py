@@ -268,7 +268,7 @@ async def analyze_data_status(request: Request) -> Response:
 
 
 async def discovery_draft(request: Request) -> Response:
-    """What the approval modal needs: the drafted run, and what it will cost against the balance.
+    """What the approval modal needs — the drafted run, and what it costs against the balance.
 
     Its own route rather than part of the poll, because it is read once when the modal opens and
     costs two extra service calls. A poll that carried it would pay for them every tick.
@@ -298,7 +298,7 @@ async def discovery_draft(request: Request) -> Response:
 async def discovery_submit(request: Request) -> Response:
     """Spend the credits. **The only caller is the researcher pressing approve.**
 
-    This route *is* the credit gate. Nothing the model does reaches it: `draft_discovery_run` stops
+    This route *is* the credit gate. Nothing the model does reaches it — `draft_discovery_run` stops
     at a configured run, and `submit_run` has no other caller in the codebase. The two edits the
     modal offers — the budget and the intent — are applied here before submitting, so what the
     researcher saw and what runs are the same thing.
@@ -343,7 +343,7 @@ async def discovery_submit(request: Request) -> Response:
 async def discovery_status(request: Request) -> Response:
     """Poll a run, and persist it once it stops.
 
-    Cheap enough for a timer: the run's own status plus the experiments list, which is where the
+    Cheap enough for a timer — the run's own status plus the experiments list, which is where the
     honest progress number comes from. Deliberately does **not** touch the per-experiment endpoint
     — that is the only place figures live and it is ~458KB a node.
     """

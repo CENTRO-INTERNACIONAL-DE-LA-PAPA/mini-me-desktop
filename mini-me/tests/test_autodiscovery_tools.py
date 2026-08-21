@@ -49,6 +49,7 @@ from backend.autodiscovery_tools import (
     fetch_experiment_figures,
     is_valid_experiment_id,
     is_valid_run_id,
+    metadata_path,
     normalise_status,
     persist_discovery_outputs,
     poll_discovery_status,
@@ -95,8 +96,9 @@ def test_the_cli_subcommands_are_the_ones_the_cli_has():
     assert _build_upload_command(_RUN, ["/w/a.csv", "/w/b.csv"]) == [
         "asta", "autodiscovery", "upload", _RUN, "/w/a.csv", "/w/b.csv",
     ]
-    # `--file` is required; there is no inline metadata form.
-    assert _build_metadata_command(_RUN)[-2] == "--file"
+    # `--file` is required; there is no inline metadata form. And the staged path is passed in
+    # rather than defaulted, because a default is how the write and the read came to disagree.
+    assert _build_metadata_command(_RUN, "/w/.staged.json")[-2:] == ["--file", "/w/.staged.json"]
     for argv in (
         _build_status_command(_RUN),
         _build_experiments_command(_RUN),
@@ -127,7 +129,7 @@ def test_ids_are_validated_before_they_reach_a_shell():
 
 def test_the_draft_chain_uploads_before_it_configures():
     """Metadata naming a file the upload did not deliver configures a run against nothing."""
-    shell = _draft_shell(_RUN, ["/w/a.csv"])
+    shell = _draft_shell(_RUN, ["/w/a.csv"], "/w/.staged.json")
     assert shell.index("upload") < shell.index("metadata")
     assert "&&" in shell, "a failed upload must not be followed by a saved config"
 
@@ -522,8 +524,10 @@ def test_only_the_budget_and_the_intent_can_be_edited():
     assert updated["datasets"] == [{"name": "soc.csv"}], "an unapproved edit was applied"
     # Read-modify-write, so a field we do not model is not erased.
     assert updated["n_warmstart"] == 3
-    staged = json.loads(sandbox.writes["/tmp/asta-autodiscovery-metadata.json"])
-    assert staged["n_experiments"] == 5
+    # Staged inside the work dir, which is the whole point — see `_METADATA_NAME`.
+    where = metadata_path("/workspace")
+    assert where == "/workspace/.asta-autodiscovery-metadata.json"
+    assert json.loads(sandbox.writes[where])["n_experiments"] == 5
 
 
 def test_an_edited_budget_outside_the_bounds_is_refused_before_it_is_staged():
@@ -531,7 +535,7 @@ def test_an_edited_budget_outside_the_bounds_is_refused_before_it_is_staged():
     for bad in (0, MAX_EXPERIMENTS + 1, True, "five"):
         with pytest.raises(ValueError):
             asyncio.run(update_metadata(sandbox, _RUN, {"n_experiments": bad}))
-    assert "/tmp/asta-autodiscovery-metadata.json" not in sandbox.writes
+    assert metadata_path("/workspace") not in sandbox.writes
 
 
 def test_a_metadata_save_that_did_not_confirm_returns_nothing_so_the_route_can_refuse():
@@ -678,3 +682,63 @@ def test_a_file_the_run_cannot_see_says_what_to_do_about_it():
     assert "attach the file" in error, "and what to do"
     # Nothing was created, so nothing needs cleaning up.
     assert not any("autodiscovery create" in c for c in sandbox.commands)
+
+
+def test_the_metadata_is_staged_where_the_command_reads_it():
+    """§251, the bug this pins.
+
+    The sandbox adapter's `_resolve_for_write` rewrites any write target outside the work dir to
+    `<work_dir>/<basename>` — on purpose, because deepagents treats a leading `/` as the project
+    root. So `awrite("/tmp/x.json", …)` reported success, the file landed in the work dir, and the
+    shell that followed read `/tmp/x.json` and found nothing. The write and the read have to name
+    one path, and this asserts they do.
+    """
+    written_to: dict[str, str] = {}
+
+    class WorkDirSandbox(_Sandbox):
+        async def awrite(self, path, content):
+            # The real adapter's rule, reproduced: anything outside the work dir is moved into it.
+            if not path.startswith("/workspace/"):
+                path = "/workspace/" + os.path.basename(path)
+            written_to[path] = content
+            return SimpleNamespace(error=None)
+
+    sandbox = WorkDirSandbox(
+        [
+            ("_RESOLVE", json.dumps({"/w/a.csv": {"path": "/workspace/a.csv", "size": 5}})),
+            ("autodiscovery create", _RUN),
+            ("autodiscovery upload", "Uploading a.csv... done\nMetadata saved: gs://x"),
+        ]
+    )
+    drafted = asyncio.run(
+        draft_run(
+            sandbox,
+            name="run",
+            description="d",
+            domain="soil",
+            intent="i",
+            dataset_paths=["/w/a.csv"],
+            dataset_description="cols",
+        )
+    )
+    assert "error" not in drafted, drafted
+
+    # Exactly one file staged, and no rewrite happened — the path was already inside the work dir.
+    assert list(written_to) == ["/workspace/.asta-autodiscovery-metadata.json"]
+    # And the command reads that same path, not /tmp.
+    configure = next(c for c in sandbox.commands if "autodiscovery metadata" in c)
+    assert "/workspace/.asta-autodiscovery-metadata.json" in configure
+    assert "/tmp/" not in configure, configure
+
+
+def test_an_edit_stages_to_the_same_place_as_the_draft():
+    sandbox = _Sandbox(
+        [
+            ("metadata-get", json.dumps({"n_experiments": 15, "intent": "x"})),
+            ("autodiscovery metadata ", "Metadata saved: gs://x"),
+        ]
+    )
+    asyncio.run(update_metadata(sandbox, _RUN, {"n_experiments": 5}))
+    assert list(sandbox.writes) == [metadata_path("/workspace")]
+    configure = next(c for c in sandbox.commands if "autodiscovery metadata " in c)
+    assert metadata_path("/workspace") in configure
