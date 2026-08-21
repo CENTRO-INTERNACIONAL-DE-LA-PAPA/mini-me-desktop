@@ -14418,3 +14418,47 @@ for the wrong reason.
 *Hundred-and-ninth: nine correct pieces and one missing connector is indistinguishable, from the
 outside, from having built nothing. Every one of those pieces had a test; the path between them did
 not.*
+
+## 255. A press that could not be pressed again (2026-08-21)
+
+The modal works. §254's branch landed, the gate opened with the run's name, the presets, `5
+experiments · 5 of 495 credits`, the intent editable. Then:
+
+1. First press → **"your changes did not save, so nothing was submitted"**.
+2. Second press → **"this submit carries no valid approval."**
+
+Two defects, and the second is entirely caused by the first.
+
+### Checked early, consumed late
+
+`discovery_submit` consumed the approval token **on arrival**, before doing any of the work that
+could fail. So the first press burned it, the configuration change failed for its own reasons, and
+the second press had nothing left to present. A recoverable failure turned into a dead end.
+
+The token is now *checked* on arrival — repeatably, without consuming — and *spent* on the line
+immediately before `submit_run`. That keeps the replay protection §252 wanted, because the window in
+which a token is valid and a charge is in flight is one function call wide, while making a failed
+attempt retryable. The app also drops its own copy on any failure and re-fetches, so a token lost to
+a backend restart recovers instead of stranding the modal.
+
+### And the reason was in /dev/null
+
+"Your changes did not save" is true and useless. `update_metadata` returned `{}` on failure and the
+route turned that into one sentence, while the actual reason — a `Usage:` line, an auth error, a
+path — was discarded by the `2>/dev/null` on the command that produced it.
+
+This is §249's paraphrased-away failure in a different costume, and one layer lower: there it was a
+model summarising an error, here it was my own shell redirect. `_json_shell` is right for a JSON
+parse and wrong for the two calls that stand between a researcher's press and their run, so those
+two use `_loud_shell` (`2>&1`) and `update_metadata` raises `MetadataNotSaved` carrying the text.
+An exception rather than a falsy return, so the reason cannot be dropped on the way out.
+
+### And the call that most often did not need making
+
+While in there: if the stored configuration already matches what was approved — the common case,
+where the researcher changes nothing — there is now no write and no CLI call at all. The two things
+most likely to fail simply do not happen. That is not a fix for this bug; it is removing the
+opportunity for it.
+
+*Hundred-and-tenth: a single-use token consumed before the work it authorises turns every downstream
+failure into a permanent one. Check on arrival, spend at the point of no return.*
