@@ -646,11 +646,13 @@ impl Sidecar {
     /// `routes/artifacts.py` persists a run's charts and metrics into the workspace when it *sees*
     /// a terminal state, so asking is what collects them (§243).
     ///
-    /// `Some(n)` once the search succeeded, `None` if the backend could not be asked at all —
+    /// `Some(runs)` once the search succeeded — each entry the thread that owns a run and the run
+    /// as it now stands, so the caller can name it and open it. `None` if the backend could not be
+    /// asked at all —
     /// which happens on every launch, because the first attempt races the server coming up. Errors
     /// on an individual job are swallowed: one unreachable run must not stop the others being
     /// collected, and none of this is worth interrupting a researcher over.
-    pub fn sweep_finished_jobs(&self) -> mpsc::UnboundedReceiver<Option<usize>> {
+    pub fn sweep_finished_jobs(&self) -> mpsc::UnboundedReceiver<Option<Vec<(String, Job)>>> {
         let (tx, rx) = mpsc::unbounded();
         let base_url = self.base_url.clone();
         self.runtime.spawn(async move {
@@ -670,20 +672,20 @@ impl Sidecar {
                     return;
                 }
             };
-            let mut collected = 0usize;
+            let mut collected: Vec<(String, Job)> = Vec::new();
             for (thread_id, job) in jobs {
                 match client.poll_job(&thread_id, &job).await {
                     Ok(status) => {
                         let mut settled = job.clone();
                         settled.status = status;
                         if settled.is_finished() {
-                            collected += 1;
                             tracing::info!(
                                 thread = %thread_id,
                                 task = %job.task_id,
                                 kind = job.kind.label(),
                                 "collected a background run that finished unattended"
                             );
+                            collected.push((thread_id, settled));
                         }
                     }
                     Err(error) => {
