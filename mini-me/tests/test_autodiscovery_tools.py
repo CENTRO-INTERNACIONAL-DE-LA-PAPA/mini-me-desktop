@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import asyncio
 import json
 import os
+import shlex
 import subprocess
 import tempfile
 
@@ -37,7 +38,8 @@ from backend.autodiscovery_tools import (
     _build_status_command,
     _build_submit_command,
     _build_upload_command,
-    _draft_shell,
+    _configure_shell,
+    _upload_shell,
     _extract_json,
     _figures_shell,
     _sizes_shell,
@@ -128,11 +130,32 @@ def test_ids_are_validated_before_they_reach_a_shell():
     assert not is_valid_experiment_id("../../etc/passwd")
 
 
-def test_the_draft_chain_uploads_before_it_configures():
-    """Metadata naming a file the upload did not deliver configures a run against nothing."""
-    shell = _draft_shell(_RUN, ["/w/a.csv"], "/w/.staged.json")
-    assert shell.index("upload") < shell.index("metadata")
-    assert "&&" in shell, "a failed upload must not be followed by a saved config"
+def test_the_configure_step_writes_uses_and_removes_its_staging_file():
+    """§256: `awrite` is create-only, so the second write to a run's staging path was refused —
+    which is how a budget change failed and nothing ran. `>` truncates, which is the semantics a
+    transient file actually needs, and the process that writes it is the one that reads it."""
+    shell = _configure_shell(_RUN, "/w/.staged.json", {"n_experiments": 5})
+    assert shell.index("printf") < shell.index("autodiscovery")
+    assert "/w/.staged.json" in shell
+    # Cleaned up after use, and after a *failed* use too — `;` not `&&` before the rm.
+    assert shell.rstrip().endswith("rm -f " + shlex.quote("/w/.staged.json"))
+    assert "; rm -f" in shell
+    # Keeps stderr, or a failure has no reason (§255).
+    assert "2>&1" in shell
+    # A staging write that fails says so instead of silently running the CLI on a missing file.
+    assert "could not stage" in shell
+
+
+def test_the_upload_happens_before_the_configure():
+    """Metadata naming a file the upload did not deliver configures a run against nothing, so the
+    caller sequences them and can tell the two failures apart."""
+    import inspect
+
+    from backend.autodiscovery_tools import draft_run as _draft
+
+    body = inspect.getsource(_draft)
+    assert body.index("_upload_shell") < body.index("_configure_shell")
+    assert "2>&1" in _upload_shell(_RUN, ["/w/a.csv"])
 
 
 def test_a_path_with_a_semicolon_in_it_cannot_start_a_second_command():
@@ -185,7 +208,8 @@ def test_a_drafted_run_reports_the_cost_against_the_balance_and_does_not_start()
         [
             ("_RESOLVE", json.dumps({"/w/soc.csv": {"path": "/w/soc.csv", "size": 665894}})),
             ("autodiscovery create", _RUN),
-            ("autodiscovery upload", "Uploading soc.csv... done\nMetadata saved: gs://x"),
+            ("autodiscovery upload", "Uploading soc.csv... done (665894 bytes)"),
+            ("autodiscovery metadata ", "Metadata saved: gs://x"),
             ("autodiscovery credits", json.dumps({"credits": {"available": 495, "granted": 500}})),
         ]
     )
@@ -271,7 +295,7 @@ def test_a_failed_metadata_save_says_nothing_was_spent():
         [
             ("_RESOLVE", json.dumps({"/w/a.csv": {"path": "/w/a.csv", "size": 5}})),
             ("autodiscovery create", _RUN),
-            ("autodiscovery upload", "Uploading a.csv... done"),  # no "Metadata saved"
+            ("autodiscovery upload", "Uploading a.csv... done (5 bytes)"),  # nothing saves after
         ]
     )
     drafted = asyncio.run(
@@ -525,10 +549,13 @@ def test_only_the_budget_and_the_intent_can_be_edited():
     assert updated["datasets"] == [{"name": "soc.csv"}], "an unapproved edit was applied"
     # Read-modify-write, so a field we do not model is not erased.
     assert updated["n_warmstart"] == 3
-    # Staged inside the work dir, which is the whole point — see `_METADATA_NAME`.
+    # Staged inside the work dir, and staged *by the command that reads it* — no `awrite`, so
+    # nothing can relocate it (§251) and nothing refuses to overwrite it (§256).
     where = metadata_path("/workspace", _RUN)
     assert where == f"/workspace/.asta-autodiscovery-metadata.{_RUN}.json"
-    assert json.loads(sandbox.writes[where])["n_experiments"] == 5
+    configure = next(c for c in sandbox.commands if "autodiscovery metadata " in c)
+    assert where in configure
+    assert '"n_experiments": 5' in configure
 
 
 def test_an_edited_budget_outside_the_bounds_is_refused_before_it_is_staged():
@@ -688,7 +715,8 @@ def test_the_upload_reads_the_resolved_path_not_the_one_the_model_named():
         [
             ("_RESOLVE", json.dumps({host: {"path": "/workspace/soc.csv", "size": 12}})),
             ("autodiscovery create", _RUN),
-            ("autodiscovery upload", "Uploading soc.csv... done\nMetadata saved: gs://x"),
+            ("autodiscovery upload", "Uploading soc.csv... done (665894 bytes)"),
+            ("autodiscovery metadata ", "Metadata saved: gs://x"),
         ]
     )
     drafted = asyncio.run(
@@ -732,30 +760,22 @@ def test_a_file_the_run_cannot_see_says_what_to_do_about_it():
     assert not any("autodiscovery create" in c for c in sandbox.commands)
 
 
-def test_the_metadata_is_staged_where_the_command_reads_it():
-    """§251, the bug this pins.
+def test_the_metadata_is_staged_by_the_command_that_reads_it():
+    """§251 and §256, both closed by the same move.
 
-    The sandbox adapter's `_resolve_for_write` rewrites any write target outside the work dir to
-    `<work_dir>/<basename>` — on purpose, because deepagents treats a leading `/` as the project
-    root. So `awrite("/tmp/x.json", …)` reported success, the file landed in the work dir, and the
-    shell that followed read `/tmp/x.json` and found nothing. The write and the read have to name
-    one path, and this asserts they do.
+    §251: `awrite` silently relocated a write outside the work dir, so the write and the read named
+    different paths. §256: `awrite` is create-only, so the *second* write to a run's path was
+    refused outright — which is how a budget change failed and nothing ran.
+
+    Staging through the shell ends both. One command writes the file, hands it to the CLI and
+    removes it, so there is no second process to disagree and no create-only semantics to trip on.
     """
-    written_to: dict[str, str] = {}
-
-    class WorkDirSandbox(_Sandbox):
-        async def awrite(self, path, content):
-            # The real adapter's rule, reproduced: anything outside the work dir is moved into it.
-            if not path.startswith("/workspace/"):
-                path = "/workspace/" + os.path.basename(path)
-            written_to[path] = content
-            return SimpleNamespace(error=None)
-
-    sandbox = WorkDirSandbox(
+    sandbox = _Sandbox(
         [
             ("_RESOLVE", json.dumps({"/w/a.csv": {"path": "/workspace/a.csv", "size": 5}})),
             ("autodiscovery create", _RUN),
-            ("autodiscovery upload", "Uploading a.csv... done\nMetadata saved: gs://x"),
+            ("autodiscovery upload", "Uploading a.csv... done (5 bytes)"),
+            ("autodiscovery metadata ", "Metadata saved: gs://x"),
         ]
     )
     drafted = asyncio.run(
@@ -771,11 +791,15 @@ def test_the_metadata_is_staged_where_the_command_reads_it():
     )
     assert "error" not in drafted, drafted
 
-    # Exactly one file staged, and no rewrite happened — the path was already inside the work dir.
-    assert list(written_to) == [metadata_path("/workspace", _RUN)]
-    # And the command reads that same path, not /tmp.
-    configure = next(c for c in sandbox.commands if "autodiscovery metadata" in c)
-    assert metadata_path("/workspace", _RUN) in configure
+    # Nothing went through the virtual filesystem at all.
+    assert sandbox.writes == {}, sandbox.writes
+
+    where = metadata_path("/workspace", _RUN)
+    configure = next(c for c in sandbox.commands if "autodiscovery metadata " in c)
+    # Written and read in one command, at one path, and removed afterwards.
+    assert configure.count(shlex.quote(where)) >= 2, configure
+    assert configure.index("printf") < configure.index("autodiscovery metadata")
+    assert configure.rstrip().endswith("rm -f " + shlex.quote(where))
     assert "/tmp/" not in configure, configure
 
 
@@ -787,9 +811,118 @@ def test_an_edit_stages_to_the_same_place_as_the_draft():
         ]
     )
     asyncio.run(update_metadata(sandbox, _RUN, {"n_experiments": 5}))
-    assert list(sandbox.writes) == [metadata_path("/workspace", _RUN)]
+    assert sandbox.writes == {}
     configure = next(c for c in sandbox.commands if "autodiscovery metadata " in c)
     assert metadata_path("/workspace", _RUN) in configure
+
+
+def test_a_path_only_the_researchers_laptop_has_resolves_by_filename():
+    """The failure that actually happened.
+
+    The app hands the model an absolute host path whenever the attachment has not been copied into
+    the conversation folder yet — the normal state of a new conversation's first turn. Inside the
+    sandbox that path is nothing, and the run failed on its first step. The resolver looks for the
+    filename in the working directory, which is where the file actually is.
+    """
+    import subprocess
+    import sys
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as work:
+        real = os.path.join(work, "SOC_Covariables_TrainValV5.csv")
+        # `newline=""` so the size is the same on Windows, where text mode would translate each
+        # \n to \r\n and make this 10 bytes. Windows is the platform ~98% of users are on, so a
+        # Unix-only byte count in a test is a defect rather than a detail.
+        with open(real, "w", newline="") as handle:
+            handle.write("a,b\n1,2\n")
+        host_path = "/mnt/c/Users/LENOVO/Downloads/SOC_Covariables_TrainValV5.csv"
+        assert not os.path.exists(host_path), "the point is that this path is not here"
+
+        out = subprocess.run(
+            [sys.executable, "-c", _RESOLVE_PY, work, host_path],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert out.returncode == 0, out.stderr
+        resolved = json.loads(out.stdout)
+        # Keyed by what it was given, valued by what it found — so the caller can say it substituted.
+        assert resolved[host_path]["path"] == real
+        assert resolved[host_path]["size"] == 8
+
+        # A path that resolves nowhere is simply absent, not an error.
+        missing = subprocess.run(
+            [sys.executable, "-c", _RESOLVE_PY, work, "/mnt/c/nope/absent.csv"],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert json.loads(missing.stdout) == {}
+
+
+def test_a_path_that_is_already_right_is_left_alone():
+    import subprocess
+    import sys
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as work:
+        real = os.path.join(work, "soc.csv")
+        with open(real, "w") as handle:
+            handle.write("x\n")
+        out = subprocess.run(
+            [sys.executable, "-c", _RESOLVE_PY, work, real],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert json.loads(out.stdout)[real]["path"] == real
+
+
+def test_the_upload_reads_the_resolved_path_not_the_one_the_model_named():
+    """Uploading the path the model gave would upload nothing; the metadata name comes from the
+    resolved one, which is also what the service validates the upload against."""
+    host = "/mnt/c/Users/LENOVO/Downloads/soc.csv"
+    sandbox = _Sandbox(
+        [
+            ("_RESOLVE", json.dumps({host: {"path": "/workspace/soc.csv", "size": 12}})),
+            ("autodiscovery create", _RUN),
+            ("autodiscovery upload", "Uploading soc.csv... done (665894 bytes)"),
+            ("autodiscovery metadata ", "Metadata saved: gs://x"),
+        ]
+    )
+    drafted = asyncio.run(
+        draft_run(
+            sandbox,
+            name="run",
+            description="d",
+            domain="soil",
+            intent="i",
+            dataset_paths=[host],
+            dataset_description="cols",
+        )
+    )
+    assert "error" not in drafted, drafted
+    assert drafted["metadata"]["datasets"][0]["name"] == "soc.csv"
+    assert drafted["metadata"]["datasets"][0]["file_size_bytes"] == 12
+    upload = next(c for c in sandbox.commands if "autodiscovery upload" in c)
+    assert "/workspace/soc.csv" in upload
+    assert "/mnt/c" not in upload, upload
+
+
+def test_a_file_the_run_cannot_see_says_what_to_do_about_it():
+    """The message a researcher reads. It has to name the cause, not just the symptom."""
+    sandbox = _Sandbox([("_RESOLVE", json.dumps({}))])
+    drafted = asyncio.run(
+        draft_run(
+            sandbox,
+            name="run",
+            description="d",
+            domain="soil",
+            intent="i",
+            dataset_paths=["/mnt/c/Users/LENOVO/Downloads/soc.csv"],
+            dataset_description="cols",
+        )
+    )
+    error = drafted["error"]
+    assert "/mnt/c" in error, "it names the path that failed"
+    assert "not visible to a run" in error, "and why"
+    assert "attach the file" in error, "and what to do"
+    # Nothing was created, so nothing needs cleaning up.
+    assert not any("autodiscovery create" in c for c in sandbox.commands)
 
 
 # ---------------------------------------------------------------------------
