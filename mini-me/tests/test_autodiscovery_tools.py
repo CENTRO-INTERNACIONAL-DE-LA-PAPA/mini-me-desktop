@@ -525,8 +525,8 @@ def test_only_the_budget_and_the_intent_can_be_edited():
     # Read-modify-write, so a field we do not model is not erased.
     assert updated["n_warmstart"] == 3
     # Staged inside the work dir, which is the whole point — see `_METADATA_NAME`.
-    where = metadata_path("/workspace")
-    assert where == "/workspace/.asta-autodiscovery-metadata.json"
+    where = metadata_path("/workspace", _RUN)
+    assert where == f"/workspace/.asta-autodiscovery-metadata.{_RUN}.json"
     assert json.loads(sandbox.writes[where])["n_experiments"] == 5
 
 
@@ -535,7 +535,7 @@ def test_an_edited_budget_outside_the_bounds_is_refused_before_it_is_staged():
     for bad in (0, MAX_EXPERIMENTS + 1, True, "five"):
         with pytest.raises(ValueError):
             asyncio.run(update_metadata(sandbox, _RUN, {"n_experiments": bad}))
-    assert metadata_path("/workspace") not in sandbox.writes
+    assert metadata_path("/workspace", _RUN) not in sandbox.writes
 
 
 def test_a_metadata_save_that_did_not_confirm_returns_nothing_so_the_route_can_refuse():
@@ -593,7 +593,10 @@ def test_a_path_only_the_researchers_laptop_has_resolves_by_filename():
 
     with tempfile.TemporaryDirectory() as work:
         real = os.path.join(work, "SOC_Covariables_TrainValV5.csv")
-        with open(real, "w") as handle:
+        # `newline=""` so the size is the same on Windows, where text mode would translate each
+        # \n to \r\n and make this 10 bytes. Windows is the platform ~98% of users are on, so a
+        # Unix-only byte count in a test is a defect rather than a detail.
+        with open(real, "w", newline="") as handle:
             handle.write("a,b\n1,2\n")
         host_path = "/mnt/c/Users/LENOVO/Downloads/SOC_Covariables_TrainValV5.csv"
         assert not os.path.exists(host_path), "the point is that this path is not here"
@@ -724,10 +727,10 @@ def test_the_metadata_is_staged_where_the_command_reads_it():
     assert "error" not in drafted, drafted
 
     # Exactly one file staged, and no rewrite happened — the path was already inside the work dir.
-    assert list(written_to) == ["/workspace/.asta-autodiscovery-metadata.json"]
+    assert list(written_to) == [metadata_path("/workspace", _RUN)]
     # And the command reads that same path, not /tmp.
     configure = next(c for c in sandbox.commands if "autodiscovery metadata" in c)
-    assert "/workspace/.asta-autodiscovery-metadata.json" in configure
+    assert metadata_path("/workspace", _RUN) in configure
     assert "/tmp/" not in configure, configure
 
 
@@ -739,6 +742,59 @@ def test_an_edit_stages_to_the_same_place_as_the_draft():
         ]
     )
     asyncio.run(update_metadata(sandbox, _RUN, {"n_experiments": 5}))
-    assert list(sandbox.writes) == [metadata_path("/workspace")]
+    assert list(sandbox.writes) == [metadata_path("/workspace", _RUN)]
     configure = next(c for c in sandbox.commands if "autodiscovery metadata " in c)
-    assert metadata_path("/workspace") in configure
+    assert metadata_path("/workspace", _RUN) in configure
+
+
+# ---------------------------------------------------------------------------
+# §252: the approval token, and re-reading the budget before spending
+# ---------------------------------------------------------------------------
+
+
+def test_an_approval_token_authorises_one_run_at_one_budget_once():
+    from backend.routes.artifacts import _issue_approval, _redeem_approval
+
+    token = _issue_approval("thread-1", _RUN, 5)
+    # Bound to the thread and the run it was issued for, or the check is a formality.
+    assert _redeem_approval(token, "thread-2", _RUN) is None
+    assert _redeem_approval(token, "thread-1", "other-run") is None
+    assert _redeem_approval("not-a-token", "thread-1", _RUN) is None
+    assert _redeem_approval("", "thread-1", _RUN) is None
+
+    # Redeems once, for the budget it was issued against.
+    assert _redeem_approval(token, "thread-1", _RUN) == 5
+    # And never again: a replay cannot re-spend.
+    assert _redeem_approval(token, "thread-1", _RUN) is None
+
+
+def test_submitting_re_reads_the_budget_and_refuses_a_number_nobody_approved():
+    """The race a review found: the modal said 5, something else moved the run to 500, and the
+    press would have started a 500-credit run."""
+    sandbox = _Sandbox(
+        [
+            ("metadata-get", json.dumps({"n_experiments": 500})),
+            ("autodiscovery submit", "Submitted. Execution ID: x"),
+        ]
+    )
+    refused = asyncio.run(submit_run(sandbox, _RUN, approved=5))
+    assert "error" in refused
+    assert "500 experiments, not the 5 you approved" in refused["error"]
+    assert not any("autodiscovery submit" in c for c in sandbox.commands), sandbox.commands
+
+    # And when the stored budget is the approved one, it goes ahead.
+    agreeing = _Sandbox(
+        [
+            ("metadata-get", json.dumps({"n_experiments": 5})),
+            ("autodiscovery submit", "Submitted. Execution ID: x"),
+        ]
+    )
+    assert asyncio.run(submit_run(agreeing, _RUN, approved=5))["status"] == "running"
+
+
+def test_two_runs_stage_their_metadata_in_different_files():
+    """A shared staging file is a race: A writes 5, B overwrites with 500, and A's `metadata`
+    command saves B's budget onto A's run."""
+    other = "11111111-2222-3333-4444-555555555555"
+    assert metadata_path("/workspace", _RUN) != metadata_path("/workspace", other)
+    assert _RUN in metadata_path("/workspace", _RUN)

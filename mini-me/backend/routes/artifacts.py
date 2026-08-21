@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import mimetypes
 from pathlib import PurePosixPath
 
@@ -267,6 +269,57 @@ async def analyze_data_status(request: Request) -> Response:
     return JSONResponse(result)
 
 
+#: One-shot approval tokens, keyed by token, valued by `(thread_id, run_id, experiments)`.
+#:
+#: **Why a token at all.** `discovery_submit` used to submit on any POST that reached it — an empty
+#: body, `[]`, form data, `{"n_experiment": 1}`, all became `{}`, left no recognised edits, and fell
+#: straight through to spending the researcher's credits on whatever budget the service happened to
+#: hold. And this backend admits an unauthenticated local request as `local-user`, so
+#: `curl -X POST .../submit` was enough. A model-authored HTML page opened in a browser would have
+#: been enough. Found in review (§252).
+#:
+#: So approving is now two steps that only the app can perform in order: open the modal, which
+#: issues a token against a specific run *and a specific budget*, then submit that exact token. The
+#: token is consumed on use, so a replay cannot re-spend, and it carries the budget so a submit
+#: cannot quietly authorise a different one.
+#:
+#: In memory on purpose. A restart invalidates every outstanding approval, which is the safe
+#: direction: the modal is reopened and the researcher presses again.
+_APPROVALS: dict[str, tuple[str, str, int]] = {}
+
+#: How many outstanding approvals to keep. Small — one researcher, one modal at a time — and a cap
+#: rather than an expiry because the failure mode of forgetting one is a re-press, not a loss.
+_MAX_APPROVALS = 8
+
+
+def _issue_approval(thread_id: str, run_id: str, experiments: int) -> str:
+    """Mint a token that authorises submitting exactly this run at exactly this budget."""
+    import secrets
+
+    token = secrets.token_urlsafe(24)
+    if len(_APPROVALS) >= _MAX_APPROVALS:
+        # Oldest first; dicts preserve insertion order.
+        _APPROVALS.pop(next(iter(_APPROVALS)), None)
+    _APPROVALS[token] = (thread_id, run_id, experiments)
+    return token
+
+
+def _redeem_approval(token: str, thread_id: str, run_id: str) -> int | None:
+    """Consume a token, returning the budget it authorised, or `None` if it does not apply.
+
+    Bound to the thread *and* the run it was issued for: a token minted for one run must not
+    authorise another, or the check would be a formality.
+    """
+    held = _APPROVALS.get(token or "")
+    if held is None:
+        return None
+    issued_thread, issued_run, experiments = held
+    if issued_thread != thread_id or issued_run != run_id:
+        return None
+    _APPROVALS.pop(token, None)
+    return experiments
+
+
 async def discovery_draft(request: Request) -> Response:
     """What the approval modal needs — the drafted run, and what it costs against the balance.
 
@@ -290,8 +343,17 @@ async def discovery_draft(request: Request) -> Response:
     if not metadata:
         return JSONResponse({"error": "no such drafted run"}, status_code=404)
     # `available` already nets off runs in flight; the others are for context only.
+    cost = cost_of(metadata)
     return JSONResponse(
-        {"run_id": run_id, "metadata": metadata, "credits": credits, "cost": cost_of(metadata)}
+        {
+            "run_id": run_id,
+            "metadata": metadata,
+            "credits": credits,
+            "cost": cost,
+            # The token the modal must hand back. Issued here because opening the modal is the only
+            # thing in this app that legitimately precedes a press.
+            "approval": _issue_approval(thread_id, run_id, cost),
+        }
     )
 
 
@@ -310,31 +372,60 @@ async def discovery_submit(request: Request) -> Response:
     if not is_valid_run_id(run_id):
         return JSONResponse({"error": "invalid run_id"}, status_code=400)
 
+    # **An unreadable body is a refusal, not an approval.** This used to coerce anything —
+    # an empty POST, `[]`, form data, a typo'd key — into `{}`, find no recognised edits, and
+    # submit whatever budget the service held. Spending money on a request nobody could read is
+    # the wrong default in every direction (§252).
     try:
         body = await request.json()
     except Exception:  # noqa: BLE001
-        body = {}
-    body = body if isinstance(body, dict) else {}
-    changes = {key: body[key] for key in ("intent", "n_experiments") if key in body}
+        body = None
+    if not isinstance(body, dict):
+        return JSONResponse(
+            {"error": "a submit needs a JSON object naming the approved budget"},
+            status_code=400,
+        )
+
+    approved = _redeem_approval(str(body.get("approval") or ""), thread_id, run_id)
+    if approved is None:
+        return JSONResponse(
+            {
+                "error": (
+                    "this submit carries no valid approval. A run is started by approving its "
+                    "budget in the app, which is the only thing that issues one."
+                )
+            },
+            status_code=403,
+        )
+
+    # The budget must be stated, and must be the one the token was issued against unless the
+    # researcher changed it in the modal — in which case that number is what they saw and pressed.
+    wanted = body.get("n_experiments", approved)
+    if not isinstance(wanted, int) or isinstance(wanted, bool):
+        return JSONResponse({"error": "n_experiments must be a whole number"}, status_code=400)
+    changes: dict[str, Any] = {"n_experiments": wanted}
+    if isinstance(body.get("intent"), str):
+        changes["intent"] = body["intent"]
 
     adapter = await _existing_sandbox_for_thread(thread_id)
     if adapter is None:
         return JSONResponse({"status": "unavailable"})
 
     async with asta_token_scope(_request_user_id(request)):
-        if changes:
-            try:
-                metadata = await update_metadata(adapter, run_id, changes)
-            except ValueError as exc:
-                return JSONResponse({"error": str(exc)}, status_code=400)
-            if not metadata:
-                # Never submit a run whose edits did not land: the researcher approved 15
-                # experiments and the service would charge for whatever it still had stored.
-                return JSONResponse(
-                    {"error": "your changes did not save, so nothing was submitted"},
-                    status_code=409,
-                )
-        result = await submit_run(adapter, run_id)
+        try:
+            metadata = await update_metadata(adapter, run_id, changes)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        if not metadata:
+            # Never submit a run whose edits did not land: the researcher approved a number and
+            # the service would charge for whatever it still had stored.
+            return JSONResponse(
+                {"error": "your changes did not save, so nothing was submitted"},
+                status_code=409,
+            )
+        # `approved=wanted` makes `submit_run` re-read the stored budget and refuse if something
+        # else moved it between the save above and the spend below.
+        result = await submit_run(adapter, run_id, approved=wanted)
     if "error" in result:
         return JSONResponse(result, status_code=502)
     return JSONResponse(result)

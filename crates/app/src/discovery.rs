@@ -77,7 +77,15 @@ impl Confidence {
 /// and says so here rather than leaving the choice looking arbitrary.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Belief {
-    pub label: Confidence,
+    /// The label the vote counts favour, or `None` when there are no votes to favour anything.
+    ///
+    /// **Optional rather than guessed.** An earlier version fell back to bucketing `mean` into
+    /// quarters when all four counts were zero, which a review caught as a straight contradiction
+    /// of the rule stated above: two *identical* empty distributions with means 0.1 and 0.9 came
+    /// out as `Likely False` and `Likely True`, a label derived from a quantity the label is
+    /// explicitly not derived from (§252). An empty distribution says nothing about which label
+    /// holds, so this says nothing — and the mean is still printed beside it.
+    pub label: Option<Confidence>,
     pub mean: f64,
 }
 
@@ -103,23 +111,33 @@ impl Belief {
             }
         }
         let (label, votes) = best?;
-        // All four counts zero says nothing about which label holds. Fall back to the mean rather
-        // than reporting `Likely False` for an empty distribution.
-        let label = if votes > 0.0 { label } else { from_mean(mean) };
-        Some(Belief { label, mean })
+        // All four counts zero says nothing about which label holds, so nothing is what this
+        // reports. Bucketing the mean here would be deriving the label from the number the label
+        // is defined not to come from.
+        Some(Belief {
+            label: (votes > 0.0).then_some(label),
+            mean,
+        })
     }
 }
 
-/// The label a bare mean implies, for a distribution that carries no votes at all.
-///
-/// Quarters — which is what §246 wrongly assumed the labels *always* were. It is a fallback for an
-/// empty distribution and nothing else; whenever counts exist they decide.
-fn from_mean(mean: f64) -> Confidence {
-    match mean {
-        m if m < 0.25 => Confidence::LikelyFalse,
-        m if m < 0.5 => Confidence::MaybeFalse,
-        m if m < 0.75 => Confidence::MaybeTrue,
-        _ => Confidence::LikelyTrue,
+impl Belief {
+    /// How to print this belief: the label and the number when the votes said something, the
+    /// number alone when they did not.
+    ///
+    /// One function so every reader of a belief phrases an empty distribution the same way — the
+    /// list, the detail pane and anything later. `0.313` on its own is honest; `Maybe False (0.313)`
+    /// off no votes is not.
+    pub fn describe(&self) -> String {
+        match self.label {
+            Some(label) => format!("{} ({:.3})", label.label(), self.mean),
+            None => format!("{:.3}", self.mean),
+        }
+    }
+
+    /// The label alone, for a column that has its own place for the number.
+    pub fn name(&self) -> &'static str {
+        self.label.map_or("—", Confidence::label)
     }
 }
 
@@ -631,26 +649,44 @@ mod tests {
         // would read `Likely True`. The votes say otherwise, and the votes win.
         let prior = first.prior.expect("a prior");
         assert!((prior.mean - 0.7917).abs() < 0.001, "{}", prior.mean);
-        assert_eq!(prior.label, Confidence::MaybeTrue);
-        assert_eq!(prior.label.label(), "Maybe True");
+        assert_eq!(prior.label, Some(Confidence::MaybeTrue));
+        assert_eq!(prior.label.expect("a label").label(), "Maybe True");
 
         // posterior_belief: all five votes on definitely_false, mean 0.4318 — a quartile would
         // read `Maybe False` and be understating it.
         let posterior = first.posterior.expect("a posterior");
-        assert_eq!(posterior.label, Confidence::LikelyFalse);
+        assert_eq!(posterior.label, Some(Confidence::LikelyFalse));
 
-        // An empty distribution falls back to the mean rather than claiming the first label.
-        let empty = serde_json::json!({"mean": 0.9, "definitely_true": 0.0});
-        assert_eq!(
-            Belief::decode(Some(&empty)).expect("a belief").label,
-            Confidence::LikelyTrue
-        );
         // A tie leaves the less committed label standing.
         let tied = serde_json::json!({"mean": 0.6, "maybe_true": 2.0, "definitely_true": 2.0});
         assert_eq!(
             Belief::decode(Some(&tied)).expect("a belief").label,
-            Confidence::MaybeTrue
+            Some(Confidence::MaybeTrue)
         );
+    }
+
+    /// §252: two identical empty distributions used to come out with opposite labels, because the
+    /// fallback bucketed `mean` — the one quantity the label is defined not to come from.
+    #[test]
+    fn an_empty_distribution_gets_no_label_rather_than_an_invented_one() {
+        let low = serde_json::json!({
+            "mean": 0.1, "definitely_false": 0.0, "maybe_false": 0.0,
+            "maybe_true": 0.0, "definitely_true": 0.0
+        });
+        let high = serde_json::json!({
+            "mean": 0.9, "definitely_false": 0.0, "maybe_false": 0.0,
+            "maybe_true": 0.0, "definitely_true": 0.0
+        });
+        let (low, high) = (
+            Belief::decode(Some(&low)).expect("a belief"),
+            Belief::decode(Some(&high)).expect("a belief"),
+        );
+        // Same votes, so the same thing said about the label: nothing.
+        assert_eq!(low.label, None);
+        assert_eq!(high.label, None);
+        // The mean is still reported, because it *is* known.
+        assert!((low.mean - 0.1).abs() < 1e-9);
+        assert!((high.mean - 0.9).abs() < 1e-9);
     }
 
     /// §247's fourth correction: every experiment in the probe descends from a node that is not in

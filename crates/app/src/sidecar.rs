@@ -1009,6 +1009,7 @@ impl Sidecar {
     pub fn submit_discovery(
         &self,
         run_id: String,
+        approval: String,
         experiments: u32,
         intent: String,
     ) -> mpsc::UnboundedReceiver<Result<(), String>> {
@@ -1022,7 +1023,7 @@ impl Sidecar {
             };
             let client = LangGraphClient::new(base_url);
             let outcome = client
-                .submit_discovery(&thread_id, &run_id, experiments, &intent)
+                .submit_discovery(&thread_id, &run_id, &approval, experiments, &intent)
                 .await
                 .map_err(|error| format!("{error:#}"));
             let _ = tx.unbounded_send(outcome);
