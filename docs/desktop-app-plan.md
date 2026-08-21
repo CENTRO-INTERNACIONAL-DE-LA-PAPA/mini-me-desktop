@@ -14870,3 +14870,61 @@ Both ids are validated before becoming a path, because both arrive from a payloa
 
 *Hundred-and-eighteenth: a near-miss of working code is worse than a copy of it. The two attributes I
 added were the two this repository already had sections about.*
+
+## 264. Contract tests between the producer and the decoder (2026-08-21)
+
+The roadmap's first open item, asked for since §223 and put off since. §223 *was* this bug:
+`DatasetArtifactPayload` carried nine fields, the client kept one truncated title, and four distinct
+datasets rendered as four identical rows for as long as the feature existed. Nothing failed, because
+the Python tests checked what Python wrote, the Rust tests checked what Rust read, and no test ever
+compared the two.
+
+Then AutoDiscovery produced six more of the same shape in a row — §254, §257, §258, §259, §261, §262
+— and the pattern was no longer arguable: **a correct component whose output nothing downstream
+consumed, with passing unit tests on both sides.**
+
+### One fixture, generated from the producer's own types
+
+`crates/app/tests/fixtures/artifact-contract.json` is built by walking the `TypedDict` annotations,
+one distinct value per field, and committed. Then the two halves:
+
+- **Python** asserts the committed file still matches what the annotations produce. Add a field to
+  any payload and it fails until the fixture is regenerated — at which point the diff puts the new
+  field in front of whoever has to decide about it.
+- **Rust** reads the same file and asserts the decoders surface it. Every field is either in a read
+  list or in an unread list **with a reason**, and the two together must cover the fixture exactly.
+
+That second rule is `claims.py`'s discipline applied one layer along: "not in the read list" has to
+mean *somebody looked at this and decided*, never *nobody noticed*. The test rejects a reason shorter
+than ten characters, which it enforced on me immediately — my first pass wrote `"same"` four times.
+
+Values are prefixed by bucket (`contract-datasets-title`, not `contract-title`) so a field read out
+of the wrong slice is visible rather than plausible; integers are distinct and never 0 or 1, because
+those are what a decoder defaults to.
+
+### Two things the test caught on its first run
+
+**Fields the consumer validates need plausible values.** `decode_sources` puts `link` through
+`stable_link`, which only surfaces `http(s)://`, so `contract-sources-link` looked *unread* when it
+was merely rejected. The generator now shapes URL, DOI and path fields — carrying the field name
+inside them, so they stay unique and still say which slot they came from.
+
+**And the generator was broken in a way only the consumer could see.** Nested payloads never
+recursed: the guard was `not isinstance(inner, type(str))`, and `type(str)` is `type`, which every
+class satisfies — so the branch never ran and `papers` came out as a list of two strings.
+`decode_documents` found no paths, the Rust half failed, and that is the only reason anyone noticed.
+The predicate is now `typing_extensions.is_typeddict`, because `schemas.py` imports `TypedDict` from
+there and the stdlib version answers `False` for those.
+
+Both are the same lesson as the six defects that prompted this: **the half that produces and the half
+that consumes each looked right on its own.**
+
+### Proven, not asserted
+
+`Dataset.repository` was temporarily changed to `None` — one field, exactly §223's shape — and the
+test failed naming the field and its expected value. Restored, it passes. A guard nobody has watched
+fail is a guard nobody should trust.
+
+*Hundred-and-nineteenth: a fixture generated from one side's types and read by the other side's code
+is the only test that can fail for the right reason. Two suites agreeing with themselves is what a
+year-long silent bug looks like from the inside.*

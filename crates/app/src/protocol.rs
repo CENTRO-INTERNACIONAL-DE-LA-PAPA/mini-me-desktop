@@ -5240,4 +5240,305 @@ mod tests {
             "Summarise this > quoted text"
         );
     }
+
+    /// The generated contract fixture: every artifact payload, every field, one distinct value each.
+    ///
+    /// Written by `mini-me/tests/test_artifact_contract.py` from the `TypedDict` annotations
+    /// themselves, so a field added to a payload fails *there* until the fixture is regenerated,
+    /// and fails *here* until somebody decides whether the client should read it.
+    fn contract() -> Value {
+        serde_json::from_str(include_str!("../tests/fixtures/artifact-contract.json"))
+            .expect("the generated artifact contract")
+    }
+
+    /// Every field the client must surface, and every field it deliberately does not.
+    ///
+    /// **A field is either read or declared unread.** The same discipline `claims.py` applies to
+    /// path-bearing schemas, for the same reason: "not in the read list" has to mean "somebody
+    /// looked at this and decided", never "nobody noticed". §223 is what the second one costs —
+    /// `DatasetArtifactPayload` carried nine fields, the client kept one truncated title, and four
+    /// distinct datasets rendered as four identical rows for as long as the feature existed.
+    ///
+    /// `(bucket, read, unread_with_a_reason)`.
+    const CONTRACT: &[(&str, &[&str], &[(&str, &str)])] = &[
+        (
+            "datasets",
+            &["title", "persistent_id", "description", "authors", "file_count", "repository"],
+            &[
+                ("doi_url", "the row builds its own link from persistent_id, which is always there"),
+                ("recommendation_reason", "the agent's prose for the answer, not a field of the row"),
+                ("file_access_summary", "the app asks the access API per dataset instead (dataverse.rs)"),
+            ],
+        ),
+        (
+            "sources",
+            &["citation", "link"],
+            &[(
+                "relevance",
+                "the agent's sentence on why it cited this; the row shows the citation and the \
+                 `[n]` the prose already uses",
+            )],
+        ),
+        ("reports", &["title", "markdown"], &[]),
+        (
+            "files",
+            // `artifact_label` reads `name` for the bucket row; nothing else in this slice is
+            // consumed, because the outputs panel is built from the folder instead.
+            &["name"],
+            &[
+                (
+                    "path",
+                    "the outputs panel walks the conversation folder (workspace::outputs), which \
+                     is the truth about what exists — §42 found a claimed path that was not there",
+                ),
+                (
+                    "relative_path",
+                    "same source as `path`, and the folder walk yields both forms itself",
+                ),
+                (
+                    "media_type",
+                    "kind is decided from the extension on disk, so a claimed type cannot \
+                     disagree with the file",
+                ),
+                (
+                    "description",
+                    "prose for the answer; a file row shows its name, size and shape instead",
+                ),
+            ],
+        ),
+        (
+            "hypotheses",
+            // `question` is both the bucket label and the job's row text.
+            &["task_id", "status", "question"],
+            &[
+                (
+                    "theories",
+                    "the theories themselves are read from the persisted file on a later turn, \
+                     never re-rendered from a claim in the artifact",
+                ),
+                (
+                    "knowledge_gaps",
+                    "prose for the answer; the panel shows the run and its progress",
+                ),
+                (
+                    "papers_reviewed",
+                    "a count the model asserts; the Sources panel counts what it actually decoded",
+                ),
+            ],
+        ),
+        (
+            "libraries",
+            // `summary` is what `artifact_label` picks for this slice, so it *is* the bucket row.
+            &["papers", "index_path", "summary"],
+            &[
+                (
+                    "action",
+                    "the librarian's own word for what it did; the panel shows the documents it \
+                     produced instead",
+                ),
+                (
+                    "paper_count",
+                    "a total the model asserts; the modal counts the papers it decoded, which is \
+                     how §237 caught a library reporting more than it held",
+                ),
+                (
+                    "query_hint",
+                    "prose for the answer, and stale the moment the library grows",
+                ),
+            ],
+        ),
+        (
+            "analyses",
+            &["task_id", "status", "question", "context_id"],
+            &[
+                (
+                    "dataset_paths",
+                    "the claims recorder checks these against disk (claims.py); the panel shows \
+                     the folder rather than the claim",
+                ),
+                ("summary", "prose for the answer, not a field of any row"),
+                (
+                    "findings",
+                    "each finding names a chart, and §42 established figures are found on disk \
+                     rather than trusted from a list",
+                ),
+                ("hypotheses_tested", "prose for the answer"),
+                (
+                    "charts",
+                    "same as `findings[].chart_path` — the gallery walks the folder",
+                ),
+            ],
+        ),
+        (
+            "discoveries",
+            &["run_id", "status", "name", "intent", "n_experiments", "dataset_paths"],
+            &[
+                (
+                    "domain",
+                    "framing the service conditions its hypotheses on; nothing in the gate or the \
+                     row needs it back",
+                ),
+                (
+                    "note",
+                    "a failed draft's reason, surfaced by the `discoveries` bucket row rather than \
+                     by a decoder — §254 added the bucket for exactly that",
+                ),
+            ],
+        ),
+    ];
+
+    /// **The half that catches a dropped field.** Every field of every artifact payload is either
+    /// in a read list or in an unread list with a reason, and this asserts the two together cover
+    /// the fixture exactly — so a payload growing a field fails here until somebody decides.
+    #[test]
+    fn every_artifact_field_is_either_read_or_declared_unread() {
+        let artifacts = contract()["artifacts"].clone();
+        for (bucket, read, unread) in CONTRACT {
+            let entry = artifacts[bucket][0]
+                .as_object()
+                .unwrap_or_else(|| panic!("{bucket} in the contract fixture"));
+            let mut accounted: Vec<&str> = read.to_vec();
+            accounted.extend(unread.iter().map(|(field, _)| *field));
+            accounted.sort_unstable();
+
+            let mut present: Vec<&str> = entry.keys().map(String::as_str).collect();
+            present.sort_unstable();
+            assert_eq!(
+                present, accounted,
+                "{bucket}: the payload and this table disagree about which fields exist. \
+                 Regenerate the fixture, then add each new field to the read list or to the \
+                 unread list with a reason."
+            );
+            // A reason that says nothing is not a decision.
+            for (field, reason) in unread.iter() {
+                assert!(reason.len() > 10, "{bucket}.{field} needs a real reason");
+            }
+        }
+        // And no bucket in the fixture is missing from the table.
+        let mut declared: Vec<&str> = CONTRACT.iter().map(|(bucket, _, _)| *bucket).collect();
+        declared.sort_unstable();
+        let mut fixtured: Vec<&str> = artifacts
+            .as_object()
+            .expect("the artifacts object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        fixtured.sort_unstable();
+        assert_eq!(fixtured, declared, "a bucket exists that nothing is asserted about");
+    }
+
+    /// **The half that catches §223 itself.** Every field in a read list must arrive at the
+    /// consumer carrying its own distinct value, so a decoder that drops one — or reads it into
+    /// the wrong slot — fails here rather than rendering four identical rows for a year.
+    #[test]
+    fn the_decoders_surface_every_field_they_declare_they_read() {
+        let contract = contract();
+        let artifacts = &contract["artifacts"];
+
+        // datasets — the payload §223 was about.
+        let datasets = decode_datasets(artifacts);
+        assert_eq!(datasets.len(), 1);
+        let dataset = &datasets[0];
+        assert_eq!(dataset.title, "contract-datasets-title");
+        assert_eq!(dataset.persistent_id, "contract-datasets-persistent_id");
+        assert_eq!(dataset.description, "contract-datasets-description");
+        assert_eq!(
+            dataset.authors,
+            ["contract-datasets-authors-0", "contract-datasets-authors-1"]
+        );
+        assert_eq!(dataset.repository.as_deref(), Some("contract-datasets-repository"));
+        assert!(dataset.file_count.is_some(), "a declared field arrived empty");
+
+        // sources
+        let sources = decode_sources(artifacts);
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].citation, "contract-sources-citation");
+        assert_eq!(
+            sources[0].link.as_deref(),
+            Some("https://example.invalid/contract-sources-link")
+        );
+
+        // reports
+        let reports = decode_reports(artifacts);
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].title, "contract-reports-title");
+        assert_eq!(reports[0].markdown, "contract-reports-markdown");
+
+        // libraries → documents
+        let documents = decode_documents(artifacts);
+        assert_eq!(documents.len(), 2, "both indexed papers, keyed on their paths");
+        assert_eq!(documents[0].path, "./contract-libraries-papers-0-path.txt");
+        assert_eq!(documents[0].title, "contract-libraries-papers-0-title");
+
+        // hypotheses + analyses + discoveries → jobs, one per bucket that carries an id.
+        let jobs = decode_jobs(artifacts);
+        let of = |kind: JobKind| {
+            jobs.iter()
+                .find(|job| job.kind == kind)
+                .unwrap_or_else(|| panic!("a {kind:?} job"))
+        };
+        assert_eq!(of(JobKind::Theorizer).task_id, "contract-hypotheses-task_id");
+        assert_eq!(of(JobKind::Theorizer).question, "contract-hypotheses-question");
+        assert_eq!(of(JobKind::Analysis).task_id, "contract-analyses-task_id");
+        assert_eq!(of(JobKind::Analysis).question, "contract-analyses-question");
+        assert_eq!(
+            of(JobKind::Analysis).context_id.as_deref(),
+            Some("contract-analyses-context_id")
+        );
+        assert_eq!(of(JobKind::Discovery).task_id, "contract-discoveries-run_id");
+        assert_eq!(of(JobKind::Discovery).question, "contract-discoveries-name");
+
+        // Every bucket appears as a row, and each row's label is the field `artifact_label` picks.
+        let snapshot = decode_values(&serde_json::json!({"artifacts": artifacts}).to_string())
+            .expect("a snapshot");
+        for (bucket, label) in [
+            ("datasets", "contract-datasets-title"),
+            ("sources", "contract-sources-citation"),
+            ("reports", "contract-reports-title"),
+            ("files", "contract-files-name"),
+            ("hypotheses", "contract-hypotheses-question"),
+            ("libraries", "contract-libraries-summary"),
+            ("analyses", "contract-analyses-question"),
+            ("discoveries", "contract-discoveries-name"),
+        ] {
+            let row = snapshot
+                .buckets
+                .iter()
+                .find(|entry| entry.name == bucket)
+                .unwrap_or_else(|| panic!("a {bucket} bucket"));
+            assert_eq!(row.items, [label], "{bucket}");
+        }
+    }
+
+    /// A drafted run is decoded from the same fixture, with every field the gate needs.
+    #[test]
+    fn a_drafted_run_decodes_every_field_the_gate_shows() {
+        let contract = contract();
+        // The fixture's status is a contract string rather than `awaiting_approval`, so the draft
+        // path is exercised by setting the one field that selects it — which is itself the point:
+        // `decode_drafts` filters on that exact value (§253).
+        let mut artifacts = contract["artifacts"].clone();
+        artifacts["discoveries"][0]["status"] = Value::String(AWAITING_APPROVAL.to_string());
+
+        let drafts = decode_drafts(&artifacts);
+        assert_eq!(drafts.len(), 1);
+        let draft = &drafts[0];
+        assert_eq!(draft.run_id, "contract-discoveries-run_id");
+        assert_eq!(draft.name, "contract-discoveries-name");
+        assert_eq!(draft.intent, "contract-discoveries-intent");
+        assert_eq!(
+            draft.datasets,
+            [
+                "contract-discoveries-dataset_paths-0",
+                "contract-discoveries-dataset_paths-1"
+            ]
+        );
+        assert!(draft.experiments > 0, "the budget is the price and must arrive");
+        // And it is not also a job, which is §253's rule.
+        assert!(
+            !decode_jobs(&artifacts)
+                .iter()
+                .any(|job| job.kind == JobKind::Discovery)
+        );
+    }
 }
