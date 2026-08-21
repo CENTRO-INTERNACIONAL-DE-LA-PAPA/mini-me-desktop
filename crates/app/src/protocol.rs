@@ -748,9 +748,26 @@ fn decode_stored_message(message: &Value) -> Option<(String, String)> {
 /// Chat apps auto-title from the opening prompt because a list of "New conversation" is a
 /// list of nothing. Truncated on a word boundary so a title ends mid-sentence rather than
 /// mid-word.
+///
+/// **The attached-files blockquote is dropped first.** §231 made this app send the
+/// `> Attached files (already saved in the sandbox working directory): ...` line four backend
+/// prompts had always described — and the *first* message of a conversation that starts with a file
+/// then begins with it, so a conversation appeared in the sidebar named
+/// `> Attached files (already saved in th…`. `backend/project.py:_strip_attached_files_blockquote`
+/// already does this for the mission seed; the title needed the same treatment and did not have it
+/// (§253).
 pub fn title_from_prompt(prompt: &str) -> String {
     const LIMIT: usize = 48;
-    let cleaned = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    let asked = prompt
+        .lines()
+        // Every leading blockquote line, not only the first: the list can wrap.
+        .skip_while(|line| line.trim_start().starts_with('>'))
+        .collect::<Vec<_>>()
+        .join(" ");
+    // A message that is *only* the blockquote still has to be called something, so fall back to
+    // the original rather than returning an empty name.
+    let asked = if asked.trim().is_empty() { prompt } else { &asked };
+    let cleaned = asked.split_whitespace().collect::<Vec<_>>().join(" ");
     if cleaned.chars().count() <= LIMIT {
         return cleaned;
     }
@@ -5045,5 +5062,32 @@ mod tests {
         }
         // And it says how long to expect, measured off the probe rather than guessed.
         assert_eq!(job.kind.expected(), "25–40 min");
+    }
+
+    /// §253: a conversation that begins with a file was named after the blockquote.
+    #[test]
+    fn a_conversation_is_not_named_after_its_attachment_notice() {
+        let asked = "> Attached files (already saved in the sandbox working directory): \
+                     `./SOC_Covariables_TrainValV5.csv`, `./SOC_Covariables_TESTV5.csv`\n\n\
+                     Use the autodiscovery subagent to explore what's in this data.";
+        let title = title_from_prompt(asked);
+        assert!(!title.starts_with('>'), "{title}");
+        assert!(!title.contains("Attached files"), "{title}");
+        assert!(title.starts_with("Use the autodiscovery subagent"), "{title}");
+
+        // A wrapped blockquote — several `>` lines — is skipped whole.
+        let wrapped = "> Attached files: `./a.csv`,\n> `./b.csv`\n\nWhat is in here?";
+        assert_eq!(title_from_prompt(wrapped), "What is in here?");
+
+        // A message that is *only* the blockquote still gets a name rather than an empty one.
+        let bare = "> Attached files (already saved in the sandbox working directory): `./a.csv`";
+        assert!(!title_from_prompt(bare).is_empty());
+
+        // And a plain question is untouched, including one that merely mentions a quote later.
+        assert_eq!(title_from_prompt("What predicts yield?"), "What predicts yield?");
+        assert_eq!(
+            title_from_prompt("Summarise this\n> quoted text"),
+            "Summarise this > quoted text"
+        );
     }
 }
