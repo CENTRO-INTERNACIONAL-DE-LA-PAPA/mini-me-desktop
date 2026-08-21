@@ -39,6 +39,23 @@ jobs:
           echo "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
           echo "found $($fxc.FullName)"
 
+      # The tag names the release; `CARGO_PKG_VERSION` is what the built binary reports about
+      # itself, and an updater compares the two. If they disagree, an install that fetched
+      # `v0.3.0` would keep offering itself the same update forever. Fail here rather than ship
+      # a binary that misdescribes its own version.
+      - name: The tag and the crate must agree
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          crate=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          tag="${{ github.ref_name }}"
+          if [ "v$crate" != "$tag" ]; then
+            echo "::error::tag $tag was pushed but Cargo.toml says $crate."
+            echo "::error::Bump the workspace version and re-tag, so the binary reports $tag."
+            exit 1
+          fi
+          echo "$tag matches Cargo.toml"
+
       # Stamped into the binary so the About page and the first log line can say which build
       # this is. Without it a report from a second machine could be any commit, and the first
       # question back is always the same one (docs §213).
