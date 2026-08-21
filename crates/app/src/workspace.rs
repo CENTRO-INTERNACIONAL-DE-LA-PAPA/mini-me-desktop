@@ -32,6 +32,68 @@ pub const WORKSPACE_ENV: &str = "MINIME_LOCAL_WORKSPACE";
 const IMAGE_EXTENSIONS: [&str; 5] = ["png", "jpg", "jpeg", "gif", "webp"];
 
 /// The directory holding one subdirectory per thread.
+/// Task ids of background runs the researcher has already been told about.
+///
+/// **In a file, because the question is "since when".** The launch sweep (§243) asks the backend
+/// for every unfinished run across recent conversations and collects the ones that have since
+/// finished — and "finished" stays true forever. With only the in-memory `swept` flag guarding it,
+/// a run that completed on Thursday was collected, announced and banner-ed on Friday, Saturday and
+/// every launch after: *"since yesterday data voyager already finished the analysis so its weird to
+/// see the modal everytime I open it."*
+///
+/// Ids rather than a timestamp. A clock comparison needs the run's finish time, the app's last
+/// launch time and two zones to agree; a set of ids needs none of that and answers exactly the
+/// question being asked — has this one been mentioned?
+///
+/// Newline-delimited and read best-effort: an unreadable file means "nothing announced yet", which
+/// re-announces at worst and never *loses* a result.
+fn announced_path() -> PathBuf {
+    crate::settings::data_dir().join("announced-runs.txt")
+}
+
+/// The runs already announced. Empty when the file is missing, which is the first-launch case.
+pub fn announced_runs() -> std::collections::HashSet<String> {
+    std::fs::read_to_string(announced_path())
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Record that these runs have been mentioned, so the next launch stays quiet about them.
+///
+/// Capped, because this file grows once per background run forever and nothing prunes it. The cap
+/// keeps the newest, which is the only end that matters: a run old enough to fall off the list is
+/// one no sweep will surface again, because the sweep only looks at recent conversations.
+pub fn remember_announced(ids: &[String]) {
+    const KEEP: usize = 500;
+    if ids.is_empty() {
+        return;
+    }
+    let mut known = announced_runs();
+    let already = ids.iter().all(|id| known.contains(id));
+    if already {
+        return;
+    }
+    known.extend(ids.iter().cloned());
+    let path = announced_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut lines: Vec<String> = known.into_iter().collect();
+    lines.sort();
+    if lines.len() > KEEP {
+        let drop = lines.len() - KEEP;
+        lines.drain(..drop);
+    }
+    if let Err(error) = std::fs::write(&path, lines.join("\n")) {
+        // Not fatal: the cost is announcing the same run twice, not losing it.
+        tracing::warn!(%error, path = %path.display(), "could not record announced runs");
+    }
+}
+
 pub fn root() -> PathBuf {
     if let Some(dir) = std::env::var_os(WORKSPACE_ENV) {
         return PathBuf::from(dir);
@@ -1631,6 +1693,52 @@ mod authorship_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// §250: the banner reappeared every launch for a run that finished the day before.
+    #[test]
+    fn a_run_is_only_ever_announced_once() {
+        // The repo's idiom for an env override: one lock, one temp dir named after the process.
+        let _env = crate::backend::env_lock::hold();
+        let dir = std::env::temp_dir().join(format!("minime-announced-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a temp dir");
+        // SAFETY: the lock above serialises every test that touches the environment.
+        unsafe { std::env::set_var("MINIME_DATA_DIR", &dir) };
+
+        assert!(
+            announced_runs().is_empty(),
+            "nothing announced on a first launch"
+        );
+
+        remember_announced(&["task-a".to_string(), "task-b".to_string()]);
+        let known = announced_runs();
+        assert!(known.contains("task-a"));
+        assert!(known.contains("task-b"));
+
+        // The whole point: the sweep re-collects the same finished run forever, because "finished"
+        // stays true — so the second launch has to stay quiet about it.
+        remember_announced(&["task-a".to_string()]);
+        assert_eq!(announced_runs().len(), 2, "no duplicates, and nothing lost");
+
+        remember_announced(&["task-c".to_string()]);
+        assert_eq!(announced_runs().len(), 3);
+
+        // Blank lines and stray whitespace are not ids.
+        std::fs::write(dir.join("announced-runs.txt"), "\n  \ntask-a\n\n").expect("write");
+        let reread = announced_runs();
+        assert_eq!(reread.len(), 1);
+        assert!(reread.contains("task-a"));
+
+        // Nothing to record is a no-op, not an empty file.
+        std::fs::remove_file(dir.join("announced-runs.txt")).expect("remove");
+        remember_announced(&[]);
+        assert!(!dir.join("announced-runs.txt").exists());
+        // And a missing file means "nothing announced", which re-announces at worst.
+        assert!(announced_runs().is_empty());
+
+        unsafe { std::env::remove_var("MINIME_DATA_DIR") };
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn the_registry_says_which_specialists_reach_asta() {
