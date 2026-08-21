@@ -2653,16 +2653,29 @@ fn artifact_label(item: &Value) -> String {
     }
 }
 
-/// Shorten to [`MAX_LABEL_CHARS`] on a word boundary where possible. Operates on
-/// `char`s, never bytes, so multi-byte text can't be split mid-character.
+/// Shorten to [`MAX_LABEL_CHARS`] on a word boundary where possible.
 fn truncate_label(text: &str) -> String {
-    if text.chars().count() <= MAX_LABEL_CHARS {
+    clip(text, MAX_LABEL_CHARS)
+}
+
+/// Shorten to `max_chars` on a word boundary where possible. Operates on `char`s, never bytes,
+/// so multi-byte text can't be split mid-character.
+///
+/// Public because the panel clips a job's question with a limit of its own, and one clipper with a
+/// parameter is better than two with a constant each: an artifact label and a job question are the
+/// same problem at two widths, and the ellipsis has to look identical in both.
+///
+/// **Never applied to what is stored.** `Job::question` is also a query parameter the theorizer's
+/// poll route sends back to the backend, so clipping happens at the point of drawing and nowhere
+/// upstream of it.
+pub fn clip(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
         return text.to_string();
     }
-    let clipped: String = text.chars().take(MAX_LABEL_CHARS).collect();
+    let clipped: String = text.chars().take(max_chars).collect();
     let cut = clipped.rfind(' ').unwrap_or(clipped.len());
     // Only prefer the word boundary if it keeps most of the text.
-    let kept = if cut > MAX_LABEL_CHARS / 2 {
+    let kept = if cut > max_chars / 2 {
         &clipped[..cut]
     } else {
         clipped.as_str()
