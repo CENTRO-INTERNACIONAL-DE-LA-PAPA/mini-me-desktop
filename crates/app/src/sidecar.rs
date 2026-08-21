@@ -956,6 +956,57 @@ impl Sidecar {
     /// Runs on the Tokio runtime, which lives as long as the window. Closing the window
     /// ends the poll; the job itself continues on Asta's service and can be picked up
     /// again by task id.
+    /// Ask what a drafted discovery run would cost, for the modal that approves it.
+    pub fn discovery_draft(
+        &self,
+        run_id: String,
+    ) -> mpsc::UnboundedReceiver<Result<crate::protocol::DraftCost, String>> {
+        let (tx, rx) = mpsc::unbounded();
+        let base_url = self.base_url.clone();
+        let thread = self.thread.clone();
+        self.runtime.spawn(async move {
+            let Some(thread_id) = thread.lock().expect("thread id mutex").clone() else {
+                let _ = tx.unbounded_send(Err("this conversation has no thread yet".into()));
+                return;
+            };
+            let client = LangGraphClient::new(base_url);
+            let outcome = client
+                .discovery_draft(&thread_id, &run_id)
+                .await
+                .map_err(|error| format!("{error:#}"));
+            let _ = tx.unbounded_send(outcome);
+        });
+        rx
+    }
+
+    /// Approve a drafted run and start it. **This spends the researcher's credits.**
+    ///
+    /// One shot, no retry. A failed submit is reported and left alone: retrying a call that may
+    /// already have charged is worse than saying it did not work.
+    pub fn submit_discovery(
+        &self,
+        run_id: String,
+        experiments: u32,
+        intent: String,
+    ) -> mpsc::UnboundedReceiver<Result<(), String>> {
+        let (tx, rx) = mpsc::unbounded();
+        let base_url = self.base_url.clone();
+        let thread = self.thread.clone();
+        self.runtime.spawn(async move {
+            let Some(thread_id) = thread.lock().expect("thread id mutex").clone() else {
+                let _ = tx.unbounded_send(Err("this conversation has no thread yet".into()));
+                return;
+            };
+            let client = LangGraphClient::new(base_url);
+            let outcome = client
+                .submit_discovery(&thread_id, &run_id, experiments, &intent)
+                .await
+                .map_err(|error| format!("{error:#}"));
+            let _ = tx.unbounded_send(outcome);
+        });
+        rx
+    }
+
     pub fn watch_job(&self, job: Job) -> mpsc::UnboundedReceiver<Job> {
         let (tx, rx) = mpsc::unbounded();
         let base_url = self.base_url.clone();

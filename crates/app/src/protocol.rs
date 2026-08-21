@@ -1205,6 +1205,93 @@ impl LangGraphClient {
             .to_string())
     }
 
+    /// What a drafted discovery run will cost, and what is left to spend.
+    ///
+    /// Its own request rather than part of the poll: it is read once, when the approval modal
+    /// opens, and it costs the backend two extra calls to the service.
+    pub async fn discovery_draft(&self, thread_id: &str, run_id: &str) -> Result<DraftCost> {
+        let value: Value = self
+            .http
+            .get(format!(
+                "{}/discovery/{}/{}/draft",
+                self.base_url,
+                urlencode(thread_id),
+                urlencode(run_id)
+            ))
+            .send()
+            .await
+            .context("asking what a discovery run would cost failed")?
+            .error_for_status()
+            .context("the discovery draft route returned an error status")?
+            .json()
+            .await
+            .context("could not decode the discovery draft response")?;
+        let credits = value.get("credits");
+        Ok(DraftCost {
+            experiments: value
+                .get("cost")
+                .and_then(Value::as_u64)
+                .unwrap_or_default() as u32,
+            // `available` and nothing else: submitting moves credits to `pending` immediately, so
+            // `granted` overstates what is left by however much is already in flight (§247).
+            available: credits
+                .and_then(|credits| credits.get("available"))
+                .and_then(Value::as_u64)
+                .map(|value| value as u32),
+            intent: value
+                .get("metadata")
+                .and_then(|metadata| metadata.get("intent"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
+        })
+    }
+
+    /// Approve a drafted run: apply the researcher's two edits, then spend the credits.
+    ///
+    /// **The only call in this client that costs money.** It exists because the researcher pressed
+    /// a button; there is no other caller and no retry loop around it — a submit that failed is
+    /// reported, never repeated, because "did it charge me?" is not a question this app should ever
+    /// make someone ask.
+    pub async fn submit_discovery(
+        &self,
+        thread_id: &str,
+        run_id: &str,
+        experiments: u32,
+        intent: &str,
+    ) -> Result<()> {
+        let resp = self
+            .http
+            .post(format!(
+                "{}/discovery/{}/{}/submit",
+                self.base_url,
+                urlencode(thread_id),
+                urlencode(run_id)
+            ))
+            .json(&serde_json::json!({"n_experiments": experiments, "intent": intent}))
+            .send()
+            .await
+            .context("submitting the discovery run failed")?;
+        if resp.status().is_success() {
+            return Ok(());
+        }
+        // The backend's own message, which says whether anything was spent — a 409 means the
+        // edits did not save and it refused to submit rather than charging for something else.
+        let status = resp.status();
+        let detail = resp
+            .json::<Value>()
+            .await
+            .ok()
+            .and_then(|body| {
+                body.get("error")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| format!("the service returned {status}"));
+        anyhow::bail!(detail)
+    }
+
     /// Every unfinished background run across recent conversations, with the thread that owns it.
     ///
     /// # Why this exists
@@ -2577,6 +2664,19 @@ pub struct Draft {
     /// Experiments the run is configured for. One credit each, so this is also the price.
     pub experiments: u32,
     pub datasets: Vec<String>,
+}
+
+/// What a drafted run will cost, against what is left to spend.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DraftCost {
+    /// Experiments configured, which is also the price in credits.
+    pub experiments: u32,
+    /// Credits left, or `None` when the service would not say. A missing balance is shown as
+    /// unknown rather than as zero: refusing to let someone spend because a lookup failed is the
+    /// wrong failure, and so is implying they have none.
+    pub available: Option<u32>,
+    /// The intent the service currently holds, which is what an edit starts from.
+    pub intent: String,
 }
 
 /// The artifact status a drafted-but-unsubmitted run carries (`backend/schemas.py`).
