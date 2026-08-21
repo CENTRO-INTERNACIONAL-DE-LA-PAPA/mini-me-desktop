@@ -13850,3 +13850,89 @@ other runs held 60 in `pending` would be off by sixty.
 Nothing was guessed here. This is the §222 discipline — build the doubles from a captured contract —
 applied *before* writing the code rather than after a middleware's tests passed for weeks against an
 argument the live tool rejected.
+
+### The run: 13 minutes, 5 experiments, and it found the needle
+
+Submitted 12:55:58, `SUCCEEDED` 13:08:13. Per-experiment runtimes 128s, 329s, 172s, 172s, 132s —
+933s of work in 735s of wall clock, so they overlap. **15 experiments is 25–40 minutes**, which is
+the number `JobKind::expected()` has to say out loud.
+
+The synthetic control earned its keep. The planted columns are `cov_000`, `cov_005` and `cov_011`
+among 113, and **four of the five experiments named all three**. One of them, having tried
+permutation importance with an FDR-corrected t-test, reported this:
+
+> the t-test identified 113 features as statistically significant … This occurs because the
+> permutation importance scores for noise features, while extremely close to zero, are consistently
+> slightly positive across repeats … Despite failing to distinguish signal from noise strictly via
+> statistical significance, the magnitude of the mean importance scores clearly separates a small
+> subset of features (`cov_000`, `cov_005`, and `cov_011`) from the rest.
+
+That is a correct diagnosis of its own method's failure and the right conclusion anyway. Whatever
+else is true of AutoDiscovery, it is not producing slop. **And none of the five was flagged
+`is_surprising`** — which is its own finding, below.
+
+### Nine corrections to §246, all from the payload
+
+**1. `experiments` returns the whole experiment, not a summary.** `analysis`, `review`, `code`,
+`code_output`, `experiment_plan`, `parent_id`, `child_ids` — all of it, in one request. §246 worried
+a hundred-node graph might cost a hundred requests. It does not: **the tree is free.**
+
+**2. `rich_outputs` is only in the *detail* response.** The list returns `null` for it; `experiment
+<id>` returns the figures. So the images *are* the N+1, at **458KB for one experiment** — 7MB for a
+15-experiment run. They must be fetched lazily, per experiment, on demand.
+
+**3. `child_ids` is EMPTY in the detail response and populated in the list.** The same field, two
+answers, and the detail one is the wrong answer. **The list is authoritative for the tree; the detail
+is authoritative for the images.** A graph built from detail calls has no downward edges at all.
+
+**4. `parent_id` can point at a node that is not in the list.** Every experiment here descends from
+`node_1_0`, which is not among the five. Roots and seeds exist outside the experiment set, so the
+graph builder must treat a dangling parent as normal rather than as corruption.
+
+**5. `surprise` is signed.** −0.67, −0.06, −0.53, +0.39, +0.25. §246 said direction was derived from
+the belief move; it is not — **the sign of `surprise` is the direction**, and the web view's own
+Direction column is reading exactly that. The table shows the magnitude and the column shows the
+sign.
+
+**6. `is_surprising` is not a threshold on `|surprise|`.** With `surprisal_width: 0.5`, an experiment
+at −0.6705 came back `is_surprising: false`. Whatever the rule is, it is not the obvious one.
+**Trust the flag; never recompute it.** `run_stats.num_surprising_experiments` counts the same thing
+server-side, and it said 0.
+
+**7. The belief labels are categories, not buckets of a number.** §246 guessed the web view's
+`Likely True` / `Maybe False` were quarters of the probability. They are not: `prior_belief` and
+`posterior_belief` are four-category distributions with *vote counts* —
+`{definitely_true: 2, maybe_true: 3, maybe_false: 0, definitely_false: 0}` — plus **two** means,
+`mean` (0.7917) and `_empirical_mean` (0.85). The label comes from the distribution, the number from
+`mean`. Which of the two means the web view prints is still unconfirmed and is a five-minute check
+against a shared run rather than something to infer.
+
+**8. Three identifiers per experiment, and they are not interchangeable.** `experiment_id`
+(`node_2_0`) is what `parent_id` and `child_ids` reference. `id_in_run` (1, 2, 3…) is what the web
+view's ID column shows. `creation_idx` (2, 3, 4…) is the ordering. Draw with the first, label with
+the second, sort by the third.
+
+**9. Uploaded datasets expire after a week.** `dataset_expires_at` is created_at + 7 days. So a
+run's results must be persisted into the conversation's folder — the service is not an archive — and
+a fork of a month-old run cannot have its data. §246 did not know this and it is the strongest
+argument yet for `persist_discovery_outputs` being in Phase 1 rather than later.
+
+### And the run URL question, answered
+
+`runs` returns `path: None` and `run_metadata.is_shared: None` for this run, alongside
+`can_explore_with_asta: false` and `can_view_datasets: false`. The only address anyone has seen is
+the `/shared/samples/…` one. So a shareable URL looks like something a researcher *grants*, not
+something every run has — and **`open in AutoDiscovery` cannot be an unconditional link**. Either
+the app offers it only once `is_shared` is set, or the plan's "the graph is theirs" needs revisiting.
+That is the one Phase 0 question that came back with a shape rather than an answer.
+
+### What the figures actually are
+
+A Jupyter display bundle, one per output: the same figure as `image/png` (127KB), `image/jpeg`
+(90KB), `image/svg+xml` (158KB of real vector), and `text/plain` (`<Figure size 1000x800 with 2
+Axes>`). Take the PNG, the way §242's decoder already does for DataVoyager — and note the SVG is
+there if a plot is ever worth zooming.
+
+*Hundred-and-second: the same field can have two different values at two endpoints, and the one that
+looks authoritative is not. `child_ids` is complete in the list and empty in the detail; nothing in
+either response says so.*
