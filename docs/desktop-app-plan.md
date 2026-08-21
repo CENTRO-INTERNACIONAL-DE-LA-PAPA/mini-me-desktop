@@ -14992,3 +14992,58 @@ run on their laptop. Said plainly because this session already spent four rounds
 
 *Hundred-and-twentieth: when a platform call cannot be tested where the code is written, make it one
 line and test everything that decides to make it.*
+
+## 266. Reading a discovery run, rather than scanning it (2026-08-21)
+
+The toast works — the log line and the screenshot both:
+
+```
+INFO raised a desktop notification title="Discovery finished"
+```
+
+Three things asked for in the same breath, all about the same thing: the results modal was built to
+*scan* a list and the content turned out to be worth *reading*.
+
+### The markdown was on screen as source
+
+The service writes real Markdown into `analysis` and `review` — `###` headings, `- ` bullets,
+`**bold**` labels — and the pane printed it verbatim. A review that opens `### Summary of Findings:`
+is worse than plain prose, because the reader has to parse the markup themselves.
+
+`markdown_block` is the transcript's own renderer and already takes `None` for the selection
+registry — the mode the file preview uses, meaning *the same blocks, not part of a conversation*.
+Nothing new was needed; the pane simply was not calling it.
+
+### Full screen, because 760px is a scanning width
+
+*"maybe we can make an option to full-screen for the ui modal of autodiscovery as it have
+interesting reading for the user."*
+
+1180px rather than the whole window, and the tree and both panes grow with it. `ui::Modal` centres on
+a fixed width, and prose running the full width of a 4K display is unreadable for the opposite reason
+— §152's argument about a chart cropped square, applied to a paragraph.
+
+### A sort that can be reversed, and reversed back
+
+Loudest first is the default because the point of a discovery run is the handful of results that
+changed the picture. The other direction answers a real question too — *what did it try that moved
+nothing?* — which is why it is a toggle rather than a fixed order.
+
+**Ties break on creation order**, and that is not a detail: three of the five experiments in the real
+run reported the same `0.690`. Equal scores are the common case here, so a sort that reshuffled them
+would make the toggle look like it was doing something other than reversing. `ranked` is a free
+function for exactly that reason — the property "flip it twice and nothing moved" is testable, and
+tested, without a window.
+
+Both buttons are named in words. §199's rule: an affordance nobody can name is one they conclude does
+not exist, and an arrow glyph is not a name.
+
+### And a note on how this got built
+
+Three edit scripts in this section aborted on an assertion **before writing the file**, so changes I
+believed were applied were not — and I noticed only because a later grep showed the old code. That is
+the fourth time this session (§256 recorded the first three). The fix is mechanical: write after each
+edit, or check the file rather than the script's exit.
+
+*Hundred-and-twenty-first: content built for scanning becomes content for reading the moment it is
+any good. The modal was sized for a list and filled with essays.*
