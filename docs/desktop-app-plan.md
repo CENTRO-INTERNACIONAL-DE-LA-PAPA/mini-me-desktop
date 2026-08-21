@@ -14077,3 +14077,71 @@ time in this project that the existing suite found a new mistake before its auth
 *Hundred-and-fourth: a path is only meaningful next to the filesystem it came from. This app spans
 three — Windows, WSL and a container — and every path crossing between them is a defect waiting for
 the first turn of a new conversation.*
+
+## 250. Announced once, dismissable always, and a log on the wrong filesystem (2026-08-21)
+
+Three defects reported in one message, and they have nothing to do with each other except that all
+three were mine.
+
+### The banner came back every launch
+
+*"Since yesterday data voyager already finished the analysis so its weird to see the modal everytime
+I open it. This means we are not caching the status if its succeded or not."*
+
+Exactly right, and the diagnosis is the fix. §243's sweep asks the backend for every unfinished run
+across recent conversations and collects the ones that have since finished. **"Finished" stays true
+forever.** The only guard was an in-memory `swept` flag, which stops the sweep running *twice in a
+launch* and says nothing about launches. So a run that completed on Thursday was re-collected and
+re-announced on Friday, Saturday, and every launch after.
+
+Now recorded on disk — `announced-runs.txt` in the app's data directory, one task id per line — and
+the sweep filters against it before announcing. Ids rather than a timestamp on purpose: a clock
+comparison would need the run's finish time, the app's last launch time and two time zones to
+agree, where a set of ids answers exactly the question being asked. Capped at 500, keeping the
+newest, because nothing prunes it otherwise and a run old enough to fall off is one the sweep will
+not surface again anyway.
+
+Failure mode chosen deliberately: an unreadable or missing file means "nothing announced", which
+re-announces at worst and can never *lose* a result.
+
+### The banner could not be dismissed
+
+*"Also, I cannot dismiss the modal, that ui design."*
+
+A straight design mistake in §244, and visible in its own code: the `×` was rendered **only in the
+several-runs branch**. One run got `open it` and nothing else, with the whole strip as a single
+press target — so the only way to clear a notice was to go where it pointed.
+
+Opening a conversation and deciding not to are different answers, so they are now different
+buttons, and the one meaning *"I have read this"* exists in both cases. A notice that can only be
+cleared by travelling is a notice holding the window hostage.
+
+Worth stating for §244's sake: the banner-versus-modal argument still stands. What was wrong was
+never the shape, it was giving a dismissable thing no way to be dismissed.
+
+### And I sent a WSL path for a Windows file
+
+```
+wsl bash -lc "grep -iE 'discovery' /tmp/mini-me-desktop-backend.log"
+grep: /tmp/mini-me-desktop-backend.log: No such file or directory
+```
+
+Of course not. `default_log_path()` is `std::env::temp_dir()`, the app runs on **Windows**, and
+`temp_dir()` there is `%TEMP%` — `C:\Users\…\AppData\Local\Temp`. The file was never in WSL's
+`/tmp`. This is §249's lesson repeating one day later and one layer up: this app spans Windows, WSL
+and a container, and a path is only meaningful beside the filesystem it came from.
+
+Partly the app's fault, which is the part worth fixing. The Setup pane named the **sidecar** log and
+not the app's, so there was nowhere to look the answer up — and §206 already records what that
+costs: a diagnostic gets added, somebody is asked to grep for it, and the empty answer gets mistaken
+for evidence. Both are now listed.
+
+The command that works, and it covers both files:
+
+```powershell
+Select-String -Path "$env:TEMP\mini-me-desktop-*.log" -Pattern discovery | Select-Object -Last 20
+```
+
+*Hundred-and-fifth: "it only appears once" is a claim about state that outlives the process, so it
+cannot be enforced by a flag that does not. An in-memory guard against a permanent condition is a
+guard against nothing.*
