@@ -51,7 +51,10 @@ from backend.autodiscovery_tools import (
     normalise_status,
     persist_discovery_outputs,
     poll_discovery_status,
+    read_credits,
+    read_metadata,
     submit_run,
+    update_metadata,
 )
 
 _RUN = "8e5d2eaa-f067-4193-9400-d555e4607c41"
@@ -482,3 +485,85 @@ def test_json_is_found_even_when_the_cli_prints_around_it():
     assert _extract_json('["figure-01.png"]') == ["figure-01.png"]
     assert _extract_json("no json here") is None
     assert _extract_json("") is None
+
+
+# ---------------------------------------------------------------------------
+# The edits the modal offers, and only those
+# ---------------------------------------------------------------------------
+
+
+def test_only_the_budget_and_the_intent_can_be_edited():
+    """The modal offers two fields; a request carrying more is not honoured quietly."""
+    current = {
+        "name": "SOC covariates",
+        "intent": "original",
+        "n_experiments": 15,
+        "datasets": [{"name": "soc.csv"}],
+        # A field this backend has never heard of, which must survive the round trip.
+        "n_warmstart": 3,
+    }
+    sandbox = _Sandbox(
+        [
+            ("metadata-get", json.dumps(current)),
+            ("autodiscovery metadata ", "Metadata saved: gs://x"),
+        ]
+    )
+    updated = asyncio.run(
+        update_metadata(
+            sandbox,
+            _RUN,
+            {"intent": "steered differently", "n_experiments": 5, "name": "renamed", "datasets": []},
+        )
+    )
+    assert updated["intent"] == "steered differently"
+    assert updated["n_experiments"] == 5
+    assert updated["name"] == "SOC covariates", "an unapproved edit was applied"
+    assert updated["datasets"] == [{"name": "soc.csv"}], "an unapproved edit was applied"
+    # Read-modify-write, so a field we do not model is not erased.
+    assert updated["n_warmstart"] == 3
+    staged = json.loads(sandbox.writes["/tmp/asta-autodiscovery-metadata.json"])
+    assert staged["n_experiments"] == 5
+
+
+def test_an_edited_budget_outside_the_bounds_is_refused_before_it_is_staged():
+    sandbox = _Sandbox([("metadata-get", json.dumps({"n_experiments": 15}))])
+    for bad in (0, MAX_EXPERIMENTS + 1, True, "five"):
+        with pytest.raises(ValueError):
+            asyncio.run(update_metadata(sandbox, _RUN, {"n_experiments": bad}))
+    assert "/tmp/asta-autodiscovery-metadata.json" not in sandbox.writes
+
+
+def test_a_metadata_save_that_did_not_confirm_returns_nothing_so_the_route_can_refuse():
+    """The researcher approved a number. If the edit did not land, submitting would charge for
+    whatever the service still had stored — so an unconfirmed save must not look like success."""
+    sandbox = _Sandbox(
+        [
+            ("metadata-get", json.dumps({"n_experiments": 15, "intent": "x"})),
+            ("autodiscovery metadata ", "some other output"),
+        ]
+    )
+    assert asyncio.run(update_metadata(sandbox, _RUN, {"n_experiments": 5})) == {}
+
+
+def test_metadata_is_read_from_whichever_endpoint_it_came_from():
+    """`metadata-get` returns it bare; the run listing nests it under `run_metadata`."""
+    bare = _Sandbox([("metadata-get", json.dumps({"n_experiments": 15, "name": "a"}))])
+    assert asyncio.run(read_metadata(bare, _RUN))["name"] == "a"
+
+    nested = _Sandbox([("metadata-get", json.dumps({"run_metadata": {"name": "b"}}))])
+    assert asyncio.run(read_metadata(nested, _RUN))["name"] == "b"
+
+    wrapped = _Sandbox([("metadata-get", json.dumps({"metadata": {"name": "c"}}))])
+    assert asyncio.run(read_metadata(wrapped, _RUN))["name"] == "c"
+
+
+def test_only_available_credits_are_reported_as_spendable():
+    """Submitting moves credits to `pending`, so `granted` overstates what is left."""
+    sandbox = _Sandbox(
+        [("autodiscovery credits", json.dumps(
+            {"credits": {"granted": 500, "consumed": 5, "pending": 60, "available": 435}}
+        ))]
+    )
+    credits = asyncio.run(read_credits(sandbox))
+    assert credits["available"] == 435
+    assert credits["granted"] == 500 and credits["pending"] == 60
