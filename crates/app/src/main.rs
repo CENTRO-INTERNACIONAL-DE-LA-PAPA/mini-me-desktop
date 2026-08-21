@@ -13756,11 +13756,17 @@ impl Workbench {
             submitting: false,
         });
 
-        // What it costs against what is left. The modal renders without it — the run's own
-        // experiment count is the price either way — so a slow or failed lookup delays the
-        // balance, never the decision.
-        let mut answer = self.sidecar.discovery_draft(draft.run_id.clone());
-        let wanted = draft.run_id.clone();
+        self.refresh_approval(draft.run_id.clone(), cx);
+        cx.notify();
+    }
+
+    /// Ask the backend what this run costs, and for the token that authorises submitting it.
+    ///
+    /// Called when the gate opens and again after a failed submit. The modal renders without the
+    /// answer — the run's own experiment count is the price either way — so a slow lookup delays
+    /// the balance and the press, never the reading.
+    fn refresh_approval(&mut self, run_id: String, cx: &mut Context<Self>) {
+        let mut answer = self.sidecar.discovery_draft(run_id.clone());
         cx.spawn(async move |workbench, cx| {
             if let Some(outcome) = answer.next().await {
                 let _ = workbench.update(cx, |workbench, cx| {
@@ -13769,8 +13775,8 @@ impl Workbench {
                     };
                     // The gate may have been answered and reopened for a different run while this
                     // was in flight; a balance belonging to another run would be a wrong number
-                    // next to a price.
-                    if approval.draft.run_id != wanted {
+                    // next to a price, and a token for another run would be refused.
+                    if approval.draft.run_id != run_id {
                         return;
                     }
                     match outcome {
@@ -13784,7 +13790,6 @@ impl Workbench {
             }
         })
         .detach();
-        cx.notify();
     }
 
     /// Spend the credits. The only place in this app that does.
@@ -13845,9 +13850,22 @@ impl Workbench {
                         }
                         Err(error) => {
                             tracing::warn!(%error, run = %run_id, "a discovery submit failed");
+                            let still_open = workbench
+                                .approving
+                                .as_ref()
+                                .is_some_and(|open| open.draft.run_id == run_id);
                             if let Some(approval) = workbench.approving.as_mut() {
                                 approval.submitting = false;
                                 approval.error = Some(error);
+                                // The token is gone from this side's point of view whether or not
+                                // the backend spent it, so the modal re-fetches one. Without this
+                                // a recoverable failure — a configuration change that did not
+                                // save — left the next press answering "this submit carries no
+                                // valid approval", which is a dead end rather than a retry (§255).
+                                approval.cost = None;
+                            }
+                            if still_open {
+                                workbench.refresh_approval(run_id.clone(), cx);
                             }
                         }
                     }

@@ -49,6 +49,7 @@ from backend.autodiscovery_tools import (
     fetch_experiment_figures,
     is_valid_experiment_id,
     is_valid_run_id,
+    MetadataNotSaved,
     metadata_path,
     normalise_status,
     persist_discovery_outputs,
@@ -538,16 +539,60 @@ def test_an_edited_budget_outside_the_bounds_is_refused_before_it_is_staged():
     assert metadata_path("/workspace", _RUN) not in sandbox.writes
 
 
-def test_a_metadata_save_that_did_not_confirm_returns_nothing_so_the_route_can_refuse():
+def test_a_metadata_save_that_did_not_confirm_raises_with_the_reason():
     """The researcher approved a number. If the edit did not land, submitting would charge for
-    whatever the service still had stored — so an unconfirmed save must not look like success."""
+    whatever the service still had stored — so an unconfirmed save must not look like success.
+
+    And it has to say *why*: "your changes did not save" is true and useless, which is how §255's
+    dead end reached the researcher with the reason in /dev/null."""
     sandbox = _Sandbox(
         [
             ("metadata-get", json.dumps({"n_experiments": 15, "intent": "x"})),
-            ("autodiscovery metadata ", "some other output"),
+            ("autodiscovery metadata ", "Usage: asta autodiscovery metadata [OPTIONS] RUNID"),
         ]
     )
-    assert asyncio.run(update_metadata(sandbox, _RUN, {"n_experiments": 5})) == {}
+    with pytest.raises(MetadataNotSaved) as raised:
+        asyncio.run(update_metadata(sandbox, _RUN, {"n_experiments": 5}))
+    assert "Usage: asta autodiscovery metadata" in str(raised.value)
+
+    # A command that printed nothing at all still gets a message rather than an empty one.
+    silent = _Sandbox(
+        [
+            ("metadata-get", json.dumps({"n_experiments": 15})),
+            ("autodiscovery metadata ", ""),
+        ]
+    )
+    with pytest.raises(MetadataNotSaved) as quiet:
+        asyncio.run(update_metadata(silent, _RUN, {"n_experiments": 5}))
+    assert "printed nothing" in str(quiet.value)
+
+    # And a configuration read that fails is its own reason, not a silent falsy return.
+    unreadable = _Sandbox([("metadata-get", "Error: not found")])
+    with pytest.raises(MetadataNotSaved):
+        asyncio.run(update_metadata(unreadable, _RUN, {"n_experiments": 5}))
+
+
+def test_a_configuration_that_already_matches_is_not_rewritten():
+    """The common case — the researcher changes nothing — must not depend on the two calls most
+    likely to fail."""
+    sandbox = _Sandbox([("metadata-get", json.dumps({"n_experiments": 15, "intent": "x"}))])
+    same = asyncio.run(update_metadata(sandbox, _RUN, {"n_experiments": 15, "intent": "x"}))
+    assert same["n_experiments"] == 15
+    assert sandbox.writes == {}, "nothing staged"
+    assert not any("autodiscovery metadata " in c for c in sandbox.commands), sandbox.commands
+
+
+def test_the_metadata_calls_keep_stderr_so_a_failure_has_a_reason():
+    """`2>/dev/null` is right for a JSON parse and wrong for the two calls that stand between a
+    press and a run."""
+    from backend.autodiscovery_tools import _loud_shell, _json_shell
+
+    assert _loud_shell(["asta", "x"]).endswith("2>&1")
+    assert _json_shell(["asta", "x"]).endswith("2>/dev/null")
+
+    sandbox = _Sandbox([("metadata-get", json.dumps({"n_experiments": 1}))])
+    asyncio.run(read_metadata(sandbox, _RUN))
+    assert sandbox.commands[0].endswith("2>&1"), sandbox.commands[0]
 
 
 def test_metadata_is_read_from_whichever_endpoint_it_came_from():
@@ -752,20 +797,24 @@ def test_an_edit_stages_to_the_same_place_as_the_draft():
 # ---------------------------------------------------------------------------
 
 
-def test_an_approval_token_authorises_one_run_at_one_budget_once():
-    from backend.routes.artifacts import _issue_approval, _redeem_approval
+def test_an_approval_token_authorises_one_run_at_one_budget():
+    from backend.routes.artifacts import _check_approval, _issue_approval, _spend_approval
 
     token = _issue_approval("thread-1", _RUN, 5)
     # Bound to the thread and the run it was issued for, or the check is a formality.
-    assert _redeem_approval(token, "thread-2", _RUN) is None
-    assert _redeem_approval(token, "thread-1", "other-run") is None
-    assert _redeem_approval("not-a-token", "thread-1", _RUN) is None
-    assert _redeem_approval("", "thread-1", _RUN) is None
+    assert _check_approval(token, "thread-2", _RUN) is None
+    assert _check_approval(token, "thread-1", "other-run") is None
+    assert _check_approval("not-a-token", "thread-1", _RUN) is None
+    assert _check_approval("", "thread-1", _RUN) is None
 
-    # Redeems once, for the budget it was issued against.
-    assert _redeem_approval(token, "thread-1", _RUN) == 5
-    # And never again: a replay cannot re-spend.
-    assert _redeem_approval(token, "thread-1", _RUN) is None
+    # Checking does NOT consume, so a submit that fails before spending can be retried. §255: the
+    # first version consumed on arrival, and a failed save left the next press with no approval.
+    assert _check_approval(token, "thread-1", _RUN) == 5
+    assert _check_approval(token, "thread-1", _RUN) == 5, "checking is repeatable"
+
+    # Spending consumes it, immediately before the charge — so a replay cannot pay twice.
+    _spend_approval(token)
+    assert _check_approval(token, "thread-1", _RUN) is None
 
 
 def test_submitting_re_reads_the_budget_and_refuses_a_number_nobody_approved():

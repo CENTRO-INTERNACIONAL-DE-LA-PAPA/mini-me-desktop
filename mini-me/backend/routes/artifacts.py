@@ -13,6 +13,7 @@ from starlette.responses import JSONResponse, Response
 from backend.sandbox import LazyLangsmithSandbox
 from backend.schemas import _is_supported_artifact_file
 from backend.autodiscovery_tools import (
+    MetadataNotSaved,
     cost_of,
     fetch_experiment_figures,
     is_valid_experiment_id,
@@ -304,8 +305,8 @@ def _issue_approval(thread_id: str, run_id: str, experiments: int) -> str:
     return token
 
 
-def _redeem_approval(token: str, thread_id: str, run_id: str) -> int | None:
-    """Consume a token, returning the budget it authorised, or `None` if it does not apply.
+def _check_approval(token: str, thread_id: str, run_id: str) -> int | None:
+    """The budget a token authorises, **without consuming it**, or `None` if it does not apply.
 
     Bound to the thread *and* the run it was issued for: a token minted for one run must not
     authorise another, or the check would be a formality.
@@ -316,8 +317,21 @@ def _redeem_approval(token: str, thread_id: str, run_id: str) -> int | None:
     issued_thread, issued_run, experiments = held
     if issued_thread != thread_id or issued_run != run_id:
         return None
-    _APPROVALS.pop(token, None)
     return experiments
+
+
+def _spend_approval(token: str) -> None:
+    """Consume a token, immediately before the call that spends credits.
+
+    **Checked early, consumed late, and the order matters.** The first version consumed on arrival,
+    so a submit that failed *after* the check — because the configuration change did not save —
+    burned the token, and the researcher's second press came back "this submit carries no valid
+    approval". A press that cannot be retried after a recoverable failure is a dead end (§255).
+
+    Consumed before the spend rather than after it, so a replay still cannot pay twice: the window
+    where a token is valid and a charge is in flight is one function call wide.
+    """
+    _APPROVALS.pop(token or "", None)
 
 
 async def discovery_draft(request: Request) -> Response:
@@ -386,7 +400,8 @@ async def discovery_submit(request: Request) -> Response:
             status_code=400,
         )
 
-    approved = _redeem_approval(str(body.get("approval") or ""), thread_id, run_id)
+    token = str(body.get("approval") or "")
+    approved = _check_approval(token, thread_id, run_id)
     if approved is None:
         return JSONResponse(
             {
@@ -413,18 +428,20 @@ async def discovery_submit(request: Request) -> Response:
 
     async with asta_token_scope(_request_user_id(request)):
         try:
-            metadata = await update_metadata(adapter, run_id, changes)
+            await update_metadata(adapter, run_id, changes)
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
-        if not metadata:
-            # Never submit a run whose edits did not land: the researcher approved a number and
-            # the service would charge for whatever it still had stored.
-            return JSONResponse(
-                {"error": "your changes did not save, so nothing was submitted"},
-                status_code=409,
-            )
-        # `approved=wanted` makes `submit_run` re-read the stored budget and refuse if something
-        # else moved it between the save above and the spend below.
+        except MetadataNotSaved as exc:
+            # Never submit a run whose edits did not land: the researcher approved a number and the
+            # service would charge for whatever it still had stored. The token is deliberately
+            # *not* spent here, so pressing again after a transient failure works — and the
+            # service's own words come back with it, because "your changes did not save" is true
+            # and useless (§255).
+            return JSONResponse({"error": str(exc)}, status_code=409)
+
+        # From here on a charge is possible, so the token goes now. `approved=wanted` makes
+        # `submit_run` re-read the stored budget and refuse if something else moved it.
+        _spend_approval(token)
         result = await submit_run(adapter, run_id, approved=wanted)
     if "error" in result:
         return JSONResponse(result, status_code=502)
