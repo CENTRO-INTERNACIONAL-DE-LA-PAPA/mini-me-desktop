@@ -14782,3 +14782,42 @@ body is now read first and the status only used when the body says nothing.
 *Hundred-and-sixteenth: every layer that can summarise an error will, unless it is written not to.
 The fix is never a better message at the bottom — it is refusing to replace one anywhere in the
 middle.*
+
+## 262. Argument list too long (2026-08-21)
+
+§261's fix worked, and the reason it revealed was the actual bug all along:
+
+```
+could not read figures: [stderr] /bin/sh: 1: python3: Argument list too long
+Exit code: 126
+```
+
+Linux caps a **single argument** at `MAX_ARG_STRLEN` — 32 pages, 128KB — independently of the
+`ARG_MAX` total. The per-experiment response is ~458KB. So the payload could never travel on a
+command line, and both earlier forms failed identically: the first read it through `"$(cat)"`, the
+second passed `"$OUT"`. §260 rewrote one into the other and changed nothing about the thing that was
+wrong.
+
+The response now goes to a **file** — written by the fetch, read by the decoder, removed after —
+staged per experiment so two open at once cannot read each other's response. A file has no such
+limit. Which is also what §256 concluded about the metadata staging, for a different reason, three
+sections apart.
+
+### The test that could not have caught it
+
+`test_the_figure_decoder_prefers_png_and_survives_a_bundle_it_cannot_read` ran the real script
+through a real shell — the right shape — with a **400-byte** fixture. It passed every time, and would
+have passed forever, because it exercised everything about the command except its size.
+
+I even used it as evidence: §260 records "the decoder was fine — verified against a real shell", and
+concluded the fetch must be at fault. The verification was real and the conclusion was wrong, because
+the property that mattered was not being varied.
+
+So there is now a test with a payload **the size of the real one**: a PNG whose base64 alone clears
+the per-argument limit twice over, through a real `bash`, asserting that
+`Argument list too long` does not appear, that the figure lands, and that the staging file is
+cleaned up.
+
+*Hundred-and-seventeenth: a fixture that is the right shape and the wrong size tests the shape. When
+the payload's size is the thing the code has to survive, the fixture has to be that size — and
+"verified against a real shell" is not a claim about anything a 400-byte string can establish.*
