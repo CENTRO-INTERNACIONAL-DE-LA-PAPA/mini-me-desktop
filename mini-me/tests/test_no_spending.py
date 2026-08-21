@@ -161,3 +161,55 @@ def test_the_guard_is_attached_to_the_coordinator_and_every_subagent():
         assert any(
             isinstance(m, NoSpendingWithoutApproval) for m in subagent["middleware"]
         ), subagent["name"]
+
+
+def test_every_middleware_this_project_adds_can_actually_be_registered():
+    """§253: the test that was missing, and the reason the app would not open.
+
+    `NoSpendingWithoutApproval` was duck-typed — `wrap_tool_call` and nothing else. Every unit test
+    above passed, because they call the middleware directly. But `create_agent` reads its hooks off
+    the *class*, so building the graph raised
+
+        AttributeError: type object 'NoSpendingWithoutApproval' has no attribute 'before_agent'
+
+    and every conversation hung on "Opening this conversation…". A guard that stops the app from
+    opening is worse than the hole it closes.
+
+    So this asserts the property that matters and that a direct call cannot: the middleware is a
+    real `AgentMiddleware` and a graph carrying it builds.
+    """
+    from langchain.agents.middleware import AgentMiddleware
+
+    assert isinstance(NoSpendingWithoutApproval(), AgentMiddleware)
+
+
+def test_a_graph_carrying_the_guard_builds():
+    import os
+
+    from langchain.agents import create_agent
+    from langchain_core.tools import tool
+
+    @tool
+    def execute(command: str) -> str:
+        """Run a shell command."""
+        return "ran"
+
+    # `create_agent` resolves a model eagerly; a placeholder is enough, nothing is called.
+    os.environ.setdefault("OPENAI_API_KEY", "sk-not-used-by-this-test")
+    agent = create_agent(
+        model="openai:gpt-4o-mini",
+        tools=[execute],
+        middleware=[NoSpendingWithoutApproval()],
+    )
+    assert agent is not None
+
+
+def test_the_whole_middleware_stack_is_registerable():
+    """Not just this one. Every class the guardrail builder returns has to survive graph
+    construction, and this is the cheapest way to find out."""
+    from langchain.agents.middleware import AgentMiddleware
+
+    from backend.middleware.guardrails import _build_guardrail_middleware
+
+    for middleware in _build_guardrail_middleware(["find_papers"]):
+        assert isinstance(middleware, AgentMiddleware), type(middleware).__name__

@@ -14314,3 +14314,58 @@ platform ~98% of users are on.
 *Hundred-and-seventh: state the claim you tested, not the claim you wanted. "No tool spends a
 credit" was true and provable; "no path spends a credit" was neither, and writing the second one down
 is how a guard nobody built came to look like a guard.*
+
+## 253. A guard that stopped the app from opening (2026-08-21)
+
+*"I think we broke the conversation loading time, its taking too much time and it doesnt even load."*
+
+Broke it outright, not slowed it. §252's `NoSpendingWithoutApproval` was duck-typed — a class with
+`wrap_tool_call` and `awrap_tool_call` and nothing else — carrying this comment:
+
+> Duck-typed to match this project's other middleware; `AgentMiddleware` is not subclassed so the
+> class stays importable and testable without a graph.
+
+**Both halves of that were false.** Every other middleware in `backend/middleware/` subclasses
+`AgentMiddleware`; and subclassing costs nothing in testability, as the same tests now prove. I wrote
+a justification for a deviation instead of checking whether the deviation was needed.
+
+`create_agent` reads its hooks off the *class*:
+
+```
+AttributeError: type object 'NoSpendingWithoutApproval' has no attribute 'before_agent'
+```
+
+So the agent graph never built. Every conversation hung on *"Opening this conversation…"*, and the
+status bar said what it always says when the graph is missing — *"backend started; research tools are
+not ready"*, which was true and which I had no test looking at.
+
+### Why seventeen passing tests missed it
+
+They all called the middleware **directly**: construct it, hand it a fake request, assert on the
+refusal. Which is the right way to test the *rule* and cannot possibly test *registration*. The
+property that mattered — "a graph carrying this builds" — was never asserted, so the guard was
+perfect and unreachable.
+
+Three tests now assert it: the class is an `AgentMiddleware`, a graph carrying it builds, and every
+entry `_build_guardrail_middleware` returns passes the same check. That last one is the general
+version, because the specific bug is less interesting than the class of bug.
+
+**A guard that stops the app from opening is worse than the hole it closes.** §252 spent its whole
+argument on not over-claiming safety and then shipped something that made the app unusable, which is
+its own kind of over-claim.
+
+### And a title read off the wrong line
+
+Visible in the same screenshot: a conversation in the sidebar called
+`> Attached files (already saved in th…`.
+
+§231 made this app send the attached-files blockquote that four backend prompts had always described.
+The first message of a conversation that starts with a file therefore *begins* with that blockquote,
+and `title_from_prompt` takes the first thing the researcher asked — which was now a machine-written
+notice. `backend/project.py:_strip_attached_files_blockquote` already strips it for the mission seed;
+the title needed the same treatment and nobody gave it one. It now skips every leading `>` line, and
+falls back to the whole message when that leaves nothing.
+
+*Hundred-and-eighth: a unit test of a rule is not a test that the rule is installed. The bug was not
+in anything the tests examined — it was in the wiring they all bypassed by constructing the thing
+themselves.*
