@@ -1017,6 +1017,15 @@ fn affordable(experiments: u32, available: Option<u32>) -> bool {
     }
 }
 
+/// Whether the gate has what it needs to submit: a one-shot approval token from the draft lookup.
+///
+/// Pure so the enable rule is testable. Split out because "the button is pressable" and "the press
+/// will work" have to be the same condition — a modal that offers a press it knows will be refused
+/// is a modal that teaches people to press twice.
+fn ready_to_submit(cost: Option<&protocol::DraftCost>) -> bool {
+    cost.is_some_and(|cost| !cost.approval.trim().is_empty())
+}
+
 /// The cost and the balance as one sentence, because they are one question.
 ///
 /// `available` and never `granted`: submitting moves credits to `pending` immediately, so the grant
@@ -13420,11 +13429,9 @@ impl Workbench {
             let experiment = &view.experiments[at];
             let (_, _, accent) = self.node_colours(experiment);
             let belief = match (experiment.prior, experiment.posterior) {
-                (Some(prior), Some(posterior)) => format!(
-                    "{} → {}",
-                    prior.label.label(),
-                    posterior.label.label()
-                ),
+                (Some(prior), Some(posterior)) => {
+                    format!("{} → {}", prior.name(), posterior.name())
+                }
                 _ => String::new(),
             };
             let score = match experiment.surprise {
@@ -13522,13 +13529,9 @@ impl Workbench {
             .overflow_y_scroll();
 
         let shift = match (experiment.prior, experiment.posterior) {
-            (Some(prior), Some(posterior)) => format!(
-                "{} ({:.3}) → {} ({:.3})",
-                prior.label.label(),
-                prior.mean,
-                posterior.label.label(),
-                posterior.mean
-            ),
+            (Some(prior), Some(posterior)) => {
+                format!("{} → {}", prior.describe(), posterior.describe())
+            }
             _ => "no belief recorded".to_string(),
         };
         detail = detail.child(
@@ -13798,11 +13801,26 @@ impl Workbench {
         let experiments = approval.experiments;
         let kind = approval.draft.name.clone();
         let intent = self.intent_field.read(cx).text().trim().to_string();
+        // The token the draft lookup issued. Without it the submit is refused — which is the point,
+        // and also why a modal opened before the lookup answered cannot be pressed (§252).
+        let Some(approval) = approval
+            .cost
+            .as_ref()
+            .map(|cost| cost.approval.clone())
+            .filter(|token| !token.is_empty())
+        else {
+            approval.submitting = false;
+            approval.error = Some(
+                "still checking the cost with the service — try again in a moment".to_string(),
+            );
+            cx.notify();
+            return;
+        };
         tracing::info!(run = %run_id, experiments, "approving a discovery run");
 
         let mut answer = self
             .sidecar
-            .submit_discovery(run_id.clone(), experiments, intent);
+            .submit_discovery(run_id.clone(), approval, experiments, intent);
         cx.spawn(async move |workbench, cx| {
             if let Some(outcome) = answer.next().await {
                 let _ = workbench.update(cx, |workbench, cx| {
@@ -14016,7 +14034,13 @@ impl Workbench {
                         // Not while a press is in flight, and not for a budget the balance cannot
                         // cover: the service would refuse it, and letting someone press a button
                         // that fails is worse than not offering it.
-                        .disabled(approval.submitting || over_budget)
+                        // Unpressable until the token is in hand. A press that could only fail is
+                        // worse than a button that says "not yet" by being disabled (§252).
+                        .disabled(
+                            approval.submitting
+                                || over_budget
+                                || !ready_to_submit(approval.cost.as_ref()),
+                        )
                         .on_click(cx.listener(|workbench, _event, _window, cx| {
                             workbench.approve_discovery(cx);
                         })),
@@ -14025,6 +14049,8 @@ impl Workbench {
             .footer(
                 ui::Label::new(if over_budget {
                     "That is more than the credits left.".to_string()
+                } else if !ready_to_submit(approval.cost.as_ref()) {
+                    "Checking the cost with the service…".to_string()
                 } else {
                     "One credit per experiment. Nothing is spent until you press.".to_string()
                 })
@@ -17906,6 +17932,28 @@ mod tests {
         // No balance yet: say the rate rather than implying a number nobody confirmed.
         assert_eq!(cost_line(15, None), "15 experiments · one credit each");
         assert!(!cost_line(15, Some(495)).contains("500"), "the grant is not the balance");
+    }
+
+    /// §252: the press must be impossible, not merely doomed, until the token is in hand.
+    #[test]
+    fn the_gate_cannot_be_pressed_without_an_approval_token() {
+        assert!(!ready_to_submit(None), "no lookup has answered yet");
+
+        let mut cost = protocol::DraftCost {
+            approval: String::new(),
+            experiments: 15,
+            available: Some(495),
+            intent: "steer it".into(),
+        };
+        assert!(!ready_to_submit(Some(&cost)), "answered, but with no token");
+        cost.approval = "   ".into();
+        assert!(!ready_to_submit(Some(&cost)), "whitespace is not a token");
+        cost.approval = "tok_abc".into();
+        assert!(ready_to_submit(Some(&cost)));
+
+        // The token is orthogonal to affordability: both have to hold.
+        assert!(affordable(15, cost.available));
+        assert!(!affordable(500, cost.available));
     }
 }
 

@@ -11,6 +11,7 @@ from backend.middleware.dataverse_first import (
     SearchResultsFile,
 )
 from backend.middleware.library_first import RunBeforeReporting
+from backend.middleware.no_spending import NoSpendingWithoutApproval
 from backend.middleware.submit_first import (
     DraftBeforeReporting,
     SubmitBeforeReporting,
@@ -38,6 +39,7 @@ __all__ = [
     "ProjectSpineMiddleware",
     "RunBeforeReporting",
     "DraftBeforeReporting",
+    "NoSpendingWithoutApproval",
     "SubmitBeforeReporting",
     "TheorizeBeforeReporting",
     "SearchBeforeCiting",

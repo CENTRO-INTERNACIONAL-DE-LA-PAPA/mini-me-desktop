@@ -5,15 +5,24 @@ MCTS search over hypotheses it writes itself, each experiment executing code
 against an uploaded dataset and reporting how far the result moved a prior
 belief. The output is a tree of measured belief shifts.
 
-**Submitting is not a tool, and that is the whole design of this module.**
+**Submitting is not a tool, and that is most of the design of this module.**
 1 credit = 1 experiment, 1–500 per run, out of a grant this account cannot
 top up. The CLI's own `submit` asks for confirmation with `click.confirm`, which
 a sandbox with no TTY cannot answer — so the backend has to pass `-y`, and the
 guard has to live somewhere else. It lives in the desktop app: the agent can only
 ever *draft* a run (`draft_discovery_run` — create, upload, save metadata, all
 free), and `submit_run` is a plain function reachable only from the route the
-approval modal posts to. There is no code path from a model decision to a spent
-credit.
+approval modal posts to. There is no *tool* a model can call that spends a credit.
+
+**Which is not the same as "no path", and a review found the difference.**
+`execute` is a general shell every agent keeps, `ASTA_TOKEN` is injected into
+every command it runs, and `asta autodiscovery submit <id> -y` is a shell command
+— so with `approve_execute = false` a model could have spent the whole grant with
+no press at all. `middleware/no_spending.py` refuses those commands now, the route
+requires a one-shot token the app issues when the modal opens, and `submit_run`
+re-reads the budget before spending. None of that is airtight against a model
+actively working around it; all of it closes the path a confused one would take.
+The residual is written down in docs §252 rather than claimed away.
 
 Every field name here was read off a captured response, not the documentation.
 The probe in docs §247 found nine places where the documented shape was wrong or
@@ -55,8 +64,38 @@ DEFAULT_EXPERIMENTS = 15
 MIN_EXPERIMENTS = 1
 MAX_EXPERIMENTS = 500
 
-#: Sandbox path the drafted metadata is written to before `--file` reads it.
-_METADATA_PATH = "/tmp/asta-autodiscovery-metadata.json"
+#: Filename the drafted metadata is staged under, **inside the working directory**.
+#:
+#: Not `/tmp`, and that was a real failure rather than a style preference. The sandbox adapter's
+#: `_resolve_for_write` rewrites *any* write target outside `SANDBOX_WORK_DIR` to
+#: `<work_dir>/<basename>` — deliberately, because deepagents treats a leading `/` as the project
+#: root while the sandbox's `/` is a POSIX root the run cannot write to. So `awrite` reported
+#: success, the file landed in the work dir, and the shell command that followed read
+#: `/tmp/asta-autodiscovery-metadata.json` and found nothing:
+#:
+#:     Error: Invalid value for '--file' / '-f': Path '/tmp/asta-autodiscovery-metadata.json'
+#:     does not exist.
+#:
+#: A leading dot so it does not show up as one of the researcher's own files in the panel.
+_METADATA_NAME = ".asta-autodiscovery-metadata"
+
+
+def metadata_path(work_dir: str, run_id: str = "") -> str:
+    """Where the staged metadata lives, for whoever writes it *and* whoever reads it.
+
+    One function so the two cannot drift — the failure above was a write and a read naming
+    different paths.
+
+    **Per run**, which is the second half of that lesson. A single shared staging file is a race: a
+    modal showing 5 experiments for run A writes the file, a concurrent draft for run B overwrites
+    it with 500, and A's `metadata` command reads whatever is there and saves *B's* budget onto A.
+    Then A's "spend 5" press starts a 500-credit run. Found in review rather than in production
+    (§252), and the fix is to stop sharing the file.
+    """
+    base = (work_dir or ".").rstrip("/")
+    if run_id:
+        return f"{base}/{_METADATA_NAME}.{run_id}.json"
+    return f"{base}/{_METADATA_NAME}.json"
 
 #: Cap on how much of an experiment's narrative crosses back to the model. The full response is
 #: 8–12KB per experiment, dominated by `code` and `code_output`; a 100-experiment run is ~1MB and
@@ -79,12 +118,14 @@ def _build_upload_command(run_id: str, dataset_paths: list[str]) -> list[str]:
     return ["asta", "autodiscovery", "upload", run_id, *dataset_paths]
 
 
-def _build_metadata_command(run_id: str, metadata_path: str = _METADATA_PATH) -> list[str]:
+def _build_metadata_command(run_id: str, staged: str) -> list[str]:
     """`asta autodiscovery metadata RUNID --file PATH`.
 
-    `--file` is *required* by the CLI; there is no inline form.
+    `--file` is *required* by the CLI; there is no inline form. `staged` must come from
+    [`metadata_path`] — the path is not defaulted here, because a default is exactly how the write
+    and the read came to disagree.
     """
-    return ["asta", "autodiscovery", "metadata", run_id, "--file", metadata_path]
+    return ["asta", "autodiscovery", "metadata", run_id, "--file", staged]
 
 
 def _build_submit_command(run_id: str) -> list[str]:
@@ -287,14 +328,16 @@ def _sizes_shell(dataset_paths: list[str], work_dir: str = ".") -> str:
     return f"python3 -c {script} {args}"
 
 
-def _draft_shell(run_id: str, dataset_paths: list[str]) -> str:
-    """Upload the datasets, then save the metadata already written to `_METADATA_PATH`.
+def _draft_shell(run_id: str, dataset_paths: list[str], staged: str) -> str:
+    """Upload the datasets, then save the metadata already staged at `staged`.
 
     Chained with `&&`: metadata that names a file the upload did not deliver would configure a run
     against data that is not there, and the service validates the two against each other.
     """
     upload = " ".join(shlex.quote(part) for part in _build_upload_command(run_id, dataset_paths))
-    metadata = " ".join(shlex.quote(part) for part in _build_metadata_command(run_id))
+    metadata = " ".join(
+        shlex.quote(part) for part in _build_metadata_command(run_id, staged)
+    )
     return f"{upload} && {metadata}"
 
 
@@ -534,12 +577,13 @@ async def draft_run(
     awrite = getattr(sandbox, "awrite", None)
     if awrite is None:
         return {"error": "this sandbox cannot write the metadata file"}
-    written = await awrite(_METADATA_PATH, json.dumps(metadata, indent=2, ensure_ascii=False))
+    staged = metadata_path(work_dir, run_id)
+    written = await awrite(staged, json.dumps(metadata, indent=2, ensure_ascii=False))
     if getattr(written, "error", None):
         return {"error": f"could not write the run metadata: {written.error}"}
 
     uploads = [actual for _, actual, _ in present]
-    out = await _run(sandbox, _draft_shell(run_id, uploads), _DRAFT_TIMEOUT_S)
+    out = await _run(sandbox, _draft_shell(run_id, uploads, staged), _DRAFT_TIMEOUT_S)
     if "Metadata saved" not in out:
         logger.warning("autodiscovery draft run=%s did not confirm metadata: %.300s", run_id, out)
         return {
@@ -634,12 +678,13 @@ async def update_metadata(
     awrite = getattr(sandbox, "awrite", None)
     if awrite is None:
         return {}
-    written = await awrite(_METADATA_PATH, json.dumps(updated, indent=2, ensure_ascii=False))
+    staged = metadata_path(await _work_dir(sandbox), run_id)
+    written = await awrite(staged, json.dumps(updated, indent=2, ensure_ascii=False))
     if getattr(written, "error", None):
         logger.warning("could not stage edited metadata for %s: %s", run_id, written.error)
         return {}
     out = await _run(
-        sandbox, _json_shell(_build_metadata_command(run_id)), _STATUS_TIMEOUT_S
+        sandbox, _json_shell(_build_metadata_command(run_id, staged)), _STATUS_TIMEOUT_S
     )
     if "Metadata saved" not in (out or ""):
         logger.warning("edited metadata for %s did not save: %.200s", run_id, out)
@@ -650,7 +695,7 @@ async def update_metadata(
     return updated
 
 
-async def submit_run(sandbox: Any, run_id: str) -> dict[str, Any]:
+async def submit_run(sandbox: Any, run_id: str, *, approved: int | None = None) -> dict[str, Any]:
     """Spend the credits and start the run. **Only ever called for an approved draft.**
 
     Not a tool, not exported to the model, and not reachable from a turn: the single caller is the
@@ -659,8 +704,30 @@ async def submit_run(sandbox: Any, run_id: str) -> dict[str, Any]:
     """
     if not is_valid_run_id(run_id):
         return {"error": "not a run id"}
+
+    # **Read back what will actually be charged.** The researcher approved a number; between their
+    # press and this call another client, another app instance or a concurrent draft could have
+    # changed the run's stored budget. Verifying here rather than trusting the earlier save closes
+    # that window, and it costs one cheap request on a call that spends money (§252).
+    if approved is not None:
+        stored = await read_metadata(sandbox, run_id)
+        actual = stored.get("n_experiments")
+        if actual != approved:
+            logger.warning(
+                "refusing to submit run=%s: approved %s experiments, service holds %s",
+                run_id,
+                approved,
+                actual,
+            )
+            return {
+                "error": (
+                    f"this run is now configured for {actual} experiments, not the {approved} "
+                    "you approved — nothing was submitted. Open it again to approve the new number."
+                )
+            }
+
     out = await _run(
-        sandbox, _json_shell(_build_submit_command(run_id)) , _SUBMIT_TIMEOUT_S
+        sandbox, _json_shell(_build_submit_command(run_id)), _SUBMIT_TIMEOUT_S
     )
     text = out or ""
     if "Submitted" not in text:
