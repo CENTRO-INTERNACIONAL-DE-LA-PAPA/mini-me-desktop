@@ -359,6 +359,9 @@ async def discovery_draft(request: Request) -> Response:
         # `awaiting_approval` indefinitely, and re-offering the gate for a run already finished is
         # worse than not offering it (§258).
         started = await already_submitted(adapter, run_id)
+        # The run's real state, so a caller adopting an already-approved run shows what it is
+        # rather than assuming "running" and flickering to "completed" on the first poll (§260).
+        polled = await poll_discovery_status(adapter, run_id) if started else {}
     if not metadata:
         return JSONResponse({"error": "no such drafted run"}, status_code=404)
     # `available` already nets off runs in flight; the others are for context only.
@@ -372,6 +375,7 @@ async def discovery_draft(request: Request) -> Response:
             # `true` when the service says this run is past `CREATED`. The gate must not be offered
             # for it, and the caller adopts it as a running job instead.
             "submitted": bool(started),
+            "status": str(polled.get("status") or "") if started else "",
             # The token the modal must hand back. Issued here because opening the modal is the only
             # thing in this app that legitimately precedes a press. Not issued at all for a run that
             # has already started — there is nothing left to authorise.
@@ -511,8 +515,14 @@ async def discovery_figures(request: Request) -> Response:
         return JSONResponse({"status": "unavailable"})
 
     async with asta_token_scope(_request_user_id(request)):
-        paths = await fetch_experiment_figures(adapter, run_id, experiment_id)
-    return JSONResponse({"run_id": run_id, "experiment_id": experiment_id, "figures": paths})
+        outcome = await fetch_experiment_figures(adapter, run_id, experiment_id)
+    # An error is a 502 rather than an empty list, so the caller does not cache a failed fetch as
+    # "this experiment drew nothing" (§260).
+    if outcome.get("error"):
+        return JSONResponse(
+            {"run_id": run_id, "experiment_id": experiment_id, **outcome}, status_code=502
+        )
+    return JSONResponse({"run_id": run_id, "experiment_id": experiment_id, **outcome})
 
 
 async def delete_sandbox(request: Request) -> Response:
