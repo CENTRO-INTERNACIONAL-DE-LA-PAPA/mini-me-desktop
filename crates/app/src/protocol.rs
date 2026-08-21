@@ -1296,7 +1296,7 @@ impl LangGraphClient {
         run_id: &str,
         experiment_id: &str,
     ) -> Result<Vec<std::path::PathBuf>> {
-        let value: Value = self
+        let resp = self
             .http
             .post(format!(
                 "{}/discovery/{}/{}/experiments/{}/figures",
@@ -1307,17 +1307,21 @@ impl LangGraphClient {
             ))
             .send()
             .await
-            .context("asking for an experiment's figures failed")?
-            .error_for_status()
-            .context("the discovery figures route returned an error status")?
-            .json()
-            .await
-            .context("could not decode the discovery figures response")?;
+            .context("asking for an experiment's figures failed")?;
+        // **The body, before the status.** `error_for_status()` here discarded exactly the thing
+        // §260 built the route to say: a 502 carries `{"error": reason}`, and reporting
+        // "502 Bad Gateway" instead of the reason is the third time this session that a failure's
+        // own words were thrown away by the code meant to relay them (§261).
+        let status = resp.status();
+        let value: Value = resp.json().await.unwrap_or_else(|_| Value::Null);
         if let Some(error) = value.get("error").and_then(Value::as_str) {
             // A failed fetch is not an experiment without plots. The caller caches the second and
             // retries the first, so returning an empty list here would turn a transient error into
             // a permanent "this one drew none" (§260).
             anyhow::bail!(error.to_string());
+        }
+        if !status.is_success() {
+            anyhow::bail!("the figures route returned {status} with no reason attached");
         }
         Ok(value
             .get("figures")
@@ -1356,6 +1360,27 @@ impl LangGraphClient {
         experiments: u32,
         status: &str,
     ) -> Result<()> {
+        self.record_discovery(thread_id, run_id, Some(experiments), status)
+            .await
+    }
+
+    /// Record a status change alone, with no claim about the budget.
+    pub async fn discovery_status_changed(
+        &self,
+        thread_id: &str,
+        run_id: &str,
+        status: &str,
+    ) -> Result<()> {
+        self.record_discovery(thread_id, run_id, None, status).await
+    }
+
+    async fn record_discovery(
+        &self,
+        thread_id: &str,
+        run_id: &str,
+        experiments: Option<u32>,
+        status: &str,
+    ) -> Result<()> {
         self.http
             .post(format!(
                 "{}/threads/{}/state",
@@ -1365,14 +1390,17 @@ impl LangGraphClient {
             .json(&serde_json::json!({
                 "values": {
                     "artifacts": {
-                        "discoveries": [{
-                            "run_id": run_id,
-                            // Whatever it actually is. Writing "running" for a run that has
-                            // finished means the next launch shows a spinner for a completed job
-                            // until a poll corrects it (§260).
-                            "status": status,
-                            "n_experiments": experiments,
-                        }]
+                        // Only the fields being claimed. `_merge_artifacts` merges a partial row
+                        // over the stored one, so omitting the budget leaves the stored budget
+                        // alone rather than overwriting it with a guess.
+                        "discoveries": [experiments.map_or_else(
+                            || serde_json::json!({"run_id": run_id, "status": status}),
+                            |count| serde_json::json!({
+                                "run_id": run_id,
+                                "status": status,
+                                "n_experiments": count,
+                            }),
+                        )]
                     }
                 }
             }))

@@ -3702,6 +3702,18 @@ impl Workbench {
                         } else {
                             format!("{label} ended: {}", update.status)
                         };
+                        // **Write the ending down, not just the beginning.** §258 recorded
+                        // `running` at approval — correctly, it was — and nothing ever recorded
+                        // the end. So every launch after read `running` from the artifact, drew
+                        // `running · usually 25–40 min` for a run that had finished hours before,
+                        // and corrected it on the first poll: the same flicker, forever (§261).
+                        if update.kind == protocol::JobKind::Discovery {
+                            workbench.record_discovery_status(
+                                update.task_id.clone(),
+                                &update.status,
+                                cx,
+                            );
+                        }
                         // The route wrote the outcome into the sandbox as it reported it,
                         // so the spine and outputs have something new to show.
                         workbench.refresh_project(cx);
@@ -13252,6 +13264,26 @@ impl Workbench {
     /// **Two call sites, one per frame.** `artifacts_contents` renders this either from its
     /// no-spine early return or from the full panel, never both, so the fixed element ids below
     /// cannot collide the way two sibling `datasets-heading`s once did.
+    /// Record a discovery run's status when a poll observes it changing.
+    ///
+    /// Sends no budget: `n_experiments` was written at approval and is not this call's business —
+    /// a status update that also restated the budget would be a second chance to get it wrong.
+    fn record_discovery_status(&mut self, run_id: String, status: &str, cx: &mut Context<Self>) {
+        let mut answer = self
+            .sidecar
+            .discovery_status_changed(run_id.clone(), status.to_string());
+        cx.spawn(async move |_workbench, _cx| {
+            if let Some(Err(error)) = answer.next().await {
+                tracing::warn!(
+                    %error,
+                    run = %run_id,
+                    "could not record a discovery run's status; the row will be corrected by a poll"
+                );
+            }
+        })
+        .detach();
+    }
+
     /// Tell the conversation's own record that an approved run is now running.
     ///
     /// Fire-and-forget with a warning on failure: the run is already paying for itself on Asta and
@@ -13286,6 +13318,39 @@ impl Workbench {
     /// here; they live only in the per-experiment response and are worth ~458KB each.
     fn open_discovery(&mut self, run_id: String, name: String, cx: &mut Context<Self>) {
         tracing::info!(run = %run_id, "opening a discovery run");
+        // **Ours first.** The poll route writes `discovery/<run_id>.json` into this conversation's
+        // folder the moment a run finishes, because the service forgets its datasets after a week
+        // (§247). So a finished run is already on disk, and asking the service again on every open
+        // was a wait for something we owned (§261).
+        let stored = self
+            .thread_workspace()
+            .and_then(|folder| workspace::discovery_record(&folder, &run_id));
+        if let Some(record) = stored {
+            let experiments = discovery::decode_experiments(&record);
+            if !experiments.is_empty() {
+                tracing::info!(
+                    run = %run_id,
+                    experiments = experiments.len(),
+                    "read a discovery run from this conversation's folder"
+                );
+                self.discovery_open = Some(DiscoveryView {
+                    run_id,
+                    name,
+                    experiments,
+                    selected: None,
+                    figures: std::collections::HashMap::new(),
+                    fetching: None,
+                    loading: false,
+                    // The file only exists once the run reached a terminal state, so its presence
+                    // *is* the completeness — no need to ask.
+                    complete: true,
+                    error: None,
+                });
+                cx.notify();
+                return;
+            }
+        }
+
         self.discovery_open = Some(DiscoveryView {
             run_id: run_id.clone(),
             name,
