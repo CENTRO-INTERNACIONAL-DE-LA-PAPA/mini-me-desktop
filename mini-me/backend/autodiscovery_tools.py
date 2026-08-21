@@ -401,7 +401,16 @@ def _loud_shell(argv: list[str]) -> str:
 #: Apostrophe-free on purpose: the whole script is `shlex.quote`d into a single-quoted shell string.
 _FIGURES_PY = """
 import base64, json, os, sys
-run_dir, payload = sys.argv[1], sys.argv[2]
+run_dir, source = sys.argv[1], sys.argv[2]
+# Read from a file, never from an argument. The response is ~458KB and Linux caps a *single*
+# argument at MAX_ARG_STRLEN — 32 pages, 128KB — regardless of how much ARG_MAX allows in total,
+# so passing it on the command line failed with "Argument list too long" every time (§262).
+try:
+    with open(source, encoding="utf-8", errors="replace") as handle:
+        payload = handle.read()
+except Exception as exc:
+    print(json.dumps({"ok": False, "reason": "could not read the fetched response: %s" % exc}))
+    raise SystemExit(0)
 # The fetch keeps stderr, so the payload may carry a warning or a Usage: line before any JSON.
 # Everything from the first brace is the response; nothing before it is.
 brace = payload.find(chr(123))
@@ -450,16 +459,23 @@ def _figures_shell(run_id: str, experiment_id: str, run_dir: str) -> str:
     an experiment with no figures — indistinguishable from one that genuinely drew none, and the
     app then cached that as an answer (§260).
 
-    The payload is passed as an argument rather than piped. The previous form piped it *and* read
-    `$(cat)` in the same command, so two readers raced for one stdin; it happened to work, which is
-    the worst way for something like that to behave.
+    **And the response goes through a file, not an argument.** Linux caps a single argument at
+    `MAX_ARG_STRLEN` — 32 pages, 128KB — independently of `ARG_MAX`, and the response is ~458KB. So
+    both earlier forms failed identically with `python3: Argument list too long`: the first read it
+    via `"$(cat)"`, the second passed `"$OUT"`. A file has no such limit, and the staging file is
+    per experiment so two open at once cannot read each other's response (§262).
     """
     fetch = " ".join(
         shlex.quote(part) for part in _build_experiment_command(run_id, experiment_id)
     )
     script = shlex.quote(_FIGURES_PY)
     target = shlex.quote(f"{run_dir}/{experiment_id}")
-    return f'OUT=$({fetch} 2>&1); python3 -c {script} {target} "$OUT"'
+    # Per experiment, so two open at once cannot read each other's response, and removed after.
+    staged = shlex.quote(f"{run_dir}/.figures-{experiment_id}.json")
+    return (
+        f"mkdir -p {shlex.quote(run_dir)} && {fetch} > {staged} 2>&1; "
+        f"python3 -c {script} {target} {staged}; rm -f {staged}"
+    )
 
 
 def _decode_figures(output: str) -> tuple[list[str], str | None]:

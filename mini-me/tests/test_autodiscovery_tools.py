@@ -21,6 +21,7 @@ import json
 import os
 import shlex
 import subprocess
+import sys
 import tempfile
 
 import pytest
@@ -499,47 +500,105 @@ def test_figures_are_fetched_per_experiment_and_never_by_the_poll():
     ), poll_sandbox.commands
 
 
-def test_the_figure_decoder_prefers_png_and_survives_a_bundle_it_cannot_read():
-    """`rich_outputs` carries the same figure four ways; only the PNG is wanted."""
-    import base64, subprocess, sys, tempfile, os
+def test_a_real_sized_response_survives_the_shell():
+    """§262: the bug a small fixture could never find.
 
-    png = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"x" * 200).decode()
-    payload = json.dumps(
-        {"experiment": {"rich_outputs": [
-            {"image/png": png, "image/jpeg": "not base64 at all", "text/plain": "<Figure>"},
-            {"text/plain": "no image here"},
-            "not even a dict",
-        ]}}
-    )
+    `rich_outputs` is ~458KB for one experiment, and Linux caps a *single* argument at
+    `MAX_ARG_STRLEN` — 32 pages, 128KB — independently of `ARG_MAX`. So passing the response on the
+    command line failed with `python3: Argument list too long` on every real experiment, while the
+    400-byte fixture in the test below passed happily.
+
+    This runs the actual command through a real shell with a payload the real size, which is the
+    only version of this test that means anything.
+    """
+    import base64
+    import os
+    import subprocess
+    import tempfile
+
+    # A PNG big enough that its base64 alone clears the per-argument limit twice over.
+    png = base64.b64encode(b"\x89PNG\r\n\x1a\n" + os.urandom(340_000)).decode()
+    assert len(png) > 400_000, "the fixture has to be the size that broke it"
+    payload = json.dumps({"experiment": {"rich_outputs": [{"image/png": png}]}})
+
     with tempfile.TemporaryDirectory() as work:
+        run_dir = f"{work}/discovery/run"
+        shell = _figures_shell(_RUN, "node_2_0", run_dir)
+        # Stand in for the CLI with something that emits the payload from a file, as it would.
+        os.makedirs(run_dir, exist_ok=True)
+        with open(f"{work}/response.json", "w") as handle:
+            handle.write(payload)
+        stub = shell.replace(
+            f"asta autodiscovery experiment {_RUN} node_2_0 --format json",
+            f"cat {work}/response.json",
+        )
+        out = subprocess.run(["bash", "-c", stub], capture_output=True, text=True, timeout=120)
+        assert "Argument list too long" not in (out.stderr + out.stdout), out.stderr[:300]
+        answered = json.loads(out.stdout)
+        assert answered["ok"] is True, answered
+        assert answered["figures"] == ["figure-01.png"]
+        written = f"{run_dir}/node_2_0/figure-01.png"
+        assert os.path.getsize(written) > 300_000
+        # The staging file is removed, so a conversation folder does not accumulate them.
+        assert not os.path.exists(f"{run_dir}/.figures-node_2_0.json")
+
+
+def test_the_figure_decoder_prefers_png_and_survives_a_bundle_it_cannot_read():
+    """`rich_outputs` carries the same figure four ways; only the PNG is wanted.
+
+    The decoder takes a *path*, not the payload — see §262. These write the fixture to a file the
+    way the shell does.
+    """
+    import base64
+    import os
+    import subprocess
+    import tempfile
+
+    def decode(payload: str, work: str) -> dict:
+        source = os.path.join(work, "response.json")
+        with open(source, "w", encoding="utf-8") as handle:
+            handle.write(payload)
         out = subprocess.run(
-            [sys.executable, "-c", _FIGURES_PY, f"{work}/node_2_0", payload],
+            [sys.executable, "-c", _FIGURES_PY, f"{work}/node_2_0", source],
             capture_output=True, text=True, timeout=60,
         )
         assert out.returncode == 0, out.stderr
-        answered = json.loads(out.stdout)
+        return json.loads(out.stdout)
+
+    png = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"x" * 200).decode()
+    with tempfile.TemporaryDirectory() as work:
+        answered = decode(
+            json.dumps({"experiment": {"rich_outputs": [
+                {"image/png": png, "image/jpeg": "not base64 at all", "text/plain": "<Figure>"},
+                {"text/plain": "no image here"},
+                "not even a dict",
+            ]}}),
+            work,
+        )
         assert answered["ok"] is True
         assert answered["figures"] == ["figure-01.png"]
         assert os.path.isfile(f"{work}/node_2_0/figure-01.png")
 
     # A payload that is not a response at all reports why rather than reporting no figures.
     with tempfile.TemporaryDirectory() as work:
-        out = subprocess.run(
-            [sys.executable, "-c", _FIGURES_PY, f"{work}/node_2_0", "Usage: asta autodiscovery"],
-            capture_output=True, text=True, timeout=60,
-        )
-        refused = json.loads(out.stdout)
+        refused = decode("Usage: asta autodiscovery", work)
         assert refused["ok"] is False
         assert "Usage: asta autodiscovery" in refused["reason"]
 
-    # And a warning printed before the JSON — which keeping stderr makes likely — still parses.
+    # A warning printed before the JSON — which keeping stderr makes likely — still parses.
     with tempfile.TemporaryDirectory() as work:
         noisy = "WARNING stale token\n" + json.dumps({"experiment": {"rich_outputs": []}})
+        assert decode(noisy, work) == {"ok": True, "figures": [], "bundles": 0}
+
+    # And a response file the fetch never created says so rather than crashing.
+    with tempfile.TemporaryDirectory() as work:
         out = subprocess.run(
-            [sys.executable, "-c", _FIGURES_PY, f"{work}/node_2_0", noisy],
+            [sys.executable, "-c", _FIGURES_PY, f"{work}/node_2_0", f"{work}/absent.json"],
             capture_output=True, text=True, timeout=60,
         )
-        assert json.loads(out.stdout) == {"ok": True, "figures": [], "bundles": 0}
+        missing = json.loads(out.stdout)
+        assert missing["ok"] is False
+        assert "could not read the fetched response" in missing["reason"]
 
 
 def test_json_is_found_even_when_the_cli_prints_around_it():
