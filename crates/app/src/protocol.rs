@@ -1275,6 +1275,47 @@ impl LangGraphClient {
         })
     }
 
+    /// Decode one experiment's figures to disk, and return where they landed.
+    ///
+    /// The expensive call, and the only one that gets them: `rich_outputs` is `null` in the
+    /// experiments listing and populated only per experiment, at roughly 458KB a node (§247). So
+    /// this is made when a researcher opens an experiment and not before.
+    pub async fn discovery_figures(
+        &self,
+        thread_id: &str,
+        run_id: &str,
+        experiment_id: &str,
+    ) -> Result<Vec<std::path::PathBuf>> {
+        let value: Value = self
+            .http
+            .post(format!(
+                "{}/discovery/{}/{}/experiments/{}/figures",
+                self.base_url,
+                urlencode(thread_id),
+                urlencode(run_id),
+                urlencode(experiment_id)
+            ))
+            .send()
+            .await
+            .context("asking for an experiment's figures failed")?
+            .error_for_status()
+            .context("the discovery figures route returned an error status")?
+            .json()
+            .await
+            .context("could not decode the discovery figures response")?;
+        Ok(value
+            .get("figures")
+            .and_then(Value::as_array)
+            .map(|paths| {
+                paths
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(std::path::PathBuf::from)
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
     /// A discovery run's experiments, whole.
     ///
     /// The same route the poller uses, read for its body rather than its status. It returns every
