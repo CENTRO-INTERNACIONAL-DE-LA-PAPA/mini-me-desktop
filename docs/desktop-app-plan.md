@@ -14009,3 +14009,71 @@ otherwise indistinguishable from one that was drawn wrong.
 *Hundred-and-third: when a picture and a number disagree about how confident to look, draw both and
 say which is which. Folding the service's judgment into our own banding would have made a
 contradiction invisible instead of visible.*
+
+## 249. The run cannot see the researcher's machine (2026-08-21)
+
+First real AutoDiscovery run, and it failed in 14.8 seconds:
+
+> The AutoDiscovery draft did not complete successfully. … Status: failed during draft preparation.
+> The subagent did not return the failure reason.
+
+Two defects, and the second one hid the first.
+
+### The paths were on the wrong computer
+
+The datasets the subagent reported were:
+
+```
+/mnt/c/Users/LENOVO/Downloads/SOC_Covariables_TESTV5.csv
+/mnt/c/Users/LENOVO/Downloads/SOC_Covariables_TrainValV5.csv
+```
+
+The model did nothing wrong: those are exactly the paths the app put in the attached-files
+blockquote. `main.rs` builds a reference as `./<name>` for a file copied into the conversation
+folder and **as the absolute host path for one that was not** — and §236 established that a new
+conversation has no folder until the backend has issued a thread id, so the first turn of a fresh
+conversation carries absolute paths by construction.
+
+And the sandbox is not a view of the researcher's machine. `backend/sandbox.py` provisions an
+`AsyncSandbox` with its own root filesystem — `/root/.bashrc`, `/etc/profile.d`, a
+`SANDBOX_WORK_DIR` — and attachments arrive in it by being synced from the conversation folder.
+So `/mnt/c/Users/LENOVO/Downloads/…` is a real file on a laptop and nothing at all inside the run.
+The draft died on its first step, before creating anything.
+
+**This was never AutoDiscovery-specific.** `analyze_data` takes `dataset_paths` the same way from
+the same blockquote; §239's DataVoyager run worked because by then the files had been adopted and
+the paths were relative. The hole was there and this is the first thing to fall in it.
+
+The fix is to stop trusting the prefix. `_RESOLVE_PY` tries each path as given, then its **basename
+in the working directory**, then in the current directory — because the file the researcher attached
+is almost always sitting there under exactly that name, and refusing to look is refusing to find it.
+It returns `{given: {path, size}}`, so the caller can log that it substituted rather than doing it
+silently, and the upload reads the resolved path. When nothing resolves, the message names the path,
+the cause and the remedy instead of saying a file is missing.
+
+### And the reason was paraphrased away
+
+`draft_discovery_run` returned a sentence saying which files it could not find. What reached the
+researcher was *"the subagent did not return the failure reason"* — a summary of an actionable error,
+which is the worst possible thing to do to one.
+
+Three changes, because one would not have been enough:
+
+- `DiscoveryRunResults` gains a **`note`** field, so a failed draft carries its reason as data rather
+  than only as prose a model may compress.
+- The prompt now says **QUOTED VERBATIM** and *"Do not paraphrase"*, with the reason required in the
+  reply too.
+- `discoveries` becomes an artifact bucket. A *failed* draft is neither a `Draft` (nothing to
+  approve) nor a `Job` (nothing to poll), so until now it existed in the artifact bundle and nowhere
+  on screen. The panel is where a run that never started should still be visible.
+
+### One self-inflicted wound worth recording
+
+Writing that prompt, `C:\Users\...` went into a non-raw triple-quoted string, `\U` is a unicode
+escape, and **the entire `subagents.py` module stopped importing** — ten tests failed at once with a
+`SyntaxError`. Caught in seconds because the guardrail tests import the module, which is the second
+time in this project that the existing suite found a new mistake before its author did.
+
+*Hundred-and-fourth: a path is only meaningful next to the filesystem it came from. This app spans
+three — Windows, WSL and a container — and every path crossing between them is a defect waiting for
+the first turn of a new conversation.*

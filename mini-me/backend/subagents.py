@@ -522,6 +522,16 @@ AUTODISCOVERY_SYSTEM_PROMPT = """
     "Attached files" blockquote — pass those exact paths; never ask for a
     re-upload.
 
+    THE RUN CANNOT SEE THE RESEARCHER'S MACHINE. A discovery run executes in a
+    container with its own filesystem, so a path like
+    `/mnt/c/Users/.../Downloads/soc.csv`, or any Windows drive path, names a file on their
+    laptop and nothing the run can open. Prefer the relative `./name` form. If the
+    blockquote gives you an absolute host path anyway — which happens on the first
+    turn of a new conversation, before the file has been copied in — pass it as
+    given and let the tool resolve it; it will look for the filename in the
+    working directory. If it reports the file missing, say so plainly and tell the
+    researcher the file needs to be attached to this conversation. Do NOT retry.
+
     Handle the tool result:
       - Success → return a DiscoveryRunResults with `status="awaiting_approval"`,
         the `run_id`, the `name`, `domain`, `intent`, the `dataset_paths` and
@@ -529,8 +539,11 @@ AUTODISCOVERY_SYSTEM_PROMPT = """
         them to approve the budget in the app. Say plainly that nothing has run and
         nothing has been spent.
       - An error → return DiscoveryRunResults with `status="failed"`, the name, and
-        the reason. Do not retry a draft that failed on a missing file; say which
-        file was missing.
+        the tool's message QUOTED VERBATIM in `note`. Do not paraphrase it and do
+        not omit it: the reasons a draft fails are things the researcher can fix,
+        and "the draft did not complete successfully" tells them nothing. Repeat
+        the same reason in your reply to them. Do not retry a draft that failed on
+        a missing file.
 
     Provenance (`derived_from`): add `{"kind": "dataset", "ref": <the path or
     persistent id>}` for each dataset. Quote the ref verbatim so it matches the

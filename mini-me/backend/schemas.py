@@ -288,6 +288,14 @@ class DiscoveryRunResults(BaseModel):
             "'completed', 'failed', or 'canceled'."
         ),
     )
+    note: str = Field(
+        default="",
+        description=(
+            "When `status` is 'failed', the tool's reason QUOTED VERBATIM — not summarised. "
+            "A draft fails for reasons the researcher can act on (a file the run cannot see, a "
+            "budget out of range), and a paraphrase loses the part that says what to do."
+        ),
+    )
     derived_from: List[DerivedRef] = Field(
         default_factory=list,
         description=(
@@ -449,6 +457,7 @@ class DiscoveryRunArtifactPayload(TypedDict):
     dataset_paths: list[str]
     n_experiments: NotRequired[int]
     status: NotRequired[str]
+    note: NotRequired[str]
 
 
 class ProjectSuggestionPayload(TypedDict):
