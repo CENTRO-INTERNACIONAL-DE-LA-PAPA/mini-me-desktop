@@ -14728,3 +14728,57 @@ the worst way for something like that to behave, and it is now a plain argument.
 
 *Hundred-and-fifteenth: caching is a claim that the answer is final. Before caching an empty result,
 be certain the emptiness was an answer and not a silence.*
+
+## 261. Three answers, one of them mine three times (2026-08-21)
+
+*"I still see running when I open the thread. Also I noticed a delay when loading, why? Are we
+fetching it every time? why we dont just download it a show it? See the error when loading imgaes."*
+
+### The row still said running, because nothing wrote down the ending
+
+§260 fixed the *adoption* path — a run found already-approved is now adopted at its real status. But
+adoption only fires for a run whose artifact still says `awaiting_approval`, and §258 had already
+moved this one to `running`. Correctly: it *was* running when the button was pressed.
+
+Nothing ever recorded the end. So every launch read `running` from the artifact, drew
+`running · usually 25–40 min` for a run that had finished hours before, and corrected it on the first
+poll. The same flicker, permanently.
+
+The job watcher now writes the terminal status back. `discovery_status_changed` sends the status and
+**no budget**, because `n_experiments` was written at approval and a status update that also restated
+it would be a second chance to get it wrong — `_merge_artifacts` merges partial rows, so omitting a
+field leaves the stored one alone.
+
+### The delay was us asking for what we already had
+
+Fair question, and the answer is that we were. `persist_discovery_outputs` writes
+`discovery/<run_id>.json` into the conversation's folder the moment a run reaches a terminal state —
+it has to, because uploaded datasets expire after seven days and the service is not an archive
+(§247). So a finished run's experiments were already on disk while the app re-fetched them through
+the sandbox on every open.
+
+`open_discovery` now reads the local record first and only asks the service when there is no file —
+which is exactly the case of a run still producing, since the file appears when it stops. Its
+presence *is* the completeness, so that no longer needs asking either. The run id is checked before
+it becomes a path, because it arrives from an artifact and a `..` in it would read something else
+entirely.
+
+### And the figures error was thrown away by the code meant to relay it
+
+```
+could not read figures: the discovery figures route returned an error status:
+HTTP status server error (502 Bad Gateway) for url (…/experiments/node_2_0/figures)
+```
+
+§260 built the route to answer `{"error": reason}` with a 502 precisely so the reason would travel.
+Then `discovery_figures` called `.error_for_status()` **before** reading the body, so the reason was
+dropped and replaced with the status line.
+
+**Third time this session.** §249 was a model paraphrasing an error away; §255 was `2>/dev/null` on
+the call whose failure mattered; this is `error_for_status()` discarding a body written to be read.
+Three different mechanisms, one habit: relaying that something failed instead of what failed. The
+body is now read first and the status only used when the body says nothing.
+
+*Hundred-and-sixteenth: every layer that can summarise an error will, unless it is written not to.
+The fix is never a better message at the bottom — it is refusing to replace one anywhere in the
+middle.*
