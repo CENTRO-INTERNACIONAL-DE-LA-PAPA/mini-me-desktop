@@ -11,6 +11,8 @@ from langchain.agents.middleware import (
     ToolRetryMiddleware,
 )
 
+from backend.middleware.no_spending import NoSpendingWithoutApproval
+
 
 def _build_filesystem_permissions() -> list[FilesystemPermission]:
     """Return route-scoped filesystem permissions compatible with CompositeBackend.
@@ -90,6 +92,10 @@ def _build_pii_middleware() -> list[Any]:
 
 def _build_guardrail_middleware(external_tool_names: Sequence[str]) -> list[Any]:
     middleware: list[Any] = [
+        # First, so a refused command never reaches a retry wrapper that would run it again.
+        # Credits come out of a fixed grant and a prompt instruction is not a guard — see
+        # `middleware/no_spending.py`.
+        NoSpendingWithoutApproval(),
         *_build_pii_middleware(),
         ModelCallLimitMiddleware(run_limit=60, exit_behavior="end"),
         ToolCallLimitMiddleware(run_limit=150, exit_behavior="continue"),

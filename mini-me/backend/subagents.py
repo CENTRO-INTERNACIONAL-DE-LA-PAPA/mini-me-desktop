@@ -30,6 +30,7 @@ from backend.middleware import (
     KeepSources,
     RunBeforeReporting,
     DraftBeforeReporting,
+    NoSpendingWithoutApproval,
     SubmitBeforeReporting,
     TheorizeBeforeReporting,
     SearchBeforeCiting,
@@ -735,6 +736,12 @@ def _build_runtime_subagents(
             extra_middleware.append(DraftBeforeReporting())
         elif name == "research_planner":
             extra_middleware.append(ArtifactCaptureMiddleware("research_planner"))
+
+        # **Every subagent, not only the discovery one.** `execute` is kept for all of them and
+        # ASTA_TOKEN is injected into every command it runs, so any of them could spend the same
+        # credits. Attached here rather than in the discovery branch above precisely because the
+        # branch a reader would look in is the one that does not need it most.
+        extra_middleware.append(NoSpendingWithoutApproval())
 
         if name in DISK_WRITING_SUBAGENTS:
             extra_middleware.append(file_sync)

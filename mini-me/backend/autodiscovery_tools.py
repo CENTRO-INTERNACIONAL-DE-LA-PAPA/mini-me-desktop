@@ -5,15 +5,24 @@ MCTS search over hypotheses it writes itself, each experiment executing code
 against an uploaded dataset and reporting how far the result moved a prior
 belief. The output is a tree of measured belief shifts.
 
-**Submitting is not a tool, and that is the whole design of this module.**
+**Submitting is not a tool, and that is most of the design of this module.**
 1 credit = 1 experiment, 1–500 per run, out of a grant this account cannot
 top up. The CLI's own `submit` asks for confirmation with `click.confirm`, which
 a sandbox with no TTY cannot answer — so the backend has to pass `-y`, and the
 guard has to live somewhere else. It lives in the desktop app: the agent can only
 ever *draft* a run (`draft_discovery_run` — create, upload, save metadata, all
 free), and `submit_run` is a plain function reachable only from the route the
-approval modal posts to. There is no code path from a model decision to a spent
-credit.
+approval modal posts to. There is no *tool* a model can call that spends a credit.
+
+**Which is not the same as "no path", and a review found the difference.**
+`execute` is a general shell every agent keeps, `ASTA_TOKEN` is injected into
+every command it runs, and `asta autodiscovery submit <id> -y` is a shell command
+— so with `approve_execute = false` a model could have spent the whole grant with
+no press at all. `middleware/no_spending.py` refuses those commands now, the route
+requires a one-shot token the app issues when the modal opens, and `submit_run`
+re-reads the budget before spending. None of that is airtight against a model
+actively working around it; all of it closes the path a confused one would take.
+The residual is written down in docs §252 rather than claimed away.
 
 Every field name here was read off a captured response, not the documentation.
 The probe in docs §247 found nine places where the documented shape was wrong or
@@ -68,16 +77,25 @@ MAX_EXPERIMENTS = 500
 #:     does not exist.
 #:
 #: A leading dot so it does not show up as one of the researcher's own files in the panel.
-_METADATA_NAME = ".asta-autodiscovery-metadata.json"
+_METADATA_NAME = ".asta-autodiscovery-metadata"
 
 
-def metadata_path(work_dir: str) -> str:
+def metadata_path(work_dir: str, run_id: str = "") -> str:
     """Where the staged metadata lives, for whoever writes it *and* whoever reads it.
 
-    One function so the two cannot drift: the whole failure above was a write and a read naming
+    One function so the two cannot drift — the failure above was a write and a read naming
     different paths.
+
+    **Per run**, which is the second half of that lesson. A single shared staging file is a race: a
+    modal showing 5 experiments for run A writes the file, a concurrent draft for run B overwrites
+    it with 500, and A's `metadata` command reads whatever is there and saves *B's* budget onto A.
+    Then A's "spend 5" press starts a 500-credit run. Found in review rather than in production
+    (§252), and the fix is to stop sharing the file.
     """
-    return f"{(work_dir or '.').rstrip('/')}/{_METADATA_NAME}"
+    base = (work_dir or ".").rstrip("/")
+    if run_id:
+        return f"{base}/{_METADATA_NAME}.{run_id}.json"
+    return f"{base}/{_METADATA_NAME}.json"
 
 #: Cap on how much of an experiment's narrative crosses back to the model. The full response is
 #: 8–12KB per experiment, dominated by `code` and `code_output`; a 100-experiment run is ~1MB and
@@ -559,7 +577,7 @@ async def draft_run(
     awrite = getattr(sandbox, "awrite", None)
     if awrite is None:
         return {"error": "this sandbox cannot write the metadata file"}
-    staged = metadata_path(work_dir)
+    staged = metadata_path(work_dir, run_id)
     written = await awrite(staged, json.dumps(metadata, indent=2, ensure_ascii=False))
     if getattr(written, "error", None):
         return {"error": f"could not write the run metadata: {written.error}"}
@@ -660,7 +678,7 @@ async def update_metadata(
     awrite = getattr(sandbox, "awrite", None)
     if awrite is None:
         return {}
-    staged = metadata_path(await _work_dir(sandbox))
+    staged = metadata_path(await _work_dir(sandbox), run_id)
     written = await awrite(staged, json.dumps(updated, indent=2, ensure_ascii=False))
     if getattr(written, "error", None):
         logger.warning("could not stage edited metadata for %s: %s", run_id, written.error)
@@ -677,7 +695,7 @@ async def update_metadata(
     return updated
 
 
-async def submit_run(sandbox: Any, run_id: str) -> dict[str, Any]:
+async def submit_run(sandbox: Any, run_id: str, *, approved: int | None = None) -> dict[str, Any]:
     """Spend the credits and start the run. **Only ever called for an approved draft.**
 
     Not a tool, not exported to the model, and not reachable from a turn: the single caller is the
@@ -686,8 +704,30 @@ async def submit_run(sandbox: Any, run_id: str) -> dict[str, Any]:
     """
     if not is_valid_run_id(run_id):
         return {"error": "not a run id"}
+
+    # **Read back what will actually be charged.** The researcher approved a number; between their
+    # press and this call another client, another app instance or a concurrent draft could have
+    # changed the run's stored budget. Verifying here rather than trusting the earlier save closes
+    # that window, and it costs one cheap request on a call that spends money (§252).
+    if approved is not None:
+        stored = await read_metadata(sandbox, run_id)
+        actual = stored.get("n_experiments")
+        if actual != approved:
+            logger.warning(
+                "refusing to submit run=%s: approved %s experiments, service holds %s",
+                run_id,
+                approved,
+                actual,
+            )
+            return {
+                "error": (
+                    f"this run is now configured for {actual} experiments, not the {approved} "
+                    "you approved — nothing was submitted. Open it again to approve the new number."
+                )
+            }
+
     out = await _run(
-        sandbox, _json_shell(_build_submit_command(run_id)) , _SUBMIT_TIMEOUT_S
+        sandbox, _json_shell(_build_submit_command(run_id)), _SUBMIT_TIMEOUT_S
     )
     text = out or ""
     if "Submitted" not in text:

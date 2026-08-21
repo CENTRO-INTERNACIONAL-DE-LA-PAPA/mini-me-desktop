@@ -1233,6 +1233,11 @@ impl LangGraphClient {
             .context("could not decode the discovery draft response")?;
         let credits = value.get("credits");
         Ok(DraftCost {
+            approval: value
+                .get("approval")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
             experiments: value
                 .get("cost")
                 .and_then(Value::as_u64)
@@ -1290,6 +1295,7 @@ impl LangGraphClient {
         &self,
         thread_id: &str,
         run_id: &str,
+        approval: &str,
         experiments: u32,
         intent: &str,
     ) -> Result<()> {
@@ -1301,7 +1307,11 @@ impl LangGraphClient {
                 urlencode(thread_id),
                 urlencode(run_id)
             ))
-            .json(&serde_json::json!({"n_experiments": experiments, "intent": intent}))
+            .json(&serde_json::json!({
+                "approval": approval,
+                "n_experiments": experiments,
+                "intent": intent
+            }))
             .send()
             .await
             .context("submitting the discovery run failed")?;
@@ -2701,6 +2711,12 @@ pub struct Draft {
 /// What a drafted run will cost, against what is left to spend.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DraftCost {
+    /// The one-shot token that authorises submitting this run.
+    ///
+    /// Issued when the modal opens, because opening it is the only thing that legitimately precedes
+    /// a press. Without it the submit route accepted any POST that reached it — including a bare
+    /// `curl` and a form in a model-authored HTML page (§252).
+    pub approval: String,
     /// Experiments configured, which is also the price in credits.
     pub experiments: u32,
     /// Credits left, or `None` when the service would not say. A missing balance is shown as
