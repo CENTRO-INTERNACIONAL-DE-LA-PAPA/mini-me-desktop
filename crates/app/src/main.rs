@@ -13261,9 +13261,12 @@ impl Workbench {
         &mut self,
         run_id: String,
         experiments: u32,
+        status: &str,
         cx: &mut Context<Self>,
     ) {
-        let mut answer = self.sidecar.discovery_started(run_id.clone(), experiments);
+        let mut answer =
+            self.sidecar
+                .discovery_started(run_id.clone(), experiments, status.to_string());
         cx.spawn(async move |_workbench, _cx| {
             if let Some(Err(error)) = answer.next().await {
                 tracing::warn!(
@@ -13388,11 +13391,15 @@ impl Workbench {
                             view.figures.insert(experiment_id.clone(), paths);
                         }
                         Err(error) => {
+                            // Deliberately not recorded: an absent key means "ask again", and
+                            // caching a failure as an empty list would turn a transient error into
+                            // an experiment that permanently drew nothing (§260).
                             tracing::warn!(
                                 %error,
                                 experiment = %experiment_id,
                                 "could not decode an experiment's figures"
                             );
+                            view.error = Some(format!("could not read figures: {error}"));
                         }
                     }
                     cx.notify();
@@ -14017,13 +14024,21 @@ impl Workbench {
                         "a drafted run had already been approved; tracking it instead of asking"
                     );
                     workbench.declined.insert(draft.run_id.clone());
+                    // What the service says it *is*, not an assumption that it is running. A
+                    // finished run adopted as "running" showed "usually 25–40 min" until the first
+                    // poll corrected it, on a row somebody was already reading (§260).
+                    let status = if cost.status.is_empty() {
+                        "running".to_string()
+                    } else {
+                        cost.status.clone()
+                    };
                     workbench.track_job(
                         protocol::Job {
                             kind: protocol::JobKind::Discovery,
                             task_id: draft.run_id.clone(),
                             question: draft.name.clone(),
                             context_id: None,
-                            status: "running".to_string(),
+                            status: status.clone(),
                         },
                         cx,
                     );
@@ -14031,6 +14046,7 @@ impl Workbench {
                     workbench.record_discovery_started(
                         draft.run_id.clone(),
                         cost.experiments.max(1),
+                        &status,
                         cx,
                     );
                     cx.notify();
@@ -14153,7 +14169,12 @@ impl Workbench {
                             // artifact is written by a turn and approval is not a turn, so without
                             // this it says `awaiting_approval` forever and `decode_jobs` — which
                             // skips that by design — drops a run that is genuinely working (§258).
-                            workbench.record_discovery_started(run_id.clone(), experiments, cx);
+                            workbench.record_discovery_started(
+                                run_id.clone(),
+                                experiments,
+                                "running",
+                                cx,
+                            );
                         }
                         Err(error) => {
                             tracing::warn!(%error, run = %run_id, "a discovery submit failed");
@@ -18265,6 +18286,7 @@ mod tests {
         assert!(!ready_to_submit(None), "no lookup has answered yet");
 
         let mut cost = protocol::DraftCost {
+            status: String::new(),
             submitted: false,
             approval: String::new(),
             experiments: 15,
@@ -18284,6 +18306,7 @@ mod tests {
         // §258: a run the service says is already started issues no token at all, so the gate
         // cannot be pressed for it even if something managed to open one.
         let started = protocol::DraftCost {
+            status: "completed".into(),
             submitted: true,
             approval: String::new(),
             experiments: 5,
@@ -18347,6 +18370,24 @@ mod tests {
         );
         assert_eq!(reads(jobs), reads(tasks));
         assert!(reads(jobs) >= 2, "both the streaming and the opening path");
+    }
+
+    /// §260: a failed figure fetch must not be remembered as an experiment that drew nothing.
+    #[test]
+    fn a_failed_figure_fetch_is_not_an_answer() {
+        // The three answers the pane can hold, and the fourth state is *no key at all* — which is
+        // what a failure leaves behind, so the next open asks again.
+        let none: Option<&Vec<std::path::PathBuf>> = None;
+        assert_eq!(figure_state(none, false), Figures::Unread);
+        assert_eq!(figure_state(none, true), Figures::Fetching);
+        assert_eq!(figure_state(Some(&Vec::new()), false), Figures::Nothing);
+
+        // `Nothing` is cached and `Unread` is not, so the two must never be produced by the same
+        // input — which is the property that broke when a failure returned an empty list.
+        assert_ne!(
+            figure_state(Some(&Vec::new()), false),
+            figure_state(none, false)
+        );
     }
 }
 

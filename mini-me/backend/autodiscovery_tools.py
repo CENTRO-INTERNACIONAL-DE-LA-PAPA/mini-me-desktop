@@ -402,10 +402,20 @@ def _loud_shell(argv: list[str]) -> str:
 _FIGURES_PY = """
 import base64, json, os, sys
 run_dir, payload = sys.argv[1], sys.argv[2]
-try:
-    record = json.loads(payload)
-except Exception:
-    record = {}
+# The fetch keeps stderr, so the payload may carry a warning or a Usage: line before any JSON.
+# Everything from the first brace is the response; nothing before it is.
+brace = payload.find(chr(123))
+record = None
+if brace >= 0:
+    try:
+        record = json.loads(payload[brace:])
+    except Exception:
+        record = None
+if record is None:
+    # **Not the same as no figures.** A failed fetch and an experiment that drew nothing looked
+    # identical, so an auth error read as a plot that was never made (§260).
+    print(json.dumps({"ok": False, "reason": " ".join(payload.split())[:300]}))
+    raise SystemExit(0)
 experiment = record.get("experiment") or record
 bundles = experiment.get("rich_outputs") or []
 os.makedirs(run_dir, exist_ok=True)
@@ -425,24 +435,48 @@ for index, bundle in enumerate(bundles, start=1):
     with open(os.path.join(run_dir, name), "wb") as handle:
         handle.write(raw)
     written.append(name)
-print(json.dumps(written))
+print(json.dumps({"ok": True, "figures": written, "bundles": len(bundles)}))
 """
 
 
 def _figures_shell(run_id: str, experiment_id: str, run_dir: str) -> str:
-    """Fetch one experiment and decode its figures into `run_dir`, printing the names written.
+    """Fetch one experiment and decode its figures into `run_dir`, printing what happened.
 
-    The fetch and the decode are one command so the base64 stays inside the sandbox. Separated by
-    `;` rather than `&&` after the capture, so a decode still runs on a response the CLI wrote to
-    stdout alongside a non-zero exit.
+    The fetch and the decode are one command so the base64 — ~458KB a node — stays inside the
+    sandbox and only filenames cross back.
+
+    **Stderr is kept, and the decoder skips to the first brace.** `2>/dev/null` here meant a CLI
+    that printed `Usage:` or an auth error produced an empty payload, which the decoder reported as
+    an experiment with no figures — indistinguishable from one that genuinely drew none, and the
+    app then cached that as an answer (§260).
+
+    The payload is passed as an argument rather than piped. The previous form piped it *and* read
+    `$(cat)` in the same command, so two readers raced for one stdin; it happened to work, which is
+    the worst way for something like that to behave.
     """
-    fetch = _json_shell(_build_experiment_command(run_id, experiment_id))
+    fetch = " ".join(
+        shlex.quote(part) for part in _build_experiment_command(run_id, experiment_id)
+    )
     script = shlex.quote(_FIGURES_PY)
     target = shlex.quote(f"{run_dir}/{experiment_id}")
-    return (
-        f"OUT=$({fetch}); "
-        f"printf %s \"$OUT\" | python3 -c {script} {target} \"$(cat)\" 2>/dev/null"
-    )
+    return f'OUT=$({fetch} 2>&1); python3 -c {script} {target} "$OUT"'
+
+
+def _decode_figures(output: str) -> tuple[list[str], str | None]:
+    """Split the decoder's answer into `(names, failure)`.
+
+    `(names, None)` — including `([], None)` — is an answer. `([], reason)` is a failure, and the
+    caller must not cache it as "this experiment has no figures".
+    """
+    record = _extract_json(output)
+    if not isinstance(record, dict):
+        return [], " ".join((output or "").split())[:300] or "the command printed nothing"
+    if not record.get("ok"):
+        return [], str(record.get("reason") or "the service did not return this experiment")
+    names = record.get("figures")
+    if not isinstance(names, list):
+        return [], "the decoder returned no file list"
+    return [name for name in names if isinstance(name, str)], None
 
 
 async def _run(sandbox: Any, command: str, timeout: int) -> str:
@@ -1003,27 +1037,33 @@ async def persist_discovery_outputs(
     return written
 
 
-async def fetch_experiment_figures(sandbox: Any, run_id: str, experiment_id: str) -> list[str]:
+async def fetch_experiment_figures(
+    sandbox: Any, run_id: str, experiment_id: str
+) -> dict[str, Any]:
     """Decode one experiment's figures into `discovery/<run_id>/<experiment_id>/`.
 
     On demand and one experiment at a time, because this is the expensive call: the figures exist
     only in the per-experiment response and that response is ~458KB for a single node. The base64
     never leaves the sandbox — the decode runs there and only the filenames come back.
+
+    Returns `{"figures": [...]}`, or `{"figures": [], "error": reason}` when the fetch failed.
+    **An empty list with no error means this experiment drew nothing**, which the caller may cache;
+    an error means try again, and must not be cached as an answer (§260).
     """
     if not is_valid_run_id(run_id) or not is_valid_experiment_id(experiment_id):
-        return []
+        return {"figures": [], "error": "not a run or experiment id"}
     run_dir = f"{await _work_dir(sandbox)}/discovery/{run_id}"
     out = await _run(sandbox, _figures_shell(run_id, experiment_id, run_dir), _FIGURE_TIMEOUT_S)
-    names = _extract_json(out)
-    if not isinstance(names, list):
+    names, failure = _decode_figures(out)
+    if failure is not None:
         logger.warning(
-            "no figures decoded for run=%s experiment=%s from %d char(s)",
-            run_id,
-            experiment_id,
-            len(out or ""),
+            "could not read figures for run=%s experiment=%s: %s", run_id, experiment_id, failure
         )
-        return []
-    return [f"{run_dir}/{experiment_id}/{name}" for name in names if isinstance(name, str)]
+        return {"figures": [], "error": failure}
+    logger.info(
+        "decoded %d figure(s) for run=%s experiment=%s", len(names), run_id, experiment_id
+    )
+    return {"figures": [f"{run_dir}/{experiment_id}/{name}" for name in names]}
 
 
 # ---------------------------------------------------------------------------

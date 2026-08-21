@@ -470,9 +470,22 @@ def test_a_failed_run_still_records_what_happened():
 
 def test_figures_are_fetched_per_experiment_and_never_by_the_poll():
     """They exist only in the detail response, at ~458KB for one node."""
-    sandbox = _Sandbox([("autodiscovery experiment", json.dumps(["figure-01.png"]))])
-    paths = asyncio.run(fetch_experiment_figures(sandbox, _RUN, "node_2_0"))
-    assert paths == [f"/workspace/discovery/{_RUN}/node_2_0/figure-01.png"]
+    sandbox = _Sandbox(
+        [("autodiscovery experiment", json.dumps({"ok": True, "figures": ["figure-01.png"]}))]
+    )
+    outcome = asyncio.run(fetch_experiment_figures(sandbox, _RUN, "node_2_0"))
+    assert outcome == {"figures": [f"/workspace/discovery/{_RUN}/node_2_0/figure-01.png"]}
+
+    # §260: a failed fetch is an error, not an experiment that drew nothing — the app caches the
+    # second and retries the first, so conflating them turns an auth error into a missing plot.
+    broken = _Sandbox([("autodiscovery experiment", "Usage: asta autodiscovery experiment")])
+    failed = asyncio.run(fetch_experiment_figures(broken, _RUN, "node_2_0"))
+    assert failed["figures"] == []
+    assert "Usage: asta autodiscovery experiment" in failed["error"]
+
+    # And a genuine none is an answer with no error attached.
+    none = _Sandbox([("autodiscovery experiment", json.dumps({"ok": True, "figures": []}))])
+    assert asyncio.run(fetch_experiment_figures(none, _RUN, "node_2_0")) == {"figures": []}
     # A poll must not touch the expensive endpoint.
     poll_sandbox = _Sandbox(
         [
@@ -504,8 +517,29 @@ def test_the_figure_decoder_prefers_png_and_survives_a_bundle_it_cannot_read():
             capture_output=True, text=True, timeout=60,
         )
         assert out.returncode == 0, out.stderr
-        assert json.loads(out.stdout) == ["figure-01.png"]
+        answered = json.loads(out.stdout)
+        assert answered["ok"] is True
+        assert answered["figures"] == ["figure-01.png"]
         assert os.path.isfile(f"{work}/node_2_0/figure-01.png")
+
+    # A payload that is not a response at all reports why rather than reporting no figures.
+    with tempfile.TemporaryDirectory() as work:
+        out = subprocess.run(
+            [sys.executable, "-c", _FIGURES_PY, f"{work}/node_2_0", "Usage: asta autodiscovery"],
+            capture_output=True, text=True, timeout=60,
+        )
+        refused = json.loads(out.stdout)
+        assert refused["ok"] is False
+        assert "Usage: asta autodiscovery" in refused["reason"]
+
+    # And a warning printed before the JSON — which keeping stderr makes likely — still parses.
+    with tempfile.TemporaryDirectory() as work:
+        noisy = "WARNING stale token\n" + json.dumps({"experiment": {"rich_outputs": []}})
+        out = subprocess.run(
+            [sys.executable, "-c", _FIGURES_PY, f"{work}/node_2_0", noisy],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert json.loads(out.stdout) == {"ok": True, "figures": [], "bundles": 0}
 
 
 def test_json_is_found_even_when_the_cli_prints_around_it():
