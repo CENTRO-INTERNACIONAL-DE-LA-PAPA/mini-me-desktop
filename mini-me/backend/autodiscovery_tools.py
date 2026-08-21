@@ -244,20 +244,47 @@ def cost_of(metadata: dict[str, Any]) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _sizes_shell(dataset_paths: list[str]) -> str:
-    """Print `{path: size}` for the files that exist, as JSON.
+#: In-sandbox resolver for the dataset paths the model was given.
+#:
+#: **Why a resolver and not a `getsize`.** The sandbox is a container with its own filesystem, not
+#: a view of the researcher’s machine. An attachment reaches it by being synced from the
+#: conversation folder into the working directory — so a path like
+#: ``/mnt/c/Users/.../Downloads/soc.csv`` is a real file on their laptop and nothing at all in
+#: here. The app hands the model that absolute form whenever the file has not been copied into the
+#: conversation folder yet, which is the normal state of the first turn of a new conversation
+#: (§236): the folder does not exist until the backend has issued a thread id.
+#:
+#: So each path is tried as given, then by its basename in the working directory and in the
+#: current directory. The file the researcher attached is almost always sitting there under exactly
+#: that name, and failing on the prefix would be refusing to look in the one place it is.
+#:
+#: Reports where each one was found, so the caller can say so rather than silently substituting.
+#: Apostrophe-free: the whole script is `shlex.quote`d into a single-quoted shell string.
+_RESOLVE_PY = """
+# _RESOLVE marks this script in a sandbox transcript and in the test doubles that match on it.
+import json, os, sys
+work = sys.argv[1]
+found = {}
+for given in sys.argv[2:]:
+    name = os.path.basename(given)
+    for candidate in (given, os.path.join(work, name), name):
+        if candidate and os.path.isfile(candidate):
+            found[given] = {"path": os.path.abspath(candidate), "size": os.path.getsize(candidate)}
+            break
+print(json.dumps(found))
+"""
 
-    One round trip rather than one per file, and a missing file is simply absent from the result
-    instead of an error — `draft_run` reports which paths it could not find, which is more useful
-    to a researcher than a shell diagnostic.
+
+def _sizes_shell(dataset_paths: list[str], work_dir: str = ".") -> str:
+    """Resolve each dataset path and print `{given: {path, size}}` as JSON.
+
+    One round trip rather than one per file, and a path that resolves nowhere is simply absent
+    from the result instead of an error — `draft_run` reports which ones it could not find, and
+    where it looked, which is more useful to a researcher than a shell diagnostic.
     """
-    quoted = ", ".join(shlex.quote(path) for path in dataset_paths)
-    script = (
-        "import json,os;"
-        f"paths=[{quoted}];"
-        "print(json.dumps({p: os.path.getsize(p) for p in paths if os.path.isfile(p)}))"
-    )
-    return f"python3 -c {shlex.quote(script)}"
+    script = shlex.quote(_RESOLVE_PY)
+    args = " ".join(shlex.quote(part) for part in [work_dir, *dataset_paths])
+    return f"python3 -c {script} {args}"
 
 
 def _draft_shell(run_id: str, dataset_paths: list[str]) -> str:
@@ -439,16 +466,39 @@ async def draft_run(
     Returns `{"run_id", "metadata", "cost", "missing"}`, or `{"error"}`. Deliberately stops one
     call short of `submit`: everything here is free and reversible, and the next step is not.
     """
-    sizes_out = await _run(sandbox, _sizes_shell(dataset_paths), _STATUS_TIMEOUT_S)
-    sizes = _extract_json(sizes_out) or {}
-    if not isinstance(sizes, dict):
-        sizes = {}
-    missing = [path for path in dataset_paths if path not in sizes]
-    present = [path for path in dataset_paths if path in sizes]
+    work_dir = await _work_dir(sandbox)
+    resolved_out = await _run(sandbox, _sizes_shell(dataset_paths, work_dir), _STATUS_TIMEOUT_S)
+    resolved = _extract_json(resolved_out)
+    resolved = resolved if isinstance(resolved, dict) else {}
+    missing = [path for path in dataset_paths if path not in resolved]
+    # The path the upload will actually read, which may not be the one the model named — see
+    # `_RESOLVE_PY`. Kept in the order the caller gave them.
+    present = [
+        (given, resolved[given]["path"], int(resolved[given].get("size") or 0))
+        for given in dataset_paths
+        if given in resolved and isinstance(resolved.get(given), dict)
+    ]
+    for given, actual, _ in present:
+        if given != actual:
+            # Said out loud rather than silently substituted: the researcher attached a file and
+            # the model was told a path that only exists on their own machine.
+            logger.info("resolved discovery dataset %s to %s", given, actual)
     if not present:
+        # The most likely cause by far, and worth naming in the message rather than leaving a
+        # researcher to guess: the sandbox is a container, and a path under /mnt/c or C:\\ is on
+        # their laptop and nowhere the run can reach.
+        logger.warning(
+            "no discovery dataset resolved; looked for %s under %s",
+            ", ".join(dataset_paths),
+            work_dir,
+        )
         return {
             "error": (
-                "none of those dataset files exist in the sandbox: " + ", ".join(dataset_paths)
+                "none of those files exist in the sandbox. Looked for "
+                + ", ".join(dataset_paths)
+                + f" and for their filenames in {work_dir}. A path on the researcher's own "
+                "machine (anything under /mnt/c or C:) is not visible to a run — attach the file "
+                "to the conversation so it is copied in, then try again."
             ),
             "missing": missing,
         }
@@ -461,12 +511,12 @@ async def draft_run(
             intent=intent,
             datasets=[
                 {
-                    "path": path,
+                    "path": actual,
                     "description": dataset_description,
-                    "size": sizes.get(path, 0),
-                    "content_type": "text/csv" if path.lower().endswith(".csv") else None,
+                    "size": size,
+                    "content_type": "text/csv" if actual.lower().endswith(".csv") else None,
                 }
-                for path in present
+                for _, actual, size in present
             ],
             n_experiments=n_experiments,
         )
@@ -488,7 +538,8 @@ async def draft_run(
     if getattr(written, "error", None):
         return {"error": f"could not write the run metadata: {written.error}"}
 
-    out = await _run(sandbox, _draft_shell(run_id, present), _DRAFT_TIMEOUT_S)
+    uploads = [actual for _, actual, _ in present]
+    out = await _run(sandbox, _draft_shell(run_id, uploads), _DRAFT_TIMEOUT_S)
     if "Metadata saved" not in out:
         logger.warning("autodiscovery draft run=%s did not confirm metadata: %.300s", run_id, out)
         return {
@@ -497,10 +548,10 @@ async def draft_run(
         }
 
     logger.info(
-        "drafted a discovery run=%s experiments=%d datasets=%d",
+        "drafted a discovery run=%s experiments=%d datasets=%s",
         run_id,
         cost_of(metadata),
-        len(present),
+        ", ".join(uploads),
     )
     return {
         "run_id": run_id,
