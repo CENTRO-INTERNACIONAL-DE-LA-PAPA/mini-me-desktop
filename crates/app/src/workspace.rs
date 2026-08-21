@@ -94,6 +94,28 @@ pub fn remember_announced(ids: &[String]) {
     }
 }
 
+/// A finished discovery run's own record, written by the poll route into the conversation's folder.
+///
+/// **Read this before asking the service.** `persist_discovery_outputs` writes
+/// `discovery/<run_id>.json` the moment a run reaches a terminal state — it has to, because
+/// uploaded datasets expire after seven days and the service is not an archive (§247). So for a
+/// finished run the experiments are already on disk, and re-fetching them through the sandbox on
+/// every open was a delay for something we owned: *"Are we fetching it every time? why we dont just
+/// download it a show it?"* (§261).
+///
+/// `None` when the file is absent or unreadable, which is the ordinary case for a run still
+/// producing — its record does not exist yet. The caller falls back to the service.
+pub fn discovery_record(conversation: &std::path::Path, run_id: &str) -> Option<serde_json::Value> {
+    // The run id reaches this from an artifact, so it is checked rather than trusted: a path
+    // separator or a `..` in it would read a file from somewhere else entirely.
+    if run_id.is_empty() || run_id.contains(['/', '\\', '.']) {
+        return None;
+    }
+    let path = conversation.join("discovery").join(format!("{run_id}.json"));
+    let text = std::fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
 pub fn root() -> PathBuf {
     if let Some(dir) = std::env::var_os(WORKSPACE_ENV) {
         return PathBuf::from(dir);
@@ -1693,6 +1715,41 @@ mod authorship_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// §261: a finished run's experiments are already on disk, so opening it should not wait on
+    /// the service.
+    #[test]
+    fn a_finished_runs_record_is_read_from_the_conversations_own_folder() {
+        let dir = std::env::temp_dir().join(format!("minime-discovery-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("discovery")).expect("a temp dir");
+        let run = "8e5d2eaa-f067-4193-9400-d555e4607c41";
+        std::fs::write(
+            dir.join("discovery").join(format!("{run}.json")),
+            serde_json::json!({
+                "run_id": run,
+                "has_job_completed": true,
+                "experiments": [{"experiment_id": "node_2_0", "id_in_run": 1, "hypothesis": "h"}]
+            })
+            .to_string(),
+        )
+        .expect("write");
+
+        let record = discovery_record(&dir, run).expect("the stored run");
+        assert_eq!(record["run_id"], run);
+        assert_eq!(record["experiments"].as_array().map(Vec::len), Some(1));
+
+        // A run still producing has no file yet, which is how the caller knows to ask the service.
+        assert!(discovery_record(&dir, "11111111-2222-3333-4444-555555555555").is_none());
+
+        // The run id comes from an artifact, so it is checked rather than trusted: a traversal
+        // must not read a file from somewhere else.
+        for hostile in ["../../etc/passwd", "..", "a/b", "a.json", ""] {
+            assert!(discovery_record(&dir, hostile).is_none(), "{hostile}");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// §250: the banner reappeared every launch for a run that finished the day before.
     #[test]

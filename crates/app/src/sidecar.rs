@@ -1003,6 +1003,30 @@ impl Sidecar {
         rx
     }
 
+    /// Record a discovery run's status when a poll sees it change.
+    pub fn discovery_status_changed(
+        &self,
+        run_id: String,
+        status: String,
+    ) -> mpsc::UnboundedReceiver<Result<(), String>> {
+        let (tx, rx) = mpsc::unbounded();
+        let base_url = self.base_url.clone();
+        let thread = self.thread.clone();
+        self.runtime.spawn(async move {
+            let Some(thread_id) = thread.lock().expect("thread id mutex").clone() else {
+                let _ = tx.unbounded_send(Err("this conversation has no thread yet".into()));
+                return;
+            };
+            let client = LangGraphClient::new(base_url);
+            let outcome = client
+                .discovery_status_changed(&thread_id, &run_id, &status)
+                .await
+                .map_err(|error| format!("{error:#}"));
+            let _ = tx.unbounded_send(outcome);
+        });
+        rx
+    }
+
     /// Record an approved run as started, so it survives a reload as a job.
     pub fn discovery_started(
         &self,
