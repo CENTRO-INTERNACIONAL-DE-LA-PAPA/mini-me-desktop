@@ -14044,6 +14044,16 @@ The draft died on its first step, before creating anything.
 the same blockquote; §239's DataVoyager run worked because by then the files had been adopted and
 the paths were relative. The hole was there and this is the first thing to fall in it.
 
+> **Correction, from the log this section was written without (§251).** The diagnosis above is the
+> right *risk* and was the wrong *cause*. This researcher runs with `local_execution` on, so the
+> agent's commands execute in WSL rather than in the container — and `/mnt/c/...` resolves there.
+> The upload in fact succeeded: `Uploading SOC_Covariables_TrainValV5.csv... done (371300 bytes)`.
+> The draft died one step later for an unrelated reason. The resolver below is still worth having —
+> it is exactly right for the container case, which is the default — but it fixed a bug that had not
+> yet fired, and this section claimed a cause it had not checked. The claims recorder *was* right
+> and said so at the time: "autodiscovery used 2 file(s) from outside this conversation's folder,
+> which will not travel with it."
+
 The fix is to stop trusting the prefix. `_RESOLVE_PY` tries each path as given, then its **basename
 in the working directory**, then in the current directory — because the file the researcher attached
 is almost always sitting there under exactly that name, and refusing to look is refusing to find it.
@@ -14145,3 +14155,69 @@ Select-String -Path "$env:TEMP\mini-me-desktop-*.log" -Pattern discovery | Selec
 *Hundred-and-fifth: "it only appears once" is a claim about state that outlives the process, so it
 cannot be enforced by a flag that does not. An in-memory guard against a permanent condition is a
 guard against nothing.*
+
+## 251. A write and a read that named different paths (2026-08-21)
+
+The log §250 made reachable, on the first try:
+
+```
+minime_local: command failed (exit 2): asta autodiscovery upload f31c50d1-…
+  /mnt/c/Users/LENOVO/Downloads/SOC_Covariables_TrainValV5.csv … &&
+  asta autodiscovery metadata f31c50d1-… --file /tmp/asta-autodiscovery-metadata.json
+[stderr] Uploading SOC_Covariables_TrainValV5.csv... done (371300 bytes)
+[stderr] Error: Invalid value for '--file' / '-f':
+         Path '/tmp/asta-autodiscovery-metadata.json' does not exist.
+```
+
+Two things in there, and the first one corrects §249.
+
+### The paths were fine, and §249 guessed
+
+The upload **succeeded** — 371300 bytes of it. This researcher runs with `local_execution` on
+(`minime_local` in every log line), so the agent's commands run in WSL and `/mnt/c/...` resolves
+perfectly well. §249 saw host-looking paths, found the container's separate filesystem, and wrote
+down a cause it had not confirmed. The resolver it added is still the right thing for the default
+container case, and the claims recorder had already flagged the real risk — *"autodiscovery used 2
+file(s) from outside this conversation's folder, which will not travel with it"* — which is a
+portability problem, not the failure. §249 now carries the correction inline.
+
+### The actual bug, and it is documented behaviour I wrote straight past
+
+`backend/sandbox.py:_resolve_for_write` says exactly what it does:
+
+> Rewrite any write target outside `SANDBOX_WORK_DIR` to `<work_dir>/<basename>`.
+
+Deliberately, because deepagents treats a leading `/` as the project root while the sandbox's `/` is
+a POSIX root the run cannot write to. So `awrite("/tmp/asta-autodiscovery-metadata.json", …)` was
+silently relocated, **reported success**, and the shell command chained after it read the literal
+`/tmp` path and found nothing.
+
+Every other module already gets this right: `persist_analysis_outputs`, `persist_discovery_outputs`
+and the figure decoder all build their paths from `await sandbox.aget_work_dir()`. This one module
+had a `/tmp` constant hard-coded at the top, and a `--file` default pointing at it — so the write and
+the read each named a path independently, which is the only way they could disagree.
+
+Now one function, `metadata_path(work_dir)`, and **no default anywhere**: `_build_metadata_command`
+requires the staged path as an argument, because a default is precisely how these two drifted apart.
+The name gains a leading dot so a staging file does not appear among the researcher's own outputs.
+
+The test that pins it reproduces the adapter's rule in the double — anything written outside
+`/workspace/` gets moved into it — and then asserts the configure command reads the path that was
+actually written, with no `/tmp` in it.
+
+### And three warnings a boot that were mine
+
+```
+Unable to parse docstring from OpenAPI schema for route
+  /discovery/{thread_id}/{run_id}/submit (discovery_submit): mapping values are not allowed here
+```
+
+langgraph parses a route's docstring as YAML for its OpenAPI description, and a line whose first
+colon reads as a mapping key makes that fail. Harmless — it falls back to using the text as-is — but
+it is three warnings on every boot in a log a researcher has to read to find a real one, and §250
+was about exactly that. Two colons became dashes; the check is a two-line `yaml.safe_load` over each
+route docstring.
+
+*Hundred-and-sixth: a path stated in two places is a path that will eventually differ. The adapter
+even documented that it would rewrite mine, and the write still reported success — a silent
+relocation plus a literal read is a failure with no single line to blame.*

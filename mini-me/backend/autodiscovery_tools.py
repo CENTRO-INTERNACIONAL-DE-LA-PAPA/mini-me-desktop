@@ -55,8 +55,29 @@ DEFAULT_EXPERIMENTS = 15
 MIN_EXPERIMENTS = 1
 MAX_EXPERIMENTS = 500
 
-#: Sandbox path the drafted metadata is written to before `--file` reads it.
-_METADATA_PATH = "/tmp/asta-autodiscovery-metadata.json"
+#: Filename the drafted metadata is staged under, **inside the working directory**.
+#:
+#: Not `/tmp`, and that was a real failure rather than a style preference. The sandbox adapter's
+#: `_resolve_for_write` rewrites *any* write target outside `SANDBOX_WORK_DIR` to
+#: `<work_dir>/<basename>` — deliberately, because deepagents treats a leading `/` as the project
+#: root while the sandbox's `/` is a POSIX root the run cannot write to. So `awrite` reported
+#: success, the file landed in the work dir, and the shell command that followed read
+#: `/tmp/asta-autodiscovery-metadata.json` and found nothing:
+#:
+#:     Error: Invalid value for '--file' / '-f': Path '/tmp/asta-autodiscovery-metadata.json'
+#:     does not exist.
+#:
+#: A leading dot so it does not show up as one of the researcher's own files in the panel.
+_METADATA_NAME = ".asta-autodiscovery-metadata.json"
+
+
+def metadata_path(work_dir: str) -> str:
+    """Where the staged metadata lives, for whoever writes it *and* whoever reads it.
+
+    One function so the two cannot drift: the whole failure above was a write and a read naming
+    different paths.
+    """
+    return f"{(work_dir or '.').rstrip('/')}/{_METADATA_NAME}"
 
 #: Cap on how much of an experiment's narrative crosses back to the model. The full response is
 #: 8–12KB per experiment, dominated by `code` and `code_output`; a 100-experiment run is ~1MB and
@@ -79,12 +100,14 @@ def _build_upload_command(run_id: str, dataset_paths: list[str]) -> list[str]:
     return ["asta", "autodiscovery", "upload", run_id, *dataset_paths]
 
 
-def _build_metadata_command(run_id: str, metadata_path: str = _METADATA_PATH) -> list[str]:
+def _build_metadata_command(run_id: str, staged: str) -> list[str]:
     """`asta autodiscovery metadata RUNID --file PATH`.
 
-    `--file` is *required* by the CLI; there is no inline form.
+    `--file` is *required* by the CLI; there is no inline form. `staged` must come from
+    [`metadata_path`] — the path is not defaulted here, because a default is exactly how the write
+    and the read came to disagree.
     """
-    return ["asta", "autodiscovery", "metadata", run_id, "--file", metadata_path]
+    return ["asta", "autodiscovery", "metadata", run_id, "--file", staged]
 
 
 def _build_submit_command(run_id: str) -> list[str]:
@@ -287,14 +310,16 @@ def _sizes_shell(dataset_paths: list[str], work_dir: str = ".") -> str:
     return f"python3 -c {script} {args}"
 
 
-def _draft_shell(run_id: str, dataset_paths: list[str]) -> str:
-    """Upload the datasets, then save the metadata already written to `_METADATA_PATH`.
+def _draft_shell(run_id: str, dataset_paths: list[str], staged: str) -> str:
+    """Upload the datasets, then save the metadata already staged at `staged`.
 
     Chained with `&&`: metadata that names a file the upload did not deliver would configure a run
     against data that is not there, and the service validates the two against each other.
     """
     upload = " ".join(shlex.quote(part) for part in _build_upload_command(run_id, dataset_paths))
-    metadata = " ".join(shlex.quote(part) for part in _build_metadata_command(run_id))
+    metadata = " ".join(
+        shlex.quote(part) for part in _build_metadata_command(run_id, staged)
+    )
     return f"{upload} && {metadata}"
 
 
@@ -534,12 +559,13 @@ async def draft_run(
     awrite = getattr(sandbox, "awrite", None)
     if awrite is None:
         return {"error": "this sandbox cannot write the metadata file"}
-    written = await awrite(_METADATA_PATH, json.dumps(metadata, indent=2, ensure_ascii=False))
+    staged = metadata_path(work_dir)
+    written = await awrite(staged, json.dumps(metadata, indent=2, ensure_ascii=False))
     if getattr(written, "error", None):
         return {"error": f"could not write the run metadata: {written.error}"}
 
     uploads = [actual for _, actual, _ in present]
-    out = await _run(sandbox, _draft_shell(run_id, uploads), _DRAFT_TIMEOUT_S)
+    out = await _run(sandbox, _draft_shell(run_id, uploads, staged), _DRAFT_TIMEOUT_S)
     if "Metadata saved" not in out:
         logger.warning("autodiscovery draft run=%s did not confirm metadata: %.300s", run_id, out)
         return {
@@ -634,12 +660,13 @@ async def update_metadata(
     awrite = getattr(sandbox, "awrite", None)
     if awrite is None:
         return {}
-    written = await awrite(_METADATA_PATH, json.dumps(updated, indent=2, ensure_ascii=False))
+    staged = metadata_path(await _work_dir(sandbox))
+    written = await awrite(staged, json.dumps(updated, indent=2, ensure_ascii=False))
     if getattr(written, "error", None):
         logger.warning("could not stage edited metadata for %s: %s", run_id, written.error)
         return {}
     out = await _run(
-        sandbox, _json_shell(_build_metadata_command(run_id)), _STATUS_TIMEOUT_S
+        sandbox, _json_shell(_build_metadata_command(run_id, staged)), _STATUS_TIMEOUT_S
     )
     if "Metadata saved" not in (out or ""):
         logger.warning("edited metadata for %s did not save: %.200s", run_id, out)
