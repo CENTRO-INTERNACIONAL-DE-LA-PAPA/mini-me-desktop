@@ -941,6 +941,75 @@ const JOBS_BODY_HEIGHT: f32 = 260.;
 /// analyst, which belong to the turn that sent them.
 const JOB_QUESTION_CHARS: usize = 120;
 
+/// A discovery run waiting for its budget to be approved, and what the researcher has changed.
+///
+/// Held rather than read from the snapshot each frame because two of its fields are *being edited*.
+/// A modal that re-derived the budget from the artifact on every notify would discard the number
+/// the researcher just set — and the number is the price.
+#[derive(Clone, Debug)]
+struct Approval {
+    draft: protocol::Draft,
+    /// Experiments to run, which is the cost in credits. Starts at whatever the run was drafted
+    /// with and moves only when the researcher moves it.
+    experiments: u32,
+    /// What the service says it will cost and what is left, once that has come back. `None` while
+    /// the request is in flight.
+    cost: Option<protocol::DraftCost>,
+    /// A submit that did not work, in the backend's own words — which say whether anything was
+    /// charged.
+    error: Option<String>,
+    /// True between the press and the answer, so the button cannot be pressed twice. Spending
+    /// twice is the one double-submit in this app that cannot be undone.
+    submitting: bool,
+}
+
+/// Budgets the modal offers in one press.
+///
+/// 15 is the default because the researcher who owns the credits said so; the others bracket it.
+/// Presets rather than a text field: a typed number is how somebody spends 150 credits meaning to
+/// spend 15, and the four here cover exploring, a normal run, and a thorough one.
+const BUDGET_PRESETS: [u32; 4] = [5, 15, 30, 50];
+
+/// The most a single press of `+` can add, and the ceiling the service itself enforces.
+const MAX_BUDGET: u32 = 500;
+
+/// The budget the gate opens with, from whatever the agent drafted.
+///
+/// Clamped, so the number on screen is always one the service will accept — a modal offering to
+/// spend 0 or 900 credits is offering a press that fails.
+fn opening_budget(drafted: u32) -> u32 {
+    drafted.clamp(1, MAX_BUDGET)
+}
+
+/// Whether this budget can actually be spent.
+///
+/// `None` for the balance means the lookup did not answer, and that must not block the decision:
+/// refusing to let somebody spend because a *balance request* failed is the wrong failure, and the
+/// service will refuse an unaffordable submit anyway. Only a known, smaller balance disables the
+/// button.
+fn affordable(experiments: u32, available: Option<u32>) -> bool {
+    match available {
+        Some(left) => experiments <= left,
+        None => true,
+    }
+}
+
+/// The cost and the balance as one sentence, because they are one question.
+///
+/// `available` and never `granted`: submitting moves credits to `pending` immediately, so the grant
+/// overstates what is left by however much is already in flight (§247).
+fn cost_line(experiments: u32, available: Option<u32>) -> String {
+    let unit = if experiments == 1 {
+        "experiment"
+    } else {
+        "experiments"
+    };
+    match available {
+        Some(left) => format!("{experiments} {unit} · {experiments} of {left} credits"),
+        None => format!("{experiments} {unit} · one credit each"),
+    }
+}
+
 /// How many background things are in each state.
 ///
 /// Exists for the folded heading, which is the whole reason folding is safe: collapsed, this
@@ -3155,6 +3224,20 @@ struct Workbench {
     /// Runs collected this launch, still to be told about. Cleared when the researcher opens one
     /// or dismisses the banner.
     collected_runs: Vec<(String, protocol::Job)>,
+    /// A discovery run whose budget is waiting on the researcher. See [`Approval`].
+    ///
+    /// The one modal in this app that guards money, which is why it is a modal at all: §244 argued
+    /// a banner beats a modal for something already true, and this is the opposite — nothing
+    /// proceeds until it is answered and the wrong answer cannot be taken back.
+    approving: Option<Approval>,
+    /// Runs the researcher declined, so rejecting one does not reopen it on the next snapshot.
+    ///
+    /// Kept in memory only. The artifact still says `awaiting_approval`, because that is the
+    /// truth — the run is drafted and unspent — and a rejection is "not now", not a deletion.
+    declined: std::collections::HashSet<String>,
+    /// The intent being edited in the approval modal. The one descriptive field worth changing at
+    /// the gate, because it is what the run spends its experiments on.
+    intent_field: Entity<Composer>,
     /// Whether `BACKGROUND JOBS` is unfolded. Starts open, and reopens by itself the moment a
     /// worker stops at the approval gate — the researcher's press is respected everywhere except
     /// where it would hide a question addressed to them (§245).
@@ -3244,6 +3327,11 @@ impl Workbench {
         cx.observe(&datasets_filter, |_workbench, _field, cx| cx.notify())
             .detach();
         let sources_filter = cx.new(|cx| Composer::new(cx, "Filter by author, title or year"));
+        let intent_field = cx.new(|cx| {
+            Composer::new(cx, "What should the search focus on? (not the answer you expect)")
+        });
+        cx.observe(&intent_field, |_workbench, _field, cx| cx.notify())
+            .detach();
         cx.observe(&sources_filter, |_workbench, _field, cx| cx.notify())
             .detach();
         cx.observe(&model_filter, |_workbench, _field, cx| cx.notify())
@@ -3433,6 +3521,9 @@ impl Workbench {
             pending_adoption: Vec::new(),
             swept: false,
             collected_runs: Vec::new(),
+            approving: None,
+            declined: std::collections::HashSet::new(),
+            intent_field,
             jobs_expanded: true,
             jobs_scroll: gpui::ScrollHandle::new(),
             sources_filter,
@@ -5356,6 +5447,9 @@ impl Workbench {
                 if !snapshot.todos.is_empty() {
                     self.plan = snapshot.todos;
                 }
+                // Before the jobs, because a drafted run is not among them — it is a question,
+                // and one that must not be buried under the rows of things already running.
+                self.open_approval(&snapshot.drafts, cx);
                 for job in snapshot.jobs {
                     self.track_job(job, cx);
                 }
@@ -13042,6 +13136,321 @@ impl Workbench {
     /// **Two call sites, one per frame.** `artifacts_contents` renders this either from its
     /// no-spine early return or from the full panel, never both, so the fixed element ids below
     /// cannot collide the way two sibling `datasets-heading`s once did.
+    /// Open the budget gate for a run that is drafted and unspent.
+    ///
+    /// Called from a snapshot rather than from a press, because the researcher never asked for
+    /// this modal — the agent drafted a run and something has to ask them whether to pay for it.
+    /// Ignores a run they already declined, and never replaces a gate already on screen: a second
+    /// draft arriving mid-decision must not move the button under the pointer.
+    fn open_approval(&mut self, drafts: &[protocol::Draft], cx: &mut Context<Self>) {
+        if self.approving.is_some() {
+            return;
+        }
+        let Some(draft) = drafts
+            .iter()
+            .find(|draft| !self.declined.contains(&draft.run_id))
+        else {
+            return;
+        };
+        tracing::info!(
+            run = %draft.run_id,
+            experiments = draft.experiments,
+            "asking the researcher to approve a discovery budget"
+        );
+        // Whatever the agent drafted, clamped into what the service will accept — so the number
+        // on screen is always one that can actually be submitted.
+        let experiments = opening_budget(draft.experiments);
+        self.intent_field.update(cx, |field, cx| {
+            field.set_text(draft.intent.clone(), cx);
+        });
+        self.approving = Some(Approval {
+            draft: draft.clone(),
+            experiments,
+            cost: None,
+            error: None,
+            submitting: false,
+        });
+
+        // What it costs against what is left. The modal renders without it — the run's own
+        // experiment count is the price either way — so a slow or failed lookup delays the
+        // balance, never the decision.
+        let mut answer = self.sidecar.discovery_draft(draft.run_id.clone());
+        let wanted = draft.run_id.clone();
+        cx.spawn(async move |workbench, cx| {
+            if let Some(outcome) = answer.next().await {
+                let _ = workbench.update(cx, |workbench, cx| {
+                    let Some(approval) = workbench.approving.as_mut() else {
+                        return;
+                    };
+                    // The gate may have been answered and reopened for a different run while this
+                    // was in flight; a balance belonging to another run would be a wrong number
+                    // next to a price.
+                    if approval.draft.run_id != wanted {
+                        return;
+                    }
+                    match outcome {
+                        Ok(cost) => approval.cost = Some(cost),
+                        Err(error) => {
+                            tracing::warn!(%error, "could not read the discovery credit balance");
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Spend the credits. The only place in this app that does.
+    fn approve_discovery(&mut self, cx: &mut Context<Self>) {
+        let Some(approval) = self.approving.as_mut() else {
+            return;
+        };
+        if approval.submitting {
+            return; // the press already landed; a second one would be a second charge
+        }
+        approval.submitting = true;
+        approval.error = None;
+        let run_id = approval.draft.run_id.clone();
+        let experiments = approval.experiments;
+        let kind = approval.draft.name.clone();
+        let intent = self.intent_field.read(cx).text().trim().to_string();
+        tracing::info!(run = %run_id, experiments, "approving a discovery run");
+
+        let mut answer = self
+            .sidecar
+            .submit_discovery(run_id.clone(), experiments, intent);
+        cx.spawn(async move |workbench, cx| {
+            if let Some(outcome) = answer.next().await {
+                let _ = workbench.update(cx, |workbench, cx| {
+                    match outcome {
+                        Ok(()) => {
+                            workbench.approving = None;
+                            workbench.status =
+                                format!("{kind} running in the background ({} experiments)", experiments);
+                            // Start watching it immediately rather than waiting for the next
+                            // turn's snapshot: the researcher just paid for it, and a run with no
+                            // row is a run they cannot see.
+                            workbench.track_job(
+                                protocol::Job {
+                                    kind: protocol::JobKind::Discovery,
+                                    task_id: run_id.clone(),
+                                    question: kind.clone(),
+                                    context_id: None,
+                                    status: "running".to_string(),
+                                },
+                                cx,
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, run = %run_id, "a discovery submit failed");
+                            if let Some(approval) = workbench.approving.as_mut() {
+                                approval.submitting = false;
+                                approval.error = Some(error);
+                            }
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// The budget gate.
+    ///
+    /// **A modal, deliberately, and §244 is the argument for it rather than against.** That section
+    /// refused a modal for a background run that had already finished: nothing was pending, the
+    /// researcher had somewhere to go, and a modal would have been a toll booth in front of work
+    /// they could get on with. This is the other kind of thing. Nothing proceeds until it is
+    /// answered, it has three outcomes rather than one, and the wrong one spends credits that do
+    /// not come back. A banner is for something already true; a modal is for something that cannot
+    /// happen without you.
+    ///
+    /// Three things it must say, and the order is the order: what will run, what it costs against
+    /// what is left, and how to change it before agreeing.
+    fn approval_modal(&self, approval: &Approval, cx: &mut Context<Self>) -> impl IntoElement {
+        let experiments = approval.experiments;
+        let available = approval.cost.as_ref().and_then(|cost| cost.available);
+        let over_budget = !affordable(experiments, available);
+
+        let mut body = div().flex().flex_col().w_full().min_w_0().gap_3();
+
+        if !approval.draft.name.is_empty() {
+            body = body.child(ui::Label::new(approval.draft.name.clone()));
+        }
+        body = body.child(
+            ui::Label::new(
+                "AutoDiscovery writes its own hypotheses, runs code for each one and reports \
+                 which results most changed its beliefs. It has not started.",
+            )
+            .muted()
+            .size(ui::Size::Compact),
+        );
+
+        if !approval.draft.datasets.is_empty() {
+            body = body.child(
+                ui::Label::new(format!("Over {}", approval.draft.datasets.join(", ")))
+                    .muted()
+                    .size(ui::Size::Compact),
+            );
+        }
+
+        // --- the budget, which is the price ------------------------------------------------
+        body = body.child(
+            div()
+                .flex()
+                .flex_col()
+                .w_full()
+                .min_w_0()
+                .gap_1()
+                .child(section_label("EXPERIMENTS TO RUN"))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_1()
+                        .children(BUDGET_PRESETS.iter().map(|&preset| {
+                            ui::Button::new(
+                                SharedString::from(format!("budget-{preset}")),
+                                preset.to_string(),
+                            )
+                            .size(ui::Size::Compact)
+                            .tone(if preset == experiments {
+                                ui::Tone::Accent
+                            } else {
+                                ui::Tone::Quiet
+                            })
+                            .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                                if let Some(approval) = workbench.approving.as_mut() {
+                                    approval.experiments = preset;
+                                }
+                                cx.notify();
+                            }))
+                        }))
+                        .child(
+                            ui::Button::new("budget-down", "−")
+                                .size(ui::Size::Compact)
+                                .disabled(experiments <= 1)
+                                .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                    if let Some(approval) = workbench.approving.as_mut() {
+                                        approval.experiments =
+                                            approval.experiments.saturating_sub(1).max(1);
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            ui::Button::new("budget-up", "+")
+                                .size(ui::Size::Compact)
+                                .disabled(experiments >= MAX_BUDGET)
+                                .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                    if let Some(approval) = workbench.approving.as_mut() {
+                                        approval.experiments =
+                                            (approval.experiments + 1).min(MAX_BUDGET);
+                                    }
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                // The cost and the balance in one sentence, because they are one question. And
+                // `available` rather than `granted`: submitting moves credits to `pending`
+                // straight away, so the grant overstates what is left by whatever is in flight.
+                .child(
+                    ui::Label::new(cost_line(experiments, available))
+                    .colour(if over_budget {
+                        theme::error()
+                    } else {
+                        theme::text_muted()
+                    })
+                    .size(ui::Size::Compact),
+                ),
+        );
+
+        // --- the one field worth changing at the gate --------------------------------------
+        body = body.child(
+            div()
+                .flex()
+                .flex_col()
+                .w_full()
+                .min_w_0()
+                .gap_1()
+                .child(section_label("WHAT TO EXPLORE"))
+                .child(self.filter_field(self.intent_field.clone(), cx))
+                .child(
+                    ui::Label::new(
+                        "Steer it — \u{201c}focus on how rainfall relates to yield\u{201d}. Naming the \
+                         answer you expect wastes what this tool is for.",
+                    )
+                    .muted()
+                    .size(ui::Size::Compact),
+                ),
+        );
+
+        if let Some(error) = &approval.error {
+            body = body.child(
+                ui::Label::new(error.clone())
+                    .colour(theme::error())
+                    .size(ui::Size::Compact),
+            );
+        }
+
+        ui::Modal::new("discovery-approval", "Start this discovery run?")
+            .width(560.)
+            .focus(&self.delete_focus)
+            .body(body)
+            .actions(
+                ui::actions()
+                    .child(div().flex_grow())
+                    .child(
+                        ui::Button::new("discovery-reject", "Not now")
+                            .disabled(approval.submitting)
+                            .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                if let Some(approval) = workbench.approving.take() {
+                                    // Remembered, so the next snapshot does not ask again. The
+                                    // run stays drafted and unspent, which is what "not now"
+                                    // means — nothing is deleted.
+                                    workbench.declined.insert(approval.draft.run_id);
+                                    workbench.status =
+                                        "the discovery run is drafted and unstarted".into();
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        ui::Button::new(
+                            "discovery-approve",
+                            if approval.submitting {
+                                "Starting…".to_string()
+                            } else {
+                                format!("Run {experiments} and spend {experiments}")
+                            },
+                        )
+                        .tone(ui::Tone::Accent)
+                        // Not while a press is in flight, and not for a budget the balance cannot
+                        // cover: the service would refuse it, and letting someone press a button
+                        // that fails is worse than not offering it.
+                        .disabled(approval.submitting || over_budget)
+                        .on_click(cx.listener(|workbench, _event, _window, cx| {
+                            workbench.approve_discovery(cx);
+                        })),
+                    ),
+            )
+            .footer(
+                ui::Label::new(if over_budget {
+                    "That is more than the credits left.".to_string()
+                } else {
+                    "One credit per experiment. Nothing is spent until you press.".to_string()
+                })
+                .muted()
+                .size(ui::Size::Compact),
+            )
+    }
+
     fn jobs_section(&self, cx: &mut Context<Self>) -> Div {
         let mut section = div().flex().flex_col().gap_2().pt_2();
         if self.jobs.is_empty() && self.tasks.is_empty() {
@@ -14787,6 +15196,13 @@ impl Render for Workbench {
             root.child(self.documents_modal(cx))
         } else {
             root
+        };
+
+        // The budget gate, mounted before the confirmations below it. Nothing else in this app
+        // guards money, and the researcher did not ask for it — a drafted run did.
+        let root = match self.approving.clone() {
+            Some(approval) => root.child(self.approval_modal(&approval, cx)),
+            None => root,
         };
 
         let root = match &self.confirming_delete {
@@ -16834,6 +17250,43 @@ mod tests {
             status: "working".into(),
         };
         assert_eq!(job.question, question);
+    }
+
+    /// §248: the number on screen must always be one the service will accept.
+    #[test]
+    fn the_gate_opens_on_a_budget_that_can_actually_be_submitted() {
+        assert_eq!(opening_budget(15), 15);
+        // A draft with no budget recorded, or a nonsense one, still opens somewhere pressable.
+        assert_eq!(opening_budget(0), 1);
+        assert_eq!(opening_budget(9_999), MAX_BUDGET);
+        assert_eq!(opening_budget(MAX_BUDGET), MAX_BUDGET);
+        // And every preset is inside the bounds, so a single press cannot make it unsubmittable.
+        for preset in BUDGET_PRESETS {
+            assert_eq!(opening_budget(preset), preset, "{preset}");
+        }
+    }
+
+    /// A failed *balance* lookup must not stop somebody spending their own credits.
+    #[test]
+    fn an_unknown_balance_does_not_block_the_decision() {
+        assert!(affordable(15, None));
+        assert!(affordable(500, None));
+        // A known balance does gate it, exactly and inclusively.
+        assert!(affordable(15, Some(15)));
+        assert!(!affordable(16, Some(15)));
+        assert!(!affordable(1, Some(0)));
+    }
+
+    /// The sentence a researcher reads before spending. `available`, never `granted`.
+    #[test]
+    fn the_cost_line_states_the_price_against_what_is_left() {
+        assert_eq!(cost_line(15, Some(495)), "15 experiments · 15 of 495 credits");
+        // Singular, because "1 experiments" is the kind of detail that makes a money dialog look
+        // untrustworthy.
+        assert_eq!(cost_line(1, Some(495)), "1 experiment · 1 of 495 credits");
+        // No balance yet: say the rate rather than implying a number nobody confirmed.
+        assert_eq!(cost_line(15, None), "15 experiments · one credit each");
+        assert!(!cost_line(15, Some(495)).contains("500"), "the grant is not the balance");
     }
 }
 
