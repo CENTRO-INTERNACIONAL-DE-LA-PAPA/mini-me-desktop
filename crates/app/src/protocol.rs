@@ -147,6 +147,8 @@ pub struct Snapshot {
     pub project: Option<Project>,
     /// Long jobs the turn left running. See [`Job`].
     pub jobs: Vec<Job>,
+    /// Runs configured and waiting for a budget decision. See [`Draft`].
+    pub drafts: Vec<Draft>,
     /// Work handed to a background worker. See [`AsyncTask`].
     pub tasks: Vec<AsyncTask>,
     /// Reports, with their bodies. See [`Report`].
@@ -379,6 +381,8 @@ pub struct Job {
 pub enum JobKind {
     Theorizer,
     Analysis,
+    /// An Asta AutoDiscovery run: an MCTS search that writes and tests its own hypotheses.
+    Discovery,
 }
 
 impl JobKind {
@@ -386,6 +390,7 @@ impl JobKind {
         match self {
             JobKind::Theorizer => "Theorizer",
             JobKind::Analysis => "Data analysis",
+            JobKind::Discovery => "Discovery",
         }
     }
 
@@ -395,6 +400,9 @@ impl JobKind {
         match self {
             JobKind::Theorizer => "5–15 min",
             JobKind::Analysis => "20–40 min",
+            // Measured, not guessed: the §247 probe ran 5 experiments in 13 minutes of wall clock
+            // (933s of work overlapping into 735s), and a run is 15 by default.
+            JobKind::Discovery => "25–40 min",
         }
     }
 }
@@ -429,6 +437,12 @@ impl Job {
                 urlencode(thread_id),
                 urlencode(self.context_id.as_deref().unwrap_or_default())
             ),
+            // No query string: the run id is the whole identity, and the route reads the run's
+            // metadata back from the service rather than being told it. Which matters for a run
+            // drafted in an earlier session — the app may know nothing about it but its id.
+            JobKind::Discovery => {
+                format!("/discovery/{}/{task}", urlencode(thread_id))
+            }
         }
     }
 }
@@ -1189,6 +1203,120 @@ impl LangGraphClient {
             .unwrap_or("running")
             .trim()
             .to_string())
+    }
+
+    /// What a drafted discovery run will cost, and what is left to spend.
+    ///
+    /// Its own request rather than part of the poll: it is read once, when the approval modal
+    /// opens, and it costs the backend two extra calls to the service.
+    pub async fn discovery_draft(&self, thread_id: &str, run_id: &str) -> Result<DraftCost> {
+        let value: Value = self
+            .http
+            .get(format!(
+                "{}/discovery/{}/{}/draft",
+                self.base_url,
+                urlencode(thread_id),
+                urlencode(run_id)
+            ))
+            .send()
+            .await
+            .context("asking what a discovery run would cost failed")?
+            .error_for_status()
+            .context("the discovery draft route returned an error status")?
+            .json()
+            .await
+            .context("could not decode the discovery draft response")?;
+        let credits = value.get("credits");
+        Ok(DraftCost {
+            experiments: value
+                .get("cost")
+                .and_then(Value::as_u64)
+                .unwrap_or_default() as u32,
+            // `available` and nothing else: submitting moves credits to `pending` immediately, so
+            // `granted` overstates what is left by however much is already in flight (§247).
+            available: credits
+                .and_then(|credits| credits.get("available"))
+                .and_then(Value::as_u64)
+                .map(|value| value as u32),
+            intent: value
+                .get("metadata")
+                .and_then(|metadata| metadata.get("intent"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
+        })
+    }
+
+    /// A discovery run's experiments, whole.
+    ///
+    /// The same route the poller uses, read for its body rather than its status. It returns every
+    /// experiment complete — hypothesis, analysis, review, and the `parent_id` the tree is built
+    /// from — so the graph costs one request and not one per node (§247).
+    ///
+    /// What it deliberately does not bring back is the figures. Those exist only in the
+    /// per-experiment response, at roughly 458KB each, and are fetched when somebody opens the
+    /// experiment that has them.
+    pub async fn discovery_run(&self, thread_id: &str, run_id: &str) -> Result<Value> {
+        self.http
+            .get(format!(
+                "{}/discovery/{}/{}",
+                self.base_url,
+                urlencode(thread_id),
+                urlencode(run_id)
+            ))
+            .send()
+            .await
+            .context("reading the discovery run failed")?
+            .error_for_status()
+            .context("the discovery route returned an error status")?
+            .json()
+            .await
+            .context("could not decode the discovery run")
+    }
+
+    /// Approve a drafted run: apply the researcher's two edits, then spend the credits.
+    ///
+    /// **The only call in this client that costs money.** It exists because the researcher pressed
+    /// a button; there is no other caller and no retry loop around it — a submit that failed is
+    /// reported, never repeated, because "did it charge me?" is not a question this app should ever
+    /// make someone ask.
+    pub async fn submit_discovery(
+        &self,
+        thread_id: &str,
+        run_id: &str,
+        experiments: u32,
+        intent: &str,
+    ) -> Result<()> {
+        let resp = self
+            .http
+            .post(format!(
+                "{}/discovery/{}/{}/submit",
+                self.base_url,
+                urlencode(thread_id),
+                urlencode(run_id)
+            ))
+            .json(&serde_json::json!({"n_experiments": experiments, "intent": intent}))
+            .send()
+            .await
+            .context("submitting the discovery run failed")?;
+        if resp.status().is_success() {
+            return Ok(());
+        }
+        // The backend's own message, which says whether anything was spent — a 409 means the
+        // edits did not save and it refused to submit rather than charging for something else.
+        let status = resp.status();
+        let detail = resp
+            .json::<Value>()
+            .await
+            .ok()
+            .and_then(|body| {
+                body.get("error")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| format!("the service returned {status}"));
+        anyhow::bail!(detail)
     }
 
     /// Every unfinished background run across recent conversations, with the thread that owns it.
@@ -2264,6 +2392,7 @@ fn decode_values(data: &str) -> Option<Snapshot> {
         .and_then(|project| serde_json::from_value::<Project>(project.clone()).ok());
 
     let jobs = decode_jobs(artifacts);
+    let drafts = decode_drafts(artifacts);
     let tasks = decode_async_tasks(artifacts, &value);
     let reports = decode_reports(artifacts);
     let sources = decode_sources(artifacts);
@@ -2286,6 +2415,7 @@ fn decode_values(data: &str) -> Option<Snapshot> {
         buckets,
         project,
         jobs,
+        drafts,
         tasks,
         reports,
         sources,
@@ -2544,24 +2674,117 @@ fn decode_reports(artifacts: &Value) -> Vec<Report> {
         .collect()
 }
 
+/// A run that is configured and waiting for a person to approve its budget.
+///
+/// **Not a job.** A job is something to wait on; this is something to answer, and the difference
+/// is a spent credit. It is kept out of [`decode_jobs`] entirely, because a `Job` whose status is
+/// neither running nor terminal would be polled on a timer for as long as the app stayed open —
+/// against a run that has not started and will not start until somebody says so.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Draft {
+    /// The AutoDiscovery run id. What the submit route acts on.
+    pub run_id: String,
+    pub name: String,
+    /// How the exploration is steered. Editable before approval, because it is the field that
+    /// decides what the run spends its experiments on.
+    pub intent: String,
+    /// Experiments the run is configured for. One credit each, so this is also the price.
+    pub experiments: u32,
+    pub datasets: Vec<String>,
+}
+
+/// What a drafted run will cost, against what is left to spend.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DraftCost {
+    /// Experiments configured, which is also the price in credits.
+    pub experiments: u32,
+    /// Credits left, or `None` when the service would not say. A missing balance is shown as
+    /// unknown rather than as zero: refusing to let someone spend because a lookup failed is the
+    /// wrong failure, and so is implying they have none.
+    pub available: Option<u32>,
+    /// The intent the service currently holds, which is what an edit starts from.
+    pub intent: String,
+}
+
+/// The artifact status a drafted-but-unsubmitted run carries (`backend/schemas.py`).
+const AWAITING_APPROVAL: &str = "awaiting_approval";
+
+/// Pull the runs waiting for a budget decision out of a `values` payload.
+///
+/// Fields come from `DiscoveryRunArtifactPayload`. A draft with no `run_id` is dropped: the id is
+/// what the submit route acts on, so without it the approval could not be carried out and offering
+/// it would be offering a button that cannot work.
+fn decode_drafts(artifacts: &Value) -> Vec<Draft> {
+    let Some(items) = artifacts.get("discoveries").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter(|item| {
+            item.get("status").and_then(Value::as_str).map(str::trim) == Some(AWAITING_APPROVAL)
+        })
+        .filter_map(|item| {
+            let run_id = item
+                .get("run_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())?;
+            let text = |key: &str| {
+                item.get(key)
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string()
+            };
+            Some(Draft {
+                run_id: run_id.to_string(),
+                name: text("name"),
+                intent: text("intent"),
+                experiments: item
+                    .get("n_experiments")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0) as u32,
+                datasets: item
+                    .get("dataset_paths")
+                    .and_then(Value::as_array)
+                    .map(|paths| {
+                        paths
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
 /// Pull the still-running long jobs out of a `values` payload.
 ///
-/// Fields come from `HypothesisArtifactPayload` / `DataAnalysisArtifactPayload`
-/// (`backend/schemas.py:353,388`): both carry `status` and `task_id`, and the analysis one
-/// adds `context_id`. A job with no task id cannot be polled, so it is skipped rather than
-/// shown as something the user could wait on.
+/// Fields come from `HypothesisArtifactPayload` / `DataAnalysisArtifactPayload` /
+/// `DiscoveryRunArtifactPayload` (`backend/schemas.py`): all carry `status`, the first two carry
+/// `task_id`, the analysis one adds `context_id`, and the discovery one calls its id `run_id` — so
+/// the key is per bucket rather than assumed. A job with no id cannot be polled, so it is skipped
+/// rather than shown as something the user could wait on.
+///
+/// A discovery run still `awaiting_approval` is deliberately **not** a job here — see [`Draft`].
 fn decode_jobs(artifacts: &Value) -> Vec<Job> {
     let mut jobs = Vec::new();
-    for (bucket, kind) in [
-        ("hypotheses", JobKind::Theorizer),
-        ("analyses", JobKind::Analysis),
+    for (bucket, kind, id_key) in [
+        ("hypotheses", JobKind::Theorizer, "task_id"),
+        ("analyses", JobKind::Analysis, "task_id"),
+        ("discoveries", JobKind::Discovery, "run_id"),
     ] {
         let Some(items) = artifacts.get(bucket).and_then(Value::as_array) else {
             continue;
         };
         for item in items {
+            if item.get("status").and_then(Value::as_str).map(str::trim) == Some(AWAITING_APPROVAL) {
+                continue;
+            }
             let Some(task_id) = item
-                .get("task_id")
+                .get(id_key)
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .filter(|id| !id.is_empty())
@@ -2577,8 +2800,11 @@ fn decode_jobs(artifacts: &Value) -> Vec<Job> {
             jobs.push(Job {
                 kind,
                 task_id: task_id.to_string(),
+                // A discovery run has no question — it writes its own. Its `name` is what the
+                // researcher called it, and that is what the panel row should read.
                 question: item
                     .get("question")
+                    .or_else(|| item.get("name"))
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .trim()
@@ -4712,4 +4938,91 @@ mod tests {
         assert!(mine.contains(&running.task_id), "{mine}");
     }
 
+
+    /// A discovery run's id is `run_id`, not `task_id` — so a shared decoder has to be told which.
+    #[test]
+    fn a_discovery_run_is_a_job_keyed_on_its_run_id() {
+        let artifacts = json!({
+            "discoveries": [
+                {"run_id": "8e5d2eaa-f067-4193-9400-d555e4607c41", "name": "SOC covariates",
+                 "status": "running", "dataset_paths": ["./soc.csv"], "n_experiments": 15},
+                // No id: nothing could poll it, so it is not offered as something to wait on.
+                {"name": "nameless", "status": "running"},
+            ]
+        });
+        let jobs = decode_jobs(&artifacts);
+        assert_eq!(jobs.len(), 1);
+        let job = &jobs[0];
+        assert_eq!(job.kind, JobKind::Discovery);
+        assert_eq!(job.task_id, "8e5d2eaa-f067-4193-9400-d555e4607c41");
+        // A discovery run writes its own questions, so the row is labelled by what it was called.
+        assert_eq!(job.question, "SOC covariates");
+        assert_eq!(job.kind.label(), "Discovery");
+        assert!(!job.is_finished());
+    }
+
+    /// The whole point of `Draft`: a run awaiting a budget decision must never be polled.
+    #[test]
+    fn a_run_awaiting_approval_is_a_draft_and_never_a_job() {
+        let artifacts = json!({
+            "discoveries": [
+                {"run_id": "aaaaaaaa-0000-0000-0000-000000000001", "name": "waiting",
+                 "status": "awaiting_approval", "intent": "find what predicts yield",
+                 "n_experiments": 15, "dataset_paths": ["./soc.csv", "./test.csv"]},
+                {"run_id": "aaaaaaaa-0000-0000-0000-000000000002", "name": "going",
+                 "status": "running", "n_experiments": 15},
+            ]
+        });
+
+        // Nothing awaiting approval reaches the poller: its status is neither running nor
+        // terminal, so `is_finished` would say false for as long as the app stayed open.
+        let jobs = decode_jobs(&artifacts);
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].question, "going");
+
+        let drafts = decode_drafts(&artifacts);
+        assert_eq!(drafts.len(), 1);
+        let draft = &drafts[0];
+        assert_eq!(draft.run_id, "aaaaaaaa-0000-0000-0000-000000000001");
+        assert_eq!(draft.name, "waiting");
+        assert_eq!(draft.intent, "find what predicts yield");
+        assert_eq!(draft.experiments, 15);
+        assert_eq!(draft.datasets, ["./soc.csv", "./test.csv"]);
+    }
+
+    /// A draft with no run id could not be submitted, so it is not offered.
+    #[test]
+    fn a_draft_without_a_run_id_is_not_offered_for_approval() {
+        let artifacts = json!({
+            "discoveries": [
+                {"name": "no id at all", "status": "awaiting_approval", "n_experiments": 15},
+                {"run_id": "   ", "name": "blank id", "status": "awaiting_approval"},
+            ]
+        });
+        assert!(decode_drafts(&artifacts).is_empty());
+        assert!(decode_jobs(&artifacts).is_empty());
+    }
+
+    /// Its poll route carries the run id alone; the backend reads the rest back from the service.
+    #[test]
+    fn a_discovery_run_polls_a_route_that_needs_nothing_but_its_id() {
+        let job = Job {
+            kind: JobKind::Discovery,
+            task_id: "8e5d2eaa-f067-4193-9400-d555e4607c41".into(),
+            question: "SOC covariates".into(),
+            context_id: None,
+            status: "running".into(),
+        };
+        assert_eq!(
+            job.route("th-1"),
+            "/discovery/th-1/8e5d2eaa-f067-4193-9400-d555e4607c41"
+        );
+        // The backend normalises the service's UPPERCASE vocabulary, so this side is unchanged.
+        for done in ["completed", "failed", "canceled"] {
+            let finished = Job { status: done.into(), ..job.clone() };
+            assert!(finished.is_finished(), "{done}");
+        }
+        // And it says how long to expect, measured off the probe rather than guessed.
+        assert_eq!(job.kind.expected(), "25–40 min");
+    }
 }

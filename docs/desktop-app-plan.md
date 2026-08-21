@@ -13589,3 +13589,423 @@ takes for its thumb.
 *Ninety-ninth: every list in a panel needs a bound, and the one that gets away with not having one
 is the one whose contents you have not made good yet. Making DataVoyager ask a real question is what
 made its row too big to show.*
+
+## 246. AutoDiscovery: planning it before building it (2026-08-21)
+
+*"ok now we need autodiscovery, planify it before coding it so we can iterate faster."*
+
+AutoDiscovery is Asta's fourth long service and the first one that is **not** shaped like the three
+already wired in. The theorizer, DataVoyager and the paper search are all *ask a question, get an
+answer*. AutoDiscovery is *hand over a dataset and a budget, and it decides what to ask* — iterative
+experiments guided by Bayesian surprise and MCTS. That difference is the whole plan.
+
+### What was verified, and how
+
+Not from the docs. `asta autodiscovery --help` gives the subcommands, and the installed CLI's own
+client (`asta/autodiscovery/client.py`, `commands.py`) gives the exact request paths and response
+field names without touching the account — which is the §220 lesson applied before the fact rather
+than after: every middleware test passed for weeks against an argument name the live tool rejected.
+
+Endpoints, on `autodiscovery.allen.ai`, authenticated with the same Asta access token the sandbox
+already has (user id read from the JWT's `sub` claim):
+
+| Command | Request | Response fields that matter |
+|---|---|---|
+| `create` | `POST /api/runs/create` | `runid` |
+| `upload` | `POST /api/runs/{id}/generate-upload-url` then `PUT` to GCS | `upload_url`, `gcs_path` |
+| `metadata` | `POST /api/runs/{id}/metadata` | — |
+| `submit` | `POST /api/runs/submit` | `execution_id`, `run_details.status` |
+| `status` | `GET /api/runs/{user}/{id}/status` | `run_details.{status,status_checked_at,created_at,finished_at}` |
+| `runs` | `GET /api/runs/{user}/list` | `runs[].{runid,name,status,run_stats.{completed_experiments,requested_experiments}}` |
+| `experiments` | `POST /api/runs/{user}/{id}/experiments` | `has_job_completed`, `experiments[].{id_in_run,creation_idx,status,hypothesis,surprise,prior,posterior,is_surprising}` |
+| `experiment` | `GET …/experiments/{exp}` | adds `analysis`, `review`, `code`, `code_output`, `rich_outputs`, `runtime_ms`, `parent_id`, `child_ids` |
+| `credits` | `GET /api/user/me/credits` | `granted`, `consumed`, `pending`, `available` |
+
+Live, read-only, on this account: **500 credits granted, 0 consumed, 0 runs.**
+
+### Four things that make it unlike DataVoyager
+
+**1. Starting a run is four calls, not one.** `create` → `upload` → `metadata` → `submit`. A partial
+sequence leaves a real object on the server: an empty run, or a configured run never submitted.
+Costs nothing, but the app has to be able to say what those are rather than orphaning them.
+
+**2. It spends the researcher's money, and the CLI's own guard is unusable.** 1 credit = 1
+experiment, 1–500 per run. `asta autodiscovery submit` asks `click.confirm` unless given `-y`, and a
+sandbox has no TTY — so the backend must pass `-y`, and **the credit gate has to live in the app**.
+This is the single hard requirement of the feature: nothing may spend a credit without a human
+press that says how many.
+
+**3. Statuses are UPPERCASE.** `PENDING`, `RUNNING`/`IN_PROGRESS`, `SUCCEEDED`/`COMPLETED`,
+`FAILED`/`ERROR`, `CANCELLED`/`DELETED`. `protocol::Job::is_finished` matches lowercase A2A states
+today, so a finished run would poll forever. Two spellings per state, both real.
+
+**4. The service remembers your runs.** `asta autodiscovery runs` lists them server-side, which no
+other Asta service here does. §243 sweeps unattended runs by asking *our* backend what threads it
+has; for AutoDiscovery the service itself is the register, so a run can be reconciled even if the
+conversation that started it is gone.
+
+### The decisions worth taking now
+
+**Run it through the sandbox CLI, not a new Rust HTTP client.** `asta_token_scope` already binds the
+user's token for out-of-agent polls, the CLI is installed and pinned there, and the datasets are
+already mirrored into the sandbox by `workspace::adopt`. A second implementation of this contract in
+Rust is a second thing to drift.
+
+**The agent drafts the metadata; the researcher approves the budget.** The four descriptive fields
+(`name`, `description`, `domain`, `intent`) are exactly what a coordinator with the conversation and
+the CSV headers is good at. `n_experiments` is exactly what it should not be choosing — it is 1 to
+500 credits of somebody else's grant. So: subagent drafts, app shows the draft with the cost in
+credits, researcher presses. One gate, and the metadata is readable in it.
+
+**Remote only.** The skill also offers a local `asta-autodiscovery` that runs on the researcher's
+machine with their own LLM keys. That is a direct conflict with this project's locked decision that
+the model API key is request-only and never on the environment of a long-lived process. Written down
+so nobody adds it later by accident.
+
+**A new artifact type, not a reused one.** An experiment is a hypothesis with a measured belief
+shift — `prior`, `posterior`, `surprise`. The closest existing artifact is `hypotheses` (theories
+with supporting papers), and folding these into it would lose the only numbers that make an
+AutoDiscovery result worth reading. New `discoveries` artifact, ranked by surprise.
+
+### Phases, each ending somewhere testable
+
+**Phase 0 — freeze the contract.** One `create` (free) plus one deliberately small real run: 5
+experiments on the SOC dataset, 5 credits of 500. Capture every response verbatim as test fixtures.
+This also measures the one number nobody has: how long an experiment takes, which is what
+`JobKind::expected()` has to say out loud. §222's lesson — build the doubles from a captured
+contract, never from a reading of the docs.
+
+**Phase 1 — `backend/autodiscovery_tools.py`.** Pure argv builders for all six subcommands, the
+metadata builder, `poll_discovery_status`, `persist_discovery_outputs` writing
+`discovery/<runid>.md` + `.json`. Unit-tested against Phase 0's fixtures. Two traps to test
+explicitly: `metadata.datasets[].name` must match the uploaded filename exactly, and `submit` must
+carry `-y`.
+
+**Phase 2 — the subagent and its gates.** An `autodiscovery` subagent alongside `data_voyager`, plus
+the tool-gate discipline §219–§234 established: a `DraftBeforeSubmitting` step so the model cannot
+compose a run report it never launched, an entry in the claims recorder, and membership in
+`DISK_WRITING_SUBAGENTS`.
+
+**Phase 3 — the credit gate, and it is a modal.** Asked for directly: *"the user must see a center ui
+modal where the usar can accept, reject or modify the budget."* Named here because it is the second
+half of §244's argument and not a reversal of it. §244 refused a modal for a run that had *already
+finished* — nothing was pending, the researcher had somewhere to go, and a modal would have been a
+toll booth in front of work they could otherwise get on with. This is the opposite object: nothing
+proceeds until it is answered, it has three outcomes rather than one, and the wrong answer spends
+credits that do not come back. **A banner is for something already true that you may want to act on;
+a modal is for something that cannot happen without you.** `ui::Modal` is already there, and the
+datasets and library modals are the shape.
+
+What it holds: the drafted `name`, `domain` and `description` readable, the **`intent` editable**
+because that is what steers the exploration, `n_experiments` editable with the cost stated in the
+same breath as the balance (`15 experiments · 15 of 500 credits`), and three ways out — accept,
+reject, or change it first. Nothing in phases 1–2 may reach `submit` until this exists.
+
+**Phase 4 — `JobKind::Discovery`.** The uppercase statuses, the poll route, a jobs-panel row, and
+§243's sweep from day one rather than as the repair it was last time. A run measured in hours is a
+run nobody will be watching when it lands.
+
+**Phase 5a — the results as a table.** Ranked by surprise, in the shape the datasets and library
+modals already have. AutoDiscovery's own web view is the reference and its columns are the right
+ones: id, hypothesis, surprise, belief before, belief after, direction. Three decoding notes, all
+readable off that view:
+
+- **`surprise` is not `posterior - prior`.** Experiment 72 reports prior 0.823, posterior 0.313 — a
+  move of 0.510 — and a surprise of 0.611. It is a normalised surprisal score in its own right, so
+  computing it as a difference would produce a number that is wrong and looks plausible, which is
+  the §73 failure mode exactly.
+- **Direction is the sign of the belief move**, and it is what the web view puts in its own column.
+  That one *is* derived, and honestly so.
+- **The verbal labels are buckets of the probability**: 0.823 reads as `Likely True`, 0.313 as
+  `Maybe False`, so quarters — `Likely False`, `Maybe False`, `Maybe True`, `Likely True`. Worth
+  confirming against a real payload rather than inferring from two points.
+
+An experiment opens to its own detail: the belief shift on an axis, then `hypothesis`, `analysis`,
+`review`, and only then code — the order the service's own view uses, and the order
+`interpreting-results.md` asks for. `rich_outputs` holds the plots and tables and has to be decoded
+to files, because §242 is the standing lesson that Asta hands figures back encoded and something has
+to unpack them.
+
+**Phase 5b — the tree.** *"Allen ai have a interactive graph for the experiments. When click a node
+the experiment opens."* Buildable from the contract already captured: `parent_id` and `child_ids`
+are the MCTS tree, and `surprise` colours the node the way the web view's orange/grey does.
+
+**Draw the tree, not a spring layout.** Allen's view is a force-directed blob of the same data; a
+deterministic tree layout is cheaper (no physics, no animation loop, reproducible positions across
+frames — which matters in a UI rebuilt on every stream event) and it *says* more, because depth is
+how far the search refined that line of enquiry and a blob hides it. Two things to settle first:
+
+- **Does `experiments` return the tree, or only the nodes?** The CLI's list renderer never prints
+  `parent_id`, so whether the payload carries it is unverified. If it does not, a hundred-node graph
+  is a hundred requests, and that changes the phase from a view into a fetch strategy.
+- **What URL does one of *our* runs live at?** The sample in the web view is
+  `/shared/samples/nls_bmi?exp=1`; a user's own run's address is unknown, and without it there is no
+  honest `open in AutoDiscovery` link. Both are Phase 0 capture items.
+
+### Answered
+
+- **A normal run is 15 experiments.** So that is the default the modal opens with — inside the
+  skill's 10–20 "explore" band, and 33 runs' worth of the 500-credit grant rather than 10.
+- **Intent is the knob that matters.** *"we can modify the intent or guide the expriments with an
+  intent."* So of the nine metadata fields the modal makes exactly one freely editable besides the
+  budget. The five numeric knobs (`exploration_weight`, `mcts_selection`, `surprisal_width`,
+  `evidence_weight`) stay at the defaults the skill documents until there is a reason from a real
+  run to expose them — a form with six tuning fields is a form nobody fills in correctly.
+- **Credits belong to the Asta account, not to a person** — *"for the moment"*. So no per-user
+  ledger: show the balance, spend against it, and revisit if the account is ever shared.
+
+### Not planned, and why: a graph for the PDF librarian
+
+Raised in the same breath — *"not sure if we can have one for pdf librarian"* — and the honest answer
+is not yet, for a reason worth writing down. AutoDiscovery's graph is drawable because the service
+*hands over the edges*: `parent_id` and `child_ids` are the search's own record of which experiment
+came from which. `index.yaml` records documents and no relations at all, so a librarian graph would
+have to invent its own edges — citation overlap, shared authors, embedding similarity — and every one
+of those is a claim about the papers rather than a fact from them. That is the §73 line: a
+made-up structure a researcher believes is worse than no structure.
+
+It becomes real the moment there are edges worth drawing. Citations are the obvious candidate, and
+`references.rs` already resolves them; a librarian graph built on *actual* reference lists would be
+honest. Filed as a want, not a plan.
+
+### Phase 0, restated with what it now has to capture
+
+One free `create`, then one 5-experiment run. What comes back has to answer, verbatim rather than by
+inference: whether `experiments` carries `parent_id`/`child_ids`, what the four verbal belief
+buckets actually are, what a run of ours is addressable as, how long one experiment takes, and what
+`rich_outputs` holds for an experiment with a plot in it. Five unknowns, one run, and every one of
+them is a thing a later phase would otherwise guess.
+
+*Hundredth: the service that decides its own questions needs the tightest gate, not the loosest.
+Everything else here asks what you told it to ask.*
+
+*Hundred-and-first: a banner is for something already true; a modal is for something that cannot
+happen without you. §244 and §246 disagree about the widget and agree about the rule.*
+
+### Agreed, 2026-08-21
+
+Four questions, four answers, so the plan above is now settled rather than proposed:
+
+- **Phase 0 runs on the synthetic control** — the file with a planted signal in `cov_000`, `cov_005`
+  and `cov_011` that §239 used to prove DataVoyager worked. It has the property Phase 0 needs and
+  nothing else does: a *known right answer*. On real data a thin result is ambiguous — broken
+  plumbing, or honest science? — and disambiguating that is what cost §239 a whole round.
+- **Runs start through the coordinator**, like DataVoyager. The agent drafts `name`, `domain`,
+  `description` and `intent` from the conversation and the file's own headers, which is the half it
+  is good at; the modal gates the half it is not. It also means the research planner can list
+  AutoDiscovery as a step.
+- **Vertical slice first.** One run end to end with a rough list, then polish — because the thing
+  worth judging early is whether a discovery run lands in the app at all. Phase 0's submit stays
+  manual, so no credit is ever spent through an ungated path.
+- **The table is ours, the graph is theirs.** Ranked experiments and the experiment detail in
+  Mini-Me; the interactive graph opens in `autodiscovery.allen.ai`, which already has a good one.
+  Which makes the run URL shape a Phase 0 blocker rather than a curiosity — without it there is no
+  link to offer.
+
+## 247. Phase 0: what the probe run actually returned (2026-08-21)
+
+One free `create`, one 5-experiment run on the synthetic control. §246 listed five unknowns; the
+first three answered themselves before a single experiment finished, and two of them contradict the
+plan that was written from the docs.
+
+### `CREATED` and `PENDING` are statuses too
+
+An unsubmitted run reports `status: "CREATED"`. Submitted, it reports `PENDING`, then `RUNNING`. The
+CLI's own `_status_icon` — the closest thing to a documented vocabulary — handles `PENDING`,
+`RUNNING`, `IN_PROGRESS`, `SUCCEEDED`, `COMPLETED`, `FAILED`, `ERROR`, `CANCELLED` and `DELETED`,
+and has no case for `CREATED`. It renders it `[CR]`. So the state list is **open**, and
+`Job::is_finished` must be written as "terminal unless proven otherwise" rather than as a match
+against a list somebody believes is complete.
+
+**And two sources disagree in the same breath.** `submit` printed `Status: RUNNING` while the
+`status` call one second later returned `run_details.status: "PENDING"`. Both are true: the run
+record and the Cloud Run execution are separate objects, and `status` returns both —
+`run_details.status` (the run's own) and `execution_status.phase` (the infrastructure's). The app
+reads `run_details.status` and ignores the other, or it will report a run as pending while it works
+and running while it queues.
+
+### Credits move to `pending`, not `consumed`
+
+Before: `granted 500, consumed 0, pending 0, available 500`.
+One second after submitting a 5-experiment run: `granted 500, consumed 0, pending 5, available 495`.
+
+So **`available` is the only number the gate should show**, because it is the only one that already
+accounts for runs in flight. A modal that said "5 experiments, 500 credits available" while three
+other runs held 60 in `pending` would be off by sixty.
+
+### The server keeps more metadata than the docs describe
+
+`metadata-get` returns seven fields the skill's schema never mentions: `is_shared`,
+`is_bookmarked`, `bookmarked_experiment_ids`, `n_warmstart`, `warmstart_experiments`,
+`parent_run_id`, `parent_run_name`, plus a per-dataset `url`. Two matter:
+
+- **`is_shared`** is very likely the answer to §246's run-URL question. The sample in the web view
+  lives at `/shared/samples/nls_bmi`, and a run carrying an `is_shared` flag suggests the shareable
+  address is a *property the researcher grants*, not one every run has. If so, `open in
+  AutoDiscovery` cannot be an unconditional link, and the plan's Phase 5a needs a share step or a
+  different destination.
+- **`n_warmstart` / `warmstart_experiments`** is an undocumented capability: a run can apparently be
+  seeded with experiments. Noted, not planned.
+
+Nothing was guessed here. This is the §222 discipline — build the doubles from a captured contract —
+applied *before* writing the code rather than after a middleware's tests passed for weeks against an
+argument the live tool rejected.
+
+### The run: 13 minutes, 5 experiments, and it found the needle
+
+Submitted 12:55:58, `SUCCEEDED` 13:08:13. Per-experiment runtimes 128s, 329s, 172s, 172s, 132s —
+933s of work in 735s of wall clock, so they overlap. **15 experiments is 25–40 minutes**, which is
+the number `JobKind::expected()` has to say out loud.
+
+The synthetic control earned its keep. The planted columns are `cov_000`, `cov_005` and `cov_011`
+among 113, and **four of the five experiments named all three**. One of them, having tried
+permutation importance with an FDR-corrected t-test, reported this:
+
+> the t-test identified 113 features as statistically significant … This occurs because the
+> permutation importance scores for noise features, while extremely close to zero, are consistently
+> slightly positive across repeats … Despite failing to distinguish signal from noise strictly via
+> statistical significance, the magnitude of the mean importance scores clearly separates a small
+> subset of features (`cov_000`, `cov_005`, and `cov_011`) from the rest.
+
+That is a correct diagnosis of its own method's failure and the right conclusion anyway. Whatever
+else is true of AutoDiscovery, it is not producing slop. **And none of the five was flagged
+`is_surprising`** — which is its own finding, below.
+
+### Nine corrections to §246, all from the payload
+
+**1. `experiments` returns the whole experiment, not a summary.** `analysis`, `review`, `code`,
+`code_output`, `experiment_plan`, `parent_id`, `child_ids` — all of it, in one request. §246 worried
+a hundred-node graph might cost a hundred requests. It does not: **the tree is free.**
+
+**2. `rich_outputs` is only in the *detail* response.** The list returns `null` for it; `experiment
+<id>` returns the figures. So the images *are* the N+1, at **458KB for one experiment** — 7MB for a
+15-experiment run. They must be fetched lazily, per experiment, on demand.
+
+**3. `child_ids` is EMPTY in the detail response and populated in the list.** The same field, two
+answers, and the detail one is the wrong answer. **The list is authoritative for the tree; the detail
+is authoritative for the images.** A graph built from detail calls has no downward edges at all.
+
+**4. `parent_id` can point at a node that is not in the list.** Every experiment here descends from
+`node_1_0`, which is not among the five. Roots and seeds exist outside the experiment set, so the
+graph builder must treat a dangling parent as normal rather than as corruption.
+
+**5. `surprise` is signed.** −0.67, −0.06, −0.53, +0.39, +0.25. §246 said direction was derived from
+the belief move; it is not — **the sign of `surprise` is the direction**, and the web view's own
+Direction column is reading exactly that. The table shows the magnitude and the column shows the
+sign.
+
+**6. `is_surprising` is not a threshold on `|surprise|`.** With `surprisal_width: 0.5`, an experiment
+at −0.6705 came back `is_surprising: false`. Whatever the rule is, it is not the obvious one.
+**Trust the flag; never recompute it.** `run_stats.num_surprising_experiments` counts the same thing
+server-side, and it said 0.
+
+**7. The belief labels are categories, not buckets of a number.** §246 guessed the web view's
+`Likely True` / `Maybe False` were quarters of the probability. They are not: `prior_belief` and
+`posterior_belief` are four-category distributions with *vote counts* —
+`{definitely_true: 2, maybe_true: 3, maybe_false: 0, definitely_false: 0}` — plus **two** means,
+`mean` (0.7917) and `_empirical_mean` (0.85). The label comes from the distribution, the number from
+`mean`. Which of the two means the web view prints is still unconfirmed and is a five-minute check
+against a shared run rather than something to infer.
+
+**8. Three identifiers per experiment, and they are not interchangeable.** `experiment_id`
+(`node_2_0`) is what `parent_id` and `child_ids` reference. `id_in_run` (1, 2, 3…) is what the web
+view's ID column shows. `creation_idx` (2, 3, 4…) is the ordering. Draw with the first, label with
+the second, sort by the third.
+
+**9. Uploaded datasets expire after a week.** `dataset_expires_at` is created_at + 7 days. So a
+run's results must be persisted into the conversation's folder — the service is not an archive — and
+a fork of a month-old run cannot have its data. §246 did not know this and it is the strongest
+argument yet for `persist_discovery_outputs` being in Phase 1 rather than later.
+
+### And the run URL question, answered
+
+`runs` returns `path: None` and `run_metadata.is_shared: None` for this run, alongside
+`can_explore_with_asta: false` and `can_view_datasets: false`. The only address anyone has seen is
+the `/shared/samples/…` one. So a shareable URL looks like something a researcher *grants*, not
+something every run has — and **`open in AutoDiscovery` cannot be an unconditional link**. Either
+the app offers it only once `is_shared` is set, or the plan's "the graph is theirs" needs revisiting.
+That is the one Phase 0 question that came back with a shape rather than an answer.
+
+### What the figures actually are
+
+A Jupyter display bundle, one per output: the same figure as `image/png` (127KB), `image/jpeg`
+(90KB), `image/svg+xml` (158KB of real vector), and `text/plain` (`<Figure size 1000x800 with 2
+Axes>`). Take the PNG, the way §242's decoder already does for DataVoyager — and note the SVG is
+there if a plot is ever worth zooming.
+
+*Hundred-and-second: the same field can have two different values at two endpoints, and the one that
+looks authoritative is not. `child_ids` is complete in the list and empty in the detail; nothing in
+either response says so.*
+
+## 248. Drawing the tree ourselves (2026-08-21)
+
+*"maybe we need to ocnstruct our graph to avoid missbehaviours."*
+
+Right, and it also settles §247's one unanswered question by making it moot: `path` and `is_shared`
+came back null on our own run, so a shareable URL is something the researcher grants rather than
+something every run has — and there is no honest `open in AutoDiscovery` link to offer. Drawing it
+here removes the dependency.
+
+### A tree, not the blob
+
+AutoDiscovery's own view is a force-directed graph of the same data. This is a deterministic tidy
+tree — leaves take the next column, a parent centres over its children — for two reasons that both
+matter more than the resemblance:
+
+- **A spring layout settles differently every frame**, and this panel is rebuilt on every stream
+  event. The nodes would drift while a researcher was reading them.
+- **Depth is the one thing a blob cannot show.** It is how far the search kept refining a single
+  line of enquiry, which is the shape of an MCTS run and the reason the tree is worth drawing at
+  all.
+
+Edges are **three axis-aligned rectangles** each — down, across, down. gpui draws boxes; a diagonal
+would be a rotated div or a custom element, and elbows are exact where those would be approximate.
+A single child directly below its parent gets two pieces rather than three, so a chain is a straight
+line and not three segments with two of them zero-length.
+
+### Six guards, and where each one lives
+
+Everything from §247 that could misbehave now has a named home:
+
+| Guard | Where |
+|---|---|
+| edges come from `parent_id` alone, never `child_ids` | `discovery::layout`, `discovery::edges` |
+| a parent outside the set is a root | `discovery::layout` |
+| a cycle terminates and every node still gets a column | `discovery::layout` |
+| direction is the sign of `surprise` | `Experiment::direction` |
+| `is_surprising` is read, never recomputed | `decode_experiments` |
+| belief labels are the argmax of four vote counts | `Belief::decode` |
+
+### Status outranks the score
+
+The one thing this pass added that §247 did not name. An experiment that failed has no meaningful
+`surprise`, so banding it by magnitude draws **a hole in the search as a quiet result** — a reader
+would see a node that ran and found nothing, when nothing ran. So `discovery::loudness` checks
+status first and returns `Running` or `Failed` before it looks at any number, and the render function
+is a pure mapping from that band to three colours. The decision is in the module that has tests; the
+colours are in the one that does not.
+
+Two claims are kept visually distinct for the same reason: **loudness is a number we banded, and
+`is_surprising` is the service's judgment.** The probe had a −0.6705 shift the service called
+unsurprising at a 0.5 width, so folding one into the other would be asserting a relationship that
+demonstrably does not hold. Loudness is the fill; the flag is a ring.
+
+### What the modal shows, and in what order
+
+The service's own order, which `interpreting-results.md` also asks for: the belief shift, the
+hypothesis, the analysis, the review. **Code is not shown** — it is in the persisted `.json`, and a
+researcher reading results is not reading Python.
+
+The list is ranked on `|surprise|` rather than creation order, because the point of a discovery run
+is the handful of results that changed the picture and creation order buries them. An experiment that
+moved a belief hard *against* its hypothesis ranks as high as one that confirmed it, which is the
+interesting case and the reason the magnitude is what sorts.
+
+Whether the run is still producing is read from `has_job_completed` rather than inferred from the
+count: `n_experiments` is what was *requested*, and a run that failed early has fewer without still
+being in progress. Said out loud in the header, because a tree that grows between two openings is
+otherwise indistinguishable from one that was drawn wrong.
+
+*Hundred-and-third: when a picture and a number disagree about how confident to look, draw both and
+say which is which. Folding the service's judgment into our own banding would have made a
+contradiction invisible instead of visible.*

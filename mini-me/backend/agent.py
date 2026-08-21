@@ -40,6 +40,7 @@ from backend.middleware import (
     _build_filesystem_permissions,
     _build_guardrail_middleware,
 )
+from backend.autodiscovery_tools import draft_discovery_run
 from backend.datavoyager_tools import analyze_data
 from backend.prompts import COORDINATOR_SYSTEM_PROMPT
 from backend.subagents import _build_runtime_subagents, request_diagnostic_context
@@ -146,6 +147,7 @@ async def agent(config: RunnableConfig):
         diagnostic_tools=[request_diagnostic_context],
         theory_tools=[generate_theories],
         datavoyager_tools=[analyze_data],
+        discovery_tools=[draft_discovery_run],
         file_sync=file_sync,
         sandbox_backend=sandbox_backend,
         model_resolver=model_resolver,

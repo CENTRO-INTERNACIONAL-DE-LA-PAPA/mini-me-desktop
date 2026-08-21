@@ -13,6 +13,7 @@ mod backend;
 mod catalogue;
 mod composer;
 mod dataverse;
+mod discovery;
 mod gallery;
 mod markdown;
 mod menu;
@@ -939,6 +940,98 @@ const JOBS_BODY_HEIGHT: f32 = 260.;
 /// concurrent analyses apart, and a first clause does that; the rest of it is instructions to the
 /// analyst, which belong to the turn that sent them.
 const JOB_QUESTION_CHARS: usize = 120;
+
+/// A finished discovery run, open for reading.
+///
+/// Holds the experiments rather than re-reading them each frame: the fetch is a request to the
+/// service through the sandbox, and a modal that re-issued it on every notify would hammer a
+/// route to redraw a picture that has not changed.
+#[derive(Clone, Debug)]
+struct DiscoveryView {
+    run_id: String,
+    name: String,
+    experiments: Vec<discovery::Experiment>,
+    /// Which experiment is open, as an index into `experiments`. `None` shows the ranked list.
+    selected: Option<usize>,
+    /// True while the fetch is in flight, so an empty tree reads as "loading" and not "nothing".
+    loading: bool,
+    /// Whether the run has stopped producing experiments, from `has_job_completed`.
+    ///
+    /// Read rather than inferred from the count: `n_experiments` is what was *requested*, and a
+    /// run that failed early has fewer without still being in progress. The service's own flag is
+    /// the only thing that knows the difference.
+    complete: bool,
+    error: Option<String>,
+}
+
+/// A discovery run waiting for its budget to be approved, and what the researcher has changed.
+///
+/// Held rather than read from the snapshot each frame because two of its fields are *being edited*.
+/// A modal that re-derived the budget from the artifact on every notify would discard the number
+/// the researcher just set — and the number is the price.
+#[derive(Clone, Debug)]
+struct Approval {
+    draft: protocol::Draft,
+    /// Experiments to run, which is the cost in credits. Starts at whatever the run was drafted
+    /// with and moves only when the researcher moves it.
+    experiments: u32,
+    /// What the service says it will cost and what is left, once that has come back. `None` while
+    /// the request is in flight.
+    cost: Option<protocol::DraftCost>,
+    /// A submit that did not work, in the backend's own words — which say whether anything was
+    /// charged.
+    error: Option<String>,
+    /// True between the press and the answer, so the button cannot be pressed twice. Spending
+    /// twice is the one double-submit in this app that cannot be undone.
+    submitting: bool,
+}
+
+/// Budgets the modal offers in one press.
+///
+/// 15 is the default because the researcher who owns the credits said so; the others bracket it.
+/// Presets rather than a text field: a typed number is how somebody spends 150 credits meaning to
+/// spend 15, and the four here cover exploring, a normal run, and a thorough one.
+const BUDGET_PRESETS: [u32; 4] = [5, 15, 30, 50];
+
+/// The most a single press of `+` can add, and the ceiling the service itself enforces.
+const MAX_BUDGET: u32 = 500;
+
+/// The budget the gate opens with, from whatever the agent drafted.
+///
+/// Clamped, so the number on screen is always one the service will accept — a modal offering to
+/// spend 0 or 900 credits is offering a press that fails.
+fn opening_budget(drafted: u32) -> u32 {
+    drafted.clamp(1, MAX_BUDGET)
+}
+
+/// Whether this budget can actually be spent.
+///
+/// `None` for the balance means the lookup did not answer, and that must not block the decision:
+/// refusing to let somebody spend because a *balance request* failed is the wrong failure, and the
+/// service will refuse an unaffordable submit anyway. Only a known, smaller balance disables the
+/// button.
+fn affordable(experiments: u32, available: Option<u32>) -> bool {
+    match available {
+        Some(left) => experiments <= left,
+        None => true,
+    }
+}
+
+/// The cost and the balance as one sentence, because they are one question.
+///
+/// `available` and never `granted`: submitting moves credits to `pending` immediately, so the grant
+/// overstates what is left by however much is already in flight (§247).
+fn cost_line(experiments: u32, available: Option<u32>) -> String {
+    let unit = if experiments == 1 {
+        "experiment"
+    } else {
+        "experiments"
+    };
+    match available {
+        Some(left) => format!("{experiments} {unit} · {experiments} of {left} credits"),
+        None => format!("{experiments} {unit} · one credit each"),
+    }
+}
 
 /// How many background things are in each state.
 ///
@@ -3154,6 +3247,22 @@ struct Workbench {
     /// Runs collected this launch, still to be told about. Cleared when the researcher opens one
     /// or dismisses the banner.
     collected_runs: Vec<(String, protocol::Job)>,
+    /// A finished discovery run being read. See [`DiscoveryView`].
+    discovery_open: Option<DiscoveryView>,
+    /// A discovery run whose budget is waiting on the researcher. See [`Approval`].
+    ///
+    /// The one modal in this app that guards money, which is why it is a modal at all: §244 argued
+    /// a banner beats a modal for something already true, and this is the opposite — nothing
+    /// proceeds until it is answered and the wrong answer cannot be taken back.
+    approving: Option<Approval>,
+    /// Runs the researcher declined, so rejecting one does not reopen it on the next snapshot.
+    ///
+    /// Kept in memory only. The artifact still says `awaiting_approval`, because that is the
+    /// truth — the run is drafted and unspent — and a rejection is "not now", not a deletion.
+    declined: std::collections::HashSet<String>,
+    /// The intent being edited in the approval modal. The one descriptive field worth changing at
+    /// the gate, because it is what the run spends its experiments on.
+    intent_field: Entity<Composer>,
     /// Whether `BACKGROUND JOBS` is unfolded. Starts open, and reopens by itself the moment a
     /// worker stops at the approval gate — the researcher's press is respected everywhere except
     /// where it would hide a question addressed to them (§245).
@@ -3243,6 +3352,11 @@ impl Workbench {
         cx.observe(&datasets_filter, |_workbench, _field, cx| cx.notify())
             .detach();
         let sources_filter = cx.new(|cx| Composer::new(cx, "Filter by author, title or year"));
+        let intent_field = cx.new(|cx| {
+            Composer::new(cx, "What should the search focus on? (not the answer you expect)")
+        });
+        cx.observe(&intent_field, |_workbench, _field, cx| cx.notify())
+            .detach();
         cx.observe(&sources_filter, |_workbench, _field, cx| cx.notify())
             .detach();
         cx.observe(&model_filter, |_workbench, _field, cx| cx.notify())
@@ -3432,6 +3546,10 @@ impl Workbench {
             pending_adoption: Vec::new(),
             swept: false,
             collected_runs: Vec::new(),
+            discovery_open: None,
+            approving: None,
+            declined: std::collections::HashSet::new(),
+            intent_field,
             jobs_expanded: true,
             jobs_scroll: gpui::ScrollHandle::new(),
             sources_filter,
@@ -5355,6 +5473,9 @@ impl Workbench {
                 if !snapshot.todos.is_empty() {
                     self.plan = snapshot.todos;
                 }
+                // Before the jobs, because a drafted run is not among them — it is a question,
+                // and one that must not be buried under the rows of things already running.
+                self.open_approval(&snapshot.drafts, cx);
                 for job in snapshot.jobs {
                     self.track_job(job, cx);
                 }
@@ -13041,6 +13162,827 @@ impl Workbench {
     /// **Two call sites, one per frame.** `artifacts_contents` renders this either from its
     /// no-spine early return or from the full panel, never both, so the fixed element ids below
     /// cannot collide the way two sibling `datasets-heading`s once did.
+    /// Open a finished discovery run and fetch its experiments.
+    ///
+    /// One request for the whole tree — §247 established that the experiments endpoint returns
+    /// every node complete, so the graph does not cost a call per node. Figures are not fetched
+    /// here; they live only in the per-experiment response and are worth ~458KB each.
+    fn open_discovery(&mut self, run_id: String, name: String, cx: &mut Context<Self>) {
+        tracing::info!(run = %run_id, "opening a discovery run");
+        self.discovery_open = Some(DiscoveryView {
+            run_id: run_id.clone(),
+            name,
+            experiments: Vec::new(),
+            selected: None,
+            loading: true,
+            complete: false,
+            error: None,
+        });
+        let mut answer = self.sidecar.discovery_run(run_id.clone());
+        cx.spawn(async move |workbench, cx| {
+            if let Some(outcome) = answer.next().await {
+                let _ = workbench.update(cx, |workbench, cx| {
+                    let Some(view) = workbench.discovery_open.as_mut() else {
+                        return;
+                    };
+                    // A different run may have been opened while this was in flight.
+                    if view.run_id != run_id {
+                        return;
+                    }
+                    view.loading = false;
+                    match outcome {
+                        Ok(payload) => {
+                            view.experiments = discovery::decode_experiments(&payload);
+                            view.complete = discovery::finished(&payload);
+                            tracing::info!(
+                                run = %run_id,
+                                experiments = view.experiments.len(),
+                                "read a discovery run"
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, run = %run_id, "could not read a discovery run");
+                            view.error = Some(error);
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// The colours a node is drawn in, from how far it moved a belief.
+    ///
+    /// Returns `(fill, ink, border)`. Three bands rather than a ramp, because the scale of
+    /// `surprise` is not documented and a gradient over it would imply precision nobody has.
+    fn node_colours(&self, experiment: &discovery::Experiment) -> (u32, u32, u32) {
+        // A pure mapping from the band to three colours. The *decision* — that status outranks the
+        // score — lives in `discovery::loudness`, where it can be tested without a window.
+        match discovery::loudness(experiment) {
+            discovery::Loudness::Running => {
+                (theme::surface(), theme::text_muted(), theme::running())
+            }
+            discovery::Loudness::Failed => {
+                (theme::surface(), theme::text_muted(), theme::error())
+            }
+            discovery::Loudness::Loud => {
+                let fill = theme::accent();
+                (fill, theme::ink_on(fill), fill)
+            }
+            discovery::Loudness::Middling => (
+                theme::surface(),
+                theme::text(),
+                theme::border_strong(),
+            ),
+            discovery::Loudness::Quiet => {
+                (theme::surface(), theme::text_faint(), theme::border())
+            }
+        }
+    }
+
+    /// The search, drawn as the tree it is.
+    ///
+    /// **A tree and not the force-directed graph the service's own view shows.** Same data, and
+    /// the reasons are in `discovery.rs`: a spring layout settles differently every frame in a
+    /// panel that is rebuilt on every stream event, and depth is the one thing a blob cannot
+    /// show — how far the search kept refining one line of enquiry.
+    ///
+    /// Edges are three axis-aligned pieces each. gpui draws rectangles, and elbows are exact
+    /// where a rotated div would be approximate.
+    fn discovery_tree(&self, view: &DiscoveryView, cx: &mut Context<Self>) -> impl IntoElement {
+        let placed = discovery::layout(&view.experiments);
+        let (width, height) = discovery::canvas(&placed);
+        let mut canvas = div()
+            .relative()
+            .flex_none()
+            .w(px(width))
+            .h(px(height));
+
+        // Connectors first, so a node is never drawn under its own edge.
+        for (parent, child) in discovery::edges(&view.experiments) {
+            let Some(from) = placed.iter().find(|node| node.at == parent) else {
+                continue;
+            };
+            let Some(to) = placed.iter().find(|node| node.at == child) else {
+                continue;
+            };
+            for segment in discovery::elbow(from, to) {
+                canvas = canvas.child(
+                    div()
+                        .absolute()
+                        .left(px(segment.left))
+                        .top(px(segment.top))
+                        .w(px(segment.width.max(1.0)))
+                        .h(px(segment.height.max(1.0)))
+                        .bg(rgb(theme::border_strong())),
+                );
+            }
+        }
+
+        for node in &placed {
+            let Some(experiment) = view.experiments.get(node.at) else {
+                continue;
+            };
+            let (x, y) = discovery::centre(node);
+            let (fill, ink, border) = self.node_colours(experiment);
+            let chosen = view.selected == Some(node.at);
+            let at = node.at;
+            canvas = canvas.child(
+                div()
+                    .id(SharedString::from(format!("exp-node-{}", experiment.id)))
+                    .absolute()
+                    .left(px(x - discovery::NODE / 2.0))
+                    .top(px(y - discovery::NODE / 2.0))
+                    .w(px(discovery::NODE))
+                    .h(px(discovery::NODE))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(rgb(fill))
+                    // The server's own `is_surprising` gets its own mark rather than being folded
+                    // into the colour: loudness is a number we banded, and that flag is the
+                    // service's judgment. Two different claims, drawn differently.
+                    .border_2()
+                    .border_color(rgb(if chosen {
+                        theme::accent()
+                    } else if experiment.surprising {
+                        theme::warning()
+                    } else {
+                        border
+                    }))
+                    .text_color(rgb(ink))
+                    .text_xs()
+                    .child(experiment.number.to_string())
+                    .hover(|style| style.cursor_pointer())
+                    .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                        if let Some(view) = workbench.discovery_open.as_mut() {
+                            // Pressing the open one closes it, back to the ranked list.
+                            view.selected = if view.selected == Some(at) { None } else { Some(at) };
+                        }
+                        cx.notify();
+                    })),
+            );
+        }
+
+        div()
+            .id("discovery-tree")
+            .w_full()
+            .min_w_0()
+            .max_h(px(300.))
+            .overflow_scroll()
+            .child(canvas)
+    }
+
+    /// How much of an experiment's hypothesis a list row shows.
+    ///
+    /// The hypothesis is a sentence the service wrote to be read whole, so the row shows enough to
+    /// tell two apart and the detail below shows all of it.
+    const HYPOTHESIS_CHARS: usize = 90;
+
+    /// Every experiment, ranked by how far it moved a belief.
+    ///
+    /// The order is the reason to read this at all: the point of a discovery run is the handful of
+    /// results that changed the picture, and creation order buries them among the ones that did
+    /// not. Ranked on `|surprise|`, so an experiment that moved a belief hard *against* its
+    /// hypothesis ranks as high as one that confirmed it — which is the interesting case.
+    fn discovery_list(&self, view: &DiscoveryView, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut order: Vec<usize> = (0..view.experiments.len()).collect();
+        order.sort_by(|&a, &b| {
+            view.experiments[b]
+                .magnitude()
+                .total_cmp(&view.experiments[a].magnitude())
+        });
+
+        let mut list = div()
+            .id("discovery-list")
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w_0()
+            .gap_px()
+            .max_h(px(240.))
+            .overflow_y_scroll();
+
+        for at in order {
+            let experiment = &view.experiments[at];
+            let (_, _, accent) = self.node_colours(experiment);
+            let belief = match (experiment.prior, experiment.posterior) {
+                (Some(prior), Some(posterior)) => format!(
+                    "{} → {}",
+                    prior.label.label(),
+                    posterior.label.label()
+                ),
+                _ => String::new(),
+            };
+            let score = match experiment.surprise {
+                // Magnitude and direction as separate columns, the way the service's own table
+                // does it — the sign lives in `surprise` and is not derived from the beliefs.
+                Some(_) => format!(
+                    "{:.3} {}",
+                    experiment.magnitude(),
+                    experiment.direction().label()
+                ),
+                None => "—".to_string(),
+            };
+            list = list.child(
+                div()
+                    .id(SharedString::from(format!("exp-row-{}", experiment.id)))
+                    .flex()
+                    .flex_row()
+                    .items_start()
+                    .w_full()
+                    .min_w_0()
+                    .flex_none()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .when(view.selected == Some(at), |row| {
+                        row.bg(rgb(theme::hover_over(theme::surface())))
+                    })
+                    .hover(|style| {
+                        let fill = theme::hover_over(theme::surface());
+                        style
+                            .bg(rgb(fill))
+                            .text_color(rgb(theme::ink_on(fill)))
+                            .cursor_pointer()
+                    })
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(24.))
+                            .text_xs()
+                            .text_color(rgb(accent))
+                            .child(experiment.number.to_string()),
+                    )
+                    .child(
+                        div()
+                            .flex_grow()
+                            .min_w_0()
+                            .text_xs()
+                            .text_color(rgb(theme::text()))
+                            .child(protocol::clip(&experiment.hypothesis, Self::HYPOTHESIS_CHARS)),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_xs()
+                            .text_color(rgb(theme::text_muted()))
+                            .child(belief),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_xs()
+                            .text_color(rgb(theme::text_muted()))
+                            .child(score),
+                    )
+                    .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                        if let Some(view) = workbench.discovery_open.as_mut() {
+                            view.selected = Some(at);
+                        }
+                        cx.notify();
+                    })),
+            );
+        }
+        list
+    }
+
+    /// One experiment, opened.
+    ///
+    /// The order is the service's own and `interpreting-results.md` asks for it: the belief shift,
+    /// the hypothesis, the analysis, then the review. Code is not shown — it is in the persisted
+    /// `.json`, and a researcher reading results is not reading Python.
+    fn discovery_detail(
+        &self,
+        experiment: &discovery::Experiment,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mut detail = div()
+            .id("discovery-detail")
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w_0()
+            .gap_2()
+            .max_h(px(240.))
+            .overflow_y_scroll();
+
+        let shift = match (experiment.prior, experiment.posterior) {
+            (Some(prior), Some(posterior)) => format!(
+                "{} ({:.3}) → {} ({:.3})",
+                prior.label.label(),
+                prior.mean,
+                posterior.label.label(),
+                posterior.mean
+            ),
+            _ => "no belief recorded".to_string(),
+        };
+        detail = detail.child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .w_full()
+                .min_w_0()
+                .gap_2()
+                .flex_none()
+                .child(
+                    ui::Label::new(format!("Experiment {}", experiment.number))
+                        .colour(theme::text()),
+                )
+                .child(div().flex_grow())
+                .child(
+                    ui::Label::new(match experiment.surprise {
+                        Some(_) => format!(
+                            "{} {:.3}",
+                            experiment.direction().label(),
+                            experiment.magnitude()
+                        ),
+                        None => "not scored".to_string(),
+                    })
+                    .colour(if experiment.surprising {
+                        theme::warning()
+                    } else {
+                        theme::text_muted()
+                    })
+                    .size(ui::Size::Compact),
+                )
+                .child(
+                    ui::Button::new("discovery-back", "All experiments")
+                        .size(ui::Size::Compact)
+                        .on_click(cx.listener(|workbench, _event, _window, cx| {
+                            if let Some(view) = workbench.discovery_open.as_mut() {
+                                view.selected = None;
+                            }
+                            cx.notify();
+                        })),
+                ),
+        );
+        detail = detail.child(
+            ui::Label::new(shift)
+                .muted()
+                .size(ui::Size::Compact),
+        );
+        // The service's own flag, said in words. It is not a threshold on the number above it —
+        // the probe had a 0.67 shift the service called unsurprising — so the two are reported
+        // side by side rather than one derived from the other.
+        if experiment.surprising {
+            detail = detail.child(
+                ui::Label::new("The service flagged this one as surprising.")
+                    .colour(theme::warning())
+                    .size(ui::Size::Compact),
+            );
+        }
+
+        for (heading, body) in [
+            ("HYPOTHESIS", &experiment.hypothesis),
+            ("ANALYSIS", &experiment.analysis),
+            ("REVIEW", &experiment.review),
+        ] {
+            if body.trim().is_empty() {
+                continue;
+            }
+            detail = detail.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .min_w_0()
+                    .flex_none()
+                    .gap_1()
+                    .child(section_label(heading))
+                    .child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .text_xs()
+                            .text_color(rgb(theme::text()))
+                            .child(body.clone()),
+                    ),
+            );
+        }
+        detail
+    }
+
+    /// A finished discovery run: the search as a tree, and its experiments ranked.
+    fn discovery_modal(&self, view: &DiscoveryView, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut body = div().flex().flex_col().w_full().min_w_0().gap_3();
+
+        let scored = view
+            .experiments
+            .iter()
+            .filter(|experiment| experiment.surprise.is_some())
+            .count();
+        let flagged = view
+            .experiments
+            .iter()
+            .filter(|experiment| experiment.surprising)
+            .count();
+        let failed = view
+            .experiments
+            .iter()
+            .filter(|experiment| experiment.is_finished() && !experiment.succeeded())
+            .count();
+        body = body.child(
+            ui::Label::new(if view.loading {
+                "Reading the run…".to_string()
+            } else {
+                let mut parts = vec![format!(
+                    "{} experiment{}",
+                    view.experiments.len(),
+                    if view.experiments.len() == 1 { "" } else { "s" }
+                )];
+                if !view.complete {
+                    // Said out loud, because a tree that grows between two openings is otherwise
+                    // indistinguishable from one that was drawn wrong.
+                    parts.push("still running".to_string());
+                }
+                if failed > 0 {
+                    parts.push(format!("{failed} failed"));
+                }
+                parts.push(format!("{scored} scored"));
+                parts.push(format!("{flagged} flagged surprising by the service"));
+                parts.join(" · ")
+            })
+            .muted()
+            .size(ui::Size::Compact),
+        );
+
+        if let Some(error) = &view.error {
+            body = body.child(
+                ui::Label::new(error.clone())
+                    .colour(theme::error())
+                    .size(ui::Size::Compact),
+            );
+        }
+
+        if !view.experiments.is_empty() {
+            body = body
+                .child(self.discovery_tree(view, cx))
+                .child(match view.selected.and_then(|at| view.experiments.get(at)) {
+                    Some(experiment) => self.discovery_detail(experiment, cx).into_any_element(),
+                    None => self.discovery_list(view, cx).into_any_element(),
+                });
+        } else if !view.loading && view.error.is_none() {
+            body = body.child(
+                ui::Label::new(
+                    "This run recorded no experiments. Its status and any failure are in its own \
+                     folder, under `discovery/`.",
+                )
+                .muted()
+                .size(ui::Size::Compact),
+            );
+        }
+
+        ui::Modal::new("discovery-results", if view.name.is_empty() {
+            "Discovery run".to_string()
+        } else {
+            view.name.clone()
+        })
+        .width(760.)
+        .focus(&self.delete_focus)
+        .body(body)
+        .actions(
+            ui::actions()
+                .child(div().flex_grow())
+                .child(
+                    ui::Button::new("discovery-close", "Close").on_click(cx.listener(
+                        |workbench, _event, _window, cx| {
+                            workbench.discovery_open = None;
+                            cx.notify();
+                        },
+                    )),
+                ),
+        )
+        .footer(
+            ui::Label::new(
+                "Every hypothesis and number here was produced by an AI system. Have a \
+                 subject-matter expert check anything you intend to rely on.",
+            )
+            .muted()
+            .size(ui::Size::Compact),
+        )
+    }
+
+    /// Open the budget gate for a run that is drafted and unspent.
+    ///
+    /// Called from a snapshot rather than from a press, because the researcher never asked for
+    /// this modal — the agent drafted a run and something has to ask them whether to pay for it.
+    /// Ignores a run they already declined, and never replaces a gate already on screen: a second
+    /// draft arriving mid-decision must not move the button under the pointer.
+    fn open_approval(&mut self, drafts: &[protocol::Draft], cx: &mut Context<Self>) {
+        if self.approving.is_some() {
+            return;
+        }
+        let Some(draft) = drafts
+            .iter()
+            .find(|draft| !self.declined.contains(&draft.run_id))
+        else {
+            return;
+        };
+        tracing::info!(
+            run = %draft.run_id,
+            experiments = draft.experiments,
+            "asking the researcher to approve a discovery budget"
+        );
+        // Whatever the agent drafted, clamped into what the service will accept — so the number
+        // on screen is always one that can actually be submitted.
+        let experiments = opening_budget(draft.experiments);
+        self.intent_field.update(cx, |field, cx| {
+            field.set_text(draft.intent.clone(), cx);
+        });
+        self.approving = Some(Approval {
+            draft: draft.clone(),
+            experiments,
+            cost: None,
+            error: None,
+            submitting: false,
+        });
+
+        // What it costs against what is left. The modal renders without it — the run's own
+        // experiment count is the price either way — so a slow or failed lookup delays the
+        // balance, never the decision.
+        let mut answer = self.sidecar.discovery_draft(draft.run_id.clone());
+        let wanted = draft.run_id.clone();
+        cx.spawn(async move |workbench, cx| {
+            if let Some(outcome) = answer.next().await {
+                let _ = workbench.update(cx, |workbench, cx| {
+                    let Some(approval) = workbench.approving.as_mut() else {
+                        return;
+                    };
+                    // The gate may have been answered and reopened for a different run while this
+                    // was in flight; a balance belonging to another run would be a wrong number
+                    // next to a price.
+                    if approval.draft.run_id != wanted {
+                        return;
+                    }
+                    match outcome {
+                        Ok(cost) => approval.cost = Some(cost),
+                        Err(error) => {
+                            tracing::warn!(%error, "could not read the discovery credit balance");
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Spend the credits. The only place in this app that does.
+    fn approve_discovery(&mut self, cx: &mut Context<Self>) {
+        let Some(approval) = self.approving.as_mut() else {
+            return;
+        };
+        if approval.submitting {
+            return; // the press already landed; a second one would be a second charge
+        }
+        approval.submitting = true;
+        approval.error = None;
+        let run_id = approval.draft.run_id.clone();
+        let experiments = approval.experiments;
+        let kind = approval.draft.name.clone();
+        let intent = self.intent_field.read(cx).text().trim().to_string();
+        tracing::info!(run = %run_id, experiments, "approving a discovery run");
+
+        let mut answer = self
+            .sidecar
+            .submit_discovery(run_id.clone(), experiments, intent);
+        cx.spawn(async move |workbench, cx| {
+            if let Some(outcome) = answer.next().await {
+                let _ = workbench.update(cx, |workbench, cx| {
+                    match outcome {
+                        Ok(()) => {
+                            workbench.approving = None;
+                            workbench.status =
+                                format!("{kind} running in the background ({} experiments)", experiments);
+                            // Start watching it immediately rather than waiting for the next
+                            // turn's snapshot: the researcher just paid for it, and a run with no
+                            // row is a run they cannot see.
+                            workbench.track_job(
+                                protocol::Job {
+                                    kind: protocol::JobKind::Discovery,
+                                    task_id: run_id.clone(),
+                                    question: kind.clone(),
+                                    context_id: None,
+                                    status: "running".to_string(),
+                                },
+                                cx,
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, run = %run_id, "a discovery submit failed");
+                            if let Some(approval) = workbench.approving.as_mut() {
+                                approval.submitting = false;
+                                approval.error = Some(error);
+                            }
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// The budget gate.
+    ///
+    /// **A modal, deliberately, and §244 is the argument for it rather than against.** That section
+    /// refused a modal for a background run that had already finished: nothing was pending, the
+    /// researcher had somewhere to go, and a modal would have been a toll booth in front of work
+    /// they could get on with. This is the other kind of thing. Nothing proceeds until it is
+    /// answered, it has three outcomes rather than one, and the wrong one spends credits that do
+    /// not come back. A banner is for something already true; a modal is for something that cannot
+    /// happen without you.
+    ///
+    /// Three things it must say, and the order is the order: what will run, what it costs against
+    /// what is left, and how to change it before agreeing.
+    fn approval_modal(&self, approval: &Approval, cx: &mut Context<Self>) -> impl IntoElement {
+        let experiments = approval.experiments;
+        let available = approval.cost.as_ref().and_then(|cost| cost.available);
+        let over_budget = !affordable(experiments, available);
+
+        let mut body = div().flex().flex_col().w_full().min_w_0().gap_3();
+
+        if !approval.draft.name.is_empty() {
+            body = body.child(ui::Label::new(approval.draft.name.clone()));
+        }
+        body = body.child(
+            ui::Label::new(
+                "AutoDiscovery writes its own hypotheses, runs code for each one and reports \
+                 which results most changed its beliefs. It has not started.",
+            )
+            .muted()
+            .size(ui::Size::Compact),
+        );
+
+        if !approval.draft.datasets.is_empty() {
+            body = body.child(
+                ui::Label::new(format!("Over {}", approval.draft.datasets.join(", ")))
+                    .muted()
+                    .size(ui::Size::Compact),
+            );
+        }
+
+        // --- the budget, which is the price ------------------------------------------------
+        body = body.child(
+            div()
+                .flex()
+                .flex_col()
+                .w_full()
+                .min_w_0()
+                .gap_1()
+                .child(section_label("EXPERIMENTS TO RUN"))
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_1()
+                        .children(BUDGET_PRESETS.iter().map(|&preset| {
+                            ui::Button::new(
+                                SharedString::from(format!("budget-{preset}")),
+                                preset.to_string(),
+                            )
+                            .size(ui::Size::Compact)
+                            .tone(if preset == experiments {
+                                ui::Tone::Accent
+                            } else {
+                                ui::Tone::Quiet
+                            })
+                            .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                                if let Some(approval) = workbench.approving.as_mut() {
+                                    approval.experiments = preset;
+                                }
+                                cx.notify();
+                            }))
+                        }))
+                        .child(
+                            ui::Button::new("budget-down", "−")
+                                .size(ui::Size::Compact)
+                                .disabled(experiments <= 1)
+                                .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                    if let Some(approval) = workbench.approving.as_mut() {
+                                        approval.experiments =
+                                            approval.experiments.saturating_sub(1).max(1);
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            ui::Button::new("budget-up", "+")
+                                .size(ui::Size::Compact)
+                                .disabled(experiments >= MAX_BUDGET)
+                                .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                    if let Some(approval) = workbench.approving.as_mut() {
+                                        approval.experiments =
+                                            (approval.experiments + 1).min(MAX_BUDGET);
+                                    }
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                // The cost and the balance in one sentence, because they are one question. And
+                // `available` rather than `granted`: submitting moves credits to `pending`
+                // straight away, so the grant overstates what is left by whatever is in flight.
+                .child(
+                    ui::Label::new(cost_line(experiments, available))
+                    .colour(if over_budget {
+                        theme::error()
+                    } else {
+                        theme::text_muted()
+                    })
+                    .size(ui::Size::Compact),
+                ),
+        );
+
+        // --- the one field worth changing at the gate --------------------------------------
+        body = body.child(
+            div()
+                .flex()
+                .flex_col()
+                .w_full()
+                .min_w_0()
+                .gap_1()
+                .child(section_label("WHAT TO EXPLORE"))
+                .child(self.filter_field(self.intent_field.clone(), cx))
+                .child(
+                    ui::Label::new(
+                        "Steer it — \u{201c}focus on how rainfall relates to yield\u{201d}. Naming the \
+                         answer you expect wastes what this tool is for.",
+                    )
+                    .muted()
+                    .size(ui::Size::Compact),
+                ),
+        );
+
+        if let Some(error) = &approval.error {
+            body = body.child(
+                ui::Label::new(error.clone())
+                    .colour(theme::error())
+                    .size(ui::Size::Compact),
+            );
+        }
+
+        ui::Modal::new("discovery-approval", "Start this discovery run?")
+            .width(560.)
+            .focus(&self.delete_focus)
+            .body(body)
+            .actions(
+                ui::actions()
+                    .child(div().flex_grow())
+                    .child(
+                        ui::Button::new("discovery-reject", "Not now")
+                            .disabled(approval.submitting)
+                            .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                if let Some(approval) = workbench.approving.take() {
+                                    // Remembered, so the next snapshot does not ask again. The
+                                    // run stays drafted and unspent, which is what "not now"
+                                    // means — nothing is deleted.
+                                    workbench.declined.insert(approval.draft.run_id);
+                                    workbench.status =
+                                        "the discovery run is drafted and unstarted".into();
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        ui::Button::new(
+                            "discovery-approve",
+                            if approval.submitting {
+                                "Starting…".to_string()
+                            } else {
+                                format!("Run {experiments} and spend {experiments}")
+                            },
+                        )
+                        .tone(ui::Tone::Accent)
+                        // Not while a press is in flight, and not for a budget the balance cannot
+                        // cover: the service would refuse it, and letting someone press a button
+                        // that fails is worse than not offering it.
+                        .disabled(approval.submitting || over_budget)
+                        .on_click(cx.listener(|workbench, _event, _window, cx| {
+                            workbench.approve_discovery(cx);
+                        })),
+                    ),
+            )
+            .footer(
+                ui::Label::new(if over_budget {
+                    "That is more than the credits left.".to_string()
+                } else {
+                    "One credit per experiment. Nothing is spent until you press.".to_string()
+                })
+                .muted()
+                .size(ui::Size::Compact),
+            )
+    }
+
     fn jobs_section(&self, cx: &mut Context<Self>) -> Div {
         let mut section = div().flex().flex_col().gap_2().pt_2();
         if self.jobs.is_empty() && self.tasks.is_empty() {
@@ -13139,7 +14081,7 @@ impl Workbench {
             body = body.child(self.task_row(task, cx));
         }
         for job in &self.jobs {
-            body = body.child(self.job_row(job));
+            body = body.child(self.job_row(job, cx));
         }
 
         section.child(
@@ -13408,7 +14350,7 @@ impl Workbench {
     ///
     /// No `cx` and no controls — a job is something this client polls, not a gate it can answer.
     /// What the row owes a reader is whether it is still going and roughly how long that takes.
-    fn job_row(&self, job: &protocol::Job) -> Div {
+    fn job_row(&self, job: &protocol::Job, cx: &mut Context<Self>) -> gpui::Stateful<Div> {
         let (mark, colour) = if !job.is_finished() {
             ("◐", theme::running())
         } else if job.succeeded() {
@@ -13423,7 +14365,14 @@ impl Workbench {
             // is indistinguishable from a hang.
             format!("running · usually {}", job.kind.expected())
         };
-        div()
+        // A finished discovery run is the one job row with something to open: its results are a
+        // tree of experiments, and the alternative is composing a question to ask about work the
+        // app already has (the argument §198 made for the worker-files button).
+        let readable = job.kind == protocol::JobKind::Discovery && job.succeeded();
+        let mut row = div()
+            // Always identified, whether or not it is pressable: `.id()` changes the element's
+            // type, and branching on it would mean two incompatible return values for one row.
+            .id(SharedString::from(format!("job-row-{}", job.task_id)))
             .flex()
             .flex_col()
             .w_full()
@@ -13459,7 +14408,32 @@ impl Workbench {
                         // telling two concurrent analyses apart, and the first clause does that.
                         .child(protocol::clip(&job.question, JOB_QUESTION_CHARS)),
                 )
-            })
+            });
+
+        if readable {
+            let run_id = job.task_id.clone();
+            let name = job.question.clone();
+            row = row
+                // Said as well as coloured, because a hover-only affordance is one a researcher
+                // finds by accident — and this is the only way into a run they paid for.
+                .child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .text_color(rgb(theme::accent()))
+                        .text_xs()
+                        .child("Show what it found"),
+                )
+                .rounded_md()
+                .hover(|style| {
+                    let fill = theme::hover_over(theme::surface());
+                    style.bg(rgb(fill)).cursor_pointer()
+                })
+                .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                    workbench.open_discovery(run_id.clone(), name.clone(), cx);
+                }));
+        }
+        row
     }
 
     /// Research outputs from the current run, grouped by kind.
@@ -14788,6 +15762,18 @@ impl Render for Workbench {
             root
         };
 
+        // The budget gate, mounted before the confirmations below it. Nothing else in this app
+        // guards money, and the researcher did not ask for it — a drafted run did.
+        let root = match self.discovery_open.clone() {
+            Some(view) => root.child(self.discovery_modal(&view, cx)),
+            None => root,
+        };
+
+        let root = match self.approving.clone() {
+            Some(approval) => root.child(self.approval_modal(&approval, cx)),
+            None => root,
+        };
+
         let root = match &self.confirming_delete {
             Some(target) => root.child(self.delete_modal(target, cx)),
             None => root,
@@ -14930,7 +15916,7 @@ mod tests {
     /// §244: one run gets a definite press, because a single action has to mean something.
     #[test]
     fn one_collected_run_is_named_and_openable() {
-        let runs = vec![collected(protocol::JobKind::Analysis, "01a0215f-c66b-7461-96f2-595a168fa8f8")];
+        let runs = [collected(protocol::JobKind::Analysis, "01a0215f-c66b-7461-96f2-595a168fa8f8")];
         // The label names what finished rather than counting it.
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].1.kind.label(), "Data analysis");
@@ -14940,7 +15926,7 @@ mod tests {
     /// With several, no single thread is the right destination — the sidebar is.
     #[test]
     fn several_collected_runs_are_counted_rather_than_opened() {
-        let runs = vec![
+        let runs = [
             collected(protocol::JobKind::Analysis, "aaa"),
             collected(protocol::JobKind::Theorizer, "bbb"),
         ];
@@ -16833,6 +17819,43 @@ mod tests {
             status: "working".into(),
         };
         assert_eq!(job.question, question);
+    }
+
+    /// §248: the number on screen must always be one the service will accept.
+    #[test]
+    fn the_gate_opens_on_a_budget_that_can_actually_be_submitted() {
+        assert_eq!(opening_budget(15), 15);
+        // A draft with no budget recorded, or a nonsense one, still opens somewhere pressable.
+        assert_eq!(opening_budget(0), 1);
+        assert_eq!(opening_budget(9_999), MAX_BUDGET);
+        assert_eq!(opening_budget(MAX_BUDGET), MAX_BUDGET);
+        // And every preset is inside the bounds, so a single press cannot make it unsubmittable.
+        for preset in BUDGET_PRESETS {
+            assert_eq!(opening_budget(preset), preset, "{preset}");
+        }
+    }
+
+    /// A failed *balance* lookup must not stop somebody spending their own credits.
+    #[test]
+    fn an_unknown_balance_does_not_block_the_decision() {
+        assert!(affordable(15, None));
+        assert!(affordable(500, None));
+        // A known balance does gate it, exactly and inclusively.
+        assert!(affordable(15, Some(15)));
+        assert!(!affordable(16, Some(15)));
+        assert!(!affordable(1, Some(0)));
+    }
+
+    /// The sentence a researcher reads before spending. `available`, never `granted`.
+    #[test]
+    fn the_cost_line_states_the_price_against_what_is_left() {
+        assert_eq!(cost_line(15, Some(495)), "15 experiments · 15 of 495 credits");
+        // Singular, because "1 experiments" is the kind of detail that makes a money dialog look
+        // untrustworthy.
+        assert_eq!(cost_line(1, Some(495)), "1 experiment · 1 of 495 credits");
+        // No balance yet: say the rate rather than implying a number nobody confirmed.
+        assert_eq!(cost_line(15, None), "15 experiments · one credit each");
+        assert!(!cost_line(15, Some(495)).contains("500"), "the grant is not the balance");
     }
 }
 

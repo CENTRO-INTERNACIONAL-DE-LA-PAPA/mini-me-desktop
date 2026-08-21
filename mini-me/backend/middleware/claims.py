@@ -74,6 +74,13 @@ CLAIMED_PATHS: dict[str, tuple[str, ...]] = {
         "index_path",
         "papers[].path",
     ),
+    "DiscoveryRunResults": (
+        # Only the inputs, because a drafted run has no outputs yet — and by the time it does, the
+        # poll route wrote them rather than the model. What is worth checking is that the data the
+        # run was configured against is really on disk: the upload reads those paths, and a run
+        # configured over a file that is not there is a spent credit with nothing behind it.
+        "dataset_paths[]",
+    ),
 }
 
 #: Schemas with no path-bearing field, listed so that "not in `CLAIMED_PATHS`" can mean "nobody has

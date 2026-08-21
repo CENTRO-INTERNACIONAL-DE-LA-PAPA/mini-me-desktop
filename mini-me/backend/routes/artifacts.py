@@ -10,6 +10,18 @@ from starlette.responses import JSONResponse, Response
 
 from backend.sandbox import LazyLangsmithSandbox
 from backend.schemas import _is_supported_artifact_file
+from backend.autodiscovery_tools import (
+    cost_of,
+    fetch_experiment_figures,
+    is_valid_experiment_id,
+    is_valid_run_id,
+    persist_discovery_outputs,
+    poll_discovery_status,
+    read_credits,
+    read_metadata,
+    submit_run,
+    update_metadata,
+)
 from backend.datavoyager_tools import (
     persist_analysis_outputs,
     poll_analysis_status,
@@ -253,6 +265,137 @@ async def analyze_data_status(request: Request) -> Response:
             except Exception:  # noqa: BLE001
                 pass  # persistence is best-effort; the card still updates
     return JSONResponse(result)
+
+
+async def discovery_draft(request: Request) -> Response:
+    """What the approval modal needs: the drafted run, and what it will cost against the balance.
+
+    Its own route rather than part of the poll, because it is read once when the modal opens and
+    costs two extra service calls. A poll that carried it would pay for them every tick.
+    """
+    if (unauth := _require_auth(request)) is not None:
+        return unauth
+    thread_id = request.path_params["thread_id"]
+    run_id = request.path_params["run_id"]
+    if not is_valid_run_id(run_id):
+        return JSONResponse({"error": "invalid run_id"}, status_code=400)
+
+    adapter = await _existing_sandbox_for_thread(thread_id)
+    if adapter is None:
+        return JSONResponse({"status": "unavailable"})
+
+    async with asta_token_scope(_request_user_id(request)):
+        metadata = await read_metadata(adapter, run_id)
+        credits = await read_credits(adapter)
+    if not metadata:
+        return JSONResponse({"error": "no such drafted run"}, status_code=404)
+    # `available` already nets off runs in flight; the others are for context only.
+    return JSONResponse(
+        {"run_id": run_id, "metadata": metadata, "credits": credits, "cost": cost_of(metadata)}
+    )
+
+
+async def discovery_submit(request: Request) -> Response:
+    """Spend the credits. **The only caller is the researcher pressing approve.**
+
+    This route *is* the credit gate. Nothing the model does reaches it: `draft_discovery_run` stops
+    at a configured run, and `submit_run` has no other caller in the codebase. The two edits the
+    modal offers — the budget and the intent — are applied here before submitting, so what the
+    researcher saw and what runs are the same thing.
+    """
+    if (unauth := _require_auth(request)) is not None:
+        return unauth
+    thread_id = request.path_params["thread_id"]
+    run_id = request.path_params["run_id"]
+    if not is_valid_run_id(run_id):
+        return JSONResponse({"error": "invalid run_id"}, status_code=400)
+
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    body = body if isinstance(body, dict) else {}
+    changes = {key: body[key] for key in ("intent", "n_experiments") if key in body}
+
+    adapter = await _existing_sandbox_for_thread(thread_id)
+    if adapter is None:
+        return JSONResponse({"status": "unavailable"})
+
+    async with asta_token_scope(_request_user_id(request)):
+        if changes:
+            try:
+                metadata = await update_metadata(adapter, run_id, changes)
+            except ValueError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
+            if not metadata:
+                # Never submit a run whose edits did not land: the researcher approved 15
+                # experiments and the service would charge for whatever it still had stored.
+                return JSONResponse(
+                    {"error": "your changes did not save, so nothing was submitted"},
+                    status_code=409,
+                )
+        result = await submit_run(adapter, run_id)
+    if "error" in result:
+        return JSONResponse(result, status_code=502)
+    return JSONResponse(result)
+
+
+async def discovery_status(request: Request) -> Response:
+    """Poll a run, and persist it once it stops.
+
+    Cheap enough for a timer: the run's own status plus the experiments list, which is where the
+    honest progress number comes from. Deliberately does **not** touch the per-experiment endpoint
+    — that is the only place figures live and it is ~458KB a node.
+    """
+    if (unauth := _require_auth(request)) is not None:
+        return unauth
+    thread_id = request.path_params["thread_id"]
+    run_id = request.path_params["run_id"]
+    if not is_valid_run_id(run_id):
+        return JSONResponse({"error": "invalid run_id"}, status_code=400)
+
+    adapter = await _existing_sandbox_for_thread(thread_id)
+    if adapter is None:
+        return JSONResponse({"status": "unavailable"})
+
+    async with asta_token_scope(_request_user_id(request)):
+        try:
+            result = await poll_discovery_status(adapter, run_id)
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse({"status": "error", "message": str(exc)})
+
+        # A finished run has seven days before its datasets expire, so this is not optional —
+        # it is the only copy that outlives the service (docs §247).
+        if result.get("status") in ("completed", "failed", "canceled"):
+            try:
+                metadata = await read_metadata(adapter, run_id)
+                await persist_discovery_outputs(adapter, run_id, metadata, result)
+            except Exception:  # noqa: BLE001
+                pass  # persistence is best-effort; the caller still gets the status
+    return JSONResponse(result)
+
+
+async def discovery_figures(request: Request) -> Response:
+    """Decode one experiment's figures to disk, on demand.
+
+    Separate from everything else because it is the expensive call and it is only worth making when
+    a researcher opens that experiment. The base64 never leaves the sandbox; this returns paths.
+    """
+    if (unauth := _require_auth(request)) is not None:
+        return unauth
+    thread_id = request.path_params["thread_id"]
+    run_id = request.path_params["run_id"]
+    experiment_id = request.path_params["experiment_id"]
+    if not is_valid_run_id(run_id) or not is_valid_experiment_id(experiment_id):
+        return JSONResponse({"error": "invalid run_id or experiment_id"}, status_code=400)
+
+    adapter = await _existing_sandbox_for_thread(thread_id)
+    if adapter is None:
+        return JSONResponse({"status": "unavailable"})
+
+    async with asta_token_scope(_request_user_id(request)):
+        paths = await fetch_experiment_figures(adapter, run_id, experiment_id)
+    return JSONResponse({"run_id": run_id, "experiment_id": experiment_id, "figures": paths})
 
 
 async def delete_sandbox(request: Request) -> Response:

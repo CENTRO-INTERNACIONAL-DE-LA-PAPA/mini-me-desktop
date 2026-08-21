@@ -246,6 +246,57 @@ class DerivedRef(BaseModel):
     )
 
 
+class DiscoveryRunResults(BaseModel):
+    """An Asta AutoDiscovery run this turn prepared.
+
+    **The experiments are not in here, on purpose.** AutoDiscovery writes its own hypotheses,
+    executes its own code and reports its own belief shifts; a model filling in a `findings` list
+    for it would be authoring results it did not produce. So this artifact records the *run* — what
+    was asked, of which data, at what budget — and the experiments arrive from the service through
+    the poll route.
+
+    It also exists before the run does. A drafted run has a `run_id` and has spent nothing:
+    `status` is `awaiting_approval` until the researcher approves the budget in the app, because
+    one credit per experiment comes out of a fixed grant.
+    """
+
+    name: str = Field(description="Short title for the run, as the researcher would name it.")
+    run_id: str | None = Field(
+        default=None,
+        description="AutoDiscovery run id returned by the draft step, for polling and submitting.",
+    )
+    domain: str = Field(default="", description="Research field the run was framed in.")
+    intent: str = Field(
+        default="",
+        description=(
+            "How the exploration was steered — the one configuration field worth stating back to "
+            "the researcher, because it is what they will want to change."
+        ),
+    )
+    dataset_paths: List[str] = Field(
+        default_factory=list,
+        description="Local dataset path(s) uploaded for the run.",
+    )
+    n_experiments: int = Field(
+        default=15,
+        description="Experiments the run is configured for. One credit each.",
+    )
+    status: str = Field(
+        default="awaiting_approval",
+        description=(
+            "Run lifecycle: 'awaiting_approval' (drafted, nothing spent), 'running', "
+            "'completed', 'failed', or 'canceled'."
+        ),
+    )
+    derived_from: List[DerivedRef] = Field(
+        default_factory=list,
+        description=(
+            "Upstream artifacts the run was built on — normally the dataset "
+            "(kind='dataset'/'file'). Leave empty when there is no upstream artifact."
+        ),
+    )
+
+
 class DataAnalysisResults(BaseModel):
     """A DataVoyager (`asta analyze-data`) run: hypotheses tested against data."""
 
@@ -390,6 +441,16 @@ class DataAnalysisArtifactPayload(TypedDict):
     context_id: NotRequired[str | None]
 
 
+class DiscoveryRunArtifactPayload(TypedDict):
+    name: str
+    run_id: NotRequired[str | None]
+    domain: NotRequired[str]
+    intent: NotRequired[str]
+    dataset_paths: list[str]
+    n_experiments: NotRequired[int]
+    status: NotRequired[str]
+
+
 class ProjectSuggestionPayload(TypedDict):
     title: str
     rationale: str
@@ -459,6 +520,7 @@ class ArtifactBundle(TypedDict):
     hypotheses: NotRequired[list[HypothesisArtifactPayload]]
     libraries: NotRequired[list[LibraryArtifactPayload]]
     analyses: NotRequired[list[DataAnalysisArtifactPayload]]
+    discoveries: NotRequired[list[DiscoveryRunArtifactPayload]]
     # Single object, not a list: the reducer keeps the most recent one
     # (last-write-wins) rather than deduping/appending.
     project: NotRequired[ProjectArtifactPayload]
@@ -573,6 +635,13 @@ def _merge_artifacts(
             # the same question refreshes in place, while a follow-up (a distinct
             # question) accumulates as its own entry.
             keys=("question",),
+        ),
+        "discoveries": _dedupe_artifacts(
+            [*left.get("discoveries", []), *right.get("discoveries", [])],
+            # Keyed by the run id the service issued, not by the name: two runs over the same
+            # data with the same title are two runs and two bills, while an
+            # awaiting_approval→running→completed progression is one run updating in place.
+            keys=("run_id",),
         ),
         "edges": _dedupe_artifacts(
             [*left.get("edges", []), *right.get("edges", [])],

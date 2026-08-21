@@ -10,6 +10,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from backend.middleware.submit_first import (
+    DraftBeforeReporting,
     ANALYZE_TOOL,
     THEORIZE_TOOL,
     SubmitBeforeReporting,
@@ -137,6 +138,7 @@ def test_the_gates_are_attached_to_exactly_the_two_subagents():
         diagnostic_tools=[],
         theory_tools=[],
         datavoyager_tools=[],
+        discovery_tools=[],
         file_sync=object(),
         sandbox_backend=Sandbox(),
         model_resolver=Resolver(),
@@ -147,6 +149,9 @@ def test_the_gates_are_attached_to_exactly_the_two_subagents():
     }
     assert holding(SubmitBeforeReporting) == {"data_voyager"}
     assert holding(TheorizeBeforeReporting) == {"hypothesis_generator"}
+    # And the third, added when AutoDiscovery arrived: the one whose fabricated artifact would
+    # reach the credit gate rather than merely a waiting researcher.
+    assert holding(DraftBeforeReporting) == {"autodiscovery"}
 
 
 # --- the guidance the working run produced (§239) ------------------------------------------------
@@ -216,3 +221,35 @@ def test_the_log_says_whether_the_session_was_reused():
         assert "--context-id" in seen[-1] and "--context-id" not in seen[0]
     finally:
         _active_sandbox.reset(token)
+
+
+# --- the third gate, where the stakes are money (§248) --------------------------------------------
+
+def test_the_draft_gate_forces_the_only_tool_autodiscovery_has():
+    from backend.middleware.submit_first import DRAFT_TOOL
+
+    assert DRAFT_TOOL == "draft_discovery_run"
+    assert [step.force for step in DraftBeforeReporting.steps] == [DRAFT_TOOL]
+    # The reason is stated, because a gate whose refusal says nothing teaches nothing.
+    assert "no run id" in DraftBeforeReporting.steps[0].because
+
+
+def test_the_autodiscovery_prompt_says_it_cannot_start_a_run():
+    """The prompt and the tool surface have to agree. If a future edit softened this into "ask the
+    user first", the model would go looking for a submit tool that deliberately does not exist."""
+    from backend.subagents import AUTODISCOVERY_SYSTEM_PROMPT as prompt
+
+    assert "CANNOT START A RUN" in prompt
+    assert "There is no tool that submits" in prompt
+    # And it must not invent results it has none of.
+    assert "NEVER report experiments" in prompt
+    # The one field that steers the search, and the trap of writing the hypothesis into it.
+    assert "steering" in prompt
+
+
+def test_autodiscovery_is_told_the_difference_from_data_voyager():
+    """Two tools over the same file, and picking wrong wastes either credits or a good question."""
+    from backend.subagents import AUTODISCOVERY_SYSTEM_PROMPT as prompt
+
+    assert "data_voyager" in prompt
+    assert "decides its own questions" in prompt

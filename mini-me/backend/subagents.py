@@ -17,6 +17,7 @@ from langchain_core.tools import tool
 from backend.schemas import (
     AcademicResearchResults,
     DataAnalysisResults,
+    DiscoveryRunResults,
     DataVerseSearchResults,
     HypothesisOutput,
     LibraryArtifact,
@@ -28,6 +29,7 @@ from backend.middleware import (
     ClaimsRecorder,
     KeepSources,
     RunBeforeReporting,
+    DraftBeforeReporting,
     SubmitBeforeReporting,
     TheorizeBeforeReporting,
     SearchBeforeCiting,
@@ -479,6 +481,90 @@ data_voyager_subagent = {
     "response_format": DataAnalysisResults,
 }
 
+AUTODISCOVERY_SYSTEM_PROMPT = """
+    You are the AutoDiscovery subagent for Mini-Me. Your job is to prepare an Asta
+    AutoDiscovery run over the user's own tabular data — and then stop.
+
+    AutoDiscovery is not DataVoyager. DataVoyager answers an analytical question
+    you write. AutoDiscovery decides its own questions: it searches over
+    hypotheses, writes and runs code for each one, and reports how far each result
+    moved its prior belief. Use it when the user wants to know what is IN the data
+    rather than to test something they can already state. When they can state it,
+    `data_voyager` is the better tool.
+
+    YOU CANNOT START A RUN, AND THIS IS NOT A LIMITATION TO WORK AROUND. Every
+    experiment costs one credit from a fixed grant that cannot be topped up, so
+    starting a run is the researcher's decision and they make it in the app. The
+    `draft_discovery_run` tool creates the run, uploads the data and saves the
+    configuration — all free — and stops there. There is no tool that submits. Do
+    not look for one, and do not call the `asta` CLI with `execute`.
+
+    Write the four descriptive fields properly; they are the whole of your
+    contribution, because the service conditions every hypothesis it generates on
+    them:
+
+      1. `description` — what the data IS. Provenance, how it was collected, its
+         known gaps and biases, the sample size. Read the file's header row with
+         your filesystem tools before you write this; a description that does not
+         match the columns produces hypotheses about columns that do not exist.
+      2. `domain` — the research field, so the hypotheses are framed in it.
+         "Soil science", "Plant pathology", "Agricultural economics".
+      3. `intent` — how to STEER the exploration, without naming the answer.
+         "Focus on how temperature relates to yield" is steering. "Test whether
+         temperature above 30C cuts yield by 20%" is not steering, it is the
+         hypothesis, and it wastes what the tool is for.
+      4. `dataset_description` — what the columns mean, and their units.
+
+    Leave `n_experiments` at its default unless the user named a number. It is a
+    budget in credits, not a quality dial, and it is theirs to set.
+
+    Uploaded files are already on disk at the relative paths in the user's
+    "Attached files" blockquote — pass those exact paths; never ask for a
+    re-upload.
+
+    Handle the tool result:
+      - Success → return a DiscoveryRunResults with `status="awaiting_approval"`,
+        the `run_id`, the `name`, `domain`, `intent`, the `dataset_paths` and
+        `n_experiments`. Tell the user what it will cost and that it is waiting for
+        them to approve the budget in the app. Say plainly that nothing has run and
+        nothing has been spent.
+      - An error → return DiscoveryRunResults with `status="failed"`, the name, and
+        the reason. Do not retry a draft that failed on a missing file; say which
+        file was missing.
+
+    Provenance (`derived_from`): add `{"kind": "dataset", "ref": <the path or
+    persistent id>}` for each dataset. Quote the ref verbatim so it matches the
+    existing artifact; if you cannot quote it exactly, OMIT it rather than guessing
+    — a wrong ref produces no link, never a fabricated one.
+
+    NEVER report experiments, findings, surprise scores or belief shifts. At the
+    point you finish there are none: the run has not been approved, let alone
+    executed. When a run completes, its results are saved to
+    `discovery/<run_id>.md` (with a `.json` alongside); if the user later asks you
+    to summarize or build on one, READ that file with your filesystem tools instead
+    of guessing. ALWAYS return a structured DiscoveryRunResults.
+"""
+
+
+autodiscovery_subagent = {
+    "name": "autodiscovery",
+    "description": (
+        "Prepare an Asta AutoDiscovery run over a local tabular dataset: an "
+        "AI-driven search that writes and tests its own hypotheses and reports "
+        "which results most changed its beliefs. Use it for open-ended 'what is in "
+        "this data' exploration, where `data_voyager` is for a question the user "
+        "can already state. It DRAFTS the run only — each experiment costs a "
+        "credit, so the researcher approves the budget in the app before anything "
+        "runs."
+    ),
+    "system_prompt": AUTODISCOVERY_SYSTEM_PROMPT,
+    "skills": ["/skills/"],
+    "middleware": [],
+    "tools": [],
+    "response_format": DiscoveryRunResults,
+}
+
+
 RESEARCH_PLANNER_SYSTEM_PROMPT = """
     You are the research planner subagent for Mini-Me (the P5 autonomous run
     loop). Your job is to turn a research goal + what has already been done into
@@ -544,6 +630,7 @@ subagents = [
     hypothesis_generator_subagent,
     pdf_librarian_subagent,
     data_voyager_subagent,
+    autodiscovery_subagent,
     research_planner_subagent,
 ]
 
@@ -563,6 +650,10 @@ DISK_WRITING_SUBAGENTS = frozenset(
         "hypothesis_generator",
         "pdf_librarian",
         "data_voyager",
+        # Its results are written by the poll route, not by the model — but the files land in the
+        # conversation's folder either way, and a run whose outputs nothing surfaces is a run the
+        # researcher paid credits for and cannot see.
+        "autodiscovery",
     }
 )
 
@@ -575,6 +666,7 @@ def _build_runtime_subagents(
     diagnostic_tools: list[Any],
     theory_tools: list[Any],
     datavoyager_tools: list[Any],
+    discovery_tools: list[Any],
     file_sync: "FileSyncMiddleware",
     sandbox_backend: "LazyLangsmithSandbox",
     model_resolver: "_ModelResolver",
@@ -622,6 +714,12 @@ def _build_runtime_subagents(
             # The most expensive one to have fabricate: a composed `DataAnalysisResults` looks
             # exactly like a twenty-minute analysis and costs nothing.
             extra_middleware.append(SubmitBeforeReporting())
+        elif name == "autodiscovery":
+            extra_middleware.append(ArtifactCaptureMiddleware("autodiscovery"))
+            # The one where a fabricated artifact reaches the *credit gate*: its `run_id` is what
+            # the approval modal submits against, so an invented one asks the researcher to
+            # approve a budget for a run that does not exist.
+            extra_middleware.append(DraftBeforeReporting())
         elif name == "research_planner":
             extra_middleware.append(ArtifactCaptureMiddleware("research_planner"))
 
@@ -651,6 +749,8 @@ def _build_runtime_subagents(
             extra_tools.extend(theory_tools)
         elif name == "data_voyager":
             extra_tools.extend(datavoyager_tools)
+        elif name == "autodiscovery":
+            extra_tools.extend(discovery_tools)
 
         runtime_subagents.append(
             {
