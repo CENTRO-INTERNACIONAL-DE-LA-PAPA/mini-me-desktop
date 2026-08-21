@@ -23,7 +23,7 @@ sidecar** that the client spawns and supervises.
 | **P6.6** — outputs the researcher can see | ✅ **done** — files land in `Documents\Mini-Me\<thread>`, figures render in the chat, and OUTPUTS opens the folder. §42 |
 | **P6.7** — the UI itself | ✅ **done, verified on Windows** — a role-based palette with four built-ins **and Zed's whole theme gallery** installable in-app; conversation sidebar with fuzzy search and rename; collapsible panels; a file preview modal; visible scrollbars; rainbow CSV; a three-state send button; rounded panels and a window-wide status bar. §43/§47–§53 |
 
-### The roadmap now (2026-08-18)
+### The roadmap now (2026-08-21)
 
 **Every milestone P6.0–P6.7 is closed** and the MVP acceptance is met. What follows is the list to
 read first; the dated sections below it are the record of how each item got here.
@@ -48,29 +48,48 @@ read first; the dated sections below it are the record of how each item got here
   admit a gate and all five now have one. `report_writer` and `research_planner` are deliberately
   left out — the planner runs nothing by design and the writer synthesises from the conversation, so
   neither has a tool a gate could force without inventing a requirement.
-- ⬜ **Contract tests between each `response_format` and the client's decoder.** Static and fast,
-  and no longer hypothetical: §223 *was* this bug. `DatasetArtifactPayload` carried nine fields and
-  the client kept one truncated title, so four distinct datasets rendered as four identical rows for
-  as long as the feature existed. §222 built the pattern for the MCP boundary — capture the
-  producer's shape, assert the consumer reads it — and this is the same discipline one layer in.
+- ✅ **Contract tests between each `response_format` and the client's decoder** (§264). §223 *was*
+  this bug: `DatasetArtifactPayload` carried nine fields and the client kept one truncated title, so
+  four distinct datasets rendered as four identical rows for as long as the feature existed. The
+  Python half generates a fixture from the `TypedDict` annotations; the Rust half asserts every
+  field is either read or **declared unread with a reason**, so a field the backend adds cannot go
+  quietly missing in the app.
 - ⬜ **`execute` can still write anywhere** (§160/§161). The rewrite changed what the model is
   *told*; nothing enforces it. Sixteen files went to `/tmp` once already.
 - 🟡 **The conversation index** is copied aside before every load (§218), but upstream still deletes
   it on any read failure. We hold the evidence; we do not stop the delete.
 
-**2. Finish the roadmap** — two items, both in P6.4b.
-- ⬜ **OS notifications when a background run finishes.** The plan display (§209) says where a
-  seven-minute run has got to *if you are looking*; nothing reaches someone who switched windows.
-  The clearest remaining "the web app cannot do this" affordance, which is the MVP's own stated
-  differentiator. Needs a Windows toast API — a new dependency, and a new way for the packaged build
-  to fail on the machines §57–§60 fought.
+- ✅ **AutoDiscovery, end to end** (§246–§266). Absent from this list until now, which is the
+  §73 failure this list was written to stop. A budget modal in the centre of the window is the only
+  way a credit is ever spent; the model's single tool cannot submit; the gate is a route holding a
+  one-shot token, not a prompt. Results are read rather than scanned: the tree is drawn from the
+  run's own `parent_id` edges, the ranked table reverses, and the markdown renders.
+- 🟡 **The credit gate is structural, not airtight** (§252). `NoSpendingWithoutApproval` matches
+  `submit`/`fork` in any command-shaped argument, and `approve_execute = true` is the real defence.
+  Retracted claim, kept deliberately: the first version of this line said there was "no code path
+  from a model decision to a spent credit", and a review found four.
+
+**2. Finish the roadmap** — one item left.
+- ✅ **OS notifications when a background run finishes** (§265). A WinRT toast raised through
+  PowerShell, so nothing was added to `Cargo.toml` and there is no new way for the packaged build to
+  fail on the machines §57–§60 fought. It fires only when the window is **not** active, which is the
+  whole point — a notification for something you are already watching is noise.
 - ⬜ **Multi-window.** Listed since the beginning, never started, and the least valuable thing here
   for someone working on one study at a time.
 
 **3. Ship it to somebody else.**
 - ⬜ **Code signing.** SmartScreen is where a non-developer install ends. An organisational decision
   about a certificate, not an engineering one.
-- ⬜ **Publish a release.** `v0.2.3` is drafted and built. A decision about who may have it.
+- ✅ **A published release** (§267) — **`v0.3.0`**, cut from `main` rather than publishing the
+  `v0.2.3` draft, which by then was 56 merged pull requests behind and would have put a build older
+  than the one in daily use behind the download link. Verified by an *unauthenticated* fetch, because
+  that is what an updater makes: `/releases/latest` answers `v0.3.0` and the zip returns 200 to a
+  request carrying no credentials. The workflow now refuses a tag whose name disagrees with
+  `Cargo.toml`.
+- ⬜ **The update flow.** Now unblocked, and the reason the release could not wait: *"we cannot ask
+  users to download and install everytime."* Version comparison against `CARGO_PKG_VERSION` is
+  trivial; the hard half is that **Windows cannot overwrite a running `.exe`**, so an in-place swap
+  needs a helper that outlives the app, waits for exit, replaces the folder and relaunches.
 
 **4. Debt that keeps causing the same bug.**
 - ⬜ **`start_async_task` accepts only `background_worker`** (§114), so "run *X* in the background"
@@ -85,6 +104,13 @@ read first; the dated sections below it are the record of how each item got here
 - ⬜ **The warm-up sometimes fails** — `GET /assistants/{id}/schemas` returned a non-2xx on one
   launch and built the graph fine on the next, so the first turn pays the ten seconds §176 meant to
   absorb. Timing-dependent; measured 2026-08-18, not yet explained.
+- ⬜ **Three deferred during §246–§266**, flagged at the time and recorded here because a decision
+  taken aloud and never written down is not a decision:
+  - The experiment tree draws each root separately. Allen's own view joins them through a grey parent
+    that **is not in the listing**, so drawing it would mean inventing a node.
+  - `JobKind::expected()` says "25–40 min" whatever the budget, so a five-experiment run that takes
+    thirteen is mislabelled. It should scale with the number bought.
+  - The transcript renders the attached-files blockquote as though the researcher typed it.
 
 **5. Upstream** — nine reports written in `docs/upstream/`, none of them ours to fix.
 
@@ -106,11 +132,11 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   green without anyone typing a command. Took three rounds: §57 fixed elevation, §60 made the
   elevated output readable and stopped the app claiming "done" over a red row, §61 reverted a
   `--no-launch` flag that could have unregistered the distro.
-- 🟡 **The download link.** `v0.2.3` is tagged and built, carrying every fix through §218. Each
-  release is a **draft** deliberately — a draft can be deleted where a published one cannot — so
-  **remaining: someone decides to publish it**, which is a call about who may have this rather than
-  an engineering step. Note the repository is private, so a release link only works for someone with
-  access; sending the zip directly is usually what is wanted for one colleague.
+- ✅ **The download link.** **`v0.3.0` is published** (§267) and the repository is public, so the
+  link works for anyone — no GitHub account, no access grant, no zip sent by hand. CI still produces
+  a **draft**, and publishing is still a human press: a draft can be deleted where a release someone
+  downloaded cannot. The stale `v0.2.3` draft is left in place as history, and it is worth knowing it
+  holds a publishable downgrade behind one button.
 - ⬜ **Code signing.** SmartScreen shows "Windows protected your PC" and most researchers
   stop there. An organizational decision on a certificate; the release notes and README
   say which two words to click in the meantime.
@@ -337,8 +363,7 @@ that keeps causing the same bug**, and **friction that is felt but not blocking*
   rather than once a launch. **Awaiting a stopwatch**, which is the only thing that settles it.
 - ⬜ **`setup-wsl.sh` leaves a checkout with every file modified** from line endings, which breaks
   any git operation on it.
-- ⬜ **Publish a release** — `v0.2.3` is drafted and built; it needs a decision about who may have
-  it. See the download-link note above.
+- ✅ **Publish a release** — `v0.3.0`, 2026-08-21 (§267). See the download-link note above.
 - ⬜ **A custom store** (§93) — deliberately after the checkpointer, and only with numbers:
   alpha API, and replacing it means owning semantic search and TTL.
 - ⬜ **A native Windows backend?** (§95) — the case is the WSL install, not storage. Its own
@@ -15047,3 +15072,122 @@ edit, or check the file rather than the script's exit.
 
 *Hundred-and-twenty-first: content built for scanning becomes content for reading the moment it is
 any good. The modal was sized for a list and filled with essays.*
+
+## 267. Publishing a build that is not three days old (2026-08-21)
+
+*"ok lets do the publish now"*
+
+The thing to publish was `v0.2.3`, drafted and built and sitting there since 18 August. The roadmap
+pointed at it in three separate places for a week: *"drafted and built; it needs a decision about who
+may have it."*
+
+The decision had been made. The artifact had rotted.
+
+```
+tag v0.2.3 -> fc122fe  Tue Aug 18 10:45:57 2026
+main       -> a6197e6  Fri Aug 21 15:31:34 2026
+commits between: 129   merged pull requests: 56
+```
+
+Fifty-six. Every one of §246–§266 — AutoDiscovery from nothing to working, the credit gate, the
+experiment tree, desktop notifications, the contract tests — plus the dataset panel and the librarian
+work of §219–§245. Publishing that zip would have put a build **older than the one in daily use**
+behind the first public download link this project has ever had.
+
+And it would have broken the next thing on the list before that was even written. An updater compares
+what it is running against what is published; pointed at `v0.2.3` it would have offered every install
+a downgrade, forever, and been right to.
+
+So: **0.3.0, cut from `main`.** Minor rather than patch, because AutoDiscovery is a capability and
+not a fix — the 0.2.x series was four builds in two days, all of them repairs.
+
+### The version guard, in the only place that can make it
+
+The version a tag claims and the version a binary reports are two facts written in two files by two
+hands, and an updater compares them. Out of step by one character and a `v0.3.0` release ships a
+binary that says `0.2.3`: the install fetches the update, restarts, still believes it is behind, and
+offers the same update again. A loop, from a typo.
+
+```bash
+crate=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+if [ "v$crate" != "$tag" ]; then exit 1
+```
+
+Six lines in the release workflow, and the only place the check is possible — the tag does not exist
+until it is pushed, so no test in the repository can see it. §264's shape again: **the join, tested
+where it is made.**
+
+### Then the build failed, on the platform that matters
+
+```
+workspace::tests::an_absolute_path_is_taken_as_it_stands
+  left: None
+ right: Some("/home/piero/papers/a.pdf")
+```
+
+A test that had passed on Linux since the day it was written, failing on Windows. **Not a test
+artifact — the bug it names.**
+
+`Path::is_absolute()` is *false* on Windows for `/home/piero/papers/a.pdf`. It has a root and no
+drive letter, and Windows wants both. So it fell past the absolute branch into
+`thread.join(recorded)` — and `Path::join` **replaces** its base when the argument is rooted rather
+than extending it. The conversation folder was silently discarded and the row lit up and opened
+`C:\home\piero\papers\a.pdf`, which is exactly the *"lights up and then does nothing"* the caller's
+own comment says not to allow.
+
+`local_path` now tests `has_root()` after `is_absolute()`, and that branch — unreachable on Unix,
+where a root is always absolute, so it needs no `cfg!` — hands the string to `windows_path_for`. Only
+`/mnt/<drive>/…` crosses over. Everything else rooted is WSL's own filesystem or the sandbox's, and
+`None` leaves the row inert, which is the entire point of returning an `Option` here.
+
+The real repair is smaller and duller than the fix: **`windows_path_for` has no `cfg!` inside it.**
+The `/mnt/` conversion had lived behind `cfg!(windows)` at its only call site, and therefore had *no
+test at all* — it cannot run on the machine it is written on. Six cases now, and they run on both
+platforms. This is the §262 lesson in a different costume: a test that cannot reach the code it names
+is not coverage, whether the barrier is a 400-byte fixture or a target triple.
+
+CI on Windows was the only thing in this project capable of finding it. Worth remembering next time a
+green local suite feels like evidence.
+
+### And the flake, finally named
+
+A second failure appeared while fixing the first, then would not reproduce in eight consecutive runs.
+It had been seen once before, in §266, and its name never captured.
+
+`the_root_is_somewhere_the_researcher_can_find` sets `MINIME_LOCAL_WORKSPACE` **without holding
+`env_lock`**, under a comment reading *"SAFETY: single-threaded test setup"* — which is not what
+`cargo test` does. For the microseconds it holds that value, every concurrent test calling `root()`
+sees the workspace redirected to `/tmp/somewhere-else`. One failure, a different name each run,
+roughly once in fifty.
+
+The test nine hundred lines above it had predicted this in so many words:
+
+> `root()` reads an environment variable, and so does half of `backend`'s suite. The shared lock is
+> what keeps two tests from redirecting the workspace out from under each other — **a failure that
+> would look like this feature not working.**
+
+So the lock is taken, and `a_test_that_moves_the_environment_holds_the_lock` reads the sources to
+assert nobody skips it again. It was verified the only way a guard can be: by removing the lock and
+watching it name the offender.
+
+A comment asserting safety is not a guard. This one was not merely unenforced — it was **wrong**, and
+it had been sitting there being read and believed.
+
+### What stays a draft
+
+CI still drafts; publishing is still a human press. Same rule as the credit gate, for the same
+reason: the irreversible step gets a person in front of it. A draft can be deleted; a release
+somebody has downloaded cannot.
+
+The stale `v0.2.3` draft is **left rather than deleted**, and it is worth knowing it is there: it
+holds a publishable downgrade behind one button. Its tag is honest history. The draft is a trap.
+
+### What publishing actually unlocks
+
+Draft assets are not anonymously downloadable, whatever the repository's visibility. That is why this
+had to come first — not the link for humans, the **fetch for the app**. A published release is the
+first URL an unauthenticated `GET` can reach, which is the one thing the updater needs.
+
+*Hundred-and-twenty-third: a release that waits for permission ages while it waits. Cutting it fresh
+cost two CI runs and found two bugs neither the developer's machine nor its reviewer could see — one
+because the platform was wrong, one because the clock was.*
