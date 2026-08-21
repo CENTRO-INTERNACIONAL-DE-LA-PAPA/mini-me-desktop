@@ -5545,31 +5545,18 @@ impl Workbench {
                 if !snapshot.todos.is_empty() {
                     self.plan = snapshot.todos;
                 }
-                // Before the jobs, because a drafted run is not among them — it is a question,
-                // and one that must not be buried under the rows of things already running.
-                self.open_approval(&snapshot.drafts, cx);
-                for job in snapshot.jobs {
-                    self.track_job(job, cx);
-                }
                 // The conversation this stream belongs to, and so the owner of any worker it
                 // launched. Safe to read here and nowhere else: `apply` only runs mid-turn, and
                 // both `New thread` and opening another conversation refuse while streaming — so
                 // the open thread cannot have moved by the time this line runs.
                 let owner = self.sidecar.thread_id().unwrap_or_default();
-                for task in snapshot.tasks {
-                    // Into the provenance record as well as the Jobs panel. A background worker
-                    // runs on its own LangGraph thread, so none of its events reach this
-                    // conversation's stream — the `async_tasks` map is the only trace on this
-                    // side, and the record had never been told about it. Which is why the graph
-                    // showed nothing for work a researcher had explicitly handed off
-                    // (docs §111).
-                    self.provenance.observe_background(
-                        &format!("async:{}", task.task_id),
-                        &task.agent_name,
-                        provenance::now_ms(),
-                    );
-                    self.track_task(&owner, task, cx);
-                }
+                self.adopt_background_work(
+                    &snapshot.drafts,
+                    snapshot.jobs,
+                    snapshot.tasks,
+                    &owner,
+                    cx,
+                );
             }
             TurnEvent::Done => {
                 self.streaming = false;
@@ -5872,12 +5859,16 @@ impl Workbench {
                             workbench.project =
                                 Some(merge_spine(workbench.project.as_ref(), project));
                         }
-                        for job in snapshot.jobs {
-                            workbench.track_job(job, cx);
-                        }
-                        for task in snapshot.tasks {
-                            workbench.track_task(&owner, task, cx);
-                        }
+                        // The same call the streaming path makes, and the point of it being a
+                        // call: this site used to handle jobs and tasks and quietly ignore
+                        // `drafts` (§259).
+                        workbench.adopt_background_work(
+                            &snapshot.drafts,
+                            snapshot.jobs,
+                            snapshot.tasks,
+                            &owner,
+                            cx,
+                        );
                     }
                     workbench.opening = false;
                     workbench.status = "done".into();
@@ -13933,6 +13924,45 @@ impl Workbench {
         )
     }
 
+    /// Adopt the background work a snapshot describes: drafts, long jobs, and workers.
+    ///
+    /// **One method, because there are two places a snapshot arrives and they drifted.** A live
+    /// turn's `values` event is one; opening a conversation and reading its stored state is the
+    /// other. The streaming path called `open_approval` and the opening path did not, so a drafted
+    /// run was offered — or, after §258, repaired — only while a turn was running. Reopen the
+    /// conversation and the drafted run was decoded, dropped from the job list because
+    /// `awaiting_approval` is not a job, and adopted by nobody: *"I still cant see the ui for the
+    /// background job"* (§259).
+    ///
+    /// Drafts first, because a drafted run is not among the jobs — it is a question, and one that
+    /// must not be buried under the rows of things already running.
+    fn adopt_background_work(
+        &mut self,
+        drafts: &[protocol::Draft],
+        jobs: Vec<protocol::Job>,
+        tasks: Vec<protocol::AsyncTask>,
+        owner: &str,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_approval(drafts, cx);
+        for job in jobs {
+            self.track_job(job, cx);
+        }
+        for task in tasks {
+            // Into the provenance record as well as the Jobs panel. A background worker runs on
+            // its own LangGraph thread, so none of its events reach this conversation's stream —
+            // the `async_tasks` map is the only trace on this side, and the record had never been
+            // told about it. Which is why the graph showed nothing for work a researcher had
+            // explicitly handed off (docs §111).
+            self.provenance.observe_background(
+                &format!("async:{}", task.task_id),
+                &task.agent_name,
+                provenance::now_ms(),
+            );
+            self.track_task(owner, task, cx);
+        }
+    }
+
     /// Open the budget gate for a run that is drafted and unspent.
     ///
     /// Called from a snapshot rather than from a press, because the researcher never asked for
@@ -18282,6 +18312,41 @@ mod tests {
         // A present answer wins over a stale in-flight flag: the paths are what matters.
         assert_eq!(figure_state(Some(&one), true), Figures::Ready);
         assert_eq!(figure_state(Some(&Vec::new()), true), Figures::Nothing);
+    }
+
+    /// §259: a snapshot arrives in two places, and one of them ignored `drafts`.
+    ///
+    /// The general form of the last four defects — a value produced correctly and consumed in one
+    /// of the two places that should consume it. Asserted against the source because that is where
+    /// the property lives: a second reader of a snapshot is a second chance to forget a field.
+    ///
+    /// The needles are assembled at runtime so this test does not match itself.
+    #[test]
+    fn every_snapshot_is_adopted_through_one_path() {
+        let source = include_str!("main.rs");
+        let jobs = concat!("snapshot", ".jobs");
+        let tasks = concat!("snapshot", ".tasks");
+        let drafts = concat!("snapshot", ".drafts");
+
+        // Nothing walks them itself; the shared method does.
+        assert!(
+            !source.contains(&format!("for job in {jobs}")),
+            "a snapshot's jobs are adopted through `adopt_background_work`, not inline"
+        );
+        assert!(
+            !source.contains(&format!("for task in {tasks}")),
+            "a snapshot's tasks are adopted through `adopt_background_work`, not inline"
+        );
+
+        // And every reader of one reads all three, which is what the two sites disagreed about.
+        let reads = |needle: &str| source.matches(needle).count();
+        assert_eq!(
+            reads(jobs),
+            reads(drafts),
+            "a place that reads a snapshot's jobs must also read its drafts"
+        );
+        assert_eq!(reads(jobs), reads(tasks));
+        assert!(reads(jobs) >= 2, "both the streaming and the opening path");
     }
 }
 
