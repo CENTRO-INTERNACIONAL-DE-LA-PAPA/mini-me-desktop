@@ -126,6 +126,15 @@ def _build_experiment_command(run_id: str, experiment_id: str) -> list[str]:
     return ["asta", "autodiscovery", "experiment", run_id, experiment_id, "--format", "json"]
 
 
+def _build_metadata_get_command(run_id: str) -> list[str]:
+    """`asta autodiscovery metadata-get RUNID` — JSON on stdout, no `--format` flag of its own.
+
+    Note the asymmetry, which is the CLI's and not ours: saving is `metadata --file`, reading is
+    `metadata-get`, and only the first takes a flag.
+    """
+    return ["asta", "autodiscovery", "metadata-get", run_id]
+
+
 def _build_credits_command() -> list[str]:
     """`asta autodiscovery credits --format json`.
 
@@ -515,6 +524,79 @@ async def read_credits(sandbox: Any) -> dict[str, Any]:
         "consumed": credits.get("consumed"),
         "pending": credits.get("pending"),
     }
+
+
+async def read_metadata(sandbox: Any, run_id: str) -> dict[str, Any]:
+    """The metadata the service currently holds for a run.
+
+    What the approval modal renders. Read back from the service rather than remembered locally,
+    because the run may have been drafted in an earlier session — or forked — and the server's copy
+    is the one `submit` will act on.
+    """
+    if not is_valid_run_id(run_id):
+        return {}
+    out = await _run(sandbox, _json_shell(_build_metadata_get_command(run_id)), _STATUS_TIMEOUT_S)
+    payload = _extract_json(out)
+    if isinstance(payload, dict):
+        # The run listing nests this under `run_metadata`; `metadata-get` returns it bare. Accept
+        # both so a caller does not have to know which endpoint it came from.
+        inner = payload.get("metadata") or payload.get("run_metadata")
+        return inner if isinstance(inner, dict) else payload
+    logger.warning("autodiscovery metadata-get run=%s unreadable: %.200s", run_id, out)
+    return {}
+
+
+async def update_metadata(
+    sandbox: Any, run_id: str, changes: dict[str, Any]
+) -> dict[str, Any]:
+    """Apply the researcher's edits to a drafted run, before it is submitted.
+
+    Only `intent` and `n_experiments` may be changed, and this is where that is enforced rather
+    than in the route: the modal offers exactly those two, and a request carrying anything else is
+    either a mistake or something nobody agreed to. Unknown keys are dropped and logged.
+
+    Read-modify-write against the service's own copy, so a field this backend has never heard of
+    survives the round trip instead of being erased by a rewrite.
+    """
+    allowed = {"intent", "n_experiments"}
+    rejected = sorted(set(changes) - allowed)
+    if rejected:
+        logger.warning("ignoring unapproved discovery metadata edits: %s", ", ".join(rejected))
+    patch = {key: value for key, value in changes.items() if key in allowed}
+    if not patch:
+        return await read_metadata(sandbox, run_id)
+
+    current = await read_metadata(sandbox, run_id)
+    if not current:
+        return {}
+    updated = {**current, **patch}
+    if "n_experiments" in patch:
+        budget = patch["n_experiments"]
+        if not isinstance(budget, int) or isinstance(budget, bool):
+            raise ValueError("n_experiments must be a whole number of experiments")
+        if not MIN_EXPERIMENTS <= budget <= MAX_EXPERIMENTS:
+            raise ValueError(
+                f"n_experiments must be between {MIN_EXPERIMENTS} and {MAX_EXPERIMENTS} "
+                f"(1 credit each); got {budget}"
+            )
+
+    awrite = getattr(sandbox, "awrite", None)
+    if awrite is None:
+        return {}
+    written = await awrite(_METADATA_PATH, json.dumps(updated, indent=2, ensure_ascii=False))
+    if getattr(written, "error", None):
+        logger.warning("could not stage edited metadata for %s: %s", run_id, written.error)
+        return {}
+    out = await _run(
+        sandbox, _json_shell(_build_metadata_command(run_id)), _STATUS_TIMEOUT_S
+    )
+    if "Metadata saved" not in (out or ""):
+        logger.warning("edited metadata for %s did not save: %.200s", run_id, out)
+        return {}
+    logger.info(
+        "updated a drafted discovery run=%s experiments=%s", run_id, updated.get("n_experiments")
+    )
+    return updated
 
 
 async def submit_run(sandbox: Any, run_id: str) -> dict[str, Any]:

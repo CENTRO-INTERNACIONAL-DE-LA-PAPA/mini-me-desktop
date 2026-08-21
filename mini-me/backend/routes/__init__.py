@@ -15,6 +15,10 @@ from backend.routes.artifacts import (
     delete_sandbox,
     get_artifact_file,
     start_sandbox,
+    discovery_draft,
+    discovery_figures,
+    discovery_status,
+    discovery_submit,
     theorizer_status,
     upload_artifact_file,
 )
@@ -50,6 +54,28 @@ app = Starlette(
             "/theorizer/{thread_id}/{task_id}",
             endpoint=theorizer_status,
             methods=["GET"],
+        ),
+        # AutoDiscovery. `submit` is the credit gate: the only POST in this app that spends a
+        # researcher's grant, and the only caller is their press on the approval modal.
+        Route(
+            "/discovery/{thread_id}/{run_id}",
+            endpoint=discovery_status,
+            methods=["GET"],
+        ),
+        Route(
+            "/discovery/{thread_id}/{run_id}/draft",
+            endpoint=discovery_draft,
+            methods=["GET"],
+        ),
+        Route(
+            "/discovery/{thread_id}/{run_id}/submit",
+            endpoint=discovery_submit,
+            methods=["POST"],
+        ),
+        Route(
+            "/discovery/{thread_id}/{run_id}/experiments/{experiment_id}/figures",
+            endpoint=discovery_figures,
+            methods=["POST"],
         ),
         Route(
             "/analyze-data/{thread_id}/{task_id}",
