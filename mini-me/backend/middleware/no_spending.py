@@ -31,6 +31,7 @@ from __future__ import annotations
 import re
 from typing import Any, Awaitable, Callable
 
+from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import ToolMessage
 
 from backend import diagnostics
@@ -104,15 +105,21 @@ def _refuse(request: Any) -> ToolMessage:
     )
 
 
-class NoSpendingWithoutApproval:
+class NoSpendingWithoutApproval(AgentMiddleware):
     """Block `execute` commands that would spend credits, before they reach the shell.
 
     Attached to the coordinator *and* every subagent, because either can call `execute` and the
     credits are the same credits. Middleware rather than a prompt, because a prompt is advice.
+
+    **Subclasses `AgentMiddleware`, and the first version did not.** It was duck-typed with a
+    comment claiming that matched the rest of this project — which was simply false; every other
+    middleware here subclasses it. `create_agent` reads hooks off the *class*
+    (`AttributeError: type object 'NoSpendingWithoutApproval' has no attribute 'before_agent'`), so
+    the agent graph failed to build, every conversation hung on "Opening this conversation…", and
+    the status bar said "research tools are not ready". The unit tests all passed, because they
+    called the middleware directly and never through a graph (§253).
     """
 
-    # Duck-typed to match this project's other middleware; `AgentMiddleware` is not subclassed so
-    # the class stays importable and testable without a graph.
     name = "NoSpendingWithoutApproval"
 
     def wrap_tool_call(self, request: Any, handler: Callable[[Any], Any]) -> Any:
