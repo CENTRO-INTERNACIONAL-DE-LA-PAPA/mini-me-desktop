@@ -14821,3 +14821,52 @@ cleaned up.
 *Hundred-and-seventeenth: a fixture that is the right shape and the wrong size tests the shape. When
 the payload's size is the thing the code has to survive, the fixture has to be that size — and
 "verified against a real shell" is not a claim about anything a 400-byte string can establish.*
+
+## 263. An empty box, and fetching what we could have had (2026-08-21)
+
+*"Ok now it seems working. I noticed a wierd behaviour. Only when I click a node the imgae is
+downloaded and I can see it in the right panel but not in the ui modal. Its weird, maybe we can
+improve this logic."*
+
+Two things, and the second is the interesting one.
+
+### The box drew and the image did not
+
+The `FIGURES` heading appeared, the bordered box appeared at its full 260px, and it was empty — while
+the same file rendered perfectly in the outputs panel a few pixels away. So gpui could load it; the
+modal just gave it nowhere to be.
+
+My container was a plain `div` with `min_w_0`. gpui's default display is `Display::Block`, so an
+`img` inside with its own `w_full` had nothing definite to resolve against and came out zero-wide.
+The border box still filled the row, because *that* had a flex parent to stretch within.
+
+**§88 and §59 are both this bug, one layer up.** §88: *"a `div` is `Display::Block` by default in
+gpui, so the field inside had no row to fill and its own `width: 100%` had nothing definite to
+resolve against"*. §59: `min_w_0` gives an element zero intrinsic width. I wrote a near-miss of the
+output gallery's element — which works, and which is `.relative().flex().flex_row().w_full()` with no
+`min_w_0` — and the two differences were exactly the two the docs warn about. It is now the gallery's
+shape verbatim.
+
+### Fetching on click was the wrong moment
+
+The right instinct, and the same one §261 already applied to the experiments list. Figures were
+fetched when a researcher opened an experiment, so every first click cost a round trip through the
+sandbox and nothing existed on disk until they clicked.
+
+The poll route now decodes **every** experiment's plots when a run finishes — the same moment, and
+the same place, that already writes the `.md` and the `.json`, for the same reason: uploaded datasets
+expire in seven days and the service is not an archive (§247). Same requests, at a moment nobody is
+waiting.
+
+Sequential rather than concurrent, deliberately: each response is ~458KB and this runs inside the
+researcher's sandbox, so five at once to save seconds on work nobody is watching is the wrong trade.
+And only for a run that *succeeded* — a failed run's experiments have nothing to draw, and asking
+would be one request per node for nothing.
+
+The app then looks in the conversation's folder first and only asks when there is nothing there,
+which is the case of a run still producing. The fetch-on-demand path stays for exactly that.
+
+Both ids are validated before becoming a path, because both arrive from a payload.
+
+*Hundred-and-eighteenth: a near-miss of working code is worse than a copy of it. The two attributes I
+added were the two this repository already had sections about.*

@@ -13427,6 +13427,30 @@ impl Workbench {
             return;
         }
         let run_id = view.run_id.clone();
+
+        // **On disk already, for a finished run.** The poll route decodes every experiment's plots
+        // when the run ends (§263), so the ordinary case needs no request at all — which is what
+        // was asked for: *"maybe we can improve this logic."*
+        let stored = self.thread_workspace().map(|folder| {
+            workspace::discovery_figures(&folder, &run_id, &experiment_id)
+        });
+        if let Some(paths) = stored.filter(|paths| !paths.is_empty()) {
+            tracing::info!(
+                run = %run_id,
+                experiment = %experiment_id,
+                figures = paths.len(),
+                "read an experiment's figures from this conversation's folder"
+            );
+            if let Some(view) = self.discovery_open.as_mut() {
+                view.figures.insert(experiment_id, paths);
+            }
+            cx.notify();
+            return;
+        }
+
+        let Some(view) = self.discovery_open.as_mut() else {
+            return;
+        };
         view.fetching = Some(experiment_id.clone());
 
         let mut answer = self
@@ -13839,8 +13863,16 @@ impl Workbench {
                             let opening = path.clone();
                             div()
                                 .id(SharedString::from(format!("fig-{}-{at}", experiment.id)))
+                                // **The output gallery's exact shape, and not a near-miss.** The
+                                // first version added `min_w_0` to a block `div` — gpui's default
+                                // display — so the `img`'s own `w_full` had nothing definite to
+                                // resolve against and rendered at zero width. The bordered box
+                                // appeared, empty, while the same file drew fine in the panel.
+                                // §88 and §59 are both about exactly this, one layer up (§263).
+                                .relative()
+                                .flex()
+                                .flex_row()
                                 .w_full()
-                                .min_w_0()
                                 .flex_none()
                                 // A fixed height with `Contain`: a scree plot cropped to a square
                                 // is a scree plot you cannot read, and §152 already settled that
