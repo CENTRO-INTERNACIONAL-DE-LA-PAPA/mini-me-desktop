@@ -485,6 +485,76 @@ class ArtifactCaptureMiddleware(AgentMiddleware[ArtifactState, Any, Any]):
                 }
             }
 
+        if self.source == "autodiscovery":
+            # **Without this the modal never opens.** The whole approval path reads
+            # `artifacts.discoveries` — `decode_drafts` on the Rust side filters it for
+            # `awaiting_approval` — and this method is the only thing that puts anything there. The
+            # schema, the bundle slice, the reducer key, the decoder and the panel bucket were all
+            # built and wired, and a run drafted successfully and reported "Status: awaiting
+            # approval" while nothing appeared on screen, because no branch here matched (§254).
+            #
+            # `run_id` is the key: the reducer dedupes on it, so `awaiting_approval` → `running` →
+            # `completed` updates one entry in place while a second run accumulates as its own.
+            run_id = getattr(structured, "run_id", None)
+            status = getattr(structured, "status", "awaiting_approval")
+            if not run_id and status != "failed":
+                # A drafted run is identified by the id the service issued. Without one there is
+                # nothing to approve and nothing to poll, so emitting it would put a row on screen
+                # whose button could not work.
+                #
+                # A *failed* draft is the exception, and deliberately so: it has no run id because
+                # it never got one, and §249 added this bucket precisely so the reason is visible
+                # somewhere instead of only in prose the model might compress.
+                return None
+            return {
+                "artifacts": {
+                    "datasets": [],
+                    "sources": [],
+                    "reports": [],
+                    "files": [],
+                    "discoveries": [
+                        {
+                            "run_id": run_id,
+                            "name": getattr(structured, "name", ""),
+                            "domain": getattr(structured, "domain", ""),
+                            "intent": getattr(structured, "intent", ""),
+                            "dataset_paths": list(
+                                getattr(structured, "dataset_paths", [])
+                            ),
+                            "n_experiments": getattr(structured, "n_experiments", 15),
+                            "status": status,
+                            # The tool's own words when a draft failed, so the reason is data the
+                            # panel can show rather than prose a model might compress (§249).
+                            "note": getattr(structured, "note", ""),
+                        }
+                    ],
+                    # Only for a run that exists: an edge from `discovery:` with no id would
+                    # collapse every failed draft onto one phantom node.
+                    "edges": (
+                        [
+                            e
+                            for e in [
+                                _produced_by_edge(
+                                    artifact_node_id("discovery", {"run_id": run_id}),
+                                    "discovery",
+                                    getattr(structured, "name", "") or "Discovery run",
+                                    "autodiscovery",
+                                )
+                            ]
+                            if e is not None
+                        ]
+                        + _declared_edges(
+                            artifact_node_id("discovery", {"run_id": run_id}),
+                            "discovery",
+                            getattr(structured, "name", "") or "Discovery run",
+                            getattr(structured, "derived_from", []),
+                        )
+                    )
+                    if run_id
+                    else [],
+                }
+            }
+
         if self.source == "research_planner":
             # Carry the freshly authored run-loop plan (P5) so
             # ``ProjectSpineMiddleware`` folds it into the active project's spine.
