@@ -94,6 +94,43 @@ pub fn remember_announced(ids: &[String]) {
     }
 }
 
+/// The figures already decoded for one experiment, in this conversation's folder.
+///
+/// **Looked for before asking for them.** The poll route decodes every experiment's plots when a
+/// run finishes (§263), so for a completed run they are already here — and a request per click was
+/// a wait for something we owned, which is the same answer §261 gave about the experiments list.
+///
+/// Sorted, so `figure-01` comes before `figure-02` rather than in whatever order the directory
+/// happens to yield.
+pub fn discovery_figures(
+    conversation: &std::path::Path,
+    run_id: &str,
+    experiment_id: &str,
+) -> Vec<PathBuf> {
+    // Both ids come from a payload, so neither is trusted into a path.
+    let unsafe_id = |id: &str| id.is_empty() || id.contains(['/', '\\', '.']);
+    if unsafe_id(run_id) || unsafe_id(experiment_id) {
+        return Vec::new();
+    }
+    let dir = conversation.join("discovery").join(run_id).join(experiment_id);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| {
+                    matches!(ext.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg")
+                })
+        })
+        .collect();
+    found.sort();
+    found
+}
+
 /// A finished discovery run's own record, written by the poll route into the conversation's folder.
 ///
 /// **Read this before asking the service.** `persist_discovery_outputs` writes
@@ -1715,6 +1752,39 @@ mod authorship_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// §263: the plots are decoded when the run finishes, so opening an experiment reads them.
+    #[test]
+    fn an_experiments_figures_are_found_on_disk_in_order() {
+        let dir = std::env::temp_dir().join(format!("minime-figs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let run = "8e5d2eaa-f067-4193-9400-d555e4607c41";
+        let inside = dir.join("discovery").join(run).join("node_2_0");
+        std::fs::create_dir_all(&inside).expect("a temp dir");
+        // Written out of order on purpose: the directory yields whatever it likes.
+        for name in ["figure-02.png", "figure-01.png", "figure-03.jpg", "notes.txt"] {
+            std::fs::write(inside.join(name), b"x").expect("write");
+        }
+
+        let found = discovery_figures(&dir, run, "node_2_0");
+        let names: Vec<String> = found
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        // Sorted, and only images: `figure-01` before `figure-02`, and no `notes.txt`.
+        assert_eq!(names, ["figure-01.png", "figure-02.png", "figure-03.jpg"]);
+
+        // An experiment with nothing decoded yet is empty, which is how the caller knows to ask.
+        assert!(discovery_figures(&dir, run, "node_9_9").is_empty());
+
+        // Both ids come from a payload, so neither is trusted into a path.
+        for hostile in ["../../..", "..", "a/b", "x.y", ""] {
+            assert!(discovery_figures(&dir, run, hostile).is_empty(), "{hostile}");
+            assert!(discovery_figures(&dir, hostile, "node_2_0").is_empty(), "{hostile}");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// §261: a finished run's experiments are already on disk, so opening it should not wait on
     /// the service.
