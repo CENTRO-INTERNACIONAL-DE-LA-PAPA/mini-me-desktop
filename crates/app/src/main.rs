@@ -965,6 +965,18 @@ struct DiscoveryView {
     fetching: Option<String>,
     /// True while the fetch is in flight, so an empty tree reads as "loading" and not "nothing".
     loading: bool,
+    /// Whether the modal is expanded to fill the window.
+    ///
+    /// Asked for: *"maybe we can make an option to full-screen for the ui modal of autodiscovery as
+    /// it have interesting reading for the user."* An analysis and a review are several paragraphs
+    /// of real prose, and 760px is a width for scanning a list, not for reading one (§266).
+    expanded: bool,
+    /// Which way the ranked list is ordered.
+    ///
+    /// Loudest first by default, because the point of a discovery run is the handful of results that
+    /// changed the picture. The other direction answers a real question too — *what did it try that
+    /// moved nothing?* — which is why it is a toggle rather than a fixed order.
+    loudest_first: bool,
     /// Whether the run has stopped producing experiments, from `has_job_completed`.
     ///
     /// Read rather than inferred from the count: `n_experiments` is what was *requested*, and a
@@ -1025,6 +1037,26 @@ fn affordable(experiments: u32, available: Option<u32>) -> bool {
         Some(left) => experiments <= left,
         None => true,
     }
+}
+
+/// The experiments in reading order, as indices.
+///
+/// **Ties broken by creation order**, so flipping the direction twice returns the list to exactly
+/// where it was. Three of the five experiments in one real run reported the same `0.690`, so equal
+/// scores are the common case rather than an edge one, and a sort that reshuffled them would make
+/// the toggle look like it was doing something else.
+fn ranked(experiments: &[discovery::Experiment], loudest_first: bool) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..experiments.len()).collect();
+    order.sort_by(|&a, &b| {
+        let (first, second) = (experiments[a].magnitude(), experiments[b].magnitude());
+        if loudest_first {
+            second.total_cmp(&first)
+        } else {
+            first.total_cmp(&second)
+        }
+        .then_with(|| experiments[a].order.cmp(&experiments[b].order))
+    });
+    order
 }
 
 /// What the detail pane knows about one experiment's figures.
@@ -13400,6 +13432,8 @@ impl Workbench {
                     name,
                     experiments,
                     selected: None,
+                    expanded: false,
+                    loudest_first: true,
                     figures: std::collections::HashMap::new(),
                     fetching: None,
                     loading: false,
@@ -13418,6 +13452,8 @@ impl Workbench {
             name,
             experiments: Vec::new(),
             selected: None,
+            expanded: false,
+            loudest_first: true,
             figures: std::collections::HashMap::new(),
             fetching: None,
             loading: true,
@@ -13680,7 +13716,7 @@ impl Workbench {
             .id("discovery-tree")
             .w_full()
             .min_w_0()
-            .max_h(px(300.))
+            .max_h(px(if view.expanded { 460. } else { 300. }))
             .overflow_scroll()
             .child(canvas)
     }
@@ -13698,12 +13734,7 @@ impl Workbench {
     /// not. Ranked on `|surprise|`, so an experiment that moved a belief hard *against* its
     /// hypothesis ranks as high as one that confirmed it — which is the interesting case.
     fn discovery_list(&self, view: &DiscoveryView, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut order: Vec<usize> = (0..view.experiments.len()).collect();
-        order.sort_by(|&a, &b| {
-            view.experiments[b]
-                .magnitude()
-                .total_cmp(&view.experiments[a].magnitude())
-        });
+        let order = ranked(&view.experiments, view.loudest_first);
 
         let mut list = div()
             .id("discovery-list")
@@ -13712,7 +13743,7 @@ impl Workbench {
             .w_full()
             .min_w_0()
             .gap_px()
-            .max_h(px(240.))
+            .max_h(px(if view.expanded { 520. } else { 240. }))
             .overflow_y_scroll();
 
         for at in order {
@@ -13813,7 +13844,7 @@ impl Workbench {
             .w_full()
             .min_w_0()
             .gap_2()
-            .max_h(px(240.))
+            .max_h(px(if view.expanded { 520. } else { 240. }))
             .overflow_y_scroll();
 
         let shift = match (experiment.prior, experiment.posterior) {
@@ -13884,24 +13915,29 @@ impl Workbench {
             if body.trim().is_empty() {
                 continue;
             }
-            detail = detail.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .w_full()
-                    .min_w_0()
-                    .flex_none()
-                    .gap_1()
-                    .child(section_label(heading))
-                    .child(
-                        div()
-                            .w_full()
-                            .min_w_0()
-                            .text_xs()
-                            .text_color(rgb(theme::text()))
-                            .child(body.clone()),
-                    ),
-            );
+            // **Rendered, not printed.** The service writes real Markdown here — `###` headings,
+            // `- ` lists, `**bold**` labels — and a raw dump of it was on screen: *"The modal of
+            // autodiscovery doesnt render well markdown."* `markdown_block` is the transcript's own
+            // renderer, and `None` for the selection registry is the mode the file preview already
+            // uses: the same blocks, not part of a conversation (§266).
+            let mut rendered = div()
+                .flex()
+                .flex_col()
+                .w_full()
+                .min_w_0()
+                .flex_none()
+                .gap_1()
+                .child(section_label(heading));
+            for block in markdown::parse(body) {
+                rendered = rendered.child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .flex_none()
+                        .child(markdown_block(&block, None)),
+                );
+            }
+            detail = detail.child(rendered);
         }
 
         // **The plots the experiment actually drew.** They exist only in the per-experiment
@@ -14042,6 +14078,50 @@ impl Workbench {
 
         if !view.experiments.is_empty() {
             body = body
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .w_full()
+                        .min_w_0()
+                        .flex_none()
+                        .gap_2()
+                        .child(div().flex_grow())
+                        // Named in words rather than an arrow glyph. Our researchers are not
+                        // developers, and §199's rule is that an affordance nobody can name is one
+                        // they conclude does not exist.
+                        .child(
+                            ui::Button::new(
+                                "discovery-sort",
+                                if view.loudest_first {
+                                    "Biggest shift first"
+                                } else {
+                                    "Smallest shift first"
+                                },
+                            )
+                            .size(ui::Size::Compact)
+                            .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                if let Some(view) = workbench.discovery_open.as_mut() {
+                                    view.loudest_first = !view.loudest_first;
+                                }
+                                cx.notify();
+                            })),
+                        )
+                        .child(
+                            ui::Button::new(
+                                "discovery-expand",
+                                if view.expanded { "Shrink" } else { "Full screen" },
+                            )
+                            .size(ui::Size::Compact)
+                            .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                if let Some(view) = workbench.discovery_open.as_mut() {
+                                    view.expanded = !view.expanded;
+                                }
+                                cx.notify();
+                            })),
+                        ),
+                )
                 .child(self.discovery_tree(view, cx))
                 .child(match view.selected.and_then(|at| view.experiments.get(at)) {
                     Some(experiment) => {
@@ -14065,7 +14145,10 @@ impl Workbench {
         } else {
             view.name.clone()
         })
-        .width(760.)
+        // Wide enough to read an analysis in when expanded, and a list-scanning width otherwise.
+        // 1180 rather than "the whole window": `ui::Modal` centres on a fixed width, and prose
+        // running the full width of a 4K display is unreadable for the opposite reason.
+        .width(if view.expanded { 1180. } else { 760. })
         .focus(&self.delete_focus)
         .body(body)
         .actions(
@@ -18573,6 +18656,45 @@ mod tests {
             1,
             "the suppress-when-looking rule belongs in `notify_if_away` alone"
         );
+    }
+
+    /// §266: a sort a researcher can reverse, and reverse back.
+    #[test]
+    fn flipping_the_sort_twice_returns_the_same_order() {
+        let experiments = discovery::decode_experiments(
+            &serde_json::from_str::<serde_json::Value>(include_str!(
+                "../tests/fixtures/autodiscovery-experiments.json"
+            ))
+            .expect("the probe"),
+        );
+        let loud = ranked(&experiments, true);
+        let quiet = ranked(&experiments, false);
+
+        // Biggest shift first, and the other way round.
+        let magnitude = |at: usize| experiments[at].magnitude();
+        assert!(magnitude(loud[0]) >= magnitude(loud[loud.len() - 1]));
+        assert!(magnitude(quiet[0]) <= magnitude(quiet[quiet.len() - 1]));
+        // Every experiment appears exactly once either way.
+        let mut sorted = loud.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, (0..experiments.len()).collect::<Vec<_>>());
+        assert_eq!(ranked(&experiments, true), loud, "the sort is stable");
+
+        // Ties keep creation order, so the toggle is reversible rather than a reshuffle. Three of
+        // one real run's five experiments reported the same score, so this is the common case.
+        let tied: Vec<discovery::Experiment> = (0..4)
+            .map(|at| {
+                let mut copy = experiments[0].clone();
+                copy.order = at as u32;
+                copy.surprise = Some(0.690);
+                copy
+            })
+            .collect();
+        assert_eq!(ranked(&tied, true), [0, 1, 2, 3]);
+        assert_eq!(ranked(&tied, false), [0, 1, 2, 3]);
+
+        // And an empty run sorts to nothing rather than panicking.
+        assert!(ranked(&[], true).is_empty());
     }
 }
 
