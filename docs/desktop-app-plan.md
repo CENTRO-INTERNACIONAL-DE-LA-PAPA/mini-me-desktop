@@ -13936,3 +13936,76 @@ there if a plot is ever worth zooming.
 *Hundred-and-second: the same field can have two different values at two endpoints, and the one that
 looks authoritative is not. `child_ids` is complete in the list and empty in the detail; nothing in
 either response says so.*
+
+## 248. Drawing the tree ourselves (2026-08-21)
+
+*"maybe we need to ocnstruct our graph to avoid missbehaviours."*
+
+Right, and it also settles §247's one unanswered question by making it moot: `path` and `is_shared`
+came back null on our own run, so a shareable URL is something the researcher grants rather than
+something every run has — and there is no honest `open in AutoDiscovery` link to offer. Drawing it
+here removes the dependency.
+
+### A tree, not the blob
+
+AutoDiscovery's own view is a force-directed graph of the same data. This is a deterministic tidy
+tree — leaves take the next column, a parent centres over its children — for two reasons that both
+matter more than the resemblance:
+
+- **A spring layout settles differently every frame**, and this panel is rebuilt on every stream
+  event. The nodes would drift while a researcher was reading them.
+- **Depth is the one thing a blob cannot show.** It is how far the search kept refining a single
+  line of enquiry, which is the shape of an MCTS run and the reason the tree is worth drawing at
+  all.
+
+Edges are **three axis-aligned rectangles** each — down, across, down. gpui draws boxes; a diagonal
+would be a rotated div or a custom element, and elbows are exact where those would be approximate.
+A single child directly below its parent gets two pieces rather than three, so a chain is a straight
+line and not three segments with two of them zero-length.
+
+### Six guards, and where each one lives
+
+Everything from §247 that could misbehave now has a named home:
+
+| Guard | Where |
+|---|---|
+| edges come from `parent_id` alone, never `child_ids` | `discovery::layout`, `discovery::edges` |
+| a parent outside the set is a root | `discovery::layout` |
+| a cycle terminates and every node still gets a column | `discovery::layout` |
+| direction is the sign of `surprise` | `Experiment::direction` |
+| `is_surprising` is read, never recomputed | `decode_experiments` |
+| belief labels are the argmax of four vote counts | `Belief::decode` |
+
+### Status outranks the score
+
+The one thing this pass added that §247 did not name. An experiment that failed has no meaningful
+`surprise`, so banding it by magnitude draws **a hole in the search as a quiet result** — a reader
+would see a node that ran and found nothing, when nothing ran. So `discovery::loudness` checks
+status first and returns `Running` or `Failed` before it looks at any number, and the render function
+is a pure mapping from that band to three colours. The decision is in the module that has tests; the
+colours are in the one that does not.
+
+Two claims are kept visually distinct for the same reason: **loudness is a number we banded, and
+`is_surprising` is the service's judgment.** The probe had a −0.6705 shift the service called
+unsurprising at a 0.5 width, so folding one into the other would be asserting a relationship that
+demonstrably does not hold. Loudness is the fill; the flag is a ring.
+
+### What the modal shows, and in what order
+
+The service's own order, which `interpreting-results.md` also asks for: the belief shift, the
+hypothesis, the analysis, the review. **Code is not shown** — it is in the persisted `.json`, and a
+researcher reading results is not reading Python.
+
+The list is ranked on `|surprise|` rather than creation order, because the point of a discovery run
+is the handful of results that changed the picture and creation order buries them. An experiment that
+moved a belief hard *against* its hypothesis ranks as high as one that confirmed it, which is the
+interesting case and the reason the magnitude is what sorts.
+
+Whether the run is still producing is read from `has_job_completed` rather than inferred from the
+count: `n_experiments` is what was *requested*, and a run that failed early has fewer without still
+being in progress. Said out loud in the header, because a tree that grows between two openings is
+otherwise indistinguishable from one that was drawn wrong.
+
+*Hundred-and-third: when a picture and a number disagree about how confident to look, draw both and
+say which is which. Folding the service's judgment into our own banding would have made a
+contradiction invisible instead of visible.*

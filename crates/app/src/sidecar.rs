@@ -979,6 +979,29 @@ impl Sidecar {
         rx
     }
 
+    /// Read a discovery run's experiments for the results view.
+    pub fn discovery_run(
+        &self,
+        run_id: String,
+    ) -> mpsc::UnboundedReceiver<Result<serde_json::Value, String>> {
+        let (tx, rx) = mpsc::unbounded();
+        let base_url = self.base_url.clone();
+        let thread = self.thread.clone();
+        self.runtime.spawn(async move {
+            let Some(thread_id) = thread.lock().expect("thread id mutex").clone() else {
+                let _ = tx.unbounded_send(Err("this conversation has no thread yet".into()));
+                return;
+            };
+            let client = LangGraphClient::new(base_url);
+            let outcome = client
+                .discovery_run(&thread_id, &run_id)
+                .await
+                .map_err(|error| format!("{error:#}"));
+            let _ = tx.unbounded_send(outcome);
+        });
+        rx
+    }
+
     /// Approve a drafted run and start it. **This spends the researcher's credits.**
     ///
     /// One shot, no retry. A failed submit is reported and left alone: retrying a call that may

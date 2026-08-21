@@ -1248,6 +1248,33 @@ impl LangGraphClient {
         })
     }
 
+    /// A discovery run's experiments, whole.
+    ///
+    /// The same route the poller uses, read for its body rather than its status. It returns every
+    /// experiment complete — hypothesis, analysis, review, and the `parent_id` the tree is built
+    /// from — so the graph costs one request and not one per node (§247).
+    ///
+    /// What it deliberately does not bring back is the figures. Those exist only in the
+    /// per-experiment response, at roughly 458KB each, and are fetched when somebody opens the
+    /// experiment that has them.
+    pub async fn discovery_run(&self, thread_id: &str, run_id: &str) -> Result<Value> {
+        self.http
+            .get(format!(
+                "{}/discovery/{}/{}",
+                self.base_url,
+                urlencode(thread_id),
+                urlencode(run_id)
+            ))
+            .send()
+            .await
+            .context("reading the discovery run failed")?
+            .error_for_status()
+            .context("the discovery route returned an error status")?
+            .json()
+            .await
+            .context("could not decode the discovery run")
+    }
+
     /// Approve a drafted run: apply the researcher's two edits, then spend the credits.
     ///
     /// **The only call in this client that costs money.** It exists because the researcher pressed
