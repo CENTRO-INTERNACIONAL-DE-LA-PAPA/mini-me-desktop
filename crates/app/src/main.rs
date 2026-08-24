@@ -3764,7 +3764,7 @@ impl Workbench {
         self.status = format!(
             "{} running in the background ({}) — you can keep working",
             job.kind.label(),
-            job.kind.expected()
+            job.kind.expected(job.size)
         );
         let mut updates = self.sidecar.watch_job(job);
         cx.spawn(async move |this, cx| {
@@ -14609,6 +14609,7 @@ impl Workbench {
                             question: draft.name.clone(),
                             context_id: None,
                             status: status.clone(),
+                            size: Some(u64::from(cost.experiments)),
                         },
                         cx,
                     );
@@ -14731,6 +14732,7 @@ impl Workbench {
                                     question: kind.clone(),
                                     context_id: None,
                                     status: "running".to_string(),
+                                    size: Some(u64::from(experiments)),
                                 },
                                 cx,
                             );
@@ -15355,7 +15357,7 @@ impl Workbench {
         } else {
             // Say how long it usually takes. A spinner with no expectation attached
             // is indistinguishable from a hang.
-            format!("running · usually {}", job.kind.expected())
+            format!("running · usually {}", job.kind.expected(job.size))
         };
         // A finished discovery run is the one job row with something to open: its results are a
         // tree of experiments, and the alternative is composing a question to ask about work the
@@ -16901,6 +16903,7 @@ mod tests {
                 question: "SOC modelling".into(),
                 context_id: None,
                 status: "completed".into(),
+                size: None,
             },
         )
     }
@@ -16944,6 +16947,7 @@ mod tests {
             question: "q".into(),
             context_id: None,
             status: String::new(),
+            size: None,
         };
         for status in ["completed", "failed", "canceled", "error"] {
             let job = protocol::Job { status: status.into(), ..base.clone() };
@@ -16967,6 +16971,7 @@ mod tests {
             question: "SOC modelling".into(),
             context_id: None,
             status: "working".into(),
+            size: None,
         };
         assert!(!running.is_finished());
         // The rule the filter applies: the filename carries the task id of an unfinished job.
@@ -16990,6 +16995,7 @@ mod tests {
             question: "q".into(),
             context_id: None,
             status: "working".into(),
+            size: None,
         };
         for other in ["eda_distributions.png", "analysis/deadbeef-0000.md", "final_report.md"] {
             assert!(
@@ -18728,6 +18734,7 @@ mod tests {
             question: "q".into(),
             context_id: None,
             status: "working".into(),
+            size: None,
         };
         let jobs = vec![
             analysis.clone(),
@@ -18809,6 +18816,7 @@ mod tests {
             question: question.to_string(),
             context_id: None,
             status: "working".into(),
+            size: None,
         };
         assert_eq!(job.question, question);
     }
