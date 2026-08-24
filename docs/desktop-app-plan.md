@@ -86,10 +86,13 @@ read first; the dated sections below it are the record of how each item got here
   that is what an updater makes: `/releases/latest` answers `v0.3.0` and the zip returns 200 to a
   request carrying no credentials. The workflow now refuses a tag whose name disagrees with
   `Cargo.toml`.
-- ⬜ **The update flow.** Now unblocked, and the reason the release could not wait: *"we cannot ask
-  users to download and install everytime."* Version comparison against `CARGO_PKG_VERSION` is
-  trivial; the hard half is that **Windows cannot overwrite a running `.exe`**, so an in-place swap
-  needs a helper that outlives the app, waits for exit, replaces the folder and relaunches.
+- 🟡 **The update flow** (§268) — built, and **not yet proven on a machine**. The app checks at
+  launch, downloads and verifies against the digest GitHub publishes, and offers *Restart to
+  Update* in the status bar; the helper waits for exit, retires the old folder rather than deleting
+  it, moves the new one in, rolls back on failure and relaunches. Four bugs were found writing it,
+  three of which passed every test first. **Remaining: a swap that has actually moved a folder.**
+  `v0.3.1` carries an updater that does not work — it predates the last of those fixes — and is
+  left in place rather than retracted; `v0.3.2` repairs it.
 
 **4. Debt that keeps causing the same bug.**
 - ⬜ **`start_async_task` accepts only `background_worker`** (§114), so "run *X* in the background"
@@ -15191,3 +15194,117 @@ first URL an unauthenticated `GET` can reach, which is the one thing the updater
 *Hundred-and-twenty-third: a release that waits for permission ages while it waits. Cutting it fresh
 cost two CI runs and found two bugs neither the developer's machine nor its reviewer could see — one
 because the platform was wrong, one because the clock was.*
+
+## 268. An update that arrives, rather than one you go and fetch (2026-08-24)
+
+*"we cannot ask users to download and install everytime. we need a flow of update."*
+
+Three pull requests, and then a fourth that moved the whole thing after the first look at it.
+
+### The two refusals came first
+
+Before any of it downloads anything, two answers have to be *no*:
+
+- **A source checkout is never replaced.** The person most likely to press this button is the one
+  who built the app, whose `target/release/` sits inside a git worktree with real work in it.
+  `layout()` calls an install a bundle only when all three of `overlay/`, `scripts/` and `vendor/`
+  sit beside the executable — and a test proves two of three is not enough. This is
+  `resolve_project_dir`'s argument about the backend checkout, applied to the app's own folder.
+- **A build ahead of the release is left alone**, so a developer on 0.4.0 is never handed a
+  published 0.3.0. §267's mistake, pointed the other way.
+
+Versions compare as three numbers, never as text: `"0.10.0" < "0.9.0"` is true as a string, and an
+updater that believed it would offer the downgrade forever, including after it was taken.
+
+### It was in the wrong place, and the correction was immediate
+
+The first version put the button in the About page. The verdict came back in one sentence:
+
+> *"It doesnt make any sense a user need to enter to about section to update th eprogram. A button
+> must appear like in zed so with a click we restart and update."*
+
+Right on both counts. An update behind a page nobody opens is an update nobody takes, and a button
+that only downloads is half an answer. Two things changed:
+
+- **The download now starts on its own**, because "Restart to Update" has to have something staged
+  to restart *into*. Nothing is *installed* without the press; that is the part that matters.
+- **The chip lives in the status bar**, not a titlebar — this app uses the OS titlebar, and the
+  status bar is its full-width always-in-the-same-place strip, chosen at §53 for Zed's own reason.
+  It also costs no layout when it appears, where a banner would push the transcript down and move
+  the thing being read.
+
+About keeps the detail — what was verified, where it is staged — and has no second button, because
+two places to take one update is two places for it to be half-taken.
+
+### The swap, and why the order is the whole design
+
+Windows cannot overwrite a running `.exe`, so something has to outlive the app. A PowerShell helper
+is spawned `DETACHED_PROCESS`, and every step is a rename within one parent — the same volume, so
+each is a metadata operation rather than a ten-megabyte copy:
+
+1. **Wait, and give up rather than force it.** Still running after sixty seconds and nothing is
+   touched at all. An abandoned update is a nuisance; a half-moved one is a researcher with no
+   working app.
+2. **Retire, never delete.** The old folder is renamed aside so step 3 has something to put back.
+3. **Move the new one in; on failure, put the old one back.**
+4. **Launch, then clean up** — in that order, so a failed delete cannot stop the new build starting.
+
+The test that matters most asserts a line *cannot* exist:
+
+```rust
+assert!(
+    !script.contains(&format!("Remove-Item -LiteralPath {install}")),
+    "deleting the install rather than renaming it would remove the only rollback there is"
+);
+```
+
+Script generation is pure, so all of it runs on Linux; only the spawn is `#[cfg(windows)]` — the
+same shape `notify.rs` settled on at §265.
+
+### Four bugs, and what each of them says
+
+**The digest was free.** GitHub already publishes `digest: "sha256:…"` on every release asset, so
+verification needed no workflow change and no second request. It is labelled a **corruption check
+and not a security control**, because the digest comes from the same authority as the zip —
+`Integrity::SizeOnly` exists so a release without one says so rather than letting "downloaded and
+checked" imply more than happened. §252's mistake was a docstring claiming a guarantee the code did
+not deliver, and this is the sentence where it would have been repeated.
+
+Then, in order of how well each one hid:
+
+- **The executable's name was `#[cfg(windows)]`-split**, so it depended on the platform doing the
+  *inspecting*. But the asset is always `-windows-x64.zip`, so the name inside is always `.exe`.
+  Every synthetic test passed while the real zip failed — and **on Windows the two would have
+  agreed, so it would have shipped green.** Found only by running the real ten-megabyte download
+  through `unpack`. §262 in different clothing: a fixture that does not resemble the real payload
+  is not coverage.
+- **`behind` was read off the field before the new standing was assigned** — the previous value,
+  `None` on the only check that ever runs. The download would never have started and nothing would
+  have said why.
+- **A test used `C:\Users\…` paths on Linux**, where a backslash is not a separator: the whole
+  string is one component and `parent()` is `""`, so every assertion passed while measuring
+  nothing. §267's trap wearing a test's clothes, four days later.
+- **The helper stood in the folder it was replacing.** A spawned process inherits its parent's
+  working directory, and double-clicking the executable makes that the install folder — which
+  Windows will not rename while a process is sitting in it. The app never calls `set_current_dir`,
+  so it *always* would have. Thirty-one tests passed first, because **the text of a script says
+  nothing about the process that runs it.**
+
+That last one is the interesting one. Every earlier lesson here has been about testing the join
+rather than the part; this was a join between a string and a *process*, which no assertion on the
+string can reach. The repair was to move the working directory into `Swap` so it becomes data, and
+data can be asserted.
+
+### What is still not proven
+
+`v0.3.1` was published as the first build carrying an updater, and its updater does not work — it
+predates the fix above. It is left in place rather than retracted: nobody had downloaded it, and a
+moved tag is worse than an honest history. `v0.3.2` carries the repair.
+
+And the honest limit: **no folder has ever actually been moved.** The order is tested, the rollback
+is tested, the script's text is pinned to the byte — but a swap on a real machine has not happened
+once. That is what `v0.3.2` and `v0.3.3` exist to settle.
+
+*Hundred-and-twenty-fourth: four of these were found by running the real thing rather than a model
+of it, and the fourth could not have been found any other way. A test suite is a model of the
+program; sooner or later the program has to meet the machine.*
