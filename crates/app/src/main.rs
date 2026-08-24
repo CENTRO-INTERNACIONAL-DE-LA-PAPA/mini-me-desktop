@@ -28,6 +28,7 @@ mod sidecar;
 mod subagent;
 mod theme;
 mod ui;
+mod update;
 mod workspace;
 
 use std::borrow::Cow;
@@ -3164,6 +3165,18 @@ struct Workbench {
     /// still gone on "New thread" or a restart, and announced in the status bar the whole
     /// time it is in force, so it cannot be in effect without being visible (docs §41).
     approve_conversation: bool,
+    /// Where this build stands against the newest published one, once GitHub has been asked.
+    ///
+    /// `None` until the answer arrives, which is the state the About page renders as "checking".
+    /// The check runs once per launch and never blocks anything: an app that will not open because
+    /// github.com is unreachable would be a worse failure than the one it exists to fix.
+    update: Option<update::Standing>,
+    /// Whether this install is an unzipped bundle or a `cargo build` inside a checkout.
+    ///
+    /// Read once at startup rather than per render, and kept beside the standing because the two
+    /// together decide what the About page may offer — a source build is told about a new release
+    /// and pointedly not offered a button that would unzip over its worktree.
+    install: update::Layout,
     /// Filters the *installed* theme list. With a hundred palettes installed, a list you
     /// can only scroll is a list you cannot use.
     theme_filter: Entity<Composer>,
@@ -3547,7 +3560,17 @@ impl Workbench {
         // made it three — one file, opened three times, in a constructor.
         let stored = settings::Settings::load();
 
+        // Which folder this executable sits in, decided once. `current_exe` failing is not a
+        // reason to fail the launch — it just means no update is ever offered, which is the safe
+        // direction for a decision about replacing files.
+        let install = std::env::current_exe()
+            .as_deref()
+            .map_or(update::Layout::Source, update::layout);
+        tracing::info!(install = ?install, "the shape of this install");
+
         let mut workbench = Self {
+            update: None,
+            install,
             project: None,
             buckets: Vec::new(),
             jobs: Vec::new(),
@@ -5690,9 +5713,45 @@ impl Workbench {
     /// Cheap, and called whenever a turn ends or a name changes, because a sidebar that
     /// is only correct at launch is worse than none: it teaches the researcher to distrust
     /// it, and then they stop looking.
+    /// Ask once, at launch, whether a newer build exists.
+    ///
+    /// **Not on a button.** A button nobody presses is a check that never runs, and the person
+    /// who most needs the answer is the one who does not know to look for it. This is the quiet
+    /// half: it asks, records, and shows the answer where the version already is. Nothing pops up
+    /// and nothing is downloaded — pressing to take an update stays a separate, deliberate act.
+    fn check_for_update(&mut self, cx: &mut Context<Self>) {
+        let mut answer = self.sidecar.check_for_update();
+        cx.spawn(async move |workbench, cx| {
+            let Some(standing) = answer.next().await else {
+                return;
+            };
+            let _ = workbench.update(cx, |workbench, cx| {
+                match &standing {
+                    update::Standing::Behind(release) => tracing::info!(
+                        running = %env!("CARGO_PKG_VERSION"),
+                        published = %release.tag,
+                        "a newer build is published"
+                    ),
+                    // Logged at `warn` rather than swallowed: a check that has been silently
+                    // failing for a month looks exactly like an app that is up to date.
+                    update::Standing::Unknown(reason) => {
+                        tracing::warn!(%reason, "could not check for a newer build");
+                    }
+                    other => tracing::info!(standing = ?other, "checked for a newer build"),
+                }
+                workbench.update = Some(standing);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// Bring the backend up at launch, then show the history it has.
     fn warm_up(&mut self, cx: &mut Context<Self>) {
         self.status = "starting the agent…".into();
+        // Alongside the backend rather than after it: the two are unrelated, and an update check
+        // that waited for a graph to build would be a check that never ran on a slow launch.
+        self.check_for_update(cx);
         let mut ready = self.sidecar.warm_up();
         cx.spawn(async move |this, cx| {
             let status = ready.next().await;
@@ -8279,6 +8338,19 @@ impl Workbench {
                         ui::Label::new(
                             "Include this line when reporting a problem, with the two log files                              named in Setup.",
                         )
+                        .muted()
+                        .size(ui::Size::Compact),
+                    )
+                    // Where the version already is, because that is where someone goes to ask
+                    // "what am I running" — and "is there a newer one" is the same question with
+                    // one more word. A separate pane for it would be a pane nobody opens.
+                    .child(
+                        ui::Label::new(match &self.update {
+                            Some(standing) => update::describe(standing, &self.install),
+                            // Said out loud, so the gap between launching and answering does not
+                            // read as "there is nothing to report".
+                            None => "checking for a newer build…".to_string(),
+                        })
                         .muted()
                         .size(ui::Size::Compact),
                     ),
