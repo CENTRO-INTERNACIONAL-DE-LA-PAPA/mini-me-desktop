@@ -67,6 +67,19 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Taking an update. Both are small and pure Rust, and `deflate-flate2` reuses the
+# `flate2` above rather than vendoring a second compressor — two crates added in total.
+#
+# `zip` rather than shelling out to PowerShell's `Expand-Archive`, which would have cost
+# no dependency at all. The deciding argument is §267: a Windows-only unpack path cannot
+# be tested on the machine this is written on, and the two bugs that reached a release
+# build that day were both in code no Linux run could reach.
+zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
+# GitHub publishes `digest: "sha256:…"` on every release asset, so a download can be
+# checked against what was uploaded. 0.10 rather than 0.11 because 0.10 is already in
+# this tree transitively; a second major version would compile a second copy.
+sha2 = "0.10"
+
 [dev-dependencies]
 # Enables GPUI's headless window harness only for tests. §156 measures the list at layout time;
 # a helper that merely counts our own iterator would prove the old eager path, not that GPUI
