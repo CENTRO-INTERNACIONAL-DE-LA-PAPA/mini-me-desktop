@@ -930,6 +930,75 @@ impl Sidecar {
         rx
     }
 
+    /// Ask GitHub whether a newer build has been published.
+    ///
+    /// **The second call in this app that does not go to the backend**, and it follows the same
+    /// stricter rules as the Crossref one above:
+    ///
+    /// * **Nothing goes out.** A `GET` with no query, no body and no identifier. The comparison
+    ///   happens here, against a number compiled into this binary.
+    /// * **No credentials, deliberately.** The repository is public and the endpoint answers an
+    ///   anonymous request. Sending a token would mean an update check that works for whoever
+    ///   built the app and silently fails for everyone else — and it would fail *as* "you are up
+    ///   to date", which is the worst shape a failure can take here.
+    /// * **A short timeout, and never fatal.** A researcher on a bad connection, or behind a proxy
+    ///   that blocks api.github.com, gets a sentence in the About page and an app that works.
+    ///
+    /// The body is read **before** the status is consulted, because GitHub writes the reason into
+    /// it — the mistake §261 records making three times in one day was reporting *that* something
+    /// failed instead of *what*.
+    pub fn check_for_update(&self) -> mpsc::UnboundedReceiver<crate::update::Standing> {
+        let (tx, rx) = mpsc::unbounded();
+        self.runtime.spawn(async move {
+            let client = match reqwest::Client::builder()
+                .user_agent(concat!(
+                    "mini-me-desktop/",
+                    env!("CARGO_PKG_VERSION"),
+                    " (update check)"
+                ))
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+            {
+                Ok(client) => client,
+                Err(error) => {
+                    let _ = tx.unbounded_send(crate::update::Standing::Unknown(error.to_string()));
+                    return;
+                }
+            };
+            let standing = match client
+                .get(crate::update::LATEST_URL)
+                .header("Accept", "application/vnd.github+json")
+                .send()
+                .await
+            {
+                Ok(response) => {
+                    let status = response.status();
+                    // Body first. `error_for_status()` here would throw away the sentence GitHub
+                    // wrote to be read (§261).
+                    match response.text().await {
+                        Ok(body) if status.is_success() => match crate::update::decode_release(&body) {
+                            Ok(release) => {
+                                crate::update::standing(crate::update::Version::running(), &release)
+                            }
+                            Err(reason) => crate::update::Standing::Unknown(reason),
+                        },
+                        Ok(body) => crate::update::Standing::Unknown(format!(
+                            "GitHub answered {status}: {}",
+                            crate::protocol::clip(body.trim(), 200)
+                        )),
+                        Err(error) => crate::update::Standing::Unknown(error.to_string()),
+                    }
+                }
+                Err(error) if error.is_timeout() => {
+                    crate::update::Standing::Unknown("GitHub did not answer in ten seconds".into())
+                }
+                Err(error) => crate::update::Standing::Unknown(error.to_string()),
+            };
+            let _ = tx.unbounded_send(standing);
+        });
+        rx
+    }
+
     /// Record a conversation's project on the thread itself.
     ///
     /// Fire-and-forget: the folder has already moved and the app already shows the new grouping,
