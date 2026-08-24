@@ -3171,6 +3171,11 @@ struct Workbench {
     /// The check runs once per launch and never blocks anything: an app that will not open because
     /// github.com is unreachable would be a worse failure than the one it exists to fix.
     update: Option<update::Standing>,
+    /// How far a *taken* update has got, once the button has been pressed.
+    ///
+    /// Separate from `update` because they answer different questions — "is there a newer build"
+    /// survives a failed download, and a failed download must not erase the fact that one exists.
+    taking: Option<update::Fetch>,
     /// Whether this install is an unzipped bundle or a `cargo build` inside a checkout.
     ///
     /// Read once at startup rather than per render, and kept beside the standing because the two
@@ -3570,6 +3575,7 @@ impl Workbench {
 
         let mut workbench = Self {
             update: None,
+            taking: None,
             install,
             project: None,
             buckets: Vec::new(),
@@ -5744,6 +5750,126 @@ impl Workbench {
             });
         })
         .detach();
+    }
+
+    /// The one control an update needs, or the sentence that replaces it.
+    ///
+    /// Returns nothing at all when there is nothing to offer — an up-to-date app shows no button,
+    /// because a button that does nothing is a question the researcher has to answer every time
+    /// they open this page.
+    fn update_action(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        // Named in words, per §199: "Download 0.4.0" says what the press will do and what will
+        // arrive. "Update" says neither.
+        let offer = match (&self.update, &self.install) {
+            (Some(update::Standing::Behind(release)), update::Layout::Packaged(_)) => release,
+            _ => return None,
+        };
+        let line = match &self.taking {
+            Some(update::Fetch::Progress(so_far, total)) => {
+                // A percentage rather than bytes: the number a person can read at a glance while
+                // waiting is "how much of it", not "how many megabytes of it".
+                let percent = if *total == 0 {
+                    0
+                } else {
+                    (so_far.saturating_mul(100) / total).min(100)
+                };
+                return Some(
+                    ui::Label::new(format!("downloading {} — {percent}%", offer.tag))
+                        .muted()
+                        .size(ui::Size::Compact)
+                        .into_any_element(),
+                );
+            }
+            Some(update::Fetch::Ready(root, integrity)) => {
+                let checked = match integrity {
+                    update::Integrity::Digest => "checked against the digest GitHub published",
+                    // Said plainly rather than implied. Claiming more was verified than was is the
+                    // §252 mistake, and this is the line where it would be made.
+                    update::Integrity::SizeOnly => "checked by length only — no digest was published",
+                };
+                return Some(
+                    ui::Label::new(format!(
+                        "{} is downloaded and {checked}. It is unpacked at {} — installing it from \
+                         here is not built yet, so copy it over this folder while the app is closed.",
+                        offer.tag,
+                        root.display()
+                    ))
+                    .muted()
+                    .size(ui::Size::Compact)
+                    .into_any_element(),
+                );
+            }
+            Some(update::Fetch::Failed(reason)) => Some(reason.clone()),
+            None => None,
+        };
+        let label = match &line {
+            Some(_) => format!("Try {} again", offer.tag),
+            None => format!("Download {}", offer.tag),
+        };
+        let mut column = div().flex().flex_col().w_full().min_w_0().gap_1();
+        if let Some(reason) = line {
+            column = column.child(
+                ui::Label::new(format!("could not download it: {reason}"))
+                    .muted()
+                    .size(ui::Size::Compact),
+            );
+        }
+        Some(
+            column
+                .child(
+                    ui::Button::new("take-update", label)
+                        .size(ui::Size::Compact)
+                        .on_click(cx.listener(|workbench, _event, _window, cx| {
+                            workbench.take_update(cx);
+                        })),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Download the published build and stage it beside this one.
+    ///
+    /// Only reachable when the standing is `Behind` **and** the install is a bundle, so the two
+    /// refusals in `update.rs` gate the button rather than being re-argued here.
+    fn take_update(&mut self, cx: &mut Context<Self>) {
+        let Some(update::Standing::Behind(release)) = self.update.clone() else {
+            return;
+        };
+        let update::Layout::Packaged(install) = self.install.clone() else {
+            return;
+        };
+        if matches!(self.taking, Some(update::Fetch::Progress(..))) {
+            return; // already going; a second press must not start a second download
+        }
+        tracing::info!(tag = %release.tag, bytes = release.size, "taking an update");
+        self.taking = Some(update::Fetch::Progress(0, release.size));
+        let mut steps = self.sidecar.take_update(release, install);
+        cx.spawn(async move |workbench, cx| {
+            while let Some(step) = steps.next().await {
+                let done = !matches!(step, update::Fetch::Progress(..));
+                let updated = workbench.update(cx, |workbench, cx| {
+                    match &step {
+                        update::Fetch::Ready(root, integrity) => tracing::info!(
+                            staged = %root.display(),
+                            checked = ?integrity,
+                            "an update is downloaded and verified"
+                        ),
+                        update::Fetch::Failed(reason) => {
+                            tracing::warn!(%reason, "could not take the update");
+                        }
+                        update::Fetch::Progress(..) => {}
+                    }
+                    workbench.taking = Some(step);
+                    cx.notify();
+                });
+                // The window has gone. Stop rather than keep decoding a download nobody waits for.
+                if updated.is_err() || done {
+                    return;
+                }
+            }
+        })
+        .detach();
+        cx.notify();
     }
 
     /// Bring the backend up at launch, then show the history it has.
@@ -8353,7 +8479,8 @@ impl Workbench {
                         })
                         .muted()
                         .size(ui::Size::Compact),
-                    ),
+                    )
+                    .children(self.update_action(cx)),
             )
             .child(section_label("WHERE CODE RUNS"))
             .child(

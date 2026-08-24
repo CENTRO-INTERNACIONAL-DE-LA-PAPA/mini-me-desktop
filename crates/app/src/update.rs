@@ -44,6 +44,20 @@ pub const ASSET_SUFFIX: &str = "-windows-x64.zip";
 /// of a false positive here is a researcher's git worktree overwritten by a zip.
 const BUNDLE_MARKERS: [&str; 3] = ["overlay", "scripts", "vendor"];
 
+/// What the executable is called inside a downloaded bundle, per `scripts/package.sh`.
+///
+/// **Deliberately not `#[cfg]`-split, and that is the whole point.** The first version of this
+/// constant was `.exe` on Windows and bare elsewhere — the name depended on the platform doing the
+/// *inspecting*. But [`ASSET_SUFFIX`] means the thing inspected is always a Windows bundle, so the
+/// name inside is always Windows'. On Windows the two happened to agree, so the mistake would have
+/// shipped green; it was found by running the real published zip through `unpack` on Linux, where
+/// they disagree. Both names are accepted so a bundle `package.sh` built here can be inspected by
+/// the same code that inspects a downloaded one.
+///
+/// Needed by name only for a *download*. The installed side asks about `current_exe()`, whose name
+/// is whatever it is, so a researcher who renamed the executable is unaffected.
+const BUNDLED_EXECUTABLES: [&str; 2] = ["mini-me-desktop-app.exe", "mini-me-desktop-app"];
+
 /// A version, compared as three numbers rather than as text.
 ///
 /// The field order is the comparison order, which is what `Ord` derives — and it has to be numeric:
@@ -102,6 +116,20 @@ pub struct Release {
     pub size: u64,
     /// The release notes, so "what changed" is answerable without opening a browser.
     pub notes: String,
+    /// What GitHub says the asset hashes to, as lowercase hex without the `sha256:` prefix.
+    ///
+    /// `Option` because it is GitHub's field to publish, not ours, and an update must not become
+    /// impossible the day they stop sending it — see [`verify`] for what its absence costs.
+    pub digest: Option<String>,
+}
+
+/// Which checks a download actually passed, so the log can say rather than imply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Integrity {
+    /// Length and digest both matched what was published.
+    Digest,
+    /// Length matched; the release published no digest to compare against.
+    SizeOnly,
 }
 
 /// Where this install stands against the published build.
@@ -183,6 +211,13 @@ pub fn decode_release(payload: &str) -> Result<Release, String> {
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default()
                 .to_string(),
+            // `sha256:aab3bc…`. Only that algorithm is understood, so anything else is dropped
+            // rather than stored under a name that would make `verify` compare the wrong thing.
+            digest: asset
+                .get("digest")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|digest| digest.strip_prefix("sha256:"))
+                .map(|hex| hex.trim().to_ascii_lowercase()),
         });
     }
     // Names the thing it wanted *and* what was there, so a rename in `release.yml` is one line of
@@ -217,14 +252,179 @@ pub fn layout(executable: &Path) -> Layout {
     let Some(folder) = executable.parent() else {
         return Layout::Source;
     };
-    if BUNDLE_MARKERS
-        .iter()
-        .all(|marker| folder.join(marker).is_dir())
+    // The executable too, not only its folder's markers. A staged download of three empty
+    // directories would otherwise pass as a bundle, and the swap would leave a folder with no app
+    // in it — the one outcome worse than not updating.
+    if executable.is_file()
+        && BUNDLE_MARKERS
+            .iter()
+            .all(|marker| folder.join(marker).is_dir())
     {
         Layout::Packaged(folder.to_path_buf())
     } else {
         Layout::Source
     }
+}
+
+/// How far taking an update has got.
+///
+/// A progress variant rather than a bare result because the download is ten megabytes: on a slow
+/// connection that is a minute in which a desktop app with no feedback looks like it has hung. The
+/// roadmap has carried *"a loading state worth looking at"* as an open item since §177.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Fetch {
+    /// Bytes so far, and the total that was published.
+    Progress(u64, u64),
+    /// Downloaded, verified and unpacked. The path is the staged bundle.
+    Ready(PathBuf, Integrity),
+    /// Gave up, with the reason in words.
+    Failed(String),
+}
+
+/// Where a download is staged: beside the install, not in the system temp folder.
+///
+/// Same volume as the folder it will replace, which is what lets the swap be a move rather than a
+/// copy — and on Windows a move within a volume is the closest thing to atomic available. It is
+/// also visible: a researcher who abandons an update can see the folder and delete it.
+///
+/// Creating it is the *first* thing done, before a byte is downloaded, because "this folder is not
+/// writable" is a failure worth having in the first second rather than the sixtieth.
+pub fn staging(install: &Path, tag: &str) -> PathBuf {
+    let name = format!(".mini-me-update-{}", tag.trim_start_matches('v'));
+    install
+        .parent()
+        .unwrap_or(install)
+        .join(name)
+}
+
+/// Is this download the thing that was published?
+///
+/// **This is a corruption check, and calling it anything stronger would be the §252 mistake
+/// again.** The integrity guarantee is HTTPS to github.com with a validated certificate; the
+/// digest is published by the same authority that publishes the zip, so an attacker able to alter
+/// one could alter the other. What it does catch is the ordinary failure: a truncated download, a
+/// proxy that returned an error page with a 200, a mixed-up asset. Those are worth catching,
+/// because the next step unzips this over a working install.
+///
+/// The length is checked first and separately, because it is the failure that actually happens and
+/// because "10485760 bytes, expected 10793025" is a sentence someone can act on where a hash
+/// mismatch is not.
+pub fn verify(bytes: &[u8], release: &Release) -> Result<Integrity, String> {
+    let got = bytes.len() as u64;
+    if got != release.size {
+        return Err(format!(
+            "the download is {got} bytes and {} was published as {} — a short read, most likely",
+            release.tag, release.size
+        ));
+    }
+    let Some(expected) = release.digest.as_deref() else {
+        return Ok(Integrity::SizeOnly);
+    };
+    use sha2::Digest as _;
+    let actual = format!("{:x}", sha2::Sha256::digest(bytes));
+    if actual == expected {
+        Ok(Integrity::Digest)
+    } else {
+        Err(format!(
+            "the download does not match the digest {} published: got {actual}, expected {expected}",
+            release.tag
+        ))
+    }
+}
+
+/// Unpack a verified bundle into `into`, and answer with the folder that holds the executable.
+///
+/// Two things are refused rather than trusted:
+///
+/// 1. **Any entry that would land outside `into`.** `zip`'s own `enclosed_name` returns `None` for
+///    a path containing `..` or a root, and the join is checked again afterwards. We produce this
+///    zip ourselves, so this is not a live threat — it is the guard that stays correct if that ever
+///    stops being true, and it costs four lines.
+/// 2. **A bundle that does not look like one.** What comes out is validated with [`layout`], the
+///    same function that decides whether the *installed* folder may be replaced. One definition of
+///    "a bundle", used at both ends, so the two cannot drift apart.
+pub fn unpack(zip_bytes: &[u8], into: &Path) -> Result<PathBuf, String> {
+    let reader = std::io::Cursor::new(zip_bytes);
+    let mut archive = zip::ZipArchive::new(reader)
+        .map_err(|error| format!("the download is not a readable zip: {error}"))?;
+
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|error| format!("could not read entry {index}: {error}"))?;
+        let Some(relative) = entry.enclosed_name() else {
+            return Err(format!(
+                "the download contains an unsafe path ({}) and was not unpacked",
+                entry.name()
+            ));
+        };
+        let target = into.join(&relative);
+        if !target.starts_with(into) {
+            return Err(format!(
+                "the download would write outside the staging folder ({})",
+                relative.display()
+            ));
+        }
+        if entry.is_dir() {
+            std::fs::create_dir_all(&target)
+                .map_err(|error| format!("could not make {}: {error}", target.display()))?;
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("could not make {}: {error}", parent.display()))?;
+        }
+        let mut file = std::fs::File::create(&target)
+            .map_err(|error| format!("could not write {}: {error}", target.display()))?;
+        std::io::copy(&mut entry, &mut file)
+            .map_err(|error| format!("could not write {}: {error}", target.display()))?;
+    }
+    bundle_root(into)
+}
+
+/// The folder inside `unpacked` that is a bundle, or a sentence saying why none of them is.
+///
+/// `package.sh` writes `dist/mini-me-desktop/` and `Compress-Archive` keeps that folder, so the
+/// bundle is one level down — but this looks at `unpacked` itself first, so a flattened zip would
+/// still work rather than fail on a layout detail.
+pub fn bundle_root(unpacked: &Path) -> Result<PathBuf, String> {
+    if let Some(folder) = bundle_at(unpacked) {
+        return Ok(folder);
+    }
+    let entries = std::fs::read_dir(unpacked)
+        .map_err(|error| format!("could not read {}: {error}", unpacked.display()))?;
+    let mut seen = Vec::new();
+    for entry in entries.flatten() {
+        let candidate = entry.path();
+        if !candidate.is_dir() {
+            continue;
+        }
+        if let Some(folder) = bundle_at(&candidate) {
+            return Ok(folder);
+        }
+        seen.push(entry.file_name().to_string_lossy().into_owned());
+    }
+    Err(format!(
+        "the download does not contain a bundle: no {} beside {} (it holds: {})",
+        BUNDLED_EXECUTABLES.join(" or "),
+        BUNDLE_MARKERS.join(", "),
+        if seen.is_empty() {
+            "nothing".to_string()
+        } else {
+            seen.join(", ")
+        }
+    ))
+}
+
+/// Is this folder itself a bundle, under either name the executable can carry?
+fn bundle_at(folder: &Path) -> Option<PathBuf> {
+    BUNDLED_EXECUTABLES
+        .iter()
+        .map(|name| folder.join(name))
+        .find_map(|app| match layout(&app) {
+            Layout::Packaged(root) => Some(root),
+            Layout::Source => None,
+        })
 }
 
 /// One line for the About page, whatever the answer.
@@ -366,6 +566,7 @@ mod tests {
             asset: "https://example.invalid/x.zip".to_string(),
             size: 1,
             notes: String::new(),
+            digest: None,
         }
     }
 
@@ -453,6 +654,17 @@ mod tests {
             packager.contains("$OUT/vendor"),
             "package.sh no longer writes vendor/ into the bundle"
         );
+        // The name the executable carries inside a bundle, which is the thing a `#[cfg]` split got
+        // wrong: it made the name depend on the platform *inspecting* the zip rather than on the
+        // zip. The real published bundle disagreed with every synthetic one here, and only running
+        // it through `unpack` showed that.
+        for name in BUNDLED_EXECUTABLES {
+            assert!(
+                packager.contains(name),
+                "package.sh does not put {name} in the bundle, so unpack is looking for the \
+                 wrong file"
+            );
+        }
     }
 
     /// The asset name is written in `release.yml` and matched here; the two must not drift.
@@ -482,6 +694,206 @@ mod tests {
         let unknown = describe(&Standing::Unknown("no network".into()), &packaged);
         assert!(unknown.contains("no network"), "the reason must survive: {unknown}");
         assert!(unknown.contains("could not check"), "{unknown}");
+    }
+
+    /// The digest comes off the real payload, and it is the one `v0.3.0` really hashes to.
+    ///
+    /// Checked by hand against the published zip on the day it was cut:
+    ///
+    /// ```text
+    /// published: aab3bc3838f71b5c2871b4a10a5b394f56461ed898f9c7d5a779980b71447ffb
+    /// actual   : aab3bc3838f71b5c2871b4a10a5b394f56461ed898f9c7d5a779980b71447ffb
+    /// ```
+    #[test]
+    fn the_digest_is_read_off_the_asset_without_its_prefix() {
+        let release = decode_release(LATEST).expect("decodes");
+        assert_eq!(
+            release.digest.as_deref(),
+            Some("aab3bc3838f71b5c2871b4a10a5b394f56461ed898f9c7d5a779980b71447ffb")
+        );
+    }
+
+    /// An algorithm this code cannot compute must not be stored as though it could.
+    #[test]
+    fn a_digest_in_another_algorithm_is_dropped_rather_than_kept() {
+        let mut value: serde_json::Value = serde_json::from_str(LATEST).expect("json");
+        value["assets"][0]["digest"] = serde_json::Value::String("sha512:00ff".into());
+        let release = decode_release(&value.to_string()).expect("decodes");
+        assert_eq!(
+            release.digest, None,
+            "keeping a sha512 as if it were a sha256 would make verify() compare the wrong thing"
+        );
+    }
+
+    fn release_for(bytes: &[u8], digest: Option<&str>) -> Release {
+        Release {
+            version: Version::parse("9.9.9").expect("a version"),
+            tag: "v9.9.9".to_string(),
+            asset: "https://example.invalid/x.zip".to_string(),
+            size: bytes.len() as u64,
+            notes: String::new(),
+            digest: digest.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_download_of_the_right_length_and_digest_passes() {
+        let bytes = b"a bundle, notionally".to_vec();
+        use sha2::Digest as _;
+        let hex = format!("{:x}", sha2::Sha256::digest(&bytes));
+        assert_eq!(
+            verify(&bytes, &release_for(&bytes, Some(&hex))),
+            Ok(Integrity::Digest)
+        );
+        // Without a published digest the length is all there is, and the answer says so rather
+        // than implying more was checked than was.
+        assert_eq!(
+            verify(&bytes, &release_for(&bytes, None)),
+            Ok(Integrity::SizeOnly)
+        );
+    }
+
+    /// The failure that actually happens, and the message a person can act on.
+    #[test]
+    fn a_short_read_is_refused_and_both_numbers_are_named() {
+        let published = release_for(b"the whole bundle", None);
+        let error = verify(b"the whole", &published).expect_err("a short read");
+        assert!(error.contains("9 bytes"), "the length it got: {error}");
+        assert!(error.contains("16"), "and the length published: {error}");
+    }
+
+    #[test]
+    fn a_digest_that_does_not_match_is_refused() {
+        let bytes = b"a bundle".to_vec();
+        let wrong = "0".repeat(64);
+        let error = verify(&bytes, &release_for(&bytes, Some(&wrong))).expect_err("mismatch");
+        assert!(error.contains(&wrong), "it must name what was expected: {error}");
+        assert!(error.contains("does not match"), "{error}");
+    }
+
+    /// Build the bundle `package.sh` produces, as a zip, in memory.
+    /// Built with the **Windows** executable name, because `-windows-x64.zip` is the only asset
+    /// the updater fetches. A synthetic bundle carrying this machine's name instead is what let
+    /// `unpack` pass every test here and fail on the real zip.
+    fn bundle_zip(root: &str, with_executable: bool) -> Vec<u8> {
+        let mut buffer = std::io::Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut buffer);
+            let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            for marker in BUNDLE_MARKERS {
+                writer
+                    .start_file(format!("{root}/{marker}/keep.txt"), options)
+                    .expect("entry");
+                std::io::Write::write_all(&mut writer, b"x").expect("write");
+            }
+            if with_executable {
+                writer
+                    .start_file(format!("{root}/mini-me-desktop-app.exe"), options)
+                    .expect("entry");
+                std::io::Write::write_all(&mut writer, b"an app").expect("write");
+            }
+            writer.finish().expect("finish");
+        }
+        buffer.into_inner()
+    }
+
+    #[test]
+    fn a_bundle_unpacks_and_its_root_is_found_one_level_down() {
+        let base = scratch("unpack");
+        let zip_bytes = bundle_zip("mini-me-desktop", true);
+        let root = unpack(&zip_bytes, &base).expect("unpacks");
+        assert_eq!(root, base.join("mini-me-desktop"));
+        assert!(root.join("mini-me-desktop-app.exe").is_file(), "the app came out");
+        for marker in BUNDLE_MARKERS {
+            assert!(root.join(marker).is_dir(), "{marker} came out");
+        }
+        // And the same function that guards the *installed* folder agrees this is a bundle.
+        assert_eq!(
+            layout(&root.join("mini-me-desktop-app.exe")),
+            Layout::Packaged(root.clone())
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Three folders and no app is not something to swap in — it is the one outcome worse than
+    /// not updating, because it leaves a folder with nothing to launch.
+    #[test]
+    fn a_download_with_no_executable_is_not_a_bundle() {
+        let base = scratch("no-exe");
+        let zip_bytes = bundle_zip("mini-me-desktop", false);
+        let error = unpack(&zip_bytes, &base).expect_err("not a bundle");
+        assert!(
+            error.contains("mini-me-desktop-app.exe"),
+            "it must say what was missing: {error}"
+        );
+        assert!(error.contains("mini-me-desktop"), "and what it looked in: {error}");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn something_that_is_not_a_zip_is_refused_as_one() {
+        let base = scratch("not-zip");
+        let error = unpack(b"<html>404 not found</html>", &base).expect_err("not a zip");
+        assert!(error.contains("not a readable zip"), "{error}");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Nothing may land outside the staging folder.
+    ///
+    /// We produce this zip ourselves, so this is not a live threat — it is the guard that stays
+    /// correct if that stops being true. The entry is written with the traversal in its name, which
+    /// is why the archive is built by hand here rather than with `start_file`.
+    #[test]
+    fn an_entry_that_climbs_out_of_the_staging_folder_is_refused() {
+        let base = scratch("traversal");
+        let mut buffer = std::io::Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut buffer);
+            let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            writer
+                .add_directory("../escaped", options)
+                .or_else(|_| writer.start_file("../escaped.txt", options))
+                .expect("an entry naming a parent");
+            let _ = std::io::Write::write_all(&mut writer, b"escaped");
+            writer.finish().expect("finish");
+        }
+        let zip_bytes = buffer.into_inner();
+        match unpack(&zip_bytes, &base) {
+            Err(error) => assert!(
+                error.contains("unsafe path")
+                    || error.contains("outside the staging folder")
+                    || error.contains("does not contain a bundle"),
+                "a traversal must be refused, not written: {error}"
+            ),
+            Ok(root) => panic!("a traversal unpacked to {}", root.display()),
+        }
+        // Whatever happened, nothing was written beside the staging folder.
+        assert!(
+            !base.parent().expect("a parent").join("escaped.txt").exists(),
+            "an entry escaped the staging folder"
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Beside the install, never inside it.
+    ///
+    /// Inside would mean the folder being replaced contains the replacement, so the swap would
+    /// have to delete its own source. Same parent also means the same volume, which is what makes
+    /// the final move a move.
+    #[test]
+    fn a_download_is_staged_beside_the_install_not_within_it() {
+        let install = PathBuf::from("/opt/apps/mini-me-desktop");
+        let staged = staging(&install, "v0.4.0");
+        assert_eq!(staged.parent(), install.parent(), "the same volume, and the same parent");
+        assert!(!staged.starts_with(&install), "{}", staged.display());
+        assert!(
+            staged.file_name().expect("a name").to_string_lossy().contains("0.4.0"),
+            "the tag belongs in the name so two attempts cannot collide: {}",
+            staged.display()
+        );
+        // The `v` is dropped so the folder does not read as a git tag sitting in someone's
+        // Documents; and a bare version is accepted too, since the tag is GitHub's to spell.
+        assert_eq!(staging(&install, "0.4.0"), staged);
     }
 
     /// The endpoint is this repository's, and it is asked without credentials.
