@@ -551,6 +551,28 @@ pub fn swap_script(plan: &Swap) -> String {
     )
 }
 
+/// The script as PowerShell wants it for `-EncodedCommand`: UTF-16LE, then base64.
+///
+/// **This exists because `-Command` did not work and could not be debugged from here.** The spawn
+/// succeeded, PowerShell started, and nothing was written — not even the log's first line, because
+/// PowerShell parses the whole `-Command` string *before* running any of it, so one bad character
+/// anywhere silences everything. The script contains double quotes; `notify.rs`, which works, does
+/// not. Rust escapes them for the command line, PowerShell re-parses them, and somewhere in that
+/// handoff the script stopped being valid.
+///
+/// Rather than guess which character it was — there is no PowerShell on the machine this is written
+/// on, so the guess could not be checked — `-EncodedCommand` removes the whole class. The argument
+/// is opaque base64: nothing between here and the parser can reinterpret a quote, a brace or a
+/// semicolon (§270).
+pub fn encoded_script(script: &str) -> String {
+    use base64::Engine as _;
+    let utf16: Vec<u8> = script
+        .encode_utf16()
+        .flat_map(|unit| unit.to_le_bytes())
+        .collect();
+    base64::engine::general_purpose::STANDARD.encode(utf16)
+}
+
 /// The whole command, ready to spawn.
 pub fn swap_command(plan: &Swap) -> Vec<String> {
     vec![
@@ -560,8 +582,8 @@ pub fn swap_command(plan: &Swap) -> Vec<String> {
         "-NonInteractive".to_string(),
         "-WindowStyle".to_string(),
         "Hidden".to_string(),
-        "-Command".to_string(),
-        swap_script(plan),
+        "-EncodedCommand".to_string(),
+        encoded_script(&swap_script(plan)),
     ]
 }
 
@@ -575,6 +597,21 @@ pub fn begin_swap(plan: &Swap) -> Result<(), String> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
+
+        // **The child's own output goes to the update log.** Twice now a press has produced
+        // nothing at all — no restart, no log, no error — because the helper died before its first
+        // statement and, being detached, had no console for the message to land on. Handing it the
+        // log as stdout and stderr means the next failure of that shape writes *something*, even
+        // if the script never runs. A failure that leaves no trace costs a round trip to a person
+        // on another machine, which is the most expensive kind there is (§270).
+        let record = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&plan.log)
+            .map_err(|error| format!("could not open {}: {error}", plan.log.display()))?;
+        let errors = record
+            .try_clone()
+            .map_err(|error| format!("could not share the update log: {error}"))?;
         // **One flag, not two.** Windows documents `CREATE_NEW_CONSOLE`, `CREATE_NO_WINDOW` and
         // `DETACHED_PROCESS` as mutually exclusive: passing more than one makes `CreateProcess`
         // fail with `ERROR_INVALID_PARAMETER`. The first version passed `CREATE_NO_WINDOW |
@@ -590,6 +627,8 @@ pub fn begin_swap(plan: &Swap) -> Result<(), String> {
             .args(&argv[1..])
             // Outside the folder being replaced — see `Swap::working`.
             .current_dir(&plan.working)
+            .stdout(record)
+            .stderr(errors)
             .creation_flags(DETACHED_PROCESS)
             .spawn()
             .map(|_| ())
@@ -1269,6 +1308,53 @@ mod tests {
         assert!(script.contains("'C:/Users/$env:USERNAME/app'"), "{script}");
     }
 
+    /// The script survives the trip to PowerShell byte for byte.
+    ///
+    /// `-Command` did not: the spawn succeeded, PowerShell started, and **nothing was written at
+    /// all** — not even the log's first line, because PowerShell parses the whole string before
+    /// running any of it. One mangled quote silences everything. `-EncodedCommand` is opaque
+    /// base64, so nothing between here and the parser can reinterpret a character.
+    #[test]
+    fn the_script_arrives_exactly_as_it_was_written() {
+        let script = swap_script(&a_plan());
+        let encoded = encoded_script(&script);
+
+        use base64::Engine as _;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&encoded)
+            .expect("valid base64");
+        // UTF-16LE, which is what `-EncodedCommand` requires: two bytes per unit, low byte first.
+        assert_eq!(bytes.len() % 2, 0, "UTF-16 is two bytes per unit");
+        let units: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        assert_eq!(String::from_utf16(&units).expect("valid UTF-16"), script);
+
+        // The quotes that `-Command` could not carry are in there, unaltered.
+        assert!(script.contains('"'), "the script does have double quotes to protect");
+        assert!(encoded.chars().all(|c| c.is_ascii_alphanumeric() || "+/=".contains(c)),
+            "base64 only, so the command line cannot reinterpret anything");
+    }
+
+    /// The failure that leaves nothing behind must stop being possible.
+    ///
+    /// Twice a press produced no restart, no log and no error, because the helper died before its
+    /// first statement and — being detached — had no console for the message to land on. The child
+    /// is now handed the log as its own stdout and stderr, so even a script that never parses
+    /// writes *something*.
+    #[test]
+    fn the_helper_cannot_fail_without_leaving_a_trace() {
+        let source = include_str!("update.rs");
+        for wiring in [".stdout(record)", ".stderr(errors)"] {
+            assert!(
+                source.contains(wiring),
+                "the helper no longer sends {wiring} to the update log, so a failure before its \
+                 first statement would again leave nothing to read"
+            );
+        }
+    }
+
     /// The command that carries it, and the two flags the swap cannot work without.
     #[test]
     fn the_helper_runs_without_a_profile_or_a_prompt() {
@@ -1280,7 +1366,17 @@ mod tests {
             "a prompt nobody can answer would hang the swap forever"
         );
         assert!(argv.contains(&"Hidden".to_string()));
-        assert_eq!(argv.last().expect("a script"), &swap_script(&a_plan()));
+        // Encoded, not raw. `-Command` could not carry this script intact (§270), so the last
+        // argument is base64 and the flag beside it says so.
+        assert!(
+            argv.contains(&"-EncodedCommand".to_string()),
+            "a raw -Command string is what silently failed twice"
+        );
+        assert!(!argv.contains(&"-Command".to_string()));
+        assert_eq!(
+            argv.last().expect("a script"),
+            &encoded_script(&swap_script(&a_plan()))
+        );
     }
 
     /// The helper's log is the only record of a swap, so the Setup pane must name *that* file.
