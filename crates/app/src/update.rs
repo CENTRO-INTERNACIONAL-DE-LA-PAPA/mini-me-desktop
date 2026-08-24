@@ -427,6 +427,164 @@ fn bundle_at(folder: &Path) -> Option<PathBuf> {
         })
 }
 
+/// Everything the helper needs to replace this install after this process exits.
+///
+/// A struct rather than six arguments because the script is generated from it and asserted against
+/// it, and because getting `install` and `staged` the wrong way round would delete the app.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Swap {
+    /// The process that must exit first — this one.
+    pub pid: u32,
+    /// The folder being replaced.
+    pub install: PathBuf,
+    /// The unpacked bundle that replaces it.
+    pub staged: PathBuf,
+    /// Where the old folder is moved to, so a failure can put it back.
+    pub retired: PathBuf,
+    /// The staging folder to clean up, which is `staged`'s parent.
+    pub staging: PathBuf,
+    /// What to launch when the folders are in place.
+    pub launch: PathBuf,
+    /// Where the helper writes what it did, since by then nothing else is watching.
+    pub log: PathBuf,
+}
+
+impl Swap {
+    /// Work out the whole plan from the two folders, so no caller can pair them wrongly.
+    pub fn plan(pid: u32, install: &Path, staged: &Path, tag: &str) -> Self {
+        let parent = install.parent().unwrap_or(install).to_path_buf();
+        let version = tag.trim_start_matches('v');
+        Self {
+            pid,
+            install: install.to_path_buf(),
+            staged: staged.to_path_buf(),
+            retired: parent.join(format!(".mini-me-previous-{version}")),
+            staging: staged.parent().unwrap_or(staged).to_path_buf(),
+            launch: install.join(BUNDLED_EXECUTABLES[0]),
+            log: std::env::temp_dir().join("mini-me-desktop-update.log"),
+        }
+    }
+}
+
+/// A path as a PowerShell single-quoted literal.
+///
+/// Single quotes because PowerShell does no expansion inside them: a folder called `$env` or
+/// `` `n `` is data, not code. Doubling is the only escape that applies.
+fn quote(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "''"))
+}
+
+/// How long the helper waits for this process to let go of its files.
+const EXIT_GRACE_SECONDS: u32 = 60;
+
+/// The script that replaces the install once this process is gone.
+///
+/// **Windows cannot overwrite a running `.exe`**, which is the whole reason a helper exists rather
+/// than a few lines of Rust: something has to outlive the app to move its folder.
+///
+/// The order is the safety property, and every step is a rename within one parent — the same
+/// volume, so each is a metadata operation rather than a ten-megabyte copy:
+///
+/// 1. **Wait, and give up rather than force it.** If the app is still running after
+///    [`EXIT_GRACE_SECONDS`] nothing is touched at all. An abandoned update is a nuisance; a
+///    half-moved one is a researcher with no working app.
+/// 2. **Retire, do not delete.** The old folder is renamed aside, never removed, so step 3 has
+///    something to put back.
+/// 3. **Move the new one in. If that fails, put the old one back.** The rollback is the reason
+///    step 2 is a rename.
+/// 4. **Launch, then clean up.** In that order: a failure to delete a leftover folder must not
+///    stop the app from starting.
+///
+/// It writes what it did to `%TEMP%\mini-me-desktop-update.log`, because by the time it runs there
+/// is no app left to log anything.
+pub fn swap_script(plan: &Swap) -> String {
+    let (install, staged, retired, staging, launch, log) = (
+        quote(&plan.install),
+        quote(&plan.staged),
+        quote(&plan.retired),
+        quote(&plan.staging),
+        quote(&plan.launch),
+        quote(&plan.log),
+    );
+    let pid = plan.pid;
+    let grace = EXIT_GRACE_SECONDS;
+    format!(
+        "$ErrorActionPreference = 'Stop'; \
+         function Note($m) {{ \"$(Get-Date -Format o) $m\" | Out-File -FilePath {log} -Append -Encoding utf8 }}; \
+         Note 'waiting for mini-me-desktop-app (pid {pid}) to exit'; \
+         $left = {grace}; \
+         while ($left -gt 0 -and (Get-Process -Id {pid} -ErrorAction SilentlyContinue)) {{ \
+         Start-Sleep -Seconds 1; $left-- }}; \
+         if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ \
+         Note 'it is still running after {grace}s, so nothing was changed'; exit 1 }}; \
+         Start-Sleep -Milliseconds 750; \
+         try {{ \
+         if (Test-Path -LiteralPath {retired}) {{ Remove-Item -LiteralPath {retired} -Recurse -Force }}; \
+         Move-Item -LiteralPath {install} -Destination {retired} -Force; \
+         Note 'retired the old folder' \
+         }} catch {{ Note \"could not move the old folder aside: $_\"; exit 1 }}; \
+         try {{ \
+         Move-Item -LiteralPath {staged} -Destination {install} -Force; \
+         Note 'the new build is in place' \
+         }} catch {{ \
+         Note \"could not move the new build in, putting the old one back: $_\"; \
+         Move-Item -LiteralPath {retired} -Destination {install} -Force; \
+         Note 'the old build is back'; exit 1 }}; \
+         try {{ Start-Process -FilePath {launch}; Note 'relaunched' }} \
+         catch {{ Note \"the new build is in place but did not start: $_\" }}; \
+         Remove-Item -LiteralPath {retired} -Recurse -Force -ErrorAction SilentlyContinue; \
+         Remove-Item -LiteralPath {staging} -Recurse -Force -ErrorAction SilentlyContinue; \
+         Note 'done'"
+    )
+}
+
+/// The whole command, ready to spawn.
+pub fn swap_command(plan: &Swap) -> Vec<String> {
+    vec![
+        "powershell".to_string(),
+        "-NoProfile".to_string(),
+        // Nothing here reads from a console, and a prompt nobody can answer would hang the swap.
+        "-NonInteractive".to_string(),
+        "-WindowStyle".to_string(),
+        "Hidden".to_string(),
+        "-Command".to_string(),
+        swap_script(plan),
+    ]
+}
+
+/// Start the helper, which outlives this process on purpose.
+///
+/// Returns `Ok` when the helper is *running*, which is not the same as the swap having succeeded —
+/// nothing here can know that, because the caller's next act is to exit. What the helper did is in
+/// `%TEMP%\mini-me-desktop-update.log`.
+pub fn begin_swap(plan: &Swap) -> Result<(), String> {
+    let argv = swap_command(plan);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW so no console flashes up; DETACHED_PROCESS so the helper is not killed
+        // with the app it is waiting for — which would leave the install exactly half-moved.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| format!("could not start the updater: {error}"))
+    }
+    #[cfg(not(windows))]
+    {
+        // The bundle is Windows-only, so there is nothing to swap anywhere else. Logged rather
+        // than silently ignored so a Linux run says why the button did nothing.
+        tracing::info!(
+            steps = argv.len(),
+            "an update swap was requested on a platform that has no bundle"
+        );
+        Err("taking an update is only implemented on Windows".to_string())
+    }
+}
+
 /// One line for the About page, whatever the answer.
 ///
 /// Every branch says something, including the failures: a check that goes quiet when it cannot
@@ -894,6 +1052,147 @@ mod tests {
         // The `v` is dropped so the folder does not read as a git tag sitting in someone's
         // Documents; and a bare version is accepted too, since the tag is GitHub's to spell.
         assert_eq!(staging(&install, "0.4.0"), staged);
+    }
+
+    /// **Forward slashes deliberately.** `Path` accepts them on Windows too, and a backslash is not
+    /// a separator on Linux — so a plan built from `C:\Users\x\app` here has *one* component and
+    /// `parent()` is `""`, which makes every assertion below pass while measuring nothing. That is
+    /// §267's trap wearing a test's clothes, and it caught this file on the first run.
+    fn a_plan() -> Swap {
+        Swap::plan(
+            4242,
+            Path::new("C:/Users/LENOVO/Apps/mini-me-desktop"),
+            Path::new("C:/Users/LENOVO/Apps/.mini-me-update-0.3.1/mini-me-desktop"),
+            "v0.3.1",
+        )
+    }
+
+    /// The plan is derived, not passed in, so no caller can pair the folders the wrong way round —
+    /// which in this script would mean deleting the app instead of replacing it.
+    #[test]
+    fn the_plan_puts_every_folder_under_one_parent() {
+        let plan = a_plan();
+        let parent = Path::new("C:/Users/LENOVO/Apps");
+        for folder in [&plan.install, &plan.retired, &plan.staging] {
+            assert_eq!(folder.parent(), Some(parent), "{}", folder.display());
+        }
+        assert_ne!(plan.retired, plan.install, "the old folder must move somewhere else");
+        assert!(plan.staged.starts_with(&plan.staging));
+        assert_eq!(plan.launch, plan.install.join("mini-me-desktop-app.exe"));
+        assert!(plan.launch.starts_with(&plan.install), "it launches the new build, not the old");
+    }
+
+    /// The order **is** the safety property.
+    #[test]
+    fn nothing_moves_until_the_app_has_exited() {
+        let script = swap_script(&a_plan());
+        let waited = script.find("Get-Process").expect("it waits");
+        let moved = script.find("Move-Item").expect("it moves");
+        assert!(waited < moved, "the wait must come before the first move");
+
+        let gave_up = script.find("still running").expect("it gives up");
+        assert!(gave_up < moved, "and giving up must come before the first move too");
+        assert!(script.contains("4242"), "it waits on this process");
+    }
+
+    /// The old folder is renamed aside, never deleted, because the rollback needs it back.
+    #[test]
+    fn the_old_build_is_retired_and_can_come_back() {
+        let plan = a_plan();
+        let script = swap_script(&plan);
+        let retired = quote(&plan.retired);
+        let install = quote(&plan.install);
+        let staged = quote(&plan.staged);
+
+        // Aside, then the new one in.
+        let aside = script
+            .find(&format!("Move-Item -LiteralPath {install} -Destination {retired}"))
+            .expect("the old folder moves aside");
+        let arrived = script
+            .find(&format!("Move-Item -LiteralPath {staged} -Destination {install}"))
+            .expect("the new folder moves in");
+        assert!(aside < arrived);
+
+        // And the rollback: the old one goes back, after the failure it recovers from.
+        let back = script
+            .find(&format!("Move-Item -LiteralPath {retired} -Destination {install}"))
+            .expect("the old folder can come back");
+        assert!(arrived < back, "the rollback belongs in the failure branch, after the attempt");
+    }
+
+    /// The one line that would make this unrecoverable.
+    #[test]
+    fn the_install_is_never_deleted_only_moved() {
+        let plan = a_plan();
+        let script = swap_script(&plan);
+        let install = quote(&plan.install);
+        assert!(
+            !script.contains(&format!("Remove-Item -LiteralPath {install}")),
+            "deleting the install rather than renaming it would remove the only rollback there is"
+        );
+        // What *is* removed: the two temporary folders, and only after the launch.
+        let launched = script.find("Start-Process").expect("it launches");
+        let cleaned = script.find("-Recurse -Force -ErrorAction SilentlyContinue").expect("cleanup");
+        assert!(
+            launched < cleaned,
+            "a failed cleanup must not stop the new build from starting"
+        );
+    }
+
+    /// A folder name is data. PowerShell expands nothing inside single quotes, and the only escape
+    /// that applies is doubling — so a researcher whose username contains a quote is not a bug.
+    #[test]
+    fn a_path_is_quoted_as_data_not_code() {
+        assert_eq!(quote(Path::new(r"C:\Users\A B\app")), r"'C:\Users\A B\app'");
+        assert_eq!(quote(Path::new("/home/o'brien/app")), "'/home/o''brien/app'");
+        // `$env:X` and a backtick-n stay literal inside single quotes, which is the point.
+        let script = swap_script(&Swap::plan(
+            1,
+            Path::new("C:/Users/$env:USERNAME/app"),
+            Path::new("C:/Users/$env:USERNAME/.mini-me-update-9.9.9/mini-me-desktop"),
+            "9.9.9",
+        ));
+        assert!(script.contains("'C:/Users/$env:USERNAME/app'"), "{script}");
+    }
+
+    /// The command that carries it, and the two flags the swap cannot work without.
+    #[test]
+    fn the_helper_runs_without_a_profile_or_a_prompt() {
+        let argv = swap_command(&a_plan());
+        assert_eq!(argv[0], "powershell");
+        assert!(argv.contains(&"-NoProfile".to_string()), "a profile script must not break it");
+        assert!(
+            argv.contains(&"-NonInteractive".to_string()),
+            "a prompt nobody can answer would hang the swap forever"
+        );
+        assert!(argv.contains(&"Hidden".to_string()));
+        assert_eq!(argv.last().expect("a script"), &swap_script(&a_plan()));
+    }
+
+    /// The helper's log is the only record of a swap, so the Setup pane must name *that* file.
+    ///
+    /// §250 is the reason this is a test and not a comment: a researcher was handed a `/tmp` path
+    /// for a file the app writes to `%TEMP%`, and the round trip came back empty. This log is
+    /// worse than that one — it is written after the app has exited, so if the pane names the
+    /// wrong file there is nothing else that could have recorded what happened.
+    #[test]
+    fn the_setup_pane_names_the_log_the_helper_writes() {
+        let plan = a_plan();
+        let name = plan
+            .log
+            .file_name()
+            .expect("the helper logs somewhere")
+            .to_string_lossy()
+            .into_owned();
+        let pane = include_str!("main.rs");
+        assert!(
+            pane.contains(&name),
+            "the Setup pane does not name {name}, so a failed swap leaves nothing findable"
+        );
+        assert!(
+            swap_script(&plan).contains(&name),
+            "the helper no longer writes to {name}"
+        );
     }
 
     /// The endpoint is this repository's, and it is asked without credentials.
