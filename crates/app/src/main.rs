@@ -5849,6 +5849,26 @@ impl Workbench {
         )
     }
 
+    /// The update that is downloaded and ready to install, if there is one.
+    ///
+    /// **One reader, used by both the chip and the press.** They used to ask different questions:
+    /// the chip wanted a staged download on a packaged install, and the press *also* required the
+    /// standing to still be `Behind`. Any state satisfying the first and not the second would draw
+    /// a button that returned without doing anything and without saying why — §259's shape, in the
+    /// one place where the symptom is "I pressed it and nothing happened".
+    fn ready_update(&self) -> Option<(std::path::PathBuf, std::path::PathBuf, String)> {
+        let Some(update::Fetch::Ready(staged, _)) = &self.taking else {
+            return None;
+        };
+        let update::Layout::Packaged(install) = &self.install else {
+            return None;
+        };
+        let Some(update::Standing::Behind(release)) = &self.update else {
+            return None;
+        };
+        Some((install.clone(), staged.clone(), release.tag.clone()))
+    }
+
     /// Restart into the update that is already downloaded.
     ///
     /// The last thing this process does. A helper is spawned that waits for this window to close,
@@ -5856,14 +5876,11 @@ impl Workbench {
     /// what it is. **If the helper cannot even start, the app stays open and says so**, because
     /// quitting after a failed spawn would look exactly like a successful update that lost the app.
     fn restart_to_update(&mut self, cx: &mut Context<Self>) {
-        let (Some(update::Fetch::Ready(staged, _)), update::Layout::Packaged(install)) =
-            (self.taking.clone(), self.install.clone())
-        else {
+        let Some((install, staged, tag)) = self.ready_update() else {
+            // Not reachable through the chip, which asks the same question — kept because a
+            // keyboard path or a stale click could still land here.
+            tracing::warn!("restart was pressed with nothing staged to restart into");
             return;
-        };
-        let tag = match &self.update {
-            Some(update::Standing::Behind(release)) => release.tag.clone(),
-            _ => return,
         };
         let plan = update::Swap::plan(std::process::id(), &install, &staged, &tag);
         tracing::info!(
@@ -5904,14 +5921,10 @@ impl Workbench {
         if self.update_dismissed {
             return None;
         }
-        // Only when there is something staged to restart *into*. "Restart to Update" with nothing
-        // downloaded would be a button that lies.
-        if !matches!(self.taking, Some(update::Fetch::Ready(..))) {
-            return None;
-        }
-        let update::Layout::Packaged(_) = self.install else {
-            return None;
-        };
+        // The same question the press asks, asked once. "Restart to Update" with nothing staged
+        // would be a button that lies, and a button whose conditions differ from its action's is
+        // one that lies only sometimes — which is worse, because it looks like a broken app.
+        self.ready_update()?;
         Some(
             div()
                 .flex()
