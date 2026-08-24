@@ -504,7 +504,9 @@ const EXIT_GRACE_SECONDS: u32 = 60;
 /// 3. **Move the new one in. If that fails, put the old one back.** The rollback is the reason
 ///    step 2 is a rename.
 /// 4. **Launch, then clean up.** In that order: a failure to delete a leftover folder must not
-///    stop the app from starting.
+///    stop the app from starting. The new app is started *in* the install folder, because that is
+///    where a double-click starts it — the helper's own working directory is elsewhere by
+///    necessity, and inheriting that would make an updated app subtly unlike a fresh one.
 ///
 /// It writes what it did to `%TEMP%\mini-me-desktop-update.log`, because by the time it runs there
 /// is no app left to log anything.
@@ -541,7 +543,7 @@ pub fn swap_script(plan: &Swap) -> String {
          Note \"could not move the new build in, putting the old one back: $_\"; \
          Move-Item -LiteralPath {retired} -Destination {install} -Force; \
          Note 'the old build is back'; exit 1 }}; \
-         try {{ Start-Process -FilePath {launch}; Note 'relaunched' }} \
+         try {{ Start-Process -FilePath {launch} -WorkingDirectory {install}; Note 'relaunched' }} \
          catch {{ Note \"the new build is in place but did not start: $_\" }}; \
          Remove-Item -LiteralPath {retired} -Recurse -Force -ErrorAction SilentlyContinue; \
          Remove-Item -LiteralPath {staging} -Recurse -Force -ErrorAction SilentlyContinue; \
@@ -1100,6 +1102,32 @@ mod tests {
         assert!(plan.staged.starts_with(&plan.staging));
         assert_eq!(plan.launch, plan.install.join("mini-me-desktop-app.exe"));
         assert!(plan.launch.starts_with(&plan.install), "it launches the new build, not the old");
+    }
+
+    /// An updated app should be indistinguishable from a freshly double-clicked one.
+    ///
+    /// The helper runs outside the install folder by necessity — it cannot rename a directory it
+    /// is standing in. Without `-WorkingDirectory` the app it launches would inherit *that*, so an
+    /// updated install would run with a different working directory from a fresh one. Nothing
+    /// currently depends on it, which is exactly why this is worth pinning: "it only misbehaves
+    /// after an update" is a miserable thing to chase a year from now.
+    #[test]
+    fn the_relaunched_app_starts_where_a_double_click_would() {
+        let plan = a_plan();
+        let script = swap_script(&plan);
+        assert!(
+            script.contains(&format!(
+                "Start-Process -FilePath {} -WorkingDirectory {}",
+                quote(&plan.launch),
+                quote(&plan.install)
+            )),
+            "the new build must start in the install folder, not the helper's: {script}"
+        );
+        // And not in the helper's own directory, which is the mistake this prevents.
+        assert!(
+            !script.contains(&format!("-WorkingDirectory {}", quote(&plan.working))),
+            "the relaunched app must not inherit the helper's working directory"
+        );
     }
 
     /// One console flag, never two.

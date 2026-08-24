@@ -89,10 +89,11 @@ read first; the dated sections below it are the record of how each item got here
 - 🟡 **The update flow** (§268) — built, and **not yet proven on a machine**. The app checks at
   launch, downloads and verifies against the digest GitHub publishes, and offers *Restart to
   Update* in the status bar; the helper waits for exit, retires the old folder rather than deleting
-  it, moves the new one in, rolls back on failure and relaunches. Four bugs were found writing it,
-  three of which passed every test first. **Remaining: a swap that has actually moved a folder.**
-  `v0.3.1` carries an updater that does not work — it predates the last of those fixes — and is
-  left in place rather than retracted; `v0.3.2` repairs it.
+  it, moves the new one in, rolls back on failure and relaunches. **Five** bugs were found writing
+  it (§268, §269), four of which passed every test first, and every one of them in the seam between
+  this code and the operating system. **Remaining: a swap that has actually moved a folder.**
+  `v0.3.1` through `v0.3.3` carry a button that fails at the spawn and cannot bring themselves
+  forward; they are left in place rather than retracted, and `v0.3.4` is the first that can.
 
 **4. Debt that keeps causing the same bug.**
 - ⬜ **`start_async_task` accepts only `background_worker`** (§114), so "run *X* in the background"
@@ -15308,3 +15309,77 @@ once. That is what `v0.3.2` and `v0.3.3` exist to settle.
 *Hundred-and-twenty-fourth: four of these were found by running the real thing rather than a model
 of it, and the fourth could not have been found any other way. A test suite is a model of the
 program; sooner or later the program has to meet the machine.*
+
+## 269. A button that ran nothing, and a guard that guarded nothing (2026-08-24)
+
+The chip appeared, the download was verified, the press did nothing at all.
+
+*"I saw the button to restart but nothing restarted"* — and:
+
+```
+Get-Content : No se encuentra la ruta de acceso '…\mini-me-desktop-update.log' porque no existe.
+```
+
+**The missing log was the diagnosis.** Writing that file is the helper's *first* statement, before
+it waits for anything, so its absence does not mean the swap failed — it means PowerShell never ran.
+The failure was upstream of everything §268 tested.
+
+### Two flags that cannot be used together
+
+```rust
+.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)   // ERROR_INVALID_PARAMETER
+```
+
+Windows documents `CREATE_NEW_CONSOLE`, `CREATE_NO_WINDOW` and `DETACHED_PROCESS` as **mutually
+exclusive**: passing more than one makes `CreateProcess` fail outright. `CREATE_NO_WINDOW` was
+copied from `notify.rs`, where it is correct *on its own*, and `DETACHED_PROCESS` was added beside
+it without checking whether the two compose. They do not.
+
+`DETACHED_PROCESS` is the one that matters: the helper must not die with the app it is waiting for,
+or the install is left half-moved. It gives no console either, so nothing was gained by the second.
+
+### The guard I wrote for it was not a guard
+
+The first version asserted that only one of the three flag *names* appeared. Putting the bug back
+as `0x0800_0000 | DETACHED_PROCESS` left it **green**, because a hex literal has no name in it.
+
+A test that passes when the defect is restored is not a test. It now asserts the flag expression
+contains no `|` at all — the invariant however a flag is spelled — verified the only way that
+means anything, by reintroducing the bug and watching it fail:
+
+```
+these flags are mutually exclusive on Windows, so ORing any two makes CreateProcess fail
+with ERROR_INVALID_PARAMETER: got `0x0800_0000 | DETACHED_PROCESS`
+```
+
+This is worth recording separately from the bug. §268 closed with "the program has to meet the
+machine"; this adds the other half — **when you write the guard, make it fail once on purpose.**
+Four of the guards in this module were verified that way. This was the fifth, and it was the one
+that needed it.
+
+### A second cause, hidden behind the first
+
+The chip and the press asked different questions. `restart_chip` wanted a staged download on a
+packaged install; `restart_to_update` *also* required the standing to still be `Behind`. Any state
+satisfying one and not the other draws a button that returns without doing anything and without
+saying why — §259's shape, arriving in the one place where the symptom is precisely "I pressed it
+and nothing happened". `ready_update()` is now the single reader both call.
+
+### And one difference removed while here
+
+The helper runs outside the install folder by necessity (§268), so without `-WorkingDirectory` the
+app it launched would inherit *that* — an updated install running with a different working
+directory from a fresh one. Nothing currently depends on it. That is exactly why it is pinned now:
+"it only misbehaves after an update" is a miserable thing to chase a year from now.
+
+### The count, honestly
+
+Five defects in this flow. Four passed a full suite first, and every one lived in the seam between
+this code and the operating system: a `cfg` that guessed the wrong platform, a fixture that did not
+resemble the real payload, a process inheriting a directory, two flags that do not compose. A test
+suite written on Linux is a model of the program. Windows has opinions about the program that the
+model does not contain.
+
+*Hundred-and-twenty-fifth: the absence of a log was worth more than the log would have been. It
+located the failure upstream of everything that had been tested, which is the one thing a message
+inside the log could not have done.*
