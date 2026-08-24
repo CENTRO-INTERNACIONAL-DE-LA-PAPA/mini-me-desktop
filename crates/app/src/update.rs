@@ -447,6 +447,15 @@ pub struct Swap {
     pub launch: PathBuf,
     /// Where the helper writes what it did, since by then nothing else is watching.
     pub log: PathBuf,
+    /// The working directory the helper runs in, which must be **outside** [`Self::install`].
+    ///
+    /// A spawned process inherits its parent's working directory, and when a researcher
+    /// double-clicks the executable that directory *is* the install folder. Windows refuses to
+    /// rename a directory that is a running process's current directory, so the helper would have
+    /// held open the very folder it was about to move and failed at step 2 with a sharing
+    /// violation — on the first real swap, having passed every test here, because a script's text
+    /// says nothing about the process that runs it.
+    pub working: PathBuf,
 }
 
 impl Swap {
@@ -462,6 +471,8 @@ impl Swap {
             staging: staged.parent().unwrap_or(staged).to_path_buf(),
             launch: install.join(BUNDLED_EXECUTABLES[0]),
             log: std::env::temp_dir().join("mini-me-desktop-update.log"),
+            // The temp folder: guaranteed to exist, guaranteed not to be the thing being moved.
+            working: std::env::temp_dir(),
         }
     }
 }
@@ -568,6 +579,8 @@ pub fn begin_swap(plan: &Swap) -> Result<(), String> {
         const DETACHED_PROCESS: u32 = 0x0000_0008;
         std::process::Command::new(&argv[0])
             .args(&argv[1..])
+            // Outside the folder being replaced — see `Swap::working`.
+            .current_dir(&plan.working)
             .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
             .spawn()
             .map(|_| ())
@@ -1080,6 +1093,37 @@ mod tests {
         assert!(plan.staged.starts_with(&plan.staging));
         assert_eq!(plan.launch, plan.install.join("mini-me-desktop-app.exe"));
         assert!(plan.launch.starts_with(&plan.install), "it launches the new build, not the old");
+    }
+
+    /// The helper must not be standing in the folder it is about to move.
+    ///
+    /// A spawned process inherits the parent's working directory, and double-clicking the
+    /// executable makes that the install folder. Windows will not rename a directory that is a
+    /// running process's current directory, so the helper would have held open the folder it was
+    /// replacing and failed at the first move — after passing every other test in this file,
+    /// because the text of a script says nothing about the process that runs it.
+    #[test]
+    fn the_helper_does_not_stand_in_the_folder_it_replaces() {
+        let plan = a_plan();
+        assert!(
+            !plan.working.starts_with(&plan.install),
+            "the helper would hold open the folder it is moving: {}",
+            plan.working.display()
+        );
+        assert!(
+            !plan.working.starts_with(&plan.staging),
+            "and it must not hold open the staging folder it deletes either: {}",
+            plan.working.display()
+        );
+        assert!(plan.working.is_dir(), "it has to be somewhere that exists");
+        // And the spawn actually uses it. `begin_swap` is the only caller, and on this platform it
+        // refuses rather than spawning — so the field is read off the source, which is the honest
+        // way to assert a `#[cfg(windows)]` line from here (§267).
+        let source = include_str!("update.rs");
+        assert!(
+            source.contains(".current_dir(&plan.working)"),
+            "begin_swap no longer runs the helper outside the folder being replaced"
+        );
     }
 
     /// The order **is** the safety property.
