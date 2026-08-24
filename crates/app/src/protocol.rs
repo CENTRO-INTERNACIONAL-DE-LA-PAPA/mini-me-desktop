@@ -375,6 +375,12 @@ pub struct Job {
     pub context_id: Option<String>,
     /// Status as of the last snapshot or poll.
     pub status: String,
+    /// How much work was bought, when the job has a size a researcher chose.
+    ///
+    /// Discovery only, and `None` everywhere else: the theorizer and DataVoyager run for as long
+    /// as they run. It exists so the estimate can scale with the budget rather than quoting the
+    /// default at everybody (§266 deferred this; it is here now).
+    pub size: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -396,13 +402,26 @@ impl JobKind {
 
     /// Roughly how long these take, so the panel can set expectations rather than
     /// leaving someone watching a spinner wondering if it is stuck.
-    pub fn expected(self) -> &'static str {
+    /// Roughly how long this kind of job takes, given how much of it was bought.
+    ///
+    /// **Discovery scales; the other two do not.** A five-experiment run finishing in thirteen
+    /// minutes was being labelled "25–40 min" because the estimate quoted the default budget at
+    /// everyone — and an estimate that is wrong by three times is one a researcher stops reading.
+    ///
+    /// The numbers are an extrapolation from **one** measurement, and worth naming as such: the
+    /// §247 probe ran 5 experiments in 13 minutes of wall clock (933s of work overlapping into
+    /// 735s). `5 + n` to `5 + 2n` puts that measurement inside the range, keeps the fixed startup
+    /// cost that makes a one-experiment run take minutes rather than seconds, and lands 15 on
+    /// 20–35 — close to the 25–40 that was there before. It is a range, not a promise.
+    pub fn expected(self, size: Option<u64>) -> String {
         match self {
-            JobKind::Theorizer => "5–15 min",
-            JobKind::Analysis => "20–40 min",
-            // Measured, not guessed: the §247 probe ran 5 experiments in 13 minutes of wall clock
-            // (933s of work overlapping into 735s), and a run is 15 by default.
-            JobKind::Discovery => "25–40 min",
+            JobKind::Theorizer => "5–15 min".to_string(),
+            JobKind::Analysis => "20–40 min".to_string(),
+            JobKind::Discovery => match size {
+                Some(n) => format!("{}–{} min", 5 + n, 5 + 2 * n),
+                // Unconfigured, so the default budget is the honest guess.
+                None => "20–35 min".to_string(),
+            },
         }
     }
 }
@@ -3002,6 +3021,8 @@ fn decode_jobs(artifacts: &Value) -> Vec<Job> {
                     .and_then(Value::as_str)
                     .map(str::to_string),
                 status,
+                // Only the discoveries bucket carries one, and only when the run was configured.
+                size: item.get("n_experiments").and_then(Value::as_u64).filter(|n| *n > 0),
             });
         }
     }
@@ -4408,6 +4429,7 @@ mod tests {
                 question: String::new(),
                 context_id: None,
                 status: status.to_string(),
+                size: None,
             };
             assert!(job.is_finished(), "{status}");
             assert_eq!(job.succeeded(), status == "completed", "{status}");
@@ -4419,6 +4441,7 @@ mod tests {
                 question: String::new(),
                 context_id: None,
                 status: status.to_string(),
+                size: None,
             };
             assert!(!job.is_finished(), "{status}");
         }
@@ -5115,6 +5138,7 @@ mod tests {
             question: "SOC modelling".into(),
             context_id: Some("eb663608-04c1-4140-a673-ac8dc98a2507".into()),
             status: "working".into(),
+            size: None,
         };
         // The route is built from the thread id it is asked about, not from whatever is open —
         // `watch_job` reads the current thread and returns when it changes, which is exactly why
@@ -5200,6 +5224,7 @@ mod tests {
             question: "SOC covariates".into(),
             context_id: None,
             status: "running".into(),
+            size: None,
         };
         assert_eq!(
             job.route("th-1"),
@@ -5210,8 +5235,50 @@ mod tests {
             let finished = Job { status: done.into(), ..job.clone() };
             assert!(finished.is_finished(), "{done}");
         }
-        // And it says how long to expect, measured off the probe rather than guessed.
-        assert_eq!(job.kind.expected(), "25–40 min");
+        // And it says how long to expect, **scaled by what was bought**. A five-experiment run
+        // finishing in thirteen minutes was labelled "25–40 min" because the estimate quoted the
+        // default budget at everyone, and an estimate wrong by three times is one nobody reads.
+        assert_eq!(job.kind.expected(Some(5)), "10–15 min");
+        assert_eq!(job.kind.expected(Some(15)), "20–35 min");
+        // The one real measurement lands inside the range it produces: the §247 probe ran 5
+        // experiments in 13 minutes of wall clock.
+        assert!((10..=15).contains(&13), "the measured run must fall inside the quoted range");
+        // Bigger budgets say bigger numbers, which is the whole point.
+        assert_eq!(job.kind.expected(Some(50)), "55–105 min");
+        // Unconfigured falls back to the default budget rather than to nothing.
+        assert_eq!(job.kind.expected(None), "20–35 min");
+        // The other two do not scale: they run for as long as they run.
+        assert_eq!(JobKind::Theorizer.expected(Some(5)), JobKind::Theorizer.expected(None));
+        assert_eq!(JobKind::Analysis.expected(Some(500)), "20–40 min");
+    }
+
+    /// The estimate is only useful if the budget actually reaches it.
+    ///
+    /// `n_experiments` was already declared read by the contract test and already decoded for the
+    /// approval modal — but `decode_jobs` dropped it, so every row in the panel quoted the default
+    /// no matter what was bought. A field read in one place and ignored in another is §259, and
+    /// this is the assertion that would have caught it.
+    #[test]
+    fn a_discovery_row_carries_the_budget_that_was_bought() {
+        let artifacts = serde_json::json!({
+            "discoveries": [
+                {"run_id": "run-a", "name": "soil carbon", "status": "running", "n_experiments": 5},
+                {"run_id": "run-b", "name": "no budget", "status": "running"},
+                {"run_id": "run-c", "name": "zero", "status": "running", "n_experiments": 0},
+            ],
+            "hypotheses": [{"task_id": "th-1", "question": "why?", "status": "running"}],
+        });
+        let jobs = decode_jobs(&artifacts);
+        let by_id = |id: &str| jobs.iter().find(|job| job.task_id == id).cloned().expect(id);
+
+        assert_eq!(by_id("run-a").size, Some(5));
+        assert_eq!(by_id("run-a").kind.expected(by_id("run-a").size), "10–15 min");
+        // Absent is `None`, not a guessed default sitting in the field where a real one would go.
+        assert_eq!(by_id("run-b").size, None);
+        // Zero is not a budget: it would render "5–5 min" for a run that cannot happen.
+        assert_eq!(by_id("run-c").size, None);
+        // And nothing else grew a size it has no meaning for.
+        assert_eq!(by_id("th-1").size, None);
     }
 
     /// §253: a conversation that begins with a file was named after the blockquote.
