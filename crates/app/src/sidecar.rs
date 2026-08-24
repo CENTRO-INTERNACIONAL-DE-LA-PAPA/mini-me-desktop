@@ -930,6 +930,194 @@ impl Sidecar {
         rx
     }
 
+    /// Ask GitHub whether a newer build has been published.
+    ///
+    /// **The second call in this app that does not go to the backend**, and it follows the same
+    /// stricter rules as the Crossref one above:
+    ///
+    /// * **Nothing goes out.** A `GET` with no query, no body and no identifier. The comparison
+    ///   happens here, against a number compiled into this binary.
+    /// * **No credentials, deliberately.** The repository is public and the endpoint answers an
+    ///   anonymous request. Sending a token would mean an update check that works for whoever
+    ///   built the app and silently fails for everyone else — and it would fail *as* "you are up
+    ///   to date", which is the worst shape a failure can take here.
+    /// * **A short timeout, and never fatal.** A researcher on a bad connection, or behind a proxy
+    ///   that blocks api.github.com, gets a sentence in the About page and an app that works.
+    ///
+    /// The body is read **before** the status is consulted, because GitHub writes the reason into
+    /// it — the mistake §261 records making three times in one day was reporting *that* something
+    /// failed instead of *what*.
+    pub fn check_for_update(&self) -> mpsc::UnboundedReceiver<crate::update::Standing> {
+        let (tx, rx) = mpsc::unbounded();
+        self.runtime.spawn(async move {
+            let client = match reqwest::Client::builder()
+                .user_agent(concat!(
+                    "mini-me-desktop/",
+                    env!("CARGO_PKG_VERSION"),
+                    " (update check)"
+                ))
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+            {
+                Ok(client) => client,
+                Err(error) => {
+                    let _ = tx.unbounded_send(crate::update::Standing::Unknown(error.to_string()));
+                    return;
+                }
+            };
+            let standing = match client
+                .get(crate::update::LATEST_URL)
+                .header("Accept", "application/vnd.github+json")
+                .send()
+                .await
+            {
+                Ok(response) => {
+                    let status = response.status();
+                    // Body first. `error_for_status()` here would throw away the sentence GitHub
+                    // wrote to be read (§261).
+                    match response.text().await {
+                        Ok(body) if status.is_success() => match crate::update::decode_release(&body) {
+                            Ok(release) => {
+                                crate::update::standing(crate::update::Version::running(), &release)
+                            }
+                            Err(reason) => crate::update::Standing::Unknown(reason),
+                        },
+                        Ok(body) => crate::update::Standing::Unknown(format!(
+                            "GitHub answered {status}: {}",
+                            crate::protocol::clip(body.trim(), 200)
+                        )),
+                        Err(error) => crate::update::Standing::Unknown(error.to_string()),
+                    }
+                }
+                Err(error) if error.is_timeout() => {
+                    crate::update::Standing::Unknown("GitHub did not answer in ten seconds".into())
+                }
+                Err(error) => crate::update::Standing::Unknown(error.to_string()),
+            };
+            let _ = tx.unbounded_send(standing);
+        });
+        rx
+    }
+
+    /// Take a published update: download it, check it against what was published, unpack it.
+    ///
+    /// **Stops short of installing.** What comes back is a staged folder beside the current one;
+    /// replacing the running app is a separate, deliberate step, because it ends this process.
+    ///
+    /// The staging folder is created before the first byte is requested. "This folder is not
+    /// writable" is a failure worth having in the first second rather than after a ten-megabyte
+    /// download, and an install under `Program Files` is exactly where it happens.
+    pub fn take_update(
+        &self,
+        release: crate::update::Release,
+        install: std::path::PathBuf,
+    ) -> mpsc::UnboundedReceiver<crate::update::Fetch> {
+        let (tx, rx) = mpsc::unbounded();
+        self.runtime.spawn(async move {
+            let staged = crate::update::staging(&install, &release.tag);
+            // A leftover from an abandoned attempt is not a reason to refuse; it is a reason to
+            // start clean, since a half-unpacked bundle would pass every check a whole one does.
+            let _ = std::fs::remove_dir_all(&staged);
+            if let Err(error) = std::fs::create_dir_all(&staged) {
+                let _ = tx.unbounded_send(crate::update::Fetch::Failed(format!(
+                    "could not make room beside the app at {}: {error}",
+                    staged.display()
+                )));
+                return;
+            }
+
+            let client = match reqwest::Client::builder()
+                .user_agent(concat!(
+                    "mini-me-desktop/",
+                    env!("CARGO_PKG_VERSION"),
+                    " (update download)"
+                ))
+                // No overall timeout: ten megabytes on a slow connection is legitimately slow, and
+                // the progress messages below are what tell a stalled download from a patient one.
+                .connect_timeout(std::time::Duration::from_secs(20))
+                .build()
+            {
+                Ok(client) => client,
+                Err(error) => {
+                    let _ = tx.unbounded_send(crate::update::Fetch::Failed(error.to_string()));
+                    return;
+                }
+            };
+
+            let response = match client.get(&release.asset).send().await {
+                Ok(response) => response,
+                Err(error) => {
+                    let _ = tx.unbounded_send(crate::update::Fetch::Failed(error.to_string()));
+                    return;
+                }
+            };
+            if !response.status().is_success() {
+                let status = response.status();
+                // The body carries the reason; reading it before reporting is the §261 rule.
+                let body = response.text().await.unwrap_or_default();
+                let _ = tx.unbounded_send(crate::update::Fetch::Failed(format!(
+                    "GitHub answered {status} for the download: {}",
+                    crate::protocol::clip(body.trim(), 200)
+                )));
+                return;
+            }
+
+            let mut bytes: Vec<u8> = Vec::with_capacity(release.size as usize);
+            // Pinned so it can be polled in place, and `StreamExt` imported here rather than at the
+            // top of the file: it is the only thing in this module that streams bytes.
+            use futures::StreamExt as _;
+            let mut stream = std::pin::pin!(response.bytes_stream());
+            let mut announced = 0u64;
+            while let Some(chunk) = stream.next().await {
+                match chunk {
+                    Ok(chunk) => {
+                        bytes.extend_from_slice(&chunk);
+                        // Every tenth of the file rather than every chunk: the point is a moving
+                        // number, and a message per 8KB is a message nobody reads and a redraw
+                        // per frame of a download.
+                        let step = (release.size / 10).max(1);
+                        if bytes.len() as u64 >= announced + step {
+                            announced = bytes.len() as u64;
+                            let _ = tx.unbounded_send(crate::update::Fetch::Progress(
+                                announced,
+                                release.size,
+                            ));
+                        }
+                    }
+                    Err(error) => {
+                        let _ = tx.unbounded_send(crate::update::Fetch::Failed(format!(
+                            "the download stopped after {} of {} bytes: {error}",
+                            bytes.len(),
+                            release.size
+                        )));
+                        return;
+                    }
+                }
+            }
+
+            let integrity = match crate::update::verify(&bytes, &release) {
+                Ok(integrity) => integrity,
+                Err(reason) => {
+                    // The staged folder goes too. Leaving a verified-bad download on disk is how
+                    // a later attempt finds it and trusts it.
+                    let _ = std::fs::remove_dir_all(&staged);
+                    let _ = tx.unbounded_send(crate::update::Fetch::Failed(reason));
+                    return;
+                }
+            };
+
+            let outcome = match crate::update::unpack(&bytes, &staged) {
+                Ok(root) => crate::update::Fetch::Ready(root, integrity),
+                Err(reason) => {
+                    let _ = std::fs::remove_dir_all(&staged);
+                    crate::update::Fetch::Failed(reason)
+                }
+            };
+            let _ = tx.unbounded_send(outcome);
+        });
+        rx
+    }
+
     /// Record a conversation's project on the thread itself.
     ///
     /// Fire-and-forget: the folder has already moved and the app already shows the new grouping,

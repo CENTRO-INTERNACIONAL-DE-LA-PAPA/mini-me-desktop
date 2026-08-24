@@ -1,0 +1,906 @@
+//! Is there a newer build than this one, and may *this* install take it?
+//!
+//! Asked for in these terms: *"we cannot ask users to download and install everytime. we need a
+//! flow of update."* — so the answer has to be a press inside the app, not a link to a web page,
+//! which is the same manual download with one fewer click.
+//!
+//! This module is the **decision** half: what is published, what is running, and whether the two
+//! differ in a direction worth acting on. Fetching the zip and swapping the folder come after, and
+//! deliberately not here — everything below is pure enough to test without a network or a Windows
+//! machine, which is the §267 lesson applied before rather than after.
+//!
+//! Two refusals are load-bearing:
+//!
+//! 1. **A source checkout is never updated.** The person most likely to press this button is the
+//!    one who built the app with `cargo build`, whose `target/release/` sits inside a git worktree
+//!    with real work in it. Unzipping a release over that would destroy it. `backend.rs` makes the
+//!    same argument about the backend checkout — *"a checkout somebody pointed us at may be their
+//!    working clone… ownership is what gates that, and it must never be assumed"* — and this is
+//!    that argument for the app's own folder.
+//! 2. **A build ahead of the release is left alone.** Otherwise a developer running 0.4.0 against a
+//!    published 0.3.0 would be offered a downgrade, which is exactly what publishing the stale
+//!    `v0.2.3` draft would have done to everyone (§267).
+
+use std::path::{Path, PathBuf};
+
+/// The public API, asked without credentials — deliberately.
+///
+/// The repository is public and a release asset answers an anonymous `GET`; sending a token would
+/// mean an update check that works for whoever built the app and fails for everyone else, and the
+/// failure would look like "no update available" rather than like a mistake.
+pub const LATEST_URL: &str =
+    "https://api.github.com/repos/CENTRO-INTERNACIONAL-DE-LA-PAPA/mini-me-desktop/releases/latest";
+
+/// What the Windows bundle is called, from `release.yml`'s `Compress-Archive` step.
+///
+/// Matched as a **suffix** rather than reconstructed from the tag: the two are written in different
+/// files, and a check that rebuilds the name would fail silently the day either changes. Asking
+/// "which asset ends in this?" fails loudly instead, with the names it did find.
+pub const ASSET_SUFFIX: &str = "-windows-x64.zip";
+
+/// The three files a packaged bundle carries beside the executable (`scripts/package.sh`).
+///
+/// All three, not any: `target/release/` could plausibly acquire one of these names, and the cost
+/// of a false positive here is a researcher's git worktree overwritten by a zip.
+const BUNDLE_MARKERS: [&str; 3] = ["overlay", "scripts", "vendor"];
+
+/// What the executable is called inside a downloaded bundle, per `scripts/package.sh`.
+///
+/// **Deliberately not `#[cfg]`-split, and that is the whole point.** The first version of this
+/// constant was `.exe` on Windows and bare elsewhere — the name depended on the platform doing the
+/// *inspecting*. But [`ASSET_SUFFIX`] means the thing inspected is always a Windows bundle, so the
+/// name inside is always Windows'. On Windows the two happened to agree, so the mistake would have
+/// shipped green; it was found by running the real published zip through `unpack` on Linux, where
+/// they disagree. Both names are accepted so a bundle `package.sh` built here can be inspected by
+/// the same code that inspects a downloaded one.
+///
+/// Needed by name only for a *download*. The installed side asks about `current_exe()`, whose name
+/// is whatever it is, so a researcher who renamed the executable is unaffected.
+const BUNDLED_EXECUTABLES: [&str; 2] = ["mini-me-desktop-app.exe", "mini-me-desktop-app"];
+
+/// A version, compared as three numbers rather than as text.
+///
+/// The field order is the comparison order, which is what `Ord` derives — and it has to be numeric:
+/// `"0.10.0" < "0.9.0"` is true as a string, so a text comparison would tell every install on 0.10
+/// that 0.9 was newer and offer it the downgrade forever.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Version {
+    pub major: u64,
+    pub minor: u64,
+    pub patch: u64,
+}
+
+impl Version {
+    /// `0.3.0` or `v0.3.0`; anything else is `None`.
+    ///
+    /// Trailing pre-release text (`0.3.0-rc1`) is refused rather than silently truncated to
+    /// `0.3.0`: two builds that are not the same build must not compare equal.
+    pub fn parse(text: &str) -> Option<Self> {
+        let text = text.trim();
+        let text = text.strip_prefix('v').unwrap_or(text);
+        let mut parts = text.split('.');
+        let mut next = || parts.next()?.parse::<u64>().ok();
+        let (major, minor, patch) = (next()?, next()?, next()?);
+        if parts.next().is_some() {
+            return None;
+        }
+        Some(Self {
+            major,
+            minor,
+            patch,
+        })
+    }
+
+    /// The version this executable was compiled as.
+    pub fn running() -> Option<Self> {
+        Self::parse(env!("CARGO_PKG_VERSION"))
+    }
+}
+
+impl std::fmt::Display for Version {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
+    }
+}
+
+/// A published build this app could move to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Release {
+    pub version: Version,
+    /// The tag as published, for the log line and for naming the download.
+    pub tag: String,
+    /// Where the zip is. Anonymous `GET`, no redirect handling needed beyond following one.
+    pub asset: String,
+    /// What the zip should weigh. A short read is the ordinary download failure, and it is the one
+    /// that would otherwise be unzipped over a working install.
+    pub size: u64,
+    /// The release notes, so "what changed" is answerable without opening a browser.
+    pub notes: String,
+    /// What GitHub says the asset hashes to, as lowercase hex without the `sha256:` prefix.
+    ///
+    /// `Option` because it is GitHub's field to publish, not ours, and an update must not become
+    /// impossible the day they stop sending it — see [`verify`] for what its absence costs.
+    pub digest: Option<String>,
+}
+
+/// Which checks a download actually passed, so the log can say rather than imply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Integrity {
+    /// Length and digest both matched what was published.
+    Digest,
+    /// Length matched; the release published no digest to compare against.
+    SizeOnly,
+}
+
+/// Where this install stands against the published build.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Standing {
+    /// Running exactly what is published.
+    Current,
+    /// Something newer exists.
+    Behind(Release),
+    /// Running something newer than what is published — a developer build. Never offered anything.
+    Ahead,
+    /// The question could not be answered, and this says why in words a person can act on.
+    Unknown(String),
+}
+
+/// What kind of install this is, and therefore whether it may be replaced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Layout {
+    /// An unzipped bundle. The path is the folder that would be replaced.
+    Packaged(PathBuf),
+    /// A `cargo build` inside a checkout. Never replaced — see the module note.
+    Source,
+}
+
+/// Read the answer to `GET /releases/latest`.
+///
+/// Errors are sentences rather than codes, because they are shown to a researcher and because a
+/// message that only says *that* something failed is the mistake this project made three times in
+/// one day (§261).
+pub fn decode_release(payload: &str) -> Result<Release, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(payload).map_err(|error| format!("unreadable answer: {error}"))?;
+
+    // `/releases/latest` excludes drafts and prereleases by construction, but this decoder is also
+    // pointed at `/releases` in tests and could be pointed there for a beta channel later. Checking
+    // is two lines; discovering it by shipping a draft to everyone is not.
+    if value.get("draft").and_then(serde_json::Value::as_bool) == Some(true) {
+        return Err("the latest release is still a draft".to_string());
+    }
+    if value.get("prerelease").and_then(serde_json::Value::as_bool) == Some(true) {
+        return Err("the latest release is a prerelease".to_string());
+    }
+
+    let tag = value
+        .get("tag_name")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "the answer carried no tag_name".to_string())?;
+    let version = Version::parse(tag)
+        .ok_or_else(|| format!("{tag} is not a version this app knows how to compare"))?;
+
+    let assets = value
+        .get("assets")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| format!("{tag} carried no assets"))?;
+    let mut names = Vec::new();
+    for asset in assets {
+        let Some(name) = asset.get("name").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if !name.ends_with(ASSET_SUFFIX) {
+            names.push(name.to_string());
+            continue;
+        }
+        let url = asset
+            .get("browser_download_url")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| format!("{name} carried no download url"))?;
+        let size = asset
+            .get("size")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| format!("{name} carried no size"))?;
+        return Ok(Release {
+            version,
+            tag: tag.to_string(),
+            asset: url.to_string(),
+            size,
+            notes: value
+                .get("body")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            // `sha256:aab3bc…`. Only that algorithm is understood, so anything else is dropped
+            // rather than stored under a name that would make `verify` compare the wrong thing.
+            digest: asset
+                .get("digest")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|digest| digest.strip_prefix("sha256:"))
+                .map(|hex| hex.trim().to_ascii_lowercase()),
+        });
+    }
+    // Names the thing it wanted *and* what was there, so a rename in `release.yml` is one line of
+    // log away from being understood rather than a silent "you are up to date".
+    Err(format!(
+        "{tag} has no {ASSET_SUFFIX} asset (it carries: {})",
+        if names.is_empty() {
+            "nothing".to_string()
+        } else {
+            names.join(", ")
+        }
+    ))
+}
+
+/// Compare what is running against what is published.
+pub fn standing(running: Option<Version>, latest: &Release) -> Standing {
+    let Some(running) = running else {
+        return Standing::Unknown(format!(
+            "this build reports its version as {}, which cannot be compared",
+            env!("CARGO_PKG_VERSION")
+        ));
+    };
+    match running.cmp(&latest.version) {
+        std::cmp::Ordering::Less => Standing::Behind(latest.clone()),
+        std::cmp::Ordering::Equal => Standing::Current,
+        std::cmp::Ordering::Greater => Standing::Ahead,
+    }
+}
+
+/// Whether the folder holding this executable is a bundle the updater may replace.
+pub fn layout(executable: &Path) -> Layout {
+    let Some(folder) = executable.parent() else {
+        return Layout::Source;
+    };
+    // The executable too, not only its folder's markers. A staged download of three empty
+    // directories would otherwise pass as a bundle, and the swap would leave a folder with no app
+    // in it — the one outcome worse than not updating.
+    if executable.is_file()
+        && BUNDLE_MARKERS
+            .iter()
+            .all(|marker| folder.join(marker).is_dir())
+    {
+        Layout::Packaged(folder.to_path_buf())
+    } else {
+        Layout::Source
+    }
+}
+
+/// How far taking an update has got.
+///
+/// A progress variant rather than a bare result because the download is ten megabytes: on a slow
+/// connection that is a minute in which a desktop app with no feedback looks like it has hung. The
+/// roadmap has carried *"a loading state worth looking at"* as an open item since §177.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Fetch {
+    /// Bytes so far, and the total that was published.
+    Progress(u64, u64),
+    /// Downloaded, verified and unpacked. The path is the staged bundle.
+    Ready(PathBuf, Integrity),
+    /// Gave up, with the reason in words.
+    Failed(String),
+}
+
+/// Where a download is staged: beside the install, not in the system temp folder.
+///
+/// Same volume as the folder it will replace, which is what lets the swap be a move rather than a
+/// copy — and on Windows a move within a volume is the closest thing to atomic available. It is
+/// also visible: a researcher who abandons an update can see the folder and delete it.
+///
+/// Creating it is the *first* thing done, before a byte is downloaded, because "this folder is not
+/// writable" is a failure worth having in the first second rather than the sixtieth.
+pub fn staging(install: &Path, tag: &str) -> PathBuf {
+    let name = format!(".mini-me-update-{}", tag.trim_start_matches('v'));
+    install
+        .parent()
+        .unwrap_or(install)
+        .join(name)
+}
+
+/// Is this download the thing that was published?
+///
+/// **This is a corruption check, and calling it anything stronger would be the §252 mistake
+/// again.** The integrity guarantee is HTTPS to github.com with a validated certificate; the
+/// digest is published by the same authority that publishes the zip, so an attacker able to alter
+/// one could alter the other. What it does catch is the ordinary failure: a truncated download, a
+/// proxy that returned an error page with a 200, a mixed-up asset. Those are worth catching,
+/// because the next step unzips this over a working install.
+///
+/// The length is checked first and separately, because it is the failure that actually happens and
+/// because "10485760 bytes, expected 10793025" is a sentence someone can act on where a hash
+/// mismatch is not.
+pub fn verify(bytes: &[u8], release: &Release) -> Result<Integrity, String> {
+    let got = bytes.len() as u64;
+    if got != release.size {
+        return Err(format!(
+            "the download is {got} bytes and {} was published as {} — a short read, most likely",
+            release.tag, release.size
+        ));
+    }
+    let Some(expected) = release.digest.as_deref() else {
+        return Ok(Integrity::SizeOnly);
+    };
+    use sha2::Digest as _;
+    let actual = format!("{:x}", sha2::Sha256::digest(bytes));
+    if actual == expected {
+        Ok(Integrity::Digest)
+    } else {
+        Err(format!(
+            "the download does not match the digest {} published: got {actual}, expected {expected}",
+            release.tag
+        ))
+    }
+}
+
+/// Unpack a verified bundle into `into`, and answer with the folder that holds the executable.
+///
+/// Two things are refused rather than trusted:
+///
+/// 1. **Any entry that would land outside `into`.** `zip`'s own `enclosed_name` returns `None` for
+///    a path containing `..` or a root, and the join is checked again afterwards. We produce this
+///    zip ourselves, so this is not a live threat — it is the guard that stays correct if that ever
+///    stops being true, and it costs four lines.
+/// 2. **A bundle that does not look like one.** What comes out is validated with [`layout`], the
+///    same function that decides whether the *installed* folder may be replaced. One definition of
+///    "a bundle", used at both ends, so the two cannot drift apart.
+pub fn unpack(zip_bytes: &[u8], into: &Path) -> Result<PathBuf, String> {
+    let reader = std::io::Cursor::new(zip_bytes);
+    let mut archive = zip::ZipArchive::new(reader)
+        .map_err(|error| format!("the download is not a readable zip: {error}"))?;
+
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|error| format!("could not read entry {index}: {error}"))?;
+        let Some(relative) = entry.enclosed_name() else {
+            return Err(format!(
+                "the download contains an unsafe path ({}) and was not unpacked",
+                entry.name()
+            ));
+        };
+        let target = into.join(&relative);
+        if !target.starts_with(into) {
+            return Err(format!(
+                "the download would write outside the staging folder ({})",
+                relative.display()
+            ));
+        }
+        if entry.is_dir() {
+            std::fs::create_dir_all(&target)
+                .map_err(|error| format!("could not make {}: {error}", target.display()))?;
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("could not make {}: {error}", parent.display()))?;
+        }
+        let mut file = std::fs::File::create(&target)
+            .map_err(|error| format!("could not write {}: {error}", target.display()))?;
+        std::io::copy(&mut entry, &mut file)
+            .map_err(|error| format!("could not write {}: {error}", target.display()))?;
+    }
+    bundle_root(into)
+}
+
+/// The folder inside `unpacked` that is a bundle, or a sentence saying why none of them is.
+///
+/// `package.sh` writes `dist/mini-me-desktop/` and `Compress-Archive` keeps that folder, so the
+/// bundle is one level down — but this looks at `unpacked` itself first, so a flattened zip would
+/// still work rather than fail on a layout detail.
+pub fn bundle_root(unpacked: &Path) -> Result<PathBuf, String> {
+    if let Some(folder) = bundle_at(unpacked) {
+        return Ok(folder);
+    }
+    let entries = std::fs::read_dir(unpacked)
+        .map_err(|error| format!("could not read {}: {error}", unpacked.display()))?;
+    let mut seen = Vec::new();
+    for entry in entries.flatten() {
+        let candidate = entry.path();
+        if !candidate.is_dir() {
+            continue;
+        }
+        if let Some(folder) = bundle_at(&candidate) {
+            return Ok(folder);
+        }
+        seen.push(entry.file_name().to_string_lossy().into_owned());
+    }
+    Err(format!(
+        "the download does not contain a bundle: no {} beside {} (it holds: {})",
+        BUNDLED_EXECUTABLES.join(" or "),
+        BUNDLE_MARKERS.join(", "),
+        if seen.is_empty() {
+            "nothing".to_string()
+        } else {
+            seen.join(", ")
+        }
+    ))
+}
+
+/// Is this folder itself a bundle, under either name the executable can carry?
+fn bundle_at(folder: &Path) -> Option<PathBuf> {
+    BUNDLED_EXECUTABLES
+        .iter()
+        .map(|name| folder.join(name))
+        .find_map(|app| match layout(&app) {
+            Layout::Packaged(root) => Some(root),
+            Layout::Source => None,
+        })
+}
+
+/// One line for the About page, whatever the answer.
+///
+/// Every branch says something, including the failures: a check that goes quiet when it cannot
+/// reach GitHub is indistinguishable from one that found nothing, and the researcher would read
+/// silence as "up to date".
+pub fn describe(standing: &Standing, layout: &Layout) -> String {
+    match (standing, layout) {
+        (Standing::Behind(release), Layout::Packaged(_)) => {
+            format!("{} is available — you have {}", release.tag, running_text())
+        }
+        (Standing::Behind(release), Layout::Source) => format!(
+            "{} is published, but this build came from source — update it with git",
+            release.tag
+        ),
+        (Standing::Current, _) => format!("{} — the newest published build", running_text()),
+        (Standing::Ahead, _) => format!("{} — newer than anything published", running_text()),
+        (Standing::Unknown(reason), _) => format!("could not check for updates: {reason}"),
+    }
+}
+
+fn running_text() -> String {
+    Version::running().map_or_else(
+        || env!("CARGO_PKG_VERSION").to_string(),
+        |version| version.to_string(),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The real answer from the real endpoint, saved 2026-08-21 the day `v0.3.0` was published.
+    const LATEST: &str = include_str!("../tests/fixtures/github-latest-release.json");
+
+    #[test]
+    fn a_version_is_three_numbers_with_or_without_a_v() {
+        assert_eq!(
+            Version::parse("0.3.0"),
+            Some(Version {
+                major: 0,
+                minor: 3,
+                patch: 0
+            })
+        );
+        assert_eq!(Version::parse("v0.3.0"), Version::parse("0.3.0"));
+        assert_eq!(Version::parse(" v1.20.300 "), Version::parse("1.20.300"));
+        // Not versions this app can compare, so it must say so rather than guess.
+        assert_eq!(Version::parse("0.3"), None);
+        assert_eq!(Version::parse("0.3.0.1"), None);
+        assert_eq!(Version::parse("0.3.0-rc1"), None);
+        assert_eq!(Version::parse("latest"), None);
+        assert_eq!(Version::parse(""), None);
+    }
+
+    /// The trap this type exists for.
+    ///
+    /// `"0.10.0" < "0.9.0"` is **true** as text. An updater comparing tags as strings would tell
+    /// every install on 0.10 that 0.9 was newer, offer the downgrade, and go on offering it after
+    /// it was taken — a loop from one missing `parse`.
+    #[test]
+    fn ten_is_newer_than_nine_which_text_comparison_gets_wrong() {
+        let ten = Version::parse("0.10.0").expect("a version");
+        let nine = Version::parse("0.9.0").expect("a version");
+        assert!(ten > nine, "0.10.0 must be newer than 0.9.0");
+        assert!("0.10.0" < "0.9.0", "…which comparing the text would get backwards");
+
+        assert!(Version::parse("1.0.0").unwrap() > Version::parse("0.99.99").unwrap());
+        assert!(Version::parse("0.3.1").unwrap() > Version::parse("0.3.0").unwrap());
+    }
+
+    #[test]
+    fn the_published_release_is_read_off_the_real_answer() {
+        let release = decode_release(LATEST).expect("the real payload decodes");
+        assert_eq!(release.tag, "v0.3.0");
+        assert_eq!(release.version, Version::parse("0.3.0").unwrap());
+        assert_eq!(release.size, 10_793_025);
+        assert!(
+            release.asset.ends_with("mini-me-desktop-v0.3.0-windows-x64.zip"),
+            "{}",
+            release.asset
+        );
+        assert!(release.asset.starts_with("https://"), "{}", release.asset);
+        // The notes are carried so "what changed" is answerable without a browser.
+        assert!(release.notes.contains("AutoDiscovery"), "the notes came through");
+    }
+
+    /// The size is what a truncated download is caught by, so it must be the asset's own number and
+    /// not something plausible-looking read off the wrong field.
+    #[test]
+    fn the_size_is_the_assets_own_and_matches_what_was_published() {
+        let release = decode_release(LATEST).expect("decodes");
+        let value: serde_json::Value = serde_json::from_str(LATEST).expect("json");
+        let published = value["assets"][0]["size"].as_u64().expect("a size");
+        assert_eq!(release.size, published);
+        assert!(release.size > 1_000_000, "a bundle is megabytes, not bytes");
+    }
+
+    #[test]
+    fn a_draft_or_a_prerelease_is_not_offered() {
+        let mut value: serde_json::Value = serde_json::from_str(LATEST).expect("json");
+        value["draft"] = serde_json::Value::Bool(true);
+        let error = decode_release(&value.to_string()).expect_err("a draft is not a release");
+        assert!(error.contains("draft"), "{error}");
+
+        let mut value: serde_json::Value = serde_json::from_str(LATEST).expect("json");
+        value["prerelease"] = serde_json::Value::Bool(true);
+        let error = decode_release(&value.to_string()).expect_err("a prerelease is not offered");
+        assert!(error.contains("prerelease"), "{error}");
+    }
+
+    /// A renamed asset must fail loudly. The alternative — treating "no zip I recognise" as "no
+    /// update" — is how a rename in `release.yml` would quietly strand every install.
+    #[test]
+    fn a_missing_asset_names_what_it_wanted_and_what_was_there() {
+        let mut value: serde_json::Value = serde_json::from_str(LATEST).expect("json");
+        value["assets"][0]["name"] = serde_json::Value::String("mini-me-linux.tar.gz".into());
+        let error = decode_release(&value.to_string()).expect_err("no windows asset");
+        assert!(error.contains(ASSET_SUFFIX), "it must say what it wanted: {error}");
+        assert!(
+            error.contains("mini-me-linux.tar.gz"),
+            "and what it found instead: {error}"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_answer_is_a_sentence_not_a_silence() {
+        let error = decode_release("not json at all").expect_err("unreadable");
+        assert!(error.contains("unreadable answer"), "{error}");
+        let error = decode_release("{}").expect_err("no tag");
+        assert!(error.contains("tag_name"), "{error}");
+    }
+
+    fn release_at(tag: &str) -> Release {
+        Release {
+            version: Version::parse(tag).expect("a version"),
+            tag: tag.to_string(),
+            asset: "https://example.invalid/x.zip".to_string(),
+            size: 1,
+            notes: String::new(),
+            digest: None,
+        }
+    }
+
+    #[test]
+    fn a_newer_release_is_offered_and_an_older_one_is_not() {
+        let running = Version::parse("0.3.0");
+        assert_eq!(
+            standing(running, &release_at("0.3.1")),
+            Standing::Behind(release_at("0.3.1"))
+        );
+        assert_eq!(standing(running, &release_at("0.3.0")), Standing::Current);
+        // The §267 failure, in the other direction: a developer on 0.4.0 must never be handed 0.3.0.
+        assert_eq!(standing(running, &release_at("0.3.0")), Standing::Current);
+        assert_eq!(standing(Version::parse("0.4.0"), &release_at("0.3.0")), Standing::Ahead);
+        assert_eq!(standing(Version::parse("0.10.0"), &release_at("0.9.9")), Standing::Ahead);
+    }
+
+    #[test]
+    fn a_build_that_cannot_name_its_version_is_never_updated() {
+        match standing(None, &release_at("9.9.9")) {
+            Standing::Unknown(reason) => assert!(!reason.is_empty(), "it must say why"),
+            other => panic!("an uncomparable build must not be offered anything: {other:?}"),
+        }
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!(
+            "mini-me-update-{name}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).expect("scratch");
+        base
+    }
+
+    /// The refusal that protects a developer's checkout.
+    ///
+    /// `cargo build` leaves the executable in `target/release/` with none of a bundle's folders
+    /// beside it. Unzipping a release over that directory would replace a git worktree with a
+    /// release build — the app's own version of the mistake `resolve_project_dir` refuses to make
+    /// with the backend checkout.
+    #[test]
+    fn a_source_build_is_not_a_bundle_and_is_never_replaced() {
+        let base = scratch("source");
+        let target = base.join("target/release");
+        std::fs::create_dir_all(&target).expect("target");
+        std::fs::write(target.join("mini-me-desktop-app"), b"a build").expect("exe");
+        assert_eq!(layout(&target.join("mini-me-desktop-app")), Layout::Source);
+
+        // Two of the three markers is still not a bundle: all three, or none of it.
+        for marker in ["overlay", "scripts"] {
+            std::fs::create_dir_all(target.join(marker)).expect("marker");
+        }
+        assert_eq!(
+            layout(&target.join("mini-me-desktop-app")),
+            Layout::Source,
+            "a partial match must not be taken for a bundle"
+        );
+
+        std::fs::create_dir_all(target.join("vendor")).expect("marker");
+        assert_eq!(
+            layout(&target.join("mini-me-desktop-app")),
+            Layout::Packaged(target.clone()),
+            "all three markers is what an unzipped bundle looks like"
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// The layout `scripts/package.sh` actually writes, read off the script rather than remembered.
+    #[test]
+    fn the_markers_are_the_folders_the_packager_puts_there() {
+        let packager = include_str!("../../../scripts/package.sh");
+        for marker in BUNDLE_MARKERS {
+            assert!(
+                packager.contains(marker),
+                "{marker} is not something package.sh puts in the bundle"
+            );
+        }
+        assert!(
+            packager.contains("for dir in overlay scripts"),
+            "package.sh no longer copies overlay/ and scripts/ the way this check assumes"
+        );
+        assert!(
+            packager.contains("$OUT/vendor"),
+            "package.sh no longer writes vendor/ into the bundle"
+        );
+        // The name the executable carries inside a bundle, which is the thing a `#[cfg]` split got
+        // wrong: it made the name depend on the platform *inspecting* the zip rather than on the
+        // zip. The real published bundle disagreed with every synthetic one here, and only running
+        // it through `unpack` showed that.
+        for name in BUNDLED_EXECUTABLES {
+            assert!(
+                packager.contains(name),
+                "package.sh does not put {name} in the bundle, so unpack is looking for the \
+                 wrong file"
+            );
+        }
+    }
+
+    /// The asset name is written in `release.yml` and matched here; the two must not drift.
+    #[test]
+    fn the_asset_suffix_is_the_one_the_workflow_builds() {
+        let workflow = include_str!("../../../.github/workflows/release.yml");
+        assert!(
+            workflow.contains(&format!("mini-me-desktop-$tag{ASSET_SUFFIX}")),
+            "release.yml no longer names the bundle mini-me-desktop-<tag>{ASSET_SUFFIX}"
+        );
+    }
+
+    /// Every branch says something. A check that goes quiet on failure reads as "up to date".
+    #[test]
+    fn every_answer_has_a_sentence_including_the_failures() {
+        let packaged = Layout::Packaged(PathBuf::from("/x"));
+        let behind = describe(&Standing::Behind(release_at("9.9.9")), &packaged);
+        assert!(behind.contains("9.9.9") && behind.contains("available"), "{behind}");
+
+        // A source build is told the truth: there is a newer one, and this is not the way to it.
+        let source = describe(&Standing::Behind(release_at("9.9.9")), &Layout::Source);
+        assert!(source.contains("git"), "{source}");
+
+        assert!(describe(&Standing::Current, &packaged).contains("newest"));
+        assert!(describe(&Standing::Ahead, &packaged).contains("newer than anything"));
+
+        let unknown = describe(&Standing::Unknown("no network".into()), &packaged);
+        assert!(unknown.contains("no network"), "the reason must survive: {unknown}");
+        assert!(unknown.contains("could not check"), "{unknown}");
+    }
+
+    /// The digest comes off the real payload, and it is the one `v0.3.0` really hashes to.
+    ///
+    /// Checked by hand against the published zip on the day it was cut:
+    ///
+    /// ```text
+    /// published: aab3bc3838f71b5c2871b4a10a5b394f56461ed898f9c7d5a779980b71447ffb
+    /// actual   : aab3bc3838f71b5c2871b4a10a5b394f56461ed898f9c7d5a779980b71447ffb
+    /// ```
+    #[test]
+    fn the_digest_is_read_off_the_asset_without_its_prefix() {
+        let release = decode_release(LATEST).expect("decodes");
+        assert_eq!(
+            release.digest.as_deref(),
+            Some("aab3bc3838f71b5c2871b4a10a5b394f56461ed898f9c7d5a779980b71447ffb")
+        );
+    }
+
+    /// An algorithm this code cannot compute must not be stored as though it could.
+    #[test]
+    fn a_digest_in_another_algorithm_is_dropped_rather_than_kept() {
+        let mut value: serde_json::Value = serde_json::from_str(LATEST).expect("json");
+        value["assets"][0]["digest"] = serde_json::Value::String("sha512:00ff".into());
+        let release = decode_release(&value.to_string()).expect("decodes");
+        assert_eq!(
+            release.digest, None,
+            "keeping a sha512 as if it were a sha256 would make verify() compare the wrong thing"
+        );
+    }
+
+    fn release_for(bytes: &[u8], digest: Option<&str>) -> Release {
+        Release {
+            version: Version::parse("9.9.9").expect("a version"),
+            tag: "v9.9.9".to_string(),
+            asset: "https://example.invalid/x.zip".to_string(),
+            size: bytes.len() as u64,
+            notes: String::new(),
+            digest: digest.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_download_of_the_right_length_and_digest_passes() {
+        let bytes = b"a bundle, notionally".to_vec();
+        use sha2::Digest as _;
+        let hex = format!("{:x}", sha2::Sha256::digest(&bytes));
+        assert_eq!(
+            verify(&bytes, &release_for(&bytes, Some(&hex))),
+            Ok(Integrity::Digest)
+        );
+        // Without a published digest the length is all there is, and the answer says so rather
+        // than implying more was checked than was.
+        assert_eq!(
+            verify(&bytes, &release_for(&bytes, None)),
+            Ok(Integrity::SizeOnly)
+        );
+    }
+
+    /// The failure that actually happens, and the message a person can act on.
+    #[test]
+    fn a_short_read_is_refused_and_both_numbers_are_named() {
+        let published = release_for(b"the whole bundle", None);
+        let error = verify(b"the whole", &published).expect_err("a short read");
+        assert!(error.contains("9 bytes"), "the length it got: {error}");
+        assert!(error.contains("16"), "and the length published: {error}");
+    }
+
+    #[test]
+    fn a_digest_that_does_not_match_is_refused() {
+        let bytes = b"a bundle".to_vec();
+        let wrong = "0".repeat(64);
+        let error = verify(&bytes, &release_for(&bytes, Some(&wrong))).expect_err("mismatch");
+        assert!(error.contains(&wrong), "it must name what was expected: {error}");
+        assert!(error.contains("does not match"), "{error}");
+    }
+
+    /// Build the bundle `package.sh` produces, as a zip, in memory.
+    /// Built with the **Windows** executable name, because `-windows-x64.zip` is the only asset
+    /// the updater fetches. A synthetic bundle carrying this machine's name instead is what let
+    /// `unpack` pass every test here and fail on the real zip.
+    fn bundle_zip(root: &str, with_executable: bool) -> Vec<u8> {
+        let mut buffer = std::io::Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut buffer);
+            let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            for marker in BUNDLE_MARKERS {
+                writer
+                    .start_file(format!("{root}/{marker}/keep.txt"), options)
+                    .expect("entry");
+                std::io::Write::write_all(&mut writer, b"x").expect("write");
+            }
+            if with_executable {
+                writer
+                    .start_file(format!("{root}/mini-me-desktop-app.exe"), options)
+                    .expect("entry");
+                std::io::Write::write_all(&mut writer, b"an app").expect("write");
+            }
+            writer.finish().expect("finish");
+        }
+        buffer.into_inner()
+    }
+
+    #[test]
+    fn a_bundle_unpacks_and_its_root_is_found_one_level_down() {
+        let base = scratch("unpack");
+        let zip_bytes = bundle_zip("mini-me-desktop", true);
+        let root = unpack(&zip_bytes, &base).expect("unpacks");
+        assert_eq!(root, base.join("mini-me-desktop"));
+        assert!(root.join("mini-me-desktop-app.exe").is_file(), "the app came out");
+        for marker in BUNDLE_MARKERS {
+            assert!(root.join(marker).is_dir(), "{marker} came out");
+        }
+        // And the same function that guards the *installed* folder agrees this is a bundle.
+        assert_eq!(
+            layout(&root.join("mini-me-desktop-app.exe")),
+            Layout::Packaged(root.clone())
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Three folders and no app is not something to swap in — it is the one outcome worse than
+    /// not updating, because it leaves a folder with nothing to launch.
+    #[test]
+    fn a_download_with_no_executable_is_not_a_bundle() {
+        let base = scratch("no-exe");
+        let zip_bytes = bundle_zip("mini-me-desktop", false);
+        let error = unpack(&zip_bytes, &base).expect_err("not a bundle");
+        assert!(
+            error.contains("mini-me-desktop-app.exe"),
+            "it must say what was missing: {error}"
+        );
+        assert!(error.contains("mini-me-desktop"), "and what it looked in: {error}");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn something_that_is_not_a_zip_is_refused_as_one() {
+        let base = scratch("not-zip");
+        let error = unpack(b"<html>404 not found</html>", &base).expect_err("not a zip");
+        assert!(error.contains("not a readable zip"), "{error}");
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Nothing may land outside the staging folder.
+    ///
+    /// We produce this zip ourselves, so this is not a live threat — it is the guard that stays
+    /// correct if that stops being true. The entry is written with the traversal in its name, which
+    /// is why the archive is built by hand here rather than with `start_file`.
+    #[test]
+    fn an_entry_that_climbs_out_of_the_staging_folder_is_refused() {
+        let base = scratch("traversal");
+        let mut buffer = std::io::Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut buffer);
+            let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+            writer
+                .add_directory("../escaped", options)
+                .or_else(|_| writer.start_file("../escaped.txt", options))
+                .expect("an entry naming a parent");
+            let _ = std::io::Write::write_all(&mut writer, b"escaped");
+            writer.finish().expect("finish");
+        }
+        let zip_bytes = buffer.into_inner();
+        match unpack(&zip_bytes, &base) {
+            Err(error) => assert!(
+                error.contains("unsafe path")
+                    || error.contains("outside the staging folder")
+                    || error.contains("does not contain a bundle"),
+                "a traversal must be refused, not written: {error}"
+            ),
+            Ok(root) => panic!("a traversal unpacked to {}", root.display()),
+        }
+        // Whatever happened, nothing was written beside the staging folder.
+        assert!(
+            !base.parent().expect("a parent").join("escaped.txt").exists(),
+            "an entry escaped the staging folder"
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Beside the install, never inside it.
+    ///
+    /// Inside would mean the folder being replaced contains the replacement, so the swap would
+    /// have to delete its own source. Same parent also means the same volume, which is what makes
+    /// the final move a move.
+    #[test]
+    fn a_download_is_staged_beside_the_install_not_within_it() {
+        let install = PathBuf::from("/opt/apps/mini-me-desktop");
+        let staged = staging(&install, "v0.4.0");
+        assert_eq!(staged.parent(), install.parent(), "the same volume, and the same parent");
+        assert!(!staged.starts_with(&install), "{}", staged.display());
+        assert!(
+            staged.file_name().expect("a name").to_string_lossy().contains("0.4.0"),
+            "the tag belongs in the name so two attempts cannot collide: {}",
+            staged.display()
+        );
+        // The `v` is dropped so the folder does not read as a git tag sitting in someone's
+        // Documents; and a bare version is accepted too, since the tag is GitHub's to spell.
+        assert_eq!(staging(&install, "0.4.0"), staged);
+    }
+
+    /// The endpoint is this repository's, and it is asked without credentials.
+    #[test]
+    fn the_url_points_at_this_repository_and_asks_for_the_latest() {
+        assert!(LATEST_URL.starts_with("https://api.github.com/repos/"));
+        assert!(LATEST_URL.contains("CENTRO-INTERNACIONAL-DE-LA-PAPA/mini-me-desktop"));
+        assert!(LATEST_URL.ends_with("/releases/latest"));
+    }
+}
