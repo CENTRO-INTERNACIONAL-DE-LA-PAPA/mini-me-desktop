@@ -3176,6 +3176,12 @@ struct Workbench {
     /// Separate from `update` because they answer different questions — "is there a newer build"
     /// survives a failed download, and a failed download must not erase the fact that one exists.
     taking: Option<update::Fetch>,
+    /// The researcher sent the update chip away for this session.
+    ///
+    /// Not persisted, and deliberately: an update dismissed forever is an install that never
+    /// updates, which is the thing this whole flow exists to prevent. It comes back next launch,
+    /// which is also when there is something new to say.
+    update_dismissed: bool,
     /// Whether this install is an unzipped bundle or a `cargo build` inside a checkout.
     ///
     /// Read once at startup rather than per render, and kept beside the standing because the two
@@ -3576,6 +3582,7 @@ impl Workbench {
         let mut workbench = Self {
             update: None,
             taking: None,
+            update_dismissed: false,
             install,
             project: None,
             buckets: Vec::new(),
@@ -5738,6 +5745,8 @@ impl Workbench {
                         published = %release.tag,
                         "a newer build is published"
                     ),
+                    // Nothing else to do here; the fetch is started below, once the standing is
+                    // recorded, because `take_update` reads it off `self`.
                     // Logged at `warn` rather than swallowed: a check that has been silently
                     // failing for a month looks exactly like an app that is up to date.
                     update::Standing::Unknown(reason) => {
@@ -5745,7 +5754,18 @@ impl Workbench {
                     }
                     other => tracing::info!(standing = ?other, "checked for a newer build"),
                 }
+                // Read off the *answer*, not off the field: taking it from `workbench.update`
+                // reads the previous value, which is `None` on the only check that ever runs — so
+                // the download would never start and nothing would say why.
+                let behind = matches!(standing, update::Standing::Behind(_));
                 workbench.update = Some(standing);
+                // **Downloaded without being asked**, which is what "Restart to Update" requires:
+                // a button offering a restart has to have something staged to restart into. Ten
+                // megabytes, once per published release, on a machine that just fetched a graph.
+                // Nothing is *installed* without a press — that is the part that matters.
+                if behind && matches!(workbench.install, update::Layout::Packaged(_)) {
+                    workbench.take_update(cx);
+                }
                 cx.notify();
             });
         })
@@ -5787,10 +5807,13 @@ impl Workbench {
                     // §252 mistake, and this is the line where it would be made.
                     update::Integrity::SizeOnly => "checked by length only — no digest was published",
                 };
+                // No button here. **Restart to Update lives in the status bar**, and two places to
+                // take one update is two places for it to be half-taken. This is the detail view:
+                // where it came from, what was verified, where it is sitting.
                 return Some(
                     ui::Label::new(format!(
-                        "{} is downloaded and {checked}. It is unpacked at {} — installing it from \
-                         here is not built yet, so copy it over this folder while the app is closed.",
+                        "{} is downloaded and {checked}. Press Restart to Update in the status \
+                         bar. It is waiting at {}.",
                         offer.tag,
                         root.display()
                     ))
@@ -5802,10 +5825,9 @@ impl Workbench {
             Some(update::Fetch::Failed(reason)) => Some(reason.clone()),
             None => None,
         };
-        let label = match &line {
-            Some(_) => format!("Try {} again", offer.tag),
-            None => format!("Download {}", offer.tag),
-        };
+        // Only ever a retry now: the download starts on its own when the check finds something, so
+        // reaching this with nothing in flight means it failed or was interrupted.
+        let label = format!("Try {} again", offer.tag);
         let mut column = div().flex().flex_col().w_full().min_w_0().gap_1();
         if let Some(reason) = line {
             column = column.child(
@@ -5821,6 +5843,97 @@ impl Workbench {
                         .size(ui::Size::Compact)
                         .on_click(cx.listener(|workbench, _event, _window, cx| {
                             workbench.take_update(cx);
+                        })),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Restart into the update that is already downloaded.
+    ///
+    /// The last thing this process does. A helper is spawned that waits for this window to close,
+    /// moves the folders and starts the new build — see `update::swap_script` for why the order is
+    /// what it is. **If the helper cannot even start, the app stays open and says so**, because
+    /// quitting after a failed spawn would look exactly like a successful update that lost the app.
+    fn restart_to_update(&mut self, cx: &mut Context<Self>) {
+        let (Some(update::Fetch::Ready(staged, _)), update::Layout::Packaged(install)) =
+            (self.taking.clone(), self.install.clone())
+        else {
+            return;
+        };
+        let tag = match &self.update {
+            Some(update::Standing::Behind(release)) => release.tag.clone(),
+            _ => return,
+        };
+        let plan = update::Swap::plan(std::process::id(), &install, &staged, &tag);
+        tracing::info!(
+            pid = plan.pid,
+            install = %plan.install.display(),
+            staged = %plan.staged.display(),
+            log = %plan.log.display(),
+            "restarting into a new build"
+        );
+        match update::begin_swap(&plan) {
+            Ok(()) => {
+                // The helper is waiting on this pid, so the last useful act is to stop existing.
+                self.status = "restarting into the new build…".into();
+                cx.notify();
+                cx.quit();
+            }
+            Err(reason) => {
+                tracing::warn!(%reason, "could not start the updater");
+                self.taking = Some(update::Fetch::Failed(reason.clone()));
+                self.error = Some(format!("could not restart to update: {reason}"));
+                cx.notify();
+            }
+        }
+    }
+
+    /// The chip in the status bar, once an update is downloaded and waiting.
+    ///
+    /// **Not in About.** Asked for in these terms: *"It doesnt make any sense a user need to enter
+    /// to about section to update th eprogram. A button must appear like in zed so with a click we
+    /// restart and update."* — and that is right. An update behind a page nobody opens is an
+    /// update nobody takes.
+    ///
+    /// The status bar rather than a titlebar because this app uses the OS titlebar; the status bar
+    /// is its full-width, always-in-the-same-place strip, which §53 chose for Zed's own reason. It
+    /// also means the chip costs no layout when it appears — a banner that pushes the transcript
+    /// down would move the thing the researcher is reading.
+    fn restart_chip(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        if self.update_dismissed {
+            return None;
+        }
+        // Only when there is something staged to restart *into*. "Restart to Update" with nothing
+        // downloaded would be a button that lies.
+        if !matches!(self.taking, Some(update::Fetch::Ready(..))) {
+            return None;
+        }
+        let update::Layout::Packaged(_) = self.install else {
+            return None;
+        };
+        Some(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .child(
+                    ui::Button::new("restart-to-update", "Restart to Update")
+                        .tone(ui::Tone::Accent)
+                        .size(ui::Size::Chip)
+                        .on_click(cx.listener(|workbench, _event, _window, cx| {
+                            workbench.restart_to_update(cx);
+                        })),
+                )
+                // Sent away for this session only. The staged folder stays, so dismissing costs
+                // nothing but the reminder, and next launch offers it again.
+                .child(
+                    ui::Button::new("dismiss-update", "×")
+                        .size(ui::Size::Chip)
+                        .on_click(cx.listener(|workbench, _event, _window, cx| {
+                            workbench.update_dismissed = true;
+                            cx.notify();
                         })),
                 )
                 .into_any_element(),
@@ -12483,6 +12596,21 @@ impl Workbench {
                 .text_xs()
                 .child(format!("App log: {}", app_log_path().display())),
         )
+        // A third, and the one hardest to guess at: the update helper runs *after* this app has
+        // exited, so when a swap goes wrong there is nothing else left to have written anything
+        // down. Listing it here is the difference between a diagnosable failure and a researcher
+        // whose app did not come back.
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .text_color(rgb(theme::text_muted()))
+                .text_xs()
+                .child(format!(
+                    "Update log: {}",
+                    std::env::temp_dir().join("mini-me-desktop-update.log").display()
+                )),
+        )
     }
 
     fn run_command(&mut self, command: Command, cx: &mut Context<Self>) {
@@ -13012,6 +13140,7 @@ impl Workbench {
                         })),
                 )
             })
+            .children(self.restart_chip(cx))
             // Panel toggles. Both always present, so a closed panel is never a one-way
             // door — the commonest way a collapsible panel becomes a bug report.
             .child(
