@@ -573,15 +573,22 @@ pub fn begin_swap(plan: &Swap) -> Result<(), String> {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        // CREATE_NO_WINDOW so no console flashes up; DETACHED_PROCESS so the helper is not killed
-        // with the app it is waiting for — which would leave the install exactly half-moved.
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        // **One flag, not two.** Windows documents `CREATE_NEW_CONSOLE`, `CREATE_NO_WINDOW` and
+        // `DETACHED_PROCESS` as mutually exclusive: passing more than one makes `CreateProcess`
+        // fail with `ERROR_INVALID_PARAMETER`. The first version passed `CREATE_NO_WINDOW |
+        // DETACHED_PROCESS`, copied from `notify.rs` where the first is correct *alone*, and every
+        // press failed at the spawn — no console, no helper, and no log to say so, because the
+        // helper is what writes the log.
+        //
+        // `DETACHED_PROCESS` is the one that matters here: the helper must not die with the app it
+        // is waiting for, or the install would be left exactly half-moved. It also gives no
+        // console, so nothing flashes up either.
         const DETACHED_PROCESS: u32 = 0x0000_0008;
         std::process::Command::new(&argv[0])
             .args(&argv[1..])
             // Outside the folder being replaced — see `Swap::working`.
             .current_dir(&plan.working)
-            .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
+            .creation_flags(DETACHED_PROCESS)
             .spawn()
             .map(|_| ())
             .map_err(|error| format!("could not start the updater: {error}"))
@@ -1093,6 +1100,41 @@ mod tests {
         assert!(plan.staged.starts_with(&plan.staging));
         assert_eq!(plan.launch, plan.install.join("mini-me-desktop-app.exe"));
         assert!(plan.launch.starts_with(&plan.install), "it launches the new build, not the old");
+    }
+
+    /// One console flag, never two.
+    ///
+    /// Windows treats `CREATE_NEW_CONSOLE`, `CREATE_NO_WINDOW` and `DETACHED_PROCESS` as **mutually
+    /// exclusive**: passing more than one makes `CreateProcess` fail with `ERROR_INVALID_PARAMETER`.
+    /// The first version OR'd two together — `CREATE_NO_WINDOW` copied from `notify.rs`, where it is
+    /// correct on its own — and every press failed at the spawn. There was no log to diagnose it
+    /// from, because writing the log is the helper's job and the helper never started.
+    ///
+    /// The spawn is `#[cfg(windows)]` and unreachable from here, so this reads the flags off the
+    /// source. A narrow assertion on the one expression that matters, not a search of the file.
+    #[test]
+    fn the_helper_is_spawned_with_one_console_flag() {
+        let call = include_str!("update.rs")
+            .split("creation_flags(")
+            .nth(1)
+            .expect("the helper is spawned with creation flags")
+            .split(')')
+            .next()
+            .expect("a flag expression");
+        // **No `|` at all**, which is the invariant however a flag is spelled. Checking for the
+        // three names alone was not enough: putting the bug back as `0x0800_0000 |
+        // DETACHED_PROCESS` left this test green, and a guard that passes when the defect is
+        // restored is not a guard.
+        assert!(
+            !call.contains('|'),
+            "these flags are mutually exclusive on Windows, so ORing any two makes CreateProcess \
+             fail with ERROR_INVALID_PARAMETER: got `{call}`"
+        );
+        assert_eq!(
+            call.trim(),
+            "DETACHED_PROCESS",
+            "the helper must outlive the app it is waiting for, and must be the only flag"
+        );
     }
 
     /// The helper must not be standing in the folder it is about to move.
