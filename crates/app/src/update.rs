@@ -640,24 +640,30 @@ pub fn begin_swap(plan: &Swap) -> Result<(), String> {
         let errors = record
             .try_clone()
             .map_err(|error| format!("could not share the update log: {error}"))?;
-        // **One flag, not two.** Windows documents `CREATE_NEW_CONSOLE`, `CREATE_NO_WINDOW` and
-        // `DETACHED_PROCESS` as mutually exclusive: passing more than one makes `CreateProcess`
-        // fail with `ERROR_INVALID_PARAMETER`. The first version passed `CREATE_NO_WINDOW |
-        // DETACHED_PROCESS`, copied from `notify.rs` where the first is correct *alone*, and every
-        // press failed at the spawn — no console, no helper, and no log to say so, because the
-        // helper is what writes the log.
+        // **`CREATE_NO_WINDOW`, and not `DETACHED_PROCESS`.** These two and `CREATE_NEW_CONSOLE`
+        // are mutually exclusive — passing more than one makes `CreateProcess` fail with
+        // `ERROR_INVALID_PARAMETER` — so exactly one has to be chosen, and the first two choices
+        // were both wrong:
         //
-        // `DETACHED_PROCESS` is the one that matters here: the helper must not die with the app it
-        // is waiting for, or the install would be left exactly half-moved. It also gives no
-        // console, so nothing flashes up either.
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        // 1. `CREATE_NO_WINDOW | DETACHED_PROCESS` failed at the spawn, rejected outright (§270).
+        // 2. `DETACHED_PROCESS` alone spawned successfully and PowerShell died before its first
+        //    statement, leaving a log this process had created and the child never wrote to. It
+        //    gives the child **no console at all**, and `powershell.exe` is a console application:
+        //    with stderr redirected it emits CLIXML progress records before running anything, and
+        //    not one of those arrived either (§273).
+        //
+        // `CREATE_NO_WINDOW` gives the child its own console and hides it, which is what
+        // `notify.rs` has used to run PowerShell successfully in this app since §265 — the working
+        // example that was sitting here the whole time. Nothing kills a child when its parent
+        // exits on Windows, so the helper still outlives the app without being detached.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         std::process::Command::new(&argv[0])
             .args(&argv[1..])
             // Outside the folder being replaced — see `Swap::working`.
             .current_dir(&plan.working)
             .stdout(record)
             .stderr(errors)
-            .creation_flags(DETACHED_PROCESS)
+            .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .map(|_| ())
             .map_err(|error| format!("could not start the updater: {error}"))
@@ -1227,8 +1233,9 @@ mod tests {
         );
         assert_eq!(
             call.trim(),
-            "DETACHED_PROCESS",
-            "the helper must outlive the app it is waiting for, and must be the only flag"
+            "CREATE_NO_WINDOW",
+            "the flag `notify.rs` uses to run PowerShell in this app, and the only one proven to \
+             let it start; DETACHED_PROCESS gives the child no console and it died silently (§273)"
         );
     }
 
@@ -1394,6 +1401,36 @@ mod tests {
                 "{placeholder} is never substituted"
             );
         }
+    }
+
+    /// The helper is spawned the way PowerShell is already spawned successfully in this app.
+    ///
+    /// `notify.rs` has run PowerShell with `CREATE_NO_WINDOW` since §265. The updater reached for
+    /// `DETACHED_PROCESS` instead, on the reasoning that the helper must outlive the app — which is
+    /// true, and which nothing on Windows threatens: a child is not killed when its parent exits.
+    /// What `DETACHED_PROCESS` actually did was leave a console application with no console, and it
+    /// died before writing a byte.
+    ///
+    /// Two spawns of the same program in one binary should not disagree about how to start it.
+    #[test]
+    fn the_updater_and_the_notifier_start_powershell_the_same_way() {
+        let flags_in = |source: &str| -> String {
+            source
+                .split("creation_flags(")
+                .nth(1)
+                .expect("a spawn")
+                .split(')')
+                .next()
+                .expect("a flag expression")
+                .trim()
+                .to_string()
+        };
+        assert_eq!(
+            flags_in(include_str!("update.rs")),
+            flags_in(include_str!("notify.rs")),
+            "the updater spawns PowerShell differently from the notifier, and only one of the two \
+             has ever been seen to work"
+        );
     }
 
     /// An empty log must not be ambiguous.
