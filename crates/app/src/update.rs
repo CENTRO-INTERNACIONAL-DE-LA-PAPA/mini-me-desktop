@@ -645,7 +645,7 @@ pub fn begin_swap(plan: &Swap) -> Result<(), String> {
         // `ERROR_INVALID_PARAMETER` — so exactly one has to be chosen, and the first two choices
         // were both wrong:
         //
-        // 1. `CREATE_NO_WINDOW | DETACHED_PROCESS` failed at the spawn, rejected outright (§270).
+        // 1. `CREATE_NO_WINDOW | DETACHED_PROCESS` failed at the spawn, rejected outright (§269).
         // 2. `DETACHED_PROCESS` alone spawned successfully and PowerShell died before its first
         //    statement, leaving a log this process had created and the child never wrote to. It
         //    gives the child **no console at all**, and `powershell.exe` is a console application:
