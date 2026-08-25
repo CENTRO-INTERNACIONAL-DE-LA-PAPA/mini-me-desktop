@@ -11,7 +11,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
+
+import pytest
 
 from minime_local import ledger
 
@@ -170,3 +173,68 @@ def test_a_command_that_stays_inside_reports_nothing_outside(tmp_path, monkeypat
     written = [json.loads(line) for line in record.read_text().splitlines()]
     assert written[0]["outside"] == []
     assert (tmp_path / "thread-y" / "inside.csv").is_file(), "it ran in the conversation folder"
+
+
+#: The record as the app must read it. Same discipline as `test_artifact_contract.py`: the producer
+#: writes the fixture from its own code, so a field added here fails a test until the client's
+#: authors have decided about it, rather than arriving unread for as long as the feature exists.
+FIXTURE = (
+    Path(__file__).resolve().parent.parent.parent
+    / "crates" / "app" / "tests" / "fixtures" / "command-record.jsonl"
+)
+
+
+def _sample() -> list[dict]:
+    """Three entries covering every shape the app has to render.
+
+    Real-ish rather than minimal: a command that stayed inside, §160's command that did not, and
+    one that failed — because "exit is null or a number" and "outside is empty or not" are the two
+    branches the client gets wrong if it never sees them.
+    """
+    work = "/mnt/c/Users/piero/Documents/Mini-Me/019ff651-0cd7-71c1"
+    return [
+        ledger.entry(
+            "python3 -c \"import pandas as pd; pd.read_csv('data.csv').describe().to_csv('summary.csv')\"",
+            exit_code=0,
+            seconds=1.4,
+            work_dir=work,
+            at="2026-08-25T09:14:03Z",
+        ),
+        ledger.entry(
+            "python3 -c \"import matplotlib.pyplot as plt; plt.savefig('/tmp/hist.png')\"",
+            exit_code=0,
+            seconds=2.1,
+            work_dir=work,
+            at="2026-08-25T09:14:07Z",
+        ),
+        ledger.entry(
+            "Rscript missing.R",
+            exit_code=127,
+            seconds=0.05,
+            work_dir=work,
+            at="2026-08-25T09:15:00Z",
+        ),
+    ]
+
+
+def test_the_committed_record_fixture_matches_what_this_module_writes():
+    """Regenerate with `MINIME_WRITE_CONTRACT=1 pytest mini-me/tests/test_ledger.py`."""
+    generated = "\n".join(json.dumps(e, ensure_ascii=False, sort_keys=True) for e in _sample()) + "\n"
+    if os.environ.get("MINIME_WRITE_CONTRACT"):
+        FIXTURE.parent.mkdir(parents=True, exist_ok=True)
+        FIXTURE.write_text(generated, encoding="utf-8")
+        pytest.skip("fixture regenerated; read the diff")
+
+    assert FIXTURE.exists(), f"{FIXTURE} is missing — regenerate with MINIME_WRITE_CONTRACT=1"
+    assert FIXTURE.read_text(encoding="utf-8") == generated, (
+        "the command record changed shape. Regenerate with "
+        "`MINIME_WRITE_CONTRACT=1 pytest mini-me/tests/test_ledger.py`, then decide whether the "
+        "app should read the new field."
+    )
+
+
+def test_the_fixture_covers_both_branches_the_client_can_get_wrong():
+    entries = _sample()
+    assert any(e["outside"] for e in entries), "a command that named something outside"
+    assert any(not e["outside"] for e in entries), "and one that did not"
+    assert any(e["exit"] != 0 for e in entries), "and one that failed"

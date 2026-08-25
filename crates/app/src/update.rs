@@ -463,6 +463,11 @@ impl Swap {
     ///
     /// Derived from the staging folder rather than carried separately: one fewer field that can be
     /// set to something the rest of the plan disagrees with.
+    // Read only from `begin_swap`'s `#[cfg(windows)]` body and from the tests, so a non-test build
+    // on any other platform sees no caller. Kept rather than gated, because the value it produces
+    // is part of the plan and a `#[cfg]` here would make it another thing that exists only on the
+    // platform nothing can be tested on (§273).
+    #[allow(dead_code)]
     pub fn tag_hint(&self) -> String {
         self.staging
             .file_name()

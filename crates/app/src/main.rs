@@ -1046,6 +1046,34 @@ fn affordable(experiments: u32, available: Option<u32>) -> bool {
 /// where it was. Three of the five experiments in one real run reported the same `0.690`, so equal
 /// scores are the common case rather than an edge one, and a sort that reshuffled them would make
 /// the toggle look like it was doing something else.
+/// The one line the Outputs panel shows about what a conversation ran, and whether it is loud.
+///
+/// A free function so the wording is testable without a window — the same reason `ranked` is one
+/// (§266). What it says is the whole feature: a count nobody can act on is furniture, and the
+/// phrase that matters is the one naming files the Outputs panel cannot show.
+fn commands_summary(commands: &[workspace::Command]) -> (String, bool) {
+    let escaped = commands.iter().filter(|command| command.escaped()).count();
+    let failed = commands.iter().filter(|command| command.failed()).count();
+
+    // The number first, because the number is what is being scanned for.
+    let mut summary = format!(
+        "{} command{}",
+        commands.len(),
+        if commands.len() == 1 { "" } else { "s" }
+    );
+    if failed > 0 {
+        summary.push_str(&format!(" · {failed} failed"));
+    }
+    if escaped > 0 {
+        // **"named", not "wrote".** The producer can only see paths that appear in the command's
+        // text, and a line that said "wrote" would be claiming something nothing here can know.
+        summary.push_str(&format!(
+            " · {escaped} named a file outside this conversation"
+        ));
+    }
+    (summary, escaped > 0)
+}
+
 fn ranked(experiments: &[discovery::Experiment], loudest_first: bool) -> Vec<usize> {
     let mut order: Vec<usize> = (0..experiments.len()).collect();
     order.sort_by(|&a, &b| {
@@ -3182,6 +3210,12 @@ struct Workbench {
     /// updates, which is the thing this whole flow exists to prevent. It comes back next launch,
     /// which is also when there is something new to say.
     update_dismissed: bool,
+    /// The record of what this conversation ran is open.
+    ///
+    /// A modal rather than a panel section: the list is long by nature, and the question it answers
+    /// — *what did that turn actually do* — is asked occasionally and read closely, which is the
+    /// opposite of what a permanently-visible section is for.
+    commands_open: bool,
     /// Whether this install is an unzipped bundle or a `cargo build` inside a checkout.
     ///
     /// Read once at startup rather than per render, and kept beside the standing because the two
@@ -3583,6 +3617,7 @@ impl Workbench {
             update: None,
             taking: None,
             update_dismissed: false,
+            commands_open: false,
             install,
             project: None,
             buckets: Vec::new(),
@@ -11621,6 +11656,12 @@ impl Workbench {
             cx.notify();
             return;
         }
+        if self.commands_open {
+            self.commands_open = false;
+            self.restore_focus = true;
+            cx.notify();
+            return;
+        }
         if self.confirming_provider.take().is_some() {
             // Escape leaves the provider as it was: this modal exists precisely so the change
             // needs a deliberate press, and dismissing is not one.
@@ -16320,6 +16361,167 @@ impl Workbench {
         shape
     }
 
+    /// Everything this conversation ran, newest first.
+    ///
+    /// **Newest first, unlike the file itself.** The record is written oldest-first because that is
+    /// how it accumulates; it is read to answer "what did that just do", so the last command is the
+    /// one being looked for.
+    ///
+    /// The heading states the limit rather than burying it in a docstring nobody here will read:
+    /// these are paths the commands *named*, and a command can write somewhere it never names.
+    /// Saying that once, where the list is, is the difference between a report and a false promise.
+    fn commands_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let commands = self.thread_commands();
+        let escaped = commands.iter().filter(|command| command.escaped()).count();
+
+        let mut body = div().flex().flex_col().w_full().min_w_0().gap_2().child(
+            ui::Label::new(
+                "Every command this conversation ran. Paths are ones the command **named** \
+                 outside this conversation's folder — a command can also write somewhere it \
+                 never names, and nothing here can see that.",
+            )
+            .muted()
+            .size(ui::Size::Compact),
+        );
+
+        for command in commands.iter().rev() {
+            let mut row = div()
+                .flex()
+                .flex_col()
+                .w_full()
+                .min_w_0()
+                .gap_1()
+                .p_2()
+                .rounded_lg()
+                .bg(rgb(theme::surface()));
+
+            let mut heading = command.at.clone();
+            if let Some(seconds) = command.seconds {
+                heading.push_str(&format!(" · {seconds:.1}s"));
+            }
+            match command.exit {
+                Some(0) | None => {}
+                Some(code) => heading.push_str(&format!(" · exit {code}")),
+            }
+            row = row.child(
+                ui::Label::new(heading)
+                    .colour(if command.failed() {
+                        theme::error()
+                    } else {
+                        theme::text_faint()
+                    })
+                    .size(ui::Size::Compact),
+            );
+
+            // The command as written. Monospace, because it is code and a proportional font makes
+            // a shell pipeline unreadable at exactly the moment somebody is checking it carefully.
+            row = row.child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .font_family("monospace")
+                    .text_size(px(12.))
+                    .text_color(rgb(theme::text()))
+                    .child(command.text.clone()),
+            );
+            if command.clipped {
+                row = row.child(
+                    ui::Label::new("(clipped — the full command is in the backend log)")
+                        .muted()
+                        .size(ui::Size::Compact),
+                );
+            }
+
+            for path in &command.outside {
+                row = row.child(
+                    ui::Label::new(format!("named outside this conversation: {path}"))
+                        .colour(theme::accent())
+                        .size(ui::Size::Compact),
+                );
+            }
+            body = body.child(row);
+        }
+
+        let title = if escaped > 0 {
+            format!("What ran · {} · {escaped} outside", commands.len())
+        } else {
+            format!("What ran · {}", commands.len())
+        };
+        ui::Modal::new("commands", title)
+            .width(820.)
+            .focus(&self.delete_focus)
+            .body(body)
+            .actions(
+                ui::actions().child(div().flex_grow()).child(
+                    ui::Button::new("commands-close", "Close").on_click(cx.listener(
+                        |workbench, _event, _window, cx| {
+                            workbench.commands_open = false;
+                            workbench.restore_focus = true;
+                            cx.notify();
+                        },
+                    )),
+                ),
+            )
+    }
+
+    /// One line for what this conversation *ran*, beside what it produced.
+    ///
+    /// **This is the half §219 has been missing.** The provenance recorder records and does not
+    /// block, deliberately — *"the rules worth enforcing are the ones that come from failures
+    /// actually seen"* — and the roadmap has carried the same sentence about it since: *nothing has
+    /// been read off it yet*. A record nobody reads is a record that is not working.
+    ///
+    /// Shown only when something ran, so an ordinary conversation gains no furniture. When a
+    /// command named a file outside this conversation, the line says so in the accent colour and
+    /// says how many — because that is §160's failure, and the whole point is that it is legible on
+    /// the day it happens rather than a week later.
+    fn commands_line(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let commands = self.thread_commands();
+        if commands.is_empty() {
+            return None;
+        }
+        let (summary, escaped) = commands_summary(&commands);
+        let tone = if escaped {
+            theme::accent()
+        } else {
+            theme::text_muted()
+        };
+
+        Some(
+            div()
+                .id("what-ran")
+                .flex()
+                .flex_col()
+                .w_full()
+                .min_w_0()
+                .gap_1()
+                .p_1()
+                .rounded_md()
+                .hover(|style| {
+                    let fill = theme::hover_over(theme::surface());
+                    style.bg(rgb(fill)).cursor_pointer()
+                })
+                .on_click(cx.listener(|workbench, _event, _window, cx| {
+                    workbench.commands_open = true;
+                    cx.notify();
+                }))
+                .child(section_label("WHAT RAN"))
+                .child(
+                    ui::Label::new(summary)
+                        .colour(tone)
+                        .size(ui::Size::Compact),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// The commands this conversation recorded, oldest first.
+    fn thread_commands(&self) -> Vec<workspace::Command> {
+        self.thread_workspace()
+            .map(|dir| workspace::commands(&dir))
+            .unwrap_or_default()
+    }
+
     fn outputs_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
         // What is actually on disk, rather than the agent's own artifact list: a file written by
         // a script inside `execute` registers no artifact, and those are most of them.
@@ -16353,6 +16555,10 @@ impl Workbench {
         if count == 0 && self.buckets.is_empty() {
             return section;
         }
+
+        // Above `FILES`, because "what ran" is the question that explains why the file list is
+        // shorter than expected — which is exactly §160's morning.
+        section = section.children(self.commands_line(cx));
 
         if count > 0 {
             section = section.child(section_label_owned(format!("FILES · {count}")));
@@ -16769,6 +16975,12 @@ impl Render for Workbench {
             root
         };
 
+        let root = if self.commands_open {
+            root.child(self.commands_modal(cx))
+        } else {
+            root
+        };
+
         // The budget gate, mounted before the confirmations below it. Nothing else in this app
         // guards money, and the researcher did not ask for it — a drafted run did.
         let root = match self.discovery_open.clone() {
@@ -16922,6 +17134,43 @@ mod tests {
     }
 
     /// §244: one run gets a definite press, because a single action has to mean something.
+    /// What the Outputs panel says about a conversation's commands.
+    ///
+    /// A free function so the *wording* is testable, because the wording is the feature: the phrase
+    /// that matters names files the panel below it cannot show, and it has to say **named** rather
+    /// than **wrote** — the producer sees paths in a command's text and nothing more.
+    #[test]
+    fn the_summary_says_named_and_never_says_wrote() {
+        let fixture = include_str!("../tests/fixtures/command-record.jsonl");
+        let commands = workspace::decode_commands(fixture);
+        let (summary, loud) = commands_summary(&commands);
+
+        assert!(summary.starts_with("3 commands"), "{summary}");
+        assert!(summary.contains("1 failed"), "{summary}");
+        assert!(summary.contains("1 named a file outside this conversation"), "{summary}");
+        assert!(
+            !summary.contains("wrote"),
+            "the producer sees what a command *names*; claiming it wrote there is §252's mistake: \
+             {summary}"
+        );
+        assert!(loud, "something landed outside, so the line is drawn in the accent colour");
+    }
+
+    /// A quiet conversation says a quiet thing, and is not drawn as a warning.
+    #[test]
+    fn nothing_outside_is_not_an_alarm() {
+        let commands = workspace::decode_commands(
+            "{\"command\":\"ls\",\"exit\":0,\"outside\":[]}\n{\"command\":\"pwd\",\"exit\":0,\"outside\":[]}",
+        );
+        let (summary, loud) = commands_summary(&commands);
+        assert_eq!(summary, "2 commands");
+        assert!(!loud);
+
+        // And one command is not "1 commands".
+        let one = workspace::decode_commands("{\"command\":\"ls\",\"exit\":0,\"outside\":[]}");
+        assert_eq!(commands_summary(&one).0, "1 command");
+    }
+
     #[test]
     fn one_collected_run_is_named_and_openable() {
         let runs = [collected(protocol::JobKind::Analysis, "01a0215f-c66b-7461-96f2-595a168fa8f8")];
