@@ -1,3 +1,4 @@
-{"at": "2026-08-25T09:14:03Z", "clipped": false, "command": "python3 -c \"import pandas as pd; pd.read_csv('data.csv').describe().to_csv('summary.csv')\"", "exit": 0, "outside": [], "seconds": 1.4}
-{"at": "2026-08-25T09:14:07Z", "clipped": false, "command": "python3 -c \"import matplotlib.pyplot as plt; plt.savefig('/tmp/hist.png')\"", "exit": 0, "outside": ["/tmp/hist.png"], "seconds": 2.1}
-{"at": "2026-08-25T09:15:00Z", "clipped": false, "command": "Rscript missing.R", "exit": 127, "outside": [], "seconds": 0.05}
+{"at": "2026-08-25T09:14:03Z", "clipped": false, "command": "python3 -c \"import pandas as pd; pd.read_csv('data.csv').describe().to_csv('summary.csv')\"", "exit": 0, "outside": [], "seconds": 1.4, "wrote": []}
+{"at": "2026-08-25T09:14:07Z", "clipped": false, "command": "python3 -c \"import matplotlib.pyplot as plt; plt.savefig('/tmp/hist.png')\"", "exit": 0, "outside": ["/tmp/hist.png"], "seconds": 2.1, "wrote": []}
+{"at": "2026-08-25T09:15:00Z", "clipped": false, "command": "Rscript missing.R", "exit": 127, "outside": [], "seconds": 0.05, "wrote": []}
+{"at": "2026-08-25T09:16:11Z", "clipped": false, "command": "python3 -c \"open('/tmp/late-blight.csv','w').write(rows)\"", "exit": 0, "outside": ["/tmp/late-blight.csv"], "seconds": 0.8, "wrote": ["/tmp/late-blight.csv"]}
