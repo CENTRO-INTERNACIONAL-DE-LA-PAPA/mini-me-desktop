@@ -28,6 +28,7 @@ import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +40,7 @@ from deepagents.backends.protocol import ExecuteResponse
 # context window and is not sandbox-specific.
 from backend.sandbox import _emit_sandbox_status, _truncate_execute_response
 
-from minime_local import authorship
+from minime_local import authorship, ledger
 
 #: Where per-thread workspaces live. The desktop app sets this; the fallback keeps
 #: a bare ``langgraph dev`` working.
@@ -265,6 +266,33 @@ def _exit_and_output(result: Any) -> tuple[Any, str]:
     if isinstance(result, dict):
         return result.get("exit_code"), result.get("output") or ""
     return getattr(result, "exit_code", None), getattr(result, "output", "") or ""
+
+
+def _record(command: str, result: Any, work_dir: Any, seconds: float) -> None:
+    """Add this command to the conversation's own record. **Never raises.**
+
+    Every command, not only the failures `_log_failure` keeps: the ones that matter most are the
+    ones that worked and wrote somewhere nobody looked (§160), and under the conversation-wide
+    approval grant (§41) nobody sees them go past at all.
+
+    Placed here because this is the one function every `execute` already passes through — the same
+    reason `_say_where_it_ran` is here, and the difference between a record and a record with a
+    hole in it.
+    """
+    try:
+        exit_code, _ = _exit_and_output(result)
+        ledger.append(
+            work_dir,
+            ledger.entry(
+                command,
+                exit_code=exit_code,
+                seconds=seconds,
+                work_dir=work_dir,
+                at=datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            ),
+        )
+    except Exception:  # noqa: BLE001 — a diagnostic must never be what takes `execute` down
+        logger.debug("minime_local: could not record a command", exc_info=True)
 
 
 def _say_where_it_ran(result: Any, work_dir: Any) -> None:
@@ -625,9 +653,11 @@ class LocalWorkspaceBackend(LocalShellBackend):
             logger.debug(
                 "minime_local: no _env on the backend; the Asta token cannot be refreshed"
             )
+        started = time.monotonic()
         result = self.execute(command, timeout=timeout)
         _log_failure(command, result)
         _say_where_it_ran(result, self._work_dir)
+        _record(command, result, self._work_dir, time.monotonic() - started)
         return result
 
     @property

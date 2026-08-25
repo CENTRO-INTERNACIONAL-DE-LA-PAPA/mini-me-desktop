@@ -704,6 +704,81 @@ fn windows_path_for(recorded: &str) -> Option<PathBuf> {
     )))
 }
 
+/// One command a conversation ran, as the overlay recorded it.
+///
+/// The producer is `overlay/minime_local/ledger.py`, and the shape is pinned by a fixture it
+/// generates from its own code (`crates/app/tests/fixtures/command-record.jsonl`) — §264's
+/// discipline, applied to the one record written by a Python file that ships beside this binary
+/// rather than by the backend.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Command {
+    /// When it ran, as the overlay wrote it. Kept as text: it is shown, never compared.
+    pub at: String,
+    /// The command, already clipped by the producer if it was enormous.
+    pub text: String,
+    /// Whether the producer clipped it, so the app can say so rather than imply the whole thing.
+    pub clipped: bool,
+    /// Its exit code. `None` when the producer could not read one.
+    pub exit: Option<i64>,
+    /// How long it took, in seconds.
+    pub seconds: Option<f64>,
+    /// **Absolute paths the command named that lie outside this conversation.**
+    ///
+    /// Named, not written — the producer is explicit about this and so is the UI that shows it. A
+    /// command can write somewhere it never names, and nothing here can see that.
+    pub outside: Vec<String>,
+}
+
+impl Command {
+    /// Whether this one put something where the Outputs panel cannot show it.
+    pub fn escaped(&self) -> bool {
+        !self.outside.is_empty()
+    }
+
+    /// Whether it failed. `None` counts as not failed: an unreadable exit code is not evidence.
+    pub fn failed(&self) -> bool {
+        self.exit.is_some_and(|code| code != 0)
+    }
+}
+
+/// Every command this conversation ran, oldest first.
+///
+/// A malformed line is skipped rather than failing the read. The record is a diagnostic written by
+/// a process that may have been killed mid-write, and a half-written last line must not cost the
+/// researcher the other four hundred.
+pub fn commands(conversation: &Path) -> Vec<Command> {
+    let path = conversation.join(".mini-me").join("commands.jsonl");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    decode_commands(&text)
+}
+
+/// Split out from [`commands`] so the shape can be tested against the producer's own fixture.
+pub fn decode_commands(text: &str) -> Vec<Command> {
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .map(|value| Command {
+            at: value["at"].as_str().unwrap_or_default().to_string(),
+            text: value["command"].as_str().unwrap_or_default().to_string(),
+            clipped: value["clipped"].as_bool().unwrap_or(false),
+            exit: value["exit"].as_i64(),
+            seconds: value["seconds"].as_f64(),
+            outside: value["outside"]
+                .as_array()
+                .map(|paths| {
+                    paths
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
+        .collect()
+}
+
 /// A bounded view of everything a conversation wrote.
 ///
 /// `truncated` is deliberately part of the result rather than a log line. The person looking at
@@ -2526,6 +2601,67 @@ mod tests {
         assert_eq!(local_path("asta://doc/1", Some(thread)), None);
         assert_eq!(local_path("doi:10.1000/x", Some(thread)), None);
         assert_eq!(local_path("   ", Some(thread)), None);
+    }
+
+    /// The record, read from the fixture the producer generates from its own code.
+    ///
+    /// Every field is asserted, because the failure this shape exists to prevent is §223's: the
+    /// producer carried nine fields, the client kept one, and four distinct things rendered
+    /// identically for as long as the feature existed. Regenerate with
+    /// `MINIME_WRITE_CONTRACT=1 pytest mini-me/tests/test_ledger.py`.
+    #[test]
+    fn every_field_the_overlay_records_is_read_back() {
+        let fixture = include_str!("../tests/fixtures/command-record.jsonl");
+        let commands = decode_commands(fixture);
+        assert_eq!(commands.len(), 3, "one line per command");
+
+        let first = &commands[0];
+        assert_eq!(first.at, "2026-08-25T09:14:03Z");
+        assert!(first.text.starts_with("python3 -c"), "{}", first.text);
+        assert_eq!(first.exit, Some(0));
+        assert_eq!(first.seconds, Some(1.4));
+        assert!(!first.clipped);
+        assert!(!first.escaped(), "it stayed inside the conversation");
+        assert!(!first.failed());
+
+        // The one this whole record exists for.
+        let escaped = &commands[1];
+        assert_eq!(escaped.outside, vec!["/tmp/hist.png".to_string()]);
+        assert!(escaped.escaped());
+        assert!(!escaped.failed(), "landing outside is not the same as failing");
+
+        let broken = &commands[2];
+        assert_eq!(broken.exit, Some(127));
+        assert!(broken.failed());
+        assert!(!broken.escaped(), "and failing is not the same as landing outside");
+    }
+
+    /// A record written by a process that may have been killed mid-write.
+    #[test]
+    fn a_half_written_line_does_not_cost_the_researcher_the_others() {
+        let text = "{\"command\":\"echo one\",\"exit\":0}\n{\"command\":\"echo tw";
+        let commands = decode_commands(text);
+        assert_eq!(commands.len(), 1, "the whole line survives the broken one");
+        assert_eq!(commands[0].text, "echo one");
+        // And an absent field is a default rather than a panic.
+        assert_eq!(commands[0].seconds, None);
+        assert!(commands[0].at.is_empty());
+    }
+
+    /// An unreadable exit code is not evidence of failure.
+    #[test]
+    fn a_command_with_no_exit_code_is_not_called_failed() {
+        let commands = decode_commands("{\"command\":\"echo\",\"exit\":null}");
+        assert_eq!(commands[0].exit, None);
+        assert!(!commands[0].failed(), "absence of a code is not a non-zero code");
+    }
+
+    /// No record at all is the ordinary case, not an error.
+    #[test]
+    fn a_conversation_that_ran_nothing_has_no_commands() {
+        let base = scratch("no-commands");
+        assert!(commands(&base).is_empty());
+        std::fs::remove_dir_all(&base).ok();
     }
 
     /// On Linux that path *is* the file. On Windows it is on the other side of WSL, and
