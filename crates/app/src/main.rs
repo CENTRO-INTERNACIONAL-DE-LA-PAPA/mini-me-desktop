@@ -1046,6 +1046,26 @@ fn affordable(experiments: u32, available: Option<u32>) -> bool {
 /// where it was. Three of the five experiments in one real run reported the same `0.690`, so equal
 /// scores are the common case rather than an edge one, and a sort that reshuffled them would make
 /// the toggle look like it was doing something else.
+/// The distinct files this conversation's commands were watched writing outside it.
+///
+/// **Files, not commands.** The button says how many will be copied, and one command can write
+/// three — counting commands would have made the label a lie the first time a script produced a
+/// figure per variable, which is the ordinary case here.
+///
+/// Deduplicated in order: a file rewritten by a later command is one file, and it appears where it
+/// was first produced, which is the order a person remembers making them in.
+fn files_left_outside(commands: &[workspace::Command]) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    for command in commands {
+        for path in &command.wrote {
+            if !found.contains(path) {
+                found.push(path.clone());
+            }
+        }
+    }
+    found
+}
+
 /// Whether the Outputs panel has nothing at all to say.
 ///
 /// **A turn that ran commands has something to say even with no files**, and that is not an edge
@@ -3232,6 +3252,13 @@ struct Workbench {
     /// — *what did that turn actually do* — is asked occasionally and read closely, which is the
     /// opposite of what a permanently-visible section is for.
     commands_open: bool,
+    /// What came back from the last press of "Bring them in", or that one is in flight.
+    ///
+    /// Kept so the modal can report *what happened to each file* rather than a count. A partial
+    /// result is the normal case — `/tmp` is swept — and "3 of 5" is not something anyone can act
+    /// on.
+    collecting: Option<Result<protocol::Collected, String>>,
+    collect_in_flight: bool,
     /// Whether this install is an unzipped bundle or a `cargo build` inside a checkout.
     ///
     /// Read once at startup rather than per render, and kept beside the standing because the two
@@ -3634,6 +3661,8 @@ impl Workbench {
             taking: None,
             update_dismissed: false,
             commands_open: false,
+            collecting: None,
+            collect_in_flight: false,
             install,
             project: None,
             buckets: Vec::new(),
@@ -16377,6 +16406,41 @@ impl Workbench {
         shape
     }
 
+    /// Copy the files this conversation's commands wrote outside it back into it.
+    ///
+    /// **A press, and only ever a copy.** Automatic would be wrong twice over: a named path can be
+    /// the researcher's own input, and a script often reads back what it just wrote. The backend
+    /// decides *which* files from its own record — this sends no paths, because a request that
+    /// could name one would be a file-copier pointed at anything.
+    fn collect_outside(&mut self, cx: &mut Context<Self>) {
+        if self.collect_in_flight {
+            return;
+        }
+        self.collect_in_flight = true;
+        self.collecting = None;
+        cx.notify();
+
+        let mut answer = self.sidecar.collect_outside();
+        cx.spawn(async move |workbench, cx| {
+            if let Some(outcome) = answer.next().await {
+                let _ = workbench.update(cx, |workbench, cx| {
+                    workbench.collect_in_flight = false;
+                    match &outcome {
+                        Ok(collected) => tracing::info!(
+                            brought = collected.brought.len(),
+                            refused = collected.refused.len(),
+                            "brought files into the conversation"
+                        ),
+                        Err(error) => tracing::warn!(%error, "could not bring the files in"),
+                    }
+                    workbench.collecting = Some(outcome);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
     /// Everything this conversation ran, newest first.
     ///
     /// **Newest first, unlike the file itself.** The record is written oldest-first because that is
@@ -16471,12 +16535,63 @@ impl Workbench {
         } else {
             format!("What ran · {}", commands.len())
         };
+        // What happened last time the button was pressed, per file. A partial result is the
+        // normal case — `/tmp` is swept — and a count would hide which ones did not make it.
+        match &self.collecting {
+            Some(Ok(collected)) => {
+                for (path, name) in &collected.brought {
+                    body = body.child(
+                        ui::Label::new(format!("brought in as {name} — from {path}"))
+                            .colour(theme::accent())
+                            .size(ui::Size::Compact),
+                    );
+                }
+                for (path, reason) in &collected.refused {
+                    body = body.child(
+                        ui::Label::new(format!("left where it was: {path} — {reason}"))
+                            .muted()
+                            .size(ui::Size::Compact),
+                    );
+                }
+            }
+            Some(Err(error)) => {
+                body = body.child(
+                    ui::Label::new(format!("could not bring them in: {error}"))
+                        .colour(theme::error())
+                        .size(ui::Size::Compact),
+                );
+            }
+            None => {}
+        }
+
+        // Offered only when a command was *watched writing* somewhere — never for a path that was
+        // merely named, which may be the researcher's own input.
+        let written = files_left_outside(&commands).len();
+        let mut actions = ui::actions().child(div().flex_grow());
+        if written > 0 {
+            actions = actions.child(
+                ui::Button::new(
+                    "collect-outside",
+                    if self.collect_in_flight {
+                        "Bringing them in…".to_string()
+                    } else {
+                        // Named in words: what the press will do, and to how many.
+                        format!("Copy {written} file{} into this conversation", if written == 1 { "" } else { "s" })
+                    },
+                )
+                .tone(ui::Tone::Accent)
+                .on_click(cx.listener(|workbench, _event, _window, cx| {
+                    workbench.collect_outside(cx);
+                })),
+            );
+        }
+
         ui::Modal::new("commands", title)
             .width(820.)
             .focus(&self.delete_focus)
             .body(body)
             .actions(
-                ui::actions().child(div().flex_grow()).child(
+                actions.child(
                     ui::Button::new("commands-close", "Close").on_click(cx.listener(
                         |workbench, _event, _window, cx| {
                             workbench.commands_open = false;
@@ -17166,6 +17281,33 @@ mod tests {
     }
 
     /// §244: one run gets a definite press, because a single action has to mean something.
+    /// The button counts **files**, not commands.
+    ///
+    /// One command can write three — a figure per variable is the ordinary case here — so counting
+    /// commands would have made "Copy 1 file into this conversation" a lie the first time a real
+    /// analysis ran.
+    #[test]
+    fn what_would_be_copied_is_counted_in_files() {
+        let commands = workspace::decode_commands(
+            "{\"command\":\"a\",\"outside\":[\"/tmp/x.png\",\"/tmp/y.png\"],\"wrote\":[\"/tmp/x.png\",\"/tmp/y.png\"]}\n\
+             {\"command\":\"b\",\"outside\":[\"/tmp/x.png\"],\"wrote\":[\"/tmp/x.png\"]}\n\
+             {\"command\":\"c\",\"outside\":[\"/tmp/read.csv\"],\"wrote\":[]}",
+        );
+        let files = files_left_outside(&commands);
+        // Two commands, three `wrote` entries, two distinct files — and the read is not among them.
+        assert_eq!(files, vec!["/tmp/x.png".to_string(), "/tmp/y.png".to_string()]);
+        assert!(!files.contains(&"/tmp/read.csv".to_string()), "a path only named is never copied");
+    }
+
+    /// Nothing confirmed written means nothing to offer, even with paths named.
+    #[test]
+    fn a_conversation_that_only_read_outside_files_offers_nothing() {
+        let commands = workspace::decode_commands(
+            "{\"command\":\"python3 read.py\",\"outside\":[\"/tmp/theirs.csv\"],\"wrote\":[]}",
+        );
+        assert!(files_left_outside(&commands).is_empty());
+    }
+
     /// The panel must not go silent in the situation the record exists for.
     ///
     /// A command that wrote everything to `/tmp` leaves the conversation folder empty, so `files`

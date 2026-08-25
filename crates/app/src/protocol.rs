@@ -1309,6 +1309,59 @@ impl LangGraphClient {
     /// The expensive call, and the only one that gets them: `rich_outputs` is `null` in the
     /// experiments listing and populated only per experiment, at roughly 458KB a node (§247). So
     /// this is made when a researcher opens an experiment and not before.
+    /// Ask the backend to copy files this conversation's commands wrote outside it back into it.
+    ///
+    /// **No paths are sent.** The record decides, on the backend side, from the `wrote` list its
+    /// own mtime check produced. A request that could name a path would be a file-copier pointed at
+    /// anything rather than a way to recover a turn's own output, and those are different tools.
+    pub async fn collect_outside(&self, thread_id: &str) -> Result<Collected> {
+        let resp = self
+            .http
+            .post(format!("{}/collect/{}", self.base_url, urlencode(thread_id)))
+            .send()
+            .await
+            .context("asking for the files to be brought in failed")?;
+        // The body before the status, for the reason §261 records three times over.
+        let status = resp.status();
+        let value: Value = resp.json().await.unwrap_or(Value::Null);
+        if let Some(error) = value.get("error").and_then(Value::as_str) {
+            anyhow::bail!("{error}");
+        }
+        if !status.is_success() {
+            anyhow::bail!("the backend answered {status}");
+        }
+        Ok(Collected {
+            brought: value["brought"]
+                .as_array()
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| {
+                            Some((
+                                item.get("path")?.as_str()?.to_string(),
+                                item.get("as")?.as_str()?.to_string(),
+                            ))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            refused: value["refused"]
+                .as_array()
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| {
+                            Some((
+                                item.get("path")?.as_str()?.to_string(),
+                                item.get("reason")?.as_str()?.to_string(),
+                            ))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
+    }
+
     pub async fn discovery_figures(
         &self,
         thread_id: &str,
@@ -2880,6 +2933,19 @@ pub struct Draft {
     pub experiments: u32,
     pub datasets: Vec<String>,
 }
+/// What came back from asking for a conversation's outside files.
+///
+/// **Both halves, always.** A partial result is the normal case here — a file may have been swept
+/// from `/tmp` since it was written — and a count alone would hide it. Each refusal carries its own
+/// reason, because "3 of 5" is not something a researcher can act on.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Collected {
+    /// `(where it was, what it is called here now)`.
+    pub brought: Vec<(String, String)>,
+    /// `(path, why not)`.
+    pub refused: Vec<(String, String)>,
+}
+
 
 /// What a drafted run will cost, against what is left to spend.
 #[derive(Clone, Debug, PartialEq, Eq)]

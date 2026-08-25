@@ -394,3 +394,86 @@ def test_a_real_command_records_what_it_wrote_and_not_what_it_read(tmp_path, mon
         "only the file this command created may be offered as its output; the other is the "
         "researcher's own input and moving it would be theft"
     )
+
+
+# --- bringing them back -------------------------------------------------------------------------
+
+
+def test_only_what_was_written_is_offered_and_never_what_was_read(tmp_path: Path):
+    """`collectable` reads `wrote`, never `outside`. That difference is the whole safety property."""
+    theirs, ours = tmp_path.parent / "their-input.csv", tmp_path.parent / "our-output.csv"
+    theirs.write_text("theirs")
+    ours.write_text("ours")
+    ledger.append(
+        tmp_path,
+        ledger.entry(
+            f"python3 -c \"open('{ours}','w').write(open('{theirs}').read())\"",
+            exit_code=0,
+            seconds=0.1,
+            work_dir=tmp_path,
+            at="t",
+            wrote=[str(ours)],
+        ),
+    )
+    assert ledger.collectable(tmp_path) == [str(ours)]
+
+
+def test_a_file_that_has_since_gone_is_not_offered(tmp_path: Path):
+    gone = tmp_path.parent / "cleaned-up.csv"
+    ledger.append(
+        tmp_path,
+        ledger.entry(
+            f"python3 -c \"open('{gone}','w')\"",
+            exit_code=0, seconds=0.1, work_dir=tmp_path, at="t", wrote=[str(gone)],
+        ),
+    )
+    assert ledger.collectable(tmp_path) == [], "/tmp is swept; a stale record is not an offer"
+
+
+def test_collecting_copies_and_leaves_the_original_where_it_was(tmp_path: Path):
+    """**Copy, not move.**
+
+    A script often writes a file and reads it back later in the same run, and a later turn may
+    expect it where it was left. Moving breaks work that is still going; copying costs disk.
+    """
+    source = tmp_path.parent / "results.csv"
+    source.write_text("col1\n1\n")
+    outcome = ledger.collect(tmp_path, [str(source)])
+
+    assert outcome["brought"] == [{"path": str(source), "as": "results.csv"}]
+    assert (tmp_path / "results.csv").read_text() == "col1\n1\n"
+    assert source.is_file(), "the original must still be there for whatever reads it next"
+
+
+def test_an_existing_name_is_suffixed_rather_than_overwritten(tmp_path: Path):
+    """The turn's own output must survive a file arriving with its name."""
+    (tmp_path / "results.csv").write_text("what the turn produced")
+    source = tmp_path.parent / "results.csv"
+    source.write_text("what was outside")
+
+    outcome = ledger.collect(tmp_path, [str(source)])
+    assert outcome["brought"] == [{"path": str(source), "as": "results-2.csv"}]
+    assert (tmp_path / "results.csv").read_text() == "what the turn produced"
+    assert (tmp_path / "results-2.csv").read_text() == "what was outside"
+    # Suffixed before the extension, or the file stops being openable.
+    assert not (tmp_path / "results.csv-2").exists()
+
+
+def test_one_bad_file_does_not_lose_the_others(tmp_path: Path):
+    """A partial result is the normal case, and reporting only a count would hide it."""
+    good = tmp_path.parent / "good.csv"
+    good.write_text("fine")
+    missing = tmp_path.parent / "not-there.csv"
+
+    outcome = ledger.collect(tmp_path, [str(missing), str(good)])
+    assert [b["as"] for b in outcome["brought"]] == ["good.csv"]
+    assert outcome["refused"][0]["path"] == str(missing)
+    assert "no longer there" in outcome["refused"][0]["reason"], "and it says why"
+
+
+def test_a_file_already_inside_is_refused_rather_than_duplicated(tmp_path: Path):
+    inside = tmp_path / "already-here.csv"
+    inside.write_text("x")
+    outcome = ledger.collect(tmp_path, [str(inside)])
+    assert outcome["brought"] == []
+    assert "already in this conversation" in outcome["refused"][0]["reason"]
