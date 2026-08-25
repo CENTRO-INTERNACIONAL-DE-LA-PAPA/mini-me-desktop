@@ -459,6 +459,17 @@ pub struct Swap {
 }
 
 impl Swap {
+    /// A short label for the log line written before the helper starts.
+    ///
+    /// Derived from the staging folder rather than carried separately: one fewer field that can be
+    /// set to something the rest of the plan disagrees with.
+    pub fn tag_hint(&self) -> String {
+        self.staging
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "update".to_string())
+    }
+
     /// Work out the whole plan from the two folders, so no caller can pair them wrongly.
     pub fn plan(pid: u32, install: &Path, staged: &Path, tag: &str) -> Self {
         let parent = install.parent().unwrap_or(install).to_path_buf();
@@ -604,11 +615,28 @@ pub fn begin_swap(plan: &Swap) -> Result<(), String> {
         // log as stdout and stderr means the next failure of that shape writes *something*, even
         // if the script never runs. A failure that leaves no trace costs a round trip to a person
         // on another machine, which is the most expensive kind there is (§270).
-        let record = std::fs::OpenOptions::new()
+        let mut record = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&plan.log)
             .map_err(|error| format!("could not open {}: {error}", plan.log.display()))?;
+
+        // **A line of our own, before the child exists.** An empty log is ambiguous in exactly the
+        // wrong way: "the helper never started" and "the helper started and said nothing" look
+        // identical, and they need opposite fixes. This one line makes the file say which — it is
+        // written by this process, so its presence proves the spawn was reached and its
+        // *loneliness* proves the child contributed nothing (§272).
+        use std::io::Write as _;
+        let _ = writeln!(
+            record,
+            "--- {} about to start the helper: powershell {} args, pid {} to wait for, install {}",
+            plan.tag_hint(),
+            argv.len() - 1,
+            plan.pid,
+            plan.install.display()
+        );
+        let _ = record.flush();
+
         let errors = record
             .try_clone()
             .map_err(|error| format!("could not share the update log: {error}"))?;
@@ -1335,6 +1363,36 @@ mod tests {
         assert!(script.contains('"'), "the script does have double quotes to protect");
         assert!(encoded.chars().all(|c| c.is_ascii_alphanumeric() || "+/=".contains(c)),
             "base64 only, so the command line cannot reinterpret anything");
+    }
+
+    /// An empty log must not be ambiguous.
+    ///
+    /// "The helper never started" and "the helper started and said nothing" want opposite fixes,
+    /// and an empty file looks the same either way. This process writes one line of its own before
+    /// the child exists, so the file's *contents* answer which — a diagnostic that only helps when
+    /// something has already gone wrong, which is when every other signal has failed (§272).
+    #[test]
+    fn the_log_says_the_spawn_was_reached_before_the_child_can_say_anything() {
+        let source = include_str!("update.rs");
+        let before = source.find("about to start the helper").expect("a line of our own");
+        let spawn = source.find(".spawn()").expect("the spawn");
+        assert!(before < spawn, "our line must be written before the child can write anything");
+        assert!(
+            source[before..spawn].contains("record.flush()"),
+            "an unflushed line is no line at all when the process is about to exit"
+        );
+    }
+
+    /// The label comes off the plan rather than beside it.
+    #[test]
+    fn the_log_line_names_the_staging_folder_it_is_about() {
+        let plan = a_plan();
+        assert_eq!(plan.tag_hint(), ".mini-me-update-0.3.1");
+        assert_eq!(
+            plan.staging.file_name().expect("a name").to_string_lossy(),
+            plan.tag_hint(),
+            "derived, so it cannot disagree with the rest of the plan"
+        );
     }
 
     /// The failure that leaves nothing behind must stop being possible.
