@@ -281,16 +281,21 @@ def _record(command: str, result: Any, work_dir: Any, seconds: float) -> None:
     """
     try:
         exit_code, _ = _exit_and_output(result)
-        ledger.append(
-            work_dir,
-            ledger.entry(
-                command,
-                exit_code=exit_code,
-                seconds=seconds,
-                work_dir=work_dir,
-                at=datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
-            ),
+        finished = time.time()
+        record = ledger.entry(
+            command,
+            exit_code=exit_code,
+            seconds=seconds,
+            work_dir=work_dir,
+            at=datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
         )
+        # Which of the named paths the command actually *wrote*, decided by the file's own mtime
+        # against the window this command ran in. Done here rather than in `entry` because it needs
+        # the filesystem, and it needs to happen now: a minute later the answer has changed.
+        record["wrote"] = ledger.written_during(
+            record["outside"], finished - (seconds or 0.0), finished
+        )
+        ledger.append(work_dir, record)
     except Exception:  # noqa: BLE001 — a diagnostic must never be what takes `execute` down
         logger.debug("minime_local: could not record a command", exc_info=True)
 
@@ -600,6 +605,18 @@ class LocalWorkspaceBackend(LocalShellBackend):
         cheap to apply: find the function *everything* passes through, not the one you happened to
         be editing.
         """
+        # **The workspace has to exist first.** `aresolve` creates it, and only `aexecute` awaits
+        # that — so a command arriving through the *synchronous* tool ran with a `cwd` that was not
+        # there and died with `FileNotFoundError` before it could do anything. Pre-existing, and
+        # invisible while only the async tool was in use.
+        #
+        # `mkdir` rather than `aresolve`: this is a sync method, the directory is the only part of
+        # resolution a command needs, and `exist_ok` makes it free on every call after the first.
+        try:
+            self._work_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            logger.debug("minime_local: could not make the workspace before a command", exc_info=True)
+
         started = time.monotonic()
         try:
             result = super().execute(command, timeout=timeout)
