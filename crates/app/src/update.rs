@@ -519,22 +519,27 @@ const EXIT_GRACE_SECONDS: u32 = 60;
 ///    where a double-click starts it — the helper's own working directory is elsewhere by
 ///    necessity, and inheriting that would make an updated app subtly unlike a fresh one.
 ///
-/// It writes what it did to `%TEMP%\mini-me-desktop-update.log`, because by the time it runs there
-/// is no app left to log anything.
+/// **It never opens the log itself.** `begin_swap` hands the child the log as its stdout, so `Note`
+/// writes to the output stream and the bytes land there — one writer, one handle.
+///
+/// The first version used `Out-File -Append` on that same path, and the child could not open a file
+/// it already held open as stdout: `Out-File` asks for a share mode the existing handle
+/// contradicts. The very first `Note` failed, `$ErrorActionPreference = 'Stop'` made it terminating,
+/// and the helper died at line one having done nothing. The only reason it was ever diagnosable is
+/// that PowerShell put the error on *stderr* — the same file by a different handle (§274).
 pub fn swap_script(plan: &Swap) -> String {
-    let (install, staged, retired, staging, launch, log) = (
+    let (install, staged, retired, staging, launch) = (
         quote(&plan.install),
         quote(&plan.staged),
         quote(&plan.retired),
         quote(&plan.staging),
         quote(&plan.launch),
-        quote(&plan.log),
     );
     let pid = plan.pid;
     let grace = EXIT_GRACE_SECONDS;
     format!(
         "$ErrorActionPreference = 'Stop'; \
-         function Note($m) {{ \"$(Get-Date -Format o) $m\" | Out-File -FilePath {log} -Append -Encoding utf8 }}; \
+         function Note($m) {{ Write-Output \"$(Get-Date -Format o) $m\" }}; \
          Note 'waiting for mini-me-desktop-app (pid {pid}) to exit'; \
          $left = {grace}; \
          while ($left -gt 0 -and (Get-Process -Id {pid} -ErrorAction SilentlyContinue)) {{ \
@@ -1433,6 +1438,31 @@ mod tests {
         );
     }
 
+    /// The helper must never open the log it is already holding.
+    ///
+    /// `begin_swap` hands the child the log as stdout and stderr, so the child *has* that file
+    /// open. `Out-File` on the same path asks for a share mode the existing handle contradicts, and
+    /// the open fails — which, under `$ErrorActionPreference = 'Stop'`, killed the script on its
+    /// first statement. Three presses died there.
+    ///
+    /// The log path must therefore not appear in the script at all: Rust owns the handle, the
+    /// script writes to the stream.
+    #[test]
+    fn the_script_writes_to_its_output_stream_not_to_the_log_file() {
+        let plan = a_plan();
+        let script = swap_script(&plan);
+        assert!(
+            !script.contains(&plan.log.to_string_lossy().to_string()),
+            "the script names the log file, so it would try to open a file it already holds: \
+             {script}"
+        );
+        assert!(!script.contains("Out-File"), "one writer, one handle: {script}");
+        assert!(
+            script.contains("function Note($m) { Write-Output"),
+            "the helper must report through the stream Rust redirected: {script}"
+        );
+    }
+
     /// An empty log must not be ambiguous.
     ///
     /// "The helper never started" and "the helper started and said nothing" want opposite fixes,
@@ -1525,9 +1555,11 @@ mod tests {
             pane.contains(&name),
             "the Setup pane does not name {name}, so a failed swap leaves nothing findable"
         );
+        // Not the script: it must *not* name the log, because it must not open a file it already
+        // holds as stdout (§274). The binding that matters is Rust's, so assert on that.
         assert!(
-            swap_script(&plan).contains(&name),
-            "the helper no longer writes to {name}"
+            include_str!("update.rs").contains(".open(&plan.log)"),
+            "begin_swap no longer opens {name}, so nothing points the helper's output at it"
         );
     }
 

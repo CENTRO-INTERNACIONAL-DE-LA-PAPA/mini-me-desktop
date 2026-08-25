@@ -13,12 +13,12 @@
 
 $ErrorActionPreference = 'Continue'
 $base = Join-Path $env:TEMP 'swap-rehearsal'
-$log  = Join-Path $env:TEMP 'swap-rehearsal.log'
+$out  = Join-Path $env:TEMP 'swap-rehearsal.out'
 $err  = Join-Path $env:TEMP 'swap-rehearsal.err'
 
 Write-Host "=== a throwaway install under $base ===" -ForegroundColor Cyan
 Remove-Item -Recurse -Force $base -ErrorAction SilentlyContinue
-Remove-Item -Force $log, $err -ErrorAction SilentlyContinue
+Remove-Item -Force $out, $err -ErrorAction SilentlyContinue
 foreach ($d in @(
     'mini-me-desktop\overlay', 'mini-me-desktop\scripts', 'mini-me-desktop\vendor',
     '.mini-me-update-9.9.9\mini-me-desktop\overlay',
@@ -33,9 +33,9 @@ Write-Host ("before: " + (Get-Content (Join-Path $base 'mini-me-desktop\mini-me-
 # The app's own script. Generated from `update::swap_script`, with only the three paths
 # substituted — everything else is character for character what the app sends.
 $script = @'
-$ErrorActionPreference = 'Stop'; function Note($m) { "$(Get-Date -Format o) $m" | Out-File -FilePath '__LOG__' -Append -Encoding utf8 }; Note 'waiting for mini-me-desktop-app (pid 999999) to exit'; $left = 60; while ($left -gt 0 -and (Get-Process -Id 999999 -ErrorAction SilentlyContinue)) { Start-Sleep -Seconds 1; $left-- }; if (Get-Process -Id 999999 -ErrorAction SilentlyContinue) { Note 'it is still running after 60s, so nothing was changed'; exit 1 }; Start-Sleep -Milliseconds 750; try { if (Test-Path -LiteralPath '__BASE__/.mini-me-previous-9.9.9') { Remove-Item -LiteralPath '__BASE__/.mini-me-previous-9.9.9' -Recurse -Force }; Move-Item -LiteralPath '__BASE__/mini-me-desktop' -Destination '__BASE__/.mini-me-previous-9.9.9' -Force; Note 'retired the old folder' } catch { Note "could not move the old folder aside: $_"; exit 1 }; try { Move-Item -LiteralPath '__BASE__/.mini-me-update-9.9.9/mini-me-desktop' -Destination '__BASE__/mini-me-desktop' -Force; Note 'the new build is in place' } catch { Note "could not move the new build in, putting the old one back: $_"; Move-Item -LiteralPath '__BASE__/.mini-me-previous-9.9.9' -Destination '__BASE__/mini-me-desktop' -Force; Note 'the old build is back'; exit 1 }; try { Start-Process -FilePath '__BASE__/mini-me-desktop/mini-me-desktop-app.exe' -WorkingDirectory '__BASE__/mini-me-desktop'; Note 'relaunched' } catch { Note "the new build is in place but did not start: $_" }; Remove-Item -LiteralPath '__BASE__/.mini-me-previous-9.9.9' -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath '__BASE__/.mini-me-update-9.9.9' -Recurse -Force -ErrorAction SilentlyContinue; Note 'done'
+$ErrorActionPreference = 'Stop'; function Note($m) { Write-Output "$(Get-Date -Format o) $m" }; Note 'waiting for mini-me-desktop-app (pid 999999) to exit'; $left = 60; while ($left -gt 0 -and (Get-Process -Id 999999 -ErrorAction SilentlyContinue)) { Start-Sleep -Seconds 1; $left-- }; if (Get-Process -Id 999999 -ErrorAction SilentlyContinue) { Note 'it is still running after 60s, so nothing was changed'; exit 1 }; Start-Sleep -Milliseconds 750; try { if (Test-Path -LiteralPath '__BASE__/.mini-me-previous-9.9.9') { Remove-Item -LiteralPath '__BASE__/.mini-me-previous-9.9.9' -Recurse -Force }; Move-Item -LiteralPath '__BASE__/mini-me-desktop' -Destination '__BASE__/.mini-me-previous-9.9.9' -Force; Note 'retired the old folder' } catch { Note "could not move the old folder aside: $_"; exit 1 }; try { Move-Item -LiteralPath '__BASE__/.mini-me-update-9.9.9/mini-me-desktop' -Destination '__BASE__/mini-me-desktop' -Force; Note 'the new build is in place' } catch { Note "could not move the new build in, putting the old one back: $_"; Move-Item -LiteralPath '__BASE__/.mini-me-previous-9.9.9' -Destination '__BASE__/mini-me-desktop' -Force; Note 'the old build is back'; exit 1 }; try { Start-Process -FilePath '__BASE__/mini-me-desktop/mini-me-desktop-app.exe' -WorkingDirectory '__BASE__/mini-me-desktop'; Note 'relaunched' } catch { Note "the new build is in place but did not start: $_" }; Remove-Item -LiteralPath '__BASE__/.mini-me-previous-9.9.9' -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath '__BASE__/.mini-me-update-9.9.9' -Recurse -Force -ErrorAction SilentlyContinue; Note 'done'
 '@
-$script = $script.Replace('__BASE__', $base).Replace('__LOG__', $log).Replace('__WORK__', $env:TEMP)
+$script = $script.Replace('__BASE__', $base).Replace('__LOG__', $out).Replace('__WORK__', $env:TEMP)
 $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
 Write-Host ("script: {0} chars, encoded: {1} chars" -f $script.Length, $encoded.Length)
 
@@ -43,18 +43,19 @@ Write-Host "`n=== running it the way the app does ===" -ForegroundColor Cyan
 $p = Start-Process -FilePath 'powershell' `
   -ArgumentList '-NoProfile','-NonInteractive','-WindowStyle','Hidden','-EncodedCommand',$encoded `
   -WorkingDirectory $env:TEMP -PassThru -Wait `
-  -RedirectStandardError $err -RedirectStandardOutput (Join-Path $env:TEMP 'swap-rehearsal.out')
+  -RedirectStandardError $err -RedirectStandardOutput $out
 Write-Host "exit code: $($p.ExitCode)"
 
-Write-Host "`n=== the log the helper wrote ===" -ForegroundColor Cyan
-if ((Test-Path $log) -and (Get-Item $log).Length -gt 0) { Get-Content $log }
-else { Write-Host 'NOTHING — the script wrote no log' -ForegroundColor Red }
+# The helper reports on **stdout**, which the app redirects into the update log. It must not
+# open that file itself: it already holds it, and a second open fails with a sharing violation
+# that killed the script on its first statement three times over (docs 274).
+Write-Host "`n=== what the helper reported ===" -ForegroundColor Cyan
+if ((Test-Path $out) -and (Get-Item $out).Length -gt 0) { Get-Content $out }
+else { Write-Host 'NOTHING — the helper said nothing at all' -ForegroundColor Red }
 
-foreach ($stream in @(@('stderr', $err), @('stdout', (Join-Path $env:TEMP 'swap-rehearsal.out')))) {
-  if ((Test-Path $stream[1]) -and (Get-Item $stream[1]).Length -gt 0) {
-    Write-Host ("`n=== what PowerShell put on {0} ===" -f $stream[0]) -ForegroundColor Yellow
-    Get-Content $stream[1]
-  }
+if ((Test-Path $err) -and (Get-Item $err).Length -gt 0) {
+  Write-Host "`n=== what PowerShell put on stderr ===" -ForegroundColor Yellow
+  Get-Content $err
 }
 
 Write-Host "`n=== did the folder move? ===" -ForegroundColor Cyan
