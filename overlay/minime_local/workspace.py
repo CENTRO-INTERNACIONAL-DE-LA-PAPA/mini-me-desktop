@@ -583,6 +583,31 @@ class LocalWorkspaceBackend(LocalShellBackend):
         authorship.record(self._work_dir, [path for path, _ in rerouted])
         return result
 
+    def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
+        """Run a command, and record that it ran.
+
+        **Overridden for the record, and here rather than in `aexecute`, which is where the first
+        version put it.** deepagents registers *two* execute tools — a synchronous one calling
+        `execute` and an async one calling `aexecute` (`middleware/filesystem.py:1538` and `:1627`)
+        — and which is used depends on how the graph was built. Recording in `aexecute` covered one
+        of them.
+
+        This is the point both reach: the protocol's `aexecute` delegates to `execute`, and so does
+        ours. One override, no double entry, and no way for a command to run without appearing.
+
+        That is the sixth time in this project a correct component has been wired to one of two
+        paths (§254, §257, §258, §259, §261, §262). The lesson each time is the same and it is
+        cheap to apply: find the function *everything* passes through, not the one you happened to
+        be editing.
+        """
+        started = time.monotonic()
+        try:
+            result = super().execute(command, timeout=timeout)
+        finally:
+            elapsed = time.monotonic() - started
+        _record(command, result, self._work_dir, elapsed)
+        return result
+
     # -- the surface upstream added on top of deepagents -------------------------
 
     async def aget_work_dir(self) -> str:
@@ -653,11 +678,9 @@ class LocalWorkspaceBackend(LocalShellBackend):
             logger.debug(
                 "minime_local: no _env on the backend; the Asta token cannot be refreshed"
             )
-        started = time.monotonic()
         result = self.execute(command, timeout=timeout)
         _log_failure(command, result)
         _say_where_it_ran(result, self._work_dir)
-        _record(command, result, self._work_dir, time.monotonic() - started)
         return result
 
     @property
