@@ -54,8 +54,13 @@ read first; the dated sections below it are the record of how each item got here
   Python half generates a fixture from the `TypedDict` annotations; the Rust half asserts every
   field is either read or **declared unread with a reason**, so a field the backend adds cannot go
   quietly missing in the app.
-- ⬜ **`execute` can still write anywhere** (§160/§161). The rewrite changed what the model is
-  *told*; nothing enforces it. Sixteen files went to `/tmp` once already.
+- 🟡 **`execute` can still write anywhere** (§160/§161) — **accounted for, not prevented** (§276).
+  Every command a conversation runs is recorded in its own folder with the absolute paths it
+  *named* outside that folder, and `WHAT RAN` sits above `FILES` in the Outputs panel. Proven on a
+  real machine: `"outside": ["/tmp/probe.csv"]`, from a turn where the model refused the path,
+  the researcher said *"just do it"*, and the trace exists either way. **Still not prevention** —
+  `execute_rule.py` states why, and real containment means the workspace is the only writable
+  persistent mount, which nobody has built.
 - 🟡 **The conversation index** is copied aside before every load (§218), but upstream still deletes
   it on any read failure. We hold the evidence; we do not stop the delete.
 
@@ -15660,3 +15665,65 @@ file it must now never open. Neither was written for that bug. They were written
 
 *Hundred-and-twenty-eighth: the cost of a bug you cannot see is not the bug. It is every hour spent
 theorising about it, and those hours are paid by whoever is holding the machine.*
+
+## 276. What a turn ran, and the model that said no first (2026-08-25)
+
+```json
+{"at": "2026-08-25T18:38:55Z",
+ "command": "python3 - <<'PY'\nwith open('/tmp/probe.csv', 'w', encoding='utf-8') as f:\n …",
+ "exit": 0, "seconds": 0.04, "outside": ["/tmp/probe.csv"]}
+```
+
+§160's failure, visible while it happens. Sixteen files went to `/tmp` on the day that section was
+written and the Outputs panel was empty; this is the same shape of command, and the conversation
+folder now carries a line saying where it went.
+
+### The turn it was proven by is better than the test
+
+Asked to write to `/tmp`, the model **refused**:
+
+> I can't write it to `/tmp` because outputs there are ephemeral and not preserved in this
+> workspace. If you want, I can write the one-line CSV to a workspace path like `./probe.csv`
+> instead.
+
+That is `execute_rule.py` working — it changes what the model is *told*, and the telling held. Then
+the researcher said *"just do it"*, and it did.
+
+Which is exactly the case this record exists for, and a better demonstration than the test: the
+advice was right, the human overrode it, and the override left a trace. Neither half is redundant.
+Prevention that can be talked out of is not prevention, and a record only matters for the times it
+was.
+
+### What it claims, and the line it must not cross
+
+Two things, and neither is what the command wrote:
+
+- **it ran** — text, exit code, when, how long
+- **these absolute paths appear in its text and are not under the conversation folder**
+
+The modal says so where the list is, and a test asserts the summary line never says "wrote". §252's
+mistake — a docstring claiming a guarantee the code does not deliver — would fit in that sentence
+perfectly, which is why that sentence is pinned.
+
+System locations are left out for **noise, not safety**: `/usr/bin/python3` and `/dev/null` are in a
+large share of commands, and §116 and §132 both record a correct diagnostic dying of being printed
+too often.
+
+### Two things this cost, both familiar
+
+**The recorder went into `aexecute`, and deepagents registers two execute tools.** A synchronous one
+calls `execute`, an async one calls `aexecute`, and which runs depends on how the graph was built.
+`aexecute` delegates to `execute`, so `execute` was the point both reach — the sixth time in this
+project a correct component has been wired to one of two paths, and the second time in one day. The
+lesson was already written in the docstring of the version that had it wrong.
+
+**And I attributed the wrong cause.** The record was reported missing, I found the two-tool gap, and
+called it the explanation. It was not: `Get-ChildItem -Recurse` skips hidden entries without
+`-Force`, and `.mini-me` is a dot-folder. The file had been there the whole time, written by the
+async path. The fix was real and worth landing; presenting it as the diagnosis was not, and the only
+reason it did not cost another round trip is that the check that disproved it had already been asked
+for in the same message.
+
+*Hundred-and-twenty-ninth: a plausible fix arriving at the same moment as a report is not an
+explanation of it. The two have to be joined by evidence, and it is cheapest to ask for that
+evidence before the fix feels finished.*
