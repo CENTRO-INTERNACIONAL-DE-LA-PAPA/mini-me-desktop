@@ -1046,6 +1046,16 @@ fn affordable(experiments: u32, available: Option<u32>) -> bool {
 /// where it was. Three of the five experiments in one real run reported the same `0.690`, so equal
 /// scores are the common case rather than an edge one, and a sort that reshuffled them would make
 /// the toggle look like it was doing something else.
+/// Whether the Outputs panel has nothing at all to say.
+///
+/// **A turn that ran commands has something to say even with no files**, and that is not an edge
+/// case — it is the case this whole record exists for. A command that wrote everything to `/tmp`
+/// leaves `files == 0`, and the first version of the panel checked only files and buckets, so it
+/// went silent in exactly the situation §160 describes (§277).
+fn outputs_are_empty(files: usize, buckets: usize, commands: usize) -> bool {
+    files == 0 && buckets == 0 && commands == 0
+}
+
 /// The one line the Outputs panel shows about what a conversation ran, and whether it is loud.
 ///
 /// A free function so the wording is testable without a window — the same reason `ranked` is one
@@ -16549,16 +16559,24 @@ impl Workbench {
             .border_t_1()
             .border_color(rgb(theme::border()));
 
+        // **Asked before the guard below, and that is the whole point.** The case where this line
+        // matters most is a turn that wrote nothing *into the conversation* — because everything it
+        // wrote went somewhere else. That is exactly `count == 0`, so the first version, which
+        // added it after the early return, hid it in the one situation it exists for. A researcher
+        // pressed the button, the file went to `/tmp`, and the panel stayed silent (§277).
+        let ran = self.commands_line(cx);
+
         // **Nothing at all when there is nothing.** This used to promise which artifacts would
         // appear before the filesystem had any. The recursive scan now makes §117's subfolders
-        // visible, but an empty section still says less and is right.
-        if count == 0 && self.buckets.is_empty() {
+        // visible, but an empty section still says less and is right — and "nothing" now includes
+        // having run nothing.
+        if outputs_are_empty(count, self.buckets.len(), usize::from(ran.is_some())) {
             return section;
         }
 
         // Above `FILES`, because "what ran" is the question that explains why the file list is
         // shorter than expected — which is exactly §160's morning.
-        section = section.children(self.commands_line(cx));
+        section = section.children(ran);
 
         if count > 0 {
             section = section.child(section_label_owned(format!("FILES · {count}")));
@@ -17134,6 +17152,26 @@ mod tests {
     }
 
     /// §244: one run gets a definite press, because a single action has to mean something.
+    /// The panel must not go silent in the situation the record exists for.
+    ///
+    /// A command that wrote everything to `/tmp` leaves the conversation folder empty, so `files`
+    /// is 0 — and the first version returned early on `files == 0 && buckets.is_empty()`, hiding
+    /// `WHAT RAN` in precisely the case §160 describes. A researcher pressed the button, the file
+    /// went outside, and the panel said nothing (§277).
+    #[test]
+    fn a_turn_that_wrote_nothing_here_still_has_something_to_say() {
+        assert!(
+            !outputs_are_empty(0, 0, 1),
+            "no files, no artifacts, one command — the panel must still show what ran, because \
+             the missing files are the point"
+        );
+        // The genuinely empty case stays empty: a conversation gains no furniture for nothing.
+        assert!(outputs_are_empty(0, 0, 0));
+        // And any one of the three is enough on its own.
+        assert!(!outputs_are_empty(1, 0, 0));
+        assert!(!outputs_are_empty(0, 1, 0));
+    }
+
     /// What the Outputs panel says about a conversation's commands.
     ///
     /// A free function so the *wording* is testable, because the wording is the feature: the phrase
