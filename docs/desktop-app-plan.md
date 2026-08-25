@@ -86,19 +86,15 @@ read first; the dated sections below it are the record of how each item got here
   that is what an updater makes: `/releases/latest` answers `v0.3.0` and the zip returns 200 to a
   request carrying no credentials. The workflow now refuses a tag whose name disagrees with
   `Cargo.toml`.
-- 🟡 **The update flow** (§268) — built, and **not yet proven on a machine**. The app checks at
-  launch, downloads and verifies against the digest GitHub publishes, and offers *Restart to
-  Update* in the status bar; the helper waits for exit, retires the old folder rather than deleting
-  it, moves the new one in, rolls back on failure and relaunches. **Nine** bugs were found writing
-  it (§268–§274), every one in the seam between this code and the operating system and not one
-  reachable from the machine it was written on. Every link is now demonstrated on a real machine —
-  the check and download by a chip appearing, the spawn by a real PowerShell error arriving, the
-  script and the reporting by `scripts/swap-rehearsal.ps1` — and `v0.3.10` is the first build
-  carrying all of them. **Remaining: one press, end to end, by somebody who is not testing it.**
-  Everything from `v0.3.1` to `v0.3.9` carries a button that cannot bring itself forward, left in
-  place rather than retracted since none was ever downloaded.
-
-**4. Debt that keeps causing the same bug.**
+- ✅ **The update flow** (§268–§275) — **proven end to end on 2026-08-25**: `v0.3.10` found
+  `v0.3.11`, downloaded and verified it against the digest GitHub publishes, and one press in the
+  status bar retired the old folder, moved the new one in and relaunched — two seconds, five lines
+  in `%TEMP%\mini-me-desktop-update.log`, ending in `done`. Nine defects were found building it,
+  every one in the seam between this code and the operating system, and four of them cost a round
+  trip each because the failure produced no output and I theorised instead of building
+  `scripts/swap-rehearsal.ps1`, which then settled it in five seconds. Everything from `v0.3.1` to
+  `v0.3.9` carries a button that cannot bring itself forward; they are left in place rather than
+  retracted, since none was ever downloaded.
 - ⬜ **`start_async_task` accepts only `background_worker`** (§114), so "run *X* in the background"
   cannot route a named specialist.
 - ⬜ **Two renderers for one collection** — sources drawn from `buckets` in one path and
@@ -15605,3 +15601,62 @@ checking the half of a contract that was already fine.
 
 *Hundred-and-twenty-seventh: a safety net added without asking what the other one is holding is not
 a second net. It is something for the first to catch on.*
+
+## 275. One press, end to end (2026-08-25)
+
+```
+--- .mini-me-update-0.3.11 about to start the helper: powershell 6 args, pid 23044 to wait for,
+    install C:\Users\LENOVO\Downloads\mini-me-desktop-v0.3.10-windows-x64\mini-me-desktop
+2026-08-25T09:14:03 waiting for mini-me-desktop-app (pid 23044) to exit
+2026-08-25T09:14:04 retired the old folder
+2026-08-25T09:14:04 the new build is in place
+2026-08-25T09:14:04 relaunched
+2026-08-25T09:14:05 done
+```
+
+*"Now it worked."*
+
+`relaunched`, not the caught failure the rehearsal produces against a fake executable — the real
+app, started by the helper, on a researcher's own machine. `v0.3.10` reached `v0.3.11` by itself in
+two seconds, and the folder it was running from is now a different folder.
+
+The file also shows the previous attempt directly above it, which is worth leaving in the record:
+the same five lines are missing and an `Out-File` sharing violation stands in their place. One log,
+two presses, the fix visible between them.
+
+### What it took
+
+Nine defects, §268–§274. Every one lived in the seam between this code and Windows, and not one was
+reachable from the machine the code was written on:
+
+- a `#[cfg]` that guessed the platform doing the *inspecting* rather than the platform inspected
+- a field read before it was assigned
+- test paths that were one component on Linux and four on Windows
+- a helper standing in the folder it was replacing
+- two console flags that cannot be combined
+- a chip and a press asking different questions
+- a script that `-Command` could not carry intact
+- a console application given no console
+- a log file opened twice, by the same process, in two incompatible ways
+
+Four of them cost a full round trip each — cut two releases, ask someone on another continent to
+install one, read what came back, guess again — because the failure produced no output and I kept
+reasoning about it from a distance instead of building something that could see it.
+
+### The thing worth carrying forward
+
+`scripts/swap-rehearsal.ps1` took twenty minutes to write and answered in five seconds what four
+release pairs had failed to answer. It should have existed after the *second* silent failure, not
+the fifth.
+
+The signal was legible the whole time and went unread: **three consecutive reports of "nothing
+happened".** Not a wrong answer — no answer. A wrong answer is a bug to reason about. No answer is a
+statement that the system cannot be observed, and the only correct response is to stop guessing and
+build the instrument.
+
+It also paid twice. When the ninth fix landed, two guards failed before anybody pressed anything —
+the rehearsal was pinned to a script that no longer existed, and a test asserted the script named a
+file it must now never open. Neither was written for that bug. They were written for drift.
+
+*Hundred-and-twenty-eighth: the cost of a bug you cannot see is not the bug. It is every hour spent
+theorising about it, and those hours are paid by whoever is holding the machine.*
