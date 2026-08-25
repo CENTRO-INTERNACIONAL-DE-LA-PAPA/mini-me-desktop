@@ -197,3 +197,101 @@ def append(work_dir: str | PurePosixPath, record: dict[str, Any]) -> None:
         target.write_text("\n".join(kept) + "\n", encoding="utf-8")
     except Exception:  # noqa: BLE001 — see the docstring; nothing here may reach the researcher
         pass
+
+
+def read(work_dir: str | PurePosixPath) -> list[dict[str, Any]]:
+    """The conversation's record, oldest first. A malformed line is skipped, never fatal."""
+    from pathlib import Path
+
+    target = Path(str(work_dir)) / RECORD_DIR / RECORD_NAME
+    try:
+        lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    records: list[dict[str, Any]] = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            records.append(json.loads(line))
+        except ValueError:
+            continue
+    return records
+
+
+def collectable(work_dir: str | PurePosixPath) -> list[str]:
+    """Files this conversation's commands wrote outside it, that are still there.
+
+    **Only `wrote`, never `outside`.** A named path may be the researcher's own input, and the
+    difference between the two lists is the difference between offering somebody their results and
+    taking their data (see :func:`written_during`).
+
+    Deduplicated and ordered by when they were written, because that is the order they were
+    produced in and the order a person expects to see them.
+    """
+    from pathlib import Path
+
+    found: list[str] = []
+    for record in read(work_dir):
+        for path in record.get("wrote") or []:
+            if path in found:
+                continue
+            try:
+                if Path(path).is_file():
+                    found.append(path)
+            except OSError:
+                continue
+    return found
+
+
+def free_name(folder: "Path", name: str) -> "Path":  # type: ignore[name-defined]
+    """A path in `folder` that is not taken, suffixing before the extension.
+
+    The same rule `workspace::adopt` uses on the app side: `results.csv` becomes `results-2.csv`,
+    never `results.csv-2`, because the extension is what makes a file openable.
+    """
+    from pathlib import Path
+
+    candidate = folder / name
+    if not candidate.exists():
+        return candidate
+    stem, suffix = Path(name).stem, Path(name).suffix
+    for index in range(2, 100):
+        candidate = folder / f"{stem}-{index}{suffix}"
+        if not candidate.exists():
+            return candidate
+    raise FileExistsError(f"{name} already exists a hundred times over in this conversation")
+
+
+def collect(work_dir: str | PurePosixPath, paths: Iterable[str]) -> dict[str, Any]:
+    """**Copy** the given files into the conversation. Never moves, never overwrites.
+
+    Copied rather than moved for a reason that is not squeamishness: a script often writes a file
+    and reads it back later in the same run, and a later turn may expect it where it was left.
+    Moving it breaks work that is still going; copying costs disk and breaks nothing.
+
+    Returns what arrived and what did not, with a reason for each — a partial result is the normal
+    case here and reporting only the count would hide it.
+    """
+    from pathlib import Path
+    import shutil
+
+    folder = Path(str(work_dir))
+    brought: list[dict[str, str]] = []
+    refused: list[dict[str, str]] = []
+    for path in paths:
+        source = Path(path)
+        try:
+            if not source.is_file():
+                refused.append({"path": path, "reason": "it is no longer there"})
+                continue
+            if folder in source.parents:
+                refused.append({"path": path, "reason": "it is already in this conversation"})
+                continue
+            folder.mkdir(parents=True, exist_ok=True)
+            target = free_name(folder, source.name)
+            shutil.copy2(source, target)
+            brought.append({"path": path, "as": target.name})
+        except Exception as exc:  # noqa: BLE001 — one bad file must not lose the others
+            refused.append({"path": path, "reason": str(exc)})
+    return {"brought": brought, "refused": refused}
