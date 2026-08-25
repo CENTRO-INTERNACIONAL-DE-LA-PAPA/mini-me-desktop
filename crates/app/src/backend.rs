@@ -1712,7 +1712,29 @@ pub(crate) mod env_lock {
 
 #[cfg(test)]
 mod tests {
-    /// Every test that redirects the environment must hold [`env_lock`].
+    /// The shared globals a test may change, and the lock each one requires.
+    ///
+    /// Two locks, the same rule, and the same failure twice: a lock only works if *everyone* takes
+    /// it. §267 found one test setting `MINIME_LOCAL_WORKSPACE` without `env_lock`; §271 found
+    /// seven changing the live palette without the theme lock, which had been fixed at §197 for
+    /// the four tests that could reach it and left open for the seven that could not.
+    ///
+    /// Both surfaced as a single failure with a different name each run — the shape that costs
+    /// days, because it looks like flakiness rather than a race.
+    const GUARDED: [(&str, &[&str], &str); 2] = [
+        (
+            "env_lock::hold()",
+            &["std::env::set_var", "std::env::remove_var"],
+            "process-global environment",
+        ),
+        (
+            "theme_lock::hold()",
+            &["theme::apply(", "install_theme", "= apply("],
+            "the live palette",
+        ),
+    ];
+
+    /// Every test that changes a shared global must hold its lock.
     ///
     /// The lock only works if everyone takes it. One test set `MINIME_LOCAL_WORKSPACE` without
     /// it, and for the microseconds it held that value *every other test running concurrently*
@@ -1725,34 +1747,40 @@ mod tests {
     /// are split on `#[test]`, which is not exactly a function boundary but is close enough to
     /// catch the mistake and never fires on correct code.
     #[test]
-    fn a_test_that_moves_the_environment_holds_the_lock() {
-        let sources: [(&str, &str); 6] = [
+    fn a_test_that_changes_a_shared_global_holds_its_lock() {
+        let sources: [(&str, &str); 8] = [
             ("workspace.rs", include_str!("workspace.rs")),
             ("backend.rs", include_str!("backend.rs")),
             ("preflight.rs", include_str!("preflight.rs")),
             ("settings.rs", include_str!("settings.rs")),
             ("sidecar.rs", include_str!("sidecar.rs")),
+            ("theme.rs", include_str!("theme.rs")),
+            ("ui.rs", include_str!("ui.rs")),
             ("main.rs", include_str!("main.rs")),
         ];
         let mut unguarded = Vec::new();
-        for (name, source) in sources {
-            for chunk in source.split("#[test]").skip(1) {
-                let moves = chunk.contains("std::env::set_var")
-                    || chunk.contains("std::env::remove_var");
-                if moves && !chunk.contains("env_lock::hold()") {
+        for (lock, writes, what) in GUARDED {
+            for (name, source) in sources {
+                for chunk in source.split("#[test]").skip(1) {
+                    if !writes.iter().any(|write| chunk.contains(write)) {
+                        continue;
+                    }
+                    if chunk.contains(lock) {
+                        continue;
+                    }
                     let signature = chunk
                         .lines()
                         .find(|line| line.trim_start().starts_with("fn "))
                         .unwrap_or("<unnamed>")
                         .trim();
-                    unguarded.push(format!("{name}: {signature}"));
+                    unguarded.push(format!("{name}: {signature} changes {what} without {lock}"));
                 }
             }
         }
         assert!(
             unguarded.is_empty(),
-            "these tests move process-global environment without env_lock::hold(), so they \
-             corrupt whatever runs beside them:\n  {}",
+            "these tests change a shared global without its lock, so they corrupt whatever runs \
+             beside them:\n  {}",
             unguarded.join("\n  ")
         );
     }
