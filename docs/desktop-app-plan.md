@@ -89,13 +89,14 @@ read first; the dated sections below it are the record of how each item got here
 - 🟡 **The update flow** (§268) — built, and **not yet proven on a machine**. The app checks at
   launch, downloads and verifies against the digest GitHub publishes, and offers *Restart to
   Update* in the status bar; the helper waits for exit, retires the old folder rather than deleting
-  it, moves the new one in, rolls back on failure and relaunches. **Eight** bugs were found writing
-  it (§268–§273), every one in the seam between this code and the operating system and not one
-  reachable from the machine it was written on. **The swap script itself is now proven on a real
-  machine** by `scripts/swap-rehearsal.ps1`, which moved a real folder; what is left unproven is the
-  app's own spawn of it, fixed at §273 and shipping in `v0.3.8`. Every release from `v0.3.1` to
-  `v0.3.7` carries a button that cannot bring itself forward — left in place rather than retracted,
-  since none was ever downloaded.
+  it, moves the new one in, rolls back on failure and relaunches. **Nine** bugs were found writing
+  it (§268–§274), every one in the seam between this code and the operating system and not one
+  reachable from the machine it was written on. Every link is now demonstrated on a real machine —
+  the check and download by a chip appearing, the spawn by a real PowerShell error arriving, the
+  script and the reporting by `scripts/swap-rehearsal.ps1` — and `v0.3.10` is the first build
+  carrying all of them. **Remaining: one press, end to end, by somebody who is not testing it.**
+  Everything from `v0.3.1` to `v0.3.9` carries a button that cannot bring itself forward, left in
+  place rather than retracted since none was ever downloaded.
 
 **4. Debt that keeps causing the same bug.**
 - ⬜ **`start_async_task` accepts only `background_worker`** (§114), so "run *X* in the background"
@@ -15537,3 +15538,70 @@ precisely when nothing else can be trusted.
 
 *Hundred-and-twenty-sixth: when the third report in a row says "nothing happened", the next thing to
 build is not a fix. It is the instrument that would have told you what happened.*
+
+## 274. Two safety nets, tangled around one file (2026-08-25)
+
+§273 fixed the spawn, and the press still did nothing — but this time the log said why, in
+sentences:
+
+```
+Out-File : El proceso no puede obtener acceso al archivo
+'…\mini-me-desktop-update.log' porque está siendo utilizado en otro proceso.
+```
+
+`begin_swap` hands the child that file as stdout **and** stderr (§272), so the child already holds
+it open. The script's `Note` then opened the same path with `Out-File`, which asks for a share mode
+the existing handle contradicts. The open failed; `$ErrorActionPreference = 'Stop'` made that
+terminating; the helper died on its first statement having done nothing. Three presses.
+
+**Two safety nets, added for different failures, tangled around one file.** The redirect existed to
+catch a script that never runs. The script's own logging existed to record what it did once running.
+Each was right on its own and together they were a deadlock: the second could not open what the
+first was holding.
+
+Rust owns the handle now, and `Note` writes to the output stream — one writer. The log path does not
+appear in the script at all, and a test asserts it, because the whole failure was the script naming
+a file it was not allowed to open.
+
+### The reasoning that hid it for three rounds
+
+This cause was considered, several rounds earlier, and dismissed: Rust's `OpenOptions` on Windows
+opens with `FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE`, so another writer *is*
+permitted. That is true, and it is the wrong side of the transaction. A sharing violation is decided
+by both halves: what the existing handle **permits**, and what the new open **requests**.
+`Out-File`'s request was the restrictive one. Checking only the permissive half proved nothing and
+felt like proof.
+
+The one thing that made it visible was PowerShell writing the error to *stderr* — the same file, by
+a different handle, which was inherited and so needed no open at all.
+
+### Something finally went right
+
+Both guards caught the fix before a person did — the first time in this arc:
+
+- `the_rehearsal_runs_the_script_this_module_generates` failed, because the committed rehearsal
+  still carried a script with `Out-File` in it.
+- `the_setup_pane_names_the_log_the_helper_writes` failed, because it asserted the script names the
+  log, which it must now never do.
+
+Neither was written for this bug. They were written for drift, and drift is what a fix *is* from the
+outside. That is the argument for the join tests in one line: they do not have to anticipate the
+defect, only the seam it will move through.
+
+### Where the update flow actually stands
+
+Every link is now demonstrated on a real machine rather than argued from a Linux box:
+
+| link | proven by |
+|---|---|
+| check, download, verify | the chip appeared on a real install |
+| spawn reaches PowerShell | a real PowerShell error arrived in the log |
+| the script parses and moves folders | `swap-rehearsal.ps1`, twice |
+| the helper's report reaches the log | the same rehearsal, after this fix |
+
+Nine defects across §268–§274. Every one in the seam between this code and Windows; not one
+reachable from the machine it was written on; and the two that took longest were both cases of
+checking the half of a contract that was already fine.
+
+*Hundred-and-twenty-seventh: a safety net added without asking what the other one is holding is not
+a second net. It is something for the first to catch on.*
