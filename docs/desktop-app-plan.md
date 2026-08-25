@@ -89,11 +89,13 @@ read first; the dated sections below it are the record of how each item got here
 - 🟡 **The update flow** (§268) — built, and **not yet proven on a machine**. The app checks at
   launch, downloads and verifies against the digest GitHub publishes, and offers *Restart to
   Update* in the status bar; the helper waits for exit, retires the old folder rather than deleting
-  it, moves the new one in, rolls back on failure and relaunches. **Five** bugs were found writing
-  it (§268, §269), four of which passed every test first, and every one of them in the seam between
-  this code and the operating system. **Remaining: a swap that has actually moved a folder.**
-  `v0.3.1` through `v0.3.3` carry a button that fails at the spawn and cannot bring themselves
-  forward; they are left in place rather than retracted, and `v0.3.4` is the first that can.
+  it, moves the new one in, rolls back on failure and relaunches. **Eight** bugs were found writing
+  it (§268–§273), every one in the seam between this code and the operating system and not one
+  reachable from the machine it was written on. **The swap script itself is now proven on a real
+  machine** by `scripts/swap-rehearsal.ps1`, which moved a real folder; what is left unproven is the
+  app's own spawn of it, fixed at §273 and shipping in `v0.3.8`. Every release from `v0.3.1` to
+  `v0.3.7` carries a button that cannot bring itself forward — left in place rather than retracted,
+  since none was ever downloaded.
 
 **4. Debt that keeps causing the same bug.**
 - ⬜ **`start_async_task` accepts only `background_worker`** (§114), so "run *X* in the background"
@@ -15383,3 +15385,155 @@ model does not contain.
 *Hundred-and-twenty-fifth: the absence of a log was worth more than the log would have been. It
 located the failure upstream of everything that had been tested, which is the one thing a message
 inside the log could not have done.*
+
+## 270. A script that could not survive the trip (2026-08-24)
+
+The console flags were fixed (§269) and the press still did nothing. This time the app log said the
+spawn had *worked*:
+
+```
+INFO restarting into a new build pid=9284 install=… staged=… log=…
+```
+
+No "could not start the updater" beside it. PowerShell was created, and wrote nothing.
+
+**PowerShell parses the whole `-Command` string before executing any of it**, so one mangled
+character silences everything — including the log's own first statement, which is why there was
+nothing to read. The script contains double quotes; `notify.rs`, which works, does not. Rust escapes
+them for the command line and PowerShell re-parses them, and somewhere in that handoff the script
+stopped being valid.
+
+There is no PowerShell on the machine this is written on, so which character it was could not be
+checked, **and a guess that cannot be checked is not worth shipping.** `-EncodedCommand` takes
+opaque base64 instead: nothing between the app and the parser can reinterpret a quote, a brace or a
+semicolon. The round trip is asserted — UTF-16LE, decoded back, byte-identical.
+
+### The expensive part was the silence
+
+Three presses had now produced *nothing at all*: no restart, no log, no error. The helper died
+before its first statement and, being detached, had no console for the message to land on. That is
+the most expensive shape a failure can take — it costs a round trip to a person on another machine
+and tells them only that something is wrong.
+
+The child is handed the update log as its own stdout and stderr now, so a script that never parses
+still writes something. Two layers, covering different failures: the redirect catches what happens
+before the script runs, the script's own logging covers after.
+
+## 271. A lock in a private module is a lock seven tests cannot take (2026-08-24)
+
+A full run failed on `a_hover_is_visible_over_every_surface_it_can_cover`, then would not reproduce
+in six more. That test holds the theme lock correctly. **Seven others do not** — one in `main.rs`,
+two in `settings.rs`, three in `ui.rs` — all changing the global palette while it reads it.
+
+They could not. `THEME_LOCK` lived inside `theme.rs`'s own `mod tests`, so §197 was fixed for the
+four tests that could reach it and left open for the seven that could not. The comment beside it
+describes this exact failure — *"a failure roughly one run in four, always in whichever test lost,
+which reads as a flake and is a genuine data race between tests"* — and had been describing a race
+it only half prevented.
+
+The lock is `theme::theme_lock` now, crate-visible, shaped like `backend::env_lock` for the same
+reason. All seven take it.
+
+**And the guard generalised**, because this is the second time the same rule has broken and the
+first fix (§267) only covered the case that had already bitten:
+
+```
+env_lock::hold()    std::env::set_var / remove_var     §267
+theme_lock::hold()  theme::apply / install_theme       §197, §271
+```
+
+It scans `theme.rs` and `ui.rs` too, which the first version did not, and it was verified by
+removing one guard and watching it name the offender.
+
+*Worth noting how this was found:* a `cargo test` inside a `&&` chain printed `FAILED`, and the
+chain continued — because `grep` had succeeded at finding the word. A commit whose suite was red was
+merged on the strength of a successful `grep`. The pipeline reported the grep's fate as the run's,
+which is §267's `gh run watch --exit-status` mistake in a different costume.
+
+## 272. An empty file that meant two opposite things (2026-08-24)
+
+After §270 the update log finally **existed** — and was empty.
+
+Progress, but ambiguous in exactly the wrong way. *"The helper never started"* and *"the helper
+started and said nothing"* look identical as zero bytes, and they want opposite fixes. Four rounds
+had already been spent on the difference.
+
+So this process writes one line into the log before the child exists, and flushes it. Its presence
+proves the spawn was reached; its loneliness proves the child contributed nothing. The line carries
+what would otherwise have to be asked for: which staging folder, how many arguments the helper was
+given, which pid it waits on, which folder it would replace.
+
+A diagnostic that only helps once something has already gone wrong — which is precisely when every
+other signal has failed.
+
+## 273. Building the rehearsal, four attempts too late (2026-08-24)
+
+Three release pairs, three presses, three reports of nothing happening. Then one script, run once,
+and the answer in five seconds:
+
+```
+retired the old folder
+the new build is in place
+after : THE NEW BUILD
+SWAP WORKED
+```
+
+**The swap script was correct all along.** Encoding, quoting, ordering, rollback — every part of
+what §268 tested, working on a real machine against real folders. The fault was in the spawn, and
+four rounds of guessing had never touched it.
+
+### What the rehearsal saw that nothing else could
+
+```
+#< CLIXML ... Preparando módulos para el primer uso.
+```
+
+PowerShell writes progress records to stderr the moment stderr is redirected, **before running
+anything**. The app's log contained none of them. So PowerShell was not failing to parse the script;
+it was dying before it prepared its modules.
+
+`DETACHED_PROCESS` gives a child **no console at all**, and `powershell.exe` is a console
+application. That was the whole bug. The reasoning behind the flag — *"the helper must outlive the
+app it is waiting for"* — is true and is not threatened by anything: Windows does not kill a child
+when its parent exits. It was a flag solving a problem that does not exist, at the cost of the one
+that does.
+
+`CREATE_NO_WINDOW` gives the child its own console and hides it. **It is what `notify.rs` has used
+to run PowerShell in this app since §265** — a working example, in the same binary, four attempts
+away. The two spawns are now pinned to agree, because a program starting the same executable two
+different ways is what this cost.
+
+### Eight, and the shape of all of them
+
+| § | the defect | how long it hid |
+|---|---|---|
+| 268 | `#[cfg(windows)]` on the bundled executable's name | every test passed |
+| 268 | `behind` read off the field before assignment | every test passed |
+| 268 | `C:\…` test paths, one component on Linux | every test passed |
+| 268 | the helper standing in the folder it replaced | thirty-one tests passed |
+| 270 | two mutually exclusive console flags | spawn failed, silently |
+| 270 | chip and press asking different questions | button returned silently |
+| 272 | `-Command` could not carry the script | helper started, wrote nothing |
+| 273 | `DETACHED_PROCESS` left it without a console | helper started, wrote nothing |
+
+Every one in the seam between this code and the operating system. Not one reachable from the machine
+it was written on.
+
+### The actual lesson, which is not about Windows
+
+The rehearsal took twenty minutes to build and settled in five seconds a question that four release
+pairs had failed to answer. Each of those cost two CI runs, an install, and a person's attention on
+another continent — call it an hour each, and the fourth one still ended in *"nothing restarted"*.
+
+The tell was there from the first report and went unread: **three consecutive failures produced no
+output at all.** Not a wrong answer — *no* answer. That is not a bug to be reasoned about from a
+distance; it is a signal that the thing cannot be observed, and the correct response is to stop
+guessing and build the instrument. Everything after §270 was theorising about a black box that could
+have been opened at any point.
+
+`scripts/swap-rehearsal.ps1` is committed, generated from `swap_script` itself, with a test asserting
+it has not drifted — because a rehearsal of a stale script is worse than none, and it is run
+precisely when nothing else can be trusted.
+
+*Hundred-and-twenty-sixth: when the third report in a row says "nothing happened", the next thing to
+build is not a fix. It is the instrument that would have told you what happened.*
