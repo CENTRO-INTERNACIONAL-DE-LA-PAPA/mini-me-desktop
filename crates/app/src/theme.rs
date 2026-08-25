@@ -624,23 +624,36 @@ pub fn contrast(a: u32, b: u32) -> f64 {
 // separate concern with its own fixtures. Keeping that narrative order is more useful
 // than moving the entire test module to satisfy a source-order preference (docs §118).
 #[allow(clippy::items_after_test_module)]
+/// Serialises every test that calls [`apply`].
+///
+/// **The live theme is global**, which is the whole design — free rendering helpers have no
+/// `Context` to reach a GPUI global through. It also means two tests that `apply` different
+/// palettes and then read `text()` or `ink_on()` are racing, and `cargo test` runs them in
+/// parallel by default. That produced a failure roughly one run in four, always in whichever test
+/// lost, which reads as a flake and is a genuine data race between tests (docs §197).
+///
+/// **It used to live inside this file's own `mod tests`**, which made it unreachable from the
+/// seven tests in `main.rs`, `ui.rs` and `settings.rs` that also change the palette — so §197 was
+/// fixed for four tests and left open for seven. It surfaced again on 2026-08-24 as a one-in-many
+/// failure in `a_hover_is_visible_over_every_surface_it_can_cover`, which holds the lock correctly
+/// and was being undermined by tests that could not.
+///
+/// A guard nobody can reach is not a guard, so it sits beside the code it protects now, shaped
+/// like `backend::env_lock` for the same reason.
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Serialises every test that calls [`apply`].
-    ///
-    /// **The live theme is global**, which is the whole design — free rendering helpers have no
-    /// `Context` to reach a GPUI global through. It also means two tests that `apply` different
-    /// palettes and then read `text()` or `ink_on()` are racing, and `cargo test` runs them in
-    /// parallel by default. That produced a failure roughly one run in four, always in whichever
-    /// test lost, which reads as a flake and is a genuine data race between tests (docs §197).
-    static THEME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) mod theme_lock {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// Take the lock, surviving a panic in a test that held it before.
-    fn hold_theme() -> std::sync::MutexGuard<'static, ()> {
-        THEME_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    pub(crate) fn hold() -> std::sync::MutexGuard<'static, ()> {
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::theme_lock::hold as hold_theme;
+    use super::*;
 
     #[test]
     fn a_hover_is_visible_over_every_surface_it_can_cover() {

@@ -646,6 +646,10 @@ mod tests {
 
     #[test]
     fn a_researchers_own_palette_can_replace_a_built_in() {
+        // The live palette is global, so a test that changes it must not run beside one
+        // that reads it. §197 fixed this for `theme.rs`'s own tests and could not reach
+        // these three files, because the lock lived in a private test module.
+        let _theme = crate::theme::theme_lock::hold();
         let _env = crate::backend::env_lock::hold();
         let dir = std::env::temp_dir().join(format!("minime-theme-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -698,6 +702,10 @@ mod tests {
 
     #[test]
     fn uninstalling_one_zed_file_removes_its_whole_family_and_nothing_beside_it() {
+        // The live palette is global, so a test that changes it must not run beside one
+        // that reads it. §197 fixed this for `theme.rs`'s own tests and could not reach
+        // these three files, because the lock lived in a private test module.
+        let _theme = crate::theme::theme_lock::hold();
         let _env = crate::backend::env_lock::hold();
         let dir = std::env::temp_dir().join(format!(
             "minime-theme-uninstall-test-{}",

@@ -17815,6 +17815,10 @@ mod tests {
 
     #[test]
     fn csv_columns_get_distinct_colours_from_the_live_palette() {
+        // The live palette is global, so a test that changes it must not run beside one
+        // that reads it. §197 fixed this for `theme.rs`'s own tests and could not reach
+        // these three files, because the lock lived in a private test module.
+        let _theme = crate::theme::theme_lock::hold();
         assert!(is_delimited("papas.csv"));
         assert!(is_delimited("MODELO.TSV"), "case is not a format");
         assert!(!is_delimited("informe.md"));
