@@ -1365,6 +1365,37 @@ mod tests {
             "base64 only, so the command line cannot reinterpret anything");
     }
 
+    /// `scripts/swap-rehearsal.ps1` must carry *this* script, not one from a week ago.
+    ///
+    /// A rehearsal of the wrong script is worse than none: it would prove something true of code
+    /// that no longer ships, and it is being run precisely when nothing else can be trusted.
+    #[test]
+    fn the_rehearsal_runs_the_script_this_module_generates() {
+        let template = swap_script(&Swap {
+            pid: 999_999,
+            install: PathBuf::from("__BASE__/mini-me-desktop"),
+            staged: PathBuf::from("__BASE__/.mini-me-update-9.9.9/mini-me-desktop"),
+            retired: PathBuf::from("__BASE__/.mini-me-previous-9.9.9"),
+            staging: PathBuf::from("__BASE__/.mini-me-update-9.9.9"),
+            launch: PathBuf::from("__BASE__/mini-me-desktop/mini-me-desktop-app.exe"),
+            log: PathBuf::from("__LOG__"),
+            working: PathBuf::from("__WORK__"),
+        });
+        let rehearsal = include_str!("../../../scripts/swap-rehearsal.ps1");
+        assert!(
+            rehearsal.contains(template.trim()),
+            "scripts/swap-rehearsal.ps1 no longer carries the script this module generates, so \
+             running it would prove nothing about the app"
+        );
+        // And it substitutes all three, or it would rehearse against literal placeholders.
+        for placeholder in ["__BASE__", "__LOG__", "__WORK__"] {
+            assert!(
+                rehearsal.contains(&format!("Replace('{placeholder}'")),
+                "{placeholder} is never substituted"
+            );
+        }
+    }
+
     /// An empty log must not be ambiguous.
     ///
     /// "The helper never started" and "the helper started and said nothing" want opposite fixes,
