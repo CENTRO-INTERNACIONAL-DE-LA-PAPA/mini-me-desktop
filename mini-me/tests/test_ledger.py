@@ -214,6 +214,17 @@ def _sample() -> list[dict]:
             work_dir=work,
             at="2026-08-25T09:15:00Z",
         ),
+        # The strong case: named *and* confirmed written, which is the only one a copy button may
+        # ever act on. Passed explicitly because deciding it needs a filesystem and this is a
+        # fixture, not a run.
+        ledger.entry(
+            "python3 -c \"open('/tmp/late-blight.csv','w').write(rows)\"",
+            exit_code=0,
+            seconds=0.8,
+            work_dir=work,
+            at="2026-08-25T09:16:11Z",
+            wrote=["/tmp/late-blight.csv"],
+        ),
     ]
 
 
@@ -238,6 +249,11 @@ def test_the_fixture_covers_both_branches_the_client_can_get_wrong():
     assert any(e["outside"] for e in entries), "a command that named something outside"
     assert any(not e["outside"] for e in entries), "and one that did not"
     assert any(e["exit"] != 0 for e in entries), "and one that failed"
+    assert any(e["wrote"] for e in entries), "and one confirmed to have written there"
+    assert any(e["outside"] and not e["wrote"] for e in entries), (
+        "and one that named a path without writing it — the read case, which is the whole reason "
+        "`wrote` exists and the one a copy button must never touch"
+    )
 
 
 def test_both_execute_tools_reach_the_record(tmp_path, monkeypatch):
@@ -262,6 +278,13 @@ def test_both_execute_tools_reach_the_record(tmp_path, monkeypatch):
     assert "echo synchronous" in ran, "the sync tool's commands must be recorded"
     assert "echo asynchronous" in ran, "and the async tool's"
     assert len(written) == 2, f"exactly once each, not twice: {ran}"
+    # **Recorded is not the same as ran**, and the first version of this test only checked the
+    # former. It passed while every synchronous command was dying with `FileNotFoundError`,
+    # because `_record` records failures too — only `aexecute` created the workspace, so the sync
+    # path ran with a `cwd` that did not exist.
+    assert [entry["exit"] for entry in written] == [0, 0], (
+        f"both tools must actually work, not merely be recorded: {written}"
+    )
 
 
 def test_a_command_that_raises_is_still_timed_out_of_the_record(tmp_path, monkeypatch):
@@ -279,3 +302,95 @@ def test_a_command_that_raises_is_still_timed_out_of_the_record(tmp_path, monkey
     backend.execute("echo fine")
     record = tmp_path / "raising" / ledger.RECORD_DIR / ledger.RECORD_NAME
     assert record.is_file(), "the ordinary path still records"
+
+
+# --- what the command wrote, as against what it named -----------------------------------------
+
+
+def test_a_file_written_during_the_command_is_reported_as_written(tmp_path: Path):
+    import time
+
+    target = tmp_path / "made-now.csv"
+    start = time.time()
+    target.write_text("col1\n1\n")
+    end = time.time()
+    assert ledger.written_during([str(target)], start, end) == [str(target)]
+
+
+def test_a_file_the_command_only_read_is_not_reported_as_written(tmp_path: Path):
+    """**The distinction the whole feature turns on.**
+
+    `pd.read_csv('/tmp/input.csv')` names a file the researcher owns. Treating a named path as
+    output is how a well-meant tidy-up steals somebody's data, and the command's text cannot tell
+    the two apart — the file's own mtime can.
+    """
+    import os
+    import time
+
+    existing = tmp_path / "the-researchers-own.csv"
+    existing.write_text("theirs")
+    long_ago = time.time() - 3600
+    os.utime(existing, (long_ago, long_ago))
+
+    start = time.time()
+    end = start + 0.5
+    assert ledger.written_during([str(existing)], start, end) == []
+
+
+def test_paths_that_are_not_files_are_left_alone(tmp_path: Path):
+    import time
+
+    start, end = time.time() - 1, time.time() + 1
+    missing = tmp_path / "never-existed.csv"
+    a_directory = tmp_path / "a-folder"
+    a_directory.mkdir()
+    assert ledger.written_during([str(missing), str(a_directory)], start, end) == []
+
+
+def test_wrote_is_never_more_than_what_was_named():
+    """Something the command did not name cannot have been checked, so it cannot be claimed."""
+    record = ledger.entry(
+        "python3 -c \"open('/tmp/named.csv','w')\"",
+        exit_code=0,
+        seconds=0.1,
+        work_dir=WORK,
+        at="t",
+        wrote=["/tmp/named.csv", "/tmp/never-mentioned.csv"],
+    )
+    assert record["outside"] == ["/tmp/named.csv"]
+    assert record["wrote"] == ["/tmp/named.csv"]
+
+
+def test_a_real_command_records_what_it_wrote_and_not_what_it_read(tmp_path, monkeypatch):
+    """The join, with both halves in one turn.
+
+    One command reads a file it did not create and writes another. The record must name both as
+    *outside* — they are — and only the second as *written*, because only the second is this
+    command's to offer to move.
+    """
+    import os
+    import time
+
+    from minime_local.workspace import LocalWorkspaceBackend
+
+    monkeypatch.setenv("MINIME_LOCAL_WORKSPACE", str(tmp_path))
+    theirs = tmp_path.parent / "their-input.csv"
+    theirs.write_text("a,b\n1,2\n")
+    long_ago = time.time() - 3600
+    os.utime(theirs, (long_ago, long_ago))
+    ours = tmp_path.parent / "our-output.csv"
+    ours.unlink(missing_ok=True)
+
+    backend = LocalWorkspaceBackend("reads-and-writes")
+    backend.execute(
+        f"python3 -c \"open('{ours}','w').write(open('{theirs}').read())\""
+    )
+
+    record_path = tmp_path / "reads-and-writes" / ledger.RECORD_DIR / ledger.RECORD_NAME
+    written = json.loads(record_path.read_text().splitlines()[0])
+
+    assert set(written["outside"]) == {str(theirs), str(ours)}, "both are outside the conversation"
+    assert written["wrote"] == [str(ours)], (
+        "only the file this command created may be offered as its output; the other is the "
+        "researcher's own input and moving it would be theft"
+    )

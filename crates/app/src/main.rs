@@ -1074,12 +1074,18 @@ fn commands_summary(commands: &[workspace::Command]) -> (String, bool) {
     if failed > 0 {
         summary.push_str(&format!(" · {failed} failed"));
     }
-    if escaped > 0 {
-        // **"named", not "wrote".** The producer can only see paths that appear in the command's
-        // text, and a line that said "wrote" would be claiming something nothing here can know.
-        summary.push_str(&format!(
-            " · {escaped} named a file outside this conversation"
-        ));
+    // **Two claims of different strength, and the line makes exactly the one it has earned.**
+    //
+    // `wrote` is decided from the file's own mtime against the command's window, so it is a fact
+    // about the file. `outside` is a path appearing in the command's text, which may equally have
+    // been read — `pd.read_csv('/tmp/input.csv')` names a file the researcher owns. Saying "wrote"
+    // about that would be §252's mistake, and saying only "named" about a file we watched appear
+    // would be the opposite failure: burying the finding in a hedge.
+    let left = commands.iter().filter(|command| command.left_files()).count();
+    if left > 0 {
+        summary.push_str(&format!(" · {left} wrote a file outside this conversation"));
+    } else if escaped > 0 {
+        summary.push_str(&format!(" · {escaped} named a file outside this conversation"));
     }
     (summary, escaped > 0)
 }
@@ -16386,9 +16392,10 @@ impl Workbench {
 
         let mut body = div().flex().flex_col().w_full().min_w_0().gap_2().child(
             ui::Label::new(
-                "Every command this conversation ran. Paths are ones the command **named** \
-                 outside this conversation's folder — a command can also write somewhere it \
-                 never names, and nothing here can see that.",
+                "Every command this conversation ran. A path shown in the accent colour was \
+                 watched appearing while the command ran, so the command wrote it; a faint one \
+                 was only mentioned and may have been read. Either way a command can write \
+                 somewhere it never names, and nothing here can see that.",
             )
             .muted()
             .size(ui::Size::Compact),
@@ -16442,10 +16449,17 @@ impl Workbench {
                 );
             }
 
+            // Two different sentences, because they are two different claims. A file watched to
+            // appear during the command is a fact; a path merely mentioned may have been read.
             for path in &command.outside {
+                let (verb, tone) = if command.wrote.contains(path) {
+                    ("wrote, outside this conversation", theme::accent())
+                } else {
+                    ("named but not written", theme::text_faint())
+                };
                 row = row.child(
-                    ui::Label::new(format!("named outside this conversation: {path}"))
-                        .colour(theme::accent())
+                    ui::Label::new(format!("{verb}: {path}"))
+                        .colour(tone)
                         .size(ui::Size::Compact),
                 );
             }
@@ -17183,15 +17197,31 @@ mod tests {
         let commands = workspace::decode_commands(fixture);
         let (summary, loud) = commands_summary(&commands);
 
-        assert!(summary.starts_with("3 commands"), "{summary}");
+        assert!(summary.starts_with("4 commands"), "{summary}");
         assert!(summary.contains("1 failed"), "{summary}");
-        assert!(summary.contains("1 named a file outside this conversation"), "{summary}");
+        // One command is *confirmed* to have written outside, so the line says so — that is a fact
+        // about a file, established from its mtime, not a reading of the command's text.
+        assert!(summary.contains("1 wrote a file outside this conversation"), "{summary}");
+        assert!(loud, "something landed outside, so the line is drawn in the accent colour");
+    }
+
+    /// When nothing is *confirmed* written, the line must retreat to the weaker, true claim.
+    ///
+    /// `pd.read_csv('/tmp/input.csv')` names a file the researcher owns. Saying the command "wrote"
+    /// it would be §252's mistake — a sentence claiming more than the code can know — and this is
+    /// the sentence where it would be made.
+    #[test]
+    fn a_path_only_named_is_never_described_as_written() {
+        let named_only = workspace::decode_commands(
+            "{\"command\":\"python3 read.py\",\"exit\":0,\"outside\":[\"/tmp/theirs.csv\"],\"wrote\":[]}",
+        );
+        let (summary, loud) = commands_summary(&named_only);
+        assert!(summary.contains("named a file outside"), "{summary}");
         assert!(
             !summary.contains("wrote"),
-            "the producer sees what a command *names*; claiming it wrote there is §252's mistake: \
-             {summary}"
+            "nothing confirmed it was written, so the line must not say so: {summary}"
         );
-        assert!(loud, "something landed outside, so the line is drawn in the accent colour");
+        assert!(loud, "still worth the accent colour — it is still worth looking at");
     }
 
     /// A quiet conversation says a quiet thing, and is not drawn as a warning.

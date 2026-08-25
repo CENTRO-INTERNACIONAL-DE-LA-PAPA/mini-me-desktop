@@ -99,6 +99,44 @@ def outside(command: str, work_dir: str | PurePosixPath) -> list[str]:
     return reported
 
 
+#: How far outside the measured window a file's mtime may sit and still count as this command's.
+#:
+#: Filesystem timestamps are coarser than a stopwatch, and the write can land a moment after the
+#: process returns. A second either side is enough for that and short enough that the *previous*
+#: command's output is not claimed by this one — which is the false positive that would matter,
+#: since it is what a copy button would act on.
+CLOCK_SLACK = 1.0
+
+
+def written_during(paths: Iterable[str], start: float, end: float) -> list[str]:
+    """Which of `paths` exist as files and were modified while the command ran.
+
+    **This is what turns "named" into "wrote", and it is the whole difference.** A command's text
+    cannot say whether a path was read or written — `pd.read_csv('/tmp/input.csv')` names a file the
+    researcher owns, and treating that as output would be how a well-meant tidy-up steals somebody's
+    data. An mtime inside the command's own window is a fact about the file rather than a guess
+    about the string.
+
+    Still not everything the command wrote: a path it never names, a file a background process
+    writes after it returns, a write that fails to update mtime on an exotic filesystem. What is
+    claimed is exactly the title of this function.
+    """
+    from pathlib import Path
+
+    written: list[str] = []
+    for path in paths:
+        try:
+            candidate = Path(path)
+            if not candidate.is_file():
+                continue
+            mtime = candidate.stat().st_mtime
+        except OSError:
+            continue
+        if start - CLOCK_SLACK <= mtime <= end + CLOCK_SLACK:
+            written.append(path)
+    return written
+
+
 def entry(
     command: str,
     *,
@@ -106,20 +144,26 @@ def entry(
     seconds: float | None,
     work_dir: str | PurePosixPath,
     at: str,
+    wrote: list[str] | None = None,
 ) -> dict[str, Any]:
     """One line of the record.
 
-    `at` is passed in rather than read from the clock so the shape can be asserted without one.
+    `at` is passed in rather than read from the clock so the shape can be asserted without one, and
+    `wrote` likewise: deciding it needs the filesystem, and this function stays a pure description
+    of what happened.
     """
     text = (command or "").strip()
     clipped = len(text) > TEXT_CAP
+    named = outside(text, work_dir)
     return {
         "at": at,
         "command": text[:TEXT_CAP] + ("…" if clipped else ""),
         "clipped": clipped,
         "exit": exit_code,
         "seconds": None if seconds is None else round(seconds, 2),
-        "outside": outside(text, work_dir),
+        "outside": named,
+        # A subset of `outside`, never more: something the command did not name cannot be checked.
+        "wrote": [path for path in (wrote or []) if path in named],
     }
 
 

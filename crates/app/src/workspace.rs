@@ -727,12 +727,24 @@ pub struct Command {
     /// Named, not written — the producer is explicit about this and so is the UI that shows it. A
     /// command can write somewhere it never names, and nothing here can see that.
     pub outside: Vec<String>,
+    /// The subset of [`Self::outside`] the command is **known** to have written.
+    ///
+    /// Decided by the producer from the file's own mtime against the window the command ran in, so
+    /// it is a fact about the file rather than a guess about the string. This is the only list
+    /// anything may act on: `pd.read_csv('/tmp/input.csv')` names a file the researcher owns, and
+    /// treating a named path as output is how a tidy-up steals somebody's data.
+    pub wrote: Vec<String>,
 }
 
 impl Command {
-    /// Whether this one put something where the Outputs panel cannot show it.
+    /// Whether this one named something outside the conversation, written or merely mentioned.
     pub fn escaped(&self) -> bool {
         !self.outside.is_empty()
+    }
+
+    /// Whether this one is **known** to have written outside the conversation.
+    pub fn left_files(&self) -> bool {
+        !self.wrote.is_empty()
     }
 
     /// Whether it failed. `None` counts as not failed: an unreadable exit code is not evidence.
@@ -754,6 +766,20 @@ pub fn commands(conversation: &Path) -> Vec<Command> {
     decode_commands(&text)
 }
 
+/// Every string in a JSON array, ignoring anything that is not one.
+fn strings(value: &serde_json::Value) -> Vec<String> {
+    value
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Split out from [`commands`] so the shape can be tested against the producer's own fixture.
 pub fn decode_commands(text: &str) -> Vec<Command> {
     text.lines()
@@ -765,16 +791,8 @@ pub fn decode_commands(text: &str) -> Vec<Command> {
             clipped: value["clipped"].as_bool().unwrap_or(false),
             exit: value["exit"].as_i64(),
             seconds: value["seconds"].as_f64(),
-            outside: value["outside"]
-                .as_array()
-                .map(|paths| {
-                    paths
-                        .iter()
-                        .filter_map(serde_json::Value::as_str)
-                        .map(str::to_string)
-                        .collect()
-                })
-                .unwrap_or_default(),
+            outside: strings(&value["outside"]),
+            wrote: strings(&value["wrote"]),
         })
         .collect()
 }
@@ -2603,6 +2621,46 @@ mod tests {
         assert_eq!(local_path("   ", Some(thread)), None);
     }
 
+    /// Every key the producer writes is either read here or declared unread with a reason.
+    ///
+    /// **The half the first version of this fixture was missing.** The Python side asserted its own
+    /// shape, so adding `wrote` failed a Python test and regenerating it made that pass — while the
+    /// Rust decoder went on ignoring the field and 462 tests stayed green. That is §223 exactly: a
+    /// producer carrying a field the client silently drops, for as long as the feature exists.
+    ///
+    /// A one-sided contract is not a contract. This is the other side.
+    #[test]
+    fn every_key_in_the_record_is_read_or_declared_unread() {
+        /// Fields deliberately not read, and why. A reason of fewer than ten characters is not one.
+        const UNREAD: &[(&str, &str)] = &[(
+            "clipped",
+            "read into Command::clipped, but listed here because the modal shows it rather than \
+             the decoder using it",
+        )];
+
+        let fixture = include_str!("../tests/fixtures/command-record.jsonl");
+        let first: serde_json::Value =
+            serde_json::from_str(fixture.lines().next().expect("a line")).expect("json");
+        let keys: Vec<&str> = first.as_object().expect("an object").keys().map(String::as_str).collect();
+
+        // What the decoder demonstrably reads: change a field in the fixture and the value changes.
+        let read = ["at", "command", "clipped", "exit", "seconds", "outside", "wrote"];
+        for key in &keys {
+            assert!(
+                read.contains(key) || UNREAD.iter().any(|(name, _)| name == key),
+                "the record carries `{key}` and nothing here reads it or says why not — \
+                 regenerate with MINIME_WRITE_CONTRACT=1 and decide about it"
+            );
+        }
+        for (_, reason) in UNREAD {
+            assert!(reason.len() > 10, "a declared-unread field needs a real reason");
+        }
+        // And every field this claims to read is really in the record, so the list cannot rot.
+        for field in read {
+            assert!(keys.contains(&field), "`{field}` is claimed as read but is not in the record");
+        }
+    }
+
     /// The record, read from the fixture the producer generates from its own code.
     ///
     /// Every field is asserted, because the failure this shape exists to prevent is §223's: the
@@ -2613,7 +2671,7 @@ mod tests {
     fn every_field_the_overlay_records_is_read_back() {
         let fixture = include_str!("../tests/fixtures/command-record.jsonl");
         let commands = decode_commands(fixture);
-        assert_eq!(commands.len(), 3, "one line per command");
+        assert_eq!(commands.len(), 4, "one line per command");
 
         let first = &commands[0];
         assert_eq!(first.at, "2026-08-25T09:14:03Z");
@@ -2634,6 +2692,15 @@ mod tests {
         assert_eq!(broken.exit, Some(127));
         assert!(broken.failed());
         assert!(!broken.escaped(), "and failing is not the same as landing outside");
+
+        // **The distinction everything downstream rests on.** The second command named a path it
+        // did not write — that is the read case, and nothing may act on it. The fourth is
+        // confirmed written, and is the only kind a copy button may ever touch.
+        assert!(escaped.escaped() && !escaped.left_files(), "named without writing");
+        let created = &commands[3];
+        assert_eq!(created.wrote, vec!["/tmp/late-blight.csv".to_string()]);
+        assert!(created.left_files());
+        assert_eq!(created.outside, created.wrote, "wrote is always a subset of named");
     }
 
     /// A record written by a process that may have been killed mid-write.
