@@ -842,6 +842,10 @@ mod tests {
 
     #[test]
     fn a_disabled_button_is_grey_whatever_it_would_otherwise_be() {
+        // The live palette is global, so a test that changes it must not run beside one
+        // that reads it. §197 fixed this for `theme.rs`'s own tests and could not reach
+        // these three files, because the lock lived in a private test module.
+        let _theme = crate::theme::theme_lock::hold();
         // The colour and the inertness come from one flag, so they cannot disagree — which
         // they could when each call site kept its own `busy` boolean and its own palette.
         theme::apply(&theme::MINI_ME_DARK);
@@ -855,6 +859,10 @@ mod tests {
 
     #[test]
     fn every_button_tone_is_distinguishable() {
+        // The live palette is global, so a test that changes it must not run beside one
+        // that reads it. §197 fixed this for `theme.rs`'s own tests and could not reach
+        // these three files, because the lock lived in a private test module.
+        let _theme = crate::theme::theme_lock::hold();
         // A tone that resolved to the same colour as another would make the set decorative.
         theme::apply(&theme::MINI_ME_DARK);
         let tones = [Tone::Accent, Tone::Quiet, Tone::Danger];
@@ -868,6 +876,10 @@ mod tests {
 
     #[test]
     fn tones_follow_the_live_theme_rather_than_the_one_at_startup() {
+        // The live palette is global, so a test that changes it must not run beside one
+        // that reads it. §197 fixed this for `theme.rs`'s own tests and could not reach
+        // these three files, because the lock lived in a private test module.
+        let _theme = crate::theme::theme_lock::hold();
         // Read per frame, not captured at construction: a control built while the palette
         // changes must not keep the old one. §49's theme switching made this reachable.
         theme::apply(&theme::MINI_ME_DARK);
