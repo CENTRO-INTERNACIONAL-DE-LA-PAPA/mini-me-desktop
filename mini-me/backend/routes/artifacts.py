@@ -525,6 +525,48 @@ async def discovery_figures(request: Request) -> Response:
     return JSONResponse({"run_id": run_id, "experiment_id": experiment_id, **outcome})
 
 
+async def collect_outside_files(request: Request) -> Response:
+    """Copy files this conversation's commands wrote outside it back into it.
+
+    **Backend-side because only the backend can see both ends.** `/tmp` is inside WSL and the
+    desktop app runs on Windows; the conversation folder is on `/mnt/c`. This process is the one
+    with both in its namespace (docs §250's three filesystems).
+
+    **Only what a command was watched writing.** The request carries no paths: the record decides,
+    and the record's `wrote` list is the subset confirmed by mtime rather than read off a command's
+    text. Letting the caller name a path would turn a report into a file-copier pointed at
+    anything, which is a different and much worse tool.
+
+    Copies, never moves. A script often writes a file and reads it back later in the same run.
+    """
+    if (unauth := _require_auth(request)) is not None:
+        return unauth
+    thread_id = request.path_params["thread_id"]
+    if not thread_id:
+        return JSONResponse({"error": "missing thread_id"}, status_code=400)
+
+    try:
+        from minime_local import ledger
+    except ImportError:
+        # The overlay is desktop-only. A sandboxed deployment has no local files to collect, and
+        # saying so beats a 500 that reads like a bug.
+        return JSONResponse(
+            {"error": "collecting local files needs the desktop overlay"}, status_code=501
+        )
+
+    adapter = LazyLangsmithSandbox(thread_id)
+    try:
+        work_dir = await adapter.aget_work_dir()
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse({"error": f"no workspace: {exc}"}, status_code=502)
+
+    paths = ledger.collectable(work_dir)
+    if not paths:
+        return JSONResponse({"brought": [], "refused": [], "note": "nothing left outside"})
+    outcome = ledger.collect(work_dir, paths)
+    return JSONResponse(outcome)
+
+
 async def delete_sandbox(request: Request) -> Response:
     if (unauth := _require_auth(request)) is not None:
         return unauth

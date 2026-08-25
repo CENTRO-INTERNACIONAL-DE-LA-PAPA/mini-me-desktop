@@ -12,6 +12,7 @@ from starlette.routing import Route
 
 from backend.routes.artifacts import (
     analyze_data_status,
+    collect_outside_files,
     delete_sandbox,
     get_artifact_file,
     start_sandbox,
@@ -49,6 +50,9 @@ app = Starlette(
         Route("/upload/{thread_id}", endpoint=upload_artifact_file, methods=["POST"]),
         Route("/render-report/{thread_id}", endpoint=render_report, methods=["POST"]),
         Route("/sandboxes/{thread_id}", endpoint=delete_sandbox, methods=["DELETE"]),
+        # Bring back what a command wrote outside the conversation. A press, never automatic,
+        # and only files the record confirms were written rather than merely named.
+        Route("/collect/{thread_id}", endpoint=collect_outside_files, methods=["POST"]),
         Route("/sandboxes/{thread_id}/start", endpoint=start_sandbox, methods=["POST"]),
         Route(
             "/theorizer/{thread_id}/{task_id}",
