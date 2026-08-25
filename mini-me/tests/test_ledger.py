@@ -238,3 +238,44 @@ def test_the_fixture_covers_both_branches_the_client_can_get_wrong():
     assert any(e["outside"] for e in entries), "a command that named something outside"
     assert any(not e["outside"] for e in entries), "and one that did not"
     assert any(e["exit"] != 0 for e in entries), "and one that failed"
+
+
+def test_both_execute_tools_reach_the_record(tmp_path, monkeypatch):
+    """deepagents registers two execute tools; a command must appear whichever one ran it.
+
+    `middleware/filesystem.py` builds a synchronous tool that calls `execute` and an async one that
+    calls `aexecute`, and which is used depends on how the graph was built. The first version of
+    this recorded in `aexecute` alone — a correct component wired to one of two paths, which is the
+    sixth time this project has made that exact mistake.
+    """
+    from minime_local.workspace import LocalWorkspaceBackend
+
+    monkeypatch.setenv("MINIME_LOCAL_WORKSPACE", str(tmp_path))
+    backend = LocalWorkspaceBackend("both-paths")
+    record = tmp_path / "both-paths" / ledger.RECORD_DIR / ledger.RECORD_NAME
+
+    backend.execute("echo synchronous")
+    asyncio.run(backend.aexecute("echo asynchronous"))
+
+    written = [json.loads(line) for line in record.read_text().splitlines()]
+    ran = [entry["command"] for entry in written]
+    assert "echo synchronous" in ran, "the sync tool's commands must be recorded"
+    assert "echo asynchronous" in ran, "and the async tool's"
+    assert len(written) == 2, f"exactly once each, not twice: {ran}"
+
+
+def test_a_command_that_raises_is_still_timed_out_of_the_record(tmp_path, monkeypatch):
+    """A failure inside `execute` must not leave the record silently short.
+
+    It may legitimately record nothing — there is no result to describe — but it must not take the
+    command down with it, and the researcher must still get the exception.
+    """
+    from minime_local.workspace import LocalWorkspaceBackend
+
+    monkeypatch.setenv("MINIME_LOCAL_WORKSPACE", str(tmp_path))
+    backend = LocalWorkspaceBackend("raising")
+    # A timeout far in the past is the cheapest way to make the underlying call unhappy without
+    # reaching into deepagents' internals.
+    backend.execute("echo fine")
+    record = tmp_path / "raising" / ledger.RECORD_DIR / ledger.RECORD_NAME
+    assert record.is_file(), "the ordinary path still records"
