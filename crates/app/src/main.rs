@@ -1107,8 +1107,8 @@ fn files_left_outside(commands: &[workspace::Command]) -> Vec<String> {
 /// case — it is the case this whole record exists for. A command that wrote everything to `/tmp`
 /// leaves `files == 0`, and the first version of the panel checked only files and buckets, so it
 /// went silent in exactly the situation §160 describes (§277).
-fn outputs_are_empty(files: usize, buckets: usize, commands: usize) -> bool {
-    files == 0 && buckets == 0 && commands == 0
+fn outputs_are_empty(files: usize, buckets: usize, commands: usize, claims: usize) -> bool {
+    files == 0 && buckets == 0 && commands == 0 && claims == 0
 }
 
 /// The one line the Outputs panel shows about what a conversation ran, and whether it is loud.
@@ -1143,6 +1143,53 @@ fn commands_summary(commands: &[workspace::Command]) -> (String, bool) {
         summary.push_str(&format!(" · {escaped} named a file outside this conversation"));
     }
     (summary, escaped > 0)
+}
+
+/// The one line the Outputs panel shows about what this conversation's subagents *claimed*.
+///
+/// A free function for the same reason `commands_summary` is one: the wording is the feature, and
+/// it has to be assertable without a window.
+///
+/// **One clause, and it is the strongest one earned.** The line is scanned, not read; four clauses
+/// is a line nobody finishes, which is how §116's diagnostic stopped being read. Everything else is
+/// in the modal, one row per answer.
+fn claims_summary(claims: &[workspace::Claim]) -> (String, bool) {
+    let contradicted = claims.iter().filter(|claim| claim.contradicted()).count();
+    let blind = claims.iter().filter(|claim| claim.note.is_some()).count();
+    let elsewhere = claims.iter().filter(|claim| claim.used_outside()).count();
+    let unexamined = claims.iter().filter(|claim| claim.unexamined()).count();
+
+    let mut summary = format!(
+        "{} subagent answer{}",
+        claims.len(),
+        if claims.len() == 1 { "" } else { "s" }
+    );
+    if contradicted > 0 {
+        // The accusation, and the only one that colours the line: a file that is not there, or a
+        // `persistent_id` composed from memory — which is a citation a researcher would paste.
+        summary.push_str(&format!(" · {contradicted} claimed something that isn't there"));
+    } else if blind > 0 {
+        // Distinct from finding nothing wrong, and the distinction is the point: the dataverse
+        // comparison failed on every turn for two days and the log looked exactly like success.
+        summary.push_str(&format!(" · {blind} could not be checked"));
+    } else if elsewhere > 0 {
+        summary.push_str(&format!(
+            " · {elsewhere} used a file from outside this conversation"
+        ));
+    } else if unexamined > 0 {
+        // Not a fault — no rule covers those schemas. Said out loud anyway, because an unexamined
+        // answer and a verified one are the same silence, and silence reads as verified.
+        summary.push_str(&format!(" · {unexamined} with nothing to check"));
+    } else if claims
+        .iter()
+        .any(|claim| claim.claimed > 0 || claim.datasets.is_some())
+    {
+        // Earned, not assumed: every answer was examined, at least one had something to examine,
+        // and none of it was missing. Stated rather than left to a bare count, because leaving the
+        // good news implicit is what makes the bad news invisible.
+        summary.push_str(" · everything they named is there");
+    }
+    (summary, contradicted > 0)
 }
 
 fn ranked(experiments: &[discovery::Experiment], loudest_first: bool) -> Vec<usize> {
@@ -3287,6 +3334,12 @@ struct Workbench {
     /// — *what did that turn actually do* — is asked occasionally and read closely, which is the
     /// opposite of what a permanently-visible section is for.
     commands_open: bool,
+    /// The record of what this conversation's subagents *claimed* is open.
+    ///
+    /// A second modal rather than a tab inside the first, because they answer different questions
+    /// about different actors: `WHAT RAN` is the shell, this is what a subagent said it produced.
+    /// Folding them together would make the shorter one — usually this one — the harder to find.
+    claims_open: bool,
     /// The delete being confirmed would interrupt background work that says it is still running.
     ///
     /// Carried to the confirmation modal so the sentence that asks can say so. Not a refusal:
@@ -3701,6 +3754,7 @@ impl Workbench {
             taking: None,
             update_dismissed: false,
             commands_open: false,
+            claims_open: false,
             delete_interrupts_work: false,
             collecting: None,
             collect_in_flight: false,
@@ -11756,6 +11810,12 @@ impl Workbench {
             cx.notify();
             return;
         }
+        if self.claims_open {
+            self.claims_open = false;
+            self.restore_focus = true;
+            cx.notify();
+            return;
+        }
         if self.confirming_provider.take().is_some() {
             // Escape leaves the provider as it was: this modal exists precisely so the change
             // needs a deliberate press, and dismissing is not one.
@@ -16746,6 +16806,220 @@ impl Workbench {
             .unwrap_or_default()
     }
 
+    /// The claims this conversation's subagents recorded, oldest first.
+    fn thread_claims(&self) -> Vec<workspace::Claim> {
+        self.thread_workspace()
+            .map(|dir| workspace::claims(&dir))
+            .unwrap_or_default()
+    }
+
+    /// One line for what this conversation's subagents *said they produced*.
+    ///
+    /// **The half §219 has been missing since the day it was written.** The recorder compares every
+    /// path a structured response names against the workspace, and every `persistent_id` the
+    /// dataverse explorer recommends against the search that was actually run. It found the
+    /// librarian fabricating its library and it found its own dataverse check broken — both times
+    /// because a person went and read a log file. This is the same finding, on the screen the
+    /// researcher is already looking at.
+    ///
+    /// Shown only when a subagent answered, so an ordinary conversation gains no furniture.
+    fn claims_line(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let claims = self.thread_claims();
+        if claims.is_empty() {
+            return None;
+        }
+        let (summary, contradicted) = claims_summary(&claims);
+        let tone = if contradicted {
+            theme::accent()
+        } else {
+            theme::text_muted()
+        };
+
+        Some(
+            div()
+                .id("what-was-claimed")
+                .flex()
+                .flex_col()
+                .w_full()
+                .min_w_0()
+                .gap_1()
+                .p_1()
+                .rounded_md()
+                .hover(|style| {
+                    let fill = theme::hover_over(theme::surface());
+                    style.bg(rgb(fill)).cursor_pointer()
+                })
+                .on_click(cx.listener(|workbench, _event, _window, cx| {
+                    workbench.claims_open = true;
+                    cx.notify();
+                }))
+                .child(section_label("WHAT WAS CLAIMED"))
+                .child(
+                    ui::Label::new(summary)
+                        .colour(tone)
+                        .size(ui::Size::Compact),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Every answer a subagent gave, newest first, beside what the workspace held.
+    ///
+    /// Newest first for the same reason the command list is: this is read to answer "what did that
+    /// just do", so the last answer is the one being looked for.
+    ///
+    /// The heading states the limit where the list is, rather than in a docstring nobody here will
+    /// read: **this compares what was *said* against what is on disk, and nothing more.** A
+    /// subagent that produced a file and described it wrongly looks the same as one that produced
+    /// nothing, and neither is the same as one that lied about its findings — which nothing here
+    /// can see at all.
+    fn claims_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let claims = self.thread_claims();
+        let contradicted = claims.iter().filter(|claim| claim.contradicted()).count();
+
+        let mut body = div().flex().flex_col().w_full().min_w_0().gap_2().child(
+            ui::Label::new(
+                "What each subagent said it produced, beside what this conversation's folder \
+                 actually holds. A path in the accent colour is one the workspace does not have; \
+                 a faint one is real but sits outside this conversation, so it will not travel \
+                 with it. This records and does not block — nothing here stopped a turn — and it \
+                 compares names against disk, so a subagent that wrote a file and described it \
+                 wrongly is invisible to it.",
+            )
+            .muted()
+            .size(ui::Size::Compact),
+        );
+
+        for claim in claims.iter().rev() {
+            let mut row = div()
+                .flex()
+                .flex_col()
+                .w_full()
+                .min_w_0()
+                .gap_1()
+                .p_2()
+                .rounded_lg()
+                .bg(rgb(theme::surface()));
+
+            row = row.child(
+                ui::Label::new(format!("{} · {}", claim.at, claim.source))
+                    .colour(if claim.contradicted() {
+                        theme::error()
+                    } else {
+                        theme::text_faint()
+                    })
+                    .size(ui::Size::Compact),
+            );
+            row = row.child(
+                ui::Label::new(format!("answered with {}", claim.schema))
+                    .muted()
+                    .size(ui::Size::Compact),
+            );
+
+            // **Said before the lists, and separately.** A schema no rule covers produces no
+            // missing files, and an empty list under a heading reads as "checked, all fine" — the
+            // one answer this record is not allowed to imply.
+            if claim.unexamined() {
+                row = row.child(
+                    ui::Label::new("nothing here checks this kind of answer")
+                        .muted()
+                        .size(ui::Size::Compact),
+                );
+            } else if claim.claimed > 0 {
+                let verdict = if claim.missing.is_empty() {
+                    format!("named {} path(s), all present", claim.claimed)
+                } else {
+                    format!(
+                        "named {} path(s), {} not in this conversation",
+                        claim.claimed,
+                        claim.missing.len()
+                    )
+                };
+                row = row.child(ui::Label::new(verdict).muted().size(ui::Size::Compact));
+            }
+
+            // A check that could not run. Neither clean nor an accusation, and it gets its own
+            // sentence because in a log it is the same silence as success (§224).
+            if let Some(note) = &claim.note {
+                row = row.child(
+                    // "nothing was compared", rather than "could not be checked", because one of
+                    // the two notes is *recommended no datasets at all* — a fact about the run and
+                    // not a failure of the check. Both are true under this framing.
+                    ui::Label::new(format!("nothing was compared: {note}"))
+                        .colour(theme::accent())
+                        .size(ui::Size::Compact),
+                );
+            }
+
+            if let Some(datasets) = claim.datasets {
+                let verdict = if !claim.unsearched.is_empty() {
+                    format!(
+                        "recommended {datasets} dataset(s), {} absent from the search",
+                        claim.unsearched.len()
+                    )
+                } else if claim.note.is_some() {
+                    format!("recommended {datasets} dataset(s)")
+                } else {
+                    format!("recommended {datasets} dataset(s), all present in the search")
+                };
+                row = row.child(ui::Label::new(verdict).muted().size(ui::Size::Compact));
+            }
+
+            for path in &claim.missing {
+                row = row.child(
+                    ui::Label::new(format!("not in this conversation: {path}"))
+                        .colour(theme::accent())
+                        .size(ui::Size::Compact),
+                );
+            }
+            // Real files, in the researcher's own folders. Faint, because calling these missing
+            // once read as *this file does not exist*, which was false and cost the record its
+            // credibility for a week.
+            for path in &claim.outside {
+                row = row.child(
+                    ui::Label::new(format!("used from outside this conversation: {path}"))
+                        .colour(theme::text_faint())
+                        .size(ui::Size::Compact),
+                );
+            }
+            // A citation composed from memory, which is the one thing here that leaves the app —
+            // straight into a paper, if nobody says so.
+            for identifier in &claim.unsearched {
+                row = row.child(
+                    ui::Label::new(format!("never returned by the search: {identifier}"))
+                        .colour(theme::accent())
+                        .size(ui::Size::Compact),
+                );
+            }
+            body = body.child(row);
+        }
+
+        let title = if contradicted > 0 {
+            format!(
+                "What was claimed · {} · {contradicted} not borne out",
+                claims.len()
+            )
+        } else {
+            format!("What was claimed · {}", claims.len())
+        };
+
+        ui::Modal::new("claims", title)
+            .width(820.)
+            .focus(&self.delete_focus)
+            .body(body)
+            .actions(
+                ui::actions().child(div().flex_grow()).child(
+                    ui::Button::new("claims-close", "Close").on_click(cx.listener(
+                        |workbench, _event, _window, cx| {
+                            workbench.claims_open = false;
+                            workbench.restore_focus = true;
+                            cx.notify();
+                        },
+                    )),
+                ),
+            )
+    }
+
     fn outputs_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
         // What is actually on disk, rather than the agent's own artifact list: a file written by
         // a script inside `execute` registers no artifact, and those are most of them.
@@ -16779,18 +17053,30 @@ impl Workbench {
         // added it after the early return, hid it in the one situation it exists for. A researcher
         // pressed the button, the file went to `/tmp`, and the panel stayed silent (§277).
         let ran = self.commands_line(cx);
+        // Asked before the same guard, for the same reason: a turn where the subagent produced
+        // nothing is exactly the turn with no files, and computing this after the early return
+        // would hide it in the one case it exists for (§277).
+        let said = self.claims_line(cx);
 
         // **Nothing at all when there is nothing.** This used to promise which artifacts would
         // appear before the filesystem had any. The recursive scan now makes §117's subfolders
         // visible, but an empty section still says less and is right — and "nothing" now includes
         // having run nothing.
-        if outputs_are_empty(count, self.buckets.len(), usize::from(ran.is_some())) {
+        if outputs_are_empty(
+            count,
+            self.buckets.len(),
+            usize::from(ran.is_some()),
+            usize::from(said.is_some()),
+        ) {
             return section;
         }
 
         // Above `FILES`, because "what ran" is the question that explains why the file list is
         // shorter than expected — which is exactly §160's morning.
         section = section.children(ran);
+        // And below it, because the shell is what wrote the files: a subagent's claim is read
+        // against the result of the commands above, not the other way round.
+        section = section.children(said);
 
         if count > 0 {
             section = section.child(section_label_owned(format!("FILES · {count}")));
@@ -17213,6 +17499,12 @@ impl Render for Workbench {
             root
         };
 
+        let root = if self.claims_open {
+            root.child(self.claims_modal(cx))
+        } else {
+            root
+        };
+
         // The budget gate, mounted before the confirmations below it. Nothing else in this app
         // guards money, and the researcher did not ask for it — a drafted run did.
         let root = match self.discovery_open.clone() {
@@ -17479,15 +17771,81 @@ mod tests {
     #[test]
     fn a_turn_that_wrote_nothing_here_still_has_something_to_say() {
         assert!(
-            !outputs_are_empty(0, 0, 1),
+            !outputs_are_empty(0, 0, 1, 0),
             "no files, no artifacts, one command — the panel must still show what ran, because \
              the missing files are the point"
         );
         // The genuinely empty case stays empty: a conversation gains no furniture for nothing.
-        assert!(outputs_are_empty(0, 0, 0));
-        // And any one of the three is enough on its own.
-        assert!(!outputs_are_empty(1, 0, 0));
-        assert!(!outputs_are_empty(0, 1, 0));
+        assert!(outputs_are_empty(0, 0, 0, 0));
+        // And any one of the four is enough on its own.
+        assert!(!outputs_are_empty(1, 0, 0, 0));
+        assert!(!outputs_are_empty(0, 1, 0, 0));
+        // Including a subagent answer with no files behind it — which is the whole finding when a
+        // worker reports success over four empty folders (§207a).
+        assert!(!outputs_are_empty(0, 0, 0, 1));
+    }
+
+    /// What the Outputs panel says about what this conversation's subagents claimed.
+    ///
+    /// Read from the recorder's own fixture, so the wording is asserted against the shapes that
+    /// actually occur rather than against ones invented here.
+    #[test]
+    fn the_claims_line_leads_with_the_strongest_thing_it_has_earned() {
+        let fixture = include_str!("../tests/fixtures/claim-record.jsonl");
+        let claims = workspace::decode_claims(fixture);
+        let (summary, loud) = claims_summary(&claims);
+
+        assert!(summary.starts_with("5 subagent answers"), "{summary}");
+        // Two answers are contradicted — a missing index and an invented `persistent_id` — and
+        // that outranks the unreadable check and the borrowed PDF also present in this fixture.
+        assert!(summary.contains("2 claimed something that isn't there"), "{summary}");
+        assert!(loud, "a claim the workspace contradicts is drawn in the accent colour");
+    }
+
+    /// **An answer nothing looked at must not read as an answer that was verified.**
+    ///
+    /// This is `checked` earning its place. A schema with no path rule produces an empty `missing`
+    /// list, so a line that reported only findings would say "3 subagent answers" and mean
+    /// "3 verified" to every reader — the silence `NO_PATHS` exists to break.
+    #[test]
+    fn nothing_to_check_is_said_out_loud_rather_than_left_as_silence() {
+        let unexamined = workspace::decode_claims(
+            "{\"source\":\"hypothesis_generator\",\"schema\":\"HypothesisOutput\",\"checked\":false}",
+        );
+        let (summary, loud) = claims_summary(&unexamined);
+        assert_eq!(summary, "1 subagent answer · 1 with nothing to check");
+        assert!(!loud, "not a fault — no rule covers that schema");
+
+        // And the genuinely clean case says so rather than leaving the good news implicit.
+        let clean = workspace::decode_claims(
+            "{\"source\":\"data_voyager\",\"checked\":true,\"claimed\":4}",
+        );
+        assert_eq!(claims_summary(&clean).0, "1 subagent answer · everything they named is there");
+
+        // A check that could not run is neither of those, and outranks both.
+        let blind = workspace::decode_claims(
+            "{\"source\":\"dataverse_explorer\",\"checked\":true,\"datasets\":2,\
+              \"note\":\"dataverse_search.json could not be read\"}",
+        );
+        let (said, shouted) = claims_summary(&blind);
+        assert_eq!(said, "1 subagent answer · 1 could not be checked");
+        assert!(!shouted, "it is not an accusation; nothing was compared");
+    }
+
+    /// A real file in the researcher's own Downloads folder is not a missing file.
+    ///
+    /// The recorder called these "missing" once and it read as *this file does not exist*, which
+    /// was false. The line has to be able to say the true thing — they will not travel with the
+    /// conversation — without making the accusation.
+    #[test]
+    fn a_borrowed_file_is_a_durability_warning_and_not_an_accusation() {
+        let borrowed = workspace::decode_claims(
+            "{\"source\":\"pdf_librarian\",\"checked\":true,\"claimed\":1,\
+              \"outside\":[\"/mnt/c/Users/LENOVO/Downloads/gnn.pdf\"]}",
+        );
+        let (summary, loud) = claims_summary(&borrowed);
+        assert!(summary.contains("1 used a file from outside this conversation"), "{summary}");
+        assert!(!loud, "the file is real; only its location is worth saying");
     }
 
     /// What the Outputs panel says about a conversation's commands.

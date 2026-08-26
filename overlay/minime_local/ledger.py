@@ -45,6 +45,13 @@ from typing import Any, Iterable
 RECORD_DIR = ".mini-me"
 RECORD_NAME = "commands.jsonl"
 
+#: The other record kept in that folder: what a subagent *said* it produced.
+#:
+#: Named here rather than in `backend/middleware/claims.py` because the folder is this module's,
+#: and two files writing into the same directory under two different notions of where it is, is
+#: the defect §278 was. The writer lives in the middleware; the address lives here.
+CLAIMS_NAME = "claims.jsonl"
+
 #: One command's text, clipped. A generated script can be tens of kilobytes and the record is meant
 #: to be read; the full text is in the backend log for anyone who needs it.
 TEXT_CAP = 2_000
@@ -173,8 +180,10 @@ def trim(lines: Iterable[str], keep: int = MAX_ENTRIES) -> list[str]:
     return kept[-keep:] if keep > 0 else []
 
 
-def append(work_dir: str | PurePosixPath, record: dict[str, Any]) -> None:
-    """Add one line to the conversation's record. **Never raises.**
+def append(
+    work_dir: str | PurePosixPath, record: dict[str, Any], name: str = RECORD_NAME
+) -> None:
+    """Add one line to one of the conversation's records. **Never raises.**
 
     An unwritable record must cost a researcher nothing. `_say_where_it_ran` makes the same trade
     and states the reason: taking `execute` down to protect a diagnostic is the wrong way round,
@@ -185,7 +194,7 @@ def append(work_dir: str | PurePosixPath, record: dict[str, Any]) -> None:
 
         folder = Path(str(work_dir)) / RECORD_DIR
         folder.mkdir(parents=True, exist_ok=True)
-        target = folder / RECORD_NAME
+        target = folder / name
         line = json.dumps(record, ensure_ascii=False)
 
         existing: list[str] = []
@@ -199,18 +208,18 @@ def append(work_dir: str | PurePosixPath, record: dict[str, Any]) -> None:
         pass
 
 
-def record_path(work_dir: str | PurePosixPath) -> str:
-    """Where the record for this conversation lives. Named so a caller can *say* where it looked."""
+def record_path(work_dir: str | PurePosixPath, name: str = RECORD_NAME) -> str:
+    """Where a record for this conversation lives. Named so a caller can *say* where it looked."""
     from pathlib import Path
 
-    return str(Path(str(work_dir)) / RECORD_DIR / RECORD_NAME)
+    return str(Path(str(work_dir)) / RECORD_DIR / name)
 
 
-def read(work_dir: str | PurePosixPath) -> list[dict[str, Any]]:
-    """The conversation's record, oldest first. A malformed line is skipped, never fatal."""
+def read(work_dir: str | PurePosixPath, name: str = RECORD_NAME) -> list[dict[str, Any]]:
+    """One of the conversation's records, oldest first. A malformed line is skipped, never fatal."""
     from pathlib import Path
 
-    target = Path(str(work_dir)) / RECORD_DIR / RECORD_NAME
+    target = Path(str(work_dir)) / RECORD_DIR / name
     try:
         lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:

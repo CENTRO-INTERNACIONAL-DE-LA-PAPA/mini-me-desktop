@@ -29,16 +29,29 @@ run end to end. Measure first.
 Its log reaches the file through `backend/diagnostics.arriving` — see there for why that needs
 saying at all.
 
-Read the result in the backend log the app already writes — `%TEMP%\\mini-me-desktop-backend.log`
-on Windows, `$TMPDIR/mini-me-desktop-backend.log` elsewhere — by searching for `claims:`.
+# Where the result goes
+
+Two places, and the second is the one that was missing for seven months.
+
+* **The backend log** the app already writes — `%TEMP%\\mini-me-desktop-backend.log` on Windows,
+  `$TMPDIR/mini-me-desktop-backend.log` elsewhere — by searching for `claims:`.
+* **`.mini-me/claims.jsonl` in the conversation's own folder**, which the app reads and shows as
+  `WHAT WAS CLAIMED` in the Outputs panel, beside `WHAT RAN`.
+
+The roadmap carried one sentence about this module from §219 until §281: *nothing has been read off
+it yet*. It found `pdf_librarian` fabricating its library (§230) and it found the dataverse check
+failing on every turn (§224) — both times because somebody went and read a log file. A recorder
+whose findings need a person to go looking is a recorder that reports nothing on the days nobody
+looks, which is every day a researcher is doing research.
 """
 
 from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 from pathlib import PurePosixPath
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Iterable
 
 from langgraph.runtime import Runtime
 from langchain.agents.middleware import AgentMiddleware
@@ -58,7 +71,8 @@ logger = diagnostics.arriving(__name__)
 #: Declared rather than discovered. A walk that collected every string "looking like a path" would
 #: report citations and free prose — and the cost of a false "missing file" is that the next
 #: reader stops believing the record. A schema that gains a path field is a line here; that it is
-#: not automatic is the point, since `_UNMAPPED` makes the omission visible in the log.
+#: not automatic is the point, since `NO_PATHS` makes the omission visible: a schema in
+#: neither table is one nobody has looked at, and `claimed_paths` says so.
 #:
 #: `[]` means "each element of this list". Resolution is `_resolve`.
 CLAIMED_PATHS: dict[str, tuple[str, ...]] = {
@@ -270,6 +284,88 @@ def unsearched(ids: list[str], text: str) -> list[str]:
     return unmatched
 
 
+def entry(
+    source: str,
+    schema: str,
+    *,
+    at: str,
+    checked: bool,
+    claimed: int = 0,
+    missing: Iterable[str] = (),
+    outside: Iterable[str] = (),
+    datasets: int | None = None,
+    unsearched: Iterable[str] = (),
+    note: str | None = None,
+) -> dict[str, Any]:
+    """One line of the record: what a subagent answered, and how it stood against the workspace.
+
+    Pure, and `at` is passed in rather than read from the clock, for the same reason
+    `ledger.entry` is: the shape is the contract with the app and it has to be assertable without
+    a run, a sandbox or a filesystem.
+
+    **`checked` is not `missing == []`.** A schema no path rule covers produces no missing files
+    and has been examined by nobody, and a reader that cannot tell those apart will read silence
+    as a clean bill of health — which is `NO_PATHS`'s whole reason for existing, carried into the
+    record so the app can say "nothing to check here" rather than implying "checked, all fine".
+    """
+    return {
+        "at": at,
+        "source": source,
+        "schema": schema,
+        "checked": checked,
+        "claimed": claimed,
+        "missing": list(missing),
+        "outside": list(outside),
+        # Dataverse only. `None` means the question was never asked, which is different from a
+        # run that recommended nothing — `0` — and that difference is §220's entire morning.
+        "datasets": datasets,
+        "unsearched": list(unsearched),
+        "note": note,
+    }
+
+
+def _write(work_dir: str | PurePosixPath, record: dict[str, Any]) -> None:
+    """Append the record to the conversation's folder, if that folder is one this machine can see.
+
+    **Never raises, and never creates the directory.** Two different guards for two different
+    mistakes:
+
+    * A recorder that can end a subagent's turn is worse than no recorder — the same trade
+      `aafter_agent` and `ledger.append` already make, for the reason stated there.
+    * `work_dir` comes from the *sandbox* backend. Under the desktop overlay that is a real folder
+      on this machine, already created by `aresolve`. Under a hosted sandbox it is a path on
+      another machine, and `mkdir(parents=True)` would quietly build an imitation of somebody
+      else's filesystem here — writing a record into a folder no app will ever read, next to
+      nothing, under a name that implies a conversation lives there. Requiring the folder to exist
+      already is the difference between "the app can read this" and "a path-shaped string".
+    """
+    try:
+        from pathlib import Path
+
+        folder = Path(str(work_dir))
+        if not folder.is_dir():
+            logger.info(
+                "claims: %s is not a folder on this machine, so %s was logged and not recorded",
+                folder,
+                record.get("source"),
+            )
+            return
+        from minime_local import ledger
+
+        ledger.append(folder, record, name=ledger.CLAIMS_NAME)
+    except ImportError:
+        # The overlay is desktop-only, and so is the panel that reads this. `artifacts.py` makes
+        # the same call and says the same thing: a sandboxed deployment has no local record.
+        logger.debug("claims: no desktop overlay, so the record stays in this log")
+    except Exception:  # noqa: BLE001 — see the docstring
+        logger.exception("claims: could not write the record for %s", record.get("source"))
+
+
+def _now() -> str:
+    """The timestamp format the command record already uses, because they are shown together."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
 class ClaimsRecorder(AgentMiddleware[ArtifactState, Any, Any]):
     """Log what a subagent claimed against what the workspace holds. Records only; blocks nothing."""
 
@@ -308,8 +404,16 @@ class ClaimsRecorder(AgentMiddleware[ArtifactState, Any, Any]):
                 present.add(absolute[len(base) + 1 :])
         return present
 
-    async def _dataverse(self, structured: Any, work_dir: PurePosixPath) -> None:
-        """Check the recommended `persistent_id`s against the file the search wrote."""
+    async def _dataverse(
+        self, structured: Any, work_dir: PurePosixPath
+    ) -> tuple[int, list[str], str | None]:
+        """Check the recommended `persistent_id`s against the file the search wrote.
+
+        Returns how many were recommended, which of them the search never returned, and — when
+        the comparison could not be made at all — why. **The third of those is not a detail.** A
+        check that could not run and a check that found nothing are the same silence in a log, and
+        not telling them apart is what cost §224 two days.
+        """
         ids = _resolve(structured, "datasets[].persistent_id")
         if not ids:
             # Recorded rather than passed over. A `DataVerseSearchResults` with no datasets is what
@@ -322,7 +426,7 @@ class ClaimsRecorder(AgentMiddleware[ArtifactState, Any, Any]):
                 "claims: dataverse_explorer recommended no datasets at all — "
                 "check the log above for a failed SearchCIPDataverse or read_search_results"
             )
-            return
+            return 0, [], "recommended no datasets at all"
         # An explicit line count rather than `limit=0`. The sandbox reads "everything" for a
         # falsy limit; deepagents' local backend slices `lines[offset:offset + limit]`, where zero
         # is an empty read — the same call meaning opposite things on the two backends that serve
@@ -338,7 +442,7 @@ class ClaimsRecorder(AgentMiddleware[ArtifactState, Any, Any]):
                 DATAVERSE_SEARCH,
                 getattr(result, "error", "no content"),
             )
-            return
+            return len(ids), [], f"{DATAVERSE_SEARCH} could not be read"
         unmatched = unsearched(ids, text)
         if unmatched:
             logger.warning(
@@ -354,8 +458,13 @@ class ClaimsRecorder(AgentMiddleware[ArtifactState, Any, Any]):
                 len(ids),
                 DATAVERSE_SEARCH,
             )
+        return len(ids), unmatched, None
 
-    async def _paths(self, structured: Any, work_dir: PurePosixPath) -> None:
+    async def _paths(
+        self, structured: Any, work_dir: PurePosixPath
+    ) -> tuple[int, list[str], list[str], bool]:
+        """How many paths were claimed, which are absent, which are elsewhere, and whether the
+        schema was covered by a rule at all — see :func:`entry` on why the last one is separate."""
         claims, recognised = claimed_paths(structured)
         if not recognised:
             logger.info(
@@ -363,9 +472,9 @@ class ClaimsRecorder(AgentMiddleware[ArtifactState, Any, Any]):
                 self.source,
                 type(structured).__name__,
             )
-            return
+            return 0, [], [], False
         if not claims:
-            return
+            return 0, [], [], True
         missing, outside = missing_from(
             claims, await self._present(work_dir), work_dir.as_posix()
         )
@@ -391,6 +500,7 @@ class ClaimsRecorder(AgentMiddleware[ArtifactState, Any, Any]):
             logger.info(
                 "claims: %s named %d paths, all present", self.source, len(claims)
             )
+        return len(claims), missing, outside, True
 
     async def aafter_agent(
         self, state: ArtifactState, runtime: Runtime
@@ -400,9 +510,33 @@ class ClaimsRecorder(AgentMiddleware[ArtifactState, Any, Any]):
             return None
         try:
             work_dir = await self._ensure_work_dir()
-            await self._paths(structured, work_dir)
+            claimed, missing, outside, checked = await self._paths(structured, work_dir)
+            datasets: int | None = None
+            unmatched: list[str] = []
+            note: str | None = None
             if self.source == "dataverse_explorer":
-                await self._dataverse(structured, work_dir)
+                datasets, unmatched, note = await self._dataverse(structured, work_dir)
+            # **Every structured answer, including the clean ones.** A record that only holds
+            # findings cannot answer "did the dataverse explorer answer at all", and that is the
+            # question a researcher actually arrived with: a coordinator reported a failed
+            # dataverse run after three seconds and one model call, having never called the
+            # subagent. A line here per answer makes the absent line visible; a findings-only
+            # record makes it indistinguishable from a run that went perfectly.
+            _write(
+                work_dir,
+                entry(
+                    self.source,
+                    type(structured).__name__,
+                    at=_now(),
+                    checked=checked,
+                    claimed=claimed,
+                    missing=missing,
+                    outside=outside,
+                    datasets=datasets,
+                    unsearched=unmatched,
+                    note=note,
+                ),
+            )
         except Exception:
             # A record that can end a researcher's turn is worse than no record. The traceback is
             # kept because a recorder that fails quietly is the thing it was written to prevent.

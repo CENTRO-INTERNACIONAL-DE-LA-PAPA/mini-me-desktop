@@ -1,0 +1,5 @@
+{"at": "2026-08-26T11:04:12Z", "checked": true, "claimed": 4, "datasets": null, "missing": [], "note": null, "outside": [], "schema": "DataAnalysisResults", "source": "data_voyager", "unsearched": []}
+{"at": "2026-08-26T11:06:38Z", "checked": true, "claimed": 2, "datasets": null, "missing": [".asta/documents"], "note": null, "outside": ["/mnt/c/Users/LENOVO/Downloads/Graph-neural-networks.pdf"], "schema": "LibraryArtifact", "source": "pdf_librarian", "unsearched": []}
+{"at": "2026-08-26T11:09:01Z", "checked": false, "claimed": 0, "datasets": null, "missing": [], "note": null, "outside": [], "schema": "HypothesisOutput", "source": "hypothesis_generator", "unsearched": []}
+{"at": "2026-08-26T11:12:55Z", "checked": true, "claimed": 0, "datasets": 3, "missing": [], "note": null, "outside": [], "schema": "DataVerseSearchResults", "source": "dataverse_explorer", "unsearched": ["doi:10.21223/INVENTED"]}
+{"at": "2026-08-26T11:15:20Z", "checked": true, "claimed": 0, "datasets": 2, "missing": [], "note": "dataverse_search.json could not be read", "outside": [], "schema": "DataVerseSearchResults", "source": "dataverse_explorer", "unsearched": []}
