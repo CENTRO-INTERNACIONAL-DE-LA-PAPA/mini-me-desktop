@@ -176,6 +176,51 @@ impl Workbench {
 
 
 impl Workbench {
+    /// Switches the list below between every conversation and just the projects.
+    ///
+    /// Basic on purpose: two labels, one highlighted, click to switch. Creation is being
+    /// redone separately, so this does not yet try to be more than a toggle.
+    pub(crate) fn sidebar_view_toggle(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let tab = |label: &'static str, view: SidebarView, active: bool| {
+            div()
+                .id(SharedString::from(label))
+                .flex_grow()
+                .items_center()
+                .justify_center()
+                .py_1()
+                .rounded_md()
+                .text_xs()
+                .text_color(rgb(if active { theme::text() } else { theme::text_muted() }))
+                .when(active, |tab| tab.bg(rgb(theme::elevated())))
+                .hover(|style| style.text_color(rgb(theme::text())).cursor_pointer())
+                .child(label)
+                .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                    workbench.sidebar_view = view;
+                    cx.notify();
+                }))
+        };
+        div()
+            .flex_none()
+            .flex()
+            .flex_row()
+            .gap_1()
+            .mx_2()
+            .mt_2()
+            .p(px(2.))
+            .rounded_md()
+            .bg(rgb(theme::background()))
+            .child(tab(
+                "Conversations",
+                SidebarView::Conversations,
+                self.sidebar_view == SidebarView::Conversations,
+            ))
+            .child(tab(
+                "Projects",
+                SidebarView::Projects,
+                self.sidebar_view == SidebarView::Projects,
+            ))
+    }
+
     /// The conversation list.
     ///
     /// The backend has stored every thread since the first launch; the app simply never
@@ -213,7 +258,7 @@ impl Workbench {
             .p_1()
             .gap_px();
 
-        if matched.is_empty() {
+        if matched.is_empty() && self.sidebar_view == SidebarView::Conversations {
             list = list.child(
                 div()
                     .p_2()
@@ -284,12 +329,20 @@ impl Workbench {
         // heading is no longer decoration: it owns New here, Open folder and Delete project, so
         // hiding it would hide the only project-delete affordance (§155). Ungrouped work alone
         // still needs no heading because it is not a project and has no project folder to delete.
-        let show_headings = ordered.len() > 1
+        let projects_only = self.sidebar_view == SidebarView::Projects;
+        let show_headings = projects_only
+            || ordered.len() > 1
             || ordered
                 .iter()
                 .any(|(project, _conversations)| project.is_some());
 
         for (project, conversations) in ordered {
+            // The Projects tab lists projects, not the ungrouped-work bucket — that heading
+            // exists to give the workspace root somewhere to open from, not to stand in for a
+            // project that can be deleted.
+            if projects_only && project.is_none() {
+                continue;
+            }
             if show_headings {
                 let heading = project
                     .clone()
@@ -353,6 +406,9 @@ impl Workbench {
                             ))
                         }),
                 );
+            }
+            if projects_only {
+                continue;
             }
             for conversation in conversations {
                 let thread_id = conversation.thread_id.clone();
@@ -479,7 +535,7 @@ impl Workbench {
                                     .text_color(rgb(theme::accent_hover()))
                                     .cursor_pointer()
                             })
-                            .child(app_icon("icons/settings.svg", theme::accent()))
+                            .child(app_icon("icons/settings.svg", theme::accent(), None))
                             .on_click(cx.listener(|workbench, _event, _window, cx| {
                                 workbench.run_command(Command::OpenSettings, cx);
                             })),
@@ -503,24 +559,13 @@ impl Workbench {
                                     .border_color(rgb(theme::accent()))
                                     .cursor_pointer()
                             })
-                            .child("New")
-                            // A menu, because there are two kinds of new thing and a button that
-                            // silently means only one of them leaves the other with no home at
-                            // all — creating a project meant opening a conversation first and
-                            // filing it afterwards (§165).
-                            .on_click(cx.listener(
-                                |workbench, event: &gpui::ClickEvent, _window, cx| {
-                                    let at = match event {
-                                        gpui::ClickEvent::Mouse(click) => click.up.position,
-                                        _ => gpui::point(px(120.), px(60.)),
-                                    };
-                                    workbench.sidebar_menu =
-                                        Some((SidebarMenu::New, gpui::point(at.x, at.y + px(8.))));
-                                    cx.notify();
-                                },
-                            )),
+                            .child("New"),
+                            // The menu this used to open (conversation vs. project) is gone —
+                            // creation is being redone, so this button is a placeholder until it
+                            // has a new behaviour wired to it.
                     ),
             )
+            .child(self.sidebar_view_toggle(cx))
             .child(
                 div()
                     .flex_none()
