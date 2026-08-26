@@ -178,6 +178,15 @@ def workspace_thread(default: str) -> str:
 logger = logging.getLogger(__name__)
 
 
+#: One directory listing per thread per process, not one per construction.
+#:
+#: `LocalWorkspaceBackend` is built for every run *and* every request, and this walks the workspace
+#: root — a `/mnt/c` mount, where a listing is slow and a constructor is not a place to be slow.
+#: The answer cannot change while the process lives without a conversation being re-filed, and the
+#: next launch reads it fresh.
+_PROJECT_BY_THREAD: dict[str, str] = {}
+
+
 def existing_project(root: Path, thread_id: str) -> str:
     """The project folder a conversation already lives in, found by looking.
 
@@ -196,6 +205,15 @@ def existing_project(root: Path, thread_id: str) -> str:
     `""` when the conversation is ungrouped or has no folder yet — which is exactly the case where
     `root/<thread>` is right.
     """
+    if thread_id in _PROJECT_BY_THREAD:
+        return _PROJECT_BY_THREAD[thread_id]
+    found = _look_for_project(root, thread_id)
+    _PROJECT_BY_THREAD[thread_id] = found
+    return found
+
+
+def _look_for_project(root: Path, thread_id: str) -> str:
+    """The listing itself, split out so the cache above reads as one thing."""
     try:
         # **A folder with something in it beats an empty one**, wherever each of them sits.
         #
