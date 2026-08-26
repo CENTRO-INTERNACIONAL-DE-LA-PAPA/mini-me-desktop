@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -23,7 +25,9 @@ from backend.middleware.claims import (
     DATAVERSE_SEARCH,
     NO_PATHS,
     ClaimsRecorder,
+    _write,
     claimed_paths,
+    entry,
     missing_from,
     unsearched,
 )
@@ -40,21 +44,28 @@ from backend.schemas import (
 
 WORK = "/home/user/workspace"
 
+#: A fixed stamp, so the shape can be asserted without a clock — the reason `entry` takes one.
+AT = "2026-08-26T11:04:12Z"
+
 
 class FakeSandbox:
     """The three calls the recorder makes, and a switch for each one failing."""
 
-    def __init__(self, entries=(), search=None, explode=False):
+    def __init__(self, entries=(), search=None, explode=False, work_dir=WORK):
         self.entries = list(entries)
         self.search = search
         self.explode = explode
+        # **One work_dir, used by both calls.** A fake that reported one directory and listed
+        # another would let a test pass against a recorder comparing claims to the contents of
+        # somewhere else, which is precisely the defect §278 was.
+        self.work_dir = str(work_dir)
         self.globs = 0
         self.reads = 0
 
     async def aget_work_dir(self):
         if self.explode:
             raise RuntimeError("sandbox is gone")
-        return WORK
+        return self.work_dir
 
     async def aglob(self, pattern, path="/"):
         self.globs += 1
@@ -62,7 +73,7 @@ class FakeSandbox:
         # attribute access on an entry would fail here as well.
         return GlobResult(
             error=None,
-            matches=[{"path": f"{WORK}/{e}", "is_dir": False} for e in self.entries],
+            matches=[{"path": f"{self.work_dir}/{e}", "is_dir": False} for e in self.entries],
         )
 
     async def aread(self, file_path, offset=0, limit=2000):
@@ -500,3 +511,233 @@ def test_the_channel_is_shared_rather_than_copied():
     assert len(again.handlers) == before, "fitting twice must not stack handlers"
     assert again.level == logging.INFO
     assert not again.propagate
+
+
+# ---------------------------------------------------------------------------
+# The record the app reads
+# ---------------------------------------------------------------------------
+
+def test_a_schema_nobody_checked_is_not_a_clean_bill_of_health():
+    """`checked=False` and `missing=[]` are the same silence unless the record separates them.
+
+    `HypothesisOutput` has no path rule, so it produces no missing files — and a reader that
+    inferred "nothing missing" from that would report an unexamined answer as a verified one,
+    which is the failure `NO_PATHS` exists to make visible rather than to hide.
+    """
+    unchecked = entry("hypothesis_generator", "HypothesisOutput", at=AT, checked=False)
+    clean = entry("data_voyager", "DataAnalysisResults", at=AT, checked=True, claimed=3)
+    assert unchecked["missing"] == clean["missing"] == []
+    assert unchecked["checked"] is not clean["checked"]
+    assert unchecked["claimed"] == 0 and clean["claimed"] == 3
+
+
+def test_a_dataverse_run_that_recommended_nothing_is_not_a_run_that_was_never_asked():
+    """`datasets: 0` against `datasets: null` — §220's morning, in one field."""
+    asked = entry("dataverse_explorer", "DataVerseSearchResults", at=AT, checked=True, datasets=0)
+    never = entry("data_voyager", "DataAnalysisResults", at=AT, checked=True)
+    assert asked["datasets"] == 0
+    assert never["datasets"] is None
+
+
+def test_the_record_lands_beside_the_command_record(tmp_path):
+    """One folder, two files, and the app finds both by the same address."""
+    from minime_local import ledger
+
+    _write(tmp_path, entry("pdf_librarian", "LibraryArtifact", at=AT, checked=True, claimed=2))
+    written = ledger.read(tmp_path, name=ledger.CLAIMS_NAME)
+    assert [line["source"] for line in written] == ["pdf_librarian"]
+    assert (tmp_path / ledger.RECORD_DIR / ledger.CLAIMS_NAME).is_file()
+    # And it did not disturb the other record in the same folder.
+    assert ledger.read(tmp_path) == []
+
+
+def test_a_work_dir_on_another_machine_is_not_built_here(tmp_path, recorded):
+    """`work_dir` comes from the sandbox. Under a hosted one it names somebody else's filesystem.
+
+    Creating it would leave a folder shaped like a conversation, holding a record no app reads,
+    on a machine that never ran the turn.
+    """
+    elsewhere = tmp_path / "not-here" / "019ff651"
+    _write(elsewhere, entry("data_voyager", "DataAnalysisResults", at=AT, checked=True))
+    assert not elsewhere.exists(), "the folder must not be conjured"
+    assert any("not a folder on this machine" in line for line in recorded), (
+        "and skipping it silently is the thing this module was written against"
+    )
+
+
+def test_every_structured_answer_is_recorded_even_the_clean_ones(tmp_path):
+    """A findings-only record cannot answer 'did the subagent answer at all'.
+
+    That is the question the researcher actually arrived with: a coordinator reported a failed
+    dataverse run after three seconds and one model call, having never called the subagent. The
+    missing line is only visible if the present ones are there.
+    """
+    from minime_local import ledger
+
+    clean = DataAnalysisResults(
+        question="does yield track rainfall",
+        dataset_paths=["data/trials.csv"],
+        charts=["analysis/corr.png"],
+        findings=[],
+    )
+    sandbox = FakeSandbox(entries=["data/trials.csv", "analysis/corr.png"], work_dir=tmp_path)
+    assert record("data_voyager", clean, sandbox) is None
+
+    written = ledger.read(tmp_path, name=ledger.CLAIMS_NAME)
+    assert len(written) == 1, "the clean answer is a line, not a silence"
+    assert written[0]["missing"] == [] and written[0]["checked"] is True
+    assert written[0]["claimed"] == 2
+    assert written[0]["source"] == "data_voyager"
+    assert written[0]["schema"] == "DataAnalysisResults"
+    assert written[0]["at"].endswith("Z"), "the same stamp the command record uses"
+
+
+def test_a_fabricated_dataset_reaches_the_record_not_only_the_log(tmp_path):
+    from minime_local import ledger
+
+    sandbox = FakeSandbox(
+        entries=[DATAVERSE_SEARCH], search='[{"global_id": "doi:1/real"}]', work_dir=tmp_path
+    )
+    record("dataverse_explorer", _recommendation("doi:1/real", "doi:1/invented"), sandbox)
+
+    written = ledger.read(tmp_path, name=ledger.CLAIMS_NAME)
+    assert written[0]["datasets"] == 2
+    assert written[0]["unsearched"] == ["doi:1/invented"]
+    assert written[0]["note"] is None, "the check ran; there is nothing to explain"
+
+
+def test_a_check_that_could_not_run_says_so_in_the_record(tmp_path):
+    """Distinct from finding nothing wrong, which is the distinction §224 cost two days."""
+    from minime_local import ledger
+
+    sandbox = FakeSandbox(entries=[], search=None, work_dir=tmp_path)  # the read fails
+    record("dataverse_explorer", _recommendation("doi:1/x"), sandbox)
+
+    written = ledger.read(tmp_path, name=ledger.CLAIMS_NAME)
+    assert written[0]["unsearched"] == [], "no accusation from a check that never happened"
+    assert written[0]["note"] == f"{DATAVERSE_SEARCH} could not be read"
+
+
+def test_a_broken_record_never_costs_the_turn(tmp_path, recorded):
+    """The folder is a file, so every write into it fails. The turn must not notice."""
+    from minime_local import ledger
+
+    (tmp_path / ledger.RECORD_DIR).write_text("not a folder", encoding="utf-8")
+    sandbox = FakeSandbox(entries=["data/trials.csv"], work_dir=tmp_path)
+    analysis = DataAnalysisResults(
+        question="q", dataset_paths=["data/trials.csv"], charts=[], findings=[]
+    )
+    assert record("data_voyager", analysis, sandbox) is None
+
+
+# ---------------------------------------------------------------------------
+# The contract with the app that reads it
+# ---------------------------------------------------------------------------
+
+#: The record as the app must read it, written from this module's own code.
+#:
+#: Same discipline as `test_ledger.py` and `test_artifact_contract.py`: a field added here fails a
+#: test until the client's authors have decided about it, rather than arriving unread for as long
+#: as the feature exists — which is §223, and which is also what happened to this whole module for
+#: seven months.
+FIXTURE = (
+    Path(__file__).resolve().parent.parent.parent
+    / "crates" / "app" / "tests" / "fixtures" / "claim-record.jsonl"
+)
+
+
+def _sample() -> list[dict]:
+    """Five answers, covering every branch the client can render wrong.
+
+    Real-ish rather than minimal. Each of these is a shape that has actually occurred: the clean
+    analysis, the librarian naming an index that is not there beside a PDF that is (§230), a
+    schema no rule covers, a recommended dataset the search never returned, and a check that could
+    not run at all (§224).
+    """
+    return [
+        entry(
+            "data_voyager",
+            "DataAnalysisResults",
+            at="2026-08-26T11:04:12Z",
+            checked=True,
+            claimed=4,
+        ),
+        entry(
+            "pdf_librarian",
+            "LibraryArtifact",
+            at="2026-08-26T11:06:38Z",
+            checked=True,
+            claimed=2,
+            missing=[".asta/documents"],
+            outside=["/mnt/c/Users/LENOVO/Downloads/Graph-neural-networks.pdf"],
+        ),
+        entry(
+            "hypothesis_generator",
+            "HypothesisOutput",
+            at="2026-08-26T11:09:01Z",
+            checked=False,
+        ),
+        entry(
+            "dataverse_explorer",
+            "DataVerseSearchResults",
+            at="2026-08-26T11:12:55Z",
+            checked=True,
+            datasets=3,
+            unsearched=["doi:10.21223/INVENTED"],
+        ),
+        entry(
+            "dataverse_explorer",
+            "DataVerseSearchResults",
+            at="2026-08-26T11:15:20Z",
+            checked=True,
+            datasets=2,
+            note=f"{DATAVERSE_SEARCH} could not be read",
+        ),
+    ]
+
+
+def test_the_committed_claim_fixture_matches_what_this_module_writes():
+    """Regenerate with `MINIME_WRITE_CONTRACT=1 pytest mini-me/tests/test_claims.py`."""
+    generated = "\n".join(json.dumps(e, ensure_ascii=False, sort_keys=True) for e in _sample()) + "\n"
+    if os.environ.get("MINIME_WRITE_CONTRACT"):
+        FIXTURE.parent.mkdir(parents=True, exist_ok=True)
+        FIXTURE.write_text(generated, encoding="utf-8")
+        pytest.skip("fixture regenerated; read the diff")
+
+    assert FIXTURE.exists(), f"{FIXTURE} is missing — regenerate with MINIME_WRITE_CONTRACT=1"
+    assert FIXTURE.read_text(encoding="utf-8") == generated, (
+        "the claim record changed shape. Regenerate with "
+        "`MINIME_WRITE_CONTRACT=1 pytest mini-me/tests/test_claims.py`, then decide whether the "
+        "app should read the new field."
+    )
+
+
+def test_the_fixture_covers_both_branches_the_client_can_get_wrong():
+    entries = _sample()
+    assert any(e["missing"] for e in entries), "an answer naming a file that is not there"
+    assert any(not e["missing"] and e["checked"] for e in entries), "and one that was clean"
+    assert any(not e["checked"] for e in entries), "and one nothing looked at"
+    assert any(e["outside"] for e in entries), "and one using a file from elsewhere"
+    assert any(e["datasets"] is None for e in entries), "and one that was never a dataverse run"
+    assert any(e["unsearched"] for e in entries), "and one recommending an unsearched dataset"
+    assert any(e["note"] for e in entries), "and one whose check could not run at all"
+    assert any(e["datasets"] and not e["unsearched"] and not e["note"] for e in entries) is False, (
+        "no line here claims a clean dataverse check, so add one if the client needs to render it"
+    )
+
+
+def test_the_recorder_writes_the_shape_the_fixture_declares(tmp_path):
+    """The fixture is hand-built from `entry`; this is the same shape arriving from a real run.
+
+    Both halves matter. `test_ledger.py`'s first version asserted only the hand-built one, and a
+    field could be added to the fixture, regenerated, and never written by the code that runs.
+    """
+    from minime_local import ledger
+
+    sandbox = FakeSandbox(entries=["data/trials.csv"], work_dir=tmp_path)
+    analysis = DataAnalysisResults(
+        question="q", dataset_paths=["data/trials.csv"], charts=[], findings=[]
+    )
+    record("data_voyager", analysis, sandbox)
+    written = ledger.read(tmp_path, name=ledger.CLAIMS_NAME)
+    assert set(written[0]) == set(_sample()[0]), "the run and the fixture carry the same keys"

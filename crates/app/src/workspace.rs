@@ -704,6 +704,12 @@ fn windows_path_for(recorded: &str) -> Option<PathBuf> {
     )))
 }
 
+/// The folder inside a conversation where its own records are kept.
+///
+/// Named once because two readers look in it — `commands` and `claims` — and the producers spell
+/// it in Python (`ledger.RECORD_DIR`). Three copies of a folder name is how §278 started.
+const RECORD_DIR: &str = ".mini-me";
+
 /// One command a conversation ran, as the overlay recorded it.
 ///
 /// The producer is `overlay/minime_local/ledger.py`, and the shape is pinned by a fixture it
@@ -759,7 +765,7 @@ impl Command {
 /// a process that may have been killed mid-write, and a half-written last line must not cost the
 /// researcher the other four hundred.
 pub fn commands(conversation: &Path) -> Vec<Command> {
-    let path = conversation.join(".mini-me").join("commands.jsonl");
+    let path = conversation.join(RECORD_DIR).join("commands.jsonl");
     let Ok(text) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
@@ -793,6 +799,105 @@ pub fn decode_commands(text: &str) -> Vec<Command> {
             seconds: value["seconds"].as_f64(),
             outside: strings(&value["outside"]),
             wrote: strings(&value["wrote"]),
+        })
+        .collect()
+}
+
+/// One structured answer a subagent gave, beside what the conversation's folder actually held.
+///
+/// The producer is `mini-me/backend/middleware/claims.py`, and the shape is pinned by a fixture it
+/// generates from its own code (`crates/app/tests/fixtures/claim-record.jsonl`).
+///
+/// **It records and does not block**, deliberately — the enforcement rules worth writing are the
+/// ones that come from failures actually seen. Which means nothing here ever stopped a turn, and
+/// everything here is a thing that already happened.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Claim {
+    /// When the answer came back, as the producer wrote it. Text: it is shown, never compared.
+    pub at: String,
+    /// Which subagent answered — `pdf_librarian`, `dataverse_explorer`, and so on.
+    pub source: String,
+    /// The `response_format` it answered with. Shown because it says *what kind* of claim this is.
+    pub schema: String,
+    /// Whether any rule covers this schema at all.
+    ///
+    /// **Not "nothing was missing".** A schema with no path rule produces an empty [`Self::missing`]
+    /// and has been examined by nobody, and the two are the same silence unless something keeps
+    /// them apart. Reading it as "verified" is the failure the field exists to prevent, which is
+    /// why an absent value here defaults to `false` rather than to `true`.
+    pub checked: bool,
+    /// How many paths the answer named.
+    pub claimed: u64,
+    /// The ones that name nothing in the conversation's folder. **This is the accusation.**
+    pub missing: Vec<String>,
+    /// Paths that are real but elsewhere — the researcher's own Downloads folder, typically.
+    ///
+    /// Not an accusation: those files exist. A durability warning, because they do not travel with
+    /// the conversation and the Outputs panel cannot show them. The first version of the recorder
+    /// called these "missing" and it read as *this file does not exist*, which was false.
+    pub outside: Vec<String>,
+    /// How many datasets a dataverse run recommended. `None` when it was never that question.
+    ///
+    /// `Some(0)` and `None` are different facts: a run that recommended nothing is what a
+    /// researcher saw twice while a broken tool argument went unnoticed for weeks.
+    pub datasets: Option<u64>,
+    /// Recommended `persistent_id`s that appear nowhere in what the search returned.
+    pub unsearched: Vec<String>,
+    /// Why a check could not be made — set only when one was attempted and failed.
+    ///
+    /// A check that could not run and a check that found nothing are the same silence in a log,
+    /// and the whole dataverse comparison failed on every turn for two days because of it.
+    pub note: Option<String>,
+}
+
+impl Claim {
+    /// Whether the workspace contradicts this answer: a file that is not there, or a dataset the
+    /// search never returned. The only thing here strong enough to colour a line.
+    pub fn contradicted(&self) -> bool {
+        !self.missing.is_empty() || !self.unsearched.is_empty()
+    }
+
+    /// Whether it leaned on a file from outside this conversation, which will not travel with it.
+    pub fn used_outside(&self) -> bool {
+        !self.outside.is_empty()
+    }
+
+    /// Whether nothing looked at this answer at all — see [`Self::checked`].
+    pub fn unexamined(&self) -> bool {
+        !self.checked
+    }
+}
+
+/// Every claim this conversation's subagents recorded, oldest first.
+///
+/// Same tolerance as [`commands`]: a malformed line is skipped rather than costing the researcher
+/// the others, because this is a diagnostic written by a process that may have been killed.
+pub fn claims(conversation: &Path) -> Vec<Claim> {
+    let path = conversation.join(RECORD_DIR).join("claims.jsonl");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    decode_claims(&text)
+}
+
+/// Split out from [`claims`] so the shape can be tested against the producer's own fixture.
+pub fn decode_claims(text: &str) -> Vec<Claim> {
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .map(|value| Claim {
+            at: value["at"].as_str().unwrap_or_default().to_string(),
+            source: value["source"].as_str().unwrap_or_default().to_string(),
+            schema: value["schema"].as_str().unwrap_or_default().to_string(),
+            // Absent means nobody looked. Defaulting the other way would turn a truncated line
+            // into a clean bill of health, which is the one answer this must never invent.
+            checked: value["checked"].as_bool().unwrap_or(false),
+            claimed: value["claimed"].as_u64().unwrap_or(0),
+            missing: strings(&value["missing"]),
+            outside: strings(&value["outside"]),
+            datasets: value["datasets"].as_u64(),
+            unsearched: strings(&value["unsearched"]),
+            note: value["note"].as_str().map(str::to_string),
         })
         .collect()
 }
@@ -2728,6 +2833,172 @@ mod tests {
     fn a_conversation_that_ran_nothing_has_no_commands() {
         let base = scratch("no-commands");
         assert!(commands(&base).is_empty());
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Every key the recorder writes is either read here or declared unread with a reason.
+    ///
+    /// The other side of the contract, for the same reason the command record has one: a producer
+    /// carrying a field the client silently drops is §223, and it survived there for as long as
+    /// the feature existed. Regenerate with
+    /// `MINIME_WRITE_CONTRACT=1 pytest mini-me/tests/test_claims.py`.
+    #[test]
+    fn every_key_in_the_claim_record_is_read_or_declared_unread() {
+        /// Fields deliberately not read, and why. A reason of fewer than ten characters is not one.
+        const UNREAD: &[(&str, &str)] = &[];
+
+        let fixture = include_str!("../tests/fixtures/claim-record.jsonl");
+        let first: serde_json::Value =
+            serde_json::from_str(fixture.lines().next().expect("a line")).expect("json");
+        let keys: Vec<&str> = first
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+
+        let read = [
+            "at", "source", "schema", "checked", "claimed", "missing", "outside", "datasets",
+            "unsearched", "note",
+        ];
+        for key in &keys {
+            assert!(
+                read.contains(key) || UNREAD.iter().any(|(name, _)| name == key),
+                "the record carries `{key}` and nothing here reads it or says why not — \
+                 regenerate with MINIME_WRITE_CONTRACT=1 and decide about it"
+            );
+        }
+        for (_, reason) in UNREAD {
+            assert!(reason.len() > 10, "a declared-unread field needs a real reason");
+        }
+        for field in read {
+            assert!(keys.contains(&field), "`{field}` is claimed as read but is not in the record");
+        }
+    }
+
+    /// Every shape the recorder can produce, read from the fixture it generates from its own code.
+    #[test]
+    fn every_field_the_recorder_writes_is_read_back() {
+        let fixture = include_str!("../tests/fixtures/claim-record.jsonl");
+        let claims = decode_claims(fixture);
+        assert_eq!(claims.len(), 5, "one line per structured answer");
+
+        // The clean answer, which is a line rather than a silence — that is what makes a *missing*
+        // line visible, and a missing line is the run that never happened.
+        let clean = &claims[0];
+        assert_eq!(clean.at, "2026-08-26T11:04:12Z");
+        assert_eq!(clean.source, "data_voyager");
+        assert_eq!(clean.schema, "DataAnalysisResults");
+        assert_eq!(clean.claimed, 4);
+        assert!(clean.checked && !clean.contradicted() && !clean.used_outside());
+        assert_eq!(clean.datasets, None, "it was never a dataverse question");
+        assert_eq!(clean.note, None);
+
+        // The finding: an index that is not there, beside a PDF that is — in the researcher's own
+        // Downloads folder. Calling the second one missing was true only in a sense that read as
+        // false, which is why they are two lists.
+        let librarian = &claims[1];
+        assert_eq!(librarian.missing, vec![".asta/documents".to_string()]);
+        assert_eq!(
+            librarian.outside,
+            vec!["/mnt/c/Users/LENOVO/Downloads/Graph-neural-networks.pdf".to_string()]
+        );
+        assert!(librarian.contradicted(), "a named file that is not there");
+        assert!(librarian.used_outside(), "and a real one that will not travel");
+
+        let unexamined = &claims[2];
+        assert!(unexamined.unexamined());
+        assert!(!unexamined.contradicted(), "nothing looked, so nothing is contradicted");
+        assert_eq!(unexamined.claimed, 0);
+
+        let invented = &claims[3];
+        assert_eq!(invented.datasets, Some(3));
+        assert_eq!(invented.unsearched, vec!["doi:10.21223/INVENTED".to_string()]);
+        assert!(invented.contradicted(), "a citation composed from memory");
+        assert_eq!(invented.note, None, "the check ran; there is nothing to explain");
+
+        // And the one that is neither clean nor an accusation: the check could not be made.
+        let blind = &claims[4];
+        assert_eq!(blind.datasets, Some(2));
+        assert!(blind.unsearched.is_empty(), "no accusation from a check that never happened");
+        assert_eq!(blind.note.as_deref(), Some("dataverse_search.json could not be read"));
+        assert!(!blind.contradicted());
+    }
+
+    /// A truncated line must not read as a verified one.
+    ///
+    /// `checked` absent means nobody looked. Defaulting it to `true` would turn the last,
+    /// half-written line of a killed process into a clean bill of health — an answer this record
+    /// is not allowed to invent.
+    #[test]
+    fn a_claim_with_no_verdict_is_not_read_as_verified() {
+        let claims = decode_claims("{\"source\":\"pdf_librarian\"}");
+        assert!(claims[0].unexamined());
+        assert_eq!(claims[0].claimed, 0);
+        assert_eq!(claims[0].datasets, None);
+        assert!(claims[0].at.is_empty());
+    }
+
+    /// No record at all is the ordinary case: most conversations never call a subagent.
+    #[test]
+    fn a_conversation_with_no_subagent_answers_has_no_claims() {
+        let base = scratch("no-claims");
+        assert!(claims(&base).is_empty());
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// **The join, not the parts.** Python decides where the record goes; Rust decides where to
+    /// look; and until this test nothing compared the two.
+    ///
+    /// That gap is §280 exactly — two notions of where a conversation is, each correct in its own
+    /// file, both sides green. So this drives the overlay's own `append` through its own constants
+    /// and then reads the result back with the app's own reader.
+    #[test]
+    fn the_record_python_writes_is_the_one_the_app_reads() {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            eprintln!("skipping: python3 is not on PATH");
+            return;
+        }
+        let base = scratch("claims-join");
+        let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
+        // The librarian's answer out of the producer's own fixture, rather than a shape retyped
+        // here — a hand-written line would agree with itself and prove nothing about the producer.
+        let line = include_str!("../tests/fixtures/claim-record.jsonl")
+            .lines()
+            .nth(1)
+            .expect("the librarian's answer");
+
+        let script = "import json,sys\n\
+                      sys.path.insert(0, sys.argv[1])\n\
+                      from minime_local import ledger\n\
+                      ledger.append(sys.argv[2], json.loads(sys.argv[3]), name=ledger.CLAIMS_NAME)\n";
+        let out = std::process::Command::new("python3")
+            .env("PYTHONIOENCODING", "utf-8")
+            .args(["-c", script])
+            .arg(&overlay)
+            .arg(&base)
+            .arg(line)
+            .output()
+            .expect("python3 runs");
+        assert!(
+            out.status.success(),
+            "the overlay could not write the record: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let found = claims(&base);
+        assert_eq!(found.len(), 1, "the app looked where the overlay wrote");
+        assert_eq!(found[0].source, "pdf_librarian");
+        assert_eq!(found[0].missing, vec![".asta/documents".to_string()]);
+        // And the two records in that folder stay separate files. If the command reader picked
+        // this up, `WHAT RAN` would count subagent answers as commands — and every one of them
+        // would show an empty command line.
+        assert!(commands(&base).is_empty());
+
         std::fs::remove_dir_all(&base).ok();
     }
 

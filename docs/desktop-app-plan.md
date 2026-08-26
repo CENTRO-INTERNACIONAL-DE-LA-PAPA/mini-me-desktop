@@ -35,11 +35,16 @@ read first; the dated sections below it are the record of how each item got here
   modal; and open datasets download straight into the thread's folder, which is also the sandbox's
   working directory. The MCP's own download tool stays blocked — it writes to a directory on
   `dataverse-cip.fastmcp.app`, which is nobody's workspace.
-- 🟡 **A subagent's claims are written down beside what is on disk** (§219, fixed §224) — every path
-  a structured response names, and every `persistent_id` the dataverse explorer recommends. It
-  **records and does not block**, deliberately: the rules worth enforcing are the ones that come
-  from failures actually seen. It read `ReadResult.file_data.content` for two days against a
-  `TypedDict`, so the dataverse half never ran until §224. **Nothing has been read off it yet.**
+- ✅ **A subagent's claims are written down beside what is on disk, and the app reads them**
+  (§219, fixed §224, read §281) — every path a structured response names, and every
+  `persistent_id` the dataverse explorer recommends. It **records and does not block**,
+  deliberately: the rules worth enforcing are the ones that come from failures actually seen. It
+  read `ReadResult.file_data.content` for two days against a `TypedDict`, so the dataverse half
+  never ran until §224. This item carried the sentence *"nothing has been read off it yet"* from
+  §219 to §281, and the record now lands in the conversation's own folder as
+  `.mini-me/claims.jsonl`, with `WHAT WAS CLAIMED` beside `WHAT RAN` in the Outputs panel. **Seven
+  of the eleven subagents are covered** — the four without a `response_format` assert what they did
+  in a sentence, and checking that needs a reader rather than a comparison.
 - ✅ **All eleven subagents have now been run** (§230, §235–§239). `pdf_librarian` was fabricating
   its library and is gated; `data_voyager` submits, fits models and returns metrics and charts —
   measured against the live service on a dataset of the researcher's shape, recovering a planted
@@ -15839,3 +15844,111 @@ the thing it warned about.
 
 *Hundred-and-thirtieth: a bug that creates its own evidence will survive the fix that reads it. Ask
 what the artefact you are trusting was made by, before trusting it.*
+
+## 281. Reading a record that had never been read (2026-08-26)
+
+`ClaimsRecorder` has compared every path a subagent's structured answer names against the workspace
+since §219, and every `persistent_id` the dataverse explorer recommends against the search that
+actually ran. It found `pdf_librarian` fabricating its library (§230). It found its own dataverse
+half broken on every turn for two days (§224). Both findings reached a person because somebody
+opened `%TEMP%\mini-me-desktop-backend.log` and searched for `claims:`.
+
+The roadmap carried one sentence about it, unchanged from the day it was written:
+
+> **Nothing has been read off it yet.**
+
+Which is §276's defect in a second module. `execute` recorded every command it ran into a file
+nobody opened; this records every claim a subagent makes into a log nobody opens. A recorder whose
+findings need a person to go looking reports nothing on the days nobody looks, and that is every
+day a researcher is doing research rather than debugging the tool.
+
+So the record now goes where the app can read it: `.mini-me/claims.jsonl`, beside the command
+record, in the conversation's own folder — it moves when the conversation is filed into a project,
+it goes when the conversation is deleted, and `WHAT WAS CLAIMED` sits under `WHAT RAN` in the
+Outputs panel with a modal behind it. The `execute` accounting built in §276–§279 is the pattern,
+reused whole.
+
+### Three fields that exist to keep two silences apart
+
+The comparison was already written. What the file needed was the ability to say things a log line
+had never had to distinguish, because a person reading a log supplies the context and a panel
+cannot.
+
+**`checked` is not `missing == []`.** A schema no rule covers produces an empty `missing` list and
+has been examined by nobody. In a log those are two different lines. In a count they are the same
+number, and a reader takes "4 subagent answers" with no complaint attached to mean four verified
+answers. `NO_PATHS` exists precisely so that "not in `CLAIMED_PATHS`" means *nobody has looked at
+this one* rather than *checked, nothing to check* — and that distinction had to survive into the
+record or the panel would launder it. The line says `2 with nothing to check` out loud.
+
+**`note` is not an empty finding.** A dataverse check that could not read `dataverse_search.json`
+accuses nobody, and a check that found every id present accuses nobody. Same silence. That silence
+is exactly what §224 was: the check failed on every turn for two days and the log looked like a
+system with nothing to report. The record carries why a check could not be made, and it outranks
+the clean case on the panel line.
+
+**`datasets: 0` is not `datasets: null`.** A run that recommended nothing is what the researcher
+saw twice while a broken tool argument went unnoticed for weeks (§220). A turn that was never a
+dataverse question is a different fact. One field, two nulls, and the JSON keeps them apart.
+
+### Every answer, not only the findings
+
+The record holds a line per structured answer including the clean ones, which costs a line and buys
+the only question a findings-only record cannot answer: **did the subagent answer at all.**
+
+That is not hypothetical. Yesterday the coordinator reported *"the Dataverse Explorer run failed"*
+after a three-second turn with one model call, having never invoked the subagent. No claim was
+made, so a findings-only record is empty — indistinguishable from a run that went perfectly. A
+record of every answer makes the *absent* line visible, and an absent line is the run that never
+happened.
+
+### Two guards, for two different mistakes
+
+`_write` never creates the directory it writes into. `work_dir` comes from the sandbox backend:
+under the desktop overlay it is a real folder on this machine, already made by `aresolve`; under a
+hosted sandbox it names a path on somebody else's filesystem, and `mkdir(parents=True)` would
+quietly build an imitation of it here — a conversation-shaped folder holding a record no app will
+ever read. Requiring the folder to already exist is the difference between *the app can read this*
+and *a path-shaped string*. When it does not exist, that is logged rather than skipped in silence.
+
+And it never raises, for the reason `ledger.append` and `aafter_agent` already give: a recorder that
+can end a researcher's turn is worse than no recorder.
+
+### The test double that reported one folder and listed another
+
+`FakeSandbox` answered `aget_work_dir` with a module constant and built its `aglob` listing from
+the same constant — fine, until a test pointed it at a real `tmp_path` to check what got written.
+Then it reported one directory and listed the contents of another, and the recorder dutifully found
+every claimed path missing.
+
+That is §280's bug, reproduced inside the test written to catch it: two notions of where the
+conversation is. The fake now has one `work_dir` and both calls use it.
+
+### The contract, both ways
+
+The producer generates `crates/app/tests/fixtures/claim-record.jsonl` from its own code under
+`MINIME_WRITE_CONTRACT=1`, and the Rust decoder asserts that **every key in it is either read or
+declared unread with a reason**. Both halves, because §280 shipped a one-sided version of this: the
+Python side asserted its own shape, `wrote` was added, the fixture regenerated, and the Rust decoder
+went on ignoring the field with 462 tests green. A one-sided contract is not a contract.
+
+The fixture carries five answers because five shapes have actually occurred: the clean analysis; the
+librarian naming an index that is not there beside a PDF that is, in the researcher's own Downloads
+folder; a schema no rule covers; a `persistent_id` composed from memory; and a check that could not
+run at all.
+
+### What it still cannot see
+
+The four subagents without a `response_format` — cleaning, EDA, diagnostic, predictive — assert what
+they did in prose, and comparing prose to a filesystem needs a reader rather than a comparison.
+Nothing here reads findings, either: a subagent that writes a real file and describes it wrongly
+looks identical to one that wrote it correctly. What is claimed is what has always been claimed —
+*these are the paths it named, and this is what the folder holds* — and the panel says so where the
+list is rather than in a docstring nobody there will read.
+
+It still blocks nothing. That was deliberate in §219 and it stays deliberate: the rules worth
+enforcing are the ones that come from failures actually seen, and now the seeing does not depend on
+somebody thinking to open a log file.
+
+*Hundred-and-thirty-first: a record is finished when something reads it, not when something writes
+it. Until then it is a file.*
