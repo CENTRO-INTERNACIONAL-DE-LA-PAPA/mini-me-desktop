@@ -501,3 +501,74 @@ def test_a_file_already_inside_is_refused_rather_than_duplicated(tmp_path: Path)
     outcome = ledger.collect(tmp_path, [str(inside)])
     assert outcome["brought"] == []
     assert "already in this conversation" in outcome["refused"][0]["reason"]
+
+
+# --- one conversation, one folder ---------------------------------------------------------------
+
+
+def test_a_route_finds_the_folder_a_project_conversation_actually_lives_in(tmp_path, monkeypatch):
+    """**The bug that made the button say the opposite of the panel.**
+
+    `workspace_project()` reads the live run's config, and a route has none — so a conversation
+    filed in a project had its runs writing to `root/<project>/<thread>` while every route computed
+    `root/<thread>`. The app counted two files written outside; the backend, reading the other
+    folder, counted none. Both were confident and one was looking at nothing (§280).
+    """
+    from minime_local.workspace import LocalWorkspaceBackend, existing_project
+
+    monkeypatch.setenv("MINIME_LOCAL_WORKSPACE", str(tmp_path))
+    # What a run in a project leaves behind.
+    filed = tmp_path / "Late blight" / "thread-42"
+    filed.mkdir(parents=True)
+
+    assert existing_project(tmp_path, "thread-42") == "Late blight"
+    # And the backend built outside a run now resolves to it, rather than to `root/thread-42`.
+    assert LocalWorkspaceBackend("thread-42")._work_dir == filed
+
+
+def test_an_ungrouped_conversation_is_left_where_it_is(tmp_path, monkeypatch):
+    """The folder that already exists wins, and for an ungrouped conversation that is the root."""
+    from minime_local.workspace import LocalWorkspaceBackend, existing_project
+
+    monkeypatch.setenv("MINIME_LOCAL_WORKSPACE", str(tmp_path))
+    (tmp_path / "thread-7").mkdir()
+    # A project folder exists too, and must not be picked for a thread that is not inside it.
+    (tmp_path / "Some project").mkdir()
+
+    assert existing_project(tmp_path, "thread-7") == ""
+    assert LocalWorkspaceBackend("thread-7")._work_dir == tmp_path / "thread-7"
+
+
+def test_a_conversation_with_no_folder_yet_lands_where_it_would_be_created(tmp_path, monkeypatch):
+    from minime_local.workspace import LocalWorkspaceBackend, existing_project
+
+    monkeypatch.setenv("MINIME_LOCAL_WORKSPACE", str(tmp_path))
+    assert existing_project(tmp_path, "brand-new") == ""
+    assert LocalWorkspaceBackend("brand-new")._work_dir == tmp_path / "brand-new"
+
+
+def test_the_record_a_route_reads_is_the_one_the_run_wrote(tmp_path, monkeypatch):
+    """The join: a run in a project writes the record, and a route built later finds it.
+
+    This is the assertion the whole arc was missing. Both sides were tested; that they agreed about
+    *which folder* was never asserted, and they did not.
+    """
+    from minime_local.workspace import LocalWorkspaceBackend
+
+    monkeypatch.setenv("MINIME_LOCAL_WORKSPACE", str(tmp_path))
+    filed = tmp_path / "Late blight" / "thread-99"
+    filed.mkdir(parents=True)
+    outside_file = tmp_path.parent / "from-a-project-run.csv"
+    outside_file.unlink(missing_ok=True)
+
+    # The run: a command that writes outside the conversation.
+    running = LocalWorkspaceBackend("thread-99")
+    assert running._work_dir == filed
+    running.execute(f"python3 -c \"open('{outside_file}','w').write('x')\"")
+
+    # The route: a *fresh* backend for the same thread, as a request would build.
+    from_route = LocalWorkspaceBackend("thread-99")
+    report = ledger.outside_files(from_route._work_dir)
+    assert report["present"] == [str(outside_file)], (
+        "a route must read the record the run wrote, or it reports the opposite of the panel"
+    )

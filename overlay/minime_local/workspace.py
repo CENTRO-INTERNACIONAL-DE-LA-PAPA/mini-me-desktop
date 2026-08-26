@@ -134,6 +134,35 @@ def workspace_project() -> str:
 _PINNED_BY_THREAD: dict[str, str] = {}
 
 
+def existing_project(root: Path, thread_id: str) -> str:
+    """The project folder a conversation already lives in, found by looking.
+
+    **Because `workspace_project()` cannot answer outside a run.** It reads the live run's
+    `configurable`, and a *route* has none — so every route resolving a workspace for a
+    conversation filed in a project computed `root/<thread>` while its runs had been writing to
+    `root/<project>/<thread>`. Two folders for one conversation, and each side counting confidently
+    from its own.
+
+    Found rather than remembered. `workspace_thread` keeps a module-level map for the same problem,
+    which works only while the process that saw the run is still alive — and the realistic moment
+    for this is pressing a button after a restart, when that memory is empty. A directory that
+    exists is durable and needs nothing to have happened first.
+
+    One level deep, because a project is one path segment (`workspace_project` enforces that), and
+    `""` when the conversation is ungrouped or has no folder yet — which is exactly the case where
+    `root/<thread>` is right.
+    """
+    try:
+        if (root / thread_id).is_dir():
+            return ""  # ungrouped, and its folder is already where it should be
+        for candidate in sorted(root.iterdir()):
+            if candidate.is_dir() and (candidate / thread_id).is_dir():
+                return candidate.name
+    except OSError:
+        pass
+    return ""
+
+
 def workspace_thread(default: str) -> str:
     """Which thread's workspace this run should use.
 
@@ -448,8 +477,11 @@ class LocalWorkspaceBackend(LocalShellBackend):
         # Not necessarily this run's own thread: a background worker shares the
         # conversation's workspace, or its output would land where nobody looks.
         self._thread_id = workspace_thread(thread_id)
-        project = workspace_project()
         root = workspace_root()
+        # The run's own config first — it is authoritative and it is what creates the folder in the
+        # first place. Outside a run it is empty, and then the folder that already exists is the
+        # only thing that knows (§280).
+        project = workspace_project() or existing_project(root, self._thread_id)
         # **A background worker gets a folder *inside* the conversation's, named after itself.**
         #
         # Three earlier attempts moved these files between sibling directories and none of them
