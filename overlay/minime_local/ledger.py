@@ -199,6 +199,13 @@ def append(work_dir: str | PurePosixPath, record: dict[str, Any]) -> None:
         pass
 
 
+def record_path(work_dir: str | PurePosixPath) -> str:
+    """Where the record for this conversation lives. Named so a caller can *say* where it looked."""
+    from pathlib import Path
+
+    return str(Path(str(work_dir)) / RECORD_DIR / RECORD_NAME)
+
+
 def read(work_dir: str | PurePosixPath) -> list[dict[str, Any]]:
     """The conversation's record, oldest first. A malformed line is skipped, never fatal."""
     from pathlib import Path
