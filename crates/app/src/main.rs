@@ -77,7 +77,7 @@ const ASTA_CITATION: &str = "AstaBench: Rigorous Benchmarking of AI Agents with 
 /// this is only the researcher-facing name requested in §154, so it cannot become a second
 /// project registry or collide with a real folder of the same name.
 const UNGROUPED_PROJECT_LABEL: &str = "Ungrouped Conversations";
-const ICON_PATHS: [&str; 18] = [
+const ICON_PATHS: [&str; 30] = [
     "icons/settings.svg",
     "icons/conversations.svg",
     "icons/research.svg",
@@ -96,6 +96,18 @@ const ICON_PATHS: [&str; 18] = [
     "icons/file-archive.svg",
     "icons/file-db.svg",
     "icons/file-blank.svg",
+    "icons/agent-ellipse.svg",
+    "icons/binoculars.svg",
+    "icons/book-open-text.svg",
+    "icons/broom.svg",
+    "icons/chat-circle-dots.svg",
+    "icons/gear-six.svg",
+    "icons/magnifying-glass.svg",
+    "icons/paper-plane-right.svg",
+    "icons/pencil.svg",
+    "icons/plus.svg",
+    "icons/sidebar-simple-left.svg",
+    "icons/sidebar-simple-right.svg",
 ];
 
 /// The four small UI icons, compiled into the executable rather than read beside it.
@@ -128,6 +140,18 @@ impl AssetSource for Assets {
             "icons/file-archive.svg" => Some(include_bytes!("../assets/icons/file-archive.svg")),
             "icons/file-db.svg" => Some(include_bytes!("../assets/icons/file-db.svg")),
             "icons/file-blank.svg" => Some(include_bytes!("../assets/icons/file-blank.svg")),
+            "icons/agent-ellipse.svg" => Some(include_bytes!("../assets/icons/agent-ellipse.svg")),
+            "icons/binoculars.svg" => Some(include_bytes!("../assets/icons/binoculars.svg")),
+            "icons/book-open-text.svg" => Some(include_bytes!("../assets/icons/book-open-text.svg")),
+            "icons/broom.svg" => Some(include_bytes!("../assets/icons/broom.svg")),
+            "icons/chat-circle-dots.svg" => Some(include_bytes!("../assets/icons/chat-circle-dots.svg")),
+            "icons/gear-six.svg" => Some(include_bytes!("../assets/icons/gear-six.svg")),
+            "icons/magnifying-glass.svg" => Some(include_bytes!("../assets/icons/magnifying-glass.svg")),
+            "icons/paper-plane-right.svg" => Some(include_bytes!("../assets/icons/paper-plane-right.svg")),
+            "icons/pencil.svg" => Some(include_bytes!("../assets/icons/pencil.svg")),
+            "icons/plus.svg" => Some(include_bytes!("../assets/icons/plus.svg")),
+            "icons/sidebar-simple-left.svg" => Some(include_bytes!("../assets/icons/sidebar-simple-left.svg")),
+            "icons/sidebar-simple-right.svg" => Some(include_bytes!("../assets/icons/sidebar-simple-right.svg")),
             _ => None,
         };
         Ok(bytes.map(Cow::Borrowed))
@@ -249,6 +273,14 @@ struct MenuRow {
     id: &'static str,
     label: String,
     danger: bool,
+}
+
+/// Which of the two sidebar lists is showing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum SidebarView {
+    #[default]
+    Conversations,
+    Projects,
 }
 
 
@@ -2008,6 +2040,8 @@ struct Workbench {
     warming: bool,
     /// An open sidebar `⋮` or `New` menu, and where its corner goes.
     sidebar_menu: Option<(SidebarMenu, gpui::Point<gpui::Pixels>)>,
+    /// Which of the two sidebar lists — Conversations or Projects — is showing.
+    sidebar_view: SidebarView,
     /// Which row of the `/name` picker is chosen. Reset on every keystroke.
     subagent_selected: usize,
     /// An open choice popup: which choice, and where its trigger was clicked.
@@ -2426,6 +2460,7 @@ impl Workbench {
             opening: false,
             warming: false,
             sidebar_menu: None,
+            sidebar_view: SidebarView::default(),
             subagent_selected: 0,
             open_picker: None,
             settings_focus: cx.focus_handle(),
