@@ -101,6 +101,19 @@ def _configurable() -> dict:
         return {}
 
 
+# ---------------------------------------------------------------------------------------------
+# **Two Rust tests read this file as text and `exec` slices of it**, to prove the project sanitiser
+# and the thread pin agree across the language boundary without importing deepagents. One slice
+# runs from the sanitiser below to the pin resolver after it; the other from the pin map to the
+# logger.
+#
+# A function added *inside* either slice is exec'd in a namespace holding almost nothing, and dies
+# with a bare `NameError` far from here. **Add new module-level code below the logger.**
+#
+# The markers are named in the tests, not repeated here: this comment first quoted them and the
+# tests then matched *it* instead of the code — a warning that became the thing it warned about
+# (§280).
+# ---------------------------------------------------------------------------------------------
 def workspace_project() -> str:
     """The project folder for this run, or ``""`` for none.
 
@@ -134,35 +147,6 @@ def workspace_project() -> str:
 _PINNED_BY_THREAD: dict[str, str] = {}
 
 
-def existing_project(root: Path, thread_id: str) -> str:
-    """The project folder a conversation already lives in, found by looking.
-
-    **Because `workspace_project()` cannot answer outside a run.** It reads the live run's
-    `configurable`, and a *route* has none — so every route resolving a workspace for a
-    conversation filed in a project computed `root/<thread>` while its runs had been writing to
-    `root/<project>/<thread>`. Two folders for one conversation, and each side counting confidently
-    from its own.
-
-    Found rather than remembered. `workspace_thread` keeps a module-level map for the same problem,
-    which works only while the process that saw the run is still alive — and the realistic moment
-    for this is pressing a button after a restart, when that memory is empty. A directory that
-    exists is durable and needs nothing to have happened first.
-
-    One level deep, because a project is one path segment (`workspace_project` enforces that), and
-    `""` when the conversation is ungrouped or has no folder yet — which is exactly the case where
-    `root/<thread>` is right.
-    """
-    try:
-        if (root / thread_id).is_dir():
-            return ""  # ungrouped, and its folder is already where it should be
-        for candidate in sorted(root.iterdir()):
-            if candidate.is_dir() and (candidate / thread_id).is_dir():
-                return candidate.name
-    except OSError:
-        pass
-    return ""
-
-
 def workspace_thread(default: str) -> str:
     """Which thread's workspace this run should use.
 
@@ -190,7 +174,37 @@ def workspace_thread(default: str) -> str:
     return _PINNED_BY_THREAD.get(default, "") or default
 
 
+
 logger = logging.getLogger(__name__)
+
+
+def existing_project(root: Path, thread_id: str) -> str:
+    """The project folder a conversation already lives in, found by looking.
+
+    **Because `workspace_project()` cannot answer outside a run.** It reads the live run's
+    `configurable`, and a *route* has none — so every route resolving a workspace for a
+    conversation filed in a project computed `root/<thread>` while its runs had been writing to
+    `root/<project>/<thread>`. Two folders for one conversation, and each side counting confidently
+    from its own.
+
+    Found rather than remembered. `workspace_thread` keeps a module-level map for the same problem,
+    which works only while the process that saw the run is still alive — and the realistic moment
+    for this is pressing a button after a restart, when that memory is empty. A directory that
+    exists is durable and needs nothing to have happened first.
+
+    One level deep, because a project is one path segment (`workspace_project` enforces that), and
+    `""` when the conversation is ungrouped or has no folder yet — which is exactly the case where
+    `root/<thread>` is right.
+    """
+    try:
+        if (root / thread_id).is_dir():
+            return ""  # ungrouped, and its folder is already where it should be
+        for candidate in sorted(root.iterdir()):
+            if candidate.is_dir() and (candidate / thread_id).is_dir():
+                return candidate.name
+    except OSError:
+        pass
+    return ""
 
 #: How long a minted Asta token is reused before asking the CLI again.
 #:
