@@ -112,13 +112,14 @@ read first; the dated sections below it are the record of how each item got here
 - ⬜ **The warm-up sometimes fails** — `GET /assistants/{id}/schemas` returned a non-2xx on one
   launch and built the graph fine on the next, so the first turn pays the ten seconds §176 meant to
   absorb. Timing-dependent; measured 2026-08-18, not yet explained.
-- ⬜ **Three deferred during §246–§266**, flagged at the time and recorded here because a decision
+- ⬜ **Two deferred during §246–§266**, flagged at the time and recorded here because a decision
   taken aloud and never written down is not a decision:
   - The experiment tree draws each root separately. Allen's own view joins them through a grey parent
     that **is not in the listing**, so drawing it would mean inventing a node.
-  - `JobKind::expected()` says "25–40 min" whatever the budget, so a five-experiment run that takes
-    thirteen is mislabelled. It should scale with the number bought.
   - The transcript renders the attached-files blockquote as though the researcher typed it.
+  - ~~`JobKind::expected()` quotes the default budget at everybody~~ — **done**, and it scales with
+    the number bought now. Struck rather than deleted: this list was three items for a day after it
+    was two, which is the failure it was written to prevent.
 
 **5. Upstream** — nine reports written in `docs/upstream/`, none of them ours to fix.
 
