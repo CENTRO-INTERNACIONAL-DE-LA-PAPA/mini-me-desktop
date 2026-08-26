@@ -20,8 +20,8 @@ use gpui::{
 /// So the argument is not a convenience. Without it every icon here is invisible, and no test
 /// that reads the SVG file can tell — which is why this is a parameter the compiler demands
 /// rather than a rule written down.
-pub(crate) fn app_icon(path: &'static str, ink: u32) -> impl IntoElement {
-    app_icon_at(path, ink, 14.)
+pub(crate) fn app_icon(path: &'static str, ink: u32, size: Option<f32>) -> impl IntoElement {
+    app_icon_at(path, ink, size.unwrap_or(14.))
 }
 
 

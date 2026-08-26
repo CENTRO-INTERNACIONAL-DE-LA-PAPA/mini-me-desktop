@@ -267,6 +267,7 @@ impl Workbench {
                         } else {
                             theme::text_faint()
                         },
+                        None
                     ))
                     .child("conversations")
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
@@ -306,6 +307,7 @@ impl Workbench {
                                 } else {
                                     theme::text_faint()
                                 },
+                                None
                             ))
                             .child("road"),
                     )
@@ -339,6 +341,7 @@ impl Workbench {
                         } else {
                             theme::text_faint()
                         },
+                        None
                     ))
                     .child("research")
                     .on_click(cx.listener(|workbench, _event, _window, cx| {

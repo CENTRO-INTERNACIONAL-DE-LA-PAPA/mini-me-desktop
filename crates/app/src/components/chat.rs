@@ -845,7 +845,7 @@ impl Workbench {
             // Centred vertically: with nothing in the transcript there is no reading order to
             // preserve, and a page of prose pinned to the top of a tall window reads as a header.
             .justify_center()
-            .gap_6()
+            .gap_10()
             .px(px(60.))
             .py(px(34.))
             .child(
@@ -855,9 +855,38 @@ impl Workbench {
                     .gap_2()
                     .child(
                         div()
+                            .flex()
+                            .flex_row()
+                            .items_baseline()
+                            .gap_3()
                             .text_color(rgb(theme::text()))
                             .text_size(px(22.))
                             .line_height(px(29.))
+                            .child(
+                                div()
+                                    .relative()
+                                    .flex_none()
+                                    .w(px(36.))
+                                    .h(px(18.))
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .left(px(0.))
+                                            .child(app_icon_at("icons/agent-ellipse.svg", 0xF47920, 18.)),
+                                    )
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .left(px(9.))
+                                            .child(app_icon_at("icons/agent-ellipse.svg", 0x20ADF4, 18.)),
+                                    )
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .left(px(18.))
+                                            .child(app_icon_at("icons/agent-ellipse.svg", 0xF42091, 18.)),
+                                    ),
+                            )
                             .child("What are you working on?"),
                     )
                     .child(
@@ -955,17 +984,17 @@ impl Workbench {
         // exactly that in the composer for them to edit.
         const MOVES: [(&str, &str, &str); 3] = [
             (
-                "◎",
+                "icons/binoculars.svg",
                 "Find datasets in CIP Dataverse on a topic",
                 "Search CIP Dataverse for datasets about ",
             ),
             (
-                "▤",
+                "icons/book-open-text.svg",
                 "Summarise what the literature says, with references",
                 "Summarise what the literature says about , with references.",
             ),
             (
-                "▩",
+                "icons/broom.svg",
                 "Clean and profile a file I drop here",
                 "Clean and profile the file I am about to drop, and tell me what is in it.",
             ),
@@ -975,9 +1004,8 @@ impl Workbench {
             .flex_col()
             .gap_2()
             .w_full()
-            .min_w_0()
-            .child(section_label("OR START SOMETHING"));
-        for (at, (glyph, label, prompt)) in MOVES.into_iter().enumerate() {
+            .min_w_0();
+        for (at, (icon, label, prompt)) in MOVES.into_iter().enumerate() {
             let leading = at == 0;
             moves = moves.child(
                 div()
@@ -985,7 +1013,7 @@ impl Workbench {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_3()
+                    .gap_2()
                     .w_full()
                     .min_w_0()
                     .p_2()
@@ -998,20 +1026,21 @@ impl Workbench {
                             .border_color(rgb(theme::accent()))
                     })
                     .when(!leading, |row| row.border_color(rgb(theme::border())))
-                    .hover(|style| style.bg(rgb(theme::hover_over(theme::elevated()))).cursor_pointer())
+                    .when(!leading, |row| {
+                        row.hover(|style| style.bg(rgb(theme::surface())).cursor_pointer())
+                    })
+                    .when(leading, |row| row.hover(|style| style.cursor_pointer()))
                     .child(
                         div()
-                            .flex_none()
-                            .text_color(rgb(theme::accent()))
-                            .text_size(px(13.))
-                            .child(glyph),
+                            .child(app_icon(icon, theme::accent(), Some(18.))),
                     )
                     .child(
                         div()
                             .flex_grow()
                             .min_w_0()
-                            .text_color(rgb(theme::text()))
+                            .text_color(rgb(theme::text_muted()))
                             .text_size(px(13.))
+                            .when(leading, |row| row.text_color(rgb(theme::accent())))
                             .child(label),
                     )
                     .on_click(cx.listener(move |workbench, _event, window, cx| {
@@ -1505,16 +1534,15 @@ impl Workbench {
         // near-universal rule, and a send/stop toggle in the composer is how the running
         // state is expressed without adding a second control (docs §52).
         let has_text = !self.composer.read(cx).text().trim().is_empty();
-        let (glyph, fill, ink, hint) = if self.streaming {
-            ("■", theme::elevated(), theme::error(), "stop this turn")
+        let (send_icon, ink, hint) = if self.streaming {
+            ("icons/stop-circle.svg", theme::error(), "Stop this turn")
         } else if has_text {
-            ("↑", theme::accent(), theme::background(), "send")
+            ("icons/paper-plane-right.svg", theme::accent(), "Send")
         } else {
             (
-                "↑",
-                theme::elevated(),
-                theme::text_faint(),
-                "type a question first",
+                "icons/paper-plane-right.svg",
+                theme::text_muted(),
+                "Type a question first",
             )
         };
 
@@ -1525,13 +1553,15 @@ impl Workbench {
             .gap_2()
             .flex_none()
             .m_2()
-            .p_2()
+            .px_2()
+            .py_1()
             .rounded_lg()
+            .text_size(px(14.))
             // The composer reads as one field with a control inside it, rather than a
             // text box sitting next to an unrelated button.
             .bg(rgb(theme::surface()))
             .border_1()
-            .border_color(rgb(theme::border_strong()))
+            .border_color(rgb(theme::border()))
             // Which field has the keyboard is otherwise invisible — there is a caret, and it
             // is two pixels wide. `in_focus` rather than `focus` because the thing with the
             // focus is a child entity, not this box.
@@ -1560,21 +1590,31 @@ impl Workbench {
             .child(
                 div()
                     .id("attach-file")
+                    .group("attach-file-icon")
                     .flex_none()
                     .flex()
                     .items_center()
                     .justify_center()
                     .w(px(30.))
                     .h(px(30.))
-                    .rounded_full()
                     .tooltip(|_window, cx| {
                         cx.new(|_| Hint {
-                            text: "add a file from this computer".into(),
+                            text: "Add a file from this computer".into(),
                         })
                         .into()
                     })
-                    .hover(|style| style.bg(rgb(theme::hover_over(theme::elevated()))).cursor_pointer())
-                    .child(app_icon_at("icons/attach.svg", theme::text_muted(), 17.))
+                    .hover(|style| style.cursor_pointer())
+                    .child(
+                        svg()
+                            .path("icons/plus.svg")
+                            .w(px(14.))
+                            .h(px(14.))
+                            .flex_none()
+                            .text_color(rgb(theme::text_muted()))
+                            .group_hover("attach-file-icon", |style| {
+                                style.text_color(rgb(theme::accent()))
+                            }),
+                    )
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
                         workbench.choose_files(cx);
                     })),
@@ -1590,10 +1630,7 @@ impl Workbench {
                     .w(px(30.))
                     .h(px(30.))
                     // Circular, so it reads as a control and not as a word in a box.
-                    .rounded_full()
-                    .bg(rgb(fill))
                     .text_color(rgb(ink))
-                    .text_sm()
                     .tooltip({
                         let hint = hint.to_string();
                         move |_window, cx| {
@@ -1604,12 +1641,12 @@ impl Workbench {
                         }
                     })
                     .when(has_text && !self.streaming, |button| {
-                        button.hover(|style| style.bg(rgb(theme::accent_hover())).cursor_pointer())
+                        button.hover(|style| style.cursor_pointer())
                     })
                     .when(self.streaming, |button| {
                         button.hover(|style| style.cursor_pointer())
                     })
-                    .child(glyph)
+                    .child(app_icon(send_icon, ink, None))
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
                         if workbench.streaming {
                             workbench.stop_turn(cx);
