@@ -22,7 +22,7 @@ field, and committed. Then:
 - `protocol.rs`'s tests read the same file and assert the decoders surface it, so **a field the
   client silently drops fails there**.
 
-Neither half can drift without the other noticing, which is the property §222 established for the
+Neither half can drift without the other noticing, which is the property §221 established for the
 MCP boundary and this is the same discipline one layer in.
 
 # Regenerating

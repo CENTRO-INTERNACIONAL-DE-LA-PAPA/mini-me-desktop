@@ -15727,3 +15727,114 @@ for in the same message.
 *Hundred-and-twenty-ninth: a plausible fix arriving at the same moment as a report is not an
 explanation of it. The two have to be joined by evidence, and it is cheapest to ask for that
 evidence before the fix feels finished.*
+
+## 277. A guard that fired exactly when the feature mattered (2026-08-26)
+
+`WHAT RAN` never appeared. The line was added *after* `outputs_section`'s early return:
+
+```rust
+if count == 0 && self.buckets.is_empty() {
+    return section;
+}
+section = section.children(self.commands_line(cx));   // never reached
+```
+
+A turn that wrote everything to `/tmp` leaves the conversation folder empty, so `count == 0`. The
+panel went silent in precisely the case the record exists for — the researcher's files had gone
+somewhere else, which is the only reason there was nothing to list.
+
+The seventh time in this project a correct component sat where nothing reached it (§254, §257,
+§258, §259, §261, §262). The previous six were *missing* callers; this one has a caller, behind a
+condition that is false exactly when the feature matters. Worth the distinction, because "is it
+wired up?" would have answered **yes**.
+
+The emptiness decision is a free function now, so the property can be asserted rather than lived in
+a render body: `outputs_are_empty(0, 0, 1)` must be false.
+
+## 278. A guard with no way past it (2026-08-26)
+
+*"I saw this bug yesterday showing the app to a colleague and I cannot delete the conversation, it
+says is running but the search took more than 1 hour."*
+
+`request_delete` refused while any task was unfinished. The reasoning was sound — a background
+worker can still be writing beneath that directory — and there was **no way past it**, so a task
+that never reaches a terminal state locks the conversation for good. Which is what happened, in
+front of somebody else.
+
+It warns now, in the sentence that asks, and the delete proceeds. A live *foreground* turn still
+blocks: that one ends on its own, in seconds, and can be watched.
+
+A refusal cannot be read and acted on. A warning can.
+
+## 279. A press that said nothing, and a zero that meant nothing (2026-08-26)
+
+The copy button appeared to do nothing. The log said otherwise:
+
+```
+asked to bring outside files into the conversation commands=2 files=1
+brought files into the conversation brought=0 refused=0
+```
+
+Two faults in one report. `brought=0 refused=0` **drew nothing at all**, so a press that worked and
+a press that did nothing were indistinguishable — asked for directly: *"a notification must appear
+saying files copied like the modals we have at the bottom right"*, which `say` has done since §41,
+status bar plus a lingering toast, and this button used none of it.
+
+And a bare zero is a result with no information in it. `outside_files` returns both halves now —
+still there, and gone — so the route can say *why* it has nothing to do.
+
+## 280. Two folders, one conversation (2026-08-26)
+
+Then the panel and the button openly contradicted each other:
+
+```
+panel:   3 commands · 2 wrote a file outside this conversation
+backend: no command in this conversation wrote a file outside it
+```
+
+Not a swept file — that branch names a count. This was the branch where the record has no `wrote`
+entries at all, which can only mean the two sides were reading **different files for the same
+conversation**. No count from either side could say which, so both were made to name their folder.
+
+*"its a project"* — and that was the whole thing.
+
+`workspace_project()` reads the live run's `configurable`, and **a route has none**. A conversation
+filed in a project had its runs writing to `root/<project>/<thread>` while every route computed
+`root/<thread>`. This was never about the button: any route resolving a workspace outside a run had
+been reading the wrong folder for every project conversation, the figures route included. It went
+unseen because everything had been tried on ungrouped conversations, where the two paths agree.
+
+### The fix was defeated by the bug's own debris
+
+`existing_project` looked for the folder that already exists. On the researcher's disk:
+
+```
+Mini-Me\01a03ab8-…            empty — created by a route resolving the wrong path
+Mini-Me\test3\01a03ab8-…      the real one, holding the record
+```
+
+`aresolve` creates the directory it resolves to, so **every previous press had been manufacturing
+the evidence that defeated the fix**. `is_dir()` found the debris, answered "ungrouped", and the
+repair for reading the wrong folder went on reading the wrong folder — tested, green, and wrong on
+the one machine it was written for.
+
+An empty directory is not evidence a conversation lives there. It is evidence that something
+created a directory. But emptiness proves nothing either way — a conversation filed and not yet
+written to has an empty folder too — so the rule became an order of preference: content anywhere
+first, then an existing project folder, and the root only when it holds the files.
+
+Verified by rebuilding that exact layout and running a command through it.
+
+### And two of my own habits, in one section
+
+**A red suite was merged.** The command printed `test result: FAILED. 466 passed; 2 failed` and the
+commit ran anyway, because the result was *echoed* rather than gated on — the same mistake §271
+records, on the same day §271 was written. Two Rust tests `exec` slices of `workspace.py`; the new
+function landed inside one, then the other.
+
+**And the comment warning about those slices was the trap on its first attempt**, because it quoted
+the marker strings and `source.find` matched the comment instead of the code. A warning that became
+the thing it warned about.
+
+*Hundred-and-thirtieth: a bug that creates its own evidence will survive the fix that reads it. Ask
+what the artefact you are trusting was made by, before trusting it.*

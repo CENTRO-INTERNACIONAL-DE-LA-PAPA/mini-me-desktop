@@ -1,6 +1,6 @@
 """You cannot report a run you did not start.
 
-Driven against real LangChain objects for §222's reason: a double more permissive than production
+Driven against real LangChain objects for §221's reason: a double more permissive than production
 certifies the bug it was meant to catch.
 """
 

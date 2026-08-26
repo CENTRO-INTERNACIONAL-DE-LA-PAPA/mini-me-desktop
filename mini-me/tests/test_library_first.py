@@ -1,6 +1,6 @@
 """The PDF librarian must run something before it can report a library.
 
-Driven through the real middleware against real LangChain objects, for §222's reason: a double more
+Driven through the real middleware against real LangChain objects, for §221's reason: a double more
 permissive than production certifies the bug.
 """
 
