@@ -16470,6 +16470,10 @@ impl Workbench {
             commands = waiting.len(),
             files = files_left_outside(&waiting).len(),
             in_flight = self.collect_in_flight,
+            // **The folder this side read**, so it can be compared with the one the backend names
+            // in its answer. The app counted files written outside and the backend counted none,
+            // which means the two are reading different records — and neither count can say that.
+            read_from = ?self.thread_workspace(),
             "asked to bring outside files into the conversation"
         );
         if self.collect_in_flight {
