@@ -572,3 +572,38 @@ def test_the_record_a_route_reads_is_the_one_the_run_wrote(tmp_path, monkeypatch
     assert report["present"] == [str(outside_file)], (
         "a route must read the record the run wrote, or it reports the opposite of the panel"
     )
+
+
+def test_the_empty_folder_the_bug_left_behind_does_not_win(tmp_path, monkeypatch):
+    """**Exactly what was on the researcher's disk**, and what the first fix walked straight into.
+
+        Mini-Me\\01a03ab8-…                 <- empty, created by a route resolving the wrong path
+        Mini-Me\\test3\\01a03ab8-…           <- the real one, holding the record
+
+    Every earlier press had created the top-level folder through `aresolve`, so a check for
+    `is_dir()` found it and answered "ungrouped" — and the fix for reading the wrong folder went on
+    reading the wrong folder (§280).
+    """
+    from minime_local.workspace import LocalWorkspaceBackend, existing_project
+
+    monkeypatch.setenv("MINIME_LOCAL_WORKSPACE", str(tmp_path))
+    thread = "01a03ab8-2049-7363-9864-25d40e644180"
+    (tmp_path / thread).mkdir()                       # the debris
+    real = tmp_path / "test3" / thread                # where the run actually writes
+    real.mkdir(parents=True)
+    (real / "notes.md").write_text("the conversation's own work")
+
+    assert existing_project(tmp_path, thread) == "test3"
+    assert LocalWorkspaceBackend(thread)._work_dir == real
+
+
+def test_an_ungrouped_conversation_with_files_still_wins(tmp_path, monkeypatch):
+    """The rule must not simply prefer projects: a real ungrouped conversation keeps its folder."""
+    from minime_local.workspace import existing_project
+
+    thread = "ungrouped-thread"
+    (tmp_path / thread).mkdir()
+    (tmp_path / thread / "results.csv").write_text("mine")
+    (tmp_path / "some project" / thread).mkdir(parents=True)  # an empty decoy inside a project
+
+    assert existing_project(tmp_path, thread) == ""
