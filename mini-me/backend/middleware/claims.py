@@ -233,7 +233,7 @@ def content_of(result: Any) -> str | None:
     **`ReadResult.file_data` is a `FileData`, and `FileData` is a `TypedDict`** — so it is a plain
     dict and `.content` on it raises `AttributeError`. The first version of this file did exactly
     that, and the test beside it passed because its fake used `SimpleNamespace(content=...)`: a
-    double more permissive than the real type, which is the mistake §222 was written about. It cost
+    double more permissive than the real type, which is the mistake §221 was written about. It cost
     the whole dataverse check, which failed on every turn (§224).
 
     Attribute access is kept as a fallback rather than removed, because two backends answer this
