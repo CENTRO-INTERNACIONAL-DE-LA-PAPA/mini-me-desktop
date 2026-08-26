@@ -418,6 +418,30 @@ def test_only_what_was_written_is_offered_and_never_what_was_read(tmp_path: Path
     assert ledger.collectable(tmp_path) == [str(ours)]
 
 
+def test_a_swept_file_is_reported_as_gone_rather_than_silently_dropped(tmp_path: Path):
+    """An empty answer must be able to say *why* it is empty.
+
+    The first version returned only what could be copied, so a conversation whose files had been
+    swept from `/tmp` produced an empty list indistinguishable from one that never wrote anything
+    — and the button reported `brought=0 refused=0`, which is a sentence with no information in it.
+    A caller cannot explain what it was not told (§279).
+    """
+    here, gone = tmp_path.parent / "still-here.csv", tmp_path.parent / "swept.csv"
+    here.write_text("x")
+    gone.unlink(missing_ok=True)
+    for path in (gone, here):
+        ledger.append(
+            tmp_path,
+            ledger.entry(
+                f"python3 -c \"open('{path}','w')\"",
+                exit_code=0, seconds=0.1, work_dir=tmp_path, at="t", wrote=[str(path)],
+            ),
+        )
+    report = ledger.outside_files(tmp_path)
+    assert report["present"] == [str(here)]
+    assert report["gone"] == [str(gone)], "the swept one is named, not dropped"
+
+
 def test_a_file_that_has_since_gone_is_not_offered(tmp_path: Path):
     gone = tmp_path.parent / "cleaned-up.csv"
     ledger.append(

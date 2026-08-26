@@ -1046,6 +1046,41 @@ fn affordable(experiments: u32, available: Option<u32>) -> bool {
 /// where it was. Three of the five experiments in one real run reported the same `0.690`, so equal
 /// scores are the common case rather than an edge one, and a sort that reshuffled them would make
 /// the toggle look like it was doing something else.
+/// One sentence for what a press of "bring them in" actually did.
+///
+/// **Never silence, and never a bare zero.** `brought: 0, refused: 0` is a result with no
+/// information in it, and it is exactly what a researcher got when the files had been swept from
+/// `/tmp` between the command and the press: the button appeared to do nothing at all.
+fn collected_sentence(collected: &protocol::Collected) -> String {
+    let brought = collected.brought.len();
+    let refused = collected.refused.len();
+    if brought == 0 && refused == 0 {
+        // The backend's own explanation, which it sends precisely so this case can be described.
+        return if collected.note.is_empty() {
+            "nothing to bring in".to_string()
+        } else {
+            collected.note.clone()
+        };
+    }
+    let mut said = if brought == 0 {
+        "brought nothing in".to_string()
+    } else {
+        format!(
+            "brought {brought} file{} into this conversation",
+            if brought == 1 { "" } else { "s" }
+        )
+    };
+    if refused > 0 {
+        // The count *and* the first reason: "2 left out" tells nobody what to do next.
+        let (_, reason) = &collected.refused[0];
+        said.push_str(&format!(
+            " · {refused} left where {} — {reason}",
+            if refused == 1 { "it was" } else { "they were" }
+        ));
+    }
+    said
+}
+
 /// The distinct files this conversation's commands were watched writing outside it.
 ///
 /// **Files, not commands.** The button says how many will be copied, and one command can write
@@ -16449,13 +16484,24 @@ impl Workbench {
             if let Some(outcome) = answer.next().await {
                 let _ = workbench.update(cx, |workbench, cx| {
                     workbench.collect_in_flight = false;
+                    // **Say it out loud.** `say` puts the outcome in the status bar *and* in a
+                    // toast that outlives the next status change — it has existed for exactly this
+                    // since §41, and the first version of this button used none of it, so a press
+                    // that worked and a press that did nothing looked identical.
                     match &outcome {
-                        Ok(collected) => tracing::info!(
-                            brought = collected.brought.len(),
-                            refused = collected.refused.len(),
-                            "brought files into the conversation"
-                        ),
-                        Err(error) => tracing::warn!(%error, "could not bring the files in"),
+                        Ok(collected) => {
+                            tracing::info!(
+                                brought = collected.brought.len(),
+                                refused = collected.refused.len(),
+                                note = %collected.note,
+                                "brought files into the conversation"
+                            );
+                            workbench.say(collected_sentence(collected), cx);
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "could not bring the files in");
+                            workbench.say(format!("could not bring the files in: {error}"), cx);
+                        }
                     }
                     workbench.collecting = Some(outcome);
                     cx.notify();
@@ -16586,6 +16632,17 @@ impl Workbench {
                 );
             }
             None => {}
+        }
+        // And when both lists were empty, the backend's own sentence — otherwise the press draws
+        // nothing and reads as broken, which is what it did.
+        if let Some(Ok(collected)) = &self.collecting {
+            if collected.brought.is_empty() && collected.refused.is_empty() {
+                body = body.child(
+                    ui::Label::new(collected_sentence(collected))
+                        .muted()
+                        .size(ui::Size::Compact),
+                );
+            }
         }
 
         // Offered only when a command was *watched writing* somewhere — never for a path that was
@@ -17341,6 +17398,45 @@ mod tests {
             ask.contains("while its turn is running"),
             "a live foreground turn is a different case and still blocks"
         );
+    }
+
+    /// A press must never be silent, and a zero must never be bare.
+    ///
+    /// The button reported `brought=0 refused=0` and drew nothing — so a press that worked and a
+    /// press that did nothing looked identical, which is how a working feature reads as broken
+    /// (§279). The backend now sends its own sentence for that case precisely so it can be shown.
+    #[test]
+    fn every_outcome_has_a_sentence_including_nothing_at_all() {
+        let nothing = protocol::Collected {
+            brought: Vec::new(),
+            refused: Vec::new(),
+            note: "1 file(s) were written outside this conversation, and none is still there"
+                .to_string(),
+        };
+        assert_eq!(collected_sentence(&nothing), nothing.note, "the reason, not a zero");
+
+        // Even with no note the press says *something*.
+        let mute = protocol::Collected::default();
+        assert!(!collected_sentence(&mute).is_empty());
+
+        let one = protocol::Collected {
+            brought: vec![("/tmp/results.csv".into(), "results.csv".into())],
+            refused: Vec::new(),
+            note: String::new(),
+        };
+        assert_eq!(collected_sentence(&one), "brought 1 file into this conversation");
+
+        // A partial result names the count **and** the first reason: "2 left out" tells nobody
+        // what to do next.
+        let partial = protocol::Collected {
+            brought: vec![("/tmp/a.csv".into(), "a.csv".into())],
+            refused: vec![("/tmp/b.csv".into(), "it is no longer where the command left it".into())],
+            note: String::new(),
+        };
+        let said = collected_sentence(&partial);
+        assert!(said.contains("brought 1 file"), "{said}");
+        assert!(said.contains("1 left where it was"), "{said}");
+        assert!(said.contains("no longer where the command left it"), "the reason too: {said}");
     }
 
     /// The button counts **files**, not commands.
