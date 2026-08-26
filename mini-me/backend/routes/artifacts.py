@@ -560,10 +560,22 @@ async def collect_outside_files(request: Request) -> Response:
     except Exception as exc:  # noqa: BLE001
         return JSONResponse({"error": f"no workspace: {exc}"}, status_code=502)
 
-    paths = ledger.collectable(work_dir)
-    if not paths:
-        return JSONResponse({"brought": [], "refused": [], "note": "nothing left outside"})
-    outcome = ledger.collect(work_dir, paths)
+    # **Both halves, so an empty answer can say why it is empty.** `brought=0 refused=0` is a
+    # sentence with no information in it, and it is exactly what the first version returned when a
+    # file had since been swept from `/tmp`. A caller cannot explain what it was not told.
+    report = ledger.outside_files(work_dir)
+    gone = [{"path": path, "reason": "it is no longer where the command left it"} for path in report["gone"]]
+
+    if not report["present"]:
+        note = (
+            f"{len(gone)} file(s) were written outside this conversation, and none is still there"
+            if gone
+            else "no command in this conversation wrote a file outside it"
+        )
+        return JSONResponse({"brought": [], "refused": gone, "note": note})
+
+    outcome = ledger.collect(work_dir, report["present"])
+    outcome["refused"].extend(gone)
     return JSONResponse(outcome)
 
 

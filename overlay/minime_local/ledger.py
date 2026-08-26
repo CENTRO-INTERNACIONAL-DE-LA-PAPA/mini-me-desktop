@@ -219,29 +219,40 @@ def read(work_dir: str | PurePosixPath) -> list[dict[str, Any]]:
     return records
 
 
-def collectable(work_dir: str | PurePosixPath) -> list[str]:
-    """Files this conversation's commands wrote outside it, that are still there.
+def outside_files(work_dir: str | PurePosixPath) -> dict[str, list[str]]:
+    """Files this conversation's commands wrote outside it, split by whether they are still there.
 
     **Only `wrote`, never `outside`.** A named path may be the researcher's own input, and the
     difference between the two lists is the difference between offering somebody their results and
     taking their data (see :func:`written_during`).
 
-    Deduplicated and ordered by when they were written, because that is the order they were
-    produced in and the order a person expects to see them.
+    **Both halves are returned, and that is the point.** The first version answered only "here is
+    what can be copied", so a conversation whose files had since been swept from `/tmp` produced an
+    empty list indistinguishable from one that never wrote anything — and the button reported
+    `brought=0 refused=0`, which is a sentence with no information in it. A caller cannot explain
+    what it was not told.
+
+    Deduplicated and in the order the commands produced them, which is the order a person
+    remembers making them in.
     """
     from pathlib import Path
 
-    found: list[str] = []
+    present: list[str] = []
+    gone: list[str] = []
     for record in read(work_dir):
         for path in record.get("wrote") or []:
-            if path in found:
+            if path in present or path in gone:
                 continue
             try:
-                if Path(path).is_file():
-                    found.append(path)
+                (present if Path(path).is_file() else gone).append(path)
             except OSError:
-                continue
-    return found
+                gone.append(path)
+    return {"present": present, "gone": gone}
+
+
+def collectable(work_dir: str | PurePosixPath) -> list[str]:
+    """Just the files still there. Kept because it reads better at the call site."""
+    return outside_files(work_dir)["present"]
 
 
 def free_name(folder: "Path", name: str) -> "Path":  # type: ignore[name-defined]
