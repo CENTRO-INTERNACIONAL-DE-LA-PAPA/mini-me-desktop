@@ -1359,6 +1359,7 @@ impl LangGraphClient {
                         .collect()
                 })
                 .unwrap_or_default(),
+            note: value["note"].as_str().unwrap_or_default().to_string(),
         })
     }
 
@@ -2944,6 +2945,12 @@ pub struct Collected {
     pub brought: Vec<(String, String)>,
     /// `(path, why not)`.
     pub refused: Vec<(String, String)>,
+    /// The backend's sentence for why there was nothing to bring, when there was nothing.
+    ///
+    /// Carried because `brought: 0, refused: 0` is a result with no information in it, and that is
+    /// precisely the answer a researcher gets when the files were swept from `/tmp` between the
+    /// command and the press.
+    pub note: String,
 }
 
 
