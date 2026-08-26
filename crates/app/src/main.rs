@@ -47,6 +47,7 @@ use gpui::{
 };
 
 use components::common::horizontal_drag_offset;
+use components::common::app_icon;
 use components::provenance_view::{link_for, provenance_svg};
 use composer::{Composer, ComposerEvent};
 use protocol::{AgentRef, ApprovalRequest, Bucket, Project, TurnEvent};
@@ -6972,6 +6973,31 @@ impl Render for Workbench {
             .when(self.sidebar_open, |body| {
                 body.child(self.rail(cx))
                     .child(self.divider(Divider::Sidebar, cx))
+            })
+            .when(!self.sidebar_open, |body| {
+                body.child(
+                    div()
+                        .id("toggle-left-sidebar")
+                        .child(
+                            app_icon(
+                                "icons/sidebar-simple-left.svg",
+                                theme::text(),
+                                None
+                            )
+                        )
+                        .w(px(30.))
+                        .h(px(30.))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .hover(|style| style.cursor_pointer())
+                        .on_click(cx.listener(|workbench, _event, _window, cx| {
+                            workbench.sidebar_open = !workbench.sidebar_open;
+                            workbench.remember_panels();
+                            cx.notify();
+                        })),
+                    )
             })
             // **Its own card, not a strip inside the conversation's.** It lived inside the chat
             // pane's border, so the two read as one panel with a notch cut out of it while the

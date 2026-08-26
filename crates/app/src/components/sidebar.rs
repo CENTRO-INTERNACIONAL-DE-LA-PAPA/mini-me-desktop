@@ -24,7 +24,7 @@ impl SidebarMenu {
             Self::New => vec![
                 row("menu-new-conversation", "New conversation".into()),
                 // The ellipsis is a promise: this one asks for a name before anything happens.
-                row("menu-new-project", "New project…".into()),
+                row("menu-new-project", "New project".into()),
             ],
             Self::Conversation(_) => vec![
                 row("menu-rename", "Rename".into()),
@@ -524,45 +524,34 @@ impl Workbench {
                     .flex_none()
                     .px_3()
                     .py_2()
-                    .border_b_1()
-                    .border_color(rgb(theme::border()))
                     .child(
                         div()
-                            .id("open-settings")
-                            .text_color(rgb(theme::accent()))
-                            .hover(|style| {
-                                style
-                                    .text_color(rgb(theme::accent_hover()))
-                                    .cursor_pointer()
-                            })
-                            .child(app_icon("icons/settings.svg", theme::accent(), None))
-                            .on_click(cx.listener(|workbench, _event, _window, cx| {
-                                workbench.run_command(Command::OpenSettings, cx);
-                            })),
+                            .text_size(px(16.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .child("Mini-Me App"),
                     )
                     .child(
-                        // Not a `ui::Button`: it brightens its border *and* its text on
-                        // hover, which no other button does, and it uses `border_strong`.
-                        // One call site is not worth a flag on the shared type.
                         div()
-                            .id("new-conversation")
-                            .rounded_md()
-                            .px_2()
-                            .py_1()
-                            .border_1()
-                            .border_color(rgb(theme::border_strong()))
-                            .text_color(rgb(theme::text_muted()))
-                            .text_xs()
-                            .hover(|style| {
-                                style
-                                    .text_color(rgb(theme::accent()))
-                                    .border_color(rgb(theme::accent()))
-                                    .cursor_pointer()
-                            })
-                            .child("New"),
-                            // The menu this used to open (conversation vs. project) is gone —
-                            // creation is being redone, so this button is a placeholder until it
-                            // has a new behaviour wired to it.
+                            .id("toggle-left-sidebar")
+                            .child(
+                                app_icon(
+                                    "icons/sidebar-simple-left.svg",
+                                    theme::text(),
+                                    None
+                                )
+                            )
+                            .w(px(30.))
+                            .h(px(30.))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .hover(|style| style.cursor_pointer())
+                            .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                workbench.sidebar_open = !workbench.sidebar_open;
+                                workbench.remember_panels();
+                                cx.notify();
+                            })),
                     ),
             )
             .child(self.sidebar_view_toggle(cx))
@@ -579,6 +568,35 @@ impl Workbench {
                     .child(self.conversation_query.clone()),
             )
             .child(list)
+            .child(
+                div()
+                    .id("open-settings")
+                    .flex()
+                    .flex_row()
+                    .flex_none()
+                    .gap_2()
+                    .py_1()
+                    .px_2()
+                    .border_1()
+                    .rounded_lg()
+                    .m_2()
+                    .items_center()
+                    .border_color(rgb(theme::border()))
+                    .text_color(rgb(theme::text_muted()))
+                    .bg(rgb(theme::background()))
+                    .child(
+                        app_icon("icons/gear-six.svg", theme::text_muted(), None)
+                    )
+                    .hover(|style| {
+                        style
+                            .text_color(rgb(theme::accent_hover()))
+                            .cursor_pointer()
+                    })
+                    .on_click(cx.listener(|workbench, _event, _window, cx| {
+                        workbench.run_command(Command::OpenSettings, cx);
+                    }))
+                    .child("Settings")
+            )
     }
 }
 
