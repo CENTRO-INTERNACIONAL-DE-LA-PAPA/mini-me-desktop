@@ -567,11 +567,22 @@ async def collect_outside_files(request: Request) -> Response:
     gone = [{"path": path, "reason": "it is no longer where the command left it"} for path in report["gone"]]
 
     if not report["present"]:
-        note = (
-            f"{len(gone)} file(s) were written outside this conversation, and none is still there"
-            if gone
-            else "no command in this conversation wrote a file outside it"
-        )
+        # **Say where it looked.** The app read the same conversation's record and counted files
+        # written outside it, while this answered "none" — which means the two are reading
+        # different folders, and no amount of counting from either side can say which. A path in
+        # the sentence ends that in one press (§280).
+        if gone:
+            note = (
+                f"{len(gone)} file(s) were written outside this conversation, "
+                "and none is still there"
+            )
+        else:
+            looked = ledger.record_path(work_dir)
+            entries = len(ledger.read(work_dir))
+            note = (
+                f"no command wrote a file outside this conversation — read {entries} command(s) "
+                f"from {looked}"
+            )
         return JSONResponse({"brought": [], "refused": gone, "note": note})
 
     outcome = ledger.collect(work_dir, report["present"])
