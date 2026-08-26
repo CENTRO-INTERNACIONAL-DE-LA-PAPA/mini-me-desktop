@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import asyncio
 import mimetypes
 from pathlib import PurePosixPath
 
@@ -563,7 +564,11 @@ async def collect_outside_files(request: Request) -> Response:
     # **Both halves, so an empty answer can say why it is empty.** `brought=0 refused=0` is a
     # sentence with no information in it, and it is exactly what the first version returned when a
     # file had since been swept from `/tmp`. A caller cannot explain what it was not told.
-    report = ledger.outside_files(work_dir)
+    # **Off the event loop.** These walk directories, `stat` every named path and copy files, over
+    # a `/mnt/c` mount where each of those is slow — and this handler is async, so doing it inline
+    # blocks every other request in the process. LangGraph's dev server says so out loud, and the
+    # overlay already uses `to_thread` for exactly this in ten places.
+    report = await asyncio.to_thread(ledger.outside_files, work_dir)
     gone = [{"path": path, "reason": "it is no longer where the command left it"} for path in report["gone"]]
 
     if not report["present"]:
@@ -578,14 +583,14 @@ async def collect_outside_files(request: Request) -> Response:
             )
         else:
             looked = ledger.record_path(work_dir)
-            entries = len(ledger.read(work_dir))
+            entries = len(await asyncio.to_thread(ledger.read, work_dir))
             note = (
                 f"no command wrote a file outside this conversation — read {entries} command(s) "
                 f"from {looked}"
             )
         return JSONResponse({"brought": [], "refused": gone, "note": note})
 
-    outcome = ledger.collect(work_dir, report["present"])
+    outcome = await asyncio.to_thread(ledger.collect, work_dir, report["present"])
     outcome["refused"].extend(gone)
     return JSONResponse(outcome)
 

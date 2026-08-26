@@ -607,3 +607,46 @@ def test_an_ungrouped_conversation_with_files_still_wins(tmp_path, monkeypatch):
     (tmp_path / "some project" / thread).mkdir(parents=True)  # an empty decoy inside a project
 
     assert existing_project(tmp_path, thread) == ""
+
+
+def test_the_project_lookup_walks_the_root_once_per_thread(tmp_path, monkeypatch):
+    """A constructor is not a place to be slow.
+
+    `LocalWorkspaceBackend` is built for every run *and* every request, and this walks the
+    workspace root over a `/mnt/c` mount. LangGraph's dev server flags synchronous work in an
+    async handler for exactly this reason, and the honest floor is: at most one listing per
+    thread, per process.
+    """
+    from minime_local import workspace as ws
+
+    monkeypatch.setenv("MINIME_LOCAL_WORKSPACE", str(tmp_path))
+    ws._PROJECT_BY_THREAD.clear()
+    (tmp_path / "proj" / "thread-cached").mkdir(parents=True)
+    (tmp_path / "proj" / "thread-cached" / "x.txt").write_text("x")
+
+    walks = {"count": 0}
+    real = ws._look_for_project
+
+    def counted(root, thread_id):
+        walks["count"] += 1
+        return real(root, thread_id)
+
+    monkeypatch.setattr(ws, "_look_for_project", counted)
+
+    for _ in range(5):
+        assert ws.existing_project(tmp_path, "thread-cached") == "proj"
+    assert walks["count"] == 1, f"the root was walked {walks['count']} times"
+
+
+def test_the_route_does_its_filesystem_work_off_the_event_loop():
+    """Directory walks, `stat` and `copy2` in an async handler block every other request.
+
+    Asserted on the source because the property is *where the call happens*, not what it returns —
+    and a test that called the route would pass either way.
+    """
+    from pathlib import Path as P
+
+    route = P(__file__).resolve().parent.parent / "backend" / "routes" / "artifacts.py"
+    body = route.read_text().split("async def collect_outside_files")[1].split("\nasync def ")[0]
+    for call in ("ledger.outside_files", "ledger.collect", "ledger.read"):
+        assert f"asyncio.to_thread({call}" in body, f"{call} still runs on the event loop"
