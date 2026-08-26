@@ -197,14 +197,40 @@ def existing_project(root: Path, thread_id: str) -> str:
     `root/<thread>` is right.
     """
     try:
-        if (root / thread_id).is_dir():
-            return ""  # ungrouped, and its folder is already where it should be
-        for candidate in sorted(root.iterdir()):
-            if candidate.is_dir() and (candidate / thread_id).is_dir():
+        # **A folder with something in it beats an empty one**, wherever each of them sits.
+        #
+        # An empty `root/<thread>` is usually debris from this very bug: a route resolved the wrong
+        # path, `aresolve` created the directory, and it has sat there since. Answering "ungrouped"
+        # because that debris exists is how the first attempt at this fix stayed broken on the
+        # machine it was written for.
+        #
+        # But emptiness is not proof either way — a conversation filed in a project and not yet
+        # written to has an empty folder too — so an empty *project* folder still beats nothing.
+        # Content first, existence second, and the root only when it is the one with the files.
+        if _has_anything_in_it(root / thread_id):
+            return ""
+        projects = sorted(entry for entry in root.iterdir() if entry.is_dir())
+        for candidate in projects:
+            if _has_anything_in_it(candidate / thread_id):
+                return candidate.name
+        for candidate in projects:
+            if (candidate / thread_id).is_dir():
                 return candidate.name
     except OSError:
         pass
     return ""
+
+
+def _has_anything_in_it(path: Path) -> bool:
+    """Whether `path` is a directory holding at least one entry.
+
+    An empty directory is not evidence a conversation lives there. It is evidence that *something
+    created a directory*, which is a much weaker claim and, here, usually a wrong one.
+    """
+    try:
+        return path.is_dir() and any(path.iterdir())
+    except OSError:
+        return False
 
 #: How long a minted Asta token is reused before asking the CLI again.
 #:
