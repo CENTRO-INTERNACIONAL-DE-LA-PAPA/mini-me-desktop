@@ -3252,6 +3252,11 @@ struct Workbench {
     /// — *what did that turn actually do* — is asked occasionally and read closely, which is the
     /// opposite of what a permanently-visible section is for.
     commands_open: bool,
+    /// The delete being confirmed would interrupt background work that says it is still running.
+    ///
+    /// Carried to the confirmation modal so the sentence that asks can say so. Not a refusal:
+    /// see `ask_to_delete` for what refusing cost.
+    delete_interrupts_work: bool,
     /// What came back from the last press of "Bring them in", or that one is in flight.
     ///
     /// Kept so the modal can report *what happened to each file* rather than a count. A partial
@@ -3661,6 +3666,7 @@ impl Workbench {
             taking: None,
             update_dismissed: false,
             commands_open: false,
+            delete_interrupts_work: false,
             collecting: None,
             collect_in_flight: false,
             install,
@@ -6389,19 +6395,17 @@ impl Workbench {
             );
             return;
         }
-        if current_is_targeted && self.tasks.iter().any(|task| !task.is_finished()) {
-            // A background worker can still be writing beneath the conversation directory after
-            // the foreground turn ends. Deleting that tree underneath it would recreate the
-            // folder or lose the remainder of its work; wait for the task's terminal state.
-            self.say(
-                format!(
-                    "can't delete this {} while its background work is running",
-                    target.noun()
-                ),
-                cx,
-            );
-            return;
-        }
+        // **A warning now, not a refusal.** A background worker can still be writing beneath the
+        // conversation directory after the foreground turn ends, and deleting that tree underneath
+        // it can lose the remainder of its work — so the modal says so, in the sentence that asks.
+        //
+        // It used to refuse outright, and that was worse than the thing it prevented: a task that
+        // never reaches a terminal state locks the conversation **forever**. It happened while the
+        // app was being shown to a colleague — a paper search that had said "running" for over an
+        // hour, and no way to remove the conversation at all. A guard with no way past it is a
+        // guard that eventually holds the wrong thing (§278).
+        self.delete_interrupts_work =
+            current_is_targeted && self.tasks.iter().any(|task| !task.is_finished());
         self.confirming_delete = Some(target);
         window.focus(&self.delete_focus);
         cx.notify();
@@ -8461,6 +8465,16 @@ impl Workbench {
                             .muted()
                             .size(ui::Size::Compact),
                     )
+                    .children(self.delete_interrupts_work.then(|| {
+                        ui::Label::new(
+                            "Background work here still says it is running. Deleting now may lose \
+                             whatever it has not finished writing — and a task that has been \
+                             running far longer than it should is usually one that has stopped \
+                             without saying so.",
+                        )
+                        .colour(theme::accent())
+                        .size(ui::Size::Compact)
+                    }))
                     .into_any_element();
                 ("Delete conversation?", body, "Delete conversation")
             }
@@ -16413,6 +16427,16 @@ impl Workbench {
     /// decides *which* files from its own record — this sends no paths, because a request that
     /// could name one would be a file-copier pointed at anything.
     fn collect_outside(&mut self, cx: &mut Context<Self>) {
+        // **Logged before anything can fail**, so "I pressed it and nothing happened" stops being
+        // indistinguishable from "the press never arrived". §272 cost four rounds to learn that an
+        // absent message and an absent action look identical from the other end of a report.
+        let waiting = self.thread_commands();
+        tracing::info!(
+            commands = waiting.len(),
+            files = files_left_outside(&waiting).len(),
+            in_flight = self.collect_in_flight,
+            "asked to bring outside files into the conversation"
+        );
         if self.collect_in_flight {
             return;
         }
@@ -17281,6 +17305,44 @@ mod tests {
     }
 
     /// §244: one run gets a definite press, because a single action has to mean something.
+    /// A conversation must never become undeletable.
+    ///
+    /// The guard used to *refuse* while any task was unfinished, and a task that never reaches a
+    /// terminal state locks the conversation for good. It happened in front of a colleague: a
+    /// paper search stuck on "running" for over an hour, and no way to remove the thread at all.
+    ///
+    /// Deleting under a live worker is a real risk and the modal says so — but a warning can be
+    /// read and acted on, where a refusal with no way past it cannot (§278).
+    #[test]
+    fn unfinished_work_warns_rather_than_locking_the_conversation() {
+        let source = include_str!("main.rs");
+        let ask = source
+            .split("fn request_delete")
+            .nth(1)
+            .expect("the delete guard")
+            .split("\n    fn ")
+            .next()
+            .expect("its body");
+
+        assert!(
+            ask.contains("self.confirming_delete = Some(target)"),
+            "the confirmation must be reachable"
+        );
+        assert!(
+            !ask.contains("while its background work is running"),
+            "unfinished background work must no longer refuse the delete outright"
+        );
+        assert!(
+            ask.contains("delete_interrupts_work"),
+            "it must still be carried to the modal, so the sentence that asks can warn"
+        );
+        // A turn actually streaming *is* still refused: that one ends on its own, in seconds.
+        assert!(
+            ask.contains("while its turn is running"),
+            "a live foreground turn is a different case and still blocks"
+        );
+    }
+
     /// The button counts **files**, not commands.
     ///
     /// One command can write three — a figure per variable is the ordinary case here — so counting
