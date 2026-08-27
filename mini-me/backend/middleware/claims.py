@@ -352,11 +352,31 @@ def _write(work_dir: str | PurePosixPath, record: dict[str, Any]) -> None:
             return
         from minime_local import ledger
 
-        ledger.append(folder, record, name=ledger.CLAIMS_NAME)
+        written = ledger.append(folder, record, name=ledger.CLAIMS_NAME)
+        if written:
+            # **Said on success, not only on failure.** A recorder that speaks only when something
+            # goes wrong cannot be distinguished from one that is not running, which is the whole
+            # argument `diagnostics.arriving` was written for — and it is how this module's own
+            # write came to fail with nothing anywhere to say so (§285).
+            logger.info("claims: recorded %s in %s", record.get("source"), written)
+        else:
+            logger.warning(
+                "claims: %s was checked but the record could not be written under %s — "
+                "the Outputs panel will have nothing to show",
+                record.get("source"),
+                folder,
+            )
     except ImportError:
         # The overlay is desktop-only, and so is the panel that reads this. `artifacts.py` makes
         # the same call and says the same thing: a sandboxed deployment has no local record.
-        logger.debug("claims: no desktop overlay, so the record stays in this log")
+        #
+        # **INFO, not DEBUG.** This channel is set to INFO, so the debug line this used to emit
+        # went nowhere — and "the overlay is missing" is the single most useful sentence anyone
+        # looking for an absent panel row could read.
+        logger.info(
+            "claims: no minime_local on the path, so %s stays in this log and out of the panel",
+            record.get("source"),
+        )
     except Exception:  # noqa: BLE001 — see the docstring
         logger.exception("claims: could not write the record for %s", record.get("source"))
 
