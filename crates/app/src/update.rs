@@ -38,11 +38,25 @@ pub const LATEST_URL: &str =
 /// "which asset ends in this?" fails loudly instead, with the names it did find.
 pub const ASSET_SUFFIX: &str = "-windows-x64.zip";
 
-/// The three files a packaged bundle carries beside the executable (`scripts/package.sh`).
+/// The directories a packaged bundle always carries beside the executable
+/// (`scripts/package.sh`).
 ///
-/// All three, not any: `target/release/` could plausibly acquire one of these names, and the cost
-/// of a false positive here is a researcher's git worktree overwritten by a zip.
-const BUNDLE_MARKERS: [&str; 3] = ["overlay", "scripts", "vendor"];
+/// All of them, not any: `target/release/` could plausibly acquire one of these names, and the
+/// cost of a false positive here is a researcher's git worktree overwritten by a zip.
+const BUNDLE_MARKERS: [&str; 2] = ["overlay", "scripts"];
+
+/// And the backend, under either name it has had.
+///
+/// **`vendor` was a third required marker and that was a latent trap.** §283 moved the backend to
+/// `mini-me/`, `package.sh` stopped writing `vendor/`, and every install already in the world went
+/// on requiring it — so the first bundle without one was rejected by `unpack` as *"the download
+/// does not contain a bundle"*, nothing staged, and **no Restart to Update button appeared at
+/// all**. A constant naming one spelling of a thing that has two is a constant that breaks on the
+/// day the second one ships.
+///
+/// Any of these, because a bundle carries exactly one. `package.sh` still writes a `vendor/`
+/// beside it for as long as installs older than v0.3.15 might update — see the note it puts there.
+const BUNDLE_BACKENDS: [&str; 2] = ["mini-me", "vendor"];
 
 /// What the executable is called inside a downloaded bundle, per `scripts/package.sh`.
 ///
@@ -259,6 +273,9 @@ pub fn layout(executable: &Path) -> Layout {
         && BUNDLE_MARKERS
             .iter()
             .all(|marker| folder.join(marker).is_dir())
+        && BUNDLE_BACKENDS
+            .iter()
+            .any(|backend| folder.join(backend).is_dir())
     {
         Layout::Packaged(folder.to_path_buf())
     } else {
@@ -405,9 +422,10 @@ pub fn bundle_root(unpacked: &Path) -> Result<PathBuf, String> {
         seen.push(entry.file_name().to_string_lossy().into_owned());
     }
     Err(format!(
-        "the download does not contain a bundle: no {} beside {} (it holds: {})",
+        "the download does not contain a bundle: no {} beside {} and one of {} (it holds: {})",
         BUNDLED_EXECUTABLES.join(" or "),
         BUNDLE_MARKERS.join(", "),
+        BUNDLE_BACKENDS.join(" or "),
         if seen.is_empty() {
             "nothing".to_string()
         } else {
@@ -880,8 +898,8 @@ mod tests {
         std::fs::write(target.join("mini-me-desktop-app"), b"a build").expect("exe");
         assert_eq!(layout(&target.join("mini-me-desktop-app")), Layout::Source);
 
-        // Two of the three markers is still not a bundle: all three, or none of it.
-        for marker in ["overlay", "scripts"] {
+        // The always-there folders, with no backend beside them: still not a bundle.
+        for marker in BUNDLE_MARKERS {
             std::fs::create_dir_all(target.join(marker)).expect("marker");
         }
         assert_eq!(
@@ -890,12 +908,19 @@ mod tests {
             "a partial match must not be taken for a bundle"
         );
 
-        std::fs::create_dir_all(target.join("vendor")).expect("marker");
-        assert_eq!(
-            layout(&target.join("mini-me-desktop-app")),
-            Layout::Packaged(target.clone()),
-            "all three markers is what an unzipped bundle looks like"
-        );
+        // **Either name for the backend, and this is the part that was missing.** `vendor` was a
+        // required marker; §283 renamed the directory to `mini-me`; and the first bundle without a
+        // `vendor/` was rejected by every install in the world with "the download does not contain
+        // a bundle" — no error a researcher could see, just no button.
+        for backend in BUNDLE_BACKENDS {
+            std::fs::create_dir_all(target.join(backend)).expect("backend");
+            assert_eq!(
+                layout(&target.join("mini-me-desktop-app")),
+                Layout::Packaged(target.clone()),
+                "a bundle whose backend is called {backend} is still a bundle"
+            );
+            std::fs::remove_dir_all(target.join(backend)).expect("backend");
+        }
         std::fs::remove_dir_all(&base).ok();
     }
 
@@ -913,9 +938,19 @@ mod tests {
             packager.contains("for dir in overlay scripts"),
             "package.sh no longer copies overlay/ and scripts/ the way this check assumes"
         );
+        // **The line, not the substring.** This check used to be `contains("$OUT/vendor")`,
+        // which stayed true when the backend moved to `mini-me/` — the string survived in a
+        // fallback branch that no longer runs, and the test went on passing while the bundle
+        // stopped containing the folder every install requires. A text check has to name
+        // something that only exists when the behaviour does.
         assert!(
-            packager.contains("$OUT/vendor"),
-            "package.sh no longer writes vendor/ into the bundle"
+            packager.contains("BACKEND_DEST=\"$OUT/mini-me\""),
+            "package.sh must put the backend where bundled_backend_dir looks first"
+        );
+        assert!(
+            packager.contains("mkdir -p \"$OUT/vendor\""),
+            "package.sh must still create vendor/ unconditionally — every install shipped before \
+             v0.3.15 rejects a download without one, and cannot be fixed remotely"
         );
         // The name the executable carries inside a bundle, which is the thing a `#[cfg]` split got
         // wrong: it made the name depend on the platform *inspecting* the zip rather than on the
@@ -1043,7 +1078,11 @@ mod tests {
         {
             let mut writer = zip::ZipWriter::new(&mut buffer);
             let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
-            for marker in BUNDLE_MARKERS {
+            // The always-there folders **and a backend**, because a bundle without one is not a
+            // bundle — which is the thing this whole pair of constants exists to say, and the
+            // thing that shipped wrong. `mini-me` rather than `vendor`: build the zip the
+            // packager now writes, or the test proves something nobody downloads.
+            for marker in BUNDLE_MARKERS.iter().chain(std::iter::once(&BUNDLE_BACKENDS[0])) {
                 writer
                     .start_file(format!("{root}/{marker}/keep.txt"), options)
                     .expect("entry");
