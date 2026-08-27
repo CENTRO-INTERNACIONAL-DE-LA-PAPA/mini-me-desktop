@@ -178,7 +178,7 @@ fn scripts_dir() -> PathBuf {
 ///
 /// `vendor/Mini-Me` is still honoured behind it, for a packaged build laid out by
 /// `scripts/bundle-backend.sh`, and `MINIME_BUNDLED_BACKEND` overrides both.
-fn bundled_backend_dir() -> Option<PathBuf> {
+pub(crate) fn bundled_backend_dir() -> Option<PathBuf> {
     // The variable names the checkout itself, not the directory holding it — someone overriding
     // it is pointing at a specific copy.
     if let Some(dir) = std::env::var_os("MINIME_BUNDLED_BACKEND") {
@@ -2240,6 +2240,42 @@ mod tests {
         // On the distro's own filesystem: a venv over /mnt/c is the placement that makes
         // everything feel broken.
         assert!(!owned_wsl_dir().starts_with("/mnt/"), "{}", owned_wsl_dir());
+    }
+
+    /// **The directory the app looks for is the directory the packager writes.**
+    ///
+    /// `bundled_backend_dir` has preferred `mini-me/` since the monorepo move, and
+    /// `scripts/package.sh` copied `vendor/Mini-Me` — a clone of the separate private repo. So
+    /// every release shipped a backend months behind this repository: four middleware modules
+    /// absent, a route absent, and the dataverse reader still passing the argument name that had
+    /// been corrected nine days before (§283).
+    ///
+    /// Neither side was wrong on its own, which is why both suites stayed green. The join was.
+    #[test]
+    fn the_packager_writes_the_directory_this_looks_for() {
+        let packager = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/package.sh");
+        let script = std::fs::read_to_string(&packager).expect("the packager is in this repo");
+
+        // What `bundled_backend_dir` prefers, taken from the call rather than restated.
+        assert!(
+            script.contains("BACKEND_DEST=\"$OUT/mini-me\""),
+            "package.sh must place the backend where bundled_backend_dir looks first"
+        );
+        // And it stamps it, or an installed copy can never tell it is out of date.
+        assert!(
+            script.contains(".bundled-backend"),
+            "package.sh must stamp the bundle so setup-wsl.sh can compare builds"
+        );
+
+        let setup = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/setup-wsl.sh"),
+        )
+        .expect("the setup script is in this repo");
+        assert!(
+            setup.contains(".bundled-backend"),
+            "setup-wsl.sh must read the stamp, or the bundle updates and the machine does not"
+        );
     }
 
     #[test]
