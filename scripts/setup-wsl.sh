@@ -107,8 +107,51 @@ find_source() {
   return 1
 }
 
+# The stamp `scripts/package.sh` writes into the bundled copy. Empty for a developer
+# checkout, which is the signal that this source is somebody's working tree and must not be
+# copied over anything.
+stamp_of() { [ -f "$1/.bundled-backend" ] && cat "$1/.bundled-backend" || true; }
+
 if [ -f "$DIR/langgraph.json" ]; then
-  ok "Mini-Me is already here: $DIR"
+  # **Already installed is not the same as up to date**, and for a long time this script
+  # treated them as the same thing: it said "already here" and copied nothing, so the app
+  # could update every week while the Python underneath it stayed at whatever shipped the
+  # first time the machine was provisioned. The researcher's dataverse explorer ran a
+  # version of `read_search_results` that had been fixed nine days earlier, and the claims
+  # recorder built for it was not on the machine at all (docs §283).
+  #
+  # Only when the source carries a stamp, so a developer checkout adopted with `Use the one
+  # I have` is never overwritten — it may hold real work (§144).
+  UPDATED=no
+  if SOURCE="$(find_source)"; then
+    BUNDLED="$(stamp_of "$SOURCE")"
+    INSTALLED="$(stamp_of "$DIR")"
+    if [ -n "$BUNDLED" ] && [ "$BUNDLED" != "$INSTALLED" ]; then
+      say "Updating Mini-Me from the copy bundled with this app"
+      echo "    installed ${INSTALLED:-unstamped} -> bundled ${BUNDLED:0:12}"
+      # **Replaced per entry, not merged.** A merge leaves a module that upstream deleted
+      # sitting importable on the machine, which is the same class of ghost this whole fix
+      # is about. Only what the bundle carries is removed: `.venv` costs fifteen minutes to
+      # rebuild, and `.env`, the overlay and the server's state directory are this machine's.
+      for entry in "$SOURCE"/* "$SOURCE"/.[!.]*; do
+        [ -e "$entry" ] || continue
+        name="$(basename "$entry")"
+        case "$name" in
+          .venv|.env|.git|.desktop-overlay|.langgraph_api) continue ;;
+        esac
+        rm -rf "${DIR:?}/$name"
+      done
+      cp -r "$SOURCE/." "$DIR/"
+      if [ ! -f "$DIR/pyproject.toml" ]; then
+        bad "the update did not bring pyproject.toml — $SOURCE may be incomplete"
+        exit 1
+      fi
+      rm -rf "$DIR/.venv/lib"/*/site-packages/__pycache__ 2>/dev/null || true
+      ok "updated from $SOURCE"
+      UPDATED=yes
+    fi
+  fi
+  [ "$UPDATED" = no ] && ok "Mini-Me is already here and current: $DIR"
 else
   mkdir -p "$(dirname "$DIR")"
   # A failed clone can leave an empty directory behind; it would block the copy.
@@ -188,6 +231,18 @@ if [ -n "$OVERLAY_SRC" ] && [ -f "$OVERLAY_SRC/sitecustomize.py" ]; then
   ok "overlay installed here, so it no longer depends on the Windows drive"
 else
   bad "could not find the overlay next to this script — the app will use its own copy"
+fi
+
+# **A stopping point, so the step above can be rehearsed.**
+#
+# Everything below installs packages and takes minutes; everything above decides *which
+# backend this machine runs*, which is the part that was wrong for a fortnight and could not
+# be observed from the machine it was written on. `scripts/backend-refresh-rehearsal.sh`
+# sets this and checks what landed, in seconds, against throwaway directories — the lesson
+# of §275, applied one script earlier this time.
+if [ -n "${MINIME_SETUP_STOP_AFTER_SOURCE:-}" ]; then
+  say "Stopping after the source step (MINIME_SETUP_STOP_AFTER_SOURCE)"
+  exit 0
 fi
 
 # ------------------------------------------------------------------ dependencies

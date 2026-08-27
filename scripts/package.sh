@@ -11,10 +11,17 @@
 #     mini-me-desktop-app(.exe)   the app
 #     overlay/                    host execution (docs §18)
 #     scripts/                    setup-wsl.sh, run from the Setup pane
-#     vendor/Mini-Me/             the backend, so no GitHub account is needed
+#     mini-me/                    the backend, so no GitHub account is needed
 #
 # `resource()` in backend.rs looks beside the executable first, which is what makes this
 # layout work without any configuration.
+#
+# **The backend is `mini-me/`, and this script used to ship `vendor/Mini-Me` instead.**
+# `bundled_backend_dir()` has preferred `mini-me/` since the monorepo move — *"from now I
+# want a mono repo in mini me desktop"* — and this script never copied it, so every bundle
+# carried a clone of the separate private repo instead. Four middleware modules and a route
+# were simply absent from every release, and the dataverse reader shipped with the argument
+# name that had been fixed a week earlier (docs §283).
 #
 #   Usage:  bash scripts/package.sh            (release build)
 #           bash scripts/package.sh --debug
@@ -62,18 +69,48 @@ done
 find "$OUT" -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
 
 # ------------------------------------------------------------------- the backend
-if [ -f "$ROOT/vendor/Mini-Me/langgraph.json" ]; then
-  mkdir -p "$OUT/vendor"
+#
+# `mini-me/` first, because that is the source this repository tracks and the directory
+# `bundled_backend_dir()` looks for before anything else. `vendor/Mini-Me` remains as the
+# fallback for a checkout that predates the monorepo move and still bundles from the
+# private repo — but it is no longer what a build here ships.
+BACKEND_SRC=""
+BACKEND_DEST=""
+if [ -f "$ROOT/mini-me/langgraph.json" ]; then
+  BACKEND_SRC="$ROOT/mini-me"
+  BACKEND_DEST="$OUT/mini-me"
+elif [ -f "$ROOT/vendor/Mini-Me/langgraph.json" ]; then
+  BACKEND_SRC="$ROOT/vendor/Mini-Me"
+  BACKEND_DEST="$OUT/vendor/Mini-Me"
+  bad "shipping vendor/Mini-Me — mini-me/ is missing, so this is the pre-monorepo layout"
+fi
+
+if [ -n "$BACKEND_SRC" ]; then
+  mkdir -p "$(dirname "$BACKEND_DEST")"
   # --exclude would be nicer, but cp is what every platform here has. Copy then prune.
-  cp -r "$ROOT/vendor/Mini-Me" "$OUT/vendor/Mini-Me"
-  for junk in .venv .env node_modules .git; do
-    rm -rf "$OUT/vendor/Mini-Me/$junk"
+  cp -r "$BACKEND_SRC" "$BACKEND_DEST"
+  for junk in .venv .env node_modules .git .langgraph_api; do
+    rm -rf "$BACKEND_DEST/$junk"
   done
-  ok "vendor/Mini-Me ($(du -sh "$OUT/vendor/Mini-Me" | cut -f1)) — no GitHub account needed"
+  find "$BACKEND_DEST" -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
+
+  # **A stamp, so an installed copy can tell it is out of date.**
+  #
+  # `setup-wsl.sh` copies the backend once and reports "already here" ever after, so before
+  # this a backend fix could never reach a machine that had already been provisioned — the
+  # app updated and the Python underneath it did not (docs §283). The stamp is content-
+  # derived rather than a version number: a hand-built bundle has no version to quote, and
+  # what matters is whether these files differ from the installed ones, not what they are
+  # called.
+  STAMP="$(cd "$BACKEND_DEST" && find . -type f \( -name '*.py' -o -name '*.json' -o -name '*.toml' -o -name '*.md' \) \
+    | LC_ALL=C sort | xargs sha256sum 2>/dev/null | sha256sum | cut -d' ' -f1)"
+  printf '%s\n' "$STAMP" > "$BACKEND_DEST/.bundled-backend"
+  ok "$(basename "$BACKEND_DEST")/ ($(du -sh "$BACKEND_DEST" | cut -f1)) — no GitHub account needed"
+  ok "stamped ${STAMP:0:12} — an older install will notice and re-copy"
 else
-  bad "vendor/Mini-Me is missing, so this bundle CANNOT install itself."
-  bad "Mini-Me is a private repository: without a bundled copy the user is asked"
-  bad "for a GitHub token they do not have. Fix it with:"
+  bad "no backend to bundle, so this bundle CANNOT install itself."
+  bad "Expected mini-me/langgraph.json in this repository. If this is a"
+  bad "pre-monorepo checkout, fix it with:"
   bad "    bash scripts/bundle-backend.sh"
   bad "Continuing anyway — this bundle is only usable by someone with repo access."
 fi

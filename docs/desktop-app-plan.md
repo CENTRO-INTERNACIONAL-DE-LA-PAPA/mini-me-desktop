@@ -16038,3 +16038,109 @@ spine that was deleted is not.
 *Hundred-and-thirty-second: "backwards compatible by construction" is a claim about callers, not
 about users. The fallback that keeps an old client working is the same line that gives a new
 conversation somebody else's history.*
+
+## 283. The backend we built, and the backend we shipped (2026-08-27)
+
+The researcher asked why `read_search_results` kept failing. The backend log answered:
+
+```
+read_search_results(filename=None) -> 'dataverse_search.json'
+```
+
+That line is printed by `SearchResultsFile._fix`, and the running code was passing **`filename`**.
+§220 established, by probing the live MCP, that the argument is `file_path` and that `filename` is
+a hard error — *"so injecting `filename` did not merely fail to help: it made every read fail"*.
+§221 fixed it. On 18 August. Nine days before this.
+
+So the machine was running code this repository had replaced. The obvious next question is which
+code, and the answer was in the release, not in a log: **downloading v0.3.12 and unzipping it.**
+
+```
+mini-me-desktop/vendor/Mini-Me/backend/middleware/
+  artifacts.py  dataverse_first.py  guardrails.py  project.py
+  search_first.py  sync.py  tool_gate.py
+```
+
+Seven files. This repository has twelve. Absent from every release ever cut:
+
+* `claims.py` — the subagent claims recorder, and everything §281 built on it a day earlier;
+* `no_spending.py` — **the credit gate**, the one rule the researcher has restated more than any
+  other: *no credit may be spent without a human press*;
+* `library_first.py` — the gate that stopped `pdf_librarian` fabricating its library (§230);
+* `submit_first.py` — the discovery draft gate;
+* `routes/artifacts.py`'s collect route — the button pressed two days ago.
+
+And `dataverse_first.py` shipped in its pre-§220 form, `READ_TOOL: "filename"` and all.
+
+### Three defects in one chain, each correct in its own file
+
+**The bundle carried the wrong backend.** `bundled_backend_dir()` has preferred `mini-me/` since
+the monorepo move — *"from now I want a mono repo in mini me desktop. I dont want to depende on a
+secod repo anymmore."* `scripts/package.sh` was never changed to copy it, and went on shipping
+`vendor/Mini-Me`, which `bundle-backend.sh` clones from the **separate private repository**, pinned
+at `e482ca5`. Neither file was wrong about its own job. The join was, and both suites were green
+the whole time.
+
+**An installed backend was never updated.** `setup-wsl.sh` opened with
+`if [ -f "$DIR/langgraph.json" ]; then ok "Mini-Me is already here"`. Already installed was treated
+as up to date, so even a correct bundle could not have reached a machine that had been provisioned
+once.
+
+**The app never asked.** The Setup pane offers `Install Mini-Me` only when `langgraph.json` is
+missing, so after the first provisioning the question was never put again. The app updated weekly.
+The Python underneath it never did.
+
+Any one of the three would have been enough to hide the other two.
+
+### What changed
+
+`package.sh` copies `mini-me/` and writes a content-derived stamp into it. `setup-wsl.sh` compares
+that stamp with the installed one and replaces the backend when they differ — **entry by entry
+rather than merged**, because a merge leaves a module upstream deleted sitting importable, which is
+the same ghost this whole section is about. `.venv`, `.env`, the overlay and the server's state
+directory are this machine's and are left alone: rebuilding a virtualenv on every app update would
+be a worse trade than the bug.
+
+Only a **stamped** source updates anything. A developer checkout adopted through *"Use the one I
+have"* carries no stamp and is never overwritten — §144's rule, unchanged.
+
+Preflight gains `Backend build`, naming both stamps and offering one press. It reports a
+**failure**, though nothing in the pane blocks a turn and nothing here does either: `Warn` prints
+as *optional* in the summary, and one of the modules an out-of-date backend is missing is
+`no_spending.py` — the gate that stops a subagent spending credits without a press. That is not an
+optional improvement. The red row is the whole signal. The app still starts and still answers,
+because hijacking a launch for the fifteen minutes `uv sync` can take is a worse trade than saying
+so plainly.
+
+### The instrument, written first this time
+
+`setup-wsl.sh` takes minutes and installs system packages, so nobody runs it to check a copy — and
+its interesting half is the twenty lines that decide *which backend this machine runs*.
+`MINIME_SETUP_STOP_AFTER_SOURCE=1` stops it there, and `scripts/backend-refresh-rehearsal.sh` runs
+**the real script** against throwaway directories in about a second:
+
+```
+==> A machine provisioned once, then handed a newer bundle
+    ok  a newer bundle replaces the backend
+    ok  a module deleted upstream goes
+    ok  the virtualenv survives
+    ok  the machine's own .env survives
+==> A developer checkout is never overwritten
+    ok  an unstamped source never overwrites
+```
+
+Restoring the old `already here` behaviour fails three of the eight, which is the check that makes
+them worth having. §275 built its instrument after the fifth silent failure; this one was built
+before the first.
+
+### What this does not explain
+
+The researcher's machine may not have been provisioned from a bundle at all — `find_source` also
+looks in `~/Documents/Mini-Me` and on the Windows drive, and a checkout found there would explain
+why the collect button worked while the dataverse reader did not. Which of the two happened is one
+command's worth of evidence and is not worth a guess; the three defects above are true either way,
+and every fresh install had all three.
+
+*Hundred-and-thirty-third: two files can each be right about their own job and wrong about the
+same thing. `package.sh` wrote where it always had; `backend.rs` read where it now should. Nothing
+compared the two, so the product of a fortnight's work shipped to nobody.*
