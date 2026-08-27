@@ -16104,9 +16104,13 @@ be a worse trade than the bug.
 Only a **stamped** source updates anything. A developer checkout adopted through *"Use the one I
 have"* carries no stamp and is never overwritten — §144's rule, unchanged.
 
-Preflight gains `Backend build`, a **warning** rather than a failure, naming both stamps and
-offering one press. A warning because an older backend still answers, and hijacking a launch for
-the fifteen minutes `uv sync` can take is not a decision to make on somebody's behalf.
+Preflight gains `Backend build`, naming both stamps and offering one press. It reports a
+**failure**, though nothing in the pane blocks a turn and nothing here does either: `Warn` prints
+as *optional* in the summary, and one of the modules an out-of-date backend is missing is
+`no_spending.py` — the gate that stops a subagent spending credits without a press. That is not an
+optional improvement. The red row is the whole signal. The app still starts and still answers,
+because hijacking a launch for the fifteen minutes `uv sync` can take is a worse trade than saying
+so plainly.
 
 ### The instrument, written first this time
 

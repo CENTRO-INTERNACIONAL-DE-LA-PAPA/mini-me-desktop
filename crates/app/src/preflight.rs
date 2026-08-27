@@ -297,10 +297,16 @@ fn probe(argv: &[String]) -> Probe {
 /// `read_search_results` that had been fixed nine days earlier, and four middleware modules
 /// written for it were not on the machine at all (§283).
 ///
-/// A **warning**, not a failure: an older backend still answers, and hijacking a launch for the
-/// fifteen minutes `uv sync` can take would be a worse trade than saying so and offering the
-/// button. Silent when there is nothing to compare — a developer checkout carries no stamp, and
-/// running the app from source is not a machine out of date.
+/// **A failure, not a warning**, though nothing here blocks a turn — the pane is diagnostic and
+/// always has been. `Warn` prints as *optional* in the summary, and the modules an out-of-date
+/// backend is missing include `no_spending.py`, the gate that stops a subagent spending credits
+/// without a press. A machine running without it is not a machine with an optional improvement
+/// available. The red row is the whole signal; the app still starts, still answers, and the fix is
+/// one button, because hijacking a launch for the fifteen minutes `uv sync` can take is a worse
+/// trade than saying so plainly.
+///
+/// Silent when there is nothing to compare — a developer checkout carries no stamp, and running
+/// the app from source is not a machine out of date.
 fn backend_build(config: &BackendConfig) -> Check {
     let Some(bundled) = bundled_backend_stamp() else {
         return Check::pass(
@@ -335,7 +341,7 @@ fn backend_build(config: &BackendConfig) -> Check {
     Check::failing(
         "backend-build",
         "Backend build",
-        State::Warn,
+        State::Fail,
         detail,
         vec![Fix::Run {
             label: "Update the backend",
@@ -1382,14 +1388,18 @@ mod tests {
 
         // Installed before stamps existed — which is every machine on the day this ships.
         let unstamped = backend_build(&config);
-        assert_eq!(unstamped.state, State::Warn);
+        assert_eq!(
+            unstamped.state,
+            State::Fail,
+            "an out-of-date backend is missing the credit gate, which is not optional"
+        );
         assert!(unstamped.detail.contains("ccbe00ee1741"), "{}", unstamped.detail);
         assert_eq!(unstamped.fixes.len(), 1, "and it can be fixed from the pane");
 
         // A different build.
         std::fs::write(installed.join(BACKEND_STAMP), "0000deadbeef").expect("stamp");
         let stale = backend_build(&config);
-        assert_eq!(stale.state, State::Warn);
+        assert_eq!(stale.state, State::Fail);
         assert!(stale.detail.contains("0000deadbeef"), "names what is installed: {}", stale.detail);
         assert!(stale.detail.contains("ccbe00ee1741"), "and what it should be: {}", stale.detail);
 
