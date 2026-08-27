@@ -16317,3 +16317,65 @@ counting it against the recommendation is one command rather than an argument.
 
 *Hundred-and-thirty-sixth: one constant naming two files with different lifetimes is two bugs
 waiting, and the comment that says "overwriting is intended" is true of exactly one of them.*
+
+## 287. Blocking the loop, twice, and the guard that had already said so (2026-08-27)
+
+§286 made `ledger.append` log its traceback. One turn later:
+
+```
+blockbuster.blockbuster.BlockingError: Blocking call to os.mkdir
+  File ".../minime_local/ledger.py", line 207, in append
+    folder.mkdir(parents=True, exist_ok=True)
+```
+
+`langgraph dev` wraps the interpreter in `blockbuster`, which raises on a synchronous filesystem
+call inside an async context. `ClaimsRecorder.aafter_agent` is async. So the claims record failed
+on **every** turn, and every test here passed, because a test calls `_write` directly and there is
+no loop to block. The failure exists only on the path production takes.
+
+`workspace.py` had already written the warning, three files away:
+
+> **Never called on the event loop** — see the call site in `aexecute`, which is already inside
+> `asyncio.to_thread`. `langgraph dev`'s blocking-call guard rejects subprocesses on the loop, and
+> **that guard has aborted a run in this project before.**
+
+Third time. `routes/artifacts.py` learned it in §279 and offloads all three of its filesystem
+calls; `aexecute` learned it earlier and puts its whole command path in a thread. The claims write
+did not, so `aafter_agent` now offloads it.
+
+### And a second one, worse
+
+Sweeping every `async def` we own turned up one more:
+
+```python
+async def checkpointer():
+    database = path()
+    os.makedirs(os.path.dirname(database), exist_ok=True)
+```
+
+`os.makedirs` calls `os.mkdir` even when the directory is already there. A `BlockingError` here is
+not a slow checkpointer — it is **no checkpointer**: `AsyncSqliteSaver` is never constructed, and
+the conversations it holds do not load. Which is what the researcher reported an hour earlier,
+after the update, and which came back on a manual relaunch.
+
+### Why both arrived now
+
+`langgraph-api` went from **0.9.0 to 0.12.6** when the backend finally started updating (§283).
+Both calls had been there for weeks against a runtime that tolerated them. A dependency getting
+stricter is exactly the class of change a bundle nobody was shipping had been hiding — the fortnight
+of unshipped backend did not only withhold fixes, it withheld the failures that would have found
+these.
+
+### A checker, because remembering is not a mechanism
+
+`tests/test_no_blocking_on_the_loop.py` walks the syntax tree of everything under
+`mini-me/backend/` and `overlay/minime_local/`, and fails on a blocking name inside an `async def`
+unless it sits inside an `asyncio.to_thread(...)` argument. Matched by **name** rather than
+resolved symbol: `Path.mkdir`, `os.mkdir` and a bare `open` are one hazard, and false positives
+cost a `to_thread` that was the right answer anyway.
+
+It has its own test, because a checker that cannot fail is a comment.
+
+*Hundred-and-thirty-seventh: a comment that says "never call this on the event loop" protects the
+one call site its author was looking at. The rule wanted a checker, and it had been written down
+in prose twice before it got one.*
