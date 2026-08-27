@@ -37,6 +37,7 @@ configuration, and the checkout stays untouched.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 import os
@@ -81,7 +82,16 @@ async def checkpointer() -> AsyncIterator[object]:
     from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
     database = path()
-    os.makedirs(os.path.dirname(database), exist_ok=True)
+    # **Off the loop.** This function is `async` and `langgraph dev` wraps the interpreter in
+    # `blockbuster`, which raises `BlockingError` on a synchronous `os.mkdir` in an async context
+    # — and `os.makedirs` calls `os.mkdir` even when the directory is already there. A
+    # `BlockingError` here is not a slow checkpointer, it is **no checkpointer**: the saver is
+    # never constructed, so the conversations it holds do not load (§287).
+    #
+    # The upgrade this arrived with is the point. `langgraph-api` went from 0.9.0 to 0.12.6 when
+    # the backend finally started updating (§283), and a runtime that got stricter is exactly the
+    # kind of change a bundle nobody was shipping had been hiding.
+    await asyncio.to_thread(os.makedirs, os.path.dirname(database), exist_ok=True)
     async with AsyncSqliteSaver.from_conn_string(database) as saver:
         # `setup` creates the tables and applies migrations. Idempotent, and calling it here
         # rather than lazily means a schema problem surfaces at startup — where the log is being
