@@ -26,6 +26,7 @@ from backend.middleware.claims import (
     NO_PATHS,
     ClaimsRecorder,
     _write,
+    bare_identifier,
     claimed_paths,
     entry,
     missing_from,
@@ -820,3 +821,78 @@ def test_the_record_is_written_off_the_event_loop(tmp_path, monkeypatch):
     assert ran_on[0] != here, (
         f"the write ran on {ran_on[0]}, the same thread as the loop — blockbuster raises there"
     )
+
+
+# ---------------------------------------------------------------------------
+# One identifier, several spellings
+# ---------------------------------------------------------------------------
+
+def test_the_same_dataset_spelled_two_ways_is_the_same_dataset():
+    """**The false accusation, on real data.**
+
+    Six recommendations were reported absent from a search that had returned all six, because the
+    model answered `doi:10.21223/P3/HKABUV` and the file held `10.21223/P3/HKABUV`. Dataverse
+    hands the same dataset back under several spellings — `global_id` carries the prefix, the
+    native record splits protocol/authority/identifier so the joined form appears nowhere, and a
+    link field is a resolver URL.
+    """
+    native = json.dumps(
+        [{"protocol": "doi", "authority": "10.21223", "identifier": "P3/HKABUV"},
+         {"global_id": "10.21223/66XOT9"},
+         {"url": "https://doi.org/10.21223/2NYJIT"}]
+    )
+    assert unsearched(
+        ["doi:10.21223/P3/HKABUV", "doi:10.21223/66XOT9", "doi:10.21223/2NYJIT"], native
+    ) == ["doi:10.21223/P3/HKABUV"], (
+        "the split record genuinely has no joined id anywhere; the other two are the same "
+        "dataset wearing a different prefix and must not be reported"
+    )
+
+
+def test_a_prefix_is_stripped_from_whichever_side_wears_it():
+    ids = ["10.21223/HOUFZD"]
+    assert unsearched(ids, json.dumps([{"global_id": "doi:10.21223/HOUFZD"}])) == []
+    assert unsearched(ids, json.dumps([{"url": "https://doi.org/10.21223/HOUFZD"}])) == []
+    assert unsearched(["hdl:1902.1/ABCDEF"], json.dumps([{"id": "1902.1/ABCDEF"}])) == []
+
+
+def test_stripping_cannot_hide_an_identifier_that_was_never_searched():
+    """The case worth catching is untouched: composed from memory is absent under any spelling."""
+    searched = json.dumps([{"global_id": "doi:10.21223/REAL01"}])
+    assert unsearched(["doi:10.21223/INVENTED"], searched) == ["doi:10.21223/INVENTED"]
+    # A real-looking neighbour of a real id is still caught: the difference is in the identifier,
+    # which is the part that decides which dataset a reader ends up citing.
+    assert unsearched(["doi:10.21223/REAL02"], searched) == ["doi:10.21223/REAL02"]
+
+
+def test_the_substring_rule_is_permissive_and_that_is_the_older_decision():
+    """**Documented rather than tightened**, because it long predates the prefix work.
+
+    `unsearched` counts a *substring* of the search text as present, so a degenerate id like
+    `doi:` matches anything containing one. `_ids_in` states the reasoning: the MCP owns this
+    layout, and a reader that walked named keys *"would report every dataset as fabricated the day
+    that layout changed, which is the one failure mode a record like this cannot afford"*. Erring
+    towards silence is the deliberate half of that trade.
+
+    Asserted here so the next person changing this knows it is a decision and not an oversight.
+    No model returns `doi:` as a recommendation; if one ever does, the empty answer above it is
+    the finding.
+    """
+    assert unsearched(["doi:"], json.dumps([{"global_id": "doi:10.21223/REAL01"}])) == []
+
+
+def test_a_remnant_too_short_to_mean_anything_is_not_a_match():
+    """A two-character bare form would match almost any file.
+
+    A check that can never find anything is worse than one that cries wolf, because it looks
+    exactly like success — which is `NO_PATHS`'s argument and §224's two days.
+    """
+    assert unsearched(["doi:x"], json.dumps([{"global_id": "doi:10.21223/AXBYCZ"}])) == ["doi:x"]
+
+
+def test_bare_identifier_is_stable_on_what_it_is_given():
+    assert bare_identifier("DOI:10.21223/P3/HKABUV") == "10.21223/p3/hkabuv"
+    assert bare_identifier("https://doi.org/10.21223/X") == "10.21223/x"
+    assert bare_identifier('  "doi:10.21223/Y"  ') == "10.21223/y"
+    assert bare_identifier("10.21223/Z/") == "10.21223/z"
+    assert bare_identifier("") == ""
