@@ -480,30 +480,11 @@ impl Workbench {
         for (at, attachment) in self.attachments.iter().enumerate() {
             let label = attachment.label.clone();
             row = row.child(
-                div()
-                    .id(SharedString::from(format!("attached-{at}")))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_1()
-                    .flex_none()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(rgb(theme::border()))
-                    .bg(rgb(theme::surface()))
-                    .text_color(rgb(theme::text_muted()))
-                    .text_xs()
-                    .hover(|style| {
-                        let fill = theme::hover_over(theme::surface());
-                        style
-                            .bg(rgb(fill))
-                            .text_color(rgb(theme::ink_on(fill)))
-                            .cursor_pointer()
-                    })
-                    // The whole chip removes it, so the target is the chip and not a four-pixel
-                    // glyph at the end of a filename.
+                // The whole chip removes it, so the target is the chip and not a four-pixel
+                // glyph at the end of a filename.
+                ui::Chip::new(SharedString::from(format!("attached-{at}")), label)
+                    .bg(theme::surface())
+                    .removable(true)
                     .on_click(cx.listener(move |workbench, _event, _window, cx| {
                         if at < workbench.attachments.len() {
                             let gone = workbench.attachments.remove(at);
@@ -515,16 +496,7 @@ impl Workbench {
                                 format!("{} will not go with this question", gone.label);
                         }
                         cx.notify();
-                    }))
-                    // `ellipsis` rather than the whole name: a chip row has to stay a row, and the
-                    // full path is not information anybody wanted here anyway.
-                    .child(ui::Label::new(label).inherit().size(ui::Size::Compact).ellipsis())
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_color(rgb(theme::text_faint()))
-                            .child("×"),
-                    ),
+                    })),
             );
         }
         Some(row.into_any_element())
@@ -848,6 +820,7 @@ impl Workbench {
             .gap_10()
             .px(px(60.))
             .py(px(34.))
+            .mx_auto()
             .child(
                 div()
                     .flex()
@@ -857,11 +830,10 @@ impl Workbench {
                         div()
                             .flex()
                             .flex_row()
-                            .items_baseline()
                             .gap_3()
                             .text_color(rgb(theme::text()))
-                            .text_size(px(22.))
-                            .line_height(px(29.))
+                            .text_2xl()
+                            .items_center()
                             .child(
                                 div()
                                     .relative()
@@ -892,8 +864,7 @@ impl Workbench {
                     .child(
                         div()
                             .text_color(rgb(theme::text_muted()))
-                            .text_size(px(14.))
-                            .line_height(px(21.))
+                            .text_base()
                             .child(
                                 "Ask below, or add one of your own data files with the clip — \
                                  dropping it on this window works too. Everything a turn \
@@ -1016,7 +987,8 @@ impl Workbench {
                     .gap_2()
                     .w_full()
                     .min_w_0()
-                    .p_2()
+                    .py_2()
+                    .px_2p5()
                     .rounded_lg()
                     .border_1()
                     // The first is marked, not louder: one suggestion carrying the accent is a
@@ -1032,14 +1004,14 @@ impl Workbench {
                     .when(leading, |row| row.hover(|style| style.cursor_pointer()))
                     .child(
                         div()
-                            .child(app_icon(icon, theme::accent(), Some(18.))),
+                            .child(app_icon(icon, theme::accent(), Some(ui::IconSize::Medium.px())))
                     )
                     .child(
                         div()
                             .flex_grow()
                             .min_w_0()
                             .text_color(rgb(theme::text_muted()))
-                            .text_size(px(13.))
+                            .text_sm()
                             .when(leading, |row| row.text_color(rgb(theme::accent())))
                             .child(label),
                     )
@@ -1392,7 +1364,7 @@ impl Workbench {
             .flex_grow()
             .min_w_0()
             .h_full()
-            .m_1()
+            .m_2()
             .rounded_lg()
             .overflow_hidden()
             .bg(rgb(theme::background()))
@@ -1556,7 +1528,7 @@ impl Workbench {
             .px_2()
             .py_1()
             .rounded_lg()
-            .text_size(px(14.))
+            .text_sm()
             // The composer reads as one field with a control inside it, rather than a
             // text box sitting next to an unrelated button.
             .bg(rgb(theme::surface()))
@@ -1566,7 +1538,7 @@ impl Workbench {
             // is two pixels wide. `in_focus` rather than `focus` because the thing with the
             // focus is a child entity, not this box.
             .track_focus(&self.composer.focus_handle(cx))
-            .in_focus(|style| style.border_color(rgb(theme::accent())))
+            // .in_focus(|style| style.border_color(rgb(theme::accent())))
             // **Feedback for a gesture that had none.** A file dragged over the window changed
             // nothing on screen, so there was no way to tell the app would take it until you
             // let go. Lit here rather than over the whole window because this is where the
@@ -1588,65 +1560,21 @@ impl Workbench {
                 }),
             )
             .child(
-                div()
-                    .id("attach-file")
-                    .group("attach-file-icon")
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .w(px(30.))
-                    .h(px(30.))
-                    .tooltip(|_window, cx| {
-                        cx.new(|_| Hint {
-                            text: "Add a file from this computer".into(),
-                        })
-                        .into()
-                    })
-                    .hover(|style| style.cursor_pointer())
-                    .child(
-                        svg()
-                            .path("icons/plus.svg")
-                            .w(px(14.))
-                            .h(px(14.))
-                            .flex_none()
-                            .text_color(rgb(theme::text_muted()))
-                            .group_hover("attach-file-icon", |style| {
-                                style.text_color(rgb(theme::accent()))
-                            }),
-                    )
+                ui::IconButton::new("attach-file", "icons/plus.svg")
+                    .icon_size(14.)
+                    .hover_ink(theme::accent())
+                    .tooltip("Add a file from this computer")
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
                         workbench.choose_files(cx);
                     })),
             )
             .child(self.composer.clone())
             .child(
-                div()
-                    .id("send-turn")
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .w(px(30.))
-                    .h(px(30.))
-                    // Circular, so it reads as a control and not as a word in a box.
-                    .text_color(rgb(ink))
-                    .tooltip({
-                        let hint = hint.to_string();
-                        move |_window, cx| {
-                            cx.new(|_| Hint {
-                                text: hint.clone().into(),
-                            })
-                            .into()
-                        }
-                    })
-                    .when(has_text && !self.streaming, |button| {
-                        button.hover(|style| style.cursor_pointer())
-                    })
-                    .when(self.streaming, |button| {
-                        button.hover(|style| style.cursor_pointer())
-                    })
-                    .child(app_icon(send_icon, ink, None))
+                ui::IconButton::new("send-turn", send_icon)
+                    .icon_size(ui::IconSize::Large.px())
+                    .ink(ink)
+                    .hoverable(has_text && !self.streaming || self.streaming)
+                    .tooltip(hint)
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
                         if workbench.streaming {
                             workbench.stop_turn(cx);

@@ -6982,13 +6982,20 @@ impl Render for Workbench {
                             app_icon(
                                 "icons/sidebar-simple-left.svg",
                                 theme::text(),
-                                None
+                                Some(ui::IconSize::Small.px())
                             )
                         )
                         .w(px(30.))
                         .h(px(30.))
+                        .bg(rgb(theme::surface()))
+                        .m_2()
+                        .mt_4()
+                        .border_1()
+                        .border_color(rgb(theme::border()))
                         .flex_none()
+                        .p_4()
                         .flex()
+                        .rounded_lg()
                         .items_center()
                         .justify_center()
                         .hover(|style| style.cursor_pointer())

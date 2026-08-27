@@ -188,11 +188,10 @@ impl Workbench {
                 .items_center()
                 .justify_center()
                 .py_1()
-                .rounded_md()
-                .text_xs()
-                .text_color(rgb(if active { theme::text() } else { theme::text_muted() }))
-                .when(active, |tab| tab.bg(rgb(theme::elevated())))
-                .hover(|style| style.text_color(rgb(theme::text())).cursor_pointer())
+                .text_sm()
+                .text_color(rgb(if active { theme::accent() } else { theme::text_muted() }))
+                .text_center()
+                .when(active, |tab| tab.bg(rgb(theme::accent_soft())))
                 .child(label)
                 .on_click(cx.listener(move |workbench, _event, _window, cx| {
                     workbench.sidebar_view = view;
@@ -206,8 +205,12 @@ impl Workbench {
             .gap_1()
             .mx_2()
             .mt_2()
-            .p(px(2.))
             .rounded_md()
+            .rounded_b_none()
+            .border_1()
+            .border_b_0()
+            .border_color(rgb(theme::border()))
+            .hover(|style| style.text_color(rgb(theme::text())).cursor_pointer())
             .bg(rgb(theme::background()))
             .child(tab(
                 "Conversations",
@@ -255,7 +258,7 @@ impl Workbench {
             .flex_grow()
             .min_w_0()
             .overflow_y_scroll()
-            .p_1()
+            .p_2()
             .gap_px();
 
         if matched.is_empty() && self.sidebar_view == SidebarView::Conversations {
@@ -463,33 +466,9 @@ impl Workbench {
 
                 let open = thread_id.clone();
                 list = list.child(
-                    div()
-                        .id(SharedString::from(format!("conv-{thread_id}")))
-                        .group(SharedString::from(format!("conv-group-{thread_id}")))
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_1()
-                        .w_full()
-                        .min_w_0()
-                        .px_2()
-                        .py_1()
-                        .rounded_md()
-                        .when(selected, |row| row.bg(rgb(theme::accent_soft())))
-                        // Every row reacts to the pointer. A list that does not respond to
-                        // the cursor does not read as a list of *buttons*.
-                        .hover(|style| style.bg(rgb(theme::hover_over(theme::elevated()))).cursor_pointer())
-                        .child(
-                            ui::Label::new(conversation.title.clone())
-                                .colour(if selected {
-                                    theme::text()
-                                } else {
-                                    theme::text_muted()
-                                })
-                                .size(ui::Size::Compact)
-                                .ellipsis(),
-                        )
-                        .child(self.sidebar_menu_button(
+                    ui::ListRow::new(SharedString::from(format!("conv-{thread_id}")), conversation.title.clone())
+                        .selected(selected)
+                        .trailing(self.sidebar_menu_button(
                             format!("row-menu-{thread_id}"),
                             SidebarMenu::Conversation(conversation.clone()),
                             cx,
@@ -509,7 +488,7 @@ impl Workbench {
             .flex_none()
             // A rounded card on the window background, the way Zed's panels sit, rather
             // than a full-bleed slab meeting the next panel at a hairline (docs §50).
-            .m_1()
+            .m_2()
             .rounded_lg()
             .overflow_hidden()
             .bg(rgb(theme::surface()))
@@ -531,22 +510,9 @@ impl Workbench {
                             .child("Mini-Me App"),
                     )
                     .child(
-                        div()
-                            .id("toggle-left-sidebar")
-                            .child(
-                                app_icon(
-                                    "icons/sidebar-simple-left.svg",
-                                    theme::text(),
-                                    None
-                                )
-                            )
-                            .w(px(30.))
-                            .h(px(30.))
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .hover(|style| style.cursor_pointer())
+                        ui::IconButton::new("toggle-left-sidebar", "icons/sidebar-simple-left.svg")
+                            .icon_size(ui::IconSize::Small.px())
+                            .ink(theme::text())
                             .on_click(cx.listener(|workbench, _event, _window, cx| {
                                 workbench.sidebar_open = !workbench.sidebar_open;
                                 workbench.remember_panels();
@@ -559,43 +525,32 @@ impl Workbench {
                 div()
                     .flex_none()
                     .m_2()
-                    .px_2()
-                    .py_1()
+                    .mt_0()
+                    .px_2p5()
+                    .py_2()
                     .rounded_md()
-                    .bg(rgb(theme::background()))
+                    .rounded_t_none()
+                    .bg(rgb(theme::surface()))
                     .border_1()
+                    .text_color(rgb(theme::text_muted()))
                     .border_color(rgb(theme::border()))
-                    .child(self.conversation_query.clone()),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .text_sm()
+                            .child(app_icon("icons/magnifying-glass.svg", theme::text_muted(), Some(ui::IconSize::Small.px())))
+                            .child(self.conversation_query.clone()),
+                    )
             )
             .child(list)
             .child(
-                div()
-                    .id("open-settings")
-                    .flex()
-                    .flex_row()
-                    .flex_none()
-                    .gap_2()
-                    .py_1()
-                    .px_2()
-                    .border_1()
-                    .rounded_lg()
-                    .m_2()
-                    .items_center()
-                    .border_color(rgb(theme::border()))
-                    .text_color(rgb(theme::text_muted()))
-                    .bg(rgb(theme::background()))
-                    .child(
-                        app_icon("icons/gear-six.svg", theme::text_muted(), None)
-                    )
-                    .hover(|style| {
-                        style
-                            .text_color(rgb(theme::accent_hover()))
-                            .cursor_pointer()
-                    })
+                ui::IconTextButton::new("open-settings", "icons/gear-six.svg", "Settings")
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
                         workbench.run_command(Command::OpenSettings, cx);
-                    }))
-                    .child("Settings")
+                    })),
             )
     }
 }

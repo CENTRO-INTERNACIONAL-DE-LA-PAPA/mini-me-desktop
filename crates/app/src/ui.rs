@@ -164,7 +164,7 @@ impl Button {
 impl RenderOnce for Button {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let ink = if self.disabled {
-            theme::text_faint()
+            theme::text_muted()
         } else {
             self.tone.ink()
         };
@@ -184,8 +184,8 @@ impl RenderOnce for Button {
             .text_color(rgb(ink))
             .child(self.label);
         button = match self.size {
-            Size::Regular => button.px_3().py_1().text_sm(),
-            Size::Compact => button.px_2().py_1().text_xs(),
+            Size::Regular => button.py_2().px_2p5().text_sm(),
+            Size::Compact => button.px_2().py_1().text_sm(),
             Size::Chip => button.px_2().text_xs(),
         };
         if self.disabled {
@@ -197,6 +197,524 @@ impl RenderOnce for Button {
             // true in the styling and false in the behaviour.
             Some(handler) => button.on_click(move |event, window, cx| handler(event, window, cx)),
             None => button,
+        }
+    }
+}
+
+/// One svg icon, sized and tinted, as the sole content of a control.
+///
+/// A handful of pinned, borderless controls — attach a file, send the turn, fold the sidebar —
+/// were each their own `div().w(px(30.)).h(px(30.))…` with the same shape and the same
+/// non-obvious requirement: `app_icon`'s docstring explains why the icon needs its *own*
+/// `text_color` rather than inheriting one, which means recolouring it on hover needs the
+/// matching `group`/`group_hover` pair rather than a plain `.hover(...)`. Some call sites had
+/// that pair, some didn't; this is the one copy.
+#[derive(IntoElement)]
+pub struct IconButton {
+    id: ElementId,
+    icon: &'static str,
+    icon_size: f32,
+    box_size: f32,
+    ink: u32,
+    hover_ink: Option<u32>,
+    bg: Option<u32>,
+    hover_bg: Option<u32>,
+    border: Option<u32>,
+    hover_border: Option<u32>,
+    circle: bool,
+    rounded: bool,
+    /// Whether hovering does anything at all — a send/stop control with nothing to do yet
+    /// stays visually inert rather than inviting a click that would do nothing.
+    hoverable: bool,
+    tooltip: Option<SharedString>,
+    on_click: Option<OnClick>,
+}
+
+impl IconButton {
+    pub fn new(id: impl Into<ElementId>, icon: &'static str) -> Self {
+        Self {
+            id: id.into(),
+            icon,
+            icon_size: IconSize::Medium.px(),
+            box_size: 30.,
+            ink: theme::text_muted(),
+            hover_ink: None,
+            bg: None,
+            hover_bg: None,
+            border: None,
+            hover_border: None,
+            circle: false,
+            rounded: false,
+            hoverable: true,
+            tooltip: None,
+            on_click: None,
+        }
+    }
+
+    pub fn icon_size(mut self, icon_size: f32) -> Self {
+        self.icon_size = icon_size;
+        self
+    }
+
+    pub fn box_size(mut self, box_size: f32) -> Self {
+        self.box_size = box_size;
+        self
+    }
+
+    pub fn ink(mut self, ink: u32) -> Self {
+        self.ink = ink;
+        self
+    }
+
+    pub fn hover_ink(mut self, hover_ink: u32) -> Self {
+        self.hover_ink = Some(hover_ink);
+        self
+    }
+
+    pub fn bg(mut self, bg: u32) -> Self {
+        self.bg = Some(bg);
+        self
+    }
+
+    pub fn hover_bg(mut self, hover_bg: u32) -> Self {
+        self.hover_bg = Some(hover_bg);
+        self
+    }
+
+    pub fn border(mut self, border: u32) -> Self {
+        self.border = Some(border);
+        self
+    }
+
+    pub fn hover_border(mut self, hover_border: u32) -> Self {
+        self.hover_border = Some(hover_border);
+        self
+    }
+
+    pub fn circle(mut self) -> Self {
+        self.circle = true;
+        self
+    }
+
+    pub fn rounded(mut self) -> Self {
+        self.rounded = true;
+        self
+    }
+
+    pub fn hoverable(mut self, hoverable: bool) -> Self {
+        self.hoverable = hoverable;
+        self
+    }
+
+    pub fn tooltip(mut self, text: impl Into<SharedString>) -> Self {
+        self.tooltip = Some(text.into());
+        self
+    }
+
+    pub fn on_click(
+        mut self,
+        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_click = Some(Box::new(handler));
+        self
+    }
+}
+
+impl RenderOnce for IconButton {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let group = SharedString::from(format!("icon-btn-{:?}", self.id));
+        let mut wrapper = div()
+            .id(self.id)
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .w(gpui::px(self.box_size))
+            .h(gpui::px(self.box_size))
+            .group(group.clone());
+        if self.circle {
+            wrapper = wrapper.rounded_full();
+        } else if self.rounded {
+            wrapper = wrapper.rounded_md();
+        }
+        if let Some(bg) = self.bg {
+            wrapper = wrapper.bg(rgb(bg));
+        }
+        if let Some(border) = self.border {
+            wrapper = wrapper.border_1().border_color(rgb(border));
+        }
+        if let Some(text) = self.tooltip.clone() {
+            wrapper = wrapper.tooltip(move |_window, cx| {
+                cx.new(|_| crate::Hint { text: text.clone() }).into()
+            });
+        }
+        let mut icon = gpui::svg()
+            .path(self.icon)
+            .w(gpui::px(self.icon_size))
+            .h(gpui::px(self.icon_size))
+            .flex_none()
+            .text_color(rgb(self.ink));
+        if let Some(hover_ink) = self.hover_ink {
+            icon = icon.group_hover(group, move |style| style.text_color(rgb(hover_ink)));
+        }
+        wrapper = wrapper.child(icon);
+        if self.hoverable {
+            let hover_bg = self.hover_bg;
+            let hover_border = self.hover_border;
+            wrapper = wrapper.hover(move |mut style| {
+                style = style.cursor_pointer();
+                if let Some(bg) = hover_bg {
+                    style = style.bg(rgb(bg));
+                }
+                if let Some(border) = hover_border {
+                    style = style.border_color(rgb(border));
+                }
+                style
+            });
+        }
+        match self.on_click {
+            Some(handler) => wrapper.on_click(move |event, window, cx| handler(event, window, cx)),
+            None => wrapper,
+        }
+    }
+}
+
+/// A bordered control pairing an icon with its label — the shape `Button` cannot make, since
+/// `Button` is deliberately text-only (see its own doc comment above).
+#[derive(IntoElement)]
+pub struct IconTextButton {
+    id: ElementId,
+    icon: &'static str,
+    icon_size: f32,
+    label: SharedString,
+    ink: u32,
+    border: u32,
+    bg: Option<u32>,
+    hover_bg: Option<u32>,
+    on_click: Option<OnClick>,
+}
+
+impl IconTextButton {
+    pub fn new(
+        id: impl Into<ElementId>,
+        icon: &'static str,
+        label: impl Into<SharedString>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            icon,
+            icon_size: IconSize::Medium.px(),
+            label: label.into(),
+            ink: theme::text_muted(),
+            border: theme::border(),
+            bg: Some(theme::background()),
+            hover_bg: Some(theme::surface()),
+            on_click: None,
+        }
+    }
+
+    pub fn icon_size(mut self, icon_size: f32) -> Self {
+        self.icon_size = icon_size;
+        self
+    }
+
+    pub fn ink(mut self, ink: u32) -> Self {
+        self.ink = ink;
+        self
+    }
+
+    pub fn border(mut self, border: u32) -> Self {
+        self.border = border;
+        self
+    }
+
+    pub fn bg(mut self, bg: u32) -> Self {
+        self.bg = Some(bg);
+        self
+    }
+
+    pub fn hover_bg(mut self, hover_bg: u32) -> Self {
+        self.hover_bg = Some(hover_bg);
+        self
+    }
+
+    pub fn on_click(
+        mut self,
+        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_click = Some(Box::new(handler));
+        self
+    }
+}
+
+impl RenderOnce for IconTextButton {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let mut row = div()
+            .id(self.id)
+            .flex()
+            .flex_row()
+            .flex_none()
+            .items_center()
+            .gap_2()
+            .py_2()
+            .px_2p5()
+            .m_2()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(self.border))
+            .text_color(rgb(self.ink))
+            .text_sm();
+        if let Some(bg) = self.bg {
+            row = row.bg(rgb(bg));
+        }
+        row = row
+            .child(
+                gpui::svg()
+                    .path(self.icon)
+                    .w(gpui::px(self.icon_size))
+                    .h(gpui::px(self.icon_size))
+                    .flex_none()
+                    .text_color(rgb(self.ink)),
+            )
+            .child(self.label);
+        let hover_bg = self.hover_bg;
+        row = row.hover(move |mut style| {
+            style = style.cursor_pointer();
+            if let Some(bg) = hover_bg {
+                style = style.bg(rgb(bg));
+            }
+            style
+        });
+        match self.on_click {
+            Some(handler) => row.on_click(move |event, window, cx| handler(event, window, cx)),
+            None => row,
+        }
+    }
+}
+
+/// A selectable, single-line row — the shape used down the conversation list, minus the copy
+/// that differed from one row to the next only in role, colours and what trailed it.
+#[derive(IntoElement)]
+pub struct ListRow {
+    id: ElementId,
+    label: SharedString,
+    label_color: u32,
+    bg: Option<u32>,
+    hover_bg: u32,
+    hover_text: u32,
+    hover_border: u32,
+    trailing: Option<gpui::AnyElement>,
+    on_click: Option<OnClick>,
+}
+
+impl ListRow {
+    pub fn new(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            label_color: theme::text_muted(),
+            bg: None,
+            hover_bg: theme::accent_soft(),
+            hover_text: theme::accent(),
+            hover_border: theme::accent(),
+            trailing: None,
+            on_click: None,
+        }
+    }
+
+    /// The row this enquiry is currently open on: filled and its label recoloured, same as
+    /// hovering it — a selected row is "as if the pointer never left".
+    pub fn selected(mut self, selected: bool) -> Self {
+        if selected {
+            self.bg = Some(theme::accent_soft());
+            self.label_color = theme::accent();
+        }
+        self
+    }
+
+    pub fn label_color(mut self, label_color: u32) -> Self {
+        self.label_color = label_color;
+        self
+    }
+
+    pub fn bg(mut self, bg: u32) -> Self {
+        self.bg = Some(bg);
+        self
+    }
+
+    pub fn hover_bg(mut self, hover_bg: u32) -> Self {
+        self.hover_bg = hover_bg;
+        self
+    }
+
+    pub fn hover_text(mut self, hover_text: u32) -> Self {
+        self.hover_text = hover_text;
+        self
+    }
+
+    pub fn hover_border(mut self, hover_border: u32) -> Self {
+        self.hover_border = hover_border;
+        self
+    }
+
+    /// A row's own menu button, or anything else that rides along after the label.
+    pub fn trailing(mut self, trailing: impl IntoElement) -> Self {
+        self.trailing = Some(trailing.into_any_element());
+        self
+    }
+
+    pub fn on_click(
+        mut self,
+        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_click = Some(Box::new(handler));
+        self
+    }
+}
+
+impl RenderOnce for ListRow {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let mut row = div()
+            .id(self.id)
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .w_full()
+            .min_w_0()
+            .px_2p5()
+            .py_2()
+            .rounded_md()
+            .text_sm();
+        if let Some(bg) = self.bg {
+            row = row.bg(rgb(bg));
+        }
+        let hover_bg = self.hover_bg;
+        let hover_text = self.hover_text;
+        let hover_border = self.hover_border;
+        row = row.hover(move |style| {
+            style
+                .bg(rgb(hover_bg))
+                .text_color(rgb(hover_text))
+                .border_1()
+                .border_color(rgb(hover_border))
+                .cursor_pointer()
+        });
+        row = row.child(Label::new(self.label).colour(self.label_color).ellipsis());
+        row = row.children(self.trailing);
+        match self.on_click {
+            Some(handler) => row.on_click(move |event, window, cx| handler(event, window, cx)),
+            None => row,
+        }
+    }
+}
+
+/// A bordered pill: a label the pointer can act on, filled and recoloured on hover rather than
+/// merely showing a cursor — the "attached file" / "open what a specialist produced" idiom that
+/// was hand-copied at both call sites down to the same `theme::hover_over` line.
+#[derive(IntoElement)]
+pub struct Chip {
+    id: ElementId,
+    label: SharedString,
+    ink: u32,
+    border: u32,
+    bg: Option<u32>,
+    hover_base: u32,
+    removable: bool,
+    on_click: Option<OnClick>,
+}
+
+impl Chip {
+    pub fn new(id: impl Into<ElementId>, label: impl Into<SharedString>) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            ink: theme::text_muted(),
+            border: theme::border(),
+            bg: None,
+            hover_base: theme::surface(),
+            removable: false,
+            on_click: None,
+        }
+    }
+
+    pub fn ink(mut self, ink: u32) -> Self {
+        self.ink = ink;
+        self
+    }
+
+    pub fn border(mut self, border: u32) -> Self {
+        self.border = border;
+        self
+    }
+
+    pub fn bg(mut self, bg: u32) -> Self {
+        self.bg = Some(bg);
+        self
+    }
+
+    /// The surface hovering repaints toward — `theme::hover_over` computes the actual fill,
+    /// this only picks which base colour that lift is measured from.
+    pub fn hover_base(mut self, hover_base: u32) -> Self {
+        self.hover_base = hover_base;
+        self
+    }
+
+    /// Adds the trailing "×" that marks a chip as dismissible. The whole chip stays the click
+    /// target — §225a's rule — this only draws the hint that it can be removed.
+    pub fn removable(mut self, removable: bool) -> Self {
+        self.removable = removable;
+        self
+    }
+
+    pub fn on_click(
+        mut self,
+        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_click = Some(Box::new(handler));
+        self
+    }
+}
+
+impl RenderOnce for Chip {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let mut chip = div()
+            .id(self.id)
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .flex_none()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(self.border))
+            .text_color(rgb(self.ink))
+            .text_xs();
+        if let Some(bg) = self.bg {
+            chip = chip.bg(rgb(bg));
+        }
+        let hover_base = self.hover_base;
+        chip = chip.hover(move |style| {
+            let fill = theme::hover_over(hover_base);
+            style
+                .bg(rgb(fill))
+                .text_color(rgb(theme::ink_on(fill)))
+                .cursor_pointer()
+        });
+        chip = chip.child(Label::new(self.label).inherit().size(Size::Compact).ellipsis());
+        if self.removable {
+            chip = chip.child(
+                div()
+                    .flex_none()
+                    .text_color(rgb(theme::text_faint()))
+                    .child("×"),
+            );
+        }
+        match self.on_click {
+            Some(handler) => chip.on_click(move |event, window, cx| handler(event, window, cx)),
+            None => chip,
         }
     }
 }
@@ -834,6 +1352,22 @@ pub fn picker_popup(at: gpui::Point<gpui::Pixels>, panel: impl IntoElement) -> i
                 .child(panel),
         ),
     )
+}
+
+pub enum IconSize {
+    Small,
+    Medium,
+    Large,
+}
+
+impl IconSize {
+    pub const fn px(self) -> f32 {
+        match self {
+            IconSize::Small => 18.0,
+            IconSize::Medium => 20.0,
+            IconSize::Large => 22.0,
+        }
+    }
 }
 
 #[cfg(test)]

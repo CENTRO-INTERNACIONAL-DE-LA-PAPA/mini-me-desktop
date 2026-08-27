@@ -1234,7 +1234,7 @@ impl Workbench {
             .w(px(self.panel_width))
             .flex_none()
             .h_full()
-            .m_1()
+            .m_2()
             .rounded_lg()
             .overflow_hidden()
             .bg(rgb(theme::surface()))
@@ -1937,35 +1937,19 @@ impl Workbench {
                 .map(|conversation| workspace::worker_dir(&conversation, &task.thread_id))
             {
                 row = row.child(
-                    div()
-                        .id(SharedString::from(format!("task-files-{}", task.task_id)))
-                        .flex_none()
-                        .mt_1()
-                        .px_2()
-                        .py_1()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(rgb(theme::border()))
-                        .text_color(rgb(theme::text_muted()))
-                        .text_xs()
-                        .hover(|style| {
-                            let fill = theme::hover_over(theme::surface());
-                            style
-                                .bg(rgb(fill))
-                                .text_color(rgb(theme::ink_on(fill)))
-                                .cursor_pointer()
-                        })
+                    div().mt_1().child(
                         // Names the specialist, because several run at once (§43) and a row
                         // of identical buttons is one you have to count rows to use.
-                        .child(format!(
-                            "Show what {} produced",
-                            task.agent_name.replace('_', " ")
-                        ))
+                        ui::Chip::new(
+                            SharedString::from(format!("task-files-{}", task.task_id)),
+                            format!("Show what {} produced", task.agent_name.replace('_', " ")),
+                        )
                         .on_click(move |_event, _window, _cx| {
                             if let Err(error) = workspace::open(&dir) {
                                 tracing::warn!(%error, "could not open a worker's folder");
                             }
                         }),
+                    ),
                 );
             }
         }

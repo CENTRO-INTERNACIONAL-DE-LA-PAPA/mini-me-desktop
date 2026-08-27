@@ -21,7 +21,7 @@ use gpui::{
 /// that reads the SVG file can tell — which is why this is a parameter the compiler demands
 /// rather than a rule written down.
 pub(crate) fn app_icon(path: &'static str, ink: u32, size: Option<f32>) -> impl IntoElement {
-    app_icon_at(path, ink, size.unwrap_or(14.))
+    app_icon_at(path, ink, size.unwrap_or(ui::IconSize::Medium.px()))
 }
 
 
