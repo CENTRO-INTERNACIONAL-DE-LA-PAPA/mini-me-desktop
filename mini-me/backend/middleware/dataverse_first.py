@@ -81,9 +81,31 @@ SEARCH_TOOL = "SearchCIPDataverse"
 #: never seen the contents of.
 READ_TOOL = "read_search_results"
 
-#: The one name both tools must agree on. Successive searches overwrite it, which is intended:
-#: the file is a hand-off between two calls, not an archive.
+#: The one name both tools must agree on.
+#:
+#: **On the MCP host, successive searches overwrite it, and that is right**: there it is a hand-off
+#: between two calls. The *workspace* copy is a different thing wearing the same name — it is what
+#: the researcher opens and what `middleware/claims.py` checks recommendations against — and
+#: overwriting that one was a defect.
+#:
+#: A real turn ran forty-six steps and several searches. The explorer recommended a dataset it had
+#: found early, `doi:10.21223/J9NLVP` — real, published, with real authors — and the claims check
+#: compared it against the *last* search's results, which no longer contained it:
+#:
+#:     WARNING claims: dataverse_explorer recommended 1 datasets, 1 absent from
+#:     dataverse_search.json: doi:10.21223/J9NLVP
+#:
+#: A false accusation of the one thing that module exists to catch, and its own docstring names the
+#: cost: *"a record that cries wolf once is a record nobody reads the second time"*. The workspace
+#: copy now accumulates across the turn (§286).
 FIXED_FILENAME = "dataverse_search.json"
+
+#: How many records the workspace copy will hold before it stops growing.
+#:
+#: A model that loops on searches must not fill a researcher's disk, and a file nobody can open is
+#: not a record. Generous, because the whole point is that a recommendation made forty steps ago is
+#: still checkable.
+MAX_KEPT_RECORDS = 2_000
 
 #: Where the MCP writes when it is not told otherwise, used only if a read is somehow reached
 #: without a search having answered first. The gate above makes that ordering hard to produce, and
@@ -127,6 +149,14 @@ class SearchResultsFile(AgentMiddleware):
         #: Where the last search said it wrote. Instance state is per-request: the middleware is
         #: constructed in `_build_runtime_subagents`, which runs once per turn.
         self._server_path: str | None = None
+        #: Every record read this turn, in the order they were first seen.
+        #:
+        #: **Per turn, deliberately, and that is the same scope the claims check runs at.**
+        #: `ClaimsRecorder` is constructed beside this one and compares at `aafter_agent`, so
+        #: "everything this turn searched" is exactly the set a recommendation could have come
+        #: from. Carrying it across turns would grow without bound and check a recommendation
+        #: against searches nobody made today.
+        self._kept: list[Any] = []
 
     # -- reading what a tool answered ------------------------------------------------------
 
@@ -207,26 +237,71 @@ class SearchResultsFile(AgentMiddleware):
         if isinstance(path, str) and path:
             self._server_path = path
 
+    def _accumulate(self, content: Any) -> list[Any]:
+        """Add this read's records to what the turn has already seen, in first-seen order.
+
+        Deduplicated on the record's whole JSON, **shape-blind**, for the same reason
+        `claims._ids_in` walks leaves rather than named keys: the MCP owns this layout, and a
+        reader that keyed on `global_id` would silently stop deduplicating the day it was renamed.
+        An unhashable or unserialisable record is kept rather than dropped — a record we cannot
+        compare is not a record we may discard.
+        """
+        records = content if isinstance(content, list) else [content]
+        seen = set()
+        for kept in self._kept:
+            try:
+                seen.add(json.dumps(kept, sort_keys=True, ensure_ascii=False))
+            except (TypeError, ValueError):
+                continue
+        for record in records:
+            if len(self._kept) >= MAX_KEPT_RECORDS:
+                logger.warning(
+                    "%s is at %d records and stopped growing — later searches this turn are in "
+                    "the log but not in the file, so a claims check may not find them",
+                    FIXED_FILENAME,
+                    MAX_KEPT_RECORDS,
+                )
+                break
+            try:
+                key = json.dumps(record, sort_keys=True, ensure_ascii=False)
+            except (TypeError, ValueError):
+                self._kept.append(record)
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            self._kept.append(record)
+        return self._kept
+
     async def _keep(self, result: Any) -> None:
-        """Write the metadata into the sandbox, where Outputs and the claims check can see it."""
+        """Write the metadata into the sandbox, where Outputs and the claims check can see it.
+
+        **Accumulated across the turn, not replaced.** See [`FIXED_FILENAME`] for the false
+        accusation that overwriting produced.
+        """
         if self.sandbox_backend is None:
             return
         payload = self._payload(result)
         if not payload or "content" not in payload:
             return
         try:
+            arrived = payload["content"]
+            merged = self._accumulate(arrived)
             work_dir = await self.sandbox_backend.aget_work_dir()
             written = await self.sandbox_backend.awrite(
                 f"{str(work_dir).rstrip('/')}/{FIXED_FILENAME}",
-                json.dumps(payload["content"], indent=2, ensure_ascii=False),
+                json.dumps(merged, indent=2, ensure_ascii=False),
             )
             if getattr(written, "error", None):
                 logger.warning("could not keep %s: %s", FIXED_FILENAME, written.error)
             else:
+                # Both numbers, because "this read brought 3" and "the turn has seen 47" answer
+                # different questions and the second is the one a claims warning turns on.
                 logger.info(
-                    "kept %s in the workspace (%d item(s))",
+                    "kept %s in the workspace (%d new, %d this turn)",
                     FIXED_FILENAME,
-                    len(payload["content"]) if isinstance(payload["content"], list) else 1,
+                    len(arrived) if isinstance(arrived, list) else 1,
+                    len(merged),
                 )
         except Exception:
             # A copy is a convenience. Losing it must not cost the search that produced it.

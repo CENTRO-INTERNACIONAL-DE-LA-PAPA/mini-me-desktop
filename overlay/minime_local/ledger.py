@@ -33,9 +33,14 @@ rather than a week later.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from pathlib import PurePosixPath
 from typing import Any, Iterable
+
+#: This module's own channel. `minime_local` lines reach the backend log the app writes, which is
+#: where anybody looking for an absent record will already be.
+logger = logging.getLogger(__name__)
 
 #: Where the record lives, inside the conversation's own folder.
 #:
@@ -212,6 +217,17 @@ def append(
         target.write_text("\n".join(kept) + "\n", encoding="utf-8")
         return str(target)
     except Exception:  # noqa: BLE001 — see the docstring; nothing here may reach the researcher
+        # **The traceback, because "it returned None" is not a diagnosis.** The claims record
+        # failed to appear on a real machine and this line was `pass`; the caller could report
+        # *that* it failed and nothing could report *why*, so the next step was another release
+        # (§286). Warning rather than exception-level: a diagnostic that fails is worth one line,
+        # not a wall of text on every turn if the disk is full.
+        logger.warning(
+            "minime_local: could not write %s in %s",
+            name,
+            work_dir,
+            exc_info=True,
+        )
         return None
 
 
