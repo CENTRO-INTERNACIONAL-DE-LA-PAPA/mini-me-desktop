@@ -116,6 +116,27 @@ else
 fi
 
 # `.git` is dropped above, so record what went in.
+# ------------------------------------------------- a folder the old app insists on
+#
+# **Kept for one reason, and it is not a good one.** `update.rs` shipped with `vendor` as a
+# *required* marker of a bundle, so an install from before v0.3.15 refuses any download
+# without one: `unpack` answers "the download does not contain a bundle", nothing is staged,
+# and the Restart to Update button never appears. There is no way to fix that remotely —
+# the check lives in the copy already on the researcher's machine.
+#
+# So every bundle carries a `vendor/`, whatever else it carries, until nobody is running a
+# build older than v0.3.15. Newer apps accept `mini-me` or `vendor` (BUNDLE_BACKENDS), which
+# is what this should have been from the start.
+mkdir -p "$OUT/vendor"
+cat > "$OUT/vendor/README.txt" <<'VENDOR'
+The backend moved to ../mini-me in v0.3.14.
+
+This folder is kept only so that installs older than v0.3.15 accept this download:
+their updater requires a folder named `vendor` beside the executable and refuses
+the bundle without one. Nothing reads what is in here.
+VENDOR
+ok "vendor/ (empty — so an older install still accepts this bundle)"
+
 if [ -f "$ROOT/vendor/BUNDLED.txt" ]; then
   cp "$ROOT/vendor/BUNDLED.txt" "$OUT/vendor/BUNDLED.txt"
 fi

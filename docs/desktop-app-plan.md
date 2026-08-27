@@ -16144,3 +16144,61 @@ and every fresh install had all three.
 *Hundred-and-thirty-third: two files can each be right about their own job and wrong about the
 same thing. `package.sh` wrote where it always had; `backend.rs` read where it now should. Nothing
 compared the two, so the product of a fortnight's work shipped to nobody.*
+
+## 284. A bundle the installed app did not recognise (2026-08-27)
+
+v0.3.14 shipped the backend fix §283 was about. The researcher opened the app they had, and:
+
+> *"I dont see the button to restart to update"*
+
+`update.rs` decides whether a folder is a replaceable bundle by looking for three directories
+beside the executable:
+
+```rust
+const BUNDLE_MARKERS: [&str; 3] = ["overlay", "scripts", "vendor"];
+```
+
+§283 moved the backend from `vendor/Mini-Me` to `mini-me/` and stopped writing `vendor/` at all.
+So the first bundle built after that fix had two of the three, and the same function that guards the
+*installed* folder also validates the *downloaded* one — `unpack` → `bundle_at` → `layout`. The
+check ran, found a newer release, downloaded ten megabytes, rejected it as *"the download does not
+contain a bundle"*, staged nothing, and the button that only appears once something is staged never
+appeared.
+
+**And the fix could not be shipped to the machines that needed it**, because the rejection happens
+in the copy already installed. Every release from here carries an empty `vendor/` with a note in
+it, until nobody is running a build older than v0.3.15.
+
+### The test that passed while the bundle broke
+
+There was a check for exactly this, and it held the wrong thing:
+
+```rust
+assert!(packager.contains("$OUT/vendor"), "package.sh no longer writes vendor/ into the bundle");
+```
+
+§283 left `BACKEND_DEST="$OUT/vendor/Mini-Me"` in a fallback branch for pre-monorepo checkouts. The
+branch no longer runs; the substring survived; the assertion went on passing while the folder it
+was written to protect stopped being created. The synthetic zip in `a_bundle_unpacks…` had the same
+shape of hole: it was built from `BUNDLE_MARKERS` itself, so it agreed with whatever the constant
+said and could never disagree with what `package.sh` writes.
+
+A text assertion has to name something that only exists when the behaviour does. It now names the
+line — `mkdir -p "$OUT/vendor"` — rather than a path fragment that appears in three places.
+
+### v0.3.14 was a dead end and was withdrawn
+
+Worse than not updating: v0.3.14's *own* folder has no `vendor/`, and its binary predates this
+fix — so it would have decided it was a source build and never offered another update to anyone
+who installed it. It is back to a draft. `/releases/latest` returns v0.3.12 again, which is where
+everyone still is, and which can accept v0.3.15.
+
+### What the constant should have been
+
+`BUNDLE_MARKERS` for what is always there, `BUNDLE_BACKENDS` for the thing that has two names and
+needs one of them. A constant naming one spelling of something with two spellings is a constant
+that breaks on the day the second one ships — and it broke silently, in the one code path whose
+entire job is to reach a machine nobody can log into.
+
+*Hundred-and-thirty-fourth: the update path is the only feature that must work in the version you
+are replacing. Every other bug can be fixed in the next release; this one cannot.*
