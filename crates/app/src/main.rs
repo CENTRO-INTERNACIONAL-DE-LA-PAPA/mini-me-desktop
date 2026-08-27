@@ -78,7 +78,7 @@ const ASTA_CITATION: &str = "AstaBench: Rigorous Benchmarking of AI Agents with 
 /// this is only the researcher-facing name requested in §154, so it cannot become a second
 /// project registry or collide with a real folder of the same name.
 const UNGROUPED_PROJECT_LABEL: &str = "Ungrouped Conversations";
-const ICON_PATHS: [&str; 30] = [
+const ICON_PATHS: [&str; 31] = [
     "icons/settings.svg",
     "icons/conversations.svg",
     "icons/research.svg",
@@ -97,6 +97,7 @@ const ICON_PATHS: [&str; 30] = [
     "icons/file-archive.svg",
     "icons/file-db.svg",
     "icons/file-blank.svg",
+    "icons/folder.svg",
     "icons/agent-ellipse.svg",
     "icons/binoculars.svg",
     "icons/book-open-text.svg",
@@ -153,6 +154,7 @@ impl AssetSource for Assets {
             "icons/plus.svg" => Some(include_bytes!("../assets/icons/plus.svg")),
             "icons/sidebar-simple-left.svg" => Some(include_bytes!("../assets/icons/sidebar-simple-left.svg")),
             "icons/sidebar-simple-right.svg" => Some(include_bytes!("../assets/icons/sidebar-simple-right.svg")),
+            "icons/folder.svg" => Some(include_bytes!("../assets/icons/folder.svg")),
             _ => None,
         };
         Ok(bytes.map(Cow::Borrowed))
@@ -3215,6 +3217,15 @@ impl Workbench {
             (SidebarMenu::Project { name, .. }, "menu-new-here") => {
                 self.new_thread_in(Some(name.clone()), cx)
             }
+            (SidebarMenu::Project { name, .. }, "menu-open-folder") => {
+                if let Some(dir) =
+                    workspace::project_folder(name).map(|folder| workspace::root().join(folder))
+                {
+                    if let Err(error) = workspace::open(&dir) {
+                        tracing::warn!(%error, "could not open a project");
+                    }
+                }
+            }
             (
                 SidebarMenu::Project {
                     name,
@@ -4350,6 +4361,12 @@ impl Workbench {
         cx.spawn(async move |this, cx| {
             if let Some((messages, snapshot)) = messages.next().await {
                 let _ = this.update(cx, |workbench, cx| {
+                    // The user can leave — a new thread, a different conversation — while this
+                    // fetch is still in flight. Landing it anyway would push a stranger's
+                    // messages into whatever is open by the time the response arrives.
+                    if workbench.sidecar.thread_id().as_deref() != Some(owner.as_str()) {
+                        return;
+                    }
                     for (role, body) in messages {
                         // Roles come back as the two the transcript renders; anything
                         // else was filtered out server-side by `decode_stored_message`.
@@ -5229,6 +5246,10 @@ impl Workbench {
         self.project = None;
         self.refresh_project(cx);
         self.transcript.clear();
+        // A conversation fetch started before this can still land after it — see the guard
+        // in `open_conversation`'s completion — but the screen itself must not keep showing
+        // "opening…" for a conversation that was just left (§262).
+        self.opening = false;
         // A new conversation is a new enquiry. The one just left keeps its own record on disk,
         // where reopening it will find it.
         self.provenance = provenance::Record::default();
@@ -6989,7 +7010,7 @@ impl Render for Workbench {
                         .h(px(30.))
                         .bg(rgb(theme::surface()))
                         .m_2()
-                        .mt_4()
+                        .mt_3()
                         .border_1()
                         .border_color(rgb(theme::border()))
                         .flex_none()
@@ -7024,7 +7045,34 @@ impl Render for Workbench {
             body.child(self.divider(Divider::Panel, cx))
                 .child(self.artifacts_panel(cx))
         } else {
-            body
+            body.child(
+                div()
+                    .id("toggle-right-panel")
+                    .child(app_icon(
+                        "icons/sidebar-simple-right.svg",
+                        theme::text(),
+                        Some(ui::IconSize::Small.px()),
+                    ))
+                    .w(px(30.))
+                    .h(px(30.))
+                    .bg(rgb(theme::surface()))
+                    .m_2()
+                    .mt_4()
+                    .border_1()
+                    .border_color(rgb(theme::border()))
+                    .flex_none()
+                    .p_3()
+                    .flex()
+                    .rounded_lg()
+                    .items_center()
+                    .justify_center()
+                    .hover(|style| style.cursor_pointer())
+                    .on_click(cx.listener(|workbench, _event, _window, cx| {
+                        workbench.panel_open = !workbench.panel_open;
+                        workbench.remember_panels();
+                        cx.notify();
+                    })),
+            )
         };
 
         let root = div()

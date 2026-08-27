@@ -391,6 +391,14 @@ pub struct IconTextButton {
     border: u32,
     bg: Option<u32>,
     hover_bg: Option<u32>,
+    /// Whether the button carries its own `m_2()` breathing room. On by default, since that is
+    /// what a button sitting directly in an unpadded column needs — a caller placing it inside
+    /// an already-padded list (matching the padding its other rows already sit in) wants this
+    /// off, or the two paddings stack into a visibly narrower row.
+    margin: bool,
+    /// Stretches to the width of its container instead of sizing to its content — for sitting
+    /// flush with full-width rows above it, the way [`ListRow`] does.
+    full_width: bool,
     on_click: Option<OnClick>,
 }
 
@@ -409,8 +417,20 @@ impl IconTextButton {
             border: theme::border(),
             bg: Some(theme::background()),
             hover_bg: Some(theme::surface()),
+            margin: true,
+            full_width: false,
             on_click: None,
         }
+    }
+
+    pub fn margin(mut self, margin: bool) -> Self {
+        self.margin = margin;
+        self
+    }
+
+    pub fn full_width(mut self, full_width: bool) -> Self {
+        self.full_width = full_width;
+        self
     }
 
     pub fn icon_size(mut self, icon_size: f32) -> Self {
@@ -456,14 +476,19 @@ impl RenderOnce for IconTextButton {
             .flex_none()
             .items_center()
             .gap_2()
-            .py_2()
+            .py_1p5()
             .px_2p5()
-            .m_2()
             .rounded_lg()
             .border_1()
             .border_color(rgb(self.border))
             .text_color(rgb(self.ink))
             .text_sm();
+        if self.margin {
+            row = row.m_2();
+        }
+        if self.full_width {
+            row = row.w_full().min_w_0();
+        }
         if let Some(bg) = self.bg {
             row = row.bg(rgb(bg));
         }
@@ -583,7 +608,7 @@ impl RenderOnce for ListRow {
             .w_full()
             .min_w_0()
             .px_2p5()
-            .py_2()
+            .py_1p5()
             .rounded_md()
             .text_sm();
         if let Some(bg) = self.bg {

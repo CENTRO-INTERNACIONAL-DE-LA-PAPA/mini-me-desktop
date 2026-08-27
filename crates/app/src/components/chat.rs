@@ -882,7 +882,15 @@ impl Workbench {
             .take(RECENT)
             .collect();
         if !recent.is_empty() {
-            let mut cards = div().flex().flex_row().gap_2().w_full().min_w_0();
+            // `items_start`, or a flex row's default cross-axis stretch makes every card match
+            // the tallest sibling's height instead of hugging its own two lines of content.
+            let mut cards = div()
+                .flex()
+                .flex_row()
+                .items_start()
+                .gap_2()
+                .w_full()
+                .min_w_0();
             for conversation in recent {
                 let thread_id = conversation.thread_id.clone();
                 // What is in it, counted off disk rather than remembered — the same source the
@@ -1323,6 +1331,14 @@ impl Workbench {
         } else {
             col = col.child(rows);
         }
+        // The conversation's own name, read the same way the sidebar row does: by the thread
+        // the sidecar is currently attached to, looked up against the list it renders.
+        let title = self
+            .sidecar
+            .thread_id()
+            .and_then(|id| self.conversations.iter().find(|c| c.thread_id == id))
+            .map(|conversation| conversation.title.clone());
+
         // Everything that is not the road: transcript, approval, picker, composer. Built as its
         // own column so the road can sit *beside* all of it rather than above the transcript
         // and below the composer.
@@ -1332,6 +1348,26 @@ impl Workbench {
             .flex_grow()
             .min_w_0()
             .h_full()
+            .children(title.map(|title| {
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .flex_none()
+                    .w_full()
+                    .min_w_0()
+                    .px_4()
+                    .py_2()
+                    .text_base()
+                    .text_color(rgb(theme::text()))
+                    .child(app_icon(
+                        "icons/chat-circle-dots.svg",
+                        theme::text(),
+                        Some(ui::IconSize::Small.px()),
+                    ))
+                    .child(title)
+            }))
             .child(
                 div()
                     .relative()
@@ -1561,7 +1597,7 @@ impl Workbench {
             )
             .child(
                 ui::IconButton::new("attach-file", "icons/plus.svg")
-                    .icon_size(14.)
+                    .icon_size(ui::IconSize::Medium.px())
                     .hover_ink(theme::accent())
                     .tooltip("Add a file from this computer")
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
@@ -1571,7 +1607,7 @@ impl Workbench {
             .child(self.composer.clone())
             .child(
                 ui::IconButton::new("send-turn", send_icon)
-                    .icon_size(ui::IconSize::Large.px())
+                    .icon_size(ui::IconSize::Medium.px())
                     .ink(ink)
                     .hoverable(has_text && !self.streaming || self.streaming)
                     .tooltip(hint)

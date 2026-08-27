@@ -1241,6 +1241,26 @@ impl Workbench {
             .border_1()
             .border_color(rgb(theme::border()))
             .group(SCROLL_GROUP)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_start()
+                    .flex_none()
+                    .px_3()
+                    .py_2()
+                    .child(
+                        ui::IconButton::new("toggle-right-panel", "icons/sidebar-simple-right.svg")
+                            .icon_size(ui::IconSize::Small.px())
+                            .ink(theme::text())
+                            .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                workbench.panel_open = false;
+                                workbench.remember_panels();
+                                cx.notify();
+                            })),
+                    ),
+            )
             .child(self.artifacts_contents(cx))
             .children(scrollbar(&self.panel_scroll))
     }

@@ -75,6 +75,7 @@ option, defined by the (default) text.
 
 4. **Spacing**:
   - You should only use the following spacing (margin/padding) for your elements:
+    - `p_1p5()`
     - `p_2()` (default)
     - `p_2p5()`
     - `p_3()`
@@ -86,8 +87,15 @@ option, defined by the (default) text.
 These are the general design rules you should follow when building the UI.
 
 - If you are creating a button with a `div()` chain (Meaning the already existing buttons are not enough for your use case), you should
-  use a `py_2()` and a `px_2p5()` for the padding. 
+  use a `py_1p5()` and a `px_2p5()` for the padding. 
 - If a button has `theme::background()` as its background color, the hover background color should be `theme::surface()`. 
   If a button has `theme::surface()` as its background color, the hover background color should be `theme::background()`. Likewise,
 - If a button has `theme::accent_soft()` as its background color, the background should stay the same on hover.
 - A button with `theme::accent_soft()` as its background color should have `theme::accent()` as its text color and outline/border color.
+- If a text has an icon next to it, the icon should be on the left side of the text and have a `gap_2()` between the icon and the text. Also, it should have `items_center()` to make sure the icon and text are aligned properly.
+- Before placing an element inside an existing container, check what horizontal
+  padding/margin its siblings already use and match it, rather than trusting the
+  element's own default — a component's own margin can stack with the container's
+  padding (use `ui::IconTextButton`'s `.margin(false)` / `.full_width(true)` to avoid
+  that), and a heading with no horizontal padding of its own won't line up with rows
+  that have theirs.
