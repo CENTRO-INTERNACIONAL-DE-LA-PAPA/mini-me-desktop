@@ -386,7 +386,11 @@ impl Sidecar {
     /// Forget the current thread, so the next turn starts a fresh conversation.
     ///
     /// The backend keeps the old thread — nothing is deleted; we simply stop adding
-    /// to it. The project spine is thread-independent, so the mission survives.
+    /// to it. A *project's* spine outlives the conversation, so filing a new thread under one
+    /// picks up its mission. A conversation in no project now has a spine of its own (§282), so
+    /// forgetting the thread here is also forgetting which spine to read — and until the next
+    /// turn mints one, the panel has nothing to show, which is correct: a conversation that has
+    /// not happened yet has achieved nothing.
     pub fn reset_thread(&self) {
         self.thread.lock().expect("thread id mutex").take();
     }
@@ -401,11 +405,25 @@ impl Sidecar {
     pub fn fetch_project(&self) -> mpsc::UnboundedReceiver<Result<Project, String>> {
         let (tx, rx) = mpsc::unbounded();
         let base_url = self.base_url.clone();
-        // The spine belongs to the project, not to the person (docs §109).
+        // The spine belongs to the project, not to the person (docs §109) — and when there is no
+        // project, to the conversation, not to every conversation that was never filed (§282).
         let project = self.project();
+        let thread = self.thread_id();
+
+        // **Neither means nothing to read, and that is an answer rather than a missing one.** A
+        // conversation with no project and no thread has not happened yet, so it has no mission,
+        // no plan and nothing completed. Asking anyway sends a `/project` with no scope at all,
+        // which the overlay answers from the record shared by every client that does not know
+        // about the parameters — and the panel would open on somebody else's work again (§282).
+        if project.is_none() && thread.is_none() {
+            let _ = tx.unbounded_send(Ok(crate::protocol::Project::default()));
+            return rx;
+        }
 
         self.runtime.spawn(async move {
-            let client = LangGraphClient::new(base_url).with_project(project);
+            let client = LangGraphClient::new(base_url)
+                .with_project(project)
+                .with_thread(thread);
             let outcome = client
                 .fetch_project()
                 .await
@@ -430,9 +448,22 @@ impl Sidecar {
         let (tx, rx) = mpsc::unbounded();
         let base_url = self.base_url.clone();
         let project = self.project();
+        let thread = self.thread_id();
+
+        // Refused rather than written somewhere shared. Saying so is the whole point: a mission
+        // that silently landed in the record every ungrouped conversation reads is the defect
+        // this call is being fixed for, and a write is the half a researcher trusts most.
+        if project.is_none() && thread.is_none() {
+            let _ = tx.unbounded_send(Err(
+                "ask something first — a mission is saved with its conversation".to_string(),
+            ));
+            return rx;
+        }
 
         self.runtime.spawn(async move {
-            let client = LangGraphClient::new(base_url).with_project(project);
+            let client = LangGraphClient::new(base_url)
+                .with_project(project)
+                .with_thread(thread);
             let outcome = client
                 .set_mission(&mission)
                 .await

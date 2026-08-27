@@ -1063,6 +1063,8 @@ pub struct LangGraphClient {
     model: Option<ModelChoice>,
     /// The project whose folder this thread's outputs belong in, if any.
     project: Option<String>,
+    /// The conversation this call is about, for the one route that has no thread in its path.
+    thread: Option<String>,
 }
 
 impl LangGraphClient {
@@ -1072,12 +1074,24 @@ impl LangGraphClient {
             base_url: base_url.into(),
             model: None,
             project: None,
+            thread: None,
         }
     }
 
     /// Name the project folder the backend should write this thread's outputs into.
     pub fn with_project(mut self, project: Option<String>) -> Self {
         self.project = project;
+        self
+    }
+
+    /// Name the conversation, so a spine call that is in no project scopes to this one.
+    ///
+    /// **Only the spine uses it.** Every other call already names its thread in the path; this
+    /// exists because `/project` is a stateless route with no thread in its URL, and without one
+    /// an ungrouped conversation reads a record shared by every ungrouped conversation there has
+    /// ever been (§282).
+    pub fn with_thread(mut self, thread: Option<String>) -> Self {
+        self.thread = thread;
         self
     }
 
@@ -1165,20 +1179,26 @@ impl LangGraphClient {
     /// and `patch_project` alike, so a PATCH that spelled its scope differently from the GET
     /// would save the mission into a namespace the panel never reads and look like a save that
     /// silently did nothing.
+    ///
+    /// **A conversation in no project names itself instead**, because otherwise it names nothing
+    /// and the overlay falls back to a record every ungrouped conversation shares — which is how a
+    /// new conversation about late blight opened under a mission of "Testting functionalities",
+    /// with six visualizations it had not produced (§282). Only one of the two is ever sent: a
+    /// filed conversation's spine belongs to its project.
     fn project_url(&self) -> String {
-        format!(
-            "{}/project{}",
-            self.base_url,
-            match self
-                .project
+        let named = |value: &Option<String>| {
+            value
                 .as_deref()
                 .map(str::trim)
-                .filter(|p| !p.is_empty())
-            {
-                Some(project) => format!("?project={}", urlencode(project)),
-                None => String::new(),
-            }
-        )
+                .filter(|text| !text.is_empty())
+                .map(str::to_string)
+        };
+        let query = match (named(&self.project), named(&self.thread)) {
+            (Some(project), _) => format!("?project={}", urlencode(&project)),
+            (None, Some(thread)) => format!("?thread={}", urlencode(&thread)),
+            (None, None) => String::new(),
+        };
+        format!("{}/project{}", self.base_url, query)
     }
 
     /// `PATCH /project` → set the mission by hand, and get the saved spine back.
@@ -4753,6 +4773,80 @@ mod tests {
         let blank =
             LangGraphClient::new("http://127.0.0.1:2024").with_project(Some("  ".into()));
         assert_eq!(blank.project_url(), "http://127.0.0.1:2024/project");
+    }
+
+    /// **A conversation in no project names itself, or it reads everybody's.**
+    ///
+    /// Naming neither is what the client used to do, and the overlay answered from a record every
+    /// unfiled conversation shared — so a new conversation about late blight opened under a
+    /// mission of "Testting functionalities" with six visualizations it had not produced. Worse
+    /// than the panel: that spine is injected into the coordinator's system prompt every turn
+    /// (§282).
+    #[test]
+    fn an_unfiled_conversation_scopes_the_spine_to_itself() {
+        let solo = LangGraphClient::new("http://127.0.0.1:2024")
+            .with_thread(Some("01a043eb-54b4-7922-8154-c8e5e67861d5".into()));
+        assert_eq!(
+            solo.project_url(),
+            "http://127.0.0.1:2024/project?thread=01a043eb-54b4-7922-8154-c8e5e67861d5",
+        );
+
+        // **One or the other, never both.** Filing a conversation into a project says its work
+        // belongs with that project's, and the overlay resolves the same way — but sending both
+        // would leave which one wins to be agreed twice, in two languages.
+        let filed = LangGraphClient::new("http://127.0.0.1:2024")
+            .with_project(Some("TEST3".into()))
+            .with_thread(Some("01a043eb-54b4".into()));
+        assert_eq!(filed.project_url(), "http://127.0.0.1:2024/project?project=TEST3");
+
+        // A conversation that has not started yet is neither, and the sidecar does not call at
+        // all in that case — but if it ever did, this is the old shared record and it must stay
+        // recognisable rather than look like a scope.
+        let fresh = LangGraphClient::new("http://127.0.0.1:2024").with_thread(Some(" ".into()));
+        assert_eq!(fresh.project_url(), "http://127.0.0.1:2024/project");
+    }
+
+    /// The names this client sends and the names the overlay reads are the same two names.
+    ///
+    /// Read out of the overlay's own source rather than restated here. A rename on either side is
+    /// a spine that silently falls back to the shared record — which is a defect that looks like
+    /// nothing at all, because the panel still fills in.
+    #[test]
+    fn the_query_parameters_are_the_ones_the_overlay_reads() {
+        let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../overlay/minime_local/spine.py");
+        let source = std::fs::read_to_string(&overlay).expect("the overlay is beside the crate");
+
+        let constant = |name: &str| {
+            let start = source
+                .find(&format!("{name} = \""))
+                .unwrap_or_else(|| panic!("{name} is gone from spine.py"))
+                + name.len()
+                + 4;
+            source[start..]
+                .split('"')
+                .next()
+                .expect("a quoted value")
+                .to_string()
+        };
+
+        let url = LangGraphClient::new("http://x")
+            .with_thread(Some("t".into()))
+            .project_url();
+        assert!(
+            url.contains(&format!("?{}=", constant("THREAD_PARAM"))),
+            "the app sends {url}, and the overlay reads ?{}",
+            constant("THREAD_PARAM")
+        );
+
+        let filed = LangGraphClient::new("http://x")
+            .with_project(Some("p".into()))
+            .project_url();
+        assert!(
+            filed.contains(&format!("?{}=", constant("QUERY_PARAM"))),
+            "the app sends {filed}, and the overlay reads ?{}",
+            constant("QUERY_PARAM")
+        );
     }
 
     #[test]
