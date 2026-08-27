@@ -78,6 +78,14 @@ jobs:
         env:
           BACKEND_TOKEN: ${{ secrets.MINIME_BACKEND_TOKEN }}
         run: |
+          # The backend lives at `mini-me/` in this repository and `package.sh` ships that
+          # directory. Cloning the separate private repo would fetch a copy nothing reads —
+          # and failing here for a missing token would block a release that does not need
+          # one. Kept for a pre-monorepo checkout, skipped for this one (docs §283).
+          if [ -f mini-me/langgraph.json ]; then
+            echo "mini-me/ is in this repository — nothing to fetch."
+            exit 0
+          fi
           if [ -z "$BACKEND_TOKEN" ]; then
             echo "::error::MINIME_BACKEND_TOKEN is not set. Add a PAT with read access to"
             echo "::error::the Mini-Me repository under Settings → Secrets → Actions."
