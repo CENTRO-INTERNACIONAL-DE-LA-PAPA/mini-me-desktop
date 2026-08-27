@@ -19,9 +19,21 @@ Patch only the first and `GET /project` reads a namespace the turns no longer wr
 goes blank rather than becoming correct. So both are patched here, and the route learns the
 project from a query parameter the client already knows.
 
-**Backwards compatible by construction.** With no project the namespace is unchanged,
-`(user_id, "project")`, so every spine that exists today is what an ungrouped conversation reads.
-A project appends one segment: `(user_id, "project", "<name>")`.
+**One spine per conversation, for conversations in no project.** That last sentence used to
+read *"with no project the namespace is unchanged"* — one record shared by every conversation the
+researcher had never filed. So a brand-new conversation about late blight opened showing a mission
+of *"Testting functionalities"*, six visualizations it had not produced, and the plan from the
+conversation before it.
+
+Not only on the screen. `render_mission_context` puts that spine into the **coordinator's system
+prompt** every turn, under *"Ground every answer, plan, and delegation in this mission"* — so an
+unrelated conversation began by being told what it had already achieved. A panel that overstates is
+a nuisance; a prompt that overstates changes what the agent does.
+
+An ungrouped conversation now gets `(user_id, "project", "<default>", "solo-<thread>")`, which is
+its own and nobody else's. A project still appends its name. Only a call that names neither — no
+project, no conversation — reads the old shared record, which is every non-desktop client and
+nothing this app does.
 
 **Where this belongs in the end.** Upstream, as a `project` parameter on the route and a namespace
 that takes one — see `docs/upstream/mini-me/`. This is the bridge, in the same sense §18 meant it:
@@ -45,8 +57,21 @@ _http_project: contextvars.ContextVar[str] = contextvars.ContextVar(
     "minime_local_http_project", default=""
 )
 
-#: The query parameter the desktop app sends on `/project`.
+#: The conversation the current HTTP request is about, when it is in no project.
+#:
+#: Separate from the project rather than folded into it: a route that received both would have to
+#: decide which wins, and the answer differs by caller. Here the rule is stated once, in
+#: :func:`current_scope`, and both variables are plain inputs to it.
+_http_thread: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "minime_local_http_thread", default=""
+)
+
+#: The query parameters the desktop app sends on `/project`.
 QUERY_PARAM = "project"
+THREAD_PARAM = "thread"
+
+#: The `configurable` key LangGraph puts the conversation id under, inside a run.
+_THREAD_KEY = "thread_id"
 
 
 def sanitise(name: str) -> str:
@@ -64,23 +89,47 @@ def sanitise(name: str) -> str:
     return cleaned[:96]
 
 
-def current_project() -> str:
-    """The project this call is about: an HTTP request's, or the running turn's.
+def solo_scope(thread_id: str) -> str:
+    """The spine segment for a conversation that is in no project, or `""` for no conversation.
 
-    Checked in that order because only one of them is ever set. A route handler puts the value in
-    the ContextVar and has no run config; a turn has a run config and never touches the ContextVar.
+    Prefixed so the segment cannot be mistaken for a project name in the store, and so a person
+    reading the keys can see at a glance which records belong to a single conversation.
+    """
+    cleaned = sanitise(thread_id)
+    return f"solo-{cleaned}" if cleaned else ""
+
+
+def current_scope() -> str:
+    """Whose spine this call is about: a project's, one conversation's, or nobody's.
+
+    **A project always wins over a conversation.** Filing a conversation into a project is a
+    statement that its work belongs with the rest of that project's, and the panel has said so
+    since §109: *"moving between them changes which one the panel shows"*.
+
+    HTTP first, then the run config, because only one of the two is ever populated: a route
+    handler sets the ContextVars and has no run config; a turn has a run config and never touches
+    them. A route that named neither falls through to an empty segment, which is the old shared
+    record — left reachable deliberately, for a client that does not know about either parameter.
     """
     from_request = _http_project.get()
     if from_request:
         return sanitise(from_request)
+    from_thread = _http_thread.get()
+    if from_thread:
+        return solo_scope(from_thread)
     try:
         from langgraph.config import get_config
 
         from minime_local.workspace import WORKSPACE_PROJECT_KEY
 
         configurable = (get_config() or {}).get("configurable") or {}
-        return sanitise(str(configurable.get(WORKSPACE_PROJECT_KEY) or ""))
-    except Exception:  # noqa: BLE001 — outside a run, which is the ungrouped case
+        project = sanitise(str(configurable.get(WORKSPACE_PROJECT_KEY) or ""))
+        if project:
+            return project
+        # The turn's own conversation. Without this an ungrouped run writes its mission and its
+        # plan into the record every other ungrouped conversation reads, which is the defect.
+        return solo_scope(str(configurable.get(_THREAD_KEY) or ""))
+    except Exception:  # noqa: BLE001 — outside a run and outside a request
         return ""
 
 
@@ -105,11 +154,11 @@ def install_runtime(module) -> None:
     @functools.wraps(original)
     def _project_namespace_scoped(*args, **kwargs):
         base = original(*args, **kwargs)
-        project = current_project()
-        return (*base, project) if project else base
+        scope = current_scope()
+        return (*base, scope) if scope else base
 
     module._project_namespace = _project_namespace_scoped
-    logger.warning("minime_local: the research spine is now per project")
+    logger.warning("minime_local: the research spine is now per project, or per conversation")
 
 
 def install_routes(module) -> None:
@@ -132,12 +181,19 @@ def install_routes(module) -> None:
         # and every request would read the ungrouped spine while looking like it worked.
         @functools.wraps(handler)
         async def scoped(request, *args, _handler=handler, **kwargs):
-            token = _http_project.set(request.query_params.get(QUERY_PARAM, "") or "")
+            project = _http_project.set(request.query_params.get(QUERY_PARAM, "") or "")
+            thread = _http_thread.set(request.query_params.get(THREAD_PARAM, "") or "")
             try:
                 return await _handler(request, *args, **kwargs)
             finally:
-                _http_project.reset(token)
+                _http_project.reset(project)
+                _http_thread.reset(thread)
 
         setattr(module, name, scoped)
         wrapped += 1
-    logger.warning("minime_local: /project reads its project from ?%s (%d)", QUERY_PARAM, wrapped)
+    logger.warning(
+        "minime_local: /project reads its scope from ?%s / ?%s (%d)",
+        QUERY_PARAM,
+        THREAD_PARAM,
+        wrapped,
+    )

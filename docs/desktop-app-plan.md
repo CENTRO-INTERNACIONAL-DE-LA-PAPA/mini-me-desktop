@@ -1577,6 +1577,10 @@ in `Sidecar` fixes it: create on first use, reuse after, and `reset_thread()` is
 "New thread" now means. Nothing is deleted server-side; we just stop adding to the
 old thread, and the spine is thread-independent so the mission survives.
 
+> Struck by §282: that last clause held for a *project's* spine and was the defect for everything
+> else. A conversation in no project now carries its own mission, so "New thread" starts on an
+> empty one rather than inheriting the last conversation's.
+
 *Verified live:* `--check-backend --prompt "find the deseq2 paper" --prompt "who is
 the first author of that paper?"` → turn 2 answered **"Michael I. Love."** in 5
 chunks with no subagent and no re-search, on the same thread id. That answer was
@@ -15952,3 +15956,85 @@ somebody thinking to open a log file.
 
 *Hundred-and-thirty-first: a record is finished when something reads it, not when something writes
 it. Until then it is a file.*
+
+## 282. One mission, every conversation (2026-08-27)
+
+A researcher opened a new conversation about potato late blight and the panel beside it read:
+
+```
+MISSION      Testting functionalities
+COMPLETED    ✓ Produced 6 visualizations from the data.
+             ✓ Wrote report: "Reporte de Monitoreo Sintético de Bactericera".
+             ✓ Identified 3 candidate datasets in CIP Dataverse.
+             ✓ Indexed 2 documents into the local library.
+PLAN         2 of 6
+```
+
+None of it was that conversation's. The mission came from a different enquiry, the completed list
+from several, and the plan from the conversation immediately before — which had been stopped after
+four minutes.
+
+> *"I really hate to see a filled mission and prefilled plan from previous conversations when I'm
+> starting a new conversation that's not inside a project."*
+
+### One record, shared by everything that was never filed
+
+`overlay/minime_local/spine.py` gives each **project** its own spine, and its own docstring stated
+the remainder as a feature:
+
+> **Backwards compatible by construction.** With no project the namespace is unchanged,
+> `(user_id, "project")`, so every spine that exists today is what an ungrouped conversation reads.
+
+Which is exactly right for a client that does not know which conversation it is asking about, and
+exactly wrong for one that does. Every unfiled conversation resolved to the same key, so each one
+inherited the accumulated mission, completed list and plan of all the others.
+
+### The half that was not on the screen
+
+`render_mission_context` (`backend/project.py`) puts that spine into the **coordinator's system
+prompt**, every turn, and ends it:
+
+> Ground every answer, plan, and delegation in this mission.
+
+So the late blight conversation began with the model holding a mission about testing
+functionality and a list of six visualizations it had already produced. That is a plausible part
+of why the coordinator, after its dataverse subagent came back empty, delegated to a
+`general-purpose` agent that ran `ls` and four `grep`s and returned nothing: work it had never done
+was in its context as done.
+
+A panel that overstates is a nuisance. A prompt that overstates changes what the agent does, and
+every odd coordinator report this week was made under one.
+
+### The scope, stated once
+
+`current_project` became `current_scope`, and answers with a project, a conversation, or nobody:
+
+* a **project** wins over the conversation inside it — filing a conversation is a statement that
+  its work belongs with that project's, which is what §109 already said the panel should show;
+* otherwise the **conversation** names itself, `solo-<thread>`;
+* naming **neither** still reads the old shared record, deliberately, so the compatibility claim
+  the module was written on stays true for every caller that knows about neither parameter.
+
+The app sends one or the other and never both, so which wins is decided in one place rather than
+agreed twice in two languages. A test reads the parameter names out of the overlay's own source
+and asserts the client sends those, because a rename on either side is a spine that quietly falls
+back to the shared record — a defect that looks like nothing at all, since the panel still fills in.
+
+### A conversation that has not happened yet
+
+Before its first turn a conversation has no thread, so it has no scope. The client does not ask —
+it answers an empty spine locally — because asking with no scope is asking for the shared record
+again. A mission typed before the first question is **refused with a sentence** rather than written
+somewhere shared: *"ask something first — a mission is saved with its conversation"*. §199's point
+survives, one turn later: `advance_project` seeds the mission from the first human message.
+
+### What this does not do
+
+Nothing is migrated. The old shared record still holds what accumulated in it and is simply no
+longer read by any conversation; a researcher who wants that mission back can type it into the
+project they meant it for. Nothing is deleted, because a spine nobody can find is recoverable and a
+spine that was deleted is not.
+
+*Hundred-and-thirty-second: "backwards compatible by construction" is a claim about callers, not
+about users. The fallback that keeps an old client working is the same line that gives a new
+conversation somebody else's history.*
