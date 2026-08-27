@@ -24,7 +24,7 @@ use std::io::Read as _;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::backend::{quote_path, shell_quote, BackendConfig, Execution};
+use crate::backend::{bundled_backend_dir, quote_path, shell_quote, BackendConfig, Execution};
 
 /// Ceiling for one probe. Generous because a **cold** WSL distro genuinely takes
 /// several seconds to boot on the first `wsl.exe` call of a session, and reporting
@@ -288,6 +288,64 @@ fn probe(argv: &[String]) -> Probe {
     }
 }
 
+/// Whether the installed backend is the one this app shipped with.
+///
+/// **The check that was missing for a fortnight.** `setup-wsl.sh` runs only when the Setup pane
+/// offers it, and the pane offered it only when `langgraph.json` was absent — so once a machine
+/// was provisioned, the Python underneath the app never changed again. The app updated weekly and
+/// the backend stayed at whatever shipped the first time: a researcher's dataverse explorer ran a
+/// `read_search_results` that had been fixed nine days earlier, and four middleware modules
+/// written for it were not on the machine at all (§283).
+///
+/// A **warning**, not a failure: an older backend still answers, and hijacking a launch for the
+/// fifteen minutes `uv sync` can take would be a worse trade than saying so and offering the
+/// button. Silent when there is nothing to compare — a developer checkout carries no stamp, and
+/// running the app from source is not a machine out of date.
+fn backend_build(config: &BackendConfig) -> Check {
+    let Some(bundled) = bundled_backend_stamp() else {
+        return Check::pass(
+            "backend-build",
+            "Backend build",
+            "running from source — nothing bundled to compare against",
+        );
+    };
+    let installed = installed_backend_stamp(config);
+    if installed.as_deref() == Some(bundled.as_str()) {
+        return Check::pass(
+            "backend-build",
+            "Backend build",
+            "matches the copy bundled with this app",
+        );
+    }
+
+    let short = |stamp: &str| stamp.chars().take(12).collect::<String>();
+    let detail = match &installed {
+        // Named rather than counted: "older" invites the question this line should answer.
+        Some(stamp) => format!(
+            "installed {} but this app ships {} — subagents may be running last month's rules",
+            short(stamp),
+            short(&bundled)
+        ),
+        None => format!(
+            "installed before this app stamped its backend; this app ships {} — \
+             subagents may be running last month's rules",
+            short(&bundled)
+        ),
+    };
+    Check::failing(
+        "backend-build",
+        "Backend build",
+        State::Warn,
+        detail,
+        vec![Fix::Run {
+            label: "Update the backend",
+            argv: config.shell_argv(&config.setup_script()),
+            note: "copies the bundled backend over the installed one and refreshes its packages — \
+                   your API keys and conversations are untouched",
+        }],
+    )
+}
+
 /// Whether a path exists where the backend would look for it.
 ///
 /// Host mode stats the filesystem directly rather than shelling out — that works on
@@ -300,6 +358,40 @@ fn exists(config: &BackendConfig, relative: &str) -> bool {
         }
         None => config.project_dir.join(relative).exists(),
     }
+}
+
+/// The file `scripts/package.sh` writes into the bundled backend, naming that build.
+///
+/// Content-derived rather than a version number, because a hand-built bundle has no version to
+/// quote and the question is whether these files differ from the installed ones.
+const BACKEND_STAMP: &str = ".bundled-backend";
+
+/// What build of the backend this app ships, if it ships one at all.
+fn bundled_backend_stamp() -> Option<String> {
+    let stamp = std::fs::read_to_string(bundled_backend_dir()?.join(BACKEND_STAMP)).ok()?;
+    let stamp = stamp.trim().to_string();
+    (!stamp.is_empty()).then_some(stamp)
+}
+
+/// What build of the backend is installed, read where the backend actually lives.
+///
+/// One extra probe, and only on a machine that already has a checkout — the comment on
+/// `discover_checkout` is right that each `wsl.exe` call costs seconds, and this must never
+/// become one per candidate.
+fn installed_backend_stamp(config: &BackendConfig) -> Option<String> {
+    let stamp = match &config.wsl {
+        Some(_) => {
+            let script = format!(
+                "cat {}/{BACKEND_STAMP} 2>/dev/null",
+                quote_path(&config.backend_dir())
+            );
+            let answer = probe(&config.shell_argv(&script));
+            answer.ok.then_some(answer.stdout)?
+        }
+        None => std::fs::read_to_string(config.project_dir.join(BACKEND_STAMP)).ok()?,
+    };
+    let stamp = stamp.trim().to_string();
+    (!stamp.is_empty()).then_some(stamp)
 }
 
 /// Look for a Mini-Me checkout somewhere other than where we are configured to find one.
@@ -435,6 +527,7 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
                 "Mini-Me backend",
                 format!("langgraph.json found in {}", config.backend_dir()),
             ));
+            checks.push(backend_build(config));
         } else {
             // Offer to adopt an existing checkout *before* offering to install a second
             // one. Someone who already has Mini-Me on this machine should not be made to
@@ -1258,6 +1351,59 @@ pub fn display_argv(argv: &[String]) -> String {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    /// The one check that answers "is the app newer than the Python underneath it".
+    ///
+    /// **This is the finding, stated as a test.** For a fortnight the app shipped a backend it
+    /// never installed and the Setup pane never mentioned it, so a researcher's subagents ran
+    /// rules that had been replaced nine days earlier while every pane said the machine was
+    /// fine (§283).
+    #[test]
+    fn a_backend_older_than_the_app_is_said_out_loud() {
+        let _guard = crate::backend::env_lock::hold();
+        let root = std::env::temp_dir().join(format!("mini-me-stamp-{}", std::process::id()));
+        let bundled = root.join("bundled");
+        let installed = root.join("installed");
+        std::fs::create_dir_all(&bundled).expect("bundled");
+        std::fs::create_dir_all(&installed).expect("installed");
+        std::fs::write(bundled.join("langgraph.json"), "{}").expect("marker");
+
+        let mut config = config();
+        config.project_dir = installed.clone();
+
+        // SAFETY: the lock above serialises every test that touches the environment.
+        unsafe { std::env::set_var("MINIME_BUNDLED_BACKEND", &bundled) };
+
+        // Running from source: nothing is bundled to compare against, and a machine that has
+        // never been handed a stamped build is not a machine out of date.
+        assert_eq!(backend_build(&config).state, State::Pass);
+
+        std::fs::write(bundled.join(BACKEND_STAMP), "ccbe00ee1741\n").expect("stamp");
+
+        // Installed before stamps existed — which is every machine on the day this ships.
+        let unstamped = backend_build(&config);
+        assert_eq!(unstamped.state, State::Warn);
+        assert!(unstamped.detail.contains("ccbe00ee1741"), "{}", unstamped.detail);
+        assert_eq!(unstamped.fixes.len(), 1, "and it can be fixed from the pane");
+
+        // A different build.
+        std::fs::write(installed.join(BACKEND_STAMP), "0000deadbeef").expect("stamp");
+        let stale = backend_build(&config);
+        assert_eq!(stale.state, State::Warn);
+        assert!(stale.detail.contains("0000deadbeef"), "names what is installed: {}", stale.detail);
+        assert!(stale.detail.contains("ccbe00ee1741"), "and what it should be: {}", stale.detail);
+
+        // The same build says so, and offers nothing — a pane full of actions nobody needs is
+        // how the real one stops being read.
+        std::fs::write(installed.join(BACKEND_STAMP), "  ccbe00ee1741  \n").expect("stamp");
+        let current = backend_build(&config);
+        assert_eq!(current.state, State::Pass, "whitespace is not a different build");
+        assert!(current.fixes.is_empty());
+
+        // SAFETY: same lock.
+        unsafe { std::env::remove_var("MINIME_BUNDLED_BACKEND") };
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     fn config() -> BackendConfig {
         BackendConfig {
