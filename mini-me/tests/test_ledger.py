@@ -650,3 +650,20 @@ def test_the_route_does_its_filesystem_work_off_the_event_loop():
     body = route.read_text().split("async def collect_outside_files")[1].split("\nasync def ")[0]
     for call in ("ledger.outside_files", "ledger.collect", "ledger.read"):
         assert f"asyncio.to_thread({call}" in body, f"{call} still runs on the event loop"
+
+
+def test_append_answers_where_it_wrote(tmp_path):
+    """**Never raising and never saying are different promises**, and this keeps only the first.
+
+    A caller could not tell a written record from a failed one, so when the claims record silently
+    failed to appear there were two invisible paths and no way to choose between them (§285).
+    """
+    written = ledger.append(tmp_path, {"command": "echo one"})
+    assert written == ledger.record_path(tmp_path)
+    assert Path(written).is_file()
+
+
+def test_append_answers_nothing_when_it_could_not_write(tmp_path):
+    """Still never raises — a diagnostic must not be what takes `execute` down."""
+    (tmp_path / ledger.RECORD_DIR).write_text("not a folder", encoding="utf-8")
+    assert ledger.append(tmp_path, {"command": "echo one"}) is None

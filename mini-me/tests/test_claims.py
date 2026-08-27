@@ -741,3 +741,48 @@ def test_the_recorder_writes_the_shape_the_fixture_declares(tmp_path):
     record("data_voyager", analysis, sandbox)
     written = ledger.read(tmp_path, name=ledger.CLAIMS_NAME)
     assert set(written[0]) == set(_sample()[0]), "the run and the fixture carry the same keys"
+
+
+# ---------------------------------------------------------------------------
+# Every path out of the write says which one it took
+# ---------------------------------------------------------------------------
+
+def test_a_written_record_says_so(tmp_path, recorded):
+    """**Success is logged too**, or a working recorder reads like a missing one.
+
+    That is `diagnostics.arriving`'s whole argument turned on this module: an absent line cannot
+    distinguish "checked, nothing wrong" from "never ran", and the first time this record failed
+    to appear there was nothing anywhere that said so.
+    """
+    _write(tmp_path, entry("pdf_librarian", "LibraryArtifact", at=AT, checked=True, claimed=2))
+    line = "\n".join(recorded)
+    assert "recorded pdf_librarian" in line
+    assert "claims.jsonl" in line, "and it names the file, so somebody can go and look"
+
+
+def test_a_record_that_could_not_be_written_is_a_warning(tmp_path, recorded):
+    """The folder is a file, so every write into it fails — and it must not fail quietly."""
+    from minime_local import ledger
+
+    (tmp_path / ledger.RECORD_DIR).write_text("not a folder", encoding="utf-8")
+    _write(tmp_path, entry("data_voyager", "DataAnalysisResults", at=AT, checked=True))
+    line = "\n".join(recorded)
+    assert "could not be written" in line
+    assert "data_voyager" in line
+    assert "Outputs panel" in line, "and says what the researcher will notice"
+
+
+def test_a_missing_overlay_is_said_at_a_level_this_channel_prints(monkeypatch, tmp_path, recorded):
+    """**INFO, not DEBUG.** The channel is set to INFO, so the debug line went nowhere.
+
+    A sandboxed deployment legitimately has no `minime_local`, and "the overlay is missing" is the
+    single most useful sentence for anyone looking for a panel row that never appeared.
+    """
+    import sys
+
+    monkeypatch.setitem(sys.modules, "minime_local", None)
+    _write(tmp_path, entry("academic_researcher", "AcademicResearchResults", at=AT, checked=True))
+    line = "\n".join(recorded)
+    assert "no minime_local on the path" in line
+    assert "academic_researcher" in line
+    assert not (tmp_path / ".mini-me").exists(), "and nothing was left behind"

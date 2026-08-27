@@ -182,12 +182,18 @@ def trim(lines: Iterable[str], keep: int = MAX_ENTRIES) -> list[str]:
 
 def append(
     work_dir: str | PurePosixPath, record: dict[str, Any], name: str = RECORD_NAME
-) -> None:
+) -> str | None:
     """Add one line to one of the conversation's records. **Never raises.**
 
     An unwritable record must cost a researcher nothing. `_say_where_it_ran` makes the same trade
     and states the reason: taking `execute` down to protect a diagnostic is the wrong way round,
     and this file already records making that mistake once.
+
+    **Returns where it wrote, or `None` with the reason swallowed** — and that return value is not
+    decoration. The first version answered nothing at all, so a caller could not tell a written
+    record from a failed one, and when the claims record silently failed to appear there were two
+    invisible paths and no way to choose between them (§285). Never raising and never saying are
+    different promises; this keeps the first and drops the second.
     """
     try:
         from pathlib import Path
@@ -204,8 +210,9 @@ def append(
         # Rewritten rather than appended, because the cap has to hold. A bounded file that only
         # grows is not bounded.
         target.write_text("\n".join(kept) + "\n", encoding="utf-8")
+        return str(target)
     except Exception:  # noqa: BLE001 — see the docstring; nothing here may reach the researcher
-        pass
+        return None
 
 
 def record_path(work_dir: str | PurePosixPath, name: str = RECORD_NAME) -> str:

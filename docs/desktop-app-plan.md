@@ -16202,3 +16202,52 @@ entire job is to reach a machine nobody can log into.
 
 *Hundred-and-thirty-fourth: the update path is the only feature that must work in the version you
 are replacing. Every other bug can be fixed in the next release; this one cannot.*
+
+## 285. Two ways to fail, neither of which said anything (2026-08-27)
+
+The dataverse chain worked for the first time (§283 in the researcher's hands: three
+`read_search_results_*.txt` files, 150–247 KB, and a real `10.21223/P3/HJLUJZ`). The claims
+recorder ran on it and said so:
+
+```
+INFO claims: dataverse_explorer recommended 1 datasets, all present in dataverse_search.json
+```
+
+And `WHAT WAS CLAIMED` was not in the Outputs panel, because `.mini-me/claims.jsonl` did not
+exist. The comparison ran; the record did not appear; **nothing anywhere said why**.
+
+`_write` has three ways out and only one of them could be heard:
+
+| path | what it did |
+|---|---|
+| the folder is not on this machine | `logger.info` — audible |
+| `minime_local` is not importable | `logger.debug` — **and this channel is set to INFO** |
+| `ledger.append` failed | `append` swallows every exception with a bare `except: pass` |
+
+So two of three were mute, and there was no way to choose between them without going to the
+machine. That is exactly the defect this module was written against, in the module itself: §219
+argues at length that an INFO which never lands *"cannot tell 'checked, nothing wrong' from 'never
+ran'"*, and then its own writer had two paths that never landed.
+
+### Never raising and never saying are different promises
+
+`ledger.append` keeps the first and drops the second: it still cannot raise — a diagnostic that
+takes `execute` down is the wrong way round, and this file records making that mistake once — but
+it now **returns where it wrote, or `None`**. `_write` logs which happened, including the success:
+
+```
+claims: recorded dataverse_explorer in …/.mini-me/claims.jsonl
+claims: dataverse_explorer was checked but the record could not be written under … —
+        the Outputs panel will have nothing to show
+claims: no minime_local on the path, so dataverse_explorer stays in this log and out of the panel
+```
+
+The success line is not noise. A recorder that speaks only on failure is indistinguishable from
+one that is not running, which is the whole argument `diagnostics.arriving` exists for — and it is
+how this write came to fail with nothing to say so.
+
+Each of the three is pinned by a test, and reverting the debug line to what it was fails one of
+them.
+
+*Hundred-and-thirty-fifth: a module that swallows an exception to protect its caller still owes
+the caller an answer. "It never raises" is a promise about control flow, not about knowledge.*
