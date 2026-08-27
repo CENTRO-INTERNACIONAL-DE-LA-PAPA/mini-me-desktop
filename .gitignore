@@ -11,9 +11,6 @@ Cargo.lock.orig
 .idea/
 .vscode/
 
-# Claude Code session + linked worktrees (never commit — holds build output)
-.claude/
-
 # A Mini-Me copy assembled by scripts/bundle-backend.sh for a packaged build. Still not
 # tracked — it is build output, not source.
 #
