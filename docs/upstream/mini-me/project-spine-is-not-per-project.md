@@ -60,3 +60,28 @@ spine that exists today is what an unscoped caller reads.
 through the import hook, so the checkout stays byte-for-byte upstream. It is a bridge and not a
 preference: the seam belongs here, where the route can simply take a parameter, rather than in an
 overlay that has to smuggle one through a `ContextVar`.
+
+## And a conversation in no project is not "no scope"
+
+The proposal above says *"with no project the namespace is unchanged, so every spine that exists
+today is what an unscoped caller reads"* — which is right for an unscoped caller and wrong for a
+conversation. Every conversation a researcher never filed shares that one record, so a brand-new
+conversation opens holding the mission, the completed list and the plan of the one before it.
+
+That is a display problem for about a second. `render_mission_context` injects the same spine into
+the coordinator's system prompt every turn under *"Ground every answer, plan, and delegation in
+this mission"*, so an unrelated conversation starts by being told what it has already achieved.
+
+The parameter therefore wants a sibling rather than a different default:
+
+```python
+project = request.query_params.get("project", "").strip()
+thread = request.query_params.get("thread", "").strip()
+scope = project or (f"solo-{thread}" if thread else "")
+state = await load_project(store, _project_namespace(user_id, scope))
+```
+
+A project still wins over the conversation inside it — filing a conversation says its work belongs
+with that project's. Naming neither still reads today's shared record, so the compatibility claim
+above survives intact; it just stops applying to a caller that *does* know which conversation it is
+asking about.
