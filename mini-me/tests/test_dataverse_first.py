@@ -452,3 +452,87 @@ def test_a_Command_wrapping_the_answer_is_read_as_well():
         ),
     )
     assert middleware._server_path == "/cmd/x.json"
+
+
+# --- the copy is the turn's, not the last search's ---------------------------------------------
+
+def _reads_through(middleware, *payloads):
+    """Several reads through **one** middleware, which is what a turn actually does.
+
+    `_read_returning` builds a fresh `SearchResultsFile` each time, so nothing it does could ever
+    show accumulation — the helper agreed with the bug.
+    """
+    for payload in payloads:
+        async def handler(_request, _payload=payload):
+            return [{"type": "text", "text": json.dumps(_payload)}]
+
+        asyncio.run(middleware.awrap_tool_call(_ToolCallRequest(READ_TOOL, {}), handler))
+
+
+def test_a_dataset_found_early_survives_a_later_search():
+    """**The false accusation, stated as a test.**
+
+    A real turn ran forty-six steps and several searches. The explorer recommended
+    `doi:10.21223/J9NLVP` — real, published, with real authors — found early; the workspace copy
+    was then overwritten by a narrower search; and `claims.py` reported it *absent from
+    dataverse_search.json*. The recommendation was sound and the record cried wolf (§286).
+    """
+    sandbox = _Sandbox()
+    middleware = SearchResultsFile(sandbox)
+    early = {"global_id": "doi:10.21223/J9NLVP", "name": "Three new potato varieties"}
+    late = {"global_id": "doi:10.21223/OTHER", "name": "Something narrower"}
+
+    _reads_through(middleware, {"content": [early]}, {"content": [late]})
+
+    kept = json.loads(sandbox.written["/home/user/workspace/dataverse_search.json"])
+    assert early in kept, "a recommendation made forty steps ago must still be checkable"
+    assert late in kept
+    assert kept == [early, late], "and in the order the searches produced them"
+
+
+def test_the_same_record_twice_is_one_record():
+    """Searches overlap constantly — `late blight` and `potato late blight` return the same rows."""
+    sandbox = _Sandbox()
+    middleware = SearchResultsFile(sandbox)
+    row = {"global_id": "doi:1/x", "name": "Trials"}
+
+    _reads_through(middleware, {"content": [row]}, {"content": [row, {"global_id": "doi:1/y"}]})
+
+    kept = json.loads(sandbox.written["/home/user/workspace/dataverse_search.json"])
+    assert len(kept) == 2, f"deduplicated on the whole record, not appended blindly: {kept}"
+
+
+def test_a_read_that_answered_one_object_is_kept_too():
+    """`content` is not always a list, and a single record is still a record."""
+    sandbox = _Sandbox()
+    middleware = SearchResultsFile(sandbox)
+    _reads_through(middleware, {"content": {"global_id": "doi:1/only"}})
+    kept = json.loads(sandbox.written["/home/user/workspace/dataverse_search.json"])
+    assert kept == [{"global_id": "doi:1/only"}]
+
+
+def test_the_file_stops_growing_rather_than_filling_a_disk():
+    """A model that loops on searches must not write until the machine stops."""
+    from backend.middleware.dataverse_first import MAX_KEPT_RECORDS
+
+    sandbox = _Sandbox()
+    middleware = SearchResultsFile(sandbox)
+    _reads_through(
+        middleware,
+        {"content": [{"global_id": f"doi:1/{n}"} for n in range(MAX_KEPT_RECORDS + 50)]},
+    )
+    kept = json.loads(sandbox.written["/home/user/workspace/dataverse_search.json"])
+    assert len(kept) == MAX_KEPT_RECORDS
+
+
+def test_each_turn_starts_from_an_empty_slate():
+    """Per turn, because that is the scope `ClaimsRecorder` compares at.
+
+    Carrying records across turns would check a recommendation against searches nobody made today,
+    and grow without bound.
+    """
+    sandbox = _Sandbox()
+    _reads_through(SearchResultsFile(sandbox), {"content": [{"global_id": "doi:1/yesterday"}]})
+    _reads_through(SearchResultsFile(sandbox), {"content": [{"global_id": "doi:1/today"}]})
+    kept = json.loads(sandbox.written["/home/user/workspace/dataverse_search.json"])
+    assert kept == [{"global_id": "doi:1/today"}]

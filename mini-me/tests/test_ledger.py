@@ -667,3 +667,18 @@ def test_append_answers_nothing_when_it_could_not_write(tmp_path):
     """Still never raises — a diagnostic must not be what takes `execute` down."""
     (tmp_path / ledger.RECORD_DIR).write_text("not a folder", encoding="utf-8")
     assert ledger.append(tmp_path, {"command": "echo one"}) is None
+
+
+def test_a_failed_write_says_why_and_still_does_not_raise(tmp_path, caplog):
+    """**"It returned None" is not a diagnosis.**
+
+    The claims record failed to appear on a real machine and this path was `pass`: the caller could
+    report *that* it failed and nothing could report *why*, so the next step was another release
+    (§286).
+    """
+    (tmp_path / ledger.RECORD_DIR).write_text("not a folder", encoding="utf-8")
+    with caplog.at_level("WARNING", logger="minime_local.ledger"):
+        assert ledger.append(tmp_path, {"command": "echo one"}) is None
+    assert any("could not write" in r.getMessage() for r in caplog.records)
+    # The traceback, not only the sentence — the exception type is the whole answer here.
+    assert any(r.exc_info for r in caplog.records), "the reason has to survive to the log"
