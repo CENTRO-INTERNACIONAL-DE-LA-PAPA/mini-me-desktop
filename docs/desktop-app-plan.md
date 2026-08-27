@@ -16379,3 +16379,52 @@ It has its own test, because a checker that cannot fail is a comment.
 *Hundred-and-thirty-seventh: a comment that says "never call this on the event loop" protects the
 one call site its author was looking at. The rule wanted a checker, and it had been written down
 in prose twice before it got one.*
+
+## 288. One identifier, several spellings (2026-08-27)
+
+The claims record reached the conversation folder for the first time:
+
+```
+INFO claims: recorded dataverse_explorer in
+     /mnt/c/Users/.../01a04513-.../.mini-me/claims.jsonl
+```
+
+Seven months after §219 started writing, and one line above it:
+
+```
+WARNING claims: dataverse_explorer recommended 6 datasets, 6 absent from dataverse_search.json:
+doi:10.21223/P3/HKABUV, doi:10.21223/P3/NGX3BJ, doi:10.21223/66XOT9, doi:10.21223/2NYJIT,
+doi:10.21223/HOUFZD, doi:10.21223/CQUBLX
+```
+
+Six for six is not a finding, it is a symptom of the comparison. `unsearched` matched verbatim
+strings only, and Dataverse hands the same dataset back under several spellings: `global_id`
+carries `doi:10.21223/…`; the native record splits `protocol` / `authority` / `identifier`, so the
+joined form appears nowhere; a link field is a resolver URL. The model answers with whichever it
+read.
+
+So a recommendation of `doi:10.21223/P3/HKABUV` against a file holding `10.21223/P3/HKABUV` is
+reported as a citation composed from memory — **which is the single most damaging thing this
+module can say**, and it has now said it wrongly on both of its first two real findings (§286 was
+the other).
+
+Identifiers are compared on a bare form as well as verbatim: known prefixes stripped, punctuation
+trimmed, lowercased. **Stripping cannot hide a fabrication** — something composed from memory is
+absent under every spelling, which is the case worth catching and the one this leaves untouched.
+Guarded on length, because a two-character remnant would match almost any file and turn the check
+into one that can never find anything, which looks exactly like success (§224's two days, again).
+
+### A permissive rule, written down rather than tightened
+
+Writing the tests turned up an older decision this had nothing to do with: `unsearched` counts a
+*substring* of the search text as present, so a degenerate id like `doi:` matches anything
+containing one. That is `_ids_in`'s deliberate trade — the MCP owns the layout, and a reader that
+walked named keys *"would report every dataset as fabricated the day that layout changed, which is
+the one failure mode a record like this cannot afford"*.
+
+My first test asserted the opposite and failed. The code was right and the test was wrong, so the
+test now documents the rule instead of changing it — a decision recorded is worth more than a
+decision quietly reversed by whoever writes the next assertion.
+
+*Hundred-and-thirty-eighth: before believing a checker's first finding, check the checker. Six
+for six is a bug in the comparison far more often than it is six lies.*

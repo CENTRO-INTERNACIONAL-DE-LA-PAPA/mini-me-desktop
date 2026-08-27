@@ -265,6 +265,45 @@ def content_of(result: Any) -> str | None:
     return text if isinstance(text, str) else None
 
 
+#: The ways one persistent identifier can be spelled.
+#:
+#: Dataverse hands the same dataset back under several of these: `global_id` carries
+#: `doi:10.21223/…`, the native record splits `protocol` / `authority` / `identifier` so the
+#: joined form appears nowhere, and a link field is a resolver URL. The model answers with
+#: whichever it read.
+_ID_PREFIXES = (
+    "https://doi.org/",
+    "http://doi.org/",
+    "https://dx.doi.org/",
+    "https://hdl.handle.net/",
+    "http://hdl.handle.net/",
+    "doi:",
+    "hdl:",
+)
+
+
+def bare_identifier(identifier: str) -> str:
+    """One persistent id with its prefix and punctuation removed, lowercased.
+
+    **Compared on this as well as verbatim, because the alternative is an accusation.** Six
+    recommendations were reported absent from a search that had returned all six, on a real turn,
+    because the model answered `doi:10.21223/P3/HKABUV` and the file held `10.21223/P3/HKABUV`.
+    A record whose *only* finding is a false one is worse than no record: §219 names the cost —
+    *"a record that cries wolf once is a record nobody reads the second time"* — and this one has
+    now cried wolf twice on its first two real findings (§288).
+
+    Stripping cannot hide a fabricated id. Something composed from memory is not in the file
+    under any spelling, which is the case worth catching and the one this leaves alone.
+    """
+    cleaned = identifier.strip().strip('"').strip("'")
+    lowered = cleaned.lower()
+    for prefix in _ID_PREFIXES:
+        if lowered.startswith(prefix):
+            cleaned = cleaned[len(prefix) :]
+            break
+    return cleaned.strip("/").lower()
+
+
 def unsearched(ids: list[str], text: str) -> list[str]:
     """Recommended dataset ids that do not appear anywhere in what the search returned."""
     try:
@@ -274,12 +313,21 @@ def unsearched(ids: list[str], text: str) -> list[str]:
         # rather than accuse every dataset; `_record` logs that the check could not run.
         return []
     joined = "\n".join(strings)
+    # The same text with every id reduced to its bare form, so a recommendation spelled one way
+    # can be found in a file that spells it another.
+    haystack = "\n".join(bare_identifier(value) for value in strings)
     unmatched: list[str] = []
     for identifier in ids:
         needle = identifier.strip()
         if not needle or needle in unmatched:
             continue
         if needle in strings or needle in joined:
+            continue
+        bare = bare_identifier(needle)
+        # Guarded on length: a one- or two-character remnant would match almost any file and
+        # turn this check into one that can never find anything, which is worse than a false
+        # alarm because it looks like success.
+        if len(bare) > 6 and (bare in haystack or bare in joined.lower()):
             continue
         unmatched.append(needle)
     return unmatched
