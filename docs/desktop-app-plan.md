@@ -16251,3 +16251,69 @@ them.
 
 *Hundred-and-thirty-fifth: a module that swallows an exception to protect its caller still owes
 the caller an answer. "It never raises" is a promise about control flow, not about knowledge.*
+
+## 286. A record that cried wolf, and one that still would not say why (2026-08-27)
+
+Two findings from one turn on the researcher's machine, and the diagnostic from §285 produced both.
+
+### The record could not be written, and now we know that much
+
+```
+WARNING claims: dataverse_explorer was checked but the record could not be written under
+/mnt/c/Users/LENOVO/Documents/Mini-Me/01a044ce-f460-7781-bf63-f80268d27ff1
+```
+
+Which is progress — the previous build said nothing at all — and it is still not a diagnosis.
+`ledger.append` answers `None` for every reason there is: an unwritable directory, a filesystem
+that refuses a dot-folder, a permission, a full disk. The caller can report *that* it failed and
+nothing can report *why*, so the next step is another release, which is the loop §275 was written
+about.
+
+`append` now logs the traceback before returning `None`. It still cannot raise — a diagnostic that
+takes `execute` down is the wrong way round — but "never raises" was never supposed to mean "never
+says". `minime_local` lines already reach the backend log, so the answer arrives where the person
+looking for the missing record is already reading.
+
+### And a false accusation, from a file that was doing two jobs
+
+The same turn produced this:
+
+```
+WARNING claims: dataverse_explorer recommended 1 datasets, 1 absent from
+dataverse_search.json: doi:10.21223/J9NLVP
+```
+
+`doi:10.21223/J9NLVP` is real. Published 2022, *"Three new healthy and sustainable potato varieties
+for family farming systems with resistance to late blight"*, Perez, Willmer et al. The explorer
+found it in a search, reported it accurately with year, files, and a summary of the trials at
+Oxapampa and Comas — and the claims check called it unsearched.
+
+Because `FIXED_FILENAME` is one name doing two jobs. On the MCP host it is a hand-off between two
+calls and successive searches overwrite it, which is right and which its comment said out loud:
+*"Successive searches overwrite it, which is intended: the file is a hand-off between two calls,
+not an archive."* The **workspace copy** wears the same name and is a different thing — it is what
+the researcher opens and what `claims.py` checks recommendations against — and `_keep` overwrote
+that one too. The turn ran forty-six steps and several searches, so the DOI was found early and
+checked against the last search's results.
+
+A false missing-dataset is the most expensive answer this module can give. §219 states the cost in
+its own words: *"a record that cries wolf once is a record nobody reads the second time."* It cried
+wolf on its first real finding.
+
+The workspace copy now accumulates across the turn, deduplicated on the whole record and capped —
+**per turn, because that is the scope `ClaimsRecorder` compares at**. Everything the turn searched
+is exactly the set a recommendation could have come from. Reverting `_keep` to overwriting fails
+two of the five new tests, including the one named after this DOI.
+
+### What is still open
+
+The researcher noticed something neither finding covers: *"I only see one dataset for a search even
+when maybe the mcp returns a lot of datasets."* The reads bring back 177 KB, 293 KB and 768 KB of
+metadata and one dataset reaches the recommendation. That may be the model filtering hard against
+*"directly about potato late blight resistance"* in a range the question narrowed to 2019–2025, or
+it may be ours. It is not answered yet, and the accumulated file is now the instrument that will
+answer it: after this, `dataverse_search.json` holds everything the turn actually searched, and
+counting it against the recommendation is one command rather than an argument.
+
+*Hundred-and-thirty-sixth: one constant naming two files with different lifetimes is two bugs
+waiting, and the comment that says "overwriting is intended" is true of exactly one of them.*
