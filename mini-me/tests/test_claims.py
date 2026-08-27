@@ -786,3 +786,37 @@ def test_a_missing_overlay_is_said_at_a_level_this_channel_prints(monkeypatch, t
     assert "no minime_local on the path" in line
     assert "academic_researcher" in line
     assert not (tmp_path / ".mini-me").exists(), "and nothing was left behind"
+
+
+def test_the_record_is_written_off_the_event_loop(tmp_path, monkeypatch):
+    """**`langgraph dev` refuses a synchronous `os.mkdir` inside an async context.**
+
+    `blockbuster` wraps the interpreter and raises `BlockingError`, so the first version of this
+    failed on every real turn while every test here passed — the tests call `_write` directly,
+    where there is no loop to block. The failure only exists on the path production takes.
+
+    Asserted by *where the call ran*, not by reading the source: a thread that is not the one
+    running the loop is the property that matters, and it stays true however the offload is
+    spelled.
+    """
+    import threading
+
+    import backend.middleware.claims as claims
+
+    ran_on: list[str] = []
+
+    def spy(work_dir, record):
+        ran_on.append(threading.current_thread().name)
+
+    monkeypatch.setattr(claims, "_write", spy)
+
+    analysis = DataAnalysisResults(
+        question="q", dataset_paths=["data/trials.csv"], charts=[], findings=[]
+    )
+    here = threading.current_thread().name
+    record("data_voyager", analysis, FakeSandbox(entries=["data/trials.csv"], work_dir=tmp_path))
+
+    assert ran_on, "the record was never written at all"
+    assert ran_on[0] != here, (
+        f"the write ran on {ran_on[0]}, the same thread as the loop — blockbuster raises there"
+    )

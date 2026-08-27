@@ -47,6 +47,7 @@ looks, which is every day a researcher is doing research.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from datetime import datetime, timezone
@@ -327,7 +328,18 @@ def entry(
 def _write(work_dir: str | PurePosixPath, record: dict[str, Any]) -> None:
     """Append the record to the conversation's folder, if that folder is one this machine can see.
 
-    **Never raises, and never creates the directory.** Two different guards for two different
+    **Never called on the event loop.** `langgraph dev` wraps the interpreter in `blockbuster`,
+    which raises `BlockingError` on a synchronous `os.mkdir` inside an async context — and
+    `aafter_agent` is async, so the first version of this failed on every turn with the traceback
+    buried under a `logger.warning` nobody had asked for yet:
+
+        blockbuster.blockbuster.BlockingError: Blocking call to os.mkdir
+
+    That is the third time this guard has stopped something in this project. `workspace.aexecute`
+    puts its whole command path inside `asyncio.to_thread` and says so; `routes/artifacts.py`
+    offloads all three of its filesystem calls; this one did not, so `aafter_agent` offloads it.
+
+    **Never raises, and never creates the parent directory.** Two more guards for two more
     mistakes:
 
     * A recorder that can end a subagent's turn is worse than no recorder — the same trade
@@ -542,7 +554,10 @@ class ClaimsRecorder(AgentMiddleware[ArtifactState, Any, Any]):
             # dataverse run after three seconds and one model call, having never called the
             # subagent. A line here per answer makes the absent line visible; a findings-only
             # record makes it indistinguishable from a run that went perfectly.
-            _write(
+            # **Off the event loop**, because everything below this line touches a filesystem
+            # and `blockbuster` refuses that here — see `_write`.
+            await asyncio.to_thread(
+                _write,
                 work_dir,
                 entry(
                     self.source,
