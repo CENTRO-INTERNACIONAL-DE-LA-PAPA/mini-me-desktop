@@ -16428,3 +16428,63 @@ decision quietly reversed by whoever writes the next assertion.
 
 *Hundred-and-thirty-eighth: before believing a checker's first finding, check the checker. Six
 for six is a bug in the comparison far more often than it is six lies.*
+
+## 289. The recorder was right (2026-08-27)
+
+§288 is wrong where it matters, and this corrects it rather than editing it away.
+
+It said six-for-six *"is not a finding, it is a symptom of the comparison"*, and shipped a fix on
+that reading. The researcher then listed every identifier in the search file:
+
+```
+10.21223/P3/3AIN78   10.21223/P3/HJLUJZ   10.21223/P3/PN2RGR
+10.21223/P3/5UVI58   10.21223/P3/HTRHE9   10.21223/P3/RSP2EY
+10.21223/P3/AZZZRF   10.21223/P3/K0Z7CO   10.21223/P3/STJM66
+10.21223/P3/BO6PJL   10.21223/P3/KS9HXW   10.21223/P3/UISCBD
+10.21223/P3/CKYEB5   10.21223/P3/NMXFXI   10.21223/P3/WZDOUX
+10.21223/P3/CYDNZ7   10.21223/P3/FVQLPK   10.21223/P3/P9TJCO
+```
+
+Eighteen, all of them. The six recommended — `P3/HKABUV`, `P3/NGX3BJ`, `66XOT9`, `2NYJIT`,
+`HOUFZD`, `CQUBLX` — are **not among them under any spelling**. And four of the six lack the `P3/`
+segment that every real identifier in this collection carries, which is the shape of something
+reconstructed rather than read.
+
+So `dataverse_explorer` searched, was forced to read what it found (`SearchBeforeRecommending`
+made both happen), and then answered with six persistent identifiers it composed. That is
+precisely the failure §219 was written for, in its own words:
+
+> A persistent id composed from memory is a citation a researcher will paste into a paper without
+> checking.
+
+**The record found it on the first day anyone could read it.** §288's fix stands on its own — a
+prefix mismatch is a real hazard and the check is better for handling it — but its account of
+*this* turn was mine, not the evidence's, and it was wrong.
+
+### What I did wrong, twice in one section
+
+I reasoned from the shape of the result — six of six looks like a broken comparison — and shipped
+a release before the one command that could settle it came back. The command cost nothing and I
+had already written it out. §283's memory note says to check the artefact before the source tree;
+the same rule applies to a claim: **check the checker, but do not conclude against it while the
+evidence is still one command away.**
+
+The second mistake is smaller and worse: having decided it was a false positive, I wrote that into
+the plan as fact. A plan that misdescribes its own project is worse than no plan, because it is
+believed.
+
+### What this changes
+
+§219 chose to record and not block, deliberately, and stated the condition for revisiting: *"the
+rules worth enforcing are the ones that come from failures actually seen."* One has now been seen,
+on a researcher's real question, with the fabricated citations rendered in the datasets panel ready
+to be copied.
+
+The next move is not a blanket block — a false refusal strands a turn, and this check has been
+wrong twice already this week for reasons that had nothing to do with the model. It is to carry
+the finding **to where the identifier is read**: the datasets modal, beside the row, saying that
+this one was not in the search. The researcher is the one about to paste it.
+
+*Hundred-and-thirty-ninth: when a check you wrote disagrees with a model you trust, the cheapest
+experiment settles it. Reaching for "my check must be broken" is the same reflex as "the model
+must be right", and on this occasion it cost a release and a paragraph of fiction.*
