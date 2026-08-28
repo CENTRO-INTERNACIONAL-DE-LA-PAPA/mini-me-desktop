@@ -65,6 +65,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -99,6 +100,22 @@ READ_TOOL = "read_search_results"
 #: cost: *"a record that cries wolf once is a record nobody reads the second time"*. The workspace
 #: copy now accumulates across the turn (§286).
 FIXED_FILENAME = "dataverse_search.json"
+
+#: The sentence `mcp_tools._save_mcp_to_sandbox` hands the model instead of a large answer.
+#:
+#: **This is what `_keep` was trying to parse.** A result over `MCP_TOOL_OUTPUT_MAX_BYTES`
+#: (128 KB) is written to the workspace and the model receives a pointer with a 2 KB preview —
+#: which is prose, so `json.loads` fails, `_payload` answers `None`, and `_keep` returned in
+#: silence. A search returning 100 datasets produced no file and no log line; a narrow one
+#: returning four kept its four. That is why the panel said *1 dataset found* against a 314 KB
+#: answer (§291).
+SAVED_POINTER = re.compile(r"saved to `([^`]+)`")
+
+#: The marker `_truncate_str_result` splices into a capped answer.
+#:
+#: Distinct from the pointer: this is the case where the full text was **not** saved anywhere, so
+#: there is nothing to follow and the only honest thing is to say so.
+TRUNCATION_MARKER = "[output truncated"
 
 #: How many records the workspace copy will hold before it stops growing.
 #:
@@ -329,6 +346,70 @@ class SearchResultsFile(AgentMiddleware):
         logger.info("%s(%s=%r) -> %r", name, argument, args.get(argument), wanted)
         return request.override(tool_call={**call, "args": {**cleaned, argument: wanted}})
 
+    @staticmethod
+    def _saved_path(result: Any) -> str | None:
+        """Where the full answer was put when it was too big to hand to the model.
+
+        The artifact first, because `response_format="content_and_artifact"` carries
+        `saved_path` as a fact rather than as a sentence. The pointer text is the fallback, for a
+        wrapper shape that drops the artifact on the way through.
+        """
+        artifact = getattr(result, "artifact", None)
+        if isinstance(artifact, dict):
+            saved = artifact.get("saved_path")
+            if isinstance(saved, str) and saved.strip():
+                return saved.strip()
+        for text in SearchResultsFile._texts(result):
+            found = SAVED_POINTER.search(text)
+            if found:
+                return found.group(1)
+        return None
+
+    @staticmethod
+    def _read_text(answer: Any) -> str | None:
+        """The text a backend read returned, out of whichever shape carries it.
+
+        The same two shapes `claims.content_of` handles, written out again rather than imported:
+        these two middlewares are otherwise independent, and `DATAVERSE_SEARCH` is repeated there
+        for the same reason.
+        """
+        data = getattr(answer, "file_data", None)
+        if data is None:
+            return None
+        content = data.get("content") if isinstance(data, dict) else getattr(data, "content", None)
+        return content if isinstance(content, str) else None
+
+    async def _payload_behind_pointer(self, result: Any) -> dict[str, Any] | None:
+        """Follow the pointer to the file the answer was too big to include.
+
+        Read back through the same backend that wrote it, so a deployment where `/workspace`
+        means something different is followed rather than guessed at.
+        """
+        saved = self._saved_path(result)
+        if not saved:
+            return None
+        try:
+            answer = await self.sandbox_backend.aread(saved, limit=1_000_000)
+        except Exception:  # noqa: BLE001 — a copy must never cost the search
+            logger.exception("could not read the saved answer at %s", saved)
+            return None
+        if getattr(answer, "error", None):
+            logger.warning("could not read the saved answer at %s: %s", saved, answer.error)
+            return None
+        text = self._read_text(answer)
+        if not text:
+            logger.warning("the saved answer at %s was empty", saved)
+            return None
+        try:
+            parsed = json.loads(text)
+        except (ValueError, TypeError):
+            logger.warning("the saved answer at %s is not JSON", saved)
+            return None
+        if isinstance(parsed, dict):
+            return parsed
+        # A bare array is a perfectly good answer; wrap it into the shape the caller expects.
+        return {"content": parsed} if isinstance(parsed, list) else None
+
     # -- keeping what came back ------------------------------------------------------------
 
     def _remember_search(self, result: Any) -> None:
@@ -383,6 +464,21 @@ class SearchResultsFile(AgentMiddleware):
             return
         payload = self._payload(result)
         if not payload or "content" not in payload:
+            # Too big to hand to the model, so it went to a file and we were given the address.
+            payload = await self._payload_behind_pointer(result)
+        if not payload or "content" not in payload:
+            # **Said, not swallowed.** This return was silent, and a search that found a hundred
+            # datasets produced no file and nothing anywhere to say why (§291).
+            capped = any(
+                TRUNCATION_MARKER in text for text in self._texts(result)
+            )
+            logger.warning(
+                "nothing to keep from %s: %s",
+                READ_TOOL,
+                "the answer was capped inline and the full text was not saved anywhere"
+                if capped
+                else "no JSON in the answer and no pointer to a saved copy",
+            )
             return
         try:
             arrived = payload["content"]

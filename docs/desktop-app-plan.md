@@ -16553,3 +16553,64 @@ rows loses them.
 
 *Hundred-and-fortieth: when a model retypes a fact that is already in a file, the retyping is the
 defect. Not the model — the design that asked it to be a data pipe.*
+
+## 291. A hundred datasets, and the pointer nobody followed (2026-08-28)
+
+§290 pointed the panel at the file. The researcher ran a search and the modal said **1 dataset
+found**. The file agreed — one record — so the panel was right and the question moved upstream:
+
+```
+kept dataverse_search.json in the workspace (1 new, 1 this turn)
+```
+
+One `kept` line for **six searches**. And in the same folder:
+
+```
+-rwxrwxrwx  299731  read_search_results_20260828_150508.txt
+-rwxrwxrwx  314218  read_search_results_20260828_150525.txt
+-rwxrwxrwx    3985  dataverse_search.json
+```
+
+`grep -o global_id … | wc -l` on the 314 KB file: **100**.
+
+### The cap, and the pointer
+
+`mcp_tools.MCP_TOOL_OUTPUT_MAX_BYTES` is 128,000. Over that, `_save_mcp_to_sandbox` writes the
+whole answer into the workspace and hands the model a sentence instead:
+
+```
+Full result (306 KB) saved to `/workspace/mcp_results/read_search_results_….txt`.
+Use code execution to read specific sections…
+Preview (first 2 KB): …
+```
+
+Which is prose. `_payload` calls `json.loads`, it fails, and `_keep` **returned in silence** — no
+file, no log line, nothing. Only the last search of the six, `exact_late_blight_accessions.json`,
+came back small enough to arrive as JSON, and its single record is what the panel showed.
+
+So every large search has been discarded since `_keep` was written, and a small one always worked.
+Intermittent by size, which is why it read as query behaviour rather than a defect.
+
+### Following it
+
+The pointer carries the address twice — as `saved_path` on the artifact, because
+`response_format="content_and_artifact"` makes it a fact rather than a sentence, and inside the
+text for a wrapper that drops the artifact on the way through. `_keep` now tries the direct parse,
+falls back to the pointer, and reads the file **back through the same backend that wrote it**, so a
+deployment where `/workspace` means something else is followed rather than guessed at.
+
+And the silent return is gone. The two cases it hid are different and now say which is which:
+
+* *"the answer was capped inline and the full text was not saved anywhere"* — nothing to follow;
+* *"no JSON in the answer and no pointer to a saved copy"* — an error page, or a tool that changed.
+
+### The shape of the whole day
+
+Five defects in one chain, each invisible behind the one in front of it: the backend never updated
+(§283), so the reader never worked (§283) and a stricter runtime's blocking guard never fired
+(§287); the panel read the model rather than the file (§290); and the file itself was only ever
+getting the searches small enough to arrive whole. The researcher asked *"why only one dataset"*
+two days before this section, and it took all five to answer.
+
+*Hundred-and-forty-first: an early return with no log is a decision made where nobody can see it.
+Every one this project has found was hiding a fact somebody was already asking for.*
