@@ -5,7 +5,7 @@ members = ["crates/app"]
 [workspace.package]
 # 0.1.0 is the first build handed to someone who did not write it. Not 1.0: WSL
 # provisioning has never run on a clean Windows machine, and the executable is unsigned.
-version = "0.3.20"
+version = "0.3.21"
 edition = "2021"
 license = "MIT"
 authors = ["CIP Mini-Me"]
