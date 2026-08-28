@@ -17,6 +17,8 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
+from deepagents.backends.protocol import FileData, ReadResult
+
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
@@ -302,11 +304,20 @@ def test_the_prompt_no_longer_asks_for_what_the_middleware_sets():
 # --- the copy the researcher can open ----------------------------------------------------------
 
 class _Sandbox:
-    """The two calls the copy needs, and a record of what was written."""
+    """The three calls the copy needs, and a record of what was written.
 
-    def __init__(self, error=None):
+    `aread` answers with the **real** `ReadResult`/`FileData` types rather than a friendlier
+    stand-in: `FileData` is a TypedDict, so `file_data` is a plain dict and `.content` on it
+    raises. A permissive double is what let the claims check fail on every turn for two days
+    (§221/§224).
+    """
+
+    def __init__(self, error=None, files=None, read_error=None):
         self.written: dict[str, str] = {}
         self.error = error
+        self.files: dict[str, str] = dict(files or {})
+        self.read_error = read_error
+        self.reads: list[str] = []
 
     async def aget_work_dir(self):
         return "/home/user/workspace"
@@ -314,6 +325,15 @@ class _Sandbox:
     async def awrite(self, path, content):
         self.written[path] = content
         return SimpleNamespace(error=self.error)
+
+    async def aread(self, file_path, offset=0, limit=2000):
+        self.reads.append(file_path)
+        if self.read_error:
+            return ReadResult(error=self.read_error, file_data=None)
+        text = self.files.get(file_path)
+        if text is None:
+            return ReadResult(error="not found", file_data=None)
+        return ReadResult(error=None, file_data=FileData(content=text, encoding="utf-8"))
 
 
 def _read_returning(payload, sandbox):
@@ -663,3 +683,102 @@ def test_the_committed_dataset_fixture_matches_what_this_module_writes():
         "`MINIME_WRITE_CONTRACT=1 pytest mini-me/tests/test_dataverse_first.py`, then decide "
         "whether the app should read the new field."
     )
+
+
+# --- an answer too big to hand to the model ------------------------------------------------------
+
+SAVED = "/workspace/mcp_results/read_search_results_20260828_150525.txt"
+
+
+def _pointer_text(size_kb: int = 306) -> str:
+    """What `mcp_tools._save_mcp_to_sandbox` hands the model instead of a large answer."""
+    return (
+        f"Full result ({size_kb} KB) saved to `{SAVED}`.\n"
+        "Use code execution to read specific sections, e.g.:\n"
+        f"  with open('{SAVED}') as f: print(f.read())\n\n"
+        "Preview (first 2 KB):\n---\n"
+        '{"file_path":"/tmp/mcp/json_files/dataverse_search.json","content":[{"name":"Replic'
+    )
+
+
+def _hundred() -> str:
+    rows = [
+        {"name": f"Dataset {n}", "global_id": f"doi:10.21223/P3/ROW{n:03d}"} for n in range(100)
+    ]
+    return json.dumps({"file_path": "/tmp/mcp/json_files/dataverse_search.json", "content": rows})
+
+
+def _answering(middleware, sandbox, content, artifact=None):
+    async def handler(_request):
+        message = ToolMessage(content=content, tool_call_id="call_1", name=READ_TOOL)
+        if artifact is not None:
+            message.artifact = artifact
+        return message
+
+    return asyncio.run(
+        middleware.awrap_tool_call(_ToolCallRequest(READ_TOOL, {}), handler)
+    )
+
+
+def test_an_answer_too_big_for_the_model_is_followed_to_the_file():
+    """**The hundred datasets that became one.**
+
+    `mcp_tools` caps a tool answer at 128 KB. A 314 KB search is written to the workspace and the
+    model gets a pointer with a 2 KB preview — prose, so `json.loads` failed, `_payload` answered
+    None and `_keep` returned in silence. The panel said *1 dataset found* against an answer
+    holding a hundred (§291).
+    """
+    sandbox = _Sandbox(files={SAVED: _hundred()})
+    middleware = SearchResultsFile(sandbox)
+    _answering(middleware, sandbox, _pointer_text(), artifact={"saved_path": SAVED})
+
+    kept = _kept_ids(sandbox)
+    assert len(kept) == 100, f"kept {len(kept)} of the hundred that were searched"
+    assert kept[0] == "doi:10.21223/P3/ROW000"
+    assert sandbox.reads == [SAVED], "read back through the backend that wrote it"
+
+
+def test_the_pointer_is_found_in_the_sentence_when_the_artifact_is_gone():
+    """A wrapper that drops the artifact must not cost the search."""
+    sandbox = _Sandbox(files={SAVED: _hundred()})
+    _answering(SearchResultsFile(sandbox), sandbox, _pointer_text(), artifact=None)
+    assert len(_kept_ids(sandbox)) == 100
+
+
+def test_an_answer_capped_inline_says_so_rather_than_nothing(caplog):
+    """No pointer, because nothing was saved. The only honest move is to say it."""
+    sandbox = _Sandbox()
+    capped = '{"content":[{"global_id":"doi:1/a"}' + "\n\n...[output truncated — 183 KB elided]..."
+    with caplog.at_level("WARNING", logger="backend.middleware.dataverse_first"):
+        _answering(SearchResultsFile(sandbox), sandbox, capped)
+    assert not sandbox.written, "nothing recoverable, so nothing filed"
+    assert any("capped inline" in record.getMessage() for record in caplog.records)
+
+
+def test_an_answer_with_neither_json_nor_a_pointer_says_which(caplog):
+    sandbox = _Sandbox()
+    with caplog.at_level("WARNING", logger="backend.middleware.dataverse_first"):
+        _answering(SearchResultsFile(sandbox), sandbox, "<html>gateway timeout</html>")
+    assert any("no pointer" in record.getMessage() for record in caplog.records)
+
+
+def test_a_pointer_to_a_file_that_will_not_read_costs_the_copy_and_not_the_search(caplog):
+    sandbox = _Sandbox(read_error="permission denied")
+    with caplog.at_level("WARNING", logger="backend.middleware.dataverse_first"):
+        result = _answering(
+            SearchResultsFile(sandbox), sandbox, _pointer_text(), artifact={"saved_path": SAVED}
+        )
+    assert result, "the read's own answer still reaches the model"
+    assert any("permission denied" in record.getMessage() for record in caplog.records)
+
+
+def test_a_small_answer_still_takes_the_direct_path():
+    """The pointer is a fallback, not a detour: nothing extra is read for an ordinary answer."""
+    sandbox = _Sandbox()
+    _answering(
+        SearchResultsFile(sandbox),
+        sandbox,
+        json.dumps({"content": [{"global_id": "doi:1/small"}]}),
+    )
+    assert _kept_ids(sandbox) == ["doi:1/small"]
+    assert sandbox.reads == [], "no file to follow, so none was read"
