@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -334,7 +336,13 @@ def test_what_the_read_returned_is_kept_in_the_workspace():
     rows = [{"global_id": "doi:10.21223/P3/0F9T62", "name": "Late blight trials"}]
     _read_returning({"file_path": "/tmp/mcp/json_files/x.json", "content": rows}, sandbox)
     assert list(sandbox.written) == ["/home/user/workspace/dataverse_search.json"]
-    assert json.loads(sandbox.written["/home/user/workspace/dataverse_search.json"]) == rows
+
+    # **Normalised, not verbatim** — this file is what the datasets panel renders now, so it wears
+    # the app's shape rather than the MCP's (§290). The original rides along under `raw`.
+    kept = json.loads(sandbox.written["/home/user/workspace/dataverse_search.json"])
+    assert kept[0]["persistent_id"] == "doi:10.21223/P3/0F9T62"
+    assert kept[0]["title"] == "Late blight trials"
+    assert kept[0]["raw"] == rows[0], "nothing the mapping missed is lost"
 
 
 def test_the_kept_copy_is_the_file_the_claims_check_reads():
@@ -428,7 +436,7 @@ def test_the_copy_is_written_from_a_real_ToolMessage():
     asyncio.run(
         SearchResultsFile(sandbox).awrap_tool_call(_ToolCallRequest(READ_TOOL, {}), handler)
     )
-    assert json.loads(sandbox.written["/home/user/workspace/dataverse_search.json"]) == rows
+    assert _kept_ids(sandbox) == ["doi:10.21223/P3/0F9T62"]
 
 
 def test_a_Command_wrapping_the_answer_is_read_as_well():
@@ -455,6 +463,12 @@ def test_a_Command_wrapping_the_answer_is_read_as_well():
 
 
 # --- the copy is the turn's, not the last search's ---------------------------------------------
+
+def _kept_ids(sandbox) -> list[str]:
+    """The persistent ids in the file, which is what every one of these tests is really about."""
+    kept = json.loads(sandbox.written["/home/user/workspace/dataverse_search.json"])
+    return [row["persistent_id"] for row in kept]
+
 
 def _reads_through(middleware, *payloads):
     """Several reads through **one** middleware, which is what a turn actually does.
@@ -484,10 +498,9 @@ def test_a_dataset_found_early_survives_a_later_search():
 
     _reads_through(middleware, {"content": [early]}, {"content": [late]})
 
-    kept = json.loads(sandbox.written["/home/user/workspace/dataverse_search.json"])
-    assert early in kept, "a recommendation made forty steps ago must still be checkable"
-    assert late in kept
-    assert kept == [early, late], "and in the order the searches produced them"
+    assert _kept_ids(sandbox) == ["doi:10.21223/J9NLVP", "doi:10.21223/OTHER"], (
+        "a dataset found forty steps ago must still be here, in the order the searches found it"
+    )
 
 
 def test_the_same_record_twice_is_one_record():
@@ -507,8 +520,7 @@ def test_a_read_that_answered_one_object_is_kept_too():
     sandbox = _Sandbox()
     middleware = SearchResultsFile(sandbox)
     _reads_through(middleware, {"content": {"global_id": "doi:1/only"}})
-    kept = json.loads(sandbox.written["/home/user/workspace/dataverse_search.json"])
-    assert kept == [{"global_id": "doi:1/only"}]
+    assert _kept_ids(sandbox) == ["doi:1/only"]
 
 
 def test_the_file_stops_growing_rather_than_filling_a_disk():
@@ -534,5 +546,120 @@ def test_each_turn_starts_from_an_empty_slate():
     sandbox = _Sandbox()
     _reads_through(SearchResultsFile(sandbox), {"content": [{"global_id": "doi:1/yesterday"}]})
     _reads_through(SearchResultsFile(sandbox), {"content": [{"global_id": "doi:1/today"}]})
-    kept = json.loads(sandbox.written["/home/user/workspace/dataverse_search.json"])
-    assert kept == [{"global_id": "doi:1/today"}]
+    assert _kept_ids(sandbox) == ["doi:1/today"]
+
+
+# --- the shape the app renders ------------------------------------------------------------------
+
+def test_the_search_apis_own_answer_becomes_a_row():
+    """Dataverse's documented search shape, mapped whole."""
+    from backend.middleware.dataverse_first import normalise
+
+    row = normalise(
+        {
+            "name": "Three new healthy and sustainable potato varieties",
+            "type": "dataset",
+            "url": "https://data.cipotato.org/dataset.xhtml?persistentId=doi:10.21223/P3/HJLUJZ",
+            "global_id": "doi:10.21223/P3/HJLUJZ",
+            "description": "Late blight assessed under high disease pressure.",
+            "authors": ["Perez, Willmer", "Gastelo, Manuel"],
+            "fileCount": 3,
+            "name_of_dataverse": "CIP Potato Breeding",
+        }
+    )
+    assert row["persistent_id"] == "doi:10.21223/P3/HJLUJZ"
+    assert row["title"].startswith("Three new healthy")
+    assert row["authors"] == ["Perez, Willmer", "Gastelo, Manuel"]
+    assert row["file_count"] == 3
+    assert row["repository"] == "CIP Potato Breeding"
+    assert row["link"].endswith("HJLUJZ")
+
+
+def test_a_record_that_splits_its_identifier_is_put_back_together():
+    """Dataverse's native form has no joined id anywhere, which is §288's whole difficulty."""
+    from backend.middleware.dataverse_first import normalise
+
+    row = normalise({"protocol": "doi", "authority": "10.21223", "identifier": "P3/HKABUV"})
+    assert row["persistent_id"] == "doi:10.21223/P3/HKABUV"
+
+
+def test_a_layout_nobody_has_met_yields_a_row_rather_than_an_exception():
+    """**The rule `_ids_in` set, applied here.**
+
+    A reader that insisted on one key would report an empty search the day the MCP renamed a
+    field. An empty row is visible and wrong; an exception loses the whole search.
+    """
+    from backend.middleware.dataverse_first import normalise
+
+    row = normalise({"somethingNew": "x"})
+    assert row["persistent_id"] == "" and row["title"] == ""
+    assert row["raw"] == {"somethingNew": "x"}, "and the unmapped record survives whole"
+
+    assert normalise("not a record")["title"] == "not a record"
+    assert normalise(None)["persistent_id"] == ""
+
+
+def test_a_file_count_that_is_not_a_count_is_not_one():
+    from backend.middleware.dataverse_first import normalise
+
+    assert normalise({"fileCount": "3"})["file_count"] == 3
+    assert normalise({"fileCount": "many"})["file_count"] is None
+    assert normalise({"fileCount": True})["file_count"] is None, "a flag is not a count"
+    assert normalise({})["file_count"] is None
+
+
+def test_the_claims_check_can_still_find_an_id_under_a_name_we_never_mapped():
+    """`raw` is not sentiment. `unsearched` walks the leaves of this file."""
+    from backend.middleware.claims import unsearched
+    from backend.middleware.dataverse_first import normalise
+
+    kept = json.dumps([normalise({"someFutureKey": "doi:10.21223/P3/ODDITY"})])
+    assert unsearched(["doi:10.21223/P3/ODDITY"], kept) == []
+
+
+#: The rows as the app must read them, written from this module's own code.
+DATASET_FIXTURE = (
+    Path(__file__).resolve().parent.parent.parent
+    / "crates" / "app" / "tests" / "fixtures" / "dataverse-search.json"
+)
+
+
+def _dataset_sample() -> list[dict]:
+    """Four rows covering every branch the client can render wrong."""
+    from backend.middleware.dataverse_first import normalise
+
+    return [
+        normalise(
+            {
+                "name": "Three new healthy and sustainable potato varieties",
+                "url": "https://data.cipotato.org/dataset.xhtml?persistentId=doi:10.21223/P3/HJLUJZ",
+                "global_id": "doi:10.21223/P3/HJLUJZ",
+                "description": "Late blight assessed under high disease pressure at Oxapampa.",
+                "authors": ["Perez, Willmer", "Gastelo, Manuel"],
+                "fileCount": 3,
+                "name_of_dataverse": "CIP Potato Breeding",
+            }
+        ),
+        # Everything optional missing: the row still has to render.
+        normalise({"global_id": "doi:10.21223/P3/3AIN78", "name": "Yield trials, Comas"}),
+        # The split form, which carries no joined id of its own.
+        normalise({"protocol": "doi", "authority": "10.21223", "identifier": "P3/CKYEB5"}),
+        # A layout nobody has met — an empty row rather than a lost search.
+        normalise({"somethingNew": "x"}),
+    ]
+
+
+def test_the_committed_dataset_fixture_matches_what_this_module_writes():
+    """Regenerate with `MINIME_WRITE_CONTRACT=1 pytest mini-me/tests/test_dataverse_first.py`."""
+    generated = json.dumps(_dataset_sample(), indent=2, ensure_ascii=False, sort_keys=True) + "\n"
+    if os.environ.get("MINIME_WRITE_CONTRACT"):
+        DATASET_FIXTURE.parent.mkdir(parents=True, exist_ok=True)
+        DATASET_FIXTURE.write_text(generated, encoding="utf-8")
+        pytest.skip("fixture regenerated; read the diff")
+
+    assert DATASET_FIXTURE.exists(), f"{DATASET_FIXTURE} is missing — MINIME_WRITE_CONTRACT=1"
+    assert DATASET_FIXTURE.read_text(encoding="utf-8") == generated, (
+        "the dataset row changed shape. Regenerate with "
+        "`MINIME_WRITE_CONTRACT=1 pytest mini-me/tests/test_dataverse_first.py`, then decide "
+        "whether the app should read the new field."
+    )
