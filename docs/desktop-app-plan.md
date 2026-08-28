@@ -16488,3 +16488,68 @@ this one was not in the search. The researcher is the one about to paste it.
 *Hundred-and-thirty-ninth: when a check you wrote disagrees with a model you trust, the cheapest
 experiment settles it. Reaching for "my check must be broken" is the same reflex as "the model
 must be right", and on this occasion it cost a release and a paragraph of fiction.*
+
+## 290. The panel reads the search (2026-08-27)
+
+§289 established that `dataverse_explorer` had composed six persistent identifiers. The researcher
+asked the question that mattered:
+
+> *"Dataverse returns a json file with the return of a search which is an api call. So there is not
+> hallucination there. How we drift from here to ai inventing doi? AI must only call the tool and
+> the returned json will be on our files. SO ui will read those and we have a modal to see these
+> datasets."*
+
+Which is right, and it names the architectural mistake rather than the bug. One line:
+
+```rust
+self.datasets = snapshot.datasets.clone();
+```
+
+The datasets panel rendered `DataVerseSearchResults.datasets` — **seven fields per row**, title,
+identifier, link, description, authors, file count and repository, every one of them retyped by a
+language model out of a file it had just finished reading. Seven chances to drift per row, and the
+identifier is the one that ends up in a paper.
+
+### How it drifted there
+
+The structured response came first. It was how the app got rows to render instead of prose, and
+§223 was about the *client* dropping eight of its nine fields. At that point there was no file:
+the search results lived on the MCP host at `/tmp/mcp/json_files/`, on a machine at
+`dataverse-cip.fastmcp.app`, which is nobody's workspace.
+
+`dataverse_search.json` in the conversation folder only started existing at §224, and it was added
+for a different purpose — so the claims check had something to compare against. **Nobody went back
+and re-pointed the panel at it.** The file became the source of truth for *verification* while the
+display kept reading the model, which is why the check and the panel disagreed: they were looking
+at two different things, and only one of them came from Dataverse.
+
+### What changed
+
+`dataverse_first.normalise` maps each search result into the row shape the app renders, beside the
+tool that produced it — candidate keys tried in order, `_ids_in`'s rule applied to a mapping:
+a reader that insisted on one key *"would report every dataset as fabricated the day that layout
+changed"*. Dataverse's split `protocol` / `authority` / `identifier` form is rejoined, an unknown
+layout yields an empty row rather than an exception, and the original rides along under `raw` so a
+field nobody mapped is not lost — and so `claims.unsearched`, which walks the leaves of this file,
+can still find an id under a name we have never met.
+
+`workspace::datasets` reads it, pinned by a fixture the producer generates from its own code, with
+the two-sided contract §280 established. The model's answer survives as **a mark and a sort**: the
+rows it chose say *"the agent put this one forward"* and come first. It is not a filter — the
+researcher sees everything the search returned, which is the other half of what was asked for.
+
+An identifier the model composed now has no row to appear in. It cannot be rendered, so it cannot
+be cited.
+
+### What this retires, and what it does not
+
+The claims check no longer decides anything about datasets: you cannot disagree with a file you are
+rendering. It stays exactly as useful for the subagents where the model really is the only source —
+the librarian's paper paths, the analyst's chart paths.
+
+The model's list remains the fallback for a run that wrote no file: a sandboxed deployment, or a
+conversation from before §224. The file wins wherever there is one, so nothing that used to have
+rows loses them.
+
+*Hundred-and-fortieth: when a model retypes a fact that is already in a file, the retyping is the
+defect. Not the model — the design that asked it to be a data pipe.*

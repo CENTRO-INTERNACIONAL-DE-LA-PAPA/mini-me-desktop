@@ -1192,6 +1192,30 @@ fn claims_summary(claims: &[workspace::Claim]) -> (String, bool) {
     (summary, contradicted > 0)
 }
 
+/// One persistent identifier with its scheme removed, lowercased.
+///
+/// The same normalisation the backend's claims check applies, and for the same reason: Dataverse
+/// hands the same dataset back as `doi:10.21223/P3/X`, as `10.21223/P3/X`, and as a resolver URL,
+/// and a mark that only matched one spelling would leave the agent's own choice unmarked (§288).
+fn bare_persistent_id(identifier: &str) -> String {
+    let cleaned = identifier.trim().trim_matches('"');
+    let lowered = cleaned.to_ascii_lowercase();
+    for prefix in [
+        "https://doi.org/",
+        "http://doi.org/",
+        "https://dx.doi.org/",
+        "https://hdl.handle.net/",
+        "http://hdl.handle.net/",
+        "doi:",
+        "hdl:",
+    ] {
+        if let Some(rest) = lowered.strip_prefix(prefix) {
+            return rest.trim_matches('/').to_string();
+        }
+    }
+    lowered.trim_matches('/').to_string()
+}
+
 fn ranked(experiments: &[discovery::Experiment], loudest_first: bool) -> Vec<usize> {
     let mut order: Vec<usize> = (0..experiments.len()).collect();
     order.sort_by(|&a, &b| {
@@ -3225,7 +3249,22 @@ struct Workbench {
     /// Whole citations, for a rendered report's bibliography. Not the panel's truncated ones.
     sources: Vec<protocol::Source>,
     /// Datasets the explorer recommended, whole. See [`protocol::Dataset`].
+    /// The rows the panel shows: **what the search returned**, read from the conversation's
+    /// own `dataverse_search.json`.
+    ///
+    /// Until §290 this was the model's structured answer — seven fields per row retyped by a
+    /// language model out of a file it had just read — and on a real turn six of six
+    /// `persistent_id`s were composed rather than copied. A researcher was one click from pasting
+    /// a fabricated DOI into a paper.
     datasets: Vec<protocol::Dataset>,
+    /// The model's own answer, kept as the fallback for a run that wrote no file — a sandboxed
+    /// deployment, or a conversation from before the file existed. Never preferred over it.
+    recommended_datasets: Vec<protocol::Dataset>,
+    /// The identifiers the model put forward, bare, for marking rows it chose.
+    ///
+    /// **A mark on a row, never the row itself.** An identifier that is not in the search has
+    /// nothing to mark, which is the whole point: it cannot be rendered, so it cannot be cited.
+    recommended_ids: Vec<String>,
     /// Documents the librarian indexed. See [`protocol::Document`].
     documents: Vec<protocol::Document>,
     /// What checking each reference against Crossref found, keyed by its citation text.
@@ -3768,6 +3807,8 @@ impl Workbench {
             reports: Vec::new(),
             sources: Vec::new(),
             datasets: Vec::new(),
+            recommended_datasets: Vec::new(),
+            recommended_ids: Vec::new(),
             documents: Vec::new(),
             checked: HashMap::new(),
             repaired: HashMap::new(),
@@ -5830,8 +5871,17 @@ impl Workbench {
                     self.resolve_sources(cx);
                 }
                 if !snapshot.datasets.is_empty() {
-                    self.datasets = snapshot.datasets.clone();
+                    // What the model *chose*, which is a different claim from what the search
+                    // *found*. Kept apart deliberately — §289.
+                    self.recommended_ids = snapshot
+                        .datasets
+                        .iter()
+                        .map(|dataset| bare_persistent_id(&dataset.persistent_id))
+                        .filter(|id| !id.is_empty())
+                        .collect();
+                    self.recommended_datasets = snapshot.datasets.clone();
                 }
+                self.reload_datasets();
                 if !snapshot.documents.is_empty() {
                     self.documents = snapshot.documents.clone();
                 }
@@ -6389,6 +6439,12 @@ impl Workbench {
                         let role = if role == "you" { "you" } else { "mini-me" };
                         workbench.transcript.push(Message::new(role, body));
                     }
+                    // Datasets likewise: the search results are a file in this conversation's
+                    // folder, so reopening it shows what the searches found rather than nothing
+                    // until the next turn happens to answer.
+                    workbench.recommended_ids.clear();
+                    workbench.recommended_datasets.clear();
+                    workbench.reload_datasets();
                     // Figures this conversation produced are still on disk, so they can
                     // be shown again — history the transcript alone cannot carry.
                     workbench.collect_plots();
@@ -15873,8 +15929,14 @@ impl Workbench {
             })
             .collect();
 
+        // **The agent's picks first, and only that.** Its reading is worth something — it read
+        // the descriptions — but it is a *sort*, not a filter: everything the search returned
+        // stays on the list, because the researcher is the one choosing (§290).
+        let mut ordered = matching;
+        ordered.sort_by_key(|dataset| !self.was_recommended(dataset));
+
         let mut section = div().flex().flex_col().gap_2();
-        for dataset in matching.into_iter().take(limit.unwrap_or(usize::MAX)) {
+        for dataset in ordered.into_iter().take(limit.unwrap_or(usize::MAX)) {
             section = section.child(self.dataset_row(dataset, cx));
         }
         section
@@ -15903,6 +15965,16 @@ impl Workbench {
             .w_full()
             .min_w_0()
             .gap_1();
+
+        // Said on the row the agent chose, not by leaving the others out. The list is the
+        // search's; this is the agent's opinion of it, and a reader can disagree.
+        if self.was_recommended(dataset) {
+            row = row.child(
+                ui::Label::new("the agent put this one forward")
+                    .colour(theme::accent())
+                    .size(ui::Size::Compact),
+            );
+        }
 
         let mut opener = div()
             .id(SharedString::from(format!("dataset-{id}")))
@@ -16804,6 +16876,29 @@ impl Workbench {
         self.thread_workspace()
             .map(|dir| workspace::commands(&dir))
             .unwrap_or_default()
+    }
+
+    /// Re-read the datasets this conversation's searches returned.
+    ///
+    /// **The file wins whenever there is one.** The model's answer is kept only for a run that
+    /// wrote none — a sandboxed deployment, or a conversation from before the file existed — so
+    /// that switching to the search's own answer never empties a panel that used to have rows.
+    fn reload_datasets(&mut self) {
+        let found = self
+            .thread_workspace()
+            .map(|dir| workspace::datasets(&dir))
+            .unwrap_or_default();
+        self.datasets = if found.is_empty() {
+            self.recommended_datasets.clone()
+        } else {
+            found
+        };
+    }
+
+    /// Whether the agent put this row forward, matched on the bare identifier.
+    fn was_recommended(&self, dataset: &protocol::Dataset) -> bool {
+        let id = bare_persistent_id(&dataset.persistent_id);
+        !id.is_empty() && self.recommended_ids.contains(&id)
     }
 
     /// The claims this conversation's subagents recorded, oldest first.
@@ -17760,6 +17855,48 @@ mod tests {
             "{\"command\":\"python3 read.py\",\"outside\":[\"/tmp/theirs.csv\"],\"wrote\":[]}",
         );
         assert!(files_left_outside(&commands).is_empty());
+    }
+
+    /// **The agent's pick has to match the search's row, or the mark never appears.**
+    ///
+    /// Dataverse hands the same dataset back as `doi:10.21223/P3/X`, as `10.21223/P3/X` and as a
+    /// resolver URL. The model answers with whichever it read. Comparing verbatim is what made
+    /// six real recommendations look fabricated (§288) — here it would leave every row unmarked
+    /// while the list looked fine, which is quieter and no better.
+    #[test]
+    fn a_recommendation_is_matched_however_it_is_spelled() {
+        let rows = workspace::decode_datasets(include_str!(
+            "../tests/fixtures/dataverse-search.json"
+        ));
+        let found = bare_persistent_id(&rows[0].persistent_id);
+        assert_eq!(found, "10.21223/p3/hjlujz");
+
+        for spelling in [
+            "doi:10.21223/P3/HJLUJZ",
+            "10.21223/P3/HJLUJZ",
+            "https://doi.org/10.21223/P3/HJLUJZ",
+            "  DOI:10.21223/p3/hjlujz  ",
+        ] {
+            assert_eq!(bare_persistent_id(spelling), found, "{spelling} names the same dataset");
+        }
+
+        // And a different dataset stays different — a normaliser that collapsed everything would
+        // mark every row and mean nothing.
+        assert_ne!(bare_persistent_id("doi:10.21223/P3/3AIN78"), found);
+        assert_eq!(bare_persistent_id(""), "");
+    }
+
+    /// A row the producer could not map is still a row, and must not be mistaken for a match.
+    #[test]
+    fn a_row_with_no_identifier_is_never_marked_as_chosen() {
+        let rows = workspace::decode_datasets(include_str!(
+            "../tests/fixtures/dataverse-search.json"
+        ));
+        let unmapped = rows.last().expect("the layout nobody has met");
+        assert_eq!(unmapped.persistent_id, "");
+        // `was_recommended` guards on this: an empty id must not match an empty entry in the
+        // recommendation list and light up a row the agent never named.
+        assert!(bare_persistent_id(&unmapped.persistent_id).is_empty());
     }
 
     /// The panel must not go silent in the situation the record exists for.

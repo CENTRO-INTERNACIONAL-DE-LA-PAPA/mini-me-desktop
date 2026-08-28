@@ -1,0 +1,65 @@
+[
+  {
+    "authors": [
+      "Perez, Willmer",
+      "Gastelo, Manuel"
+    ],
+    "description": "Late blight assessed under high disease pressure at Oxapampa.",
+    "file_count": 3,
+    "link": "https://data.cipotato.org/dataset.xhtml?persistentId=doi:10.21223/P3/HJLUJZ",
+    "persistent_id": "doi:10.21223/P3/HJLUJZ",
+    "raw": {
+      "authors": [
+        "Perez, Willmer",
+        "Gastelo, Manuel"
+      ],
+      "description": "Late blight assessed under high disease pressure at Oxapampa.",
+      "fileCount": 3,
+      "global_id": "doi:10.21223/P3/HJLUJZ",
+      "name": "Three new healthy and sustainable potato varieties",
+      "name_of_dataverse": "CIP Potato Breeding",
+      "url": "https://data.cipotato.org/dataset.xhtml?persistentId=doi:10.21223/P3/HJLUJZ"
+    },
+    "repository": "CIP Potato Breeding",
+    "title": "Three new healthy and sustainable potato varieties"
+  },
+  {
+    "authors": [],
+    "description": "",
+    "file_count": null,
+    "link": "",
+    "persistent_id": "doi:10.21223/P3/3AIN78",
+    "raw": {
+      "global_id": "doi:10.21223/P3/3AIN78",
+      "name": "Yield trials, Comas"
+    },
+    "repository": "",
+    "title": "Yield trials, Comas"
+  },
+  {
+    "authors": [],
+    "description": "",
+    "file_count": null,
+    "link": "",
+    "persistent_id": "doi:10.21223/P3/CKYEB5",
+    "raw": {
+      "authority": "10.21223",
+      "identifier": "P3/CKYEB5",
+      "protocol": "doi"
+    },
+    "repository": "",
+    "title": ""
+  },
+  {
+    "authors": [],
+    "description": "",
+    "file_count": null,
+    "link": "",
+    "persistent_id": "",
+    "raw": {
+      "somethingNew": "x"
+    },
+    "repository": "",
+    "title": ""
+  }
+]
