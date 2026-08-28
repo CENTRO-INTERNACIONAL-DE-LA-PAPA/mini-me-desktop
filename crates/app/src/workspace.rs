@@ -902,6 +902,61 @@ pub fn decode_claims(text: &str) -> Vec<Claim> {
         .collect()
 }
 
+/// Every dataset this conversation's searches returned, in the order they were found.
+///
+/// **The API's answer, not the model's account of it.** Until §290 the datasets panel rendered
+/// `DataVerseSearchResults.datasets` — seven fields per row, each one retyped by a language model
+/// out of a file it had just read — and on a real turn six of six `persistent_id`s were composed
+/// rather than copied. A researcher was one click from pasting a fabricated DOI into a paper.
+///
+/// A row here comes from `dataverse_search.json`, which `middleware/dataverse_first.py` writes
+/// from what the search actually returned. A fabricated identifier has no row to appear in.
+///
+/// The shape is pinned by a fixture the producer generates from its own code
+/// (`crates/app/tests/fixtures/dataverse-search.json`).
+pub fn datasets(conversation: &Path) -> Vec<crate::protocol::Dataset> {
+    let path = conversation.join("dataverse_search.json");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    decode_datasets(&text)
+}
+
+/// Split out from [`datasets`] so the shape can be tested against the producer's own fixture.
+///
+/// A row with no identifier is kept rather than dropped: the producer emits one when it meets a
+/// record whose layout it does not know, and a search that quietly lost three of eighteen rows is
+/// the failure mode that would be hardest to notice.
+pub fn decode_datasets(text: &str) -> Vec<crate::protocol::Dataset> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return Vec::new();
+    };
+    let Some(rows) = value.as_array() else {
+        return Vec::new();
+    };
+    rows.iter()
+        .map(|row| crate::protocol::Dataset {
+            title: row["title"].as_str().unwrap_or_default().to_string(),
+            persistent_id: row["persistent_id"].as_str().unwrap_or_default().to_string(),
+            // `None` rather than an empty string, because the row's own `link()` falls back to
+            // building one from the identifier and an empty string is not a URL.
+            link: row["link"]
+                .as_str()
+                .map(str::trim)
+                .filter(|link| !link.is_empty())
+                .map(str::to_string),
+            description: row["description"].as_str().unwrap_or_default().to_string(),
+            authors: strings(&row["authors"]),
+            file_count: row["file_count"].as_u64(),
+            repository: row["repository"]
+                .as_str()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string),
+        })
+        .collect()
+}
+
 /// A bounded view of everything a conversation wrote.
 ///
 /// `truncated` is deliberately part of the result rather than a log line. The person looking at
@@ -2937,6 +2992,86 @@ mod tests {
         assert_eq!(claims[0].claimed, 0);
         assert_eq!(claims[0].datasets, None);
         assert!(claims[0].at.is_empty());
+    }
+
+    /// Every key the search writer produces is either read here or declared unread with a reason.
+    #[test]
+    fn every_key_in_a_dataset_row_is_read_or_declared_unread() {
+        /// Fields deliberately not read, and why. A reason of fewer than ten characters is not one.
+        const UNREAD: &[(&str, &str)] = &[(
+            "raw",
+            "the producer's untouched record, carried so a field nobody mapped is not lost and so \
+             the claims check can still find an id under a name we have never met — the app \
+             renders the mapped fields instead",
+        )];
+
+        let fixture = include_str!("../tests/fixtures/dataverse-search.json");
+        let rows: serde_json::Value = serde_json::from_str(fixture).expect("json");
+        let first = rows.as_array().expect("an array")[0].as_object().expect("an object");
+        let keys: Vec<&str> = first.keys().map(String::as_str).collect();
+
+        let read = [
+            "title", "persistent_id", "link", "description", "authors", "file_count", "repository",
+        ];
+        for key in &keys {
+            assert!(
+                read.contains(key) || UNREAD.iter().any(|(name, _)| name == key),
+                "a dataset row carries `{key}` and nothing here reads it or says why not — \
+                 regenerate with MINIME_WRITE_CONTRACT=1 and decide about it"
+            );
+        }
+        for (_, reason) in UNREAD {
+            assert!(reason.len() > 10, "a declared-unread field needs a real reason");
+        }
+        for field in read {
+            assert!(keys.contains(&field), "`{field}` is claimed as read but is not in a row");
+        }
+    }
+
+    /// **The API's answer, read as the app will render it.**
+    ///
+    /// Every field asserted, because the failure this shape exists to prevent is §223's twin: the
+    /// producer carried nine fields, the client kept one, and four distinct datasets rendered as
+    /// four identical rows for as long as the feature existed.
+    #[test]
+    fn a_search_result_is_read_back_as_the_row_a_researcher_sees() {
+        let fixture = include_str!("../tests/fixtures/dataverse-search.json");
+        let rows = decode_datasets(fixture);
+        assert_eq!(rows.len(), 4, "one row per search result, including the ones we cannot map");
+
+        let full = &rows[0];
+        assert_eq!(full.persistent_id, "doi:10.21223/P3/HJLUJZ");
+        assert!(full.title.starts_with("Three new healthy"), "{}", full.title);
+        assert_eq!(full.authors, vec!["Perez, Willmer".to_string(), "Gastelo, Manuel".to_string()]);
+        assert_eq!(full.file_count, Some(3));
+        assert_eq!(full.repository.as_deref(), Some("CIP Potato Breeding"));
+        assert!(full.link.as_deref().is_some_and(|link| link.ends_with("HJLUJZ")));
+
+        // Everything optional missing. The row still renders and still opens.
+        let sparse = &rows[1];
+        assert_eq!(sparse.persistent_id, "doi:10.21223/P3/3AIN78");
+        assert_eq!(sparse.link, None, "an empty string is not a URL");
+        assert_eq!(sparse.file_count, None);
+        assert!(sparse.authors.is_empty());
+
+        // Dataverse's native split form, put back together by the producer — the shape whose
+        // joined id appears nowhere in the record, and which §288 mistook for a fabrication.
+        assert_eq!(rows[2].persistent_id, "doi:10.21223/P3/CKYEB5");
+
+        // A layout nobody has met. **Kept, not dropped**: a search that quietly lost three of
+        // eighteen rows is the failure hardest to notice.
+        assert_eq!(rows[3].persistent_id, "");
+    }
+
+    /// Junk and absence both give nothing rather than half a list.
+    #[test]
+    fn an_unreadable_search_file_is_no_datasets_rather_than_a_panic() {
+        assert!(decode_datasets("not json").is_empty());
+        assert!(decode_datasets("{\"content\": []}").is_empty(), "an object is not the array");
+        assert!(decode_datasets("[]").is_empty());
+        let base = scratch("no-datasets");
+        assert!(datasets(&base).is_empty());
+        std::fs::remove_dir_all(&base).ok();
     }
 
     /// No record at all is the ordinary case: most conversations never call a subagent.

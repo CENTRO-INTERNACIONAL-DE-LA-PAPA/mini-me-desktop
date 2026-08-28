@@ -113,6 +113,106 @@ MAX_KEPT_RECORDS = 2_000
 DEFAULT_SERVER_DIR = "/tmp/mcp/json_files"
 
 
+#: Where each field of a rendered row can be found, in order of preference.
+#:
+#: **Declared, and tried in order, because the MCP's layout is not ours.** `_ids_in` states the
+#: rule this follows: a reader that insisted on one key *"would report every dataset as fabricated
+#: the day that layout changed"*. So each field names every spelling seen or documented, an unknown
+#: record yields empty strings rather than an exception, and the original is kept beside the
+#: normalised form so nothing is lost when a name we have never met turns up.
+FIELDS: dict[str, tuple[str, ...]] = {
+    "persistent_id": ("global_id", "persistentId", "persistent_id", "doi", "identifier"),
+    "title": ("name", "title", "label"),
+    "link": ("url", "persistentUrl", "link", "href"),
+    "description": ("description", "dsDescription", "abstract", "summary"),
+    "repository": ("name_of_dataverse", "publisher", "identifier_of_dataverse", "repository"),
+}
+
+#: Fields whose value is a count.
+COUNT_FIELDS: tuple[str, ...] = ("fileCount", "file_count", "files_count")
+
+#: Fields whose value is a list of people.
+AUTHOR_FIELDS: tuple[str, ...] = ("authors", "author", "creators", "creator")
+
+
+def _first_string(record: dict[str, Any], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = record.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _joined_identifier(record: dict[str, Any]) -> str:
+    """`doi:10.21223/P3/X` rebuilt from a record that stores its parts separately.
+
+    Dataverse's native representation splits `protocol` / `authority` / `identifier`, so the id a
+    researcher cites appears nowhere in it as a single string — which is also how a recommendation
+    can look absent from a search that returned it (§288).
+    """
+    protocol = _first_string(record, ("protocol",))
+    authority = _first_string(record, ("authority",))
+    identifier = _first_string(record, ("identifier",))
+    if protocol and authority and identifier:
+        return f"{protocol}:{authority}/{identifier}"
+    return ""
+
+
+def normalise(record: Any) -> dict[str, Any]:
+    """One search result in the shape the app renders.
+
+    **This is what takes the model out of the citation business.** The datasets panel used to
+    render `DataVerseSearchResults.datasets` — seven fields per row, every one retyped by a model
+    out of a file it had just read — and on a real turn six of six `persistent_id`s were composed
+    rather than copied (§289). A row built here comes from the API's own answer, so a fabricated
+    identifier has no row to appear in.
+
+    The original is carried under `raw`, both because a field we failed to map is not a field
+    worth losing, and because `claims.unsearched` walks the leaves of this file: an id that only
+    exists under a name we have never met is still findable there.
+    """
+    if not isinstance(record, dict):
+        return {"persistent_id": "", "title": str(record), "raw": record}
+
+    authors: list[str] = []
+    for key in AUTHOR_FIELDS:
+        value = record.get(key)
+        if isinstance(value, list):
+            authors = [str(item).strip() for item in value if str(item).strip()]
+            break
+        if isinstance(value, str) and value.strip():
+            authors = [value.strip()]
+            break
+
+    file_count: int | None = None
+    for key in COUNT_FIELDS:
+        value = record.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            file_count = value
+            break
+        if isinstance(value, str) and value.strip().isdigit():
+            file_count = int(value.strip())
+            break
+
+    return {
+        # **Joined form first.** `identifier` is a candidate key and on a split record it holds
+        # `P3/HKABUV` alone — which is not a persistent id, and taking it would leave the row
+        # carrying half a citation. If the parts are all present they win.
+        "persistent_id": _joined_identifier(record)
+        or _first_string(record, FIELDS["persistent_id"]),
+        "title": _first_string(record, FIELDS["title"]),
+        "link": _first_string(record, FIELDS["link"]),
+        "description": _first_string(record, FIELDS["description"]),
+        "authors": authors,
+        "file_count": file_count,
+        "repository": _first_string(record, FIELDS["repository"]),
+        # Kept whole. See the docstring: an unmapped field is not a field worth losing.
+        "raw": record,
+    }
+
+
 class SearchBeforeRecommending(ToolsBeforeAnswering):
     """Force a Dataverse search, then a read of it, before recommendations become reachable."""
 
@@ -286,7 +386,12 @@ class SearchResultsFile(AgentMiddleware):
             return
         try:
             arrived = payload["content"]
-            merged = self._accumulate(arrived)
+            # **Normalised before it is kept, so the file is the app's shape rather than the
+            # MCP's.** The panel reads this file now; a reader in Rust that had to know Dataverse's
+            # field names would break the day they changed, and the mapping belongs beside the tool
+            # that produced them (§290).
+            records = arrived if isinstance(arrived, list) else [arrived]
+            merged = self._accumulate([normalise(record) for record in records])
             work_dir = await self.sandbox_backend.aget_work_dir()
             written = await self.sandbox_backend.awrite(
                 f"{str(work_dir).rstrip('/')}/{FIXED_FILENAME}",
@@ -300,7 +405,7 @@ class SearchResultsFile(AgentMiddleware):
                 logger.info(
                     "kept %s in the workspace (%d new, %d this turn)",
                     FIXED_FILENAME,
-                    len(arrived) if isinstance(arrived, list) else 1,
+                    len(records),
                     len(merged),
                 )
         except Exception:
