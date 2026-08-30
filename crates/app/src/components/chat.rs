@@ -14,12 +14,7 @@ pub(crate) fn is_delimited(name: &str) -> bool {
     name.ends_with(".csv") || name.ends_with(".tsv")
 }
 
-
-/// The colour for one CSV column.
-///
-/// Cycles the theme's own roles rather than inventing a rainbow: colours already checked
-/// against every surface for contrast, so a wide table stays readable in every palette —
-/// including the light one, where a fixed rainbow would wash out.
+/// The colour for one CSV column, cycling the theme's own roles.
 pub(crate) fn column_colour(column: usize) -> u32 {
     const WHEEL: [fn() -> u32; 6] = [
         theme::text,
@@ -32,15 +27,8 @@ pub(crate) fn column_colour(column: usize) -> u32 {
     WHEEL[column % WHEEL.len()]()
 }
 
-
-/// Consecutive identical steps folded into one line with a count.
-///
-/// An agent hunting for a file emits `glob` eight times in a row, and eight identical lines
-/// carry exactly as much information as one — while costing eight lines of the answer's
-/// screen space. `glob ×8` says the same thing and reads as one glance.
-///
-/// Only *consecutive* runs are folded. `read_file ×3, ls ×2, read_file ×3` is a different
-/// story from `read_file ×6`, and flattening the order would erase it.
+/// Consecutive identical steps folded into one line with a count (only consecutive runs fold, so
+/// `read_file ×3, ls ×2, read_file ×3` stays distinct from `read_file ×6`).
 pub(crate) fn fold_steps(steps: &[String]) -> Vec<String> {
     let mut folded: Vec<(String, usize)> = Vec::new();
     for step in steps {
@@ -60,7 +48,6 @@ pub(crate) fn fold_steps(steps: &[String]) -> Vec<String> {
         })
         .collect()
 }
-
 
 /// A labelled, bulleted list of spine entries.
 pub(crate) fn spine_list(label: &'static str, items: &[String], bullet: &'static str) -> impl IntoElement {
@@ -93,15 +80,8 @@ pub(crate) fn spine_list(label: &'static str, items: &[String], bullet: &'static
     list
 }
 
-
-/// Render one Markdown block as an element.
-///
-/// Emphasis becomes a `HighlightStyle` run rather than a nested element, which is how GPUI
-/// wants inline styling: one shaped line per block, with ranges carrying the differences.
-/// The gutter glyph for a list item at a given depth.
-///
-/// Only bullets change. A numbered item keeps the number the author wrote — renumbering it, or
-/// swapping it for a bullet because it happens to be nested, would change what the answer says.
+/// The gutter glyph for a list item at a given depth. A numbered item keeps its own number
+/// regardless of depth — renumbering it would change what the answer says.
 pub(crate) fn nested_marker(marker: &str, depth: usize) -> String {
     if marker.ends_with('.') {
         return marker.to_string();
@@ -113,12 +93,8 @@ pub(crate) fn nested_marker(marker: &str, depth: usize) -> String {
     }
 }
 
-
-/// Render one Markdown block.
-///
-/// `selectable` is the transcript's span registry when this block is part of a conversation,
-/// and `None` when it is not — the file preview renders the same blocks, and a drag there
-/// must not run through the transcript's spans as if the two were one document.
+/// Render one Markdown block. `selectable` is the transcript's span registry when this block is
+/// part of a conversation, and `None` when it's rendered standalone (e.g. a file preview).
 pub(crate) fn markdown_block(
     block: &markdown::Block,
     selectable: Option<&selection::Transcript>,
@@ -139,8 +115,6 @@ pub(crate) fn markdown_block(
                         font_style: Some(FontStyle::Italic),
                         ..Default::default()
                     },
-                    // No monospace family is bundled yet, so code is marked by colour.
-                    // Honest and legible; a real code face is a follow-up.
                     Emphasis::Code => HighlightStyle {
                         color: Some(rgb(theme::accent()).into()),
                         ..Default::default()
@@ -176,8 +150,6 @@ pub(crate) fn markdown_block(
     match block {
         Block::Heading { level, inlines } => {
             let element = styled(inlines, theme::text());
-            // Only two sizes: an answer is not a document, and six heading levels of
-            // typography would be noise.
             if *level <= 2 {
                 element.text_lg().into_any_element()
             } else {
@@ -195,16 +167,11 @@ pub(crate) fn markdown_block(
             .w_full()
             .min_w_0()
             .gap_2()
-            // Indent per level. Capped at four because past that the text column is
-            // narrower than the gutter, and a plan nested five deep is a plan nobody reads.
             .pl(px(16. * (*depth).min(4) as f32))
             .child(
                 div()
                     .flex_none()
                     .text_color(rgb(theme::text_muted()))
-                    // A different glyph per level, so nesting survives a screenshot and a
-                    // reader who cannot see the indentation of a wrapped line. A numbered
-                    // item keeps its own number at any depth.
                     .child(nested_marker(marker, *depth)),
             )
             .child(styled(inlines, theme::text()))
@@ -215,8 +182,6 @@ pub(crate) fn markdown_block(
             .w_full()
             .min_w_0()
             .pl(px(12. * (*depth).min(3) as f32))
-            // A rule down the left, which is what a quote looks like everywhere. The text is
-            // muted, because a quote is something the answer is *referring* to.
             .border_l_2()
             .border_color(rgb(theme::border_strong()))
             .child(
@@ -240,10 +205,6 @@ pub(crate) fn markdown_block(
                     .min_w_0()
                     .text_color(rgb(theme::text_muted()))
                     .text_xs()
-                    // Named, not fetched. See [`markdown::Block::Image`]: the path lives in
-                    // the distro and figures the agent really produced are already shown
-                    // below, found on the host (§42). Saying which file it meant is the
-                    // useful part; pretending to display it would not be.
                     .child(if alt.trim().is_empty() {
                         url.clone()
                     } else {
@@ -261,11 +222,7 @@ pub(crate) fn markdown_block(
                 .border_color(rgb(theme::border()))
                 .text_color(rgb(theme::text()))
                 .text_sm()
-                // Nothing bundled — a stack ending at a face Windows always has. See
-                // `ui::code_font`.
                 .font(ui::code_font());
-            // Selectable like any other run, and arguably the one that matters most: a
-            // snippet is written to be copied.
             match selectable {
                 Some(transcript) => block
                     .child(selection::Selectable::new(
@@ -278,10 +235,8 @@ pub(crate) fn markdown_block(
             }
         }
         Block::Table { header, rows } => {
-            // Equal-width columns via `flex_1`, rather than measuring content. GPUI has no
-            // table layout and measuring text before shaping is not something this app can
-            // do honestly; even columns are predictable and never collapse a column to
-            // nothing, which is what a naive proportional split does to a long cell.
+            // Equal-width columns via `flex_1` rather than measuring content: GPUI has no table
+            // layout, and a naive proportional split can collapse a long cell's column to nothing.
             let columns = block.columns();
             let cell = |inlines: &markdown::Inlines, bold: bool| {
                 div()
@@ -299,7 +254,6 @@ pub(crate) fn markdown_block(
                     ))
                     .when(bold, |row| row.font_weight(FontWeight::BOLD))
             };
-            // Pad short rows so columns stay aligned when the source is ragged.
             let padded = |row: &Vec<markdown::Inlines>| {
                 let mut cells: Vec<markdown::Inlines> = row.clone();
                 cells.resize_with(columns, Default::default);
@@ -328,8 +282,6 @@ pub(crate) fn markdown_block(
             }
             for (index, row) in rows.iter().enumerate() {
                 let mut line = div().flex().flex_row().w_full().min_w_0();
-                // A hairline between rows, but not under the last one — the table's own
-                // border already closes it.
                 if index + 1 < rows.len() {
                     line = line.border_b_1().border_color(rgb(theme::border()));
                 }
@@ -348,17 +300,168 @@ pub(crate) fn markdown_block(
     }
 }
 
-
 impl Workbench {
-    /// What finished while the researcher was away, and a press to go and look at it.
-    ///
-    /// **Above the composer rather than in a modal.** §40 settled where a thing that needs
-    /// attention goes: there, because that is where attention already is and it cannot be scrolled
-    /// away. A modal on launch is the first thing somebody fights before they can work, and worse
-    /// when two runs finished — while a banner can do the thing a modal cannot, which is *take you
-    /// there*. The status line it replaces is a strip at the bottom that the next message
-    /// overwrites, and this is the one thing the app knows that the researcher has no other way to
-    /// discover (§244).
+    /// The whole chat column: transcript, approval card, attachments/picker, composer.
+    pub(crate) fn chat_pane(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        self.text_selection.begin_frame();
+        self.sync_transcript_list();
+        let view = cx.entity().clone();
+        let list_state = self.transcript_list.clone();
+        let rows = gpui::list(list_state.clone(), move |index, _window, cx| {
+            view.update(cx, |workbench, cx| {
+                let row = if index < workbench.transcript.len() {
+                    workbench.transcript_message(index, cx)
+                } else {
+                    workbench.live_turn_row()
+                };
+                // The inset lives on the row, not the list: GPUI's `list` only applies the
+                // vertical half of its own padding to each item.
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .px(px(TRANSCRIPT_INSET))
+                    .child(row)
+                    .into_any_element()
+            })
+        })
+        .w_full()
+        .h_full()
+        .py_4();
+        let mut col = div()
+            .id("transcript")
+            .flex()
+            .flex_col()
+            .flex_grow()
+            .min_w_0()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|workbench, event: &gpui::MouseDownEvent, _window, cx| {
+                    workbench
+                        .text_selection
+                        .update(|selection| selection.clear());
+                    if let Some(spot) = workbench.text_selection.spot_at(event.position) {
+                        workbench
+                            .text_selection
+                            .update(|selection| selection.begin(spot));
+                    }
+                    cx.notify();
+                }),
+            )
+            .on_mouse_move(
+                cx.listener(|workbench, event: &gpui::MouseMoveEvent, _window, cx| {
+                    if !workbench.text_selection.selection().dragging() {
+                        return;
+                    }
+                    if let Some(spot) = workbench.text_selection.spot_at(event.position) {
+                        workbench
+                            .text_selection
+                            .update(|selection| selection.extend(spot));
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(|workbench, _event: &gpui::MouseUpEvent, _window, cx| {
+                    workbench
+                        .text_selection
+                        .update(|selection| selection.finish());
+                    cx.notify();
+                }),
+            )
+            .on_mouse_up_out(
+                gpui::MouseButton::Left,
+                cx.listener(|workbench, _event: &gpui::MouseUpEvent, _window, cx| {
+                    workbench
+                        .text_selection
+                        .update(|selection| selection.finish());
+                    cx.notify();
+                }),
+            )
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(|workbench, event: &gpui::MouseDownEvent, _window, cx| {
+                    workbench.open_context_menu(event.position, menu::Target::Transcript, cx);
+                }),
+            );
+
+        if self.opening {
+            col = col.child(self.opening_state());
+        } else if self.transcript.is_empty() {
+            col = col.child(self.empty_state(cx));
+        } else {
+            col = col.child(rows);
+        }
+        let title = self
+            .sidecar
+            .thread_id()
+            .and_then(|id| self.conversations.iter().find(|c| c.thread_id == id))
+            .map(|conversation| conversation.title.clone());
+
+        let mut column = div()
+            .flex()
+            .flex_col()
+            .flex_grow()
+            .min_w_0()
+            .h_full()
+            .children(title.map(|title| {
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .flex_none()
+                    .w_full()
+                    .min_w_0()
+                    .px_4()
+                    .py_2()
+                    .text_base()
+                    .text_color(rgb(theme::text()))
+                    .child(app_icon(
+                        "icons/chat-circle-dots.svg",
+                        theme::text(),
+                        Some(ui::IconSize::Small.px()),
+                    ))
+                    .child(title)
+            }))
+            .child(
+                div()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .flex_grow()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .group(SCROLL_GROUP)
+                    .child(col)
+                    .children(list_scrollbar(&list_state)),
+            );
+        if let Some(request) = &self.pending_approval {
+            column = column.child(self.approval_card(request, cx));
+        }
+        let column = column
+            .children(self.collected_banner(cx))
+            .children(self.attachment_chips(cx))
+            .children(self.subagent_picker(cx))
+            .child(self.composer_row(cx));
+
+        div()
+            .flex()
+            .flex_row()
+            .flex_grow()
+            .min_w_0()
+            .h_full()
+            .m_2()
+            .rounded_lg()
+            .overflow_hidden()
+            .bg(rgb(theme::background()))
+            .border_1()
+            .border_color(rgb(theme::border()))
+            .child(column)
+    }
+
+    /// What finished while the researcher was away, with a press to go and look at it. Above the
+    /// composer, where attention already is and cannot be scrolled away.
     pub(crate) fn collected_banner(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         if self.collected_runs.is_empty() {
             return None;
@@ -373,8 +476,6 @@ impl Workbench {
                 runs.len()
             ),
         };
-        // The first one, because a single press has to mean something definite. With several, the
-        // sidebar is the right place to choose and this only says to look.
         let opens = match self.collected_runs.as_slice() {
             [(thread_id, _)] => Some(thread_id.clone()),
             _ => None,
@@ -401,12 +502,6 @@ impl Workbench {
                     .size(ui::Size::Compact)
                     .ellipsis(),
             )
-            // **Two targets, not one.** The first version made the whole strip the press and gave
-            // the single-run case no dismiss at all: *"I cannot dismiss the modal."* Opening a
-            // conversation and deciding not to are different answers, so they are different
-            // buttons — and the one that means "I have read this" has to exist in both cases,
-            // because a notice you can only clear by going somewhere is a notice that holds the
-            // window hostage (§250).
             .children(opens.map(|thread_id| {
                 div()
                     .id("collected-open")
@@ -444,26 +539,14 @@ impl Workbench {
                     })
                     .child("×")
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
-                        // Only the banner goes. The runs were recorded as announced when they were
-                        // collected, so dismissing does not make them come back next launch — and
-                        // their results are on disk either way.
                         workbench.collected_runs.clear();
                         cx.notify();
                     })),
             );
         Some(row.into_any_element())
     }
-}
 
-
-impl Workbench {
     /// The files going with the next question, each removable.
-    ///
-    /// Above the composer, where the picker and the approval card already are (§40): that is where
-    /// attention is, and it cannot be scrolled away from.
-    ///
-    /// Each chip is its own remove button rather than the row carrying one action — §225a's rule.
-    /// There is exactly one thing to do to an attachment you can see, and it is take it back.
     pub(crate) fn attachment_chips(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         if self.attachments.is_empty() {
             return None;
@@ -480,18 +563,12 @@ impl Workbench {
         for (at, attachment) in self.attachments.iter().enumerate() {
             let label = attachment.label.clone();
             row = row.child(
-                // The whole chip removes it, so the target is the chip and not a four-pixel
-                // glyph at the end of a filename.
                 ui::Chip::new(SharedString::from(format!("attached-{at}")), label)
                     .bg(theme::surface())
                     .removable(true)
                     .on_click(cx.listener(move |workbench, _event, _window, cx| {
                         if at < workbench.attachments.len() {
                             let gone = workbench.attachments.remove(at);
-                            // The copy in the conversation's folder stays. It is the researcher's
-                            // file now, it appears in Outputs, and deleting somebody's data
-                            // because they changed their mind about one question would be a much
-                            // worse surprise than a file they can delete themselves.
                             workbench.status =
                                 format!("{} will not go with this question", gone.label);
                         }
@@ -501,15 +578,163 @@ impl Workbench {
         }
         Some(row.into_any_element())
     }
-}
 
+    /// The approval card: the pending command(s), verbatim, and the decision. Shown inline above
+    /// the composer, not as a modal — it must stay reachable no matter how long the command is.
+    pub(crate) fn approval_card(&self, request: &ApprovalRequest, cx: &mut Context<Self>) -> impl IntoElement {
+        let card = div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .w_full()
+            .min_w_0()
+            .gap_2()
+            .m_2()
+            .p_3()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(theme::accent()))
+            .bg(rgb(theme::surface()))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .w_full()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(rgb(theme::accent()))
+                            .text_size(px(11.))
+                            .child("RUN THIS ON YOUR MACHINE?"),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(rgb(theme::text_faint()))
+                            .text_size(px(11.))
+                            .child(match request.actions.len() {
+                                0 | 1 => request
+                                    .actions
+                                    .first()
+                                    .map(|action| action.tool.clone())
+                                    .unwrap_or_default(),
+                                many => format!("{many} commands"),
+                            }),
+                    ),
+            );
 
-impl Workbench {
-    /// The `/name` picker, shown above the composer.
-    ///
-    /// Above it for the same reason the approval card is (§40): that is where attention already
-    /// is, and it cannot be scrolled away from. A plain flex child rather than a floating popup —
-    /// no position to measure, and it behaves like part of the composer, which is what it is.
+        let mut commands = div()
+            .id("approval-commands")
+            .flex()
+            .flex_col()
+            .gap_2()
+            .w_full()
+            .min_w_0()
+            .max_h(px(260.))
+            .overflow_y_scroll();
+
+        for action in &request.actions {
+            if !action.description.is_empty() {
+                commands = commands.child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .flex_none()
+                        .text_color(rgb(theme::text_muted()))
+                        .text_xs()
+                        .child(action.description.clone()),
+                );
+            }
+            commands = commands.child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .flex_none()
+                    .p_2()
+                    .rounded_md()
+                    .bg(rgb(theme::background()))
+                    .border_1()
+                    .border_color(rgb(theme::border()))
+                    .text_color(rgb(theme::text()))
+                    .font(ui::code_font())
+                    .text_size(px(12.5))
+                    .line_height(px(19.))
+                    .child(action.detail.clone()),
+            );
+        }
+
+        let effect = match self.thread_workspace() {
+            Some(dir) => format!(
+                "Runs on {} with your permissions, in {}.",
+                self.sidecar.execution(),
+                dir.display()
+            ),
+            None => format!(
+                "Runs on {} with your permissions.",
+                self.sidecar.execution()
+            ),
+        };
+
+        card.child(commands)
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .text_color(rgb(theme::text_muted()))
+                    .text_xs()
+                    .child(effect),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .w_full()
+                    .min_w_0()
+                    .child(
+                        ui::Button::new("approve", "Approve")
+                            .tone(ui::Tone::Accent)
+                            .on_click(
+                                cx.listener(|workbench, _event, _window, cx| {
+                                    workbench.decide(true, cx)
+                                }),
+                            ),
+                    )
+                    .child(ui::Button::new("reject", "Reject").on_click(
+                        cx.listener(|workbench, _event, _window, cx| workbench.decide(false, cx)),
+                    ))
+                    .child(div().flex_grow())
+                    // Bounded grants only — nothing here persists past this turn/conversation, so
+                    // a security gate can't calcify into an unread habit.
+                    .child(
+                        ui::Button::new("approve-turn", "Approve the rest of this turn")
+                            .size(ui::Size::Compact)
+                            .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                workbench.approve_rest_of_turn = true;
+                                workbench.decide(true, cx);
+                            })),
+                    )
+                    .child(
+                        ui::Button::new(
+                            "approve-conversation",
+                            "Approve everything in this conversation",
+                        )
+                        .size(ui::Size::Compact)
+                        .on_click(cx.listener(|workbench, _event, _window, cx| {
+                            workbench.approve_conversation = true;
+                            workbench.decide(true, cx);
+                        })),
+                    ),
+            )
+    }
+
+    /// The `/name` specialist picker, shown above the composer while typing a `/name`.
     pub(crate) fn subagent_picker(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let text = self.composer.read(cx).text().to_string();
         if !subagent::completing(&text) {
@@ -535,8 +760,6 @@ impl Workbench {
             .border_color(rgb(theme::border_strong()));
 
         if agents.is_empty() {
-            // The registry is written when the backend assembles a coordinator, so before the
-            // first turn there is nothing to offer. Say which, rather than showing an empty box.
             list = list.child(
                 div()
                     .p_2()
@@ -582,8 +805,6 @@ impl Workbench {
                             })
                             .ellipsis(),
                     )
-                    // The description is not decoration: none of these names says what it does,
-                    // and the request's own guesses show that nobody can be expected to know.
                     .child(
                         ui::Label::new(agent.description.clone())
                             .colour(theme::text_faint())
@@ -597,189 +818,77 @@ impl Workbench {
         }
         Some(list.into_any_element())
     }
-}
 
-
-impl Workbench {
-    /// Who was consulted for this answer, how long it took, how many steps.
-    ///
-    /// The path reads `academic_researcher → theorizer → data_analysis · 19s · 4 steps`, which is
-    /// the summary people were expanding the trace to reconstruct.
-    pub(crate) fn answer_chips(&self, index: usize, message: &Message) -> impl IntoElement {
-        /// Past this the row wraps into a paragraph and stops being a glance.
-        const MAX_PILLS: usize = 6;
-
-        let path = consulted(&message.agents);
-        let mut row = div()
-            .flex()
-            .flex_row()
-            .flex_wrap()
-            .items_center()
-            .gap_1()
-            .w_full()
-            .min_w_0();
-
-        for (at, name) in path.iter().take(MAX_PILLS).enumerate() {
-            if at > 0 {
-                row = row.child(
-                    div()
-                        .flex_none()
-                        .text_color(rgb(theme::text_muted()))
-                        .text_size(px(11.))
-                        .child("→"),
-                );
-            }
-            row = row.child(
-                div()
-                    .flex_none()
-                    .px_2()
-                    .py_1()
-                    .rounded_full()
-                    .bg(rgb(theme::elevated()))
-                    .border_1()
-                    .border_color(rgb(theme::border()))
-                    .text_color(rgb(specialist_ink(name).unwrap_or(theme::text_muted())))
-                    .text_size(px(11.))
-                    .child(name.replace('_', " ")),
-            );
-        }
-        if path.len() > MAX_PILLS {
-            row = row.child(
-                div()
-                    .flex_none()
-                    .text_color(rgb(theme::text_faint()))
-                    .text_size(px(11.))
-                    .child(format!("+{}", path.len() - MAX_PILLS)),
-            );
-        }
-
-        // Steps across the whole turn: the coordinator's own, plus every specialist's.
-        let steps: usize = message.steps.len()
-            + message
-                .agents
-                .iter()
-                .map(|agent| agent.steps.len())
-                .sum::<usize>();
-        let mut note = String::new();
-        if let Some(turn) = self.turn_for(index) {
-            let span = turn
-                .invocations
-                .iter()
-                .map(|invocation| invocation.last_seen)
-                .max()
-                .unwrap_or(turn.sent_at)
-                .saturating_sub(turn.sent_at);
-            if span >= 1_000 {
-                note.push_str(&format!(" · {}", duration_label(span)));
-            }
-        }
-        if steps > 0 {
-            note.push_str(&format!(" · {steps} steps"));
-        }
-        if !note.is_empty() {
-            row = row.child(
-                div()
-                    .flex_none()
-                    .text_color(rgb(theme::text_faint()))
-                    .text_size(px(11.))
-                    .child(note),
-            );
-        }
-        row
-    }
-}
-
-
-impl Workbench {
-    /// What to do with a finished answer.
-    pub(crate) fn export_row(&self, message: &Message, cx: &mut Context<Self>) -> impl IntoElement {
-        let again = self
-            .transcript
-            .iter()
-            .rev()
-            .find(|earlier| earlier.role == "you")
-            .map(|earlier| earlier.body.clone());
-        let bibtex = bibliography(&self.sources, &self.source_origins());
-        let answer = message.body.clone();
+    /// The input row: attach button, text field, send/stop.
+    pub(crate) fn composer_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let has_text = !self.composer.read(cx).text().trim().is_empty();
+        let (send_icon, ink, hint) = if self.streaming {
+            ("icons/stop-circle.svg", theme::error(), "Stop this turn")
+        } else if has_text {
+            ("icons/paper-plane-right.svg", theme::accent(), "Send")
+        } else {
+            (
+                "icons/paper-plane-right.svg",
+                theme::text_muted(),
+                "Type a question first",
+            )
+        };
 
         div()
             .flex()
             .flex_row()
-            .flex_wrap()
             .items_center()
             .gap_2()
-            .w_full()
-            .min_w_0()
-            .pt_1()
+            .flex_none()
+            .m_2()
+            .px_2()
+            .py_1()
+            .rounded_lg()
+            .text_sm()
+            .bg(rgb(theme::surface()))
+            .border_1()
+            .border_color(rgb(theme::border()))
+            .track_focus(&self.composer.focus_handle(cx))
+            .drag_over::<gpui::ExternalPaths>(|style, _paths, _window, _cx| {
+                style
+                    .bg(rgb(theme::accent_soft()))
+                    .border_color(rgb(theme::accent()))
+            })
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(|workbench, event: &gpui::MouseDownEvent, _window, cx| {
+                    workbench.open_context_menu(event.position, menu::Target::Composer, cx);
+                }),
+            )
             .child(
-                ui::Button::new("export-pdf", "Save as PDF with references")
-                    .tone(ui::Tone::Accent)
-                    .size(ui::Size::Compact)
-                    // Disabled rather than hidden, so the affordance is discoverable before
-                    // there is a report to use it on.
-                    .disabled(self.reports.is_empty())
+                ui::IconButton::new("attach-file", "icons/plus.svg")
+                    .icon_size(ui::IconSize::Medium.px())
+                    .hover_ink(theme::accent())
+                    .tooltip("Add a file from this computer")
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
-                        workbench.render_report(cx);
+                        workbench.choose_files(cx);
                     })),
             )
+            .child(self.composer.clone())
             .child(
-                ui::Button::new("export-bibtex", "Copy BibTeX")
-                    .size(ui::Size::Compact)
-                    .disabled(bibtex.is_empty())
-                    .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                        let entries = bibtex.matches("@misc").count();
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(bibtex.clone()));
-                        workbench.say(format!("{entries} references copied as BibTeX"), cx);
-                    })),
-            )
-            .child(
-                ui::Button::new("export-rerun", "Re-run this turn")
-                    .size(ui::Size::Compact)
-                    .disabled(again.is_none() || self.streaming)
-                    .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                        // Into the composer, not straight to the backend. Re-running is a
-                        // decision, and a question worth asking twice is usually worth editing
-                        // first — the same rule every other suggestion here follows.
-                        if let Some(prompt) = again.clone() {
-                            workbench
-                                .composer
-                                .update(cx, |composer, cx| composer.set_text(prompt, cx));
-                            workbench.restore_focus = true;
-                            cx.notify();
+                ui::IconButton::new("send-turn", send_icon)
+                    .icon_size(ui::IconSize::Medium.px())
+                    .ink(ink)
+                    .hoverable(has_text && !self.streaming || self.streaming)
+                    .tooltip(hint)
+                    .on_click(cx.listener(|workbench, _event, _window, cx| {
+                        if workbench.streaming {
+                            workbench.stop_turn(cx);
+                            return;
                         }
+                        workbench
+                            .composer
+                            .update(cx, |composer, cx| composer.submit_now(cx));
                     })),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .text_color(rgb(theme::text_faint()))
-                    .text_size(px(11.))
-                    .child(format!("{} words", answer.split_whitespace().count())),
             )
     }
-}
 
-
-impl Workbench {
-    /// What an empty transcript says.
-    ///
-    /// It used to say one grey sentence. The replacement answers the two questions a researcher
-    /// actually opens this window with — *where was I* and *what can this thing do* — using what
-    /// the app already knows: their own recent conversations, and three things it is genuinely
-    /// good at.
-    ///
-    /// **Nothing here runs anything.** Every starting move loads the composer and stops, which is
-    /// the rule the project suggestions already follow and is org policy besides: the human
-    /// decides what is asked.
-    /// What the centre says while a conversation is being fetched.
-    ///
-    /// In the middle, because that is where the answer is about to be and where the researcher is
-    /// already looking — the status bar reports it too, at the bottom of the window, which is the
-    /// right place for a second copy and the wrong place for the only one.
-    ///
-    /// Deliberately plain: a mark and a word. A skeleton of grey bars would have to guess how many
-    /// messages are coming and how tall each is, and guessing wrong makes the real transcript jump
-    /// when it arrives.
+    /// What the centre shows while a conversation is being fetched.
     pub(crate) fn opening_state(&self) -> impl IntoElement {
         div()
             .flex()
@@ -798,13 +907,9 @@ impl Workbench {
                     .child("Opening this conversation…"),
             )
     }
-}
 
-
-impl Workbench {
+    /// The "What are you working on?" landing screen: recent conversations plus starter prompts.
     pub(crate) fn empty_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        /// Three, because a row of them has to stay readable in a narrow pane, and because a
-        /// list of recent work long enough to scroll is the sidebar's job.
         const RECENT: usize = 3;
 
         let now = provenance::now_ms() as i64 / 1_000;
@@ -814,8 +919,6 @@ impl Workbench {
             .flex_col()
             .flex_grow()
             .min_w_0()
-            // Centred vertically: with nothing in the transcript there is no reading order to
-            // preserve, and a page of prose pinned to the top of a tall window reads as a header.
             .justify_center()
             .gap_10()
             .px(px(60.))
@@ -873,8 +976,6 @@ impl Workbench {
                     ),
             );
 
-        // Where they left off. Only conversations that have actually been used — a list whose
-        // first card is an empty thread from a mis-click is a list nobody trusts.
         let recent: Vec<&protocol::Conversation> = self
             .conversations
             .iter()
@@ -882,8 +983,6 @@ impl Workbench {
             .take(RECENT)
             .collect();
         if !recent.is_empty() {
-            // `items_start`, or a flex row's default cross-axis stretch makes every card match
-            // the tallest sibling's height instead of hugging its own two lines of content.
             let mut cards = div()
                 .flex()
                 .flex_row()
@@ -893,8 +992,6 @@ impl Workbench {
                 .min_w_0();
             for conversation in recent {
                 let thread_id = conversation.thread_id.clone();
-                // What is in it, counted off disk rather than remembered — the same source the
-                // research panel reads, so the two cannot disagree.
                 let outputs: usize = workspace::outputs(&workspace::thread_dir_in(
                     conversation.project.as_deref(),
                     &conversation.thread_id,
@@ -917,8 +1014,6 @@ impl Workbench {
                         .flex()
                         .flex_col()
                         .gap_1()
-                        // Equal thirds, and `min_w_0` so a long title ellipsises instead of
-                        // widening its own card past the other two.
                         .flex_grow()
                         .flex_basis(relative(0.33))
                         .min_w_0()
@@ -958,9 +1053,6 @@ impl Workbench {
             );
         }
 
-        // Three things this is good at, in the researcher's words. Deliberately not a feature
-        // list: each one is a sentence they could have typed themselves, and clicking it puts
-        // exactly that in the composer for them to edit.
         const MOVES: [(&str, &str, &str); 3] = [
             (
                 "icons/binoculars.svg",
@@ -999,8 +1091,6 @@ impl Workbench {
                     .px_2p5()
                     .rounded_lg()
                     .border_1()
-                    // The first is marked, not louder: one suggestion carrying the accent is a
-                    // recommendation, three would be a menu shouting.
                     .when(leading, |row| {
                         row.bg(rgb(theme::accent_soft()))
                             .border_color(rgb(theme::accent()))
@@ -1027,7 +1117,6 @@ impl Workbench {
                         workbench.composer.update(cx, |composer, cx| {
                             composer.set_text(prompt, cx);
                         });
-                        // Focused, because the prompt is a stem they have to finish.
                         window.focus(&workbench.composer.focus_handle(cx));
                         cx.notify();
                     })),
@@ -1035,11 +1124,8 @@ impl Workbench {
         }
         block.child(moves)
     }
-}
 
-
-impl Workbench {
-    /// Build one row only when GPUI's variable-height list asks for it (docs §156).
+    /// Build one transcript row only when GPUI's virtualized list asks for it.
     pub(crate) fn transcript_message(&self, index: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(message) = self.transcript.get(index) else {
             return div().into_any_element();
@@ -1047,14 +1133,8 @@ impl Workbench {
         self.text_selection.begin_message(index);
         let asked = message.role == "you";
         let has_activity = !message.steps.is_empty() || !message.agents.is_empty();
-        // An empty assistant body means we're still waiting on the first token — unless a trace
-        // is already showing what's going on, which says more. The placeholder is not part of
-        // the body, so it is not parsed and never reaches §70's Markdown cache.
         let waiting = message.body.is_empty() && self.streaming && !has_activity;
         let body = message.body.clone();
-        // Side carries the role, so no label does: questions ride right in a bubble and answers
-        // run full width as prose (§86). `pb_3` replaces the eager column's old inter-row gap;
-        // list rows are independent elements and cannot inherit spacing from one another.
         let mut block = div()
             .flex()
             .flex_col()
@@ -1063,12 +1143,9 @@ impl Workbench {
             .gap_1()
             .pb_3()
             .when(asked, |block| block.items_end());
-        // The summary stays above the trace and answer: it answers who did the work without
-        // requiring the researcher to expand anything.
         if !asked && !message.agents.is_empty() {
             block = block.child(self.answer_chips(index, message));
         }
-        // The trace precedes the answer because that is the order the work happened in.
         if has_activity {
             block = block.child(self.activity_block(index, message, cx));
         }
@@ -1076,8 +1153,6 @@ impl Workbench {
             block = block.child(div().text_color(rgb(theme::text_muted())).child("…"));
         }
         if !body.is_empty() {
-            // The user's text is shown as typed. Assistant text uses the already-cached Markdown
-            // blocks; virtualization must not undo §70 by parsing again when a row remounts.
             if asked {
                 block = block.child(
                     div()
@@ -1104,8 +1179,6 @@ impl Workbench {
                 block = block.child(rendered);
             }
         }
-        // Marked, not hidden. A truncated answer looks exactly like a finished one, and whether
-        // it was cut off decides whether the researcher can rely on it (§63).
         if message.stopped {
             block = block.child(
                 div()
@@ -1116,11 +1189,6 @@ impl Workbench {
                     .child("— you stopped this turn; the answer above is incomplete"),
             );
         }
-        // **Named above, not in the folder.** Stated as the fact it is rather than as an
-        // accusation: a file can be missing because the command failed, because it was written
-        // somewhere outside the conversation (§160), or because the answer recited a name it
-        // never wrote. All three are worth knowing and the app cannot tell them apart, so it
-        // reports the check and not a verdict (§175).
         if !message.unverified.is_empty() {
             let named = message.unverified.join(", ");
             block = block.child(
@@ -1135,15 +1203,8 @@ impl Workbench {
             );
         }
 
-        // Files remain after the answer that explains them. Preserve §162–§164's two bounded
-        // galleries here: keeping PR #11's old per-file loop would compile and pass unit tests
-        // while silently turning seven plots back into seven full transcript cards.
-        //
-        // **Minus the search records.** *"Papers is working, but I think its not necesary to show
-        // it in the ui."* `papers.json` and `dataverse_search.json` exist so a researcher can take
-        // the search away with them (§220) — they are not results to read in the conversation, and
-        // the Sources and Datasets panels already say what is in them. Filtered here rather than
-        // in `workspace::outputs`, so the Outputs panel and the thread's folder still list them.
+        // Search records are filtered here rather than in `workspace::outputs`, so the thread's
+        // folder and the Outputs panel still list them — only the transcript hides them.
         let shown: Vec<workspace::Output> = message
             .outputs
             .iter()
@@ -1191,8 +1252,6 @@ impl Workbench {
             }
         }
 
-        // Only the latest completed answer gets export actions. Repeating them under every row
-        // would make a long virtual transcript a wall of controls just as it did when eager.
         if !asked
             && !message.body.is_empty()
             && index + 1 == self.transcript.len()
@@ -1202,223 +1261,9 @@ impl Workbench {
         }
         block.into_any_element()
     }
-}
 
-
-impl Workbench {
-    pub(crate) fn live_turn_row(&self) -> gpui::AnyElement {
-        let elapsed = self.provenance.turns.last()
-            .map(|turn| provenance::now_ms().saturating_sub(turn.sent_at))
-            .filter(|elapsed| *elapsed >= 1_000)
-            .map(|elapsed| format!(" · {}", duration_label(elapsed))).unwrap_or_default();
-        div().flex().flex_row().items_center().w_full().min_w_0().gap_2().pb_3()
-            .text_color(rgb(theme::text_muted())).text_xs()
-            .child(format!("{}{elapsed}", self.status)).into_any_element()
-    }
-}
-
-
-impl Workbench {
-    pub(crate) fn chat_pane(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        // `min_w_0` is what makes long assistant text *wrap* instead of running off
-        // the right edge: a flex item defaults to min-width:auto, so its content
-        // width becomes its floor and a long paragraph widens the pane instead of
-        // flowing down.
-        // `list` owns scrolling and cached row heights; the surrounding id belongs to pointer
-        // selection and inspection, not to a competing scroll container (§156).
-        // Last frame's span rectangles go now, before this frame registers its own: the
-        // transcript moves under a scroll, a resize and every streamed token, and a highlight
-        // painted from stale bounds is a highlight over the wrong words.
-        self.text_selection.begin_frame();
-        self.sync_transcript_list();
-        let view = cx.entity().clone();
-        let list_state = self.transcript_list.clone();
-        let rows = gpui::list(list_state.clone(), move |index, _window, cx| {
-            view.update(cx, |workbench, cx| {
-                let row = if index < workbench.transcript.len() {
-                    workbench.transcript_message(index, cx)
-                } else {
-                    workbench.live_turn_row()
-                };
-                // **The inset has to be on the row, not on the list.** GPUI's `list` applies only
-                // the *vertical* half of its padding: `prepaint_items` places each item at
-                // `bounds.origin + Point::new(px(0.), padding.top)`, so the horizontal half is
-                // computed and then never used. The eager scrolling div this replaced honoured
-                // all four sides, so §156 moved the transcript flush against its own border and
-                // nothing said so (§174).
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .px(px(TRANSCRIPT_INSET))
-                    .child(row)
-                    .into_any_element()
-            })
-        })
-        .w_full()
-        .h_full()
-        // Vertical only, which is all this ever applied.
-        .py_4();
-        let mut col = div()
-            .id("transcript")
-            .flex()
-            .flex_col()
-            .flex_grow()
-            .min_w_0()
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|workbench, event: &gpui::MouseDownEvent, _window, cx| {
-                    workbench
-                        .text_selection
-                        .update(|selection| selection.clear());
-                    if let Some(spot) = workbench.text_selection.spot_at(event.position) {
-                        workbench
-                            .text_selection
-                            .update(|selection| selection.begin(spot));
-                    }
-                    cx.notify();
-                }),
-            )
-            .on_mouse_move(
-                cx.listener(|workbench, event: &gpui::MouseMoveEvent, _window, cx| {
-                    if !workbench.text_selection.selection().dragging() {
-                        return;
-                    }
-                    if let Some(spot) = workbench.text_selection.spot_at(event.position) {
-                        workbench
-                            .text_selection
-                            .update(|selection| selection.extend(spot));
-                        cx.notify();
-                    }
-                }),
-            )
-            .on_mouse_up(
-                gpui::MouseButton::Left,
-                cx.listener(|workbench, _event: &gpui::MouseUpEvent, _window, cx| {
-                    workbench
-                        .text_selection
-                        .update(|selection| selection.finish());
-                    cx.notify();
-                }),
-            )
-            // Releasing outside the transcript has to end the drag too, or the selection
-            // keeps following the pointer after the button is long since up.
-            .on_mouse_up_out(
-                gpui::MouseButton::Left,
-                cx.listener(|workbench, _event: &gpui::MouseUpEvent, _window, cx| {
-                    workbench
-                        .text_selection
-                        .update(|selection| selection.finish());
-                    cx.notify();
-                }),
-            )
-            // Deliberately leaves the selection alone: right-clicking a shade off the text
-            // you just highlighted, in order to copy it, must not be what throws it away.
-            .on_mouse_down(
-                gpui::MouseButton::Right,
-                cx.listener(|workbench, event: &gpui::MouseDownEvent, _window, cx| {
-                    workbench.open_context_menu(event.position, menu::Target::Transcript, cx);
-                }),
-            );
-
-        if self.opening {
-            // **Not the empty state.** `open_conversation` clears the transcript before the fetch
-            // lands, so for the width of that request the centre said *"What are you working
-            // on?"* over a conversation that was already chosen — an invitation to start
-            // something, offered because the app had nothing else to draw (§178).
-            col = col.child(self.opening_state());
-        } else if self.transcript.is_empty() {
-            col = col.child(self.empty_state(cx));
-        } else {
-            col = col.child(rows);
-        }
-        // The conversation's own name, read the same way the sidebar row does: by the thread
-        // the sidecar is currently attached to, looked up against the list it renders.
-        let title = self
-            .sidecar
-            .thread_id()
-            .and_then(|id| self.conversations.iter().find(|c| c.thread_id == id))
-            .map(|conversation| conversation.title.clone());
-
-        // Everything that is not the road: transcript, approval, picker, composer. Built as its
-        // own column so the road can sit *beside* all of it rather than above the transcript
-        // and below the composer.
-        let mut column = div()
-            .flex()
-            .flex_col()
-            .flex_grow()
-            .min_w_0()
-            .h_full()
-            .children(title.map(|title| {
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    .flex_none()
-                    .w_full()
-                    .min_w_0()
-                    .px_4()
-                    .py_2()
-                    .text_base()
-                    .text_color(rgb(theme::text()))
-                    .child(app_icon(
-                        "icons/chat-circle-dots.svg",
-                        theme::text(),
-                        Some(ui::IconSize::Small.px()),
-                    ))
-                    .child(title)
-            }))
-            .child(
-                div()
-                    .relative()
-                    .flex()
-                    .flex_col()
-                    .flex_grow()
-                    .min_w_0()
-                    .overflow_hidden()
-                    // The region the thumb belongs to, so it appears when the pointer is over
-                    // the transcript and nowhere else.
-                    .group(SCROLL_GROUP)
-                    .child(col)
-                    .children(list_scrollbar(&list_state)),
-            );
-        // Above the composer, so the decision sits where the user's attention already
-        // is and cannot be scrolled out of view.
-        if let Some(request) = &self.pending_approval {
-            column = column.child(self.approval_card(request, cx));
-        }
-        let column = column
-            .children(self.collected_banner(cx))
-            .children(self.attachment_chips(cx))
-            .children(self.subagent_picker(cx))
-            .child(self.composer_row(cx));
-
-        div()
-            .flex()
-            // A row now: the road, then everything else.
-            .flex_row()
-            .flex_grow()
-            .min_w_0()
-            .h_full()
-            .m_2()
-            .rounded_lg()
-            .overflow_hidden()
-            .bg(rgb(theme::background()))
-            .border_1()
-            .border_color(rgb(theme::border()))
-            .child(column)
-    }
-}
-
-
-impl Workbench {
-    /// The agent activity trace for one turn: coordinator steps as one-liners, then
-    /// a collapsible group per subagent.
-    ///
-    /// This exists because a delegated turn is otherwise *silent*: the coordinator
-    /// emits only a `task` tool call while a subagent does the real work, so the user
-    /// sees a frozen window and then an answer with no account of where it came from
-    /// (plan §15).
+    /// The agent activity trace for one turn: coordinator steps, then a collapsible group per
+    /// subagent — without this a delegated turn looks like a frozen window until the answer lands.
     pub(crate) fn activity_block(
         &self,
         message_index: usize,
@@ -1427,9 +1272,6 @@ impl Workbench {
     ) -> impl IntoElement {
         let mut block = div().flex().flex_col().w_full().min_w_0().gap_1();
 
-        // The coordinator's own steps, behind the same disclosure the subagent groups have
-        // had all along. Flat and unbounded, they ran to twenty lines of `read_file`, `ls`
-        // and `glob` and pushed the actual answer off the screen (docs §47).
         let folded = fold_steps(&message.steps);
         if !folded.is_empty() {
             let count = message.steps.len();
@@ -1485,8 +1327,6 @@ impl Workbench {
                 .border_color(rgb(theme::border()))
                 .child(
                     div()
-                        // Unique per (turn, trace) so GPUI keeps each group's click
-                        // state to itself.
                         .id(SharedString::from(format!(
                             "trace-{message_index}-{trace_index}"
                         )))
@@ -1511,8 +1351,6 @@ impl Workbench {
                 for step in &fold_steps(&trace.steps) {
                     group = group.child(step_line(step));
                 }
-                // Not the raw stream: a subagent's answer often arrives as one JSON
-                // object, which is unreadable as a trace line.
                 let preview = protocol::summarize_agent_result(&trace.text);
                 if !preview.is_empty() {
                     group = group.child(
@@ -1530,100 +1368,342 @@ impl Workbench {
 
         block
     }
-}
 
+    /// Who was consulted for an answer, how long it took, how many steps.
+    pub(crate) fn answer_chips(&self, index: usize, message: &Message) -> impl IntoElement {
+        const MAX_PILLS: usize = 6;
 
-impl Workbench {
-    /// The input row: the text field plus a Send affordance.
-    pub(crate) fn composer_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        // Three states, which is what every shipped chat composer converged on: a filled
-        // circular button that sends, the same button greyed when there is nothing to
-        // send, and a stop control while a turn streams. Empty-means-disabled is the
-        // near-universal rule, and a send/stop toggle in the composer is how the running
-        // state is expressed without adding a second control (docs §52).
-        let has_text = !self.composer.read(cx).text().trim().is_empty();
-        let (send_icon, ink, hint) = if self.streaming {
-            ("icons/stop-circle.svg", theme::error(), "Stop this turn")
-        } else if has_text {
-            ("icons/paper-plane-right.svg", theme::accent(), "Send")
-        } else {
-            (
-                "icons/paper-plane-right.svg",
-                theme::text_muted(),
-                "Type a question first",
-            )
-        };
+        let path = consulted(&message.agents);
+        let mut row = div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap_1()
+            .w_full()
+            .min_w_0();
+
+        for (at, name) in path.iter().take(MAX_PILLS).enumerate() {
+            if at > 0 {
+                row = row.child(
+                    div()
+                        .flex_none()
+                        .text_color(rgb(theme::text_muted()))
+                        .text_size(px(11.))
+                        .child("→"),
+                );
+            }
+            row = row.child(
+                div()
+                    .flex_none()
+                    .px_2()
+                    .py_1()
+                    .rounded_full()
+                    .bg(rgb(theme::elevated()))
+                    .border_1()
+                    .border_color(rgb(theme::border()))
+                    .text_color(rgb(specialist_ink(name).unwrap_or(theme::text_muted())))
+                    .text_size(px(11.))
+                    .child(name.replace('_', " ")),
+            );
+        }
+        if path.len() > MAX_PILLS {
+            row = row.child(
+                div()
+                    .flex_none()
+                    .text_color(rgb(theme::text_faint()))
+                    .text_size(px(11.))
+                    .child(format!("+{}", path.len() - MAX_PILLS)),
+            );
+        }
+
+        let steps: usize = message.steps.len()
+            + message
+                .agents
+                .iter()
+                .map(|agent| agent.steps.len())
+                .sum::<usize>();
+        let mut note = String::new();
+        if let Some(turn) = self.turn_for(index) {
+            let span = turn
+                .invocations
+                .iter()
+                .map(|invocation| invocation.last_seen)
+                .max()
+                .unwrap_or(turn.sent_at)
+                .saturating_sub(turn.sent_at);
+            if span >= 1_000 {
+                note.push_str(&format!(" · {}", duration_label(span)));
+            }
+        }
+        if steps > 0 {
+            note.push_str(&format!(" · {steps} steps"));
+        }
+        if !note.is_empty() {
+            row = row.child(
+                div()
+                    .flex_none()
+                    .text_color(rgb(theme::text_faint()))
+                    .text_size(px(11.))
+                    .child(note),
+            );
+        }
+        row
+    }
+
+    /// What to do with a finished answer: export, cite, or re-run.
+    pub(crate) fn export_row(&self, message: &Message, cx: &mut Context<Self>) -> impl IntoElement {
+        let again = self
+            .transcript
+            .iter()
+            .rev()
+            .find(|earlier| earlier.role == "you")
+            .map(|earlier| earlier.body.clone());
+        let bibtex = bibliography(&self.sources, &self.source_origins());
+        let answer = message.body.clone();
 
         div()
             .flex()
             .flex_row()
+            .flex_wrap()
             .items_center()
             .gap_2()
-            .flex_none()
-            .m_2()
-            .px_2()
-            .py_1()
-            .rounded_lg()
-            .text_sm()
-            // The composer reads as one field with a control inside it, rather than a
-            // text box sitting next to an unrelated button.
-            .bg(rgb(theme::surface()))
-            .border_1()
-            .border_color(rgb(theme::border()))
-            // Which field has the keyboard is otherwise invisible — there is a caret, and it
-            // is two pixels wide. `in_focus` rather than `focus` because the thing with the
-            // focus is a child entity, not this box.
-            .track_focus(&self.composer.focus_handle(cx))
-            // .in_focus(|style| style.border_color(rgb(theme::accent())))
-            // **Feedback for a gesture that had none.** A file dragged over the window changed
-            // nothing on screen, so there was no way to tell the app would take it until you
-            // let go. Lit here rather than over the whole window because this is where the
-            // file lands: it becomes part of the question, and the drop does not send it.
-            //
-            // A style refinement rather than a flag on `Workbench`, deliberately. gpui clears
-            // `active_drag` on `FileDropEvent::Exited` but dispatches that event to no element,
-            // so a flag set on enter would have no way to learn the drag left the window and
-            // would stay lit until the next drop.
-            .drag_over::<gpui::ExternalPaths>(|style, _paths, _window, _cx| {
-                style
-                    .bg(rgb(theme::accent_soft()))
-                    .border_color(rgb(theme::accent()))
-            })
-            .on_mouse_down(
-                gpui::MouseButton::Right,
-                cx.listener(|workbench, event: &gpui::MouseDownEvent, _window, cx| {
-                    workbench.open_context_menu(event.position, menu::Target::Composer, cx);
-                }),
-            )
+            .w_full()
+            .min_w_0()
+            .pt_1()
             .child(
-                ui::IconButton::new("attach-file", "icons/plus.svg")
-                    .icon_size(ui::IconSize::Medium.px())
-                    .hover_ink(theme::accent())
-                    .tooltip("Add a file from this computer")
+                ui::Button::new("export-pdf", "Save as PDF with references")
+                    .tone(ui::Tone::Accent)
+                    .size(ui::Size::Compact)
+                    .disabled(self.reports.is_empty())
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
-                        workbench.choose_files(cx);
+                        workbench.render_report(cx);
                     })),
             )
-            .child(self.composer.clone())
             .child(
-                ui::IconButton::new("send-turn", send_icon)
-                    .icon_size(ui::IconSize::Medium.px())
-                    .ink(ink)
-                    .hoverable(has_text && !self.streaming || self.streaming)
-                    .tooltip(hint)
-                    .on_click(cx.listener(|workbench, _event, _window, cx| {
-                        if workbench.streaming {
-                            workbench.stop_turn(cx);
-                            return;
+                ui::Button::new("export-bibtex", "Copy BibTeX")
+                    .size(ui::Size::Compact)
+                    .disabled(bibtex.is_empty())
+                    .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                        let entries = bibtex.matches("@misc").count();
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(bibtex.clone()));
+                        workbench.say(format!("{entries} references copied as BibTeX"), cx);
+                    })),
+            )
+            .child(
+                ui::Button::new("export-rerun", "Re-run this turn")
+                    .size(ui::Size::Compact)
+                    .disabled(again.is_none() || self.streaming)
+                    .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                        if let Some(prompt) = again.clone() {
+                            workbench
+                                .composer
+                                .update(cx, |composer, cx| composer.set_text(prompt, cx));
+                            workbench.restore_focus = true;
+                            cx.notify();
                         }
-                        // Same path as Enter. Calling the entity directly rather than
-                        // dispatching an action keeps this working regardless of where
-                        // focus is when the button is clicked.
-                        workbench
-                            .composer
-                            .update(cx, |composer, cx| composer.submit_now(cx));
                     })),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(rgb(theme::text_faint()))
+                    .text_size(px(11.))
+                    .child(format!("{} words", answer.split_whitespace().count())),
             )
     }
-}
 
+    pub(crate) fn live_turn_row(&self) -> gpui::AnyElement {
+        let elapsed = self.provenance.turns.last()
+            .map(|turn| provenance::now_ms().saturating_sub(turn.sent_at))
+            .filter(|elapsed| *elapsed >= 1_000)
+            .map(|elapsed| format!(" · {}", duration_label(elapsed))).unwrap_or_default();
+        div().flex().flex_row().items_center().w_full().min_w_0().gap_2().pb_3()
+            .text_color(rgb(theme::text_muted())).text_xs()
+            .child(format!("{}{elapsed}", self.status)).into_any_element()
+    }
+
+    /// The provenance rail beside the chat pane: which specialist is running, fold/unfold, and a
+    /// timeline of stages visited.
+    pub(crate) fn provenance_rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        const OPEN: f32 = 172.;
+        const FOLDED: f32 = 38.;
+        const DOT: f32 = 9.;
+        const GUTTER: f32 = 12.;
+        const ROW_OPEN: f32 = 46.;
+        const ROW_FOLDED: f32 = 26.;
+
+        let stages = self.provenance.road();
+        let running = self
+            .streaming
+            .then(|| stages.iter().max_by_key(|stage| stage.last_seen))
+            .flatten()
+            .map(|stage| stage.name.clone());
+
+        let mut strip = div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .h_full()
+            .w(px(if self.road_open { OPEN } else { FOLDED }))
+            .pt(px(18.))
+            .pb(px(14.))
+            .when(self.road_open, |strip| strip.px(px(14.)).gap_3())
+            .when(!self.road_open, |strip| strip.items_center().gap_2())
+            .m_1()
+            .rounded_lg()
+            .overflow_hidden()
+            .bg(rgb(theme::surface()))
+            .border_1()
+            .border_color(rgb(theme::border()));
+
+        strip = strip.child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .w_full()
+                .flex_none()
+                .when(!self.road_open, |header| header.justify_center())
+                .when(self.road_open, |header| {
+                    header.child(
+                        div()
+                            .text_color(rgb(theme::text_faint()))
+                            .text_size(px(11.))
+                            .child("THE ROAD"),
+                    )
+                })
+                .child(
+                    div()
+                        .id("fold-road")
+                        .flex_none()
+                        .text_color(rgb(theme::text_faint()))
+                        .text_size(px(12.))
+                        .hover(|style| style.text_color(rgb(theme::accent())).cursor_pointer())
+                        .child(if self.road_open { "‹" } else { "›" })
+                        .on_click(cx.listener(|workbench, _event, _window, cx| {
+                            workbench.toggle_road(cx);
+                        })),
+                ),
+        );
+
+        if stages.is_empty() {
+            if self.road_open {
+                strip = strip.child(
+                    div()
+                        .text_color(rgb(theme::text_faint()))
+                        .text_size(px(11.))
+                        .line_height(px(16.))
+                        .child("The specialists this enquiry consults appear here as it reaches them."),
+                );
+            }
+            return strip;
+        }
+
+        let mut body = div().flex().flex_col().flex_grow().min_h_0().w_full();
+        let last = stages.len().saturating_sub(1);
+        for (at, stage) in stages.iter().enumerate() {
+            let is_running = running.as_deref() == Some(stage.name.as_str());
+
+            let gutter = div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .flex_none()
+                .w(px(GUTTER))
+                .child(
+                    div()
+                        .flex_none()
+                        .size(px(DOT))
+                        .rounded_full()
+                        .when(is_running, |dot| {
+                            dot.border_2().border_color(rgb(theme::running()))
+                        })
+                        .when(!is_running, |dot| dot.bg(rgb(theme::accent()))),
+                )
+                .when(at < last, |gutter| {
+                    gutter.child(
+                        div()
+                            .flex_grow()
+                            .w(px(2.))
+                            .min_h(px(14.))
+                            .bg(rgb(theme::border_strong())),
+                    )
+                });
+
+            let mut row = div()
+                .flex()
+                .flex_row()
+                .w_full()
+                .min_w_0()
+                .when(!self.road_open, |row| row.justify_center())
+                .when(at < last, |row| {
+                    row.min_h(px(if self.road_open { ROW_OPEN } else { ROW_FOLDED }))
+                })
+                .child(gutter);
+
+            if self.road_open {
+                let note = if is_running {
+                    format!("running · {}", duration_label(stage.busy_ms))
+                } else if stage.visits > 1 {
+                    format!(
+                        "visited {} times · {}",
+                        stage.visits,
+                        duration_label(stage.busy_ms)
+                    )
+                } else {
+                    duration_label(stage.busy_ms)
+                };
+                row = row.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_grow()
+                        .min_w_0()
+                        .items_start()
+                        .pl_2()
+                        .mt(px(-3.))
+                        .child(
+                            ui::Label::new(stage.name.replace('_', " "))
+                                .colour(if is_running { theme::running() } else { theme::text() })
+                                .ellipsis(),
+                        )
+                        .child(
+                            div()
+                                .text_color(rgb(theme::text_faint()))
+                                .text_size(px(11.))
+                                .child(note),
+                        ),
+                );
+            }
+            body = body.child(row);
+        }
+        strip = strip.child(body);
+
+        if self.road_open {
+            strip = strip
+                .child(
+                    div().w_full().flex_none().child(
+                        ui::Button::new("road-full-graph", "Full graph")
+                            .tone(ui::Tone::Accent)
+                            .size(ui::Size::Compact)
+                            .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                workbench.provenance_view = ProvenanceView::Graph;
+                                workbench.provenance_open = true;
+                                cx.notify();
+                            })),
+                    ),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(rgb(theme::text_faint()))
+                        .text_size(px(11.))
+                        .line_height(px(15.))
+                        .child("Written beside this conversation's files, so it survives a reload."),
+                );
+        }
+        strip
+    }
+}

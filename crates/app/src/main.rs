@@ -6969,31 +6969,19 @@ impl Render for Workbench {
             let composer = self.composer.focus_handle(cx);
             window.focus(&composer);
         }
-        // Once per frame, and only actually read when the record has changed. Both the panel and
-        // every transcript block need it, and doing it in each would be a file read per message
-        // per frame — the mistake `shape_of` is cached to avoid.
         self.refresh_authorship();
 
-        // `relative` so the palette's `absolute` overlay is positioned against the
-        // window rather than the page origin.
-        // The panels sit in a row; the status bar spans the **window** beneath them.
-        //
-        // It used to live inside the chat pane, so it was only as wide as the chat and its
-        // controls slid left and right whenever a panel was collapsed. A status bar that
-        // moves is one you have to look for. Zed's runs the full width for the same
-        // reason, and its buttons are always in the same place (docs §53).
         let mut body = div()
             .flex()
             .flex_row()
             .flex_grow()
-            // Without this the row refuses to shrink below its content and pushes the
-            // status bar off the bottom — the flex default that has now cost four
-            // separate bugs (§40, §48, §51).
+            // flex_grow children don't shrink below content size by default, which would push
+            // the status bar off the bottom.
             .min_h_0()
             .w_full()
             .when(self.sidebar_open, |body| {
-                body.child(self.rail(cx))
-                    .child(self.divider(Divider::Sidebar, cx))
+                body.child(self.sidebar_panel(cx))
+                    .child(self.pane_divider(Divider::Sidebar, cx))
             })
             .when(!self.sidebar_open, |body| {
                 body.child(
@@ -7027,22 +7015,13 @@ impl Render for Workbench {
                         })),
                     )
             })
-            // **Its own card, not a strip inside the conversation's.** It lived inside the chat
-            // pane's border, so the two read as one panel with a notch cut out of it while the
-            // sidebar and the research panel each sat on their own — *"the conversation panel is
-            // colliding with the road"*. Same treatment as its neighbours now (§173).
-            //
-            // Not before the first question: an empty road beside an empty transcript is a frame
-            // around nothing, and the empty state has its own things to say.
             .when(!self.transcript.is_empty(), |body| {
-                body.child(self.road_strip(cx))
+                body.child(self.provenance_rail(cx))
             })
             .child(self.chat_pane(cx));
 
-        // The right-hand slot belongs to the research panel alone. Setup used to take it,
-        // which meant diagnosing a problem hid the outputs you were diagnosing it about.
         body = if self.panel_open {
-            body.child(self.divider(Divider::Panel, cx))
+            body.child(self.pane_divider(Divider::Panel, cx))
                 .child(self.artifacts_panel(cx))
         } else {
             body.child(
@@ -7076,8 +7055,7 @@ impl Render for Workbench {
         };
 
         let root = div()
-            // An id makes the root a drop target; without one the platform's file-drop
-            // event has nowhere to land.
+            // An id is required to be a drop target for the file-drop handler below.
             .id("workbench")
             .relative()
             .flex()
@@ -7091,10 +7069,8 @@ impl Render for Workbench {
             .on_mouse_move(
                 cx.listener(|workbench, event: &gpui::MouseMoveEvent, window, cx| {
                     if let Some(drag) = workbench.gallery_scroll_drag.as_ref() {
-                        // A release outside the narrow track may not deliver its mouse-up to the
-                        // thumb. The move event still tells us the button is no longer held, so
-                        // end the drag here as well instead of letting the next click move a rail
-                        // the researcher is no longer touching (docs §158).
+                        // A release outside the narrow scrollbar track may not deliver its
+                        // mouse-up to the thumb, so end the drag here too once the button is up.
                         if !event.dragging() {
                             workbench.gallery_scroll_drag = None;
                             cx.notify();
@@ -7115,8 +7091,6 @@ impl Render for Workbench {
                     let Some(edge) = workbench.dragging else {
                         return;
                     };
-                    // Clamped so a pane can be made narrow but never vanish: a panel dragged
-                    // to nothing is one the user has no handle left to drag back.
                     let width = match edge {
                         Divider::Sidebar => f32::from(event.position.x),
                         Divider::Panel => {
@@ -7143,8 +7117,6 @@ impl Render for Workbench {
             )
             .on_action(cx.listener(Self::copy_selection))
             .on_action(cx.listener(Self::select_all_transcript))
-            // Anywhere on the window, not a designated strip: someone dragging a file has
-            // their eyes on the file, not on a target.
             .on_drop(
                 cx.listener(|workbench, paths: &gpui::ExternalPaths, _window, cx| {
                     workbench.add_files(paths.paths(), cx);
@@ -7154,8 +7126,6 @@ impl Render for Workbench {
             .child(self.status_bar(cx))
             .child(self.toasts(cx));
 
-        // Settings floats rather than displacing a panel, so opening it no longer costs
-        // the chat 420px for as long as it is open.
         let root = if self.settings_open {
             root.child(self.settings_pane(cx))
         } else {
@@ -7174,9 +7144,6 @@ impl Render for Workbench {
             root
         };
 
-        // The preview floats over the workbench but under destructive confirmation and the
-        // palette: it is a thing you open, look at, and dismiss, not a place you navigate to
-        // (docs §49, §155).
         let root = match &self.preview {
             Some(preview) => root.child(self.preview_modal(
                 preview.current().clone(),
@@ -7211,8 +7178,6 @@ impl Render for Workbench {
             root
         };
 
-        // The budget gate, mounted before the confirmations below it. Nothing else in this app
-        // guards money, and the researcher did not ask for it — a drafted run did.
         let root = match self.discovery_open.clone() {
             Some(view) => root.child(self.discovery_modal(&view, cx)),
             None => root,
@@ -7228,8 +7193,6 @@ impl Render for Workbench {
             None => root,
         };
 
-        // Above Settings, and that is not cosmetic: the pill that raises it lives *inside* the
-        // Settings pane, which mounts later and would otherwise draw straight over it.
         let root = match self.confirming_provider {
             Some(spec) => root.child(self.provider_modal(spec, cx)),
             None => root,
@@ -7243,8 +7206,6 @@ impl Render for Workbench {
 
         let root = root.children(self.picker_popup(cx));
 
-        // Both menus last, and `deferred` inside, so they paint over every pane they might open
-        // across instead of being clipped by the one they opened in.
         let root = match &self.sidebar_menu {
             Some((open, at)) => root.child(self.sidebar_menu_element(open.clone(), *at, cx)),
             None => root,

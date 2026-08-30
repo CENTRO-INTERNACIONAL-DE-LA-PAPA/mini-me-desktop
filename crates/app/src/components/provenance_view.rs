@@ -8,21 +8,88 @@ use gpui::{
     KeyBinding, ListAlignment, ListState, SharedString, StyledText, Window, WindowBounds, WindowOptions,
 };
 
+// --- citation / link resolution ---
+
+/// Where a source's `link` should point: the paper's own page on Semantic Scholar.
+///
+/// `api.semanticscholar.org/<id>` redirects to the paper page for both a corpus id and a DOI.
+pub(crate) fn scholar_link(
+    source: &protocol::Source,
+    verdict: Option<&references::Verdict>,
+    repair: Option<&references::Repair>,
+) -> Option<String> {
+    let existing = link_for(source);
+
+    // Built from the search result's own `corpusId`; nothing composed it, so nothing to check.
+    if existing.as_deref().is_some_and(references::is_corpus_link) {
+        return existing;
+    }
+
+    // The work the registry says this citation describes. Checked, so usable.
+    if let Some(repair) = repair {
+        return Some(format!("https://api.semanticscholar.org/DOI:{}", repair.doi));
+    }
+
+    // The citation's own DOI, only once verified: an unconfirmed DOI can resolve to someone
+    // else's real paper instead of failing, so it must not be linked until checked.
+    if matches!(verdict, Some(references::Verdict::Confirmed)) {
+        if let Some(doi) = existing.as_deref().and_then(references::doi_in) {
+            return Some(format!("https://api.semanticscholar.org/DOI:{doi}"));
+        }
+    }
+
+    // A link with no identifier (e.g. a thesis repository) is kept as-is; one with an
+    // unverified DOI is dropped rather than shown as if resolved.
+    match existing.as_deref().and_then(references::doi_in) {
+        Some(_) => None,
+        None => existing,
+    }
+}
+
+/// The link to actually use for a source: the backend's own field, else the URL in the citation.
+pub(crate) fn link_for(source: &protocol::Source) -> Option<String> {
+    source
+        .link
+        .clone()
+        .or_else(|| first_url(&source.citation))
+}
+
+/// The URL written into the citation text, when it contradicts the structured one.
+///
+/// `None` when they agree, when either is missing, or when they differ only in ways that are
+/// harmless (trailing slash, `http` vs `https`, `dx.doi.org` vs `doi.org`).
+pub(crate) fn disputed_link(source: &protocol::Source) -> Option<String> {
+    let structured = source.link.as_deref()?;
+    let written = first_url(&source.citation)?;
+    let normalise = |url: &str| {
+        url.trim_end_matches('/')
+            .replace("http://", "https://")
+            .replace("://dx.doi.org/", "://doi.org/")
+            .to_ascii_lowercase()
+    };
+    (normalise(structured) != normalise(&written)).then_some(written)
+}
+
+/// A citation with its URL removed, and the punctuation left tidy.
+pub(crate) fn without_url(citation: &str) -> String {
+    let Some(url) = first_url(citation) else {
+        return citation.trim().to_string();
+    };
+    let Some(at) = citation.find(&url) else {
+        return citation.trim().to_string();
+    };
+    let mut out = String::with_capacity(citation.len());
+    out.push_str(&citation[..at]);
+    out.push_str(&citation[at + url.len()..]);
+    out.trim().trim_end_matches(['.', ',', ';', ' ']).trim().to_string()
+}
+
+// --- export formats ---
+
 /// This conversation's citations as BibTeX a reference manager will import.
 ///
-/// # Why every entry is `@misc` with a `note`
-///
-/// A source arrives as **one line of the agent's prose** — `Smith, J. et al. (2021). Late blight
-/// resistance in Andean potato. Plant Pathology 70(4).` BibTeX wants `author`, `title`, `year`,
-/// `journal` as separate fields, and splitting that sentence into them means a parser that is
-/// right about most citations and confidently wrong about the rest. A mis-split reference does
-/// not look broken in a manuscript; it looks like a citation, with the wrong author on it.
-///
-/// So the whole string goes in `note`, which is what `note` is for, and the URL — the one part
-/// that can be extracted without interpretation — goes in `url`. Every entry is importable, every
-/// entry is verbatim, and nothing is attributed to anyone the agent did not name. A researcher
-/// fills in the fields their journal wants, which they were going to check anyway (org policy:
-/// *validate AI-generated content with subject matter experts*).
+/// Every entry is `@misc` with the raw citation text in `note`: splitting a prose citation into
+/// structured fields risks a confidently wrong split, while `note` is always faithful.
 pub(crate) fn bibliography(sources: &[protocol::Source], origins: &[references::Origin]) -> String {
     let mut out = String::new();
     for (at, source) in sources.iter().enumerate() {
@@ -30,21 +97,12 @@ pub(crate) fn bibliography(sources: &[protocol::Source], origins: &[references::
         if citation.is_empty() {
             continue;
         }
-        // Braces and backslashes are BibTeX's own syntax; left in they would truncate the entry
-        // at the first one and take the rest of the file with it.
+        // Braces/backslashes are BibTeX syntax and would truncate the entry if left in.
         let safe = citation.replace('\\', "\\\\").replace(['{', '}'], "");
         out.push_str(&format!("@misc{{minime{},\n  note = {{{safe}}},\n", at + 1));
         if let Some(url) = link_for(source) {
             out.push_str(&format!("  url = {{{url}}},\n"));
         }
-        // A disagreement travels with the entry rather than being resolved here. A reference
-        // manager shows `annote`, and someone importing forty references should not have to come
-        // back to this window to find out which two were doubtful.
-        //
-        // **And which ones nothing checked.** This is the copy that leaves the app — into Zotero,
-        // into a manuscript, into a colleague's inbox — so it is the one place the distinction
-        // most needs to survive. The panel can be re-read; an exported `.bib` is on its own, and
-        // the note has to travel with the entry it belongs to (docs §185).
         match (disputed_link(source), origins.get(at)) {
             (Some(written), _) => out.push_str(&format!(
                 "  annote = {{unverified: the citation text gives {written}}},\n"
@@ -60,129 +118,10 @@ pub(crate) fn bibliography(sources: &[protocol::Source], origins: &[references::
     out
 }
 
-
-/// Where a source's `link` should point: the paper's own page on Semantic Scholar.
-///
-/// Asked for directly — *"when I press it I am redirected to the paper in semantic scholar not to
-/// the article in the main page where the article was published"* — and it is the better default
-/// anyway: the publisher's landing page is often a paywall, while the Semantic Scholar record
-/// carries the abstract, the citation graph and whatever open-access copy exists.
-///
-/// `api.semanticscholar.org/<id>` 301-redirects to the paper page for **both** id forms, verified
-/// against the live service:
-///
-/// ```text
-/// CorpusID:45447591                     → /paper/117e16e7774ff0616b461a075feadcee7a33d793
-/// DOI:10.1016/0304-3878(92)90044-a      → /paper/bbec167725ba916adafcaa221f934b759e2cd131
-/// ```
-///
-/// In preference order: the corpus id the search itself returned; the DOI the registry says this
-/// citation describes; the DOI the citation carries, when that one checked out. Failing all three
-/// — a thesis in a university repository, say — whatever link the source came with, because a
-/// working link to the right document beats a Semantic Scholar page that does not exist.
-pub(crate) fn scholar_link(
-    source: &protocol::Source,
-    verdict: Option<&references::Verdict>,
-    repair: Option<&references::Repair>,
-) -> Option<String> {
-    let existing = link_for(source);
-
-    // Trustworthy by construction: built from the `corpusId` in the search result this paper came
-    // from. Nothing composed it, so there is nothing to check.
-    if existing.as_deref().is_some_and(references::is_corpus_link) {
-        return existing;
-    }
-
-    // The work the registry says this citation describes. Checked, so usable.
-    if let Some(repair) = repair {
-        return Some(format!("https://api.semanticscholar.org/DOI:{}", repair.doi));
-    }
-
-    // The citation's own DOI — **only once it has been verified**.
-    //
-    // This is the line that shipped wrong, and it made things worse rather than merely failing.
-    // It used to wrap *any* DOI, verified or not, as `api.semanticscholar.org/DOI:<doi>`. An
-    // invented DOI is a real DOI belonging to somebody else, so instead of 404ing it resolved —
-    // cleanly, to a real Semantic Scholar page. A researcher clicking `link` on a paper about
-    // potato late blight was taken to one about recombination in the mammalian germ line, with no
-    // warning, because the row renders before the check returns.
-    //
-    // Routing through Semantic Scholar removed the one accidental safeguard a bad DOI had: that
-    // it often did not resolve at all. So the guard has to be explicit. An unverified identifier
-    // written by a model is not a link; it is a claim awaiting a check.
-    if matches!(verdict, Some(references::Verdict::Confirmed)) {
-        if let Some(doi) = existing.as_deref().and_then(references::doi_in) {
-            return Some(format!("https://api.semanticscholar.org/DOI:{doi}"));
-        }
-    }
-
-    // A link that carries no identifier at all — a thesis in a university repository — is the
-    // model's, and unverifiable, but at least it is not dressed up as a resolved paper. Kept only
-    // when there is no DOI in it to be wrong about.
-    match existing.as_deref().and_then(references::doi_in) {
-        Some(_) => None,
-        None => existing,
-    }
-}
-
-
-/// The link to actually use for a source.
-///
-/// The backend's own field first, and the URL inside the citation only when there is no field.
-/// See [`protocol::Source`] for why that order is not arbitrary: one is what Semantic Scholar
-/// returned, the other is what the model wrote down.
-pub(crate) fn link_for(source: &protocol::Source) -> Option<String> {
-    source
-        .link
-        .clone()
-        .or_else(|| first_url(&source.citation))
-}
-
-
-/// The URL written into the citation text, when it contradicts the structured one.
-///
-/// `None` when they agree, when either is missing, or when they differ only in the ways URLs
-/// harmlessly differ — a trailing slash, `http` against `https`, or the `doi.org` host spelled
-/// with `dx.`. Those are the same resolver and flagging them would train people to ignore this.
-pub(crate) fn disputed_link(source: &protocol::Source) -> Option<String> {
-    let structured = source.link.as_deref()?;
-    let written = first_url(&source.citation)?;
-    let normalise = |url: &str| {
-        url.trim_end_matches('/')
-            .replace("http://", "https://")
-            .replace("://dx.doi.org/", "://doi.org/")
-            .to_ascii_lowercase()
-    };
-    (normalise(structured) != normalise(&written)).then_some(written)
-}
-
-
-/// A citation with its URL removed, and the punctuation left tidy.
-///
-/// So the prose can be read as prose and the link shown once, on its own line, where it cannot
-/// wrap into something that looks mistyped.
-pub(crate) fn without_url(citation: &str) -> String {
-    let Some(url) = first_url(citation) else {
-        return citation.trim().to_string();
-    };
-    let Some(at) = citation.find(&url) else {
-        return citation.trim().to_string();
-    };
-    let mut out = String::with_capacity(citation.len());
-    out.push_str(&citation[..at]);
-    out.push_str(&citation[at + url.len()..]);
-    // "…potato. https://doi.org/10.1/x." leaves "…potato. ." behind.
-    out.trim().trim_end_matches(['.', ',', ';', ' ']).trim().to_string()
-}
-
-
 /// The provenance graph as a Mermaid `flowchart`.
 ///
-/// Mermaid because it is the one diagram format a researcher can already paste somewhere useful:
-/// GitHub, Quarto, Obsidian and Typst all render it, and it stays readable as text if none of
-/// them are to hand. The link styles carry the same distinction the drawing does — `-->` is
-/// causal, `-.->` is arrival order — so a diagram pasted into a methods section does not quietly
-/// lose the hedge that makes it honest.
+/// Mermaid renders in GitHub, Quarto, Obsidian and Typst, and stays readable as plain text
+/// otherwise. `-->` marks a causal (delegated) edge, `-.->` an arrival-order edge.
 pub(crate) fn mermaid(graph: &provenance::Graph) -> String {
     let mut out = String::from("flowchart TD\n");
     for (at, node) in graph.nodes.iter().enumerate() {
@@ -190,7 +129,7 @@ pub(crate) fn mermaid(graph: &provenance::Graph) -> String {
             1 => node.name.replace('_', " "),
             visits => format!("{} ×{visits}", node.name.replace('_', " ")),
         };
-        // Quotes around the label so a name with a bracket or a space in it cannot end the node.
+        // Quoted so a name with a bracket or space cannot end the node early.
         out.push_str(&format!("    n{at}[\"{}\"]\n", label.replace('"', "'")));
     }
     for edge in &graph.edges {
@@ -211,18 +150,10 @@ pub(crate) fn mermaid(graph: &provenance::Graph) -> String {
     out
 }
 
-
 /// The provenance graph as a standalone SVG.
 ///
-/// **SVG rather than the PNG the design asks for.** Rasterising what is on screen would mean a
-/// screenshot API gpui 0.2.2 does not expose, or a PNG encoder — a compressor and a CRC — written
-/// by hand or pulled in as a dependency, on a build that has to succeed on a colleague's Windows
-/// machine with nothing installed. SVG needs none of that: it is text, this function is the
-/// generator, and a vector figure is what a journal asks for anyway. It also survives being
-/// scaled into a poster, which a 760px raster does not.
-///
-/// Colours are baked from the live palette at the moment of export, because the file leaves the
-/// app and cannot ask a theme anything later.
+/// SVG rather than a PNG screenshot: it's plain text, needs no rasteriser, and scales cleanly
+/// for a manuscript figure. Colours are baked from the live theme at export time.
 pub(crate) fn provenance_svg(graph: &provenance::Graph) -> String {
     const ROW: f32 = 58.;
     const LEFT: f32 = 16.;
@@ -271,8 +202,6 @@ pub(crate) fn provenance_svg(graph: &provenance::Graph) -> String {
             x + 5.5,
             ink(theme::accent())
         ));
-        // `escape` rather than the name straight in: a specialist called `a<b` would otherwise
-        // open a tag and the rest of the file would not parse.
         out.push_str(&format!(
             "<text x=\"{}\" y=\"{}\" fill=\"{}\" font-size=\"13\">{}</text>\n",
             x + 20.,
@@ -298,7 +227,6 @@ pub(crate) fn provenance_svg(graph: &provenance::Graph) -> String {
     out
 }
 
-
 /// The five characters that would otherwise be markup.
 pub(crate) fn escape_xml(text: &str) -> String {
     text.replace('&', "&amp;")
@@ -308,33 +236,18 @@ pub(crate) fn escape_xml(text: &str) -> String {
         .replace('\'', "&apos;")
 }
 
+// --- drawing primitives ---
 
 /// The colour that stands for how much an edge can be trusted.
-///
-/// Shared by the arcs and the legend so the two cannot describe different pictures — which they
-/// did while each carried its own `match`.
 pub(crate) fn edge_ink(kind: provenance::Edge) -> u32 {
     match kind {
         provenance::Edge::Delegated => theme::text_muted(),
         provenance::Edge::Then => theme::text_faint(),
-        // The one edge that gets the accent, because these returns are what §73 asked the
-        // feature to make visible.
         provenance::Edge::Returned => theme::accent(),
     }
 }
 
-
-/// Stroke a quadratic as a dashed line.
-///
-/// **Hand-rolled because there is no dash setting.** `PathBuilder::stroke` takes a width and
-/// nothing else, so a dashed curve has to be built out of short solid ones. The curve is walked at
-/// a fixed parameter step and alternate runs are emitted, which gives even-looking dashes on the
-/// gentle arcs this draws.
-///
-/// Why bother: solid versus dashed is the *only* thing separating "one specialist delegated to the
-/// other", which is true by construction, from "one was seen before the other", which is an
-/// inference. Drawing both as solid lines and explaining the difference in a paragraph underneath
-/// puts the hedge somewhere the reader has already stopped looking.
+/// Stroke a quadratic as a dashed line, since `PathBuilder::stroke` has no dash setting.
 pub(crate) fn paint_dashed_curve(
     window: &mut Window,
     start: gpui::Point<gpui::Pixels>,
@@ -343,10 +256,9 @@ pub(crate) fn paint_dashed_curve(
     weight: f32,
     colour: u32,
 ) {
-    /// Samples along the curve. Enough that a dash is a dash rather than a chord across a bend.
+    /// Samples along the curve.
     const STEPS: usize = 48;
-    /// Samples per dash, and per gap — the 4/4 pattern the design asks for, in curve parameter
-    /// rather than in pixels.
+    /// Samples per dash and per gap (a 4/4 pattern, in curve parameter rather than pixels).
     const DASH: usize = 3;
 
     let at = |t: f32| -> gpui::Point<gpui::Pixels> {
@@ -376,11 +288,7 @@ pub(crate) fn paint_dashed_curve(
     }
 }
 
-
-/// What each line in the graph means, drawn the way it is drawn.
-///
-/// A sample of the actual stroke rather than a coloured word: the reader is being asked to tell
-/// solid from dashed at 1.5px, and a legend that only names the colours does not help with that.
+/// What each line in the graph means, drawn the way it is drawn (a stroke sample, not a swatch).
 pub(crate) fn graph_legend() -> impl IntoElement {
     let mut rows = div().flex().flex_row().flex_wrap().gap_4().w_full().min_w_0();
     for (kind, meaning) in [
@@ -408,8 +316,8 @@ pub(crate) fn graph_legend() -> impl IntoElement {
                         .w(px(26.))
                         .h(px(weight))
                         .bg(rgb(colour))
-                        // A dashed sample, without a canvas: the gaps are drawn as a row of
-                        // background-coloured blocks over the line.
+                        // A dashed sample without a canvas: gaps are background-coloured blocks
+                        // laid over the line.
                         .when(dashed, |sample| {
                             sample
                                 .bg(rgb(theme::overlay()))
@@ -430,15 +338,9 @@ pub(crate) fn graph_legend() -> impl IntoElement {
     rows
 }
 
+// --- cross-file utilities (used by chat.rs) ---
 
-/// What kind of work a specialist does, as a colour.
-///
-/// **Two colours, and `None` for anything else.** The design is explicit that a colour per
-/// specialist is a legend nobody memorises; the distinction worth carrying is between work that
-/// goes and reads, and work that touches the data. Matched on the name because that is all the
-/// chip has — a heuristic, and one whose worst outcome is a chip in the ordinary text colour
-/// rather than a wrong claim. A specialist this does not recognise is left uncoloured on purpose:
-/// guessing which of two kinds a new one is would be the mistake.
+/// What kind of work a specialist does, as a colour: research-flavoured, data-flavoured, or none.
 pub(crate) fn specialist_ink(name: &str) -> Option<u32> {
     let name = name.to_ascii_lowercase();
     if ["search", "research", "literature", "paper", "citation", "theor"]
@@ -456,12 +358,7 @@ pub(crate) fn specialist_ink(name: &str) -> Option<u32> {
     None
 }
 
-
-/// The specialists a turn consulted, in order, with a run of the same one collapsed.
-///
-/// `a → a → b` is one visit to `a` then one to `b`; `a → b → a` keeps both visits to `a`, because
-/// coming *back* to a specialist after another is the loop the whole provenance feature exists to
-/// show (§73). Only consecutive repeats collapse.
+/// The specialists a turn consulted, in order, with consecutive repeats of the same one collapsed.
 pub(crate) fn consulted(agents: &[AgentTrace]) -> Vec<String> {
     let mut path: Vec<String> = Vec::new();
     for agent in agents {
@@ -472,13 +369,8 @@ pub(crate) fn consulted(agents: &[AgentTrace]) -> Vec<String> {
     path
 }
 
-
 impl Workbench {
-    /// The record of this enquiry: what was consulted, in what order, and where it doubled back.
-    ///
-    /// Requested (docs §73) with one sentence as the specification — *"each scientist can track
-    /// his work by conversation"* — and built as a modal for the reason §68 moved Setup into one:
-    /// it is something you open, read and close, not a place you navigate to.
+    /// The provenance modal: what was consulted, in what order, and where it doubled back.
     pub(crate) fn provenance_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let view = self.provenance_view;
         let rail = ui::nav_rail()
@@ -502,8 +394,7 @@ impl Workbench {
                 ),
             );
 
-        // Which turn the graph is showing. Only on the graph — the timeline is one row per turn
-        // already, so filtering it to a turn would leave a chart of one bar.
+        // Turn filter only applies to the graph — the timeline is already one row per turn.
         let rail = if view == ProvenanceView::Graph && self.provenance.turns.len() > 1 {
             let mut rail = rail.child(div().pt_3().child(section_label("TURNS"))).child(
                 ui::NavEntry::new(
@@ -520,8 +411,6 @@ impl Workbench {
                 rail = rail.child(
                     ui::NavEntry::new(
                         SharedString::from(format!("prov-turn-{at}")),
-                        // The question, cut to a line. A turn numbered and not named is a row
-                        // the reader has to count to identify.
                         SharedString::from(one_line(&turn.prompt)),
                         self.provenance_turn == Some(at),
                     )
@@ -537,9 +426,6 @@ impl Workbench {
         };
 
         let body = if self.provenance.is_empty() {
-            // Distinguished from "nothing happened": a conversation of plain questions has a
-            // record and it is empty of delegations, which is a fact about the work rather than
-            // a failure of the feature.
             div().flex().flex_col().gap_2().child(
                 ui::Label::new("No specialist has been consulted in this conversation yet.")
                     .muted(),
@@ -556,9 +442,6 @@ impl Workbench {
             .focus(&self.provenance_focus)
             .nav(rail)
             .body(body)
-            // The exports are what let a researcher put this record in a methods section, which
-            // is the whole reason it is kept. Both are text: Mermaid renders in GitHub, Quarto,
-            // Obsidian and Typst, and SVG is what a journal wants a figure in.
             .actions(
                 ui::actions()
                     .child(
@@ -600,33 +483,17 @@ impl Workbench {
                 .size(ui::Size::Compact),
             )
     }
-}
 
-
-impl Workbench {
     /// One row per turn, one bar per invocation, on a scale shared by the whole conversation.
-    ///
-    /// **The scale is the point, and getting it wrong made the view worse than useless.** It
-    /// first normalised each turn against its own span, which meant a turn with a single
-    /// invocation always drew a full-width bar — so an 8-second lookup and a 32-second one came
-    /// out pixel-identical and *looked* comparable. A chart whose bars carry no information is
-    /// worse than no chart, because it will be read anyway.
-    ///
-    /// So the divisor is the longest **turn span** in the conversation. Spans rather than
-    /// individual durations because a turn's bars are laid out inside it, and a scale smaller
-    /// than the span would push later bars off the end. Gaps *between* turns stay out of it —
-    /// those are however long the researcher took to read and type, and including them would
-    /// squash every bar to a sliver.
     pub(crate) fn provenance_timeline(&self) -> gpui::Div {
         let mut body = div().flex().flex_col().w_full().min_w_0().gap_4();
-        // Shared by every row — see `Record::scale` for why, and for what it replaced.
+        // Scaled against the longest turn span in the conversation, not each turn's own span,
+        // so bars are comparable across rows; gaps between turns are excluded from the scale.
         let scale = self.provenance.scale() as f32;
         for (index, turn) in self.provenance.turns.iter().enumerate() {
             if turn.invocations.is_empty() {
                 continue;
             }
-            // Where this turn's clock starts. Offsets are measured from here and widths against
-            // the conversation-wide `scale`, so bars compare between rows as well as within one.
             let start = turn
                 .invocations
                 .iter()
@@ -652,8 +519,7 @@ impl Workbench {
                                 .flex_none()
                                 .w(px(190.))
                                 .min_w_0()
-                                // Depth shows a nested delegation for what it is: a specialist
-                                // that was called by another specialist, not by the coordinator.
+                                // Indent shows a nested delegation as called by another specialist.
                                 .pl(px(12. * depth(&invocation.ns) as f32))
                                 .child(
                                     ui::Label::new(invocation.name.clone())
@@ -682,8 +548,7 @@ impl Workbench {
                                         .h_full()
                                         .left(relative(offset))
                                         .w(relative(width))
-                                        // A single-chunk invocation has a zero-width interval
-                                        // and would otherwise be drawn as nothing at all.
+                                        // Zero-width single-chunk invocations still get a sliver.
                                         .min_w(px(3.))
                                         .rounded_sm()
                                         .bg(rgb(theme::accent())),
@@ -727,32 +592,13 @@ impl Workbench {
             .size(ui::Size::Compact),
         )
     }
-}
 
-
-impl Workbench {
-    /// The graph: nodes are kinds, edges are the transitions between them, drawn.
-    ///
-    /// §73 sketched this as a second stage after a chain of chips, and the chain was built first.
-    /// Shown, the verdict was immediate: *"the other image its not a graph."* Fair — a row of
-    /// chips is a sentence about the work, and what was asked for is its shape.
-    ///
-    /// **Laid out vertically**, which is not the obvious choice and is the right one here. The
-    /// specialists are named `exploratory_data_analysis` and `academic_researcher`; ten of those
-    /// across a 570px modal is 57px each, so a horizontal row would either clip every label or
-    /// need text painted into the canvas. A column gives each name the full width, grows to any
-    /// number of specialists, and leaves the whole right-hand gutter for the edges.
-    ///
-    /// **Edges bow further right the further they travel**, so a transition that skips three
-    /// nodes cannot be mistaken for one between neighbours and nested arcs stay separable. The
-    /// arrowhead carries direction, which is what makes the return edge — the one this feature
-    /// exists for — visible as an arc running back *up* the column.
+    /// The graph: nodes are specialists, edges are the transitions between them, drawn as arcs.
     pub(crate) fn provenance_graph(&self) -> gpui::Div {
         let graph = self.provenance.graph_of(self.provenance_turn);
 
-        // Two sides of one geometry. `canvas` cannot lay out text and a `div` cannot draw a
-        // curve, so the nodes are real elements and the edges are painted beside them — which
-        // means both have to agree on where a node is. One constant each, used by both.
+        // Nodes are real elements (for text layout) and edges are painted beside them on a
+        // canvas, so both need to agree on geometry — hence these shared constants.
         const ROW: f32 = 58.;
         const GUTTER: f32 = 236.;
         /// How far an arc bows out per row it skips, so nested arcs stay separable.
@@ -766,15 +612,12 @@ impl Workbench {
                 from: (edge.from as f32 + 0.5) * ROW,
                 to: (edge.to as f32 + 0.5) * ROW,
                 span: (edge.to as f32 - edge.from as f32).abs(),
-                // Heavier with each traversal, but bounded: a loop walked ten times should read
-                // as heavier than one walked twice without becoming a blob.
                 weight: match edge.kind {
                     provenance::Edge::Returned => 2.,
                     _ => 1.5,
                 } + (edge.count.saturating_sub(1) as f32 * 0.8).min(3.),
                 colour: edge_ink(edge.kind),
-                // Solid means causal. Everything else is arrival order, and dashes are how a
-                // reader is told which is which without reading the legend first.
+                // Solid = causal (delegated); everything else is arrival order.
                 dashed: edge.kind != provenance::Edge::Delegated,
             })
             .collect();
@@ -787,9 +630,7 @@ impl Workbench {
                     let start = gpui::point(x, bounds.origin.y + px(arc.from));
                     let finish = gpui::point(x, bounds.origin.y + px(arc.to));
                     // A quadratic reaches half-way to its control point, so the control sits at
-                    // twice the bow the arc should actually show. Bowing in proportion to the
-                    // rows skipped is what keeps an arc over three rows outside one over two,
-                    // rather than the two crossing where neither can be followed.
+                    // twice the intended bow.
                     let bow = (24. + BOW_PER_ROW * (arc.span - 1.).max(0.)).min(GUTTER - 30.) * 2.;
                     let control = gpui::point(x + px(bow), (start.y + finish.y) / 2.);
 
@@ -804,10 +645,7 @@ impl Workbench {
                         }
                     }
 
-                    // The arrowhead, pointing the way the curve travels as it lands: for a
-                    // quadratic that tangent is `finish - control`. Without it the graph shows
-                    // that two specialists are related but not which way the work went, which is
-                    // the entire question.
+                    // Arrowhead direction is the curve's tangent at the endpoint: `finish - control`.
                     let (dx, dy) = (
                         f32::from(finish.x - control.x),
                         f32::from(finish.y - control.y),
@@ -833,7 +671,6 @@ impl Workbench {
             },
         );
 
-        // The stage still producing output, by the same rule the road strip uses.
         let running = self
             .streaming
             .then(|| {
@@ -848,7 +685,6 @@ impl Workbench {
         let mut column = div().flex().flex_col().flex_grow().min_w_0();
         for node in &graph.nodes {
             let is_running = running.as_deref() == Some(node.name.as_str());
-            // `visited twice · 11s, 6s` — the visits and how long each produced output for.
             let mut note = match node.visits {
                 1 => String::new(),
                 2 => "visited twice".to_string(),
@@ -884,13 +720,7 @@ impl Workbench {
                             .when(!is_running, |dot| dot.bg(rgb(theme::accent()))),
                     )
                     .child(
-                        // **Full width, so every node ends at the same x.** The edges are
-                        // painted in a gutter that begins where this column stops, and the
-                        // canvas has no way to ask how wide a name came out. With names at their
-                        // natural width the arcs anchored to the gutter's edge and the nodes
-                        // stopped wherever their text did — an arc floating in space, attached to
-                        // nothing (docs §86). One shared right edge is what makes the two halves
-                        // of this drawing agree.
+                        // Full width so every node ends at the same x, matching the edge gutter.
                         div()
                             .flex()
                             .flex_col()
@@ -930,8 +760,7 @@ impl Workbench {
                     .flex_none()
                     .h(px(height))
                     .child(column)
-                    // The gutter the arcs live in. Fixed, because the bow distances are measured
-                    // against it.
+                    // Fixed width: the arcs' bow distances are measured against it.
                     .child(div().flex_none().w(px(GUTTER)).h(px(height)).child(edges)),
             )
             .child(graph_legend())
@@ -948,4 +777,3 @@ impl Workbench {
             )
     }
 }
-

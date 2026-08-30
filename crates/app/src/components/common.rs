@@ -8,24 +8,12 @@ use gpui::{
     KeyBinding, ListAlignment, ListState, SharedString, StyledText, Window, WindowBounds, WindowOptions,
 };
 
-/// A theme-tinted 14px icon, matching the text it replaces without changing control geometry.
-///
-/// **`ink` is required, and that is the whole point.** GPUI paints an SVG by rasterising it to a
-/// mask and multiplying by `style.text.color` — and `Svg::paint` is literally
-/// `self.path.as_ref().zip(style.text.color)`, so a `None` there paints *nothing at all*. That
-/// colour is not inherited: `Interactivity::compute_style` starts from `Style::default()`, whose
-/// `text.color` is `None`, and refines it with the element's **own** styles. A parent's
-/// `.text_color(…)` never reaches the child (docs §157).
-///
-/// So the argument is not a convenience. Without it every icon here is invisible, and no test
-/// that reads the SVG file can tell — which is why this is a parameter the compiler demands
-/// rather than a rule written down.
+/// A theme-tinted icon. `ink` is required: GPUI does not inherit `text_color` into an `Svg`'s
+/// paint colour, so an icon built without it renders invisibly.
 pub(crate) fn app_icon(path: &'static str, ink: u32, size: Option<f32>) -> impl IntoElement {
     app_icon_at(path, ink, size.unwrap_or(ui::IconSize::Medium.px()))
 }
 
-
-/// The same, at a size the caller chooses — a file tile wants more than 14px.
 pub(crate) fn app_icon_at(path: &'static str, ink: u32, size: f32) -> impl IntoElement {
     svg()
         .path(path)
@@ -35,6 +23,13 @@ pub(crate) fn app_icon_at(path: &'static str, ink: u32, size: f32) -> impl IntoE
         .text_color(rgb(ink))
 }
 
+/// A small caps-ish section heading.
+pub(crate) fn section_label(text: &'static str) -> impl IntoElement {
+    div()
+        .text_color(rgb(theme::text_faint()))
+        .text_xs()
+        .child(text)
+}
 
 /// [`section_label`] for a heading only known at runtime.
 pub(crate) fn section_label_owned(text: String) -> impl IntoElement {
@@ -44,29 +39,7 @@ pub(crate) fn section_label_owned(text: String) -> impl IntoElement {
         .child(text)
 }
 
-
-/// A small caps-ish section heading for the side panel.
-///
-/// **Faint, not accent.** A heading is not something you can click, and the accent is the app's
-/// one signal that you can — `OUTPUTS`, `SUGGESTED NEXT` and `THE SPECIALISTS` shouting in the
-/// brand colour is most of why the window read as busy. Moving these to `text_faint` was the
-/// single largest change in the redesign and it is one line.
-pub(crate) fn section_label(text: &'static str) -> impl IntoElement {
-    div()
-        .text_color(rgb(theme::text_faint()))
-        .text_xs()
-        .child(text)
-}
-
-
-/// The glyph and colour that stand for a file's kind.
-///
-/// Finer than [`workspace::Kind`], which groups by what a researcher *does* with a file and is
-/// the right grouping for the panel's sections. Here a PDF and a Markdown note want telling
-/// apart at a glance even though both are things you read.
-///
-/// Four colours, from the palette's status roles rather than a new set — the same argument as
-/// the provenance chips: a colour per file type is a legend nobody memorises.
+/// The glyph and colour standing for a file's kind, keyed off its extension.
 pub(crate) fn file_mark(path: &std::path::Path) -> (&'static str, u32) {
     let extension = path
         .extension()
@@ -95,14 +68,8 @@ pub(crate) fn file_mark(path: &std::path::Path) -> (&'static str, u32) {
     }
 }
 
-
-/// The card every popup menu is drawn on.
-///
-/// One definition because the discipline is easy to omit and invisible when it is: a menu must
-/// `occlude`, or a click on a row also lands on whatever the menu was drawn over (§163), and it
-/// must swallow the left press, or choosing an item starts a text selection in the transcript
-/// underneath. The right-click menu learned both the hard way; a second menu written from scratch
-/// beside it would have learned them again.
+/// The card every popup menu is drawn on. Must `occlude` and swallow the left press, or a click
+/// falls through to whatever is underneath (the row it's anchored to, or the transcript below it).
 pub(crate) fn menu_card() -> gpui::Div {
     div()
         .flex()
@@ -119,7 +86,6 @@ pub(crate) fn menu_card() -> gpui::Div {
         })
 }
 
-
 /// One line of the activity trace: a tool call, or a delegation.
 pub(crate) fn step_line(label: &str) -> impl IntoElement {
     div()
@@ -130,7 +96,6 @@ pub(crate) fn step_line(label: &str) -> impl IntoElement {
         .child(format!("· {label}"))
 }
 
-
 pub(crate) fn scrollbar(handle: &gpui::ScrollHandle) -> Option<impl IntoElement> {
     let overflow = handle.max_offset().height;
     let viewport = handle.bounds().size.height;
@@ -138,7 +103,6 @@ pub(crate) fn scrollbar(handle: &gpui::ScrollHandle) -> Option<impl IntoElement>
         return None;
     }
     let content = viewport + overflow;
-    // Floored, so a very long transcript still leaves something big enough to see.
     let thumb = (viewport * (viewport / content)).max(px(28.));
     let travel = viewport - thumb;
     let progress = (-handle.offset().y / overflow).clamp(0.0, 1.0);
@@ -157,82 +121,8 @@ pub(crate) fn scrollbar(handle: &gpui::ScrollHandle) -> Option<impl IntoElement>
     )
 }
 
-
-/// How wide the thumb is for a rail showing `viewport` of `viewport + overflow` content.
-///
-/// Split out from the metrics only so it can be tested without a laid-out `ScrollHandle`; the
-/// metrics still compute it exactly once, which is the property the type above exists to hold.
-///
-/// Two bounds, and the second matters as much as the first. The 28px floor keeps a thumb
-/// grabbable on a long rail. The `viewport` ceiling keeps that floor from exceeding the track it
-/// sits in: without it a rail narrower than 28px yields a *negative* `travel`, so the thumb is
-/// painted to the left of its own track while `horizontal_drag_offset` refuses to move it — the
-/// "looked interactive, wasn't" shape of §158, one case further out.
-pub(crate) fn horizontal_thumb_width(viewport: gpui::Pixels, overflow: gpui::Pixels) -> gpui::Pixels {
-    let content = viewport + overflow;
-    (viewport * (viewport / content)).max(px(28.)).min(viewport)
-}
-
-
-pub(crate) fn horizontal_scroll_metrics(handle: &gpui::ScrollHandle) -> Option<HorizontalScrollMetrics> {
-    let overflow = handle.max_offset().width;
-    let viewport = handle.bounds().size.width;
-    if overflow <= px(0.) || viewport <= px(0.) {
-        return None;
-    }
-    let thumb = horizontal_thumb_width(viewport, overflow);
-    let travel = viewport - thumb;
-    let progress = (-handle.offset().x / overflow).clamp(0.0, 1.0);
-    Some(HorizontalScrollMetrics {
-        overflow,
-        viewport,
-        thumb,
-        travel,
-        progress,
-    })
-}
-
-
-/// Convert a dragged thumb position into GPUI's negative content offset.
-pub(crate) fn horizontal_drag_offset(
-    pointer_x: gpui::Pixels,
-    track_left: gpui::Pixels,
-    grab_x: gpui::Pixels,
-    travel: gpui::Pixels,
-    overflow: gpui::Pixels,
-) -> gpui::Pixels {
-    if travel <= px(0.) {
-        return px(0.);
-    }
-    let thumb_left = (pointer_x - track_left - grab_x).clamp(px(0.), travel);
-    -(overflow * (thumb_left / travel))
-}
-
-
-/// Images in one group, everything else in another, each keeping its listing order.
-///
-/// **The boundary the researcher asked for**, in their words: *"I want to group images and in
-/// another group other files."* §152's gallery grouped by the folder the agent chose, which was
-/// right about structure and wrong about kind — a folder holding seven plots and a summary CSV
-/// put the CSV in the middle of the strip, and the strip is the thing you flick through looking
-/// for a figure.
-///
-/// `Kind::Figure` is the test rather than the extension, so this cannot disagree with the
-/// thumbnail renderer about what an image is: both ask the same enum.
-pub(crate) fn split_images(
-    outputs: &[workspace::Output],
-) -> (Vec<workspace::Output>, Vec<workspace::Output>) {
-    outputs
-        .iter()
-        .cloned()
-        .partition(|output| output.kind == workspace::Kind::Figure)
-}
-
-
-/// A visible scrollbar for GPUI's variable-height list.
-///
-/// `list` stores its offset in [`ListState`], not a `ScrollHandle`. This keeps §40's visible
-/// affordance without adding a second scroll container around the virtual list (docs §156).
+/// A visible scrollbar for GPUI's variable-height `List`, which tracks offset in `ListState`
+/// rather than a `ScrollHandle`.
 pub(crate) fn list_scrollbar(state: &ListState) -> Option<impl IntoElement> {
     let overflow = state.max_offset_for_scrollbar().height;
     let viewport = state.viewport_bounds().size.height;
@@ -258,6 +148,55 @@ pub(crate) fn list_scrollbar(state: &ListState) -> Option<impl IntoElement> {
     )
 }
 
+/// Thumb width for a rail showing `viewport` of `viewport + overflow` content. Floored at 28px so
+/// it stays grabbable, ceilinged at `viewport` so a very narrow rail can't produce negative travel.
+pub(crate) fn horizontal_thumb_width(viewport: gpui::Pixels, overflow: gpui::Pixels) -> gpui::Pixels {
+    let content = viewport + overflow;
+    (viewport * (viewport / content)).max(px(28.)).min(viewport)
+}
+
+pub(crate) fn horizontal_scroll_metrics(handle: &gpui::ScrollHandle) -> Option<HorizontalScrollMetrics> {
+    let overflow = handle.max_offset().width;
+    let viewport = handle.bounds().size.width;
+    if overflow <= px(0.) || viewport <= px(0.) {
+        return None;
+    }
+    let thumb = horizontal_thumb_width(viewport, overflow);
+    let travel = viewport - thumb;
+    let progress = (-handle.offset().x / overflow).clamp(0.0, 1.0);
+    Some(HorizontalScrollMetrics {
+        overflow,
+        viewport,
+        thumb,
+        travel,
+        progress,
+    })
+}
+
+/// Convert a dragged thumb position into GPUI's negative content offset.
+pub(crate) fn horizontal_drag_offset(
+    pointer_x: gpui::Pixels,
+    track_left: gpui::Pixels,
+    grab_x: gpui::Pixels,
+    travel: gpui::Pixels,
+    overflow: gpui::Pixels,
+) -> gpui::Pixels {
+    if travel <= px(0.) {
+        return px(0.);
+    }
+    let thumb_left = (pointer_x - track_left - grab_x).clamp(px(0.), travel);
+    -(overflow * (thumb_left / travel))
+}
+
+/// Images in one group, everything else in another, each keeping its listing order.
+pub(crate) fn split_images(
+    outputs: &[workspace::Output],
+) -> (Vec<workspace::Output>, Vec<workspace::Output>) {
+    outputs
+        .iter()
+        .cloned()
+        .partition(|output| output.kind == workspace::Kind::Figure)
+}
 
 impl Render for Hint {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
@@ -274,24 +213,165 @@ impl Render for Hint {
     }
 }
 
-
 impl Workbench {
-    /// The bordered box a filter composer sits in.
-    ///
-    /// One helper because the theme popup and the gallery both want it, and because it is the
-    /// only place a *focus ring* has anywhere to attach: the composer is a child entity, so
-    /// the wrapper has to track its handle and light up with `in_focus`.
+    /// A visible, clickable, draggable horizontal scrollbar for one gallery rail. The whole
+    /// track is a hit target, not just the thumb: clicking off-thumb jumps toward that position.
+    pub(crate) fn horizontal_scrollbar(
+        &self,
+        id: String,
+        handle: &gpui::ScrollHandle,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        let metrics = horizontal_scroll_metrics(handle)?;
+        let track_left = handle.bounds().origin.x;
+        let thumb_left = metrics.travel * metrics.progress;
+        let dragged = handle.clone();
+
+        Some(
+            div()
+                .id(SharedString::from(format!("gallery-scrollbar-{id}")))
+                .absolute()
+                .bottom(px(0.))
+                .left(px(0.))
+                .w(metrics.viewport)
+                .h(px(12.))
+                .hover(|style| style.cursor_pointer())
+                .child(
+                    div()
+                        .absolute()
+                        .top(px(2.))
+                        .left(thumb_left)
+                        .h(px(8.))
+                        .w(metrics.thumb)
+                        .rounded_full()
+                        .bg(rgb(theme::border_strong())),
+                )
+                .on_mouse_down(
+                    gpui::MouseButton::Left,
+                    cx.listener(move |workbench, event: &gpui::MouseDownEvent, _window, cx| {
+                        let local_x =
+                            (event.position.x - track_left).clamp(px(0.), metrics.viewport);
+                        let grab_x = if local_x >= thumb_left
+                            && local_x <= thumb_left + metrics.thumb
+                        {
+                            local_x - thumb_left
+                        } else {
+                            metrics.thumb / 2.
+                        };
+                        let offset_x = horizontal_drag_offset(
+                            event.position.x,
+                            track_left,
+                            grab_x,
+                            metrics.travel,
+                            metrics.overflow,
+                        );
+                        let offset_y = dragged.offset().y;
+                        dragged.set_offset(gpui::point(offset_x, offset_y));
+                        workbench.gallery_scroll_drag = Some(GalleryScrollDrag {
+                            handle: dragged.clone(),
+                            track_left,
+                            grab_x,
+                            travel: metrics.travel,
+                            overflow: metrics.overflow,
+                        });
+                        cx.stop_propagation();
+                        cx.notify();
+                    }),
+                ),
+        )
+    }
+
+    /// The generic right-click context menu; item set and enabled state come from `open.target`.
+    pub(crate) fn context_menu(&self, open: menu::ContextMenu, cx: &mut Context<Self>) -> impl IntoElement {
+        let target = open.target;
+        let mut panel = menu_card();
+
+        for &item in open.items() {
+            let enabled = self.menu_item_enabled(item, target, cx);
+            let shortcut = item.shortcut(target);
+            panel = panel.child(
+                div()
+                    .id(SharedString::from(format!("menu-{}", item.label())))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap_4()
+                    .px_3()
+                    .py_1()
+                    .text_sm()
+                    .text_color(rgb(if enabled {
+                        theme::text()
+                    } else {
+                        theme::text_faint()
+                    }))
+                    .when(enabled, |row| {
+                        row.hover(|style| style.bg(rgb(theme::accent_soft())).cursor_pointer())
+                            .on_click(cx.listener(move |workbench, _event, window, cx| {
+                                workbench.run_menu_item(item, target, window, cx);
+                            }))
+                    })
+                    .child(item.label())
+                    .child(
+                        div()
+                            .text_color(rgb(theme::text_faint()))
+                            .text_xs()
+                            .child(shortcut),
+                    ),
+            );
+        }
+
+        gpui::deferred(gpui::anchored().position(open.at).snap_to_window().child(
+            panel.on_mouse_down_out(cx.listener(
+                |workbench, event: &gpui::MouseDownEvent, _window, cx| {
+                    // A right-click elsewhere re-opens the menu at the new spot; closing here too
+                    // would race that handler and could leave no menu at all.
+                    if event.button == gpui::MouseButton::Right {
+                        return;
+                    }
+                    workbench.context_menu = None;
+                    cx.notify();
+                },
+            )),
+        ))
+    }
+
+    /// The draggable edge between two panes. Drag state is tracked on the root, not this strip,
+    /// so it keeps following the pointer even once it outruns the 4px strip itself.
+    pub(crate) fn pane_divider(&self, edge: Divider, cx: &mut Context<Self>) -> impl IntoElement {
+        let id = match edge {
+            Divider::Sidebar => "divider-sidebar",
+            Divider::Panel => "divider-panel",
+        };
+        div()
+            .id(id)
+            .flex_none()
+            .w(px(4.))
+            .h_full()
+            .when(self.dragging == Some(edge), |bar| {
+                bar.bg(rgb(theme::accent()))
+            })
+            .hover(|style| {
+                style
+                    .bg(rgb(theme::border_strong()))
+                    .cursor(gpui::CursorStyle::ResizeLeftRight)
+            })
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(
+                    move |workbench, _event: &gpui::MouseDownEvent, _window, cx| {
+                        workbench.dragging = Some(edge);
+                        cx.notify();
+                    },
+                ),
+            )
+    }
+
+    /// The bordered box a filter/search composer sits in, shared so every instance gets the same
+    /// focus-ring behaviour (the composer is a child entity, so the wrapper tracks its handle).
     pub(crate) fn filter_field(&self, field: Entity<Composer>, cx: &App) -> impl IntoElement {
         div()
             .track_focus(&field.focus_handle(cx))
-            // Stated, not inherited. The gallery's box was built by hand and looked identical
-            // in the source, and it came out a quarter the width with its placeholder spilling
-            // out the side — it was relying on flex stretch, and the two boxes did not agree
-            // about whether they got it (docs §72).
-            //
-            // A **flex row**, because `w_full` alone was not enough and §72 came back: a `div` is
-            // `Display::Block` by default in gpui, so the field inside had no row to fill and its
-            // own `width: 100%` had nothing definite to resolve against (docs §88).
             .flex()
             .flex_row()
             .items_center()
@@ -307,4 +387,3 @@ impl Workbench {
             .child(field)
     }
 }
-

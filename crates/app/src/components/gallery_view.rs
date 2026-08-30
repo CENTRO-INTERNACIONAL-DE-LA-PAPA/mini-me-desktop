@@ -14,25 +14,16 @@ pub(crate) fn media_scrim_size(tile: f32) -> f32 {
 }
 
 
-/// How many characters of a filename fit across a tile at `text_xs`.
-///
-/// Measured rather than truncated by the layout, for the reason [`Workbench::output_grid_tile`]
-/// gives: `Label::ellipsis` collapses to a bare `…` without a flex parent to grow within (§59).
-/// Roughly 6px per character at 12px type, less the tile's own padding.
+/// How many characters of a filename fit across a tile at `text_xs` (measured, not layout-truncated).
 pub(crate) fn name_chars(tile: f32) -> usize {
     (((tile - 16.) / 6.) as usize).max(8)
 }
 
 
-/// How many tiles the grid draws, and how many images the last one stands in for.
-///
-/// **The scrimmed tile counts among the hidden**, because it is covered: eight images in four
-/// tiles reads `+5` — three pictures you can see, five you cannot — which is what the phone
-/// gallery the researcher pointed at shows for the same eight. `total - tiles` gives `+4` and
-/// looks perfectly reasonable in review; it is only wrong beside the thing it is imitating. One
-/// function so the grid and its test cannot hold two versions of the rule.
+/// How many tiles the grid draws, and how many images the last tile stands in for.
 pub(crate) fn image_grid_shape(total: usize) -> (usize, usize) {
     let shown = total.min(IMAGE_GRID_TILES);
+    // The scrimmed tile counts among the hidden, since the overlay covers it too.
     let hidden = if total > IMAGE_GRID_TILES {
         total - (IMAGE_GRID_TILES - 1)
     } else {
@@ -62,18 +53,8 @@ pub(crate) fn output_folder_groups(outputs: &[workspace::Output]) -> Vec<OutputF
 }
 
 
-/// Name the folder the agent chose, not the generated background-thread directory above it.
-///
-/// The screenshot in §152 devoted its useful width to a 36-character UUID common to every row.
-/// That component is app bookkeeping; removing only a leading UUID leaves `eda/plots`, the
-/// researcher's information, while the unshortened path remains the grouping identity above.
-///
-/// `worker` is whoever produced the files, when the app knows — from the folder for a background
-/// worker (§199), from the backend's own record for a specialist (§201). It takes the leading
-/// position either way: the UUID's, when there was one, so nothing is lost by removing it; and
-/// otherwise ahead of the folder the agent chose. Either way the heading reads as a path of work
-/// — `background worker / plots`, `exploratory data analysis / plots`. `None` keeps §152's
-/// behaviour, which is what a conversation with no record still gets.
+/// Heading for a folder: the producing worker's name (if known) ahead of the agent's own
+/// path, with a leading thread-id folder component dropped.
 pub(crate) fn output_folder_label(folder: &std::path::Path, worker: Option<&str>) -> String {
     let mut components: Vec<String> = folder
         .components()
@@ -100,14 +81,7 @@ pub(crate) fn output_folder_label(folder: &std::path::Path, worker: Option<&str>
 }
 
 
-/// The worker thread a file sits under, when it sits under one.
-///
-/// The **only** attribution this client can make without guessing. A background worker runs on
-/// its own thread and writes into a folder named after it, so the folder *is* the record of who
-/// produced the file. Specialists consulted inside the conversation share the conversation's
-/// thread and its one directory, and nothing on the wire says which of them wrote a given file —
-/// so nothing here claims to know. That restraint is `provenance.rs`'s own rule from §73: a
-/// provenance record that quietly guesses is worse than none, because it will be believed.
+/// The worker thread a file sits under, when its path starts with a thread-id folder.
 pub(crate) fn producing_thread(output: &workspace::Output) -> Option<&str> {
     let first = std::path::Path::new(&output.name).components().next()?;
     let name = first.as_os_str().to_str()?;
@@ -119,30 +93,7 @@ pub(crate) fn producing_thread(output: &workspace::Output) -> Option<&str> {
 }
 
 
-/// Outputs split by who produced them: the conversation's own first, then one group per
-/// other author, in the order their first file appears.
-///
-/// **Ahead of the image/other split, not after it.** §152 put every image in one grid because
-/// images are what a person opens the panel to look at. That was right within one body of work
-/// and wrong across two: a researcher looking at *"15 images"* was looking at the conversation's
-/// plots and a worker's plots in one tray, with nothing saying where the boundary was (§199). A
-/// background worker is already a separate run with its own job row and its own folder; its
-/// figures are a separate body of work for the same reason.
-///
-/// Two sources of truth, in this order, each exact within its own domain (§201):
-///
-/// 1. **The folder**, for a background worker — its own thread, its own directory, true by
-///    construction and true even for a conversation reopened years later.
-/// 2. **The manifest**, for everything else — what `overlay/minime_local/authorship.py` wrote
-///    down as each file was produced.
-///
-/// The folder wins where both speak, because inside a worker's run the manifest records that
-/// worker's *own* coordinator and would rename `background worker` to `coordinator` — technically
-/// true of the inner graph and useless to the person reading the panel.
-/// A file that records what a search returned, rather than a result of the research.
-///
-/// Kept out of the transcript's file cards only. Both are real outputs a researcher may want —
-/// they are just not things to read mid-conversation.
+/// Whether this output is a raw search-results file, kept out of the transcript's file cards.
 pub(crate) fn is_search_record(output: &workspace::Output) -> bool {
     matches!(
         output.path.file_name().and_then(|name| name.to_str()),
@@ -151,6 +102,8 @@ pub(crate) fn is_search_record(output: &workspace::Output) -> bool {
 }
 
 
+/// Outputs grouped by producer: the conversation's own files first, then one group per
+/// other author, in the order their first file appears.
 pub(crate) fn by_producer(
     outputs: &[workspace::Output],
     tasks: &[protocol::AsyncTask],
@@ -169,31 +122,19 @@ pub(crate) fn by_producer(
             None => groups.push((by, vec![output.clone()])),
         }
     }
-    // The conversation's own files lead even when someone else wrote first: they are what the
-    // researcher asked for directly, and a delegation is the detour under it.
+    // The conversation's own files lead even when another author wrote first.
     groups.sort_by_key(|(owner, _)| owner.is_some());
     groups
 }
 
 
-/// Who produced a group of files, in the researcher's words rather than the engine's.
-///
-/// `None` is the conversation's own thread, and stays unlabelled: those files are the unmarked
-/// case, and spending a heading on *"from this conversation"* would name the default everywhere
-/// to say something only where it is not true.
-///
-/// A thread with no matching task is still *some* worker — the folder proves it — so it says so
-/// without naming one. That is the state after a reload whose snapshot carried no `async_tasks`,
-/// and it is the difference between "we don't know which" and "nobody".
+/// Human-readable name of the worker behind a thread id, `None` for the conversation's own.
 pub(crate) fn produced_by(thread: Option<&str>, tasks: &[protocol::AsyncTask]) -> Option<String> {
     let thread = thread?;
     Some(
         tasks
             .iter()
             .find(|task| task.thread_id == thread)
-            // Underscores are the graph's spelling of a name, not a person's — the road strip and
-            // the jobs list both already say `background worker`, and a third spelling of the
-            // same specialist in a third panel is how one worker reads as two.
             .map(|task| task.agent_name.replace('_', " "))
             .unwrap_or_else(|| "a background task".to_string()),
     )
@@ -210,11 +151,7 @@ pub(crate) fn images_heading(count: usize, by: Option<&str>) -> String {
 }
 
 
-/// Keep the distinguishing tail when a filename itself is too long for a thumbnail.
-///
-/// `Label::ellipsis()` correctly protects layout (§59), but its trailing ellipsis preserves the
-/// shared prefix and removes the useful suffix in §152. Shortening the string from the leading
-/// edge before layout means the extension and differentiating part survive even in a 140px tile.
+/// Truncate a string from the front, keeping the tail (extension/differentiator) intact.
 pub(crate) fn distinguishing_tail(text: &str, max_chars: usize) -> String {
     let count = text.chars().count();
     if count <= max_chars || max_chars == 0 {
@@ -225,17 +162,7 @@ pub(crate) fn distinguishing_tail(text: &str, max_chars: usize) -> String {
 }
 
 
-/// Shorten an `a / b / c` heading to fit, giving up the middle rather than either end.
-///
-/// **[`distinguishing_tail`] keeps the wrong end for these.** §152 chose tail-keeping because its
-/// labels shared a long *prefix* and differed at the end — the right rule for a filename. §201 then
-/// put the producing worker's name at the *head*, which inverts it: `background worker / outputs /
-/// tables` came out as `…d worker / outputs / tables`, throwing away the one word the attribution
-/// exists to show. Spotted in a screenshot of the feature working (§208).
-///
-/// So both ends survive and the middle gives way. If it still will not fit, the **head** is kept
-/// whole and the tail is trimmed — the producer outranks the leaf folder, because a heading that
-/// cannot say who made these files is the heading §201 replaced.
+/// Shorten an `a / b / c` heading to fit by eliding the middle, keeping head and tail intact.
 pub(crate) fn shorten_path_label(label: &str, max_chars: usize) -> String {
     if label.chars().count() <= max_chars {
         return label.to_string();
@@ -245,7 +172,6 @@ pub(crate) fn shorten_path_label(label: &str, max_chars: usize) -> String {
         return distinguishing_tail(label, max_chars);
     };
     if segments.len() < 2 {
-        // One segment: no middle to drop, so §152's rule is still the best available.
         return distinguishing_tail(label, max_chars);
     }
     let spacer = if segments.len() > 2 { " / … / " } else { " / " };
@@ -254,8 +180,7 @@ pub(crate) fn shorten_path_label(label: &str, max_chars: usize) -> String {
         return joined;
     }
     let room = max_chars.saturating_sub(head.chars().count() + spacer.chars().count());
-    // Below four characters a trimmed tail is all ellipsis and no information; better to fall back
-    // than to print `… / … / …s`.
+    // Below four characters a trimmed tail is all ellipsis and no information.
     if room >= 4 {
         return format!("{head}{spacer}{}", distinguishing_tail(tail, room));
     }
@@ -274,11 +199,6 @@ pub(crate) fn output_filename(output: &workspace::Output) -> String {
 
 impl Workbench {
     /// The file open in the centre, with the set it belongs to along the bottom.
-    ///
-    /// `at` and `count` come from the [`Preview`] rather than being recomputed, so the arrows, the
-    /// `3 / 8` counter and the highlighted filmstrip tile can never disagree about which file is
-    /// showing — the §158 rule about one calculation, applied to three affordances that all mean
-    /// "this one".
     pub(crate) fn preview_modal(
         &self,
         output: workspace::Output,
@@ -300,11 +220,7 @@ impl Workbench {
 
         match output.kind {
             workspace::Kind::Figure => {
-                // **A box with both dimensions set, and `Contain` inside it.** `max_w_full` alone
-                // left the height to the natural size of the file, so a tall plot resolved larger
-                // than the space the flex row gave it and was clipped at *both* ends — the top of
-                // a stacked bar chart cut off, with dead space underneath. `Contain` in a bounded
-                // box letterboxes instead, which is the one arrangement that cannot crop.
+                // Bounded box with `Contain`: letterboxes rather than cropping a tall plot.
                 body = body.child(
                     div()
                         .flex()
@@ -321,8 +237,7 @@ impl Workbench {
                 );
             }
             _ => {
-                // Read a bounded prefix. A 200 MB CSV would otherwise be pulled into
-                // memory and laid out as one paragraph, on the UI thread.
+                // Bounded read: a large file would otherwise be pulled fully into memory.
                 match workspace::head(&output.path, 400) {
                     Ok(text) if output.name.ends_with(".md") => {
                         for parsed in markdown::parse(&text) {
@@ -330,11 +245,8 @@ impl Workbench {
                         }
                     }
                     Ok(text) if is_delimited(&output.name) => {
-                        // Rainbow columns, the trick the `rainbow-csv` editor extensions
-                        // use: colour by column index so the eye can follow one field
-                        // down the rows. Without column *layout* — which GPUI 0.2.2 does
-                        // not have — colour is the only thing that makes a wide CSV
-                        // readable at all (docs §50).
+                        // Colour by column index so the eye can follow a field down rows,
+                        // since GPUI has no column layout to align a wide CSV otherwise.
                         let delimiter = if output.name.ends_with(".tsv") {
                             '\t'
                         } else {
@@ -380,9 +292,7 @@ impl Workbench {
             }
         }
 
-        // The body, flanked by the arrows, so a step is a click where the eye already is rather
-        // than a trip to a toolbar. Only when there is somewhere to go: a lone file gets no
-        // arrows at all, because a control that does nothing is worse than an absent one (§158).
+        // Arrows only when there is somewhere to go; a lone file gets none.
         let framed = if set.len() > 1 {
             div()
                 .flex()
@@ -405,17 +315,12 @@ impl Workbench {
             .id("preview-backdrop")
             .absolute()
             .inset_0()
-            // **Painting over something is not the same as being in front of it.** Without this,
-            // the workbench under the dim stayed live: a click landed on the modal *and* on
-            // whatever happened to be beneath it, so opening a figure could also hit a button in
-            // the transcript. `occlude` blocks the mouse from everything behind this hitbox, which
-            // is what makes the dim mean what it looks like it means (docs §163).
+            // Blocks mouse input to whatever sits behind this hitbox, or a click could
+            // also hit a button in the transcript underneath the modal.
             .occlude()
             .flex()
             .items_center()
             .justify_center()
-            // The dim is the affordance: it says the workbench is still there and that
-            // clicking away comes back to it.
             .bg(if theme::is_light(&theme::current()) {
                 gpui::rgba(0x33333366)
             } else {
@@ -431,10 +336,7 @@ impl Workbench {
                     .bg(rgb(theme::overlay()))
                     .border_1()
                     .border_color(rgb(theme::border_strong()))
-                    // Clicks inside the panel are the panel's business. Click handlers fire on
-                    // the bubble phase — innermost first — so stopping here after a control has
-                    // run is what keeps the backdrop's close-on-click from firing too. Without
-                    // it every arrow press closed the modal it was trying to step through.
+                    // Stop the click here or it bubbles to the backdrop's close-on-click.
                     .on_click(|_event, _window, cx| cx.stop_propagation())
                     .child(
                         div()
@@ -497,15 +399,10 @@ impl Workbench {
                     .children(self.preview_filmstrip(set, at, cx)),
             )
             .on_click(cx.listener(|workbench, _event, _window, cx| {
-                // Clicking the dimmed backdrop closes it, the way every modal does.
                 workbench.preview = None;
                 cx.notify();
             }))
     }
-}
-
-
-impl Workbench {
     /// One step-through arrow beside the previewed file.
     pub(crate) fn preview_arrow(
         &self,
@@ -543,18 +440,7 @@ impl Workbench {
                 }
             }))
     }
-}
-
-
-impl Workbench {
     /// The set along the bottom of the modal: a counter, then a sideways strip to choose from.
-    ///
-    /// **This is the half the researcher asked for by name** — *"we can click and scroll at the
-    /// bottom so the user can select which picture to see."* `None` for a lone file: a filmstrip
-    /// of one is a decoration that implies there is somewhere to go.
-    ///
-    /// Tile ids carry the file's own index, so GPUI keeps each element's identity as the selection
-    /// moves and the strip does not lose its scroll position on every step.
     pub(crate) fn preview_filmstrip(
         &self,
         set: &[workspace::Output],
@@ -592,9 +478,6 @@ impl Workbench {
                     .h(px(48.))
                     .overflow_hidden()
                     .rounded_md()
-                    // The outline is the whole selection signal, so it is two pixels of accent
-                    // against one of border: a one-pixel difference in colour alone did not read
-                    // at thumbnail size on the Windows pass (§158's sibling complaint).
                     .border_2()
                     .border_color(rgb(if selected {
                         theme::accent()
@@ -611,8 +494,6 @@ impl Workbench {
                                 .object_fit(gpui::ObjectFit::Cover),
                         )
                     })
-                    // A non-image in the set still needs a tile, or the counter and the strip
-                    // disagree about how many there are.
                     .when(!is_image, |tile| {
                         tile.child(app_icon_at(glyph, ink, 18.))
                     })
@@ -657,20 +538,6 @@ impl Workbench {
                 ),
         )
     }
-}
-
-
-impl Workbench {
-    /// A file a turn produced, in the transcript, under the answer that produced it.
-    ///
-    /// **Why here and not only in the panel.** A produced file used to appear as a name and a
-    /// size in a 330px column on the far side of the window. So the answer would say "I cleaned
-    /// the dataset and removed 14 duplicate plots", and whether that dataset now had 1,204 rows
-    /// or 40 was a separate trip to a separate place — which is exactly the check a researcher
-    /// should be able to make without leaving the sentence that prompted it.
-    ///
-    /// A table shows its first rows, a figure shows itself, anything else shows its header. All
-    /// three open the existing preview modal on click.
     /// One file as a card under the answer. `by` names the worker that produced it, when one did.
     pub(crate) fn output_card(
         &self,
@@ -760,7 +627,6 @@ impl Workbench {
             .overflow_hidden()
             .border_1()
             .border_color(rgb(theme::border()))
-            // One step off the transcript's own background, whichever way the palette runs.
             .bg(rgb(if theme::is_light(&theme::current()) {
                 theme::elevated()
             } else {
@@ -773,8 +639,7 @@ impl Workbench {
             workspace::Kind::Figure => {
                 card = card.child(
                     div().p_2().child(
-                        // Capped, not scaled to the pane: a 2000px figure would otherwise push
-                        // the transcript's width around as it loads.
+                        // Capped height so a large figure can't push the transcript width around.
                         img(output.path.clone())
                             .max_w_full()
                             .max_h(px(420.))
@@ -819,8 +684,7 @@ impl Workbench {
                                     .child(cell.clone()),
                             );
                         }
-                        // Said, not silently dropped: a table shown four columns wide when it
-                        // has eleven is a table someone will read as complete.
+                        // Say the count rather than silently dropping the extra columns.
                         if record.len() > columns {
                             line = line.child(
                                 div()
@@ -859,10 +723,6 @@ impl Workbench {
             cx.notify();
         }))
     }
-}
-
-
-impl Workbench {
     pub(crate) fn output_gallery_scroll(&self, key: &str) -> gpui::ScrollHandle {
         self.output_gallery_scrolls
             .borrow_mut()
@@ -870,97 +730,8 @@ impl Workbench {
             .or_default()
             .clone()
     }
-}
 
-
-impl Workbench {
-    /// A visible, clickable and draggable horizontal scrollbar for one gallery rail.
-    ///
-    /// The first version only painted the thumb. That was enough to imply an interaction and
-    /// then break it: a mouse-first Windows user naturally grabbed the bar shown on screen and
-    /// nothing happened. The whole 12px track is now a hit target; clicking outside the thumb
-    /// jumps toward that position and holding the mouse continues the drag (docs §158).
-    pub(crate) fn horizontal_scrollbar(
-        &self,
-        id: String,
-        handle: &gpui::ScrollHandle,
-        cx: &mut Context<Self>,
-    ) -> Option<impl IntoElement> {
-        let metrics = horizontal_scroll_metrics(handle)?;
-        let track_left = handle.bounds().origin.x;
-        let thumb_left = metrics.travel * metrics.progress;
-        let dragged = handle.clone();
-
-        Some(
-            div()
-                .id(SharedString::from(format!("gallery-scrollbar-{id}")))
-                .absolute()
-                .bottom(px(0.))
-                .left(px(0.))
-                .w(metrics.viewport)
-                .h(px(12.))
-                .hover(|style| style.cursor_pointer())
-                .child(
-                    div()
-                        .absolute()
-                        .top(px(2.))
-                        .left(thumb_left)
-                        .h(px(8.))
-                        .w(metrics.thumb)
-                        .rounded_full()
-                        .bg(rgb(theme::border_strong())),
-                )
-                .on_mouse_down(
-                    gpui::MouseButton::Left,
-                    cx.listener(move |workbench, event: &gpui::MouseDownEvent, _window, cx| {
-                        let local_x =
-                            (event.position.x - track_left).clamp(px(0.), metrics.viewport);
-                        let grab_x = if local_x >= thumb_left
-                            && local_x <= thumb_left + metrics.thumb
-                        {
-                            local_x - thumb_left
-                        } else {
-                            metrics.thumb / 2.
-                        };
-                        let offset_x = horizontal_drag_offset(
-                            event.position.x,
-                            track_left,
-                            grab_x,
-                            metrics.travel,
-                            metrics.overflow,
-                        );
-                        let offset_y = dragged.offset().y;
-                        dragged.set_offset(gpui::point(offset_x, offset_y));
-                        workbench.gallery_scroll_drag = Some(GalleryScrollDrag {
-                            handle: dragged.clone(),
-                            track_left,
-                            grab_x,
-                            travel: metrics.travel,
-                            overflow: metrics.overflow,
-                        });
-                        cx.stop_propagation();
-                        cx.notify();
-                    }),
-                ),
-        )
-    }
-}
-
-
-impl Workbench {
     /// A capped grid of outputs, with the last visible tile counting the rest.
-    ///
-    /// **One renderer for images and for files**, because the researcher asked for the same
-    /// treatment on both and the difference is only what a tile draws inside itself. §153's
-    /// sideways strip is gone: it spanned the whole transcript, one folder of seven files claimed
-    /// a band of the conversation wider than the answer above it, and the phone gallery it was
-    /// being compared against is a compact block you flick past. Their words: *"the grouping
-    /// occupies too much space in the conversation (too wide) … less invasive and functions the
-    /// same."*
-    ///
-    /// Fixed-width tiles rather than a fraction of the container, which is what makes it narrow:
-    /// two per row means the block is exactly `2 × tile + gap` and stops there, whatever the panel
-    /// or the window is doing.
     pub(crate) fn output_grid(
         &self,
         scope: &str,
@@ -980,9 +751,7 @@ impl Workbench {
         for row_start in (0..shown).step_by(GRID_COLUMNS) {
             let mut row = div().flex().flex_row().gap_2().flex_none();
             for at in row_start..(row_start + GRID_COLUMNS).min(shown) {
-                // The count rides on the *last visible* tile, and only when something is behind
-                // it. Clicking it opens that file; the rest are then one arrow away, which is
-                // what makes a capped grid honest rather than lossy.
+                // The overflow count rides on the last visible tile only.
                 let more = (hidden > 0 && at + 1 == shown).then_some(hidden);
                 row = row.child(self.output_grid_tile(
                     format!("output-tile-{scope}-{at}"),
@@ -1024,21 +793,7 @@ impl Workbench {
             )
             .child(grid)
     }
-}
-
-
-impl Workbench {
     /// One tile: a picture for a figure, a glyph and a name for anything else.
-    ///
-    /// **No filename on an image tile.** The picture identifies itself, the modal's header names
-    /// it, and a caption under every thumbnail was half of what made the old strip feel like
-    /// furniture. A data file is the opposite case — one CSV looks exactly like another — so those
-    /// tiles carry the name and the shape, which is the only thing that tells them apart.
-    ///
-    /// The name is shortened **here**, in Rust, rather than by asking the layout to truncate it.
-    /// `Label::ellipsis` needs a flex parent to grow within (§59), and a tile is a column of
-    /// fixed width — get that wrong and every name renders as a bare `…`, which is exactly what
-    /// §153's tiles did in the panel.
     pub(crate) fn output_grid_tile(
         &self,
         id: String,
@@ -1065,9 +820,7 @@ impl Workbench {
                     img(output.path.clone())
                         .w_full()
                         .h_full()
-                        // `Contain`, not `Cover`: a photo crops acceptably and a chart does not.
-                        // Cropping the axes off a plot makes the thumbnail useless for choosing
-                        // between seven of them, which is the only job it has.
+                        // `Contain`, not `Cover`: cropping the axes off a plot makes it unreadable.
                         .object_fit(gpui::ObjectFit::Contain),
                 )
                 .when_some(more, |media, more| {
@@ -1154,15 +907,7 @@ impl Workbench {
                 cx.notify();
             }))
     }
-}
-
-
-impl Workbench {
     /// One file on its own row. `by` names the worker that produced it, when one did.
-    ///
-    /// A lone file gets no gallery heading to carry its attribution, so it carries it on the line
-    /// that already describes the file — otherwise a worker that wrote exactly one report would
-    /// be the one case §199 still left anonymous.
     pub(crate) fn output_panel_row(
         &self,
         id: String,
@@ -1198,8 +943,6 @@ impl Workbench {
                     .flex_col()
                     .flex_grow()
                     .min_w_0()
-                    // The filename is the distinguishing tail. The parent folder has its own
-                    // gallery heading, so repeating its UUID here recreates §152 exactly.
                     .child(
                         ui::Label::new(output_filename(output))
                             .size(ui::Size::Compact)
@@ -1217,15 +960,9 @@ impl Workbench {
                 cx.notify();
             }))
     }
-}
+    // ---- project panel ----
 
-
-impl Workbench {
-    /// The project spine: mission, what's done, what's queued, what's suggested.
-    /// The panel's card, with the scrolling contents inside it and a bar beside them.
-    ///
-    /// Split from the contents because the scrollbar must sit *outside* the scrolling
-    /// element — inside, it would scroll along with what it measures.
+    /// The panel's card: mission, plan, jobs, outputs, with a scrollbar beside the contents.
     pub(crate) fn artifacts_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .relative()
@@ -1264,24 +1001,7 @@ impl Workbench {
             .child(self.artifacts_contents(cx))
             .children(scrollbar(&self.panel_scroll))
     }
-}
-
-
-impl Workbench {
-    /// The mission, and the way to change it.
-    ///
-    /// **It had never been changeable.** The mission is seeded server-side from the first human
-    /// message of a project and then rendered here as plain text, so a researcher whose opening
-    /// question was a warm-up — or whose project turned out to be about something else — had no
-    /// way to say so: the panel showed a sentence they could not edit, and the coordinator was
-    /// reading that same sentence into its system prompt on every turn
-    /// (`backend/middleware/project.py`). Reported as *"I cannot modify the project mission"*
-    /// (§199). The route to change it had existed the whole time and this client had never
-    /// called it — see [`protocol::LangGraphClient::set_mission`].
-    ///
-    /// Editing happens in place, as renaming a conversation does, and for the same reason: the
-    /// field replaces the text it is about, so the researcher is looking at what they are
-    /// changing rather than at a copy of it in a dialog.
+    /// The mission, and the way to change it in place.
     pub(crate) fn mission_block(&self, mission: &str, cx: &mut Context<Self>) -> Div {
         let block = div().flex().flex_col().w_full().min_w_0().gap_1();
 
@@ -1302,9 +1022,6 @@ impl Workbench {
                     div()
                         .text_color(rgb(theme::text_muted()))
                         .text_xs()
-                        // What it costs to be wrong, said before the press rather than after:
-                        // this sentence is read by the coordinator on every turn, so it is not a
-                        // label on the work — it is an instruction to it.
                         .child(
                             "Enter to save · Esc to cancel. Mini-Me reads this on every turn.",
                         ),
@@ -1338,10 +1055,6 @@ impl Workbench {
                 }),
         )
     }
-}
-
-
-impl Workbench {
     pub(crate) fn artifacts_contents(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut panel = div()
             .id("spine")
@@ -1354,15 +1067,6 @@ impl Workbench {
             .track_scroll(&self.panel_scroll)
             .p_4()
             .gap_4()
-            // `MISSION`, not `RESEARCH PROJECT`. The panel *is* the research project — saying so
-            // at the top of it spends the widest heading in the column on a word that names the
-            // container rather than its first section.
-            //
-            // The heading carries the edit control rather than the mission carrying a hover-only
-            // one. Our researchers are not developers, and *"I cannot modify the project mission"*
-            // was said about a panel where the text was in fact the button — an affordance that
-            // only exists once the pointer is already on it cannot be the answer to someone who
-            // has concluded there isn't one (§199).
             .child(
                 div()
                     .flex()
@@ -1398,15 +1102,10 @@ impl Workbench {
             .as_ref()
             .map(|project| project.mission.clone())
             .unwrap_or_default();
-        // The same block whether or not a spine has arrived: with no project there is nothing to
-        // *read*, but there is still something to *write*, and a researcher who knows what this
-        // project is for should be able to say so before the first question rather than having
-        // one derived from it (§199).
         panel = panel.child(self.mission_block(&mission, cx));
 
         let Some(project) = &self.project else {
-            // No spine yet, but a run may already be producing outputs — still show
-            // them rather than an empty panel.
+            // No spine yet, but a run may already be producing outputs — show those.
             return panel
                 .child(self.plan_section(cx))
                 .child(self.jobs_section(cx))
@@ -1421,8 +1120,7 @@ impl Workbench {
             panel = panel.child(spine_list("PENDING", &project.pending, "○"));
         }
 
-        // Advisory only: shown so the user can choose to ask for one. Nothing here
-        // auto-runs — org policy is human-gated.
+        // Advisory only: loads into the composer, never auto-runs.
         if !project.suggestions.is_empty() {
             let mut suggestions = div()
                 .flex()
@@ -1457,9 +1155,7 @@ impl Workbench {
                                 .text_xs()
                                 .child(suggestion.rationale.clone()),
                         )
-                        // Clicking *loads* the prompt into the composer; it never
-                        // runs it. Suggestions are advisory and org policy is
-                        // human-gated, so the user still presses Enter.
+                        // Loads the prompt into the composer; never runs it directly.
                         .on_click(cx.listener(move |workbench, _event, window, cx| {
                             if workbench.streaming || prompt.is_empty() {
                                 return;
@@ -1467,8 +1163,7 @@ impl Workbench {
                             workbench.composer.update(cx, |composer, cx| {
                                 composer.set_text(prompt.clone(), cx);
                             });
-                            // Drop it from the list: it is in the composer now, and
-                            // leaving a duplicate to click is just confusing.
+                            // Drop it from the list now that it is in the composer.
                             if let Some(project) = workbench.project.as_mut() {
                                 project.suggestions.retain(|s| s.prompt != prompt);
                             }
@@ -1497,38 +1192,15 @@ impl Workbench {
             .child(self.outputs_section(cx))
             .child(self.sources_section(Some(SOURCES_IN_PANEL), cx))
     }
-}
-
-
-impl Workbench {
-    /// Long jobs still running, and the ones that finished this session.
-    ///
-    /// The theorizer and DataVoyager return a task id immediately and finish minutes
-    /// later, so without this the answer to "is it still going?" was nothing at all —
-    /// and, worse, nobody was collecting the result (docs §29).
-    /// An agent's own plan, as a checklist with the step it is on marked.
-    ///
-    /// **The agent's words, its order, its statuses.** Nothing is derived and nothing is estimated:
-    /// no percentage, no bar, no remaining-time guess. §73's rule about provenance applies just as
-    /// hard to progress — a number a researcher believes is worse than no number, and the only
-    /// honest denominator is the one the agent wrote down itself.
-    ///
-    /// `busy` is what the running step is doing right now, which is the `activity` the watcher
-    /// already reads. It rides the in-progress line rather than a row of its own, because a
-    /// forty-second `execute` is a property of *that step*, not of the plan.
-    ///
-    /// Empty plan, empty element. `write_todos` is optional and the model skips it for simple
-    /// requests, so a plan is a thing that sometimes exists — not a thing to fake a skeleton for
-    /// (§178).
+    /// An agent's own plan, as a checklist with the step it is on marked. Nothing is derived
+    /// or estimated — no percentage, no bar — only what the agent itself wrote down. `busy` is
+    /// what the running step is doing right now. Empty plan, empty element.
     pub(crate) fn plan_list(&self, todos: &[protocol::Todo], busy: Option<&str>) -> Div {
         let mut list = div().flex().flex_col().w_full().min_w_0().gap_1();
         if todos.is_empty() {
             return list;
         }
         for (at, todo) in todos.iter().enumerate() {
-            // Done recedes, doing is the one you read, still-to-come is legible but quiet. All
-            // three stay above the AA floor `theme` guarantees — "faint" is not permission to be
-            // unreadable, and a scientist scanning a plan is reading, not glancing.
             let ink = if todo.is_done() {
                 theme::text_muted()
             } else if todo.is_running() {
@@ -1580,19 +1252,8 @@ impl Workbench {
         }
         list
     }
-}
-
-
-impl Workbench {
-    /// The coordinator's plan for this conversation, when it wrote one.
-    ///
-    /// Its own section rather than a line in the spine, because the spine is the *project* —
-    /// durable, surviving every turn — and this is the working plan for the question in flight.
-    /// Filing them together would make an abandoned step look like a project commitment.
-    ///
-    /// Kept after the turn ends on purpose: a finished plan is the account of what the answer
-    /// involved, and clearing it the moment the last token arrives would delete the explanation
-    /// exactly when someone starts reading it.
+    /// The coordinator's working plan for this conversation, when it wrote one. Kept after the
+    /// turn ends, since a finished plan is the record of what the answer involved.
     pub(crate) fn plan_section(&self, _cx: &mut Context<Self>) -> Div {
         let mut section = div().flex().flex_col().gap_2().w_full().min_w_0();
         let Some((done, total)) = protocol::plan_progress(&self.plan) else {
@@ -1617,15 +1278,11 @@ impl Workbench {
                             .child(format!("{done} of {total}")),
                     ),
             )
-            // The coordinator's plan gets no activity string: `activity` is read off a *worker's*
-            // thread, and this conversation's current tool is already the road strip's job.
             .child(self.plan_list(&self.plan, None));
         section
     }
-}
 
-
-impl Workbench {
+    /// Long jobs still running, plus the ones that finished this session.
     pub(crate) fn jobs_section(&self, cx: &mut Context<Self>) -> Div {
         let mut section = div().flex().flex_col().gap_2().pt_2();
         if self.jobs.is_empty() && self.tasks.is_empty() {
@@ -1645,11 +1302,6 @@ impl Workbench {
                 .gap_2()
                 .py_1()
                 .rounded_md()
-                // **No horizontal padding**, so `BACKGROUND JOBS` starts on the same x as `PLAN`
-                // and `OUTPUTS` above and below it; the fill runs the width of the section
-                // instead. Which is the shape that was asked for the last time a heading here
-                // became pressable: *"a whole rectangle use the hover colour so I know that I can
-                // click there."*
                 .hover(|style| {
                     let fill = theme::hover_over(theme::surface());
                     style
@@ -1659,17 +1311,12 @@ impl Workbench {
                 })
                 .text_color(rgb(theme::text_faint()))
                 .text_xs()
-                // Drawn whether or not a pointer is near it. A disclosure whose only sign is a
-                // hover is one a researcher concludes does not exist (§199) — and this is the
-                // same `▾`/`▸` the transcript's step groups have used all along, so the fold in
-                // the panel and the fold in the conversation are one gesture.
                 .child(format!(
                     "{} BACKGROUND JOBS",
                     if self.jobs_expanded { "▾" } else { "▸" }
                 ))
                 .child(
-                    // Named states, not a total. `3 jobs` folded is a number you have to unfold
-                    // to act on, and not having to is the entire point of the fold.
+                    // Named states rather than a total, so folded still says what needs action.
                     div()
                         .flex_none()
                         .text_xs()
@@ -1685,9 +1332,7 @@ impl Workbench {
             return section;
         }
 
-        // Background workers first, because one of them may be *stopped waiting for you* —
-        // and until this existed that task simply hung, since the gate it hit runs on its
-        // own thread and nothing in the UI could answer it (docs §31).
+        // Background workers waiting for approval are shown first.
         let (waiting, working): (Vec<_>, Vec<_>) =
             self.tasks.iter().partition(|task| task.needs_approval());
         for task in waiting {
@@ -1701,22 +1346,12 @@ impl Workbench {
             .w_full()
             .min_w_0()
             .gap_2()
-            // Room for the thumb painted over this by the wrapper below (docs §100).
+            // Room for the thumb painted over this by the wrapper below.
             .pr(px(SCROLL_GUTTER))
             .max_h(px(JOBS_BODY_HEIGHT))
             .overflow_y_scroll()
             .track_scroll(&self.jobs_scroll)
-            // **The wheel drives one list at a time.** gpui's own scroll handler does not stop
-            // propagation and `should_handle_scroll` is true for every hitbox under the pointer,
-            // so an inner scroller and the panel it sits in both take the same delta from the
-            // same event and slide together — twice the speed, in two places. The offset handler
-            // is registered after this one and the bubble phase runs in reverse, so this fires
-            // second and stops the panel without stopping the list.
-            //
-            // Only attached when there is something here to scroll, so a two-row section leaves
-            // the wheel to the panel rather than swallowing it. `max_offset` is meaningless until
-            // the first paint, which costs one frame's worth of double-scroll and no more — the
-            // same deal [`scrollbar`] already takes for the thumb.
+            // Stop the wheel event here so it doesn't also scroll the panel underneath.
             .when(self.jobs_scroll.max_offset().height > px(0.), |body| {
                 body.on_scroll_wheel(|_event, _window, cx| cx.stop_propagation())
             });
@@ -1728,8 +1363,7 @@ impl Workbench {
         }
 
         section.child(
-            // The bar sits *outside* the element it measures; inside, it would scroll along with
-            // the thing it is reporting on.
+            // The bar sits outside the element it measures, so it doesn't scroll with it.
             div()
                 .relative()
                 .flex()
@@ -1740,16 +1374,7 @@ impl Workbench {
                 .children(scrollbar(&self.jobs_scroll)),
         )
     }
-}
-
-
-impl Workbench {
     /// One background worker: what it is, what it is doing, its plan, its gate, its files.
-    ///
-    /// Split out of [`Self::jobs_section`] because a worker waiting for approval is rendered from
-    /// a different place in the tree than one merely running — pinned above the scroller rather
-    /// than inside it — and two copies of this would be two places for the Approve button to
-    /// drift apart.
     pub(crate) fn task_row(&self, task: &protocol::AsyncTask, cx: &mut Context<Self>) -> Div {
         let (mark, colour) = if task.needs_approval() {
             ("⏸", theme::accent())
@@ -1765,8 +1390,6 @@ impl Workbench {
             .flex_col()
             .w_full()
             .min_w_0()
-            // A child of a `max_h` flex column shrinks to fit it by default, which would squash
-            // a worker's whole plan into the height of a line rather than letting it scroll.
             .flex_none()
             .gap_1()
             .pl_2()
@@ -1789,8 +1412,6 @@ impl Workbench {
                             .text_sm()
                             .child(format!("{mark} {}", task.agent_name.replace('_', " "))),
                     )
-                    // `step 4 of 7`, and nothing when the agent wrote no plan. The one number
-                    // in this panel with a real denominator (§209).
                     .children(protocol::plan_progress(&task.todos).map(|(done, total)| {
                         div()
                             .flex_none()
@@ -1803,9 +1424,6 @@ impl Workbench {
                 div()
                     .w_full()
                     .min_w_0()
-                    // The failure the server recorded, in place of the bare word
-                    // "error" — which is all this said while two rounds went into
-                    // guessing what had actually happened (docs §38).
                     .text_color(rgb(if task.error.is_some() {
                         theme::error()
                     } else if task.needs_approval() {
@@ -1817,9 +1435,6 @@ impl Workbench {
                     .child(match (&task.error, task.needs_approval()) {
                         (Some(error), _) => error.clone(),
                         (None, true) => "waiting for your approval".to_string(),
-                        // What it is *doing*, not just that it is doing something —
-                        // "running" for ten minutes tells a researcher nothing about
-                        // whether to wait (docs §42).
                         (None, false) => match (&task.activity, task.is_finished()) {
                             (Some(activity), false) => format!("{} · {activity}", task.status),
                             _ => task.status.clone(),
@@ -1836,18 +1451,13 @@ impl Workbench {
                         .child(task.description.clone()),
                 )
             })
-            // **What turns six minutes of "running · execute" into something a person can
-            // read.** Measured on a real run: eight approval rounds and 35–43 seconds per
-            // command, with nothing on screen saying how much of it was left (§209).
             .when(!task.todos.is_empty(), |row| {
                 row.child(self.plan_list(&task.todos, task.activity.as_deref()))
             });
 
         if let Some(request) = &task.pending {
             let task_id = task.task_id.clone();
-            // Capped and scrollable, for the same reason the foreground card is: a
-            // background worker writes long scripts, and a command tall enough to push
-            // Approve out of the panel is a gate the researcher cannot answer.
+            // Capped and scrollable so a long command can't push Approve off-screen.
             let mut commands = div()
                 .id(SharedString::from(format!("bg-commands-{task_id}")))
                 .flex()
@@ -1858,9 +1468,6 @@ impl Workbench {
                 .max_h(px(200.))
                 .overflow_y_scroll();
             for action in &request.actions {
-                // The command verbatim, exactly as the foreground card shows it: this
-                // runs on the researcher's own machine, and the only meaningful review
-                // is of the actual text (docs §19).
                 commands = commands.child(
                     div()
                         .w_full()
@@ -1906,15 +1513,7 @@ impl Workbench {
                         })),
                     ),
             );
-            // A background worker asks once per command over several minutes. Without
-            // this the researcher has to sit on the panel and answer each one, which
-            // defeats the entire point of handing the work to the background.
-            //
-            // Both blanket grants appear here, and the conversation-wide one is worded
-            // *identically* to the chat's. They are two gates — the coordinator asks
-            // below the composer, a worker asks in this panel — and which one appears
-            // depends on who happened to need permission. A grant offered in one place
-            // and not the other reads as the button moving around at random (docs §44).
+            // Blanket grants so the researcher isn't asked once per command.
             for (suffix, label, conversation_wide) in [
                 ("task", "Approve the rest of this task", false),
                 ("conv", "Approve everything in this conversation", true),
@@ -1924,8 +1523,6 @@ impl Workbench {
                         SharedString::from(format!("bg-approve-{suffix}-{task_id}")),
                         label,
                     )
-                    // `text_xs` in the original: these sit under the pair above and
-                    // are the wider-scope variants of it, not peers.
                     .size(ui::Size::Compact)
                     .on_click(cx.listener({
                         let task_id = task_id.clone();
@@ -1942,15 +1539,7 @@ impl Workbench {
             }
         }
 
-        // **What it produced, one press away.** Asked for directly: *"when a background task
-        // has a success, we should see a modal button the user can press… so the user doesn't
-        // type it every time in the chatbox."* A finished worker's output is already on disk
-        // — §151 verified plots landing at `<task>/…` inside the conversation's own folder —
-        // and until now the only way to reach it was to compose a question and wait for a
-        // turn to answer it (docs §198).
-        //
-        // **Opens the folder rather than sending a turn.** No model call, nothing billed,
-        // and it is instant; the files are the result, not a description of them.
+        // Opens the folder directly rather than composing a turn to ask for it.
         if task.succeeded() {
             if let Some(dir) = self
                 .thread_workspace()
@@ -1958,8 +1547,7 @@ impl Workbench {
             {
                 row = row.child(
                     div().mt_1().child(
-                        // Names the specialist, because several run at once (§43) and a row
-                        // of identical buttons is one you have to count rows to use.
+                        // Names the specialist since several may run at once.
                         ui::Chip::new(
                             SharedString::from(format!("task-files-{}", task.task_id)),
                             format!("Show what {} produced", task.agent_name.replace('_', " ")),
@@ -1975,14 +1563,7 @@ impl Workbench {
         }
         row
     }
-}
-
-
-impl Workbench {
-    /// One long-running job: the theorizer, or a DataVoyager analysis.
-    ///
-    /// No `cx` and no controls — a job is something this client polls, not a gate it can answer.
-    /// What the row owes a reader is whether it is still going and roughly how long that takes.
+    /// One long-running job: the theorizer, or a DataVoyager analysis. Polled only, no controls.
     pub(crate) fn job_row(&self, job: &protocol::Job, cx: &mut Context<Self>) -> gpui::Stateful<Div> {
         let (mark, colour) = if !job.is_finished() {
             ("◐", theme::running())
@@ -1994,24 +1575,17 @@ impl Workbench {
         let detail = if job.is_finished() {
             job.status.clone()
         } else {
-            // Say how long it usually takes. A spinner with no expectation attached
-            // is indistinguishable from a hang.
+            // A bare spinner reads as a hang; say the expected duration instead.
             format!("running · usually {}", job.kind.expected(job.size))
         };
-        // A finished discovery run is the one job row with something to open: its results are a
-        // tree of experiments, and the alternative is composing a question to ask about work the
-        // app already has (the argument §198 made for the worker-files button).
+        // The one job row with something to open: a finished discovery run.
         let readable = job.kind == protocol::JobKind::Discovery && job.succeeded();
         let mut row = div()
-            // Always identified, whether or not it is pressable: `.id()` changes the element's
-            // type, and branching on it would mean two incompatible return values for one row.
             .id(SharedString::from(format!("job-row-{}", job.task_id)))
             .flex()
             .flex_col()
             .w_full()
             .min_w_0()
-            // A child of a `max_h` flex column shrinks to fit it by default, which would squash
-            // three rows into the height of one rather than letting them scroll.
             .flex_none()
             .gap_1()
             .pl_2()
@@ -2036,9 +1610,7 @@ impl Workbench {
                         .min_w_0()
                         .text_color(rgb(theme::text_muted()))
                         .text_xs()
-                        // Clipped rather than wrapped whole. The full question is a paragraph the
-                        // turn that launched it already holds; what this row needs it for is
-                        // telling two concurrent analyses apart, and the first clause does that.
+                        // Clipped: enough to tell concurrent analyses apart, not the full question.
                         .child(protocol::clip(&job.question, JOB_QUESTION_CHARS)),
                 )
             });
@@ -2047,8 +1619,7 @@ impl Workbench {
             let run_id = job.task_id.clone();
             let name = job.question.clone();
             row = row
-                // Said as well as coloured, because a hover-only affordance is one a researcher
-                // finds by accident — and this is the only way into a run they paid for.
+                // Said as well as coloured; this is the only way into the run.
                 .child(
                     div()
                         .w_full()
@@ -2068,21 +1639,7 @@ impl Workbench {
         }
         row
     }
-}
-
-
-impl Workbench {
-    /// One line for what this conversation *ran*, beside what it produced.
-    ///
-    /// **This is the half §219 has been missing.** The provenance recorder records and does not
-    /// block, deliberately — *"the rules worth enforcing are the ones that come from failures
-    /// actually seen"* — and the roadmap has carried the same sentence about it since: *nothing has
-    /// been read off it yet*. A record nobody reads is a record that is not working.
-    ///
-    /// Shown only when something ran, so an ordinary conversation gains no furniture. When a
-    /// command named a file outside this conversation, the line says so in the accent colour and
-    /// says how many — because that is §160's failure, and the whole point is that it is legible on
-    /// the day it happens rather than a week later.
+    /// One line for what this conversation ran, shown only when something did.
     pub(crate) fn commands_line(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let commands = self.thread_commands();
         if commands.is_empty() {
@@ -2122,13 +1679,8 @@ impl Workbench {
                 .into_any_element(),
         )
     }
-}
-
-
-impl Workbench {
+    /// What's actually on disk for this conversation, grouped by producer and folder.
     pub(crate) fn outputs_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        // What is actually on disk, rather than the agent's own artifact list: a file written by
-        // a script inside `execute` registers no artifact, and those are most of them.
         let listing = self
             .thread_workspace()
             .map(|dir| workspace::output_listing(&dir));
@@ -2137,9 +1689,7 @@ impl Workbench {
             .map(|listing| listing.groups.as_slice())
             .unwrap_or_default();
         let count: usize = files.iter().map(|(_, items)| items.len()).sum();
-        // `output_listing` groups by file kind for ordering. The gallery's meaningful boundary
-        // is instead the directory the agent chose (§152), so restore one ordered sequence before
-        // grouping by parent. Cloning metadata only; no file is read here.
+        // Restore file order before regrouping by parent folder; metadata only, no file reads.
         let ordered_outputs: Vec<workspace::Output> = files
             .iter()
             .flat_map(|(_, items)| items.iter().cloned())
@@ -2153,23 +1703,13 @@ impl Workbench {
             .border_t_1()
             .border_color(rgb(theme::border()));
 
-        // **Asked before the guard below, and that is the whole point.** The case where this line
-        // matters most is a turn that wrote nothing *into the conversation* — because everything it
-        // wrote went somewhere else. That is exactly `count == 0`, so the first version, which
-        // added it after the early return, hid it in the one situation it exists for. A researcher
-        // pressed the button, the file went to `/tmp`, and the panel stayed silent (§277).
+        // Computed before the empty-section guard below, since count==0 is exactly when it matters.
         let ran = self.commands_line(cx);
 
-        // **Nothing at all when there is nothing.** This used to promise which artifacts would
-        // appear before the filesystem had any. The recursive scan now makes §117's subfolders
-        // visible, but an empty section still says less and is right — and "nothing" now includes
-        // having run nothing.
         if outputs_are_empty(count, self.buckets.len(), usize::from(ran.is_some())) {
             return section;
         }
 
-        // Above `FILES`, because "what ran" is the question that explains why the file list is
-        // shorter than expected — which is exactly §160's morning.
         section = section.children(ran);
 
         if count > 0 {
@@ -2177,9 +1717,7 @@ impl Workbench {
         }
 
         if listing.as_ref().is_some_and(|listing| listing.truncated) {
-            // The scan is intentionally bounded: an agent can create a virtualenv or unpack a
-            // dataset under its workspace. Say when that protection bites, because a silent cap
-            // would only turn §117's missing-folder defect into a missing-513th-file defect.
+            // The scan is bounded (a workspace may contain a virtualenv); say when it truncates.
             section = section.child(
                 div()
                     .text_color(rgb(theme::text_muted()))
@@ -2188,12 +1726,7 @@ impl Workbench {
             );
         }
 
-        // Images first and together, then everything else — the two groups the researcher asked
-        // for. Images lead because they are what a person opens the panel to look at; a CSV is
-        // opened to *check* something, which is a deliberate act further down.
-        //
-        // "Together" is now bounded by who produced them (§199): one tray per body of work, not
-        // one tray for the window.
+        // Images first, grouped by producer; a CSV is opened to check something, a deliberate act.
         for (band, (worker, produced)) in by_producer(&ordered_outputs, &self.tasks, &self.authorship)
             .into_iter()
             .enumerate()
@@ -2210,8 +1743,7 @@ impl Workbench {
             }
             for (at, group) in output_folder_groups(&others).iter().enumerate() {
                 if let [output] = group.outputs.as_slice() {
-                    // A lone file stays a row: it has the whole width for its name and shape, and
-                    // a grid of one is a tile with nothing to compare it to.
+                    // A lone file stays a row rather than a one-tile grid.
                     section = section.child(self.output_panel_row(
                         format!("panel-output-{}", output.name),
                         output,
@@ -2219,8 +1751,7 @@ impl Workbench {
                         cx,
                     ));
                 } else {
-                    // Still folder-grouped, because two runs' `results/` directories are still two
-                    // things — the image grid above is the only surface where kind outranks folder.
+                    // Still folder-grouped; only the image grid above groups by kind instead.
                     section = section.child(self.output_grid(
                         &format!("panel-{band}-{at}"),
                         shorten_path_label(
@@ -2235,13 +1766,7 @@ impl Workbench {
             }
         }
 
-        // Everything this conversation wrote, in one folder the researcher already owns.
-        // This *is* "download all the documents": the files are in their own Documents
-        // directory (`workspace.rs`), so there is nothing to package — the ask was only
-        // ever for a way to get at them.
-        //
-        // Dashed and last, because it is a way *out* of the panel rather than another row in it —
-        // and it reaches anything beyond §143's deliberate scan bounds.
+        // A way out of the panel to the whole folder, beyond the scan's bounds; dashed and last.
         if let Some(dir) = self.thread_workspace() {
             section = section.child(
                 div()
@@ -2279,22 +1804,12 @@ impl Workbench {
         }
 
         for bucket in &self.buckets {
-            // Show a bounded number of titles — a literature search can return
-            // dozens, and the count already conveys the scale.
+            // Bounded titles shown; the count already conveys the scale.
             const MAX_SHOWN: usize = 4;
-            // **Datasets get a way in.** Their bucket items are titles truncated to 96
-            // characters, which for five records of one multi-site study is five identical rows;
-            // the modal has the identifier that tells them apart, the page link and the download
-            // (docs §223). Only when the structured list actually arrived, so a bucket from an
-            // older backend still renders as plain text rather than as a heading that does
-            // nothing.
+            // Only when the structured list arrived; an older backend still renders as plain text.
             let openable = matches!(bucket.name, "datasets" | "libraries")
                 && !bucket.items.is_empty();
-            // **What the researcher is counting, not what the payload wrapped.** `libraries` holds
-            // one artifact per turn and `datasets` one entry per recommendation, so the bucket's
-            // own length answered *how many envelopes* for the first and *how many datasets* for
-            // the second — and `libraries · 1` beside two indexed papers read as the app losing
-            // one (§232). The structured lists are what a person means by these words.
+            // Count from the structured lists, not the raw bucket length.
             let (label, count, rows) = match bucket.name {
                 "libraries" if !self.documents.is_empty() => (
                     "library",
@@ -2327,21 +1842,14 @@ impl Workbench {
                 ),
             };
             let mut heading = div()
-                // **Per bucket, not one id for all of them.** Every heading in this loop carried
-                // `"datasets-heading"`, so with two buckets on screen two sibling elements shared
-                // an element id — and gpui resolves interaction against that path. Whatever it
-                // did with the collision, it was not "call the listener on the datasets one".
+                // Per-bucket id, since a shared id across sibling elements breaks gpui's click routing.
                 .id(SharedString::from(format!("bucket-{}", bucket.name)))
                 .flex()
                 .flex_row()
                 .items_center()
                 .justify_between()
                 .gap_2()
-                // **A block, not a strip.** The first version hovered a bare text div, so the
-                // target was the width of the words and nothing announced it: *"if I not hover
-                // datasets thin rectangle I will never know that there is a modal there."* The
-                // same box `open-all-sources` uses — full width, padded, rounded — so the fill
-                // lands on a shape a pointer will cross on its way past.
+                // Full-width hover target rather than a bare text strip.
                 .w_full()
                 .min_w_0()
                 .px_2()
@@ -2352,8 +1860,7 @@ impl Workbench {
                 .child(format!("{label} · {count}"));
             if openable {
                 heading = heading
-                    // Said as well as coloured. A hover-only affordance is one a researcher finds
-                    // by accident, and this is the panel's only way into the dataset list.
+                    // Said as well as coloured; this is the only way into the dataset list.
                     .child(
                         ui::Label::new("open all")
                             .inherit()

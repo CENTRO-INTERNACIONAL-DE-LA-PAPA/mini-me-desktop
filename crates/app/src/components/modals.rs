@@ -9,90 +9,9 @@ use gpui::{
 };
 
 impl Workbench {
-    pub(crate) fn context_menu(&self, open: menu::ContextMenu, cx: &mut Context<Self>) -> impl IntoElement {
-        let target = open.target;
-        let mut panel = menu_card();
+    // ---- provider / delete / about ----
 
-        for &item in open.items() {
-            let enabled = self.menu_item_enabled(item, target, cx);
-            let shortcut = item.shortcut(target);
-            panel = panel.child(
-                div()
-                    .id(SharedString::from(format!("menu-{}", item.label())))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .gap_4()
-                    .px_3()
-                    .py_1()
-                    .text_sm()
-                    .text_color(rgb(if enabled {
-                        theme::text()
-                    } else {
-                        theme::text_faint()
-                    }))
-                    .when(enabled, |row| {
-                        row.hover(|style| style.bg(rgb(theme::accent_soft())).cursor_pointer())
-                            .on_click(cx.listener(move |workbench, _event, window, cx| {
-                                workbench.run_menu_item(item, target, window, cx);
-                            }))
-                    })
-                    .child(item.label())
-                    .child(
-                        div()
-                            .text_color(rgb(theme::text_faint()))
-                            .text_xs()
-                            .child(shortcut),
-                    ),
-            );
-        }
-
-        // Clicking anywhere else closes it, which is the only way out most people look for.
-        gpui::deferred(gpui::anchored().position(open.at).snap_to_window().child(
-            panel.on_mouse_down_out(cx.listener(
-                |workbench, event: &gpui::MouseDownEvent, _window, cx| {
-                    // A right-click elsewhere re-opens the menu at the new spot, and
-                    // that handler is the only one that should decide. Closing here as
-                    // well would race it, and which one won would depend on paint
-                    // order — sometimes leaving no menu at all.
-                    if event.button == gpui::MouseButton::Right {
-                        return;
-                    }
-                    workbench.context_menu = None;
-                    cx.notify();
-                },
-            )),
-        ))
-    }
-}
-
-
-impl Workbench {
-    /// The irreversible scope, in the centre of the window rather than squeezed into a row.
-    ///
-    /// Conversation deletion now includes its saved outputs, and project deletion includes every
-    /// conversation plus the complete project folder. The old inline "delete / keep" row had no
-    /// room to say either fact; confirmation without the consequence is only a second click
-    /// (§155).
-    /// Confirm a provider change, and say what it will actually mean.
-    ///
-    /// **Which provider is selected decides which account gets billed**, and until §186 the only
-    /// thing that said so was which pill was lit. That was enough to lose an afternoon: a turn ran
-    /// against a provider the researcher had not chosen, and the first news of it was an
-    /// out-of-credits page belonging to somebody else's API — *"this is weird, I set OpenRouter
-    /// and I have credits."*
-    ///
-    /// So the modal states the three facts a person needs before pressing anything, and it reads
-    /// them **from the keychain and the settings**, not from what the panel happens to show:
-    ///
-    /// 1. Whether a key is stored **for the provider being moved to**. Keys are filed per
-    ///    provider (`llm:<id>`), so one pasted while another pill was selected belongs to that
-    ///    one and is invisible here — which is exactly how the key goes missing.
-    /// 2. That a custom endpoint needs its base URL, since without it the request has no address
-    ///    and the backend falls back to OpenAI's.
-    /// 3. Which model id it is about to be set to, because changing the provider changes that
-    ///    too, and doing it silently is how a valid id turns into one that does not exist.
+    /// Confirms switching providers, showing key and base-URL requirements.
     pub(crate) fn provider_modal(
         &self,
         spec: &'static settings::Provider,
@@ -112,7 +31,6 @@ impl Workbench {
                 spec.label
             )));
 
-        // The two that stop a turn, said here rather than discovered several minutes into one.
         if !has_key {
             body = body.child(
                 ui::Label::new(format!(
@@ -165,11 +83,7 @@ impl Workbench {
                             .on_click(cx.listener(move |workbench, _event, _window, cx| {
                                 workbench.confirming_provider = None;
                                 workbench.draft.provider = spec.id.to_string();
-                                // A different provider has a different catalogue, and the one on
-                                // screen a moment ago belonged to the provider being left.
                                 workbench.refresh_models(cx);
-                                // A model that exists for the provider just chosen, rather than
-                                // leaving one that does not.
                                 workbench.set_field(Field::ModelId, spec.suggested_model, cx);
                                 cx.notify();
                             })),
@@ -181,10 +95,8 @@ impl Workbench {
                     .size(ui::Size::Compact),
             )
     }
-}
 
-
-impl Workbench {
+    /// Confirms deleting a conversation or an entire project.
     pub(crate) fn delete_modal(&self, target: &DeleteTarget, cx: &mut Context<Self>) -> impl IntoElement {
         let (title, body, action) = match target {
             DeleteTarget::Conversation(conversation) => {
@@ -284,37 +196,13 @@ impl Workbench {
                     .size(ui::Size::Compact),
             )
     }
-}
 
-
-impl Workbench {
-    /// What this thing is, what the specialists do, and who to credit.
-    ///
-    /// Asked for after a look at the web app, which has one and this did not. Three jobs, and the
-    /// third is not optional:
-    ///
-    /// 1. **Say what the specialists are.** Ten of them delegate to each other and a researcher
-    ///    meets them one at a time, in a trace, mid-answer. A list is the cheapest orientation
-    ///    there is.
-    /// 2. **Say where the data comes from.** Asta, CIP Dataverse, AGROVOC and Crop Ontology are
-    ///    other people's catalogues, and which one an answer leaned on changes how it should be
-    ///    read.
-    /// 3. **Credit Asta.** The Allen Institute asks that work using it cite AstaBench, and a tool
-    ///    that makes their search easy to use while making the citation hard to find is taking
-    ///    something without saying so. The reference is here, selectable, next to a note about
-    ///    when it applies (docs §103).
-    ///
-    /// **The team list is read from the live registry**, not written here. §76 built that list
-    /// precisely so a copy in the client could not drift the first time upstream renamed a
-    /// specialist, and an About box that names agents the backend no longer has would be the
-    /// same defect wearing a friendlier face.
+    /// The About box: the specialist team, data sources, this build, and the Asta citation.
     pub(crate) fn about_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let specialists = workspace::subagents();
 
         let mut team = div().flex().flex_col().w_full().min_w_0().gap_2();
         if specialists.is_empty() {
-            // Said rather than left blank: an empty list looks like "there are none", and the
-            // real reason is that the backend has not assembled a coordinator yet (docs §78).
             team = team.child(
                 ui::Label::new(
                     "The specialist list appears once the backend has answered its first question.",
@@ -373,13 +261,6 @@ impl Workbench {
             );
         }
 
-        // **Where code runs, as this install is actually configured.** The web app's About says
-        // every conversation runs in an isolated LangSmith sandbox. On this app that is usually
-        // false: host execution is the default, because a local-first workbench shipping the
-        // researcher's own files to a rented VM to be read was the wrong shape (docs §11). Saying
-        // the reassuring thing regardless is the defect this repo has already reported upstream
-        // in `guardrails.py`, and it would be worse to repeat it here, in the document that
-        // explains the product.
         let execution = if self.sidecar.runs_locally() {
             (
                 "Runs on this machine",
@@ -412,14 +293,6 @@ impl Workbench {
             .child(section_label("WHERE THE DATA COMES FROM"))
             .child(sources)
             .child(section_label("THIS BUILD"))
-            // **Because a tester's report is unusable without it.** The app has never shown its
-            // own version anywhere: not in the window, not in the log, not in the About page. It
-            // logged the *backend* checkout's commit as its very first line (§115) and said nothing
-            // about itself — so "it doesn't work" from a second machine could be any of 183
-            // commits, and the first question back would always be the same one (§213).
-            //
-            // Selectable, like the citation below, because the whole point is pasting it into a
-            // message.
             .child(
                 div()
                     .w_full()
@@ -432,14 +305,9 @@ impl Workbench {
                         .muted()
                         .size(ui::Size::Compact),
                     )
-                    // Where the version already is, because that is where someone goes to ask
-                    // "what am I running" — and "is there a newer one" is the same question with
-                    // one more word. A separate pane for it would be a pane nobody opens.
                     .child(
                         ui::Label::new(match &self.update {
                             Some(standing) => update::describe(standing, &self.install),
-                            // Said out loud, so the gap between launching and answering does not
-                            // read as "there is nothing to report".
                             None => "checking for a newer build…".to_string(),
                         })
                         .muted()
@@ -462,8 +330,6 @@ impl Workbench {
                 "Literature search is powered by Asta, from the Allen Institute for AI. If your \
                  work uses output produced with it, please cite AstaBench:",
             ))
-            // Selectable, because a citation you cannot copy is a citation you will retype
-            // wrongly. `ctrl-c` takes it once dragged over, like the transcript (docs §62).
             .child(
                 div()
                     .w_full()
@@ -505,220 +371,72 @@ impl Workbench {
                 )),
             ))
     }
-}
 
-
-impl Workbench {
-    /// The approval card: the command, verbatim, and the two decisions.
-    ///
-    /// Deliberately shows the command rather than a summary. Host execution means this
-    /// runs on the researcher's own machine with their permissions, and the only
-    /// meaningful review is of the actual text (docs §19).
-    pub(crate) fn approval_card(&self, request: &ApprovalRequest, cx: &mut Context<Self>) -> impl IntoElement {
-        let card = div()
-            .flex()
-            .flex_col()
-            // Natural height, never stretched and never squeezed. Without this the card
-            // grew with the command and pushed its own buttons — and the composer — off
-            // the bottom of the window, which is exactly the review it exists to force.
-            .flex_none()
-            .w_full()
-            .min_w_0()
-            .gap_2()
-            .m_2()
-            .p_3()
-            .rounded_lg()
-            .border_1()
-            .border_color(rgb(theme::accent()))
-            .bg(rgb(theme::surface()))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .w_full()
-                    .min_w_0()
-                    .child(
-                        // The one heading in the app that keeps the accent. It is not a label
-                        // for a surface, it is the question — and the thing being asked about
-                        // is whether to run code on the researcher's own machine.
-                        div()
-                            .flex_none()
-                            .text_color(rgb(theme::accent()))
-                            .text_size(px(11.))
-                            .child("RUN THIS ON YOUR MACHINE?"),
-                    )
-                    .child(
-                        // **The tool, not the specialist.** The design names the subagent that
-                        // asked; nothing in `ApprovalRequest` carries one. It could be inferred
-                        // from whichever specialist spoke most recently — very likely right, and
-                        // an inference stated as fact beside a security decision, which is the
-                        // one place in this app that must not happen. The tool name is exact.
-                        div()
-                            .flex_none()
-                            .text_color(rgb(theme::text_faint()))
-                            .text_size(px(11.))
-                            .child(match request.actions.len() {
-                                0 | 1 => request
-                                    .actions
-                                    .first()
-                                    .map(|action| action.tool.clone())
-                                    .unwrap_or_default(),
-                                many => format!("{many} commands"),
-                            }),
-                    ),
-            );
-
-        // The command scrolls; the decision does not. An agent-written script runs to
-        // hundreds of lines, and the whole point of this gate is that Approve and Reject
-        // stay reachable no matter how long the thing being approved is.
-        let mut commands = div()
-            .id("approval-commands")
-            .flex()
-            .flex_col()
-            .gap_2()
-            .w_full()
-            .min_w_0()
-            .max_h(px(260.))
-            .overflow_y_scroll();
-
-        for action in &request.actions {
-            if !action.description.is_empty() {
-                commands = commands.child(
-                    div()
-                        .w_full()
-                        .min_w_0()
-                        .flex_none()
-                        .text_color(rgb(theme::text_muted()))
-                        .text_xs()
-                        .child(action.description.clone()),
+    /// The update control inside the About modal, or nothing when already up to date.
+    pub(crate) fn update_action(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let offer = match (&self.update, &self.install) {
+            (Some(update::Standing::Behind(release)), update::Layout::Packaged(_)) => release,
+            _ => return None,
+        };
+        let line = match &self.taking {
+            Some(update::Fetch::Progress(so_far, total)) => {
+                let percent = if *total == 0 {
+                    0
+                } else {
+                    (so_far.saturating_mul(100) / total).min(100)
+                };
+                return Some(
+                    ui::Label::new(format!("downloading {} — {percent}%", offer.tag))
+                        .muted()
+                        .size(ui::Size::Compact)
+                        .into_any_element(),
                 );
             }
-            commands = commands.child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .flex_none()
-                    .p_2()
-                    .rounded_md()
-                    // Sunk, not raised: the card is `surface`, so the command sitting on
-                    // `background` reads as a thing quoted inside it.
-                    .bg(rgb(theme::background()))
-                    .border_1()
-                    .border_color(rgb(theme::border()))
-                    .text_color(rgb(theme::text()))
-                    // Monospaced, which is not decoration on this element. This is the text a
-                    // researcher is being asked to actually review, and a proportional font hides
-                    // the differences that matter in a shell command — spacing, `l` against `1`,
-                    // where a quote opens and closes.
-                    .font(ui::code_font())
-                    .text_size(px(12.5))
-                    .line_height(px(19.))
-                    .child(action.detail.clone()),
+            Some(update::Fetch::Ready(root, integrity)) => {
+                let checked = match integrity {
+                    update::Integrity::Digest => "checked against the digest GitHub published",
+                    update::Integrity::SizeOnly => "checked by length only — no digest was published",
+                };
+                return Some(
+                    ui::Label::new(format!(
+                        "{} is downloaded and {checked}. Press Restart to Update in the status \
+                         bar. It is waiting at {}.",
+                        offer.tag,
+                        root.display()
+                    ))
+                    .muted()
+                    .size(ui::Size::Compact)
+                    .into_any_element(),
+                );
+            }
+            Some(update::Fetch::Failed(reason)) => Some(reason.clone()),
+            None => None,
+        };
+        let label = format!("Try {} again", offer.tag);
+        let mut column = div().flex().flex_col().w_full().min_w_0().gap_1();
+        if let Some(reason) = line {
+            column = column.child(
+                ui::Label::new(format!("could not download it: {reason}"))
+                    .muted()
+                    .size(ui::Size::Compact),
             );
         }
-
-        // What is knowable about the effect, and nothing more. The design's line reads "Reads 1
-        // file, writes 1 file, in …" — which would mean deciding what an arbitrary shell command
-        // touches, by reading it. A wrong "reads 1 file" beside a command that deletes a
-        // directory is worse than no line, and this is the gate that exists because the agent's
-        // `execute` runs with the researcher's own permissions.
-        let effect = match self.thread_workspace() {
-            Some(dir) => format!(
-                "Runs on {} with your permissions, in {}.",
-                self.sidecar.execution(),
-                dir.display()
-            ),
-            None => format!(
-                "Runs on {} with your permissions.",
-                self.sidecar.execution()
-            ),
-        };
-
-        card.child(commands)
-            .child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .text_color(rgb(theme::text_muted()))
-                    .text_xs()
-                    .child(effect),
-            )
-            .child(
-            div()
-                .flex()
-                .flex_row()
-                .flex_wrap()
-                .items_center()
-                .gap_2()
-                .w_full()
-                .min_w_0()
+        Some(
+            column
                 .child(
-                    ui::Button::new("approve", "Approve")
-                        .tone(ui::Tone::Accent)
-                        .on_click(
-                            cx.listener(|workbench, _event, _window, cx| {
-                                workbench.decide(true, cx)
-                            }),
-                        ),
-                )
-                .child(ui::Button::new("reject", "Reject").on_click(
-                    cx.listener(|workbench, _event, _window, cx| workbench.decide(false, cx)),
-                ))
-                // Bounded to *this turn*, and nothing is persisted. A permanent
-                // "always allow" is how a security gate becomes a habit: the tenth
-                // identical dialog in one analysis is not read, it is dismissed, and
-                // then neither is the eleventh — which is the one that mattered.
-                // Approving the rest of one task is a decision someone can actually
-                // hold in their head, and it expires on its own.
-                // Both grants pushed right and set `Compact`, so the row reads as two decisions
-                // about *this* command and two ways to stop being asked. The design shows only
-                // the wider one; neither is dropped, because the narrower grant is the safer
-                // habit and removing it would leave "approve everything" as the only way out of
-                // clicking — which is how a gate becomes a formality.
-                .child(div().flex_grow())
-                .child(
-                    ui::Button::new("approve-turn", "Approve the rest of this turn")
+                    ui::Button::new("take-update", label)
                         .size(ui::Size::Compact)
                         .on_click(cx.listener(|workbench, _event, _window, cx| {
-                            workbench.approve_rest_of_turn = true;
-                            workbench.decide(true, cx);
+                            workbench.take_update(cx);
                         })),
                 )
-                // The wider grant, asked for because one analysis is a dozen commands
-                // across several turns and nobody reads the twelfth dialog. It covers
-                // background workers too — they are where the clicking is worst, since
-                // there is no one watching the panel. Still bounded: "New thread" or
-                // closing the app ends it, nothing is written to disk, and the status bar
-                // says so for as long as it holds (docs §41).
-                .child(
-                    ui::Button::new(
-                        "approve-conversation",
-                        "Approve everything in this conversation",
-                    )
-                    .size(ui::Size::Compact)
-                    .on_click(cx.listener(|workbench, _event, _window, cx| {
-                        workbench.approve_conversation = true;
-                        workbench.decide(true, cx);
-                    })),
-                ),
+                .into_any_element(),
         )
     }
-}
 
+    // ---- discovery ----
 
-impl Workbench {
-    /// The search, drawn as the tree it is.
-    ///
-    /// **A tree and not the force-directed graph the service's own view shows.** Same data, and
-    /// the reasons are in `discovery.rs`: a spring layout settles differently every frame in a
-    /// panel that is rebuilt on every stream event, and depth is the one thing a blob cannot
-    /// show — how far the search kept refining one line of enquiry.
-    ///
-    /// Edges are three axis-aligned pieces each. gpui draws rectangles, and elbows are exact
-    /// where a rotated div would be approximate.
+    /// The discovery run's search tree: experiment nodes connected by their branching.
     pub(crate) fn discovery_tree(&self, view: &DiscoveryView, cx: &mut Context<Self>) -> impl IntoElement {
         let placed = discovery::layout(&view.experiments);
         let (width, height) = discovery::canvas(&placed);
@@ -728,7 +446,6 @@ impl Workbench {
             .w(px(width))
             .h(px(height));
 
-        // Connectors first, so a node is never drawn under its own edge.
         for (parent, child) in discovery::edges(&view.experiments) {
             let Some(from) = placed.iter().find(|node| node.at == parent) else {
                 continue;
@@ -770,9 +487,6 @@ impl Workbench {
                     .justify_center()
                     .rounded_full()
                     .bg(rgb(fill))
-                    // The server's own `is_surprising` gets its own mark rather than being folded
-                    // into the colour: loudness is a number we banded, and that flag is the
-                    // service's judgment. Two different claims, drawn differently.
                     .border_2()
                     .border_color(rgb(if chosen {
                         theme::accent()
@@ -786,7 +500,6 @@ impl Workbench {
                     .child(experiment.number.to_string())
                     .hover(|style| style.cursor_pointer())
                     .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                        // Pressing the open one closes it, back to the ranked list.
                         let closing = workbench
                             .discovery_open
                             .as_ref()
@@ -804,16 +517,8 @@ impl Workbench {
             .overflow_scroll()
             .child(canvas)
     }
-}
 
-
-impl Workbench {
     /// Every experiment, ranked by how far it moved a belief.
-    ///
-    /// The order is the reason to read this at all: the point of a discovery run is the handful of
-    /// results that changed the picture, and creation order buries them among the ones that did
-    /// not. Ranked on `|surprise|`, so an experiment that moved a belief hard *against* its
-    /// hypothesis ranks as high as one that confirmed it — which is the interesting case.
     pub(crate) fn discovery_list(&self, view: &DiscoveryView, cx: &mut Context<Self>) -> impl IntoElement {
         let order = ranked(&view.experiments, view.loudest_first);
 
@@ -837,8 +542,6 @@ impl Workbench {
                 _ => String::new(),
             };
             let score = match experiment.surprise {
-                // Magnitude and direction as separate columns, the way the service's own table
-                // does it — the sign lives in `surprise` and is not derived from the beliefs.
                 Some(_) => format!(
                     "{:.3} {}",
                     experiment.magnitude(),
@@ -906,15 +609,8 @@ impl Workbench {
         }
         list
     }
-}
 
-
-impl Workbench {
-    /// One experiment, opened.
-    ///
-    /// The order is the service's own and `interpreting-results.md` asks for it: the belief shift,
-    /// the hypothesis, the analysis, then the review. Code is not shown — it is in the persisted
-    /// `.json`, and a researcher reading results is not reading Python.
+    /// One experiment, opened: its belief shift, hypothesis, analysis, review and figures.
     pub(crate) fn discovery_detail(
         &self,
         view: &DiscoveryView,
@@ -980,9 +676,8 @@ impl Workbench {
                 .muted()
                 .size(ui::Size::Compact),
         );
-        // The service's own flag, said in words. It is not a threshold on the number above it —
-        // the probe had a 0.67 shift the service called unsurprising — so the two are reported
-        // side by side rather than one derived from the other.
+        // Reported separately from the surprise number: the service's flag is its own judgment,
+        // not a threshold derived from the magnitude above it.
         if experiment.surprising {
             detail = detail.child(
                 ui::Label::new("The service flagged this one as surprising.")
@@ -999,11 +694,6 @@ impl Workbench {
             if body.trim().is_empty() {
                 continue;
             }
-            // **Rendered, not printed.** The service writes real Markdown here — `###` headings,
-            // `- ` lists, `**bold**` labels — and a raw dump of it was on screen: *"The modal of
-            // autodiscovery doesnt render well markdown."* `markdown_block` is the transcript's own
-            // renderer, and `None` for the selection registry is the mode the file preview already
-            // uses: the same blocks, not part of a conversation (§266).
             let mut rendered = div()
                 .flex()
                 .flex_col()
@@ -1024,10 +714,6 @@ impl Workbench {
             detail = detail.child(rendered);
         }
 
-        // **The plots the experiment actually drew.** They exist only in the per-experiment
-        // response, so they arrive after the text and the pane has to distinguish three states:
-        // asking, none, and here. Conflating the first two makes an experiment with no figure look
-        // permanently stuck (§257).
         let known = view.figures.get(&experiment.id);
         match figure_state(known, view.fetching.as_deref() == Some(experiment.id.as_str())) {
             Figures::Ready => {
@@ -1045,20 +731,11 @@ impl Workbench {
                             let opening = path.clone();
                             div()
                                 .id(SharedString::from(format!("fig-{}-{at}", experiment.id)))
-                                // **The output gallery's exact shape, and not a near-miss.** The
-                                // first version added `min_w_0` to a block `div` — gpui's default
-                                // display — so the `img`'s own `w_full` had nothing definite to
-                                // resolve against and rendered at zero width. The bordered box
-                                // appeared, empty, while the same file drew fine in the panel.
-                                // §88 and §59 are both about exactly this, one layer up (§263).
                                 .relative()
                                 .flex()
                                 .flex_row()
                                 .w_full()
                                 .flex_none()
-                                // A fixed height with `Contain`: a scree plot cropped to a square
-                                // is a scree plot you cannot read, and §152 already settled that
-                                // for the output gallery.
                                 .h(px(260.))
                                 .rounded_md()
                                 .overflow_hidden()
@@ -1071,8 +748,6 @@ impl Workbench {
                                         .object_fit(gpui::ObjectFit::Contain),
                                 )
                                 .hover(|style| style.cursor_pointer())
-                                // Opens it full size in the researcher's own viewer, because a
-                                // 260px band is for recognising a plot and not for reading one.
                                 .on_click(move |_event, _window, _cx| {
                                     if let Err(error) = workspace::open(&opening) {
                                         tracing::warn!(%error, "could not open a figure");
@@ -1082,8 +757,6 @@ impl Workbench {
                 );
             }
             Figures::Nothing => {
-                // Asked, and this experiment genuinely produced none. Said out loud so it does not
-                // read as a pane that failed to finish loading.
                 detail = detail.child(
                     ui::Label::new("No figures — this experiment drew none.")
                         .muted()
@@ -1107,10 +780,7 @@ impl Workbench {
         }
         detail
     }
-}
 
-
-impl Workbench {
     /// A finished discovery run: the search as a tree, and its experiments ranked.
     pub(crate) fn discovery_modal(&self, view: &DiscoveryView, cx: &mut Context<Self>) -> impl IntoElement {
         let mut body = div().flex().flex_col().w_full().min_w_0().gap_3();
@@ -1140,8 +810,6 @@ impl Workbench {
                     if view.experiments.len() == 1 { "" } else { "s" }
                 )];
                 if !view.complete {
-                    // Said out loud, because a tree that grows between two openings is otherwise
-                    // indistinguishable from one that was drawn wrong.
                     parts.push("still running".to_string());
                 }
                 if failed > 0 {
@@ -1175,9 +843,6 @@ impl Workbench {
                         .flex_none()
                         .gap_2()
                         .child(div().flex_grow())
-                        // Named in words rather than an arrow glyph. Our researchers are not
-                        // developers, and §199's rule is that an affordance nobody can name is one
-                        // they conclude does not exist.
                         .child(
                             ui::Button::new(
                                 "discovery-sort",
@@ -1232,9 +897,6 @@ impl Workbench {
         } else {
             view.name.clone()
         })
-        // Wide enough to read an analysis in when expanded, and a list-scanning width otherwise.
-        // 1180 rather than "the whole window": `ui::Modal` centres on a fixed width, and prose
-        // running the full width of a 4K display is unreadable for the opposite reason.
         .width(if view.expanded { 1180. } else { 760. })
         .focus(&self.delete_focus)
         .body(body)
@@ -1259,22 +921,8 @@ impl Workbench {
             .size(ui::Size::Compact),
         )
     }
-}
 
-
-impl Workbench {
-    /// The budget gate.
-    ///
-    /// **A modal, deliberately, and §244 is the argument for it rather than against.** That section
-    /// refused a modal for a background run that had already finished: nothing was pending, the
-    /// researcher had somewhere to go, and a modal would have been a toll booth in front of work
-    /// they could get on with. This is the other kind of thing. Nothing proceeds until it is
-    /// answered, it has three outcomes rather than one, and the wrong one spends credits that do
-    /// not come back. A banner is for something already true; a modal is for something that cannot
-    /// happen without you.
-    ///
-    /// Three things it must say, and the order is the order: what will run, what it costs against
-    /// what is left, and how to change it before agreeing.
+    /// The budget gate before a discovery run starts: cost, balance, and what to explore.
     pub(crate) fn approval_modal(&self, approval: &Approval, cx: &mut Context<Self>) -> impl IntoElement {
         let experiments = approval.experiments;
         let available = approval.cost.as_ref().and_then(|cost| cost.available);
@@ -1302,7 +950,6 @@ impl Workbench {
             );
         }
 
-        // --- the budget, which is the price ------------------------------------------------
         body = body.child(
             div()
                 .flex()
@@ -1361,7 +1008,6 @@ impl Workbench {
                                 })),
                         ),
                 )
-                // The cost and the balance in one sentence, because they are one question. And
                 // `available` rather than `granted`: submitting moves credits to `pending`
                 // straight away, so the grant overstates what is left by whatever is in flight.
                 .child(
@@ -1375,7 +1021,6 @@ impl Workbench {
                 ),
         );
 
-        // --- the one field worth changing at the gate --------------------------------------
         body = body.child(
             div()
                 .flex()
@@ -1415,9 +1060,6 @@ impl Workbench {
                             .disabled(approval.submitting)
                             .on_click(cx.listener(|workbench, _event, _window, cx| {
                                 if let Some(approval) = workbench.approving.take() {
-                                    // Remembered, so the next snapshot does not ask again. The
-                                    // run stays drafted and unspent, which is what "not now"
-                                    // means — nothing is deleted.
                                     workbench.declined.insert(approval.draft.run_id);
                                     workbench.status =
                                         "the discovery run is drafted and unstarted".into();
@@ -1435,11 +1077,6 @@ impl Workbench {
                             },
                         )
                         .tone(ui::Tone::Accent)
-                        // Not while a press is in flight, and not for a budget the balance cannot
-                        // cover: the service would refuse it, and letting someone press a button
-                        // that fails is worse than not offering it.
-                        // Unpressable until the token is in hand. A press that could only fail is
-                        // worse than a button that says "not yet" by being disabled (§252).
                         .disabled(
                             approval.submitting
                                 || over_budget
@@ -1462,16 +1099,10 @@ impl Workbench {
                 .size(ui::Size::Compact),
             )
     }
-}
 
+    // ---- datasets ----
 
-impl Workbench {
-    /// Every dataset, in a list you scroll and search — the treatment the references got.
-    ///
-    /// *"we can search the datasets in a modal and click to be redirected to the pages."* The
-    /// panel could not do this before because the client kept datasets as bare truncated titles,
-    /// which is how five distinct records from one multi-site study rendered as five identical
-    /// rows (see [`protocol::Dataset`]).
+    /// Every dataset, in a searchable list.
     pub(crate) fn datasets_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
         ui::Modal::new("datasets", format!("Datasets · {}", self.datasets.len()))
             .width(720.)
@@ -1483,7 +1114,6 @@ impl Workbench {
                     .w_full()
                     .min_w_0()
                     .gap_2()
-                    // Outside the scroll region, so it cannot scroll away from what it filters.
                     .child(self.filter_field(self.datasets_filter.clone(), cx))
                     .child(
                         div()
@@ -1496,9 +1126,6 @@ impl Workbench {
                             .max_h(px(480.))
                             .overflow_y_scroll()
                             .child(self.datasets_section(None, cx))
-                            // A heading that opens onto nothing is indistinguishable from a
-                            // heading that does nothing. If the bucket has titles but the
-                            // structured records did not decode, say so here instead.
                             .when(self.datasets.is_empty(), |list| {
                                 list.child(
                                     div()
@@ -1537,22 +1164,13 @@ impl Workbench {
                 .size(ui::Size::Compact),
             )
     }
-}
 
-
-impl Workbench {
     /// The dataset list, capped for the panel and whole for the modal.
-    ///
-    /// One function rather than two, for the reason `sources_section` is one: a compact list and
-    /// a full one are the same rows with a different count, and written separately the download
-    /// gate ends up in one of them (docs §194).
     pub(crate) fn datasets_section(&self, limit: Option<usize>, cx: &mut Context<Self>) -> impl IntoElement {
         let query = match limit {
             Some(_) => String::new(),
             None => self.datasets_filter.read(cx).text().to_string(),
         };
-        // Scored over title, authors and identifier together, so `andrade 0F9T62` and `israel`
-        // both find what a researcher would expect them to.
         let matching: Vec<&protocol::Dataset> = self
             .datasets
             .iter()
@@ -1573,10 +1191,7 @@ impl Workbench {
         }
         section
     }
-}
 
-
-impl Workbench {
     /// One dataset: what it is, where it came from, and whether it can be had.
     pub(crate) fn dataset_row(&self, dataset: &protocol::Dataset, cx: &mut Context<Self>) -> impl IntoElement {
         let page = dataset.page();
@@ -1585,15 +1200,8 @@ impl Workbench {
         let downloading = self.downloading.contains(&id);
         let downloaded = self.downloaded.get(&id).cloned();
 
-        // **Two targets, so two shapes.** The whole row used to carry the page link, with the
-        // download button sitting inside it — so the hover fill covered both, and pressing the
-        // button opened the browser as well as downloading. *"the hover colour both the doi
-        // redirect and the download data button. There must be a distinction there."*
-        //
-        // Right, and the fix is structural rather than a `stop_propagation`: a highlight is a
-        // promise about what a press will do, and one that spans two different actions is a
-        // wrong promise however the events are routed. Only the title and byline open the page,
-        // and they are the only part that lights up.
+        // Two separate click targets: only the title/byline opens the page, so the download
+        // button's own click never also triggers the browser.
         let mut row = div()
             .flex()
             .flex_col()
@@ -1625,8 +1233,6 @@ impl Workbench {
                     .min_w_0()
                     .text_color(rgb(theme::text_muted()))
                     .text_xs()
-                    // The identifier, always: it is what tells two records of one study apart,
-                    // and what a researcher pastes into a citation.
                     .child(match dataset.authors.first() {
                         Some(author) if dataset.authors.len() > 1 => {
                             format!("{} et al. · {}", author, dataset.persistent_id)
@@ -1636,7 +1242,6 @@ impl Workbench {
                     }),
             );
 
-        // Only when there is somewhere to go, so a row never lights up and then does nothing.
         if let Some(url) = page.clone() {
             opener = opener
                 .hover(|style| {
@@ -1654,8 +1259,6 @@ impl Workbench {
         }
         row = row.child(opener);
 
-        // The button appears only for a dataset the server says is entirely public, and its label
-        // carries the size — so pressing it is never a surprise.
         if downloaded.is_none() && !downloading {
             if let Some(Ok(access)) = access {
                 if access.refusal().is_none() {
@@ -1664,13 +1267,8 @@ impl Workbench {
                     row = row.child(
                         div().px_2().pb_1().child(
                             ui::Button::new(SharedString::from(format!("get-{id}")), offer)
-                                // Accent, because this is the action the list exists for and it
-                                // must read as a control rather than as more of the row.
                                 .tone(ui::Tone::Accent)
                                 .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                                    // Belt as well as braces: the opener is a sibling now, so
-                                    // nothing is behind this — but a future nesting must not
-                                    // silently reintroduce "download also opens the browser".
                                     cx.stop_propagation();
                                     workbench.download_dataset(wanted.clone(), cx);
                                 })),
@@ -1681,17 +1279,10 @@ impl Workbench {
         }
         row
     }
-}
 
+    // ---- documents (library) ----
 
-impl Workbench {
-    /// The researcher's own library, in a list you can search.
-    ///
-    /// The third of these, after references (§194) and datasets (§223), and deliberately the same
-    /// shape: a filter outside the scroll region and one section function serving both the panel
-    /// and the modal. A library is the case that most wants searching — its whole purpose is to
-    /// answer *"what do I have on this"* — and until now `LibraryArtifact` reached the client
-    /// carrying titles, paths, summaries and tags, and the client kept none of it.
+    /// The researcher's own library, in a searchable list.
     pub(crate) fn documents_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
         ui::Modal::new("documents", format!("Library · {}", self.documents.len()))
             .width(720.)
@@ -1737,14 +1328,10 @@ impl Workbench {
                 .size(ui::Size::Compact),
             )
     }
-}
 
-
-impl Workbench {
+    /// The filtered document list.
     pub(crate) fn documents_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let query = self.documents_filter.read(cx).text().to_string();
-        // Title, tags and summary together: a library is searched by what a paper is *about*, and
-        // the summary is the only field that carries that.
         let matching: Vec<&protocol::Document> = self
             .documents
             .iter()
@@ -1761,8 +1348,6 @@ impl Workbench {
 
         let mut section = div().flex().flex_col().gap_1();
         if matching.is_empty() && !query.trim().is_empty() {
-            // Said, rather than left blank: a filter matching nothing and an empty library look
-            // identical otherwise, and only one of them is fixed by typing less.
             return section.child(
                 ui::Label::new("No document matches that.")
                     .muted()
@@ -1774,15 +1359,9 @@ impl Workbench {
         }
         section
     }
-}
 
-
-impl Workbench {
     /// One indexed document: what it is, what it is about, and where it lives.
     pub(crate) fn document_row(&self, document: &protocol::Document) -> impl IntoElement {
-        // The whole row opens the file, because unlike a dataset there is no second action to
-        // confuse it with (§225a) — and only when there is a file to open, so a URL-only entry
-        // does not light up and then do nothing.
         let openable = workspace::local_path(
             &document.path,
             self.thread_workspace().as_deref(),
@@ -1826,8 +1405,6 @@ impl Workbench {
                     .child(document.summary.clone()),
             );
         }
-        // What the librarian recorded, verbatim. A researcher chasing a document the recorder
-        // called missing needs the string it was looking for, not a prettier version of it.
         row = row.child(
             div()
                 .w_full()
@@ -1859,17 +1436,10 @@ impl Workbench {
         }
         row
     }
-}
 
+    // ---- sources (references) ----
 
-impl Workbench {
-    /// Every reference, in a list you scroll rather than a panel you fight.
-    ///
-    /// Asked for in these terms: *"a nice list that can scroll in y direction, like OS systems do
-    /// in file explorers"* — and pointedly **not** the slider the images got. A figure is one
-    /// thing you look at and the next is a different thing; a reference list is one object you
-    /// read down. Paging through twenty-six citations one at a time would be the wrong gesture
-    /// for the same reason paging through a folder would be (docs §194).
+    /// Every reference, in a searchable, scrollable list.
     pub(crate) fn sources_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let unverified = self.unverified_sources();
         ui::Modal::new("sources", format!("Sources · {}", self.sources.len()))
@@ -1882,9 +1452,6 @@ impl Workbench {
                     .w_full()
                     .min_w_0()
                     .gap_2()
-                    // The field sits outside the scroll region, so it cannot scroll away from
-                    // the list it filters. `Modal::body` is itself a scroller, and the inner
-                    // `max_h` means its content fits — so only the list moves.
                     .child(self.filter_field(self.sources_filter.clone(), cx))
                     .child(
                         div()
@@ -1912,8 +1479,6 @@ impl Workbench {
             )
             .footer(
                 ui::Label::new(match unverified {
-                    // The same count the panel header carries, from the same function, so the
-                    // two cannot disagree about what "unverified" means (§185).
                     0 => "Every reference here came from a search or was checked against a \
                           registry."
                         .to_string(),
@@ -1926,15 +1491,8 @@ impl Workbench {
                 .size(ui::Size::Compact),
             )
     }
-}
 
-
-impl Workbench {
     /// The reference list, capped for the panel and whole for the modal.
-    ///
-    /// **One function rather than two, because they must agree.** A compact panel list and a full
-    /// one are the same rows with a different count — and the moment they are written separately,
-    /// the unverified mark or the link is in one and not the other (docs §194).
     pub(crate) fn sources_section(&self, limit: Option<usize>, cx: &mut Context<Self>) -> impl IntoElement {
         let mut section = div()
             .flex()
@@ -1946,19 +1504,11 @@ impl Workbench {
                     .border_t_1()
                     .border_color(rgb(theme::border()))
                     .child(section_label_owned(match self.unverified_sources() {
-                        // **Counted where the eye lands, not only marked row by row.** Silence
-                        // under a reference means "nothing wrong with this one", and until §185
-                        // it also meant "nothing checked this one" — so a researcher scanning
-                        // fourteen citations had no way to know how many needed them. The header
-                        // says how many, and the rows say which (docs §185).
                         0 => format!("SOURCES · {}", self.sources.len()),
                         n => format!("SOURCES · {} · {n} UNVERIFIED", self.sources.len()),
                     }))
             });
 
-        // A quiet line while the registry is being asked, and nothing at all once it is done.
-        // There is no control here: see `Workbench::resolve_sources` for why verifying a citation
-        // is not something to ask permission for every time.
         if self.resolving > 0 {
             section = section.child(
                 div()
@@ -1970,9 +1520,6 @@ impl Workbench {
             );
         }
 
-        // Scored against the citation as written, which is what a researcher remembers: an
-        // author's name, a year, a word from the title. The same fuzzy scorer as every other
-        // filter here, so `2024 orchid` finds what you would expect it to.
         let query = match limit {
             Some(_) => String::new(),
             None => self.sources_filter.read(cx).text().to_string(),
@@ -1981,33 +1528,18 @@ impl Workbench {
             .sources
             .iter()
             .enumerate()
-            // **Numbered before filtering.** `[3]` has to keep meaning the third reference of
-            // the answer, or a filtered list renumbers the citations the prose points at.
+            // Numbered before filtering, so `[3]` keeps meaning the third reference of the
+            // answer rather than being renumbered by the filter.
             .filter(|(_, source)| match_score(&query, &source.citation).is_some())
             .collect();
         let showing = limit.unwrap_or(matching.len());
         for (at, source) in matching.into_iter().take(showing) {
             let verdict = self.checked.get(&source.citation);
-            // **Three states, not two.** `None` is *not looked up yet*; `Some(None)` is *looked
-            // up, and the registry has nothing*. Collapsing them with `.flatten()` — which this
-            // did — made a reference still being resolved display the message meant for one that
-            // came back empty, which is how a correctly cited Magurran 1988 was told it matched
-            // nothing while its lookup was still in flight.
-            //
-            // This is the distinction the whole feature is about, reintroduced one call inside
-            // it. Kept unflattened here so the match below can see all three.
+            // `None` is not looked up yet; `Some(None)` is looked up and the registry has
+            // nothing. Kept unflattened so the match below can tell the three states apart.
             let looked_up = self.repaired.get(&source.citation);
             let repair = looked_up.cloned().flatten();
-            // **Semantic Scholar, whichever identifier we ended up with.** Asked for directly:
-            // *"when I press it I am redirected to the paper in semantic scholar not to the
-            // article in the main page where the article was published."* `api.semanticscholar.org`
-            // 301-redirects for both id forms — verified — so a corpus id and a DOI both land on
-            // the paper's own page.
             let link = scholar_link(source, verdict, repair.as_ref());
-            // The citation without its URL. A DOI written into a sentence wraps mid-token in a
-            // 330px column, and a link that *looks* broken is one somebody retypes with a space
-            // in it — but more to the point, the raw URL is not information a reader wants. The
-            // word "link" is.
             let prose = without_url(&source.citation);
 
             let mut row = div()
@@ -2020,16 +1552,6 @@ impl Workbench {
                 .min_w_0()
                 .p_2()
                 .rounded_lg()
-                // **The whole row opens the paper, and lights up to say so.** Asked for after
-                // §194 made the list long enough to read down: *"I would like to have a hover
-                // colouring when I'm hovering a paper so when I click it I'll be redirected to
-                // the web page."* A twelve-pixel word called `link` at the end of a four-line
-                // citation is a target you aim at; the citation itself is the thing being
-                // pointed at, so it should be the thing you press (docs §195).
-                //
-                // **Only when there is somewhere to go.** A reference nothing could resolve gets
-                // no hover and no pointer, because a row that lights up and then does nothing is
-                // worse than one that never offered (§185 marks those as unverified already).
                 .when_some(link.clone(), |row, url| {
                     row.hover(|style| {
                         let fill = theme::hover_over(theme::surface());
@@ -2087,13 +1609,6 @@ impl Workbench {
                 );
             }
 
-            // **Only when something is wrong.** A line under every reference saying it checked
-            // out is fourteen lines of reassurance nobody reads, and it buries the two that
-            // matter. Silence here means verified.
-            // Said while the check is still running, because the alternative is a reference that
-            // looks finished and is not. The link is withheld until then (see `scholar_link`), and
-            // a row with neither a link nor an explanation reads as a reference with nothing
-            // wrong with it.
             let note = match (verdict, looked_up) {
                 (None, _) if self.resolving > 0 => {
                     Some((theme::text_faint(), "checking this reference…".to_string()))
@@ -2132,12 +1647,7 @@ impl Workbench {
                 )),
                 _ => None,
             };
-            // **The holes the match above leaves.** Every arm answers *is this broken*, and
-            // falling through means "nothing wrong" — which was also what a reference nothing had
-            // checked looked like. `(NoIdentifier, None)` and `(Unregistered, None)` land here,
-            // and so does a source with no verdict at all once resolution has stopped. Saying
-            // where it came from is a different question, and one that has an answer in every
-            // case (docs §185).
+            // Falls back to saying where the citation came from, so every case has some note.
             let note = note.or_else(|| {
                 references::origin(verdict, looked_up.map(Option::is_some))
                     .note()
@@ -2157,9 +1667,6 @@ impl Workbench {
             section = section.child(row);
         }
 
-        // Said, rather than left as an empty panel: a filter matching nothing and a
-        // conversation with no references look identical otherwise, and only one of them is
-        // fixed by typing less.
         if showing == 0 && !query.trim().is_empty() {
             section = section.child(
                 ui::Label::new("No reference matches that.")
@@ -2168,9 +1675,6 @@ impl Workbench {
             );
         }
 
-        // **The way in, and the count it hides.** A panel that lists twenty-six references in
-        // full is a wall a researcher scrolls past to reach the files below it — the same problem
-        // the images had before §152 grouped them behind one tile. The rest are one press away.
         let hidden = self.sources.len().saturating_sub(showing);
         if hidden > 0 {
             section = section.child(
@@ -2208,19 +1712,10 @@ impl Workbench {
         }
         section
     }
-}
 
+    // ---- commands ----
 
-impl Workbench {
     /// Everything this conversation ran, newest first.
-    ///
-    /// **Newest first, unlike the file itself.** The record is written oldest-first because that is
-    /// how it accumulates; it is read to answer "what did that just do", so the last command is the
-    /// one being looked for.
-    ///
-    /// The heading states the limit rather than burying it in a docstring nobody here will read:
-    /// these are paths the commands *named*, and a command can write somewhere it never names.
-    /// Saying that once, where the list is, is the difference between a report and a false promise.
     pub(crate) fn commands_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let commands = self.thread_commands();
         let escaped = commands.iter().filter(|command| command.escaped()).count();
@@ -2265,8 +1760,6 @@ impl Workbench {
                     .size(ui::Size::Compact),
             );
 
-            // The command as written. Monospace, because it is code and a proportional font makes
-            // a shell pipeline unreadable at exactly the moment somebody is checking it carefully.
             row = row.child(
                 div()
                     .w_full()
@@ -2284,8 +1777,6 @@ impl Workbench {
                 );
             }
 
-            // Two different sentences, because they are two different claims. A file watched to
-            // appear during the command is a fact; a path merely mentioned may have been read.
             for path in &command.outside {
                 let (verb, tone) = if command.wrote.contains(path) {
                     ("wrote, outside this conversation", theme::accent())
@@ -2306,8 +1797,6 @@ impl Workbench {
         } else {
             format!("What ran · {}", commands.len())
         };
-        // What happened last time the button was pressed, per file. A partial result is the
-        // normal case — `/tmp` is swept — and a count would hide which ones did not make it.
         match &self.collecting {
             Some(Ok(collected)) => {
                 for (path, name) in &collected.brought {
@@ -2334,8 +1823,6 @@ impl Workbench {
             }
             None => {}
         }
-        // And when both lists were empty, the backend's own sentence — otherwise the press draws
-        // nothing and reads as broken, which is what it did.
         if let Some(Ok(collected)) = &self.collecting {
             if collected.brought.is_empty() && collected.refused.is_empty() {
                 body = body.child(
@@ -2346,7 +1833,7 @@ impl Workbench {
             }
         }
 
-        // Offered only when a command was *watched writing* somewhere — never for a path that was
+        // Offered only when a command was watched writing somewhere — never for a path that was
         // merely named, which may be the researcher's own input.
         let written = files_left_outside(&commands).len();
         let mut actions = ui::actions().child(div().flex_grow());
@@ -2357,7 +1844,6 @@ impl Workbench {
                     if self.collect_in_flight {
                         "Bringing them in…".to_string()
                     } else {
-                        // Named in words: what the press will do, and to how many.
                         format!("Copy {written} file{} into this conversation", if written == 1 { "" } else { "s" })
                     },
                 )
@@ -2385,4 +1871,3 @@ impl Workbench {
             )
     }
 }
-
