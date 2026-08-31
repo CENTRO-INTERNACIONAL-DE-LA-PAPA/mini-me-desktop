@@ -17097,3 +17097,49 @@ real cases — as the thing that says so when it happens anyway.
 *Hundred-and-forty-ninth: when a model gets one field wrong and the rest right, look at what the
 instructions say about that field. Ours documented a source for every field except the one that
 mattered.*
+
+## 300. Of how many? (2026-08-31)
+
+The MCP is deployed with §299's fixes, so `SearchCIPDataverse` now answers with `total_count` and
+`complete`. This is the other end of that wire: the number reaching the researcher rather than
+stopping at the model's context.
+
+`SearchResultsFile` reads both off the search's answer and writes them beside the records, in
+`.mini-me/dataverse_search.meta.json` — its own file rather than a wrapper around the array,
+because the array has three readers (the panel decodes it, `claims.unsearched` walks it, a
+researcher opens it) and all three would have to learn a new shape to carry one integer.
+
+The panel heading and the modal title now read **`datasets · 29 of 4000`**, from one function, so
+they cannot come to disagree about the same list.
+
+### Three states, not two
+
+`total_count: 0` is **not** zero matches. It is a deployment that could not say — an MCP predating
+§299, or an instance where Dataverse omitted the field. `29 of 0` would be a claim about the corpus
+and a confident-looking one, so `denominator()` answers `None` and the heading says `29`.
+
+Two more cases where a denominator would mislead rather than inform:
+
+* **equal to the count** — `29 of 29` is noise on every complete search, which is most of them;
+* **smaller than the count** — several searches accumulate past any single query's match count
+  (§286), and `40 of 29` reads as a bug in the app rather than as a fact about Dataverse.
+
+Both answer `None`. The rule is that a denominator appears only when it tells the researcher
+something they did not already have.
+
+### One partial search makes the turn partial
+
+`complete` starts true and only ever goes false. A broad search that was cut short is not redeemed
+by a narrow one that finished afterwards: the file holds both, so what the file holds is
+incomplete, and a later `complete: true` must not overwrite that. The largest `total_count` wins
+for the same reason — a broad search having established that four thousand exist is not unsaid by
+a narrow one matching four.
+
+### What this does not do
+
+It does not make the search complete. It makes the incompleteness visible, which is the difference
+between a researcher who narrows their query and one who cites twenty-nine of four thousand
+believing that was the corpus.
+
+*Hundred-and-fiftieth: a number a system uses internally and does not return is a number it has
+decided its user does not need. That decision is almost never made on purpose.*
