@@ -196,6 +196,41 @@ pub(crate) fn venv_python(project_dir: &Path) -> Option<PathBuf> {
     python.is_file().then_some(python)
 }
 
+/// Write `GENERATED_CONFIG` beside upstream's `langgraph.json`, for `--config` to find.
+///
+/// **Missing since WSL2 was removed.** The WSL launch used to chain this generator into
+/// the same shell command as `langgraph dev` (`&&`, so a generator failure stopped the
+/// launch rather than starting a server whose coordinator points at a graph nobody
+/// serves). Host execution's branch of `launch_command_for` already added `--config
+/// GENERATED_CONFIG` to the argv on its own — nothing ever ran the generator first — so
+/// enabling "async subagents" failed outright: `Error: Invalid value for '--config':
+/// Path '.mini-me-desktop.langgraph.json' does not exist.`
+///
+/// Run every launch, not only once: upstream's `langgraph.json` is what this extends, and
+/// a stale copy would quietly serve yesterday's dependencies after a backend update —
+/// same reasoning the WSL generator's own docs gave.
+fn generate_extended_config(project_dir: &Path) -> Result<()> {
+    let python = venv_python(project_dir).with_context(|| {
+        format!(
+            "no Python venv at {} — run backend setup first",
+            project_dir.display()
+        )
+    })?;
+    let script = overlay_dir().join("minime_local/make_config.py");
+    let out = Command::new(&python)
+        .env("PYTHONIOENCODING", "utf-8")
+        .arg(&script)
+        .arg(project_dir)
+        .output()
+        .with_context(|| format!("could not run {}", script.display()))?;
+    anyhow::ensure!(
+        out.status.success(),
+        "make_config.py failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    Ok(())
+}
+
 /// How the client reaches the backend. Defaults to a locally spawned sidecar.
 #[derive(Clone, Debug)]
 pub struct BackendConfig {
@@ -381,6 +416,16 @@ fn launch_command_for(
         // supervisor's own run holds the only slot.
         "--n-jobs-per-worker".into(),
         JOBS_PER_WORKER.to_string(),
+        // `blockbuster` (langgraph dev's own event-loop-stall detector) flags
+        // `Path(root_dir).resolve()` in deepagents' filesystem backend as a blocking call
+        // and aborts every run with `BlockingError: Blocking call to os.getcwd` — on
+        // Windows only, because `ntpath.realpath` (unlike `posixpath.realpath`) queries
+        // the current directory internally, which is exactly what blockbuster watches
+        // for. This never fired under WSL2/Linux; it is not a bug in this app's own
+        // code to fix, just `langgraph dev`'s own documented dev-only escape hatch for
+        // a false positive in a single-user local server where an occasional blocking
+        // call has no one else's request to stall.
+        "--allow-blocking".into(),
     ]);
     if async_subagents {
         argv.push("--config".into());
@@ -771,6 +816,13 @@ impl BackendSupervisor {
             "no langgraph.json under {} — set MINIME_BACKEND_DIR to the Mini-Me checkout",
             self.config.project_dir.display()
         );
+
+        // `launch_command` already carries `--config GENERATED_CONFIG` when async subagents
+        // are on (see `launch_command_for`) — that file has to exist before the process
+        // below reads it, or `langgraph dev` refuses to start at all.
+        if self.config.async_subagents {
+            generate_extended_config(&self.config.project_dir)?;
+        }
 
         let (program, rest) = self
             .config

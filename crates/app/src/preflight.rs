@@ -235,6 +235,12 @@ fn probe(argv: &[String]) -> Probe {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        // Python picks its stdout encoding from the console code page, which on
+        // Windows is cp1252 — so `asta`'s Rich-formatted output (box-drawing
+        // characters, checkmarks) crashes the child with a `UnicodeEncodeError`
+        // before it prints anything, and this probe sees an empty, failed process
+        // instead of the real status. See `run_streaming` below for the same fix.
+        .env("PYTHONIOENCODING", "utf-8")
         .spawn()
     {
         Ok(child) => child,
@@ -460,6 +466,51 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
             )
         };
         checks.push(Check::failing("runtime", "Shell", State::Fail, detail, vec![fix]));
+    }
+
+    // ------------------------------------------------- 1b. execute's real shell (Windows)
+    //
+    // Independent of the check above: PowerShell runs `setup-backend.ps1` and the fixes
+    // this pane offers, but `execute()` (the tool an agent's own turns run code through —
+    // `overlay/minime_local/workspace.py`) routes through Git Bash instead, because
+    // cmd.exe — what `subprocess.run(..., shell=True)` hardcodes to on Windows —
+    // understands neither a heredoc (`cat > f.py << 'EOF' ...`, the single most common way
+    // an agent writes a multi-line file) nor a command line past roughly 8191 characters.
+    //
+    // Without bash on PATH, `execute` does not fail here — it silently falls back to that
+    // broken cmd.exe path, so the first sign of anything wrong is an agent's own command
+    // failing deep in a turn with "The command line is too long," which names nothing a
+    // researcher could act on. Reported separately from the row above so a machine with
+    // PowerShell but no Git Bash gets a specific answer instead of a green "Shell" row and
+    // an inexplicable failure three steps later.
+    if cfg!(windows) {
+        let bash = probe(&["bash".to_string(), "--version".to_string()]);
+        if bash.ok {
+            checks.push(Check::pass(
+                "execute-shell",
+                "Shell for running code",
+                format!(
+                    "Git Bash: {}",
+                    bash.stdout.lines().next().unwrap_or("").trim()
+                ),
+            ));
+        } else {
+            checks.push(Check::failing(
+                "execute-shell",
+                "Shell for running code",
+                State::Fail,
+                "Git Bash was not found — commands the agent writes to run code (multi-line \
+                 scripts especially) will fail or behave unpredictably"
+                    .to_string(),
+                vec![Fix::Manual(
+                    "Install Git for Windows (https://git-scm.com/download/win), which \
+                     includes Git Bash, then press Re-check. This is the same thing the \
+                     setup script itself needs to fetch the backend, so most machines \
+                     already have it — this usually means it isn't on PATH."
+                        .into(),
+                )],
+            ));
+        }
     }
 
     // Everything below runs *through* the runtime, so without it they would only
@@ -1037,7 +1088,12 @@ pub fn run_streaming(
         .args(rest)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        // `asta auth login` prints its device-activation URL through Rich, which on
+        // Windows crashes with `UnicodeEncodeError` against the default cp1252
+        // console encoding before the URL ever reaches this pipe. Same fix as
+        // `probe` above.
+        .env("PYTHONIOENCODING", "utf-8");
     // Its own process group, so `kill_tree` can signal the whole thing. **Unix only, and that
     // asymmetry is the measured result rather than an oversight**: on Windows `taskkill /T`
     // already walks the process tree, and an equivalent detach-then-signal gesture there was

@@ -27,6 +27,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -53,6 +54,14 @@ _NO_PRACTICAL_CAP = 64 * 1024 * 1024
 
 #: Matches the sandbox's per-command default (``_aexecute_core`` used 300s).
 _DEFAULT_TIMEOUT = 300
+
+
+def _bash_exe() -> str | None:
+    if sys.platform != "win32":
+        return None
+    return shutil.which("bash")
+
+_BASH_EXE = _bash_exe()
 
 
 #: Config key naming the thread whose workspace a run should share.
@@ -758,11 +767,106 @@ class LocalWorkspaceBackend(LocalShellBackend):
 
         started = time.monotonic()
         try:
-            result = super().execute(command, timeout=timeout)
+            result = (
+                self._execute_via_bash(command, timeout)
+                if _BASH_EXE is not None
+                else super().execute(command, timeout=timeout)
+            )
         finally:
             elapsed = time.monotonic() - started
         _record(command, result, self._work_dir, elapsed)
         return result
+
+    def _execute_via_bash(self, command: str, timeout: int | None) -> ExecuteResponse:
+        """Run ``command`` through Git Bash instead of upstream's cmd.exe path.
+
+        Mirrors ``LocalShellBackend.execute`` (output shaping, truncation, timeout and
+        error handling) exactly — see ``_bash_exe`` for why the underlying
+        ``subprocess.run`` call has to be made here instead of delegating to
+        ``super().execute()``. Kept in step with deepagents' own method by eye; it is a
+        pinned dependency, not one that changes shape without notice.
+
+        **Through a temp script file, not ``bash -c <command>``.** Measured directly:
+        `bash -c` with a long, heredoc-bearing string silently mis-parses the
+        here-document once the string passes a few hundred lines — bash warns
+        ``here-document ... delimited by end-of-file`` and the write never completes,
+        even though the same content run as a real ``.sh`` file works at any size
+        tried (up to 5000 lines). That is a limit in how Git Bash's ``-c`` reads its
+        argument, not in Windows' command-line length — writing the command to a real
+        file and running `bash <file>` sidesteps it entirely, for every size, not only
+        the ones that trip cmd.exe's ~8191-character ceiling.
+        """
+        effective_timeout = timeout if timeout is not None else self._default_timeout
+        if effective_timeout <= 0:
+            msg = f"timeout must be positive, got {effective_timeout}"
+            raise ValueError(msg)
+
+        tmp_fd, tmp_path = tempfile.mkstemp(prefix="minime-execute-", suffix=".sh")
+        try:
+            try:
+                # `newline="\n"`: a heredoc's closing delimiter must match the opening
+                # one byte-for-byte, and Windows text-mode writing would otherwise turn
+                # every `\n` into `\r\n` — a trailing `\r` bash's heredoc reader does
+                # not strip, so `EOFSCRIPT` would never match `EOFSCRIPT\r`.
+                with os.fdopen(tmp_fd, "w", encoding="utf-8", newline="\n") as script_file:
+                    script_file.write(command)
+
+                result = subprocess.run(  # noqa: S603
+                    [_BASH_EXE, tmp_path],
+                    check=False,
+                    shell=False,
+                    capture_output=True,
+                    stdin=subprocess.DEVNULL,
+                    text=True,
+                    timeout=effective_timeout,
+                    env=self._env,
+                    cwd=str(self.cwd),
+                )
+
+                output_parts = []
+                if result.stdout:
+                    output_parts.append(result.stdout)
+                if result.stderr:
+                    stderr_lines = result.stderr.strip().split("\n")
+                    output_parts.extend(f"[stderr] {line}" for line in stderr_lines)
+                output = "\n".join(output_parts) if output_parts else "<no output>"
+
+                truncated = False
+                if len(output) > self._max_output_bytes:
+                    output = output[: self._max_output_bytes]
+                    output += f"\n\n... Output truncated at {self._max_output_bytes} bytes."
+                    truncated = True
+
+                if result.returncode != 0:
+                    output = f"{output.rstrip()}\n\nExit code: {result.returncode}"
+
+                return ExecuteResponse(output=output, exit_code=result.returncode, truncated=truncated)
+
+            except subprocess.TimeoutExpired:
+                if timeout is not None:
+                    msg = (
+                        f"Error: Command timed out after {effective_timeout} seconds "
+                        "(custom timeout). The command may be stuck or require more time."
+                    )
+                else:
+                    msg = (
+                        f"Error: Command timed out after {effective_timeout} seconds. "
+                        "For long-running commands, re-run using the timeout parameter."
+                    )
+                return ExecuteResponse(output=msg, exit_code=124, truncated=False)
+            except Exception as e:  # noqa: BLE001 — matches upstream: one response, never a raise
+                return ExecuteResponse(
+                    output=f"Error executing command ({type(e).__name__}): {e}",
+                    exit_code=1,
+                    truncated=False,
+                )
+        finally:
+            # Best-effort: the temp dir is cleaned on reboot regardless, and a command
+            # is not made to fail over a cleanup step that is not its own.
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
     # -- the surface upstream added on top of deepagents -------------------------
 

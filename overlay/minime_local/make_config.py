@@ -55,6 +55,20 @@ def sqlite_available() -> bool:
     return True
 
 
+def _posix_path(path: str) -> str:
+    """Backslashes out of a graph/checkpointer path — required on Windows.
+
+    `langgraph_api.graph.collect_graphs_from_env` decides "file path" vs. "dotted module
+    name" with `"/" in path_or_module`. `os.path.join` on Windows joins with backslashes,
+    so an absolute Windows path (no `/` anywhere) reads as a module name instead —
+    `importlib.import_module("C:\\Users\\...\\async_agents")` — and fails with
+    `ModuleNotFoundError` naming the whole path. Forward slashes are accepted as path
+    separators by every Windows API underneath, so this is a safe rewrite, not a
+    platform-specific branch.
+    """
+    return path.replace("\\", "/")
+
+
 def build(checkout: str, overlay: str) -> str:
     """Write the extended config beside upstream's and return its path."""
     source = os.path.join(checkout, "langgraph.json")
@@ -73,7 +87,8 @@ def build(checkout: str, overlay: str) -> str:
         )
 
     graphs[BACKGROUND_GRAPH_ID] = (
-        os.path.join(overlay, "minime_local", "async_agents.py") + ":background_graph"
+        _posix_path(os.path.join(overlay, "minime_local", "async_agents.py"))
+        + ":background_graph"
     )
 
     # Conversations in SQLite rather than one pickle of everything: constant boot instead of a
@@ -86,7 +101,7 @@ def build(checkout: str, overlay: str) -> str:
     # install it, so this is a choice a researcher can see and make, not a silent downgrade.
     if sqlite_available():
         config["checkpointer"] = {
-            "path": os.path.join(overlay, "minime_local", "checkpointer.py")
+            "path": _posix_path(os.path.join(overlay, "minime_local", "checkpointer.py"))
             + ":checkpointer"
         }
     elif "checkpointer" in config:
