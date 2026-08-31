@@ -16913,3 +16913,49 @@ make it.
 
 *Hundred-and-forty-sixth: a guard that cannot be satisfied is a guard that has failed, however
 correctly it refuses. "Nothing was spent" and "nothing could be run" were the same sentence here.*
+
+## 297. Pick several, then ask (2026-08-31)
+
+The researcher described the flow they wanted three days before it existed:
+
+> *"desde el modal podemos seleccionar los dois, descargar uno o varios y después pedirle a la app
+> que analice lo que queramos"*
+
+§290 made the modal show what the search returned rather than what the model retyped. This adds the
+half that made that worth doing: a tick on each fetchable row, and one button that says how many
+files it will bring in.
+
+The agent's opinion stays where §290 put it — a mark and a sort. The selection is the researcher's.
+Those are different things and the modal now shows both without confusing them.
+
+### Where the tick can be
+
+Under exactly the condition the download button is: a dataset the access route says is entirely
+public, not already here, not in flight. A row that cannot be fetched must not be tickable, or the
+count on the button promises work that will not happen — which is §279's lesson about the copy
+button, on a different control.
+
+The row that carries **no identifier** — the one `normalise` emits when it meets a Dataverse layout
+it does not know — renders and cannot be ticked. It has no key to be ticked by, and an empty key
+would collide with every other unmapped row in the same search.
+
+### One call per file, not a batch
+
+`download_dataset` already guards its own id against a second start, reports its own failure, and
+refreshes Outputs when a file lands. A batch route would reimplement all three and report **one**
+outcome for several files, which is precisely the shape §279 had to undo. So the button loops, and
+says once, up front, how many are coming — because the per-file statuses that follow overwrite each
+other and the researcher pressed one button.
+
+### A test that agreed with itself
+
+The first version of the count test re-implemented the filter and asserted against its own copy. It
+would have passed whatever `picked_datasets` did. That is the shape §294 threw away a few hours
+earlier, written again the same day by the same author.
+
+The filter is now `still_fetchable`, a free function for the reason `commands_summary` is one, and
+the test calls it. Mutation-checked: counting in-flight downloads again fails it.
+
+*Hundred-and-forty-seventh: the second time you write a test that cannot fail, it is not an
+accident — it is what writing a test against a method on a large struct feels like. Move the logic
+out, or keep writing it.*
