@@ -16856,3 +16856,60 @@ five subagents.
 *Hundred-and-forty-fifth: a component can be registered, wired, gated, tested and shipped, and
 still never run — because being *reachable* is a different property from being *built*, and only
 one of them has a test.*
+
+## 296. A draft nobody could approve (2026-08-31)
+
+v0.3.24 told the coordinator that AutoDiscovery exists (§295). The researcher asked for a run, and
+the gate held perfectly:
+
+> I can't start that run myself. AutoDiscovery is human-gated and only starts when you approve the
+> draft in the app modal. Use this drafted run: `934d0b29-…`
+
+Which is the correct refusal, quoting the bullet written the same day. And then:
+
+> I didnt see any approval because it drafted. No panel of approval appear.
+
+**Nothing spent, and nothing could.** The credit gate is not the problem — it is working exactly as
+designed, and `no_spending.py` blocks the shell path while the route-side nonce blocks the rest.
+The problem is that the only door to approval never opened, so the feature is unreachable in both
+directions.
+
+### Where the door is
+
+`open_approval` is fed by `decode_drafts(artifacts)`, which reads `artifacts.discoveries` with
+`status == "awaiting_approval"` **from this conversation's snapshot**. The coordinator delegated
+the work to a background worker, which is a separate graph (`BACKGROUND_GRAPH_ID`) with its own
+state. Its artifacts never fold into the coordinator's snapshot, so `snapshot.drafts` was empty and
+`open_approval` never ran.
+
+That is §259 one level further out — *"a snapshot arrives in two places, and one of them ignored
+`drafts`"* — and the reason it had never been seen is that until this morning nothing routed to
+AutoDiscovery unless the researcher named it, which puts the draft in the coordinator's own turn.
+**Making a component reachable is what exposes the paths nobody had walked.**
+
+### The half that costs nothing
+
+The coordinator's bullet now says where a draft has to be made: in the turn, never inside
+`start_async_task`, and if the dataset needs preparing first then background *that* and draft the
+run afterwards. A test holds the sentence, because a prompt line with no test is a suggestion.
+
+This does not close the gap. A worker that drafts a run anyway — because a future prompt drifts, or
+because a subagent does it — still produces an unapprovable draft, and the app has no route to ask
+*"are there drafted runs on this thread?"*: every discovery route is keyed by a `run_id` the app
+would have to already know.
+
+### The half that does not
+
+Two candidate shapes, neither built tonight:
+
+* the poll route that reports a finished worker also reports its drafts, folding them into the
+  snapshot the gate already reads — smallest change, and it keeps one door;
+* a `GET /discovery/{thread_id}/drafts` the app can ask on its own — more honest, since the gate
+  would then depend on nothing having remembered to forward anything.
+
+The second is better and the first is cheaper. It is a decision about the one code path in this
+product that spends money, taken at the end of a very long session, and it is the wrong hour to
+make it.
+
+*Hundred-and-forty-sixth: a guard that cannot be satisfied is a guard that has failed, however
+correctly it refuses. "Nothing was spent" and "nothing could be run" were the same sentence here.*
