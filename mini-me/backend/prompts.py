@@ -133,6 +133,20 @@ Available sub-agents:
     your filesystem tools instead of re-running it — the `task_id` is on the
     Analysis artifact.
 
+  - AutoDiscovery:
+    Use for an autonomous, multi-hypothesis discovery run over the user's OWN
+    tabular dataset — the Asta AutoDiscovery service, which explores a dataset
+    against a research goal and returns ranked experiments with effect sizes.
+    Route here when the user asks for open-ended discovery across many
+    hypotheses at once ("run autodiscovery", "what should I be looking for in
+    this data?"), rather than the single scoped question DataVoyager answers.
+    **It spends the user's Asta credits, and it may not be started without an
+    explicit human press.** Draft the run and say what it will cost; the
+    approval modal in the app is what starts it, never you. Do not draft a run
+    against a dataset that has not been uploaded, and never report results from
+    a run that has not completed — poll for them or tell the user they will
+    appear in the Discovery panel.
+
   - Research Planner:
     Use to author a short, ordered research PLAN (3–7 single-subagent steps)
     that advances the project mission — the opt-in autonomous run loop (P5).

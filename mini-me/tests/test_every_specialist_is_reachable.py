@@ -1,0 +1,138 @@
+"""Every registered subagent must be one the coordinator has been told about.
+
+`autodiscovery_subagent` was in the registry, had its tools wired, had a credit gate written for
+it and a panel in the app — and appeared in **none** of the three lists that tell a model it
+exists. The coordinator's "Available sub-agents" prompt had eleven bullets for twelve subagents,
+and the research planner's `action` field enumerated ten labels.
+
+So the only way to reach it was to name it in a question. The researcher's own conversation list
+carries the workaround as a title: *"usea autodiscovery to test this data"* (§295).
+
+A registry is not a routing table. These tests hold the two together, because the failure is
+silent in both directions: nothing errors, the specialist simply never runs.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from backend.prompts import COORDINATOR_SYSTEM_PROMPT
+from backend.schemas import PlanStep
+from backend.subagents import subagents
+
+#: The friendly label each registered subagent is named by, in the prompts a model reads.
+#:
+#: Written here rather than derived, deliberately: the labels are prose a model matches on, and a
+#: test that generated them from the internal names would agree with any renaming — including one
+#: that left the prompt behind, which is the defect this file exists for.
+LABELS: dict[str, str] = {
+    "academic_researcher": "Academic Research",
+    "dataverse_explorer": "Dataverse Explorer",
+    "data_cleaning": "Data Cleaning",
+    "exploratory_data_analysis": "Exploratory Data Analysis",
+    "diagnostic_analytics": "Diagnostic Analytics",
+    "predictive_analytics": "Predictive Analytics",
+    "report_writer": "Report Writer",
+    "hypothesis_generator": "Hypothesis Generator",
+    "pdf_librarian": "PDF Librarian",
+    "data_voyager": "DataVoyager",
+    "autodiscovery": "AutoDiscovery",
+    "research_planner": "Research Planner",
+}
+
+
+#: Registered, and deliberately not something a plan step can name.
+#:
+#: Listed rather than inferred, so that "absent from the planner's labels" means *somebody decided*
+#: rather than *somebody forgot* — which is the whole distinction this file exists to make, and the
+#: same argument `claims.NO_PATHS` makes for schemas nothing checks.
+NOT_PLANNABLE: dict[str, str] = {
+    "research_planner": "it writes the plan; a step naming it would plan itself",
+}
+
+
+def _registered() -> list[str]:
+    return [subagent["name"] for subagent in subagents]
+
+
+def test_the_label_table_covers_every_registered_subagent():
+    """The table is hand-written, so it has to be held to the registry rather than trusted."""
+    missing = [name for name in _registered() if name not in LABELS]
+    assert not missing, (
+        f"{missing} are registered and this test does not know what to call them — add the label "
+        "the prompts use, then check the prompts actually use it"
+    )
+
+
+@pytest.mark.parametrize("name", _registered())
+def test_the_coordinator_has_been_told_this_specialist_exists(name):
+    """**A subagent the coordinator's prompt never names cannot be routed to.**
+
+    It is not an error, it is an absence: the model picks from what it was given, and this one was
+    not on the list for as long as it existed.
+    """
+    assert f"- {LABELS[name]}:" in COORDINATOR_SYSTEM_PROMPT, (
+        f"{name} is registered but is not a bullet in the coordinator's Available sub-agents list"
+    )
+
+
+@pytest.mark.parametrize("name", _registered())
+def test_the_planner_can_name_this_specialist(name):
+    """The planner writes `action` from a closed list; one missing means a step it cannot express.
+
+    Its choices are: omit the step, invent a label nothing routes, or mislabel it as a neighbour.
+    All three are worse than the step not being planned at all, because two of them look fine.
+    """
+    if name in NOT_PLANNABLE:
+        pytest.skip(f"{name}: {NOT_PLANNABLE[name]}")
+    described = PlanStep.model_fields["action"].description or ""
+    assert f"'{LABELS[name]}'" in described, (
+        f"{name} is registered but the planner's action field cannot name it"
+    )
+
+
+def test_nothing_is_excused_that_is_not_registered():
+    """An exclusion for a subagent that no longer exists is a stale excuse, not a decision."""
+    unknown = [name for name in NOT_PLANNABLE if name not in _registered()]
+    assert not unknown, f"{unknown} are excused from planning and are not registered at all"
+
+
+def test_the_two_lists_the_planner_reads_agree():
+    """The label list is written twice — in the schema field and in the planner's prompt.
+
+    Two copies of one list is two chances to update one of them, which is exactly what happened.
+    """
+    described = PlanStep.model_fields["action"].description or ""
+    # **Whitespace-normalised**, because the prompt is a wrapped triple-quoted string: the label
+    # `'Predictive Analytics'` is split across a line break and eight spaces of indentation, so a
+    # raw substring check reports a label that is plainly there. A test that fails on formatting
+    # gets deleted rather than believed.
+    prompt = " ".join(
+        (Path(__file__).resolve().parent.parent / "backend" / "subagents.py")
+        .read_text(encoding="utf-8")
+        .split()
+    )
+    for name in _registered():
+        label = LABELS[name]
+        if f"'{label}'" not in described:
+            continue
+        assert f"'{label}'" in prompt, (
+            f"the schema offers '{label}' and the planner's own prompt does not list it"
+        )
+
+
+def test_a_credit_spending_specialist_says_so_where_the_model_reads_it():
+    """AutoDiscovery and DataVoyager spend the researcher's Asta credits.
+
+    The gate that stops an unapproved run is real (`NoSpendingWithoutApproval`), and it is not the
+    coordinator's only defence: a coordinator that does not know a specialist costs money will
+    route to it as freely as to a search. Naming the cost where the routing decision is made is
+    the cheap half.
+    """
+    bullet = COORDINATOR_SYSTEM_PROMPT.split("- AutoDiscovery:")[1].split("\n  - ")[0]
+    assert "credit" in bullet.lower(), "the bullet must say it spends credits"
+    assert "human press" in bullet.lower() or "approval" in bullet.lower(), (
+        "and that it cannot be started without one"
+    )

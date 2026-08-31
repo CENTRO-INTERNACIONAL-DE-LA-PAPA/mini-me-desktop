@@ -885,7 +885,7 @@ class PlanStep(BaseModel):
             "'Academic Research', 'Dataverse Explorer', 'Data Cleaning', "
             "'Exploratory Data Analysis', 'Diagnostic Analytics', 'Predictive "
             "Analytics', 'Hypothesis Generator', 'PDF Librarian', 'DataVoyager', "
-            "or 'Report Writer'."
+            "'AutoDiscovery', or 'Report Writer'."
         ),
     )
     prompt: str = Field(
