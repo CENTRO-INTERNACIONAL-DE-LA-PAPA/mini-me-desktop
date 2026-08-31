@@ -16729,3 +16729,56 @@ shipped ninety minutes earlier and believed in.
 
 *Hundred-and-forty-third: a second reader is cheapest exactly where a first reader has already been
 wrong twice. Both of my errors here were confident.*
+
+## 294. The model's budget is not the researcher's (2026-08-31)
+
+§292 recovered forty of a hundred datasets where the file had been getting none. Forty is not a
+hundred, and the reason it was ever forty is that the researcher's copy was being read out of the
+model's plate.
+
+Everything in `mcp_tools` — the 128 KB cap, the trimmed array, the pointer, the head-and-tail
+elision — exists so an answer fits in a context window. All of it is right for that. **None of it
+has anything to do with the file a person opens**, which the datasets panel now renders (§290). A
+search returning a hundred datasets should file a hundred, whatever the model was shown.
+
+So `_capped` keeps the untruncated text aside before anything cuts it down, and
+`SearchResultsFile._keep` reads that first:
+
+```python
+whole = mcp_tools.last_full_answer(READ_TOOL)   # a hundred
+...
+payload = self._payload(result)                 # forty, and a sentence
+```
+
+The model still sees forty and the note telling it to narrow, which is what it should see. The
+panel gets all hundred.
+
+### Why a ContextVar
+
+The capping happens inside the tool's own coroutine, several frames below the middleware that
+wants the result, through a wrapper this file does not own — the same shape of problem
+`minime_local.spine` has with `_project_namespace`, and the same answer. Per-context, so two
+concurrent tool calls cannot read each other's, and named by tool, because reading it blind would
+file a paper search as datasets. There is a test for exactly that.
+
+Set **only** when something was actually capped. Under the cap the model has the whole answer and
+the consumer can read it from the result, so serialising a copy of every small MCP answer would be
+cost with no buyer.
+
+### The order, which is the whole change
+
+Whole answer, then the model's copy, then the pointer. Getting that backwards would file forty and
+never look further, which is precisely what three releases did.
+
+### A test that asserted nothing
+
+The first version of the last test here read `mcp_tools`' source and checked that a guard appeared
+within a few lines of a call — an assertion that could pass while meaning nothing, and would have
+kept passing through a refactor that broke the property. Replaced with a direct test of
+`last_full_answer`, which is the whole contract between the two files.
+
+A test that cannot fail is worse to own than no test, because it is counted.
+
+*Hundred-and-forty-fourth: when two consumers share one pipe, the one with the tighter budget sets
+the width for both unless somebody says otherwise. Ask which limits are the constraint and which
+are just the first reader's.*

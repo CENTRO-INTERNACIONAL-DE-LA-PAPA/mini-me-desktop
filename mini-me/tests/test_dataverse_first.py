@@ -888,3 +888,77 @@ def test_a_saved_block_under_another_key_is_still_records():
     sandbox = _Sandbox(files={SAVED: json.dumps({"data": [{"global_id": "doi:1/x"}]})})
     _answering(SearchResultsFile(sandbox), sandbox, _pointer_text(), artifact={"saved_path": SAVED})
     assert _kept_ids(sandbox) == ["doi:1/x"]
+
+
+# --- the whole answer, not the model's share ------------------------------------------------------
+
+@pytest.fixture
+def whole_answer():
+    """Set what `mcp_tools` kept aside, and clear it after — a ContextVar leaks between tests."""
+    from backend import mcp_tools
+
+    tokens = []
+
+    def keep(tool_name, text):
+        tokens.append(mcp_tools._full_answer.set((tool_name, text)))
+
+    yield keep
+    for token in reversed(tokens):
+        mcp_tools._full_answer.reset(token)
+
+
+def _trimmed_and_whole(kept: int, total: int) -> tuple[str, str]:
+    rows = [{"name": f"Dataset {n}", "global_id": f"doi:10.21223/P3/ROW{n:03d}"} for n in range(total)]
+    trimmed = json.dumps({"content": rows[:kept]}, indent=2) + (
+        f"\n\n[{total - kept} item(s) omitted — output exceeded 124 KB.]"
+    )
+    return trimmed, json.dumps({"content": rows})
+
+
+def test_the_file_gets_the_hundred_the_model_was_spared(whole_answer):
+    """**The model's budget is not the researcher's.**
+
+    A hundred datasets, trimmed to forty for the context window. The model should see forty and a
+    sentence telling it to narrow; the conversation folder has no reason to inherit that limit
+    (§294).
+    """
+    trimmed, whole = _trimmed_and_whole(kept=40, total=100)
+    whole_answer(READ_TOOL, whole)
+    sandbox = _Sandbox()
+
+    _answering(SearchResultsFile(sandbox), sandbox, trimmed)
+    assert len(_kept_ids(sandbox)) == 100, "the file takes the whole answer, not the model's share"
+
+
+def test_without_a_kept_answer_nothing_changes(whole_answer):
+    """Under the cap there is nothing to keep aside, and the result is already whole."""
+    sandbox = _Sandbox()
+    _answering(
+        SearchResultsFile(sandbox), sandbox, json.dumps({"content": [{"global_id": "doi:1/small"}]})
+    )
+    assert _kept_ids(sandbox) == ["doi:1/small"]
+
+
+def test_a_big_answer_from_another_tool_is_not_mistaken_for_this_one(whole_answer):
+    """The ContextVar holds one answer. Reading it blind would file a paper search as datasets."""
+    trimmed, whole = _trimmed_and_whole(kept=2, total=50)
+    whole_answer("snippet_search", whole)
+    sandbox = _Sandbox()
+
+    _answering(SearchResultsFile(sandbox), sandbox, trimmed)
+    assert len(_kept_ids(sandbox)) == 2, "the trimmed dataverse answer, not asta's fifty"
+
+
+def test_the_kept_answer_answers_for_its_own_tool_and_no_other(whole_answer):
+    """`last_full_answer` is the whole contract between the two files, so test it directly.
+
+    A source-inspection test stood here first and could pass while asserting nothing, which is a
+    worse thing to own than no test at all.
+    """
+    from backend import mcp_tools
+
+    assert mcp_tools.last_full_answer(READ_TOOL) is None, "nothing capped yet"
+
+    whole_answer(READ_TOOL, '{"content": []}')
+    assert mcp_tools.last_full_answer(READ_TOOL) == '{"content": []}'
+    assert mcp_tools.last_full_answer("snippet_search") is None, "one answer, and it is named"

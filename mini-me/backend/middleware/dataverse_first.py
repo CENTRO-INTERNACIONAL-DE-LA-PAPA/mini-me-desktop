@@ -71,6 +71,7 @@ from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware
 
+from backend import mcp_tools
 from backend.middleware.tool_gate import Step, ToolsBeforeAnswering
 
 logger = logging.getLogger(__name__)
@@ -521,7 +522,17 @@ class SearchResultsFile(AgentMiddleware):
         """
         if self.sandbox_backend is None:
             return
-        payload = self._payload(result)
+        # **The whole answer first, and this is the order that matters.** `_payload` reads what
+        # the *model* was given, which for a large search is a trimmed array — forty of a hundred
+        # datasets, and the sentence saying so. The researcher's copy has no reason to inherit a
+        # context budget, so if `mcp_tools` kept the untruncated answer aside, that is what gets
+        # filed (§294).
+        payload = None
+        whole = mcp_tools.last_full_answer(READ_TOOL)
+        if whole:
+            payload = self._payload_from_saved_text(whole, "the untruncated answer")
+        if not payload or "content" not in payload:
+            payload = self._payload(result)
         if not payload or "content" not in payload:
             # Too big to hand to the model, so it went to a file and we were given the address.
             payload = await self._payload_behind_pointer(result)
