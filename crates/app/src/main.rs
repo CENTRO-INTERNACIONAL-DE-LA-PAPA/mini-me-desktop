@@ -1240,6 +1240,19 @@ fn still_fetchable(
         .collect()
 }
 
+/// How many datasets to say there are, with a denominator when one was reported.
+///
+/// A free function so the wording is testable without a window, and so the panel heading and the
+/// modal title read the same — two derivations of "29 of 4,000" is two chances to disagree about
+/// what the researcher is looking at.
+fn datasets_heading(shown: usize, totals: workspace::SearchTotals) -> String {
+    match totals.denominator() {
+        // **"of" and not "/"**, because this is a sentence a researcher reads once and acts on.
+        Some(total) => format!("{shown} of {total}"),
+        None => shown.to_string(),
+    }
+}
+
 fn ranked(experiments: &[discovery::Experiment], loudest_first: bool) -> Vec<usize> {
     let mut order: Vec<usize> = (0..experiments.len()).collect();
     order.sort_by(|&a, &b| {
@@ -3296,6 +3309,8 @@ struct Workbench {
     /// or many and then ask the app to analyze whatever we want"* (§297). Cleared when the
     /// conversation changes, and a pick drops itself once its file has landed.
     dataset_picks: std::collections::HashSet<String>,
+    /// What this conversation's searches reported finding — the denominator, when there is one.
+    search_totals: workspace::SearchTotals,
     /// Documents the librarian indexed. See [`protocol::Document`].
     documents: Vec<protocol::Document>,
     /// What checking each reference against Crossref found, keyed by its citation text.
@@ -3841,6 +3856,7 @@ impl Workbench {
             recommended_datasets: Vec::new(),
             recommended_ids: Vec::new(),
             dataset_picks: std::collections::HashSet::new(),
+            search_totals: workspace::SearchTotals::default(),
             documents: Vec::new(),
             checked: HashMap::new(),
             repaired: HashMap::new(),
@@ -15935,7 +15951,13 @@ impl Workbench {
     /// which is how five distinct records from one multi-site study rendered as five identical
     /// rows (see [`protocol::Dataset`]).
     fn datasets_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        ui::Modal::new("datasets", format!("Datasets · {}", self.datasets.len()))
+        ui::Modal::new(
+            "datasets",
+            format!(
+                "Datasets · {}",
+                datasets_heading(self.datasets.len(), self.search_totals)
+            ),
+        )
             .width(720.)
             .focus(&self.delete_focus)
             .body(
@@ -17031,6 +17053,10 @@ impl Workbench {
     /// wrote none — a sandboxed deployment, or a conversation from before the file existed — so
     /// that switching to the search's own answer never empties a panel that used to have rows.
     fn reload_datasets(&mut self) {
+        self.search_totals = self
+            .thread_workspace()
+            .map(|dir| workspace::search_totals(&dir))
+            .unwrap_or_default();
         let found = self
             .thread_workspace()
             .map(|dir| workspace::datasets(&dir))
@@ -17497,7 +17523,13 @@ impl Workbench {
                 .rounded_md()
                 .text_color(rgb(theme::text()))
                 .text_sm()
-                .child(format!("{label} · {count}"));
+                // The datasets bucket carries a denominator when a search reported one, so the
+                // panel and the modal say the same thing about the same list (§300).
+                .child(if label == "datasets" {
+                    format!("{label} · {}", datasets_heading(count, self.search_totals))
+                } else {
+                    format!("{label} · {count}")
+                });
             if openable {
                 heading = heading
                     // Said as well as coloured. A hover-only affordance is one a researcher finds
@@ -18114,6 +18146,35 @@ mod tests {
         let (said, shouted) = claims_summary(&blind);
         assert_eq!(said, "1 subagent answer · 1 could not be checked");
         assert!(!shouted, "it is not an accusation; nothing was compared");
+    }
+
+    /// **A count with no denominator is not an answer, and `29 of 0` is worse than either.**
+    ///
+    /// The MCP read `total_count` to decide when to stop paging and never returned it, so
+    /// twenty-nine rows read exactly like a thorough search of a twenty-nine dataset corpus
+    /// (§299). Now that it does, the panel and the modal say so — and both say it the same way,
+    /// because the wording lives in one function.
+    #[test]
+    fn the_heading_says_of_how_many_only_when_something_said_so() {
+        use workspace::SearchTotals;
+
+        let partial = SearchTotals { total: 4000, kept: 29, complete: false };
+        assert_eq!(datasets_heading(29, partial), "29 of 4000");
+
+        // Nothing reported a total. `29 of 0` would be a claim about the corpus, and a
+        // confident-looking one — a deployment that cannot count is not a corpus of nothing.
+        let unknown = SearchTotals { total: 0, kept: 29, complete: false };
+        assert_eq!(datasets_heading(29, unknown), "29");
+        assert_eq!(unknown.denominator(), None);
+
+        // The whole corpus. A denominator equal to the count is noise, not reassurance.
+        let whole = SearchTotals { total: 29, kept: 29, complete: true };
+        assert_eq!(datasets_heading(29, whole), "29");
+
+        // And a total smaller than what is on screen — several searches this turn, accumulated
+        // past any single query's match count. Showing "40 of 29" would read as a bug.
+        let accumulated = SearchTotals { total: 29, kept: 40, complete: false };
+        assert_eq!(datasets_heading(40, accumulated), "40");
     }
 
     /// **The count on the button is the number of files that will arrive.**
