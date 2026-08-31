@@ -17020,3 +17020,80 @@ does, rather than relying on the model to look.
 
 *Hundred-and-forty-eighth: the citation that survives checking is the one to fear. A wrong answer
 that fails a spot-check protects itself; a right-looking answer from the wrong source does not.*
+
+## 299. Two audits, and the field with no source (2026-08-31)
+
+The researcher had had enough of partial fixes on the same symptom, and offered the thing that
+actually breaks the loop: *"incluso si deseas genera subagentes para que verifiquen"*, plus the
+location of the MCP's own source. Two read-only audits ran in parallel — one over the MCP, one over
+our side.
+
+### The MCP is remote
+
+`MCP_SERVER_CONFIGS` points at `https://dataverse-cip.fastmcp.app/mcp`. The source at
+`AskPapa/mcp_server_stdio` is where the fixes would go, and **nothing there reaches a researcher
+until somebody redeploys it.** That has to be said before proposing a line of it.
+
+### Why 29 and not 100
+
+`SearchCIPDataverse` paginates, reads `total_count` from Dataverse, uses it to decide when to
+stop — and never returns it. `SearchInfo` carries `status`, `message`, `output_file`, `item_count`
+and nothing else. **"Found 4,000, returning 29" is byte-identical to "found 29"**, for the model
+and for us.
+
+Four further paths to a short answer, none of which report anything:
+
+* `current += per_page` advances by the *requested* page size rather than `len(items)`, so any
+  short page silently skips the difference;
+* a missing or zero `total_count` makes `current + per_page >= 0` true immediately — the loop
+  breaks after one page and reports success;
+* a mid-pagination `RequestError` returns from inside the loop, discarding every page already
+  collected;
+* `raise_for_status()` throws `HTTPStatusError`, which is **not** a `RequestError` subclass, so a
+  4xx/5xx escapes uncaught — no `SearchInfo`, no file, and the previous search's file still on
+  disk to be read as if current.
+
+And `read_search_results` discards the directory it is handed, searching only its own default —
+so any search written elsewhere is unreadable, which the shipped example prompt instructs.
+
+### There is no way to reference a row
+
+Twenty-two tools; every one that takes a dataset takes a DOI or a numeric id. No ordinal, no
+"the third result", no server-side memory of the last search. **The model must retype an
+identifier.** That was the design question this audit existed to answer, and the answer is no.
+
+### The field with no source
+
+Our own audit found the sharper half. `metadata_extraction_rules.md` — the skill file that is the
+model's manual for this task — maps every core field to where it comes from: `title` → `title`,
+`authors` → `author -> authorName`, and so on for eight fields. The persistent id appears only
+further down, under *"required user-facing summary fields"*, **with no source named**.
+
+So the one string a researcher pastes into a paper was the one field the model was asked to produce
+rather than to copy. The schema said the same: `Field(description="Dataset DOI or persistent
+identifier.")` — what the value *is*, never where to get it, phrased exactly like every sibling.
+
+`subagents.py` did carry the rule in prose — *"Report the `persistent_id` exactly as it appears"* —
+and `tool_gate.py:36` states this project's own verdict on that: **"if it must be true, it cannot be
+asked for."** One line of prose against a manual and a schema that both said *author it*.
+
+All three now name `global_id` as the source, say *copy, never compose*, and give the fallback the
+other subagents already had: **omit the dataset rather than guess.** A reconstructed identifier is
+indistinguishable from a read one, which is why omission is the only honest alternative.
+
+### And a clobber of mine
+
+§290 pointed the panel at the search's own file. The audit found the reopen path still doing
+`workbench.datasets = snapshot.datasets` thirty lines after `reload_datasets()` — so a **reopened**
+conversation rendered the model's retyped rows while a live one rendered the file's. Two paths, one
+panel, different sources, and only one of them came from Dataverse. Fixed.
+
+### What is still not prevented
+
+None of this stops a model writing a DOI in **prose**, and nothing can. What it does is remove
+every place the product asked it to invent one, and keep `WHAT WAS CLAIMED` — which caught both
+real cases — as the thing that says so when it happens anyway.
+
+*Hundred-and-forty-ninth: when a model gets one field wrong and the rest right, look at what the
+instructions say about that field. Ours documented a source for every field except the one that
+mattered.*

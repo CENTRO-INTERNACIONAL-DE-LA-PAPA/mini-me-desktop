@@ -6511,8 +6511,20 @@ impl Workbench {
                             // a conversation whose citations are all silently unverified.
                             workbench.resolve_sources(cx);
                         }
+                        // **Not `workbench.datasets`.** §290 pointed the panel at the search's
+                        // own file; this line went on overwriting it with the model's retyped
+                        // list every time a conversation was reopened, so the live path and the
+                        // reopen path rendered different things and only one of them came from
+                        // Dataverse. What the model chose is a mark and a sort, and nothing else.
                         if !snapshot.datasets.is_empty() {
-                            workbench.datasets = snapshot.datasets;
+                            workbench.recommended_ids = snapshot
+                                .datasets
+                                .iter()
+                                .map(|dataset| bare_persistent_id(&dataset.persistent_id))
+                                .filter(|id| !id.is_empty())
+                                .collect();
+                            workbench.recommended_datasets = snapshot.datasets;
+                            workbench.reload_datasets();
                         }
                         if !snapshot.documents.is_empty() {
                             workbench.documents = snapshot.documents;
