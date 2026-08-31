@@ -89,17 +89,29 @@ else
 fi
 
 # Without this the installer asks for a GitHub token for a *private* repo, which is
-# exactly the wall this bundle exists to remove (docs §25).
-[ -f "$BUNDLE/vendor/Mini-Me/langgraph.json" ] \
-  || die "vendor/Mini-Me is missing — the bundle cannot install itself.
-       Fix: bash scripts/bundle-backend.sh && bash scripts/package.sh"
-ok "vendor/Mini-Me (the backend, so no GitHub account is needed)"
+# exactly the wall this bundle exists to remove (docs §25). `mini-me/` is what
+# `package.sh` actually ships since the monorepo move; `vendor/Mini-Me` is the
+# pre-monorepo fallback layout.
+if [ -f "$BUNDLE/mini-me/langgraph.json" ]; then
+  ok "mini-me/ (the backend, so no GitHub account is needed)"
+elif [ -f "$BUNDLE/vendor/Mini-Me/langgraph.json" ]; then
+  ok "vendor/Mini-Me (the backend, so no GitHub account is needed — pre-monorepo layout)"
+else
+  die "no backend in the bundle — mini-me/langgraph.json is missing.
+       Fix: bash scripts/package.sh"
+fi
+
+[ -f "$BUNDLE/asta-plugins/pyproject.toml" ] \
+  || die "asta-plugins/ is missing — the bundle cannot provision Asta from scratch.
+       Fix: git submodule update --init && bash scripts/package.sh"
+ok "asta-plugins/ (Asta's own source, a dependency of mini-me/)"
 
 [ -f "$BUNDLE/overlay/minime_local/workspace.py" ] \
   || die "overlay/ is missing — host execution would not work"
 ok "overlay/ (host execution)"
 
-[ -f "$BUNDLE/scripts/setup-wsl.sh" ] || die "scripts/setup-wsl.sh is missing"
+[ -f "$BUNDLE/scripts/setup-backend.sh" ] || die "scripts/setup-backend.sh is missing"
+[ -f "$BUNDLE/scripts/setup-backend.ps1" ] || die "scripts/setup-backend.ps1 is missing"
 ok "scripts/ (first-run provisioning)"
 
 if [ "$DRY" = no ]; then
@@ -164,8 +176,8 @@ Mini-Me Desktop for Windows — a research workbench that runs on your own machi
 
 No terminal, no GitHub account, no Python install. The backend is included.
 
-The first run installs a Linux environment (WSL) if you do not have one. That step
-needs administrator rights and may ask for a restart — the app says so before you press it.
+The first run installs the Python packages the backend needs — a few minutes,
+shown line by line in the Setup pane. No Linux environment, no restart required.
 
 ## Notes
 
@@ -178,7 +190,6 @@ needs administrator rights and may ask for a restart — the app says so before 
 ## Known limits in $TAG
 
 - **Not code-signed** — hence the SmartScreen warning above.
-- WSL provisioning has not yet been tested on a machine that never had WSL.
 - Text in the transcript cannot be selected with the mouse; use *Copy last answer*
   from the command palette (ctrl-p).
 - The composer is single-line: Enter sends.

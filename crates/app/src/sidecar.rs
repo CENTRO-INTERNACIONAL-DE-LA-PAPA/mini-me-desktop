@@ -175,7 +175,7 @@ impl Sidecar {
         self.config.path_for_backend(path)
     }
 
-    /// Whether the backend could open this path at all — see [`crate::backend::wsl_can_open`].
+    /// Whether the backend could open this path at all.
     pub fn can_open(&self, path: &std::path::Path) -> bool {
         self.config.can_open(path)
     }
@@ -612,7 +612,7 @@ impl Sidecar {
                 }
                 // Deliberately quiet. Setup problems are the Setup pane's job to explain,
                 // and an error before the researcher has done anything is not how they
-                // should learn that WSL is missing.
+                // should learn the backend is not set up.
                 Err(error) => tracing::debug!(%error, "backend not ready at launch"),
             }
         });
@@ -650,7 +650,8 @@ impl Sidecar {
             let mut supervisor = supervisor.lock().await;
             supervisor.stop();
             // The port has to come free before the replacement can bind it. `stop` has already
-            // asked the distro to reap, so this is waiting on the OS rather than on the server.
+            // signalled the process; this is waiting on the OS to reap it rather than on the
+            // server itself.
             for _ in 0..40 {
                 if !client.is_healthy().await {
                     break;
@@ -1507,8 +1508,8 @@ impl Sidecar {
     /// Run the first-run checks off the UI thread.
     ///
     /// `spawn_blocking`, not `spawn`: every probe is a synchronous `Command` that can
-    /// take seconds (a cold WSL distro), and blocking a reactor worker would stall any
-    /// turn sharing it.
+    /// take seconds (a cold `uv`/Python environment), and blocking a reactor worker would
+    /// stall any turn sharing it.
     ///
     /// `has_model_key` is decided by the caller on the main thread — see
     /// [`crate::preflight::inspect`] for why a keychain read must not happen here.

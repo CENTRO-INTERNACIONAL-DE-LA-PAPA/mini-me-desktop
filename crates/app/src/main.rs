@@ -2532,10 +2532,10 @@ fn markdown_block(
                     .min_w_0()
                     .text_color(rgb(theme::text_muted()))
                     .text_xs()
-                    // Named, not fetched. See [`markdown::Block::Image`]: the path lives in
-                    // the distro and figures the agent really produced are already shown
-                    // below, found on the host (§42). Saying which file it meant is the
-                    // useful part; pretending to display it would not be.
+                    // Named, not fetched. See [`markdown::Block::Image`]: figures the agent
+                    // really produced are already shown below, found on the host (§42).
+                    // Saying which file it meant is the useful part; pretending to display
+                    // it would not be.
                     .child(if alt.trim().is_empty() {
                         url.clone()
                     } else {
@@ -2853,10 +2853,10 @@ fn device_code(url: &str) -> Option<String> {
 
 /// Open a URL in the **host's** browser.
 ///
-/// Deliberately not routed through `shell_argv`: that would run inside the WSL distro,
-/// which is exactly where it does not work — `asta auth login` already tries there and
-/// reports `gio: … Operation not supported`. The browser is on Windows, so this runs on
-/// Windows.
+/// Deliberately not routed through `shell_argv`: `asta auth login` already tries to open
+/// its own sign-in link and can fail to (no default browser registered, or the process it
+/// spawned had no display to hand it to), so this uses the platform's own "open a URL"
+/// mechanism directly rather than shelling out to a command that may not exist.
 fn open_in_browser(url: &str) -> std::io::Result<()> {
     #[cfg(windows)]
     {
@@ -3203,7 +3203,7 @@ fn one_line(prompt: &str) -> String {
 struct RunningFix {
     label: String,
     /// A sign-in URL the command printed, if any. See [`Workbench::open_link`] — the
-    /// command runs *inside the distro*, which has no browser, so the link has to be
+    /// fix runs as a plain subprocess with no browser of its own, so the link has to be
     /// opened out here on the host.
     link: Option<String>,
     /// The last [`FIX_LOG_LINES`] lines. Capped because `uv sync` prints hundreds and
@@ -3935,8 +3935,8 @@ impl Workbench {
         }
 
         // Check the machine on every launch, and let the *first* report decide which pane
-        // the user lands on. A missing key is a Settings problem; a missing WSL or backend
-        // is a Setup problem, and Setup has to win — pasting a key into an app that cannot
+        // the user lands on. A missing key is a Settings problem; a missing runtime or
+        // backend is a Setup problem, and Setup has to win — pasting a key into an app that cannot
         // start its backend fixes nothing, and the first thing a new user sees should be
         // the thing actually standing in their way.
         workbench.run_preflight(cx);
@@ -5002,16 +5002,11 @@ impl Workbench {
 
     /// Say so when a fix reported success and changed nothing.
     ///
-    /// A machine with WSL but no distro ran `wsl --install -d Ubuntu`, which installed the
-    /// WSL runtime, exited 0 — and left the distro unregistered until Windows restarts. The
-    /// pane said "Install Ubuntu — done" directly above the same red row it had started
-    /// from, which reads as a bug in the app rather than as a step the user still has to
-    /// take (docs §60).
-    ///
-    /// The verdict is drawn from the re-check, never from the command's own words: `wsl.exe`
-    /// speaks the system language — the machine this came from printed *"Descargando:
-    /// Subsistema de Windows para Linux"* — so matching on "restart" would have failed for
-    /// exactly the user who needed it.
+    /// The pane otherwise says "Install Python packages — done" directly above the same red
+    /// row it had started from, which reads as a bug in the app rather than as a step the
+    /// user still has to take (docs §60). The verdict is drawn from the re-check, never from
+    /// the command's own words — a fix's own stdout is not something this app can trust to
+    /// say the right thing in the right language.
     fn judge_finished_fix(&mut self) {
         let check_id = match &self.running_fix {
             Some(fix) if fix.ok => fix.check_id,
@@ -5023,21 +5018,11 @@ impl Workbench {
         let Some(fix) = self.running_fix.as_mut() else {
             return;
         };
-        // Only the runtime row installs WSL itself, and only Windows reboots for it.
-        if check_id == "runtime" && cfg!(windows) {
-            fix.notes.push(
-                "— That installed WSL, but Windows has to restart before a distro can \
-                 start. Restart this machine, open the app again, and this row should be \
-                 green."
-                    .into(),
-            );
-        } else {
-            fix.notes.push(
-                "— It reported success but the check still fails. The output above is the \
-                 best clue; the sidecar log below has the rest."
-                    .into(),
-            );
-        }
+        fix.notes.push(
+            "— It reported success but the check still fails. The output above is the \
+             best clue; the sidecar log below has the rest."
+                .into(),
+        );
     }
 
     /// Run a fix on the user's behalf, streaming its output into the pane.
@@ -5107,9 +5092,9 @@ impl Workbench {
                     match event {
                         sidecar::FixEvent::Line(line) => {
                             // `asta auth login` prints its device-activation URL and then
-                            // tries to open it with `gio`, which fails inside WSL: no
-                            // browser there. Catching the URL is what lets the app open it
-                            // on the host, where the browser is (docs §32c).
+                            // tries to open it itself, which can fail with no browser
+                            // registered to handle it. Catching the URL is what lets the
+                            // app open it here instead (docs §32c).
                             if fix.link.is_none() {
                                 fix.link = first_url(&line);
                             }
@@ -5276,7 +5261,7 @@ impl Workbench {
         // shown in the pane. A turn ran regardless, and the consequence was not a clear failure:
         // with no key for the chosen provider, `run_request_body` omits `__llm_keys` **entirely**,
         // and `base_url` lives inside that block. The backend then builds a bare OpenAI client,
-        // picks up whatever `OPENAI_API_KEY` the distro happens to hold, and bills a provider
+        // picks up whatever `OPENAI_API_KEY` the environment happens to hold, and bills a provider
         // nobody selected. Reported as *"this is weird, I set OpenRouter and I have credits"* —
         // with an out-of-credits page for OpenAI (docs §186).
         if let Some(problem) = self.provider_blocker() {
@@ -6953,8 +6938,8 @@ impl Workbench {
     /// was necessarily complete. GPUI correctly cached that first decode failure by path, but a
     /// later paint asked for the same path and received the same failure forever; restarting the
     /// application was the only thing that cleared it. Two bounded follow-up passes cover the
-    /// Windows/WSL filesystem hand-off without turning the whole workspace into a permanent
-    /// polling loop (docs §158).
+    /// write-then-notice latency of the host filesystem without turning the whole workspace
+    /// into a permanent polling loop (docs §158).
     /// Compare what each answer *said* it wrote against what the folder holds.
     ///
     /// **The claim was never checked against the data.** An answer would list ten filenames and
@@ -12379,7 +12364,7 @@ impl Workbench {
             vec![
                 (
                     "Run code on this machine",
-                    "Commands run in your own WSL distro rather than a remote sandbox.",
+                    "Commands run on this machine rather than a remote sandbox.",
                     self.draft.local_execution,
                     0usize,
                 ),
@@ -12510,8 +12495,7 @@ impl Workbench {
                                     format!("Not ready yet · {}", report.summary())
                                 }),
                         )
-                        // Where the checks ran, because "no checkout" means something
-                        // different inside a distro than on this filesystem.
+                        // Where the checks ran.
                         .child(
                             div()
                                 .text_color(rgb(theme::text_muted()))
@@ -12717,8 +12701,9 @@ impl Workbench {
                         // Beside the label rather than among the actions below: those are about
                         // the repair's *output* — open the sign-in page, copy the command — and
                         // this is about the repair. It exists at all because §170 measured that
-                        // the process this app spawned can be killed and takes its WSL tree with
-                        // it; §146 was right to refuse the version that could not (docs §172).
+                        // the process this app spawned can be killed and takes its whole process
+                        // tree with it; §146 was right to refuse the version that could not
+                        // (docs §172).
                         .when(!fix.done, |header| {
                             header.child(
                                 ui::Button::new("stop-fix", "Stop")
@@ -12737,7 +12722,7 @@ impl Workbench {
                 );
             // A sign-in page to open. Prominent, and above the log, because while this is
             // showing the command is *blocked* waiting for the user to visit it — and the
-            // CLI's own attempt to open it failed inside the distro.
+            // CLI's own attempt to open it did not succeed.
             if let Some(link) = &fix.link {
                 // The code, big and on its own line. It is what the sign-in page asks for,
                 // and inside the full URL it is the first thing to be clipped.
@@ -18665,7 +18650,7 @@ mod tests {
             "Conversion is rare: 3.1%, so the dataset is imbalanced",
             "See https://doi.org/10.21223/P3/MO4PSJ for the dataset",
             "Missingness in annual_income (7.81%), income_band (7.81%)",
-            "I ran it with uv, then re-ran setup-wsl.sh and main.rs compiled",
+            "I ran it with uv, then re-ran setup-backend.sh and main.rs compiled",
             "e.g. the third column",
             "version 2.7.11",
         ] {
@@ -19241,7 +19226,9 @@ mod tests {
     #[test]
     fn the_sign_in_link_is_picked_out_of_the_cli_output() {
         // The real line, verbatim: `asta auth login` prints the device-activation URL and
-        // then fails to open it, because there is no browser inside the distro.
+        // then fails to open it itself (this one is `gio`'s failure, captured when the CLI
+        // ran under WSL; kept as a real fixture for the parser, which the CLI's own attempt
+        // to auto-open a link can still fail on any platform).
         let real =
             "gio: https://auth0.allenai.org/activate?user_code=DPMW-BJCG: Operation not supported";
         assert_eq!(
@@ -19596,25 +19583,6 @@ mod tests {
         assert!(!second.contains("annote ="), "{second}");
     }
 
-    #[test]
-    fn a_dropped_file_is_named_the_way_the_agent_opens_it() {
-        // The path has to be spelled the way the *agent* would open it. On Windows the agent lives
-        // inside WSL, so a reference naming `C:\…` would send it looking for a file that does not
-        // exist there — and the researcher would have no idea why.
-        let _env = backend::env_lock::hold();
-        let config = backend::BackendConfig {
-            wsl: Some(backend::WslTarget {
-                distro: None,
-                dir: "~/Mini-Me".into(),
-            }),
-            ..Default::default()
-        };
-        let translated =
-            config.path_for_backend(std::path::Path::new(r"C:\Users\LENOVO\Documents\yield.csv"));
-        assert_eq!(translated, "/mnt/c/Users/LENOVO/Documents/yield.csv");
-        assert!(!translated.contains('\\'), "no Windows path survives: {translated}");
-    }
-
     fn attached(label: &str, reference: &str) -> Attachment {
         Attachment {
             label: label.to_string(),
@@ -19751,46 +19719,12 @@ mod tests {
     }
 
     #[test]
-    fn a_file_on_a_network_share_is_refused_before_the_turn_rather_than_during_it() {
-        // `wsl_path` has no drive letter to work with here, so it passes the path through
-        // and the agent receives `//nas/shared/yield.csv` — which exists in no Linux
-        // filesystem. Left alone, that surfaces a minute into a turn as `FileNotFoundError`,
-        // naming neither the share nor the reason.
-        let _env = backend::env_lock::hold();
-        let wsl = backend::BackendConfig {
-            wsl: Some(backend::WslTarget {
-                distro: None,
-                dir: "~/Mini-Me".into(),
-            }),
-            ..Default::default()
-        };
-        let share = std::path::Path::new(r"\\nas\shared\yield.csv");
-        assert!(!wsl.can_open(share));
-        assert!(wsl.can_open(std::path::Path::new(r"C:\Users\LENOVO\yield.csv")));
-        // A mapped drive letter is fine: WSL mounts those under /mnt like any other.
-        assert!(wsl.can_open(std::path::Path::new(r"Z:\shared\yield.csv")));
-
-        // Only WSL can fail this. A backend on this host opens exactly the path the
-        // researcher's own file manager handed us, network share or not.
-        // Windows deliberately defaults the Python backend to WSL, so `Default` is not a host
-        // fixture on the platform this test is meant to protect. Name the boundary explicitly;
-        // otherwise the assertion depends on which OS runs the suite (§179).
-        let host = backend::BackendConfig {
-            wsl: None,
-            ..Default::default()
-        };
-        assert!(host.can_open(share));
-        assert!(host.can_open(std::path::Path::new("/home/p/yield.csv")));
-    }
-
-    #[test]
     fn a_backend_that_never_starts_opens_setup_rather_than_naming_a_log_file() {
         // These are the exact strings `BackendSupervisor` raises. Pinned here because
         // the routing decision reads them: if one is reworded and this is not, the app
         // silently goes back to showing "did not become healthy" and nothing else.
         for message in [
             "no langgraph.json under /home/x — set MINIME_BACKEND_DIR to the Mini-Me checkout",
-            "failed to launch the backend in WSL (default distro) ~/Mini-Me",
             "failed to spawn the backend (uv). If the LangGraph CLI is missing…",
             "backend exited during startup with exit status: 1",
             "backend did not become healthy within 120 attempts",

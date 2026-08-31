@@ -1,22 +1,16 @@
 //! Where the researcher's outputs land, and how the app reaches them.
 //!
 //! The backend writes every file a turn produces into one directory per thread
-//! (`minime_local/workspace.py:workspace_root`), and until now that was
-//! `~/.mini-me/workspaces` **inside the WSL distro** — a place a Windows researcher cannot
-//! reach without knowing what `\\wsl.localhost` means. Since ~98% of users are on Windows
-//! and none of them are expected to code, files they cannot find are files that do not
-//! exist.
+//! (`minime_local/workspace.py:workspace_root`), and left to its own default that would be
+//! `~/.mini-me/workspaces` — a place most researchers have no reason to know exists, let
+//! alone go looking in. Since none of them are expected to code, files they cannot find are
+//! files that do not exist.
 //!
-//! So the app now chooses that directory instead of letting the backend default, and
-//! chooses one on the **Windows** side: `Documents\Mini-Me`. Three things fall out of that
-//! single decision — outputs are in Explorer where a scientist expects them, "download
+//! So the app chooses that directory instead of letting the backend default, and chooses
+//! one under the researcher's own `Documents`. Three things fall out of that single
+//! decision — outputs are in the file manager where a scientist expects them, "download
 //! everything" becomes a button that opens a folder rather than a zip to build and unpack,
 //! and the app can read the plots a turn produced and show them in the chat.
-//!
-//! The cost is that writes cross WSL's 9p mount. That is genuinely slow for *many small*
-//! files — it is why the backend venv is deliberately kept inside the distro — but a
-//! turn's outputs are a handful of CSVs, figures and reports, and being able to find them
-//! is worth more than the milliseconds.
 
 use std::path::{Path, PathBuf};
 
@@ -645,9 +639,8 @@ pub fn adopt(folder: &Path, source: &Path) -> Result<PathBuf> {
 
 /// The path this app can open, for a path the *agent* wrote down.
 ///
-/// The two live on opposite sides of WSL, and `backend::wsl_path` only goes one way. A document
-/// the librarian indexed is recorded however it saw it — relative to its working directory, or
-/// absolute as `/mnt/c/…` — and neither opens in Explorer as written.
+/// A document the librarian indexed is recorded however it saw it — relative to its working
+/// directory, or absolute in whatever form the backend's own OS spells an absolute path.
 ///
 /// Returns `None` for anything that is not a local file, so a URL in `IndexedPaper.path` (which
 /// its schema explicitly allows) does not become a launch of a file that is not there.
@@ -662,46 +655,21 @@ pub fn local_path(recorded: &str, thread: Option<&Path>) -> Option<PathBuf> {
         return Some(path);
     }
     // A root with no drive letter, which on Windows is what *every* POSIX path is — the branch is
-    // unreachable on Unix, where a root is always absolute, so it needs no `cfg!`.
+    // unreachable on Unix, where a root is always absolute, so it needs no `cfg!`. Nothing this
+    // app's own backend produces takes this shape any more (the backend runs natively on whatever
+    // OS the app does, so its own absolute paths are already `is_absolute()` on that OS) — but a
+    // POSIX-rooted path can still arrive from elsewhere, and it is not one this app can resolve.
     //
-    // It must not reach the join below. `Path::join` **replaces** its base when the argument has a
-    // root rather than extending it, so the conversation folder would be silently discarded and
-    // `/home/piero/papers/a.pdf` would come back as `C:\home\piero\papers\a.pdf`: a row that
-    // lights up and opens nothing (§267).
+    // It must not reach the join below regardless: `Path::join` **replaces** its base when the
+    // argument has a root rather than extending it, so the conversation folder would be silently
+    // discarded and `/home/piero/papers/a.pdf` would come back as `C:\home\piero\papers\a.pdf`: a
+    // row that lights up and opens nothing (§267).
     if path.has_root() {
-        return windows_path_for(recorded);
+        return None;
     }
     // Relative, which is what the skills ask for and what an adopted attachment produces: it is
     // relative to the conversation's own folder.
     thread.map(|dir| dir.join(recorded))
-}
-
-/// The Windows path for a rooted POSIX path the agent wrote down, or `None` when there is not one.
-///
-/// Only `/mnt/<drive>/…` crosses over: it came from `C:\…` and has to go back. Everything else
-/// rooted is WSL's own filesystem or the sandbox's, which Explorer cannot open at all — and `None`
-/// is the honest answer, because the caller uses it to decide whether the row lights up. A row
-/// that lights up and opens nothing is worse than one that does not light up.
-///
-/// **No `cfg!` inside**, so both answers are testable on either platform. That is the point rather
-/// than a nicety: this conversion lived behind `cfg!(windows)` at its only call site and therefore
-/// had *no test at all* — it cannot run on the machine it is written on. The same blind spot let
-/// `is_absolute()` reach a release build, and it is false on Windows for `/home/x` (§267).
-fn windows_path_for(recorded: &str) -> Option<PathBuf> {
-    let rest = recorded.strip_prefix("/mnt/")?;
-    let mut chars = rest.chars();
-    let (Some(drive), Some('/')) = (chars.next(), chars.next()) else {
-        return None;
-    };
-    if !drive.is_ascii_alphabetic() {
-        return None;
-    }
-    // Both bytes were checked as ASCII above, so this is a character boundary.
-    Some(PathBuf::from(format!(
-        "{}:\\{}",
-        drive.to_ascii_uppercase(),
-        rest[2..].replace('/', "\\")
-    )))
 }
 
 /// The folder inside a conversation where its own records are kept.
@@ -2756,7 +2724,7 @@ mod tests {
         assert_eq!(adopt(&thread, &source).expect("adopted"), thread.join("README-2"));
     }
 
-    /// A path the agent wrote has to come back across WSL before this app can open it.
+    /// A relative path the agent wrote resolves against the conversation's own folder.
     #[test]
     fn a_relative_document_resolves_against_the_conversation() {
         let thread = std::path::Path::new("/w/Mini-Me/thread-1");
@@ -3137,14 +3105,17 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
-    /// On Linux that path *is* the file. On Windows it is on the other side of WSL, and
-    /// `is_absolute()` is **false** for it — a root with no drive letter — so it fell through to
-    /// the join and came back as `C:\home\piero\papers\a.pdf` (§267).
+    /// On Linux that path *is* the file. On Windows `is_absolute()` is **false** for it — a
+    /// root with no drive letter — so it fell through to the join and came back as
+    /// `C:\home\piero\papers\a.pdf` (§267).
     #[test]
     fn an_absolute_path_is_taken_as_it_stands() {
         let resolved = local_path("/home/piero/papers/a.pdf", None);
         if cfg!(windows) {
-            assert_eq!(resolved, None, "WSL's own filesystem does not open in Explorer");
+            assert_eq!(
+                resolved, None,
+                "a POSIX-rooted path is not one this app can resolve on Windows"
+            );
         } else {
             assert_eq!(resolved, Some(std::path::PathBuf::from("/home/piero/papers/a.pdf")));
         }
@@ -3157,31 +3128,11 @@ mod tests {
     #[test]
     fn a_rooted_path_never_lands_inside_the_conversation() {
         let thread = std::path::Path::new("/w/Mini-Me/thread-1");
-        for recorded in ["/root/work/report.pdf", "/home/piero/a.pdf", "/mnt/c/Users/x/a.pdf"] {
+        for recorded in ["/root/work/report.pdf", "/home/piero/a.pdf"] {
             let resolved = local_path(recorded, Some(thread));
             let inside = matches!(&resolved, Some(path) if path.starts_with(thread));
             assert!(!inside, "{recorded} resolved to {resolved:?}, inside the conversation");
         }
-    }
-
-    /// Runs on every platform, which is the whole reason `windows_path_for` is its own function:
-    /// behind `cfg!(windows)` this conversion could not be tested on the machine it was written
-    /// on, and so never was.
-    #[test]
-    fn a_mounted_drive_comes_back_as_a_drive() {
-        assert_eq!(
-            windows_path_for("/mnt/c/Users/x/Downloads/a.pdf"),
-            Some(std::path::PathBuf::from("C:\\Users\\x\\Downloads\\a.pdf"))
-        );
-        // Uppercased: `D:` is how a drive is written, and Explorer accepts either.
-        assert_eq!(windows_path_for("/mnt/d/data"), Some(std::path::PathBuf::from("D:\\data")));
-        // Not a drive. WSL's own root, the sandbox's work dir, and `/mnt/wsl`, which is a real
-        // mount point and not one letter. None of the three open from Windows.
-        assert_eq!(windows_path_for("/home/piero/a.pdf"), None);
-        assert_eq!(windows_path_for("/root/work/report.pdf"), None);
-        assert_eq!(windows_path_for("/mnt/wsl/share"), None);
-        // A bare mount root is not a document, and is not worth a case of its own.
-        assert_eq!(windows_path_for("/mnt/c"), None);
     }
 }
 

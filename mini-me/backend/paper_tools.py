@@ -48,7 +48,23 @@ from langchain_core.tools import tool
 from backend import citations
 from backend.runtime import _active_sandbox
 
+try:
+    from minime_local.workspace import LocalWorkspaceBackend, run_asta_cli
+except ImportError:  # pragma: no cover - overlay is desktop-only; absent in a hosted deployment
+    LocalWorkspaceBackend = None  # type: ignore[assignment,misc]
+    run_asta_cli = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
+
+
+def _is_local(sandbox: Any) -> bool:
+    """Whether `sandbox` is the desktop app's own local workspace.
+
+    Only then can `asta` be run as a native subprocess of this same interpreter's venv
+    (no shell, no pipes) — a remote sandbox is a different machine, so it keeps running
+    `asta` through its own POSIX shell, unchanged.
+    """
+    return LocalWorkspaceBackend is not None and isinstance(sandbox, LocalWorkspaceBackend)
 
 #: A search is a single API call behind the CLI; this is generous for a cold start.
 SEARCH_TIMEOUT_S = 90
@@ -154,15 +170,24 @@ async def find_papers(query: str, limit: int = 10) -> str:
             {"error": "no sandbox available to run the search", "papers": []}
         )
 
-    command = shlex.join(_build_search_command(query, limit))
-    runner = getattr(sandbox, "aexecute_untruncated", None) or sandbox.aexecute
+    argv = _build_search_command(query, limit)
     try:
-        response = await runner(command, timeout=SEARCH_TIMEOUT_S)
+        if _is_local(sandbox):
+            work_dir = await sandbox.aget_work_dir()
+            stdout, stderr = await run_asta_cli(argv[1:], cwd=work_dir, timeout=SEARCH_TIMEOUT_S)
+            # Merged the same way `aexecute` merges its output, so `_parse_search`'s
+            # "[stderr]"-marker tolerance keeps working unchanged either way.
+            output = stdout + (f"\n[stderr]\n{stderr}" if stderr else "")
+        else:
+            command = shlex.join(argv)
+            runner = getattr(sandbox, "aexecute_untruncated", None) or sandbox.aexecute
+            response = await runner(command, timeout=SEARCH_TIMEOUT_S)
+            output = getattr(response, "output", "") or ""
     except Exception as exc:  # noqa: BLE001
         logger.warning("find_papers failed for %r: %s", query, exc)
         return json.dumps({"error": f"the search failed: {exc}", "papers": []})
 
-    papers = _parse_search(getattr(response, "output", "") or "")
+    papers = _parse_search(output)
     found = summarise(papers)
     # Logged with a count rather than a claim: "0 papers" and "10 papers" must not look alike in
     # a log that is read when something has gone wrong.

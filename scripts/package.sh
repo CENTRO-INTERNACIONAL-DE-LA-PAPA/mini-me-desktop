@@ -10,8 +10,9 @@
 #   dist/mini-me-desktop/
 #     mini-me-desktop-app(.exe)   the app
 #     overlay/                    host execution (docs §18)
-#     scripts/                    setup-wsl.sh, run from the Setup pane
+#     scripts/                    setup-backend.sh/.ps1, run from the Setup pane
 #     mini-me/                    the backend, so no GitHub account is needed
+#     asta-plugins/               Asta's own CLI source, a dependency of mini-me/
 #
 # `resource()` in backend.rs looks beside the executable first, which is what makes this
 # layout work without any configuration.
@@ -96,7 +97,7 @@ if [ -n "$BACKEND_SRC" ]; then
 
   # **A stamp, so an installed copy can tell it is out of date.**
   #
-  # `setup-wsl.sh` copies the backend once and reports "already here" ever after, so before
+  # `setup-backend.sh`/`.ps1` copy the backend once and report "already here" ever after, so before
   # this a backend fix could never reach a machine that had already been provisioned — the
   # app updated and the Python underneath it did not (docs §283). The stamp is content-
   # derived rather than a version number: a hand-built bundle has no version to quote, and
@@ -113,6 +114,28 @@ else
   bad "pre-monorepo checkout, fix it with:"
   bad "    bash scripts/bundle-backend.sh"
   bad "Continuing anyway — this bundle is only usable by someone with repo access."
+fi
+
+# ------------------------------------------------------------------ asta-plugins
+#
+# Asta is a normal path dependency of mini-me/pyproject.toml now (`[tool.uv.sources]`,
+# `../asta-plugins`), not a separately installed CLI — so a from-scratch install needs this
+# checkout bundled right alongside the backend, the same "ships with the app, no extra
+# credential needed" reasoning as mini-me/ above. `setup-backend.sh`/`.ps1` lay it down as a
+# sibling of wherever the backend lands, at provisioning time.
+if [ -f "$ROOT/asta-plugins/pyproject.toml" ]; then
+  ASTA_DEST="$OUT/asta-plugins"
+  mkdir -p "$ASTA_DEST"
+  cp -r "$ROOT/asta-plugins/." "$ASTA_DEST/"
+  rm -rf "$ASTA_DEST/.venv" "$ASTA_DEST/.git" "$ASTA_DEST/dist" "$ASTA_DEST/.pytest_cache"
+  find "$ASTA_DEST" -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
+  ASTA_STAMP="$(cd "$ASTA_DEST" && find . -type f \( -name '*.py' -o -name '*.toml' \) \
+    | LC_ALL=C sort | xargs sha256sum 2>/dev/null | sha256sum | cut -d' ' -f1)"
+  printf '%s\n' "$ASTA_STAMP" > "$ASTA_DEST/.bundled-backend"
+  ok "asta-plugins/ ($(du -sh "$ASTA_DEST" | cut -f1))"
+else
+  bad "no asta-plugins/pyproject.toml — is the submodule checked out (git submodule update --init)?"
+  bad "Continuing anyway — the bundle will be unable to provision Asta from scratch."
 fi
 
 # `.git` is dropped above, so record what went in.
@@ -158,9 +181,8 @@ Mini-Me Desktop
 
 That is all. Nothing here needs a terminal.
 
-The first run installs a Linux environment (WSL) if you do not already have one.
-That step asks for administrator rights and may need a restart — the app says so
-before you press it.
+The first run installs the Python packages the backend needs — a few minutes,
+shown line by line in the Setup pane. No Linux environment or restart required.
 
 Keys you paste are stored in Windows Credential Manager, not in any file.
 

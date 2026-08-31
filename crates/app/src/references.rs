@@ -395,8 +395,8 @@ mod tests {
     /// console code page, which on a Windows runner is cp1252 — so an en-dash written by the
     /// overlay arrives as the single byte `0x96`, and reading it back as UTF-8 gives `�`. The test
     /// then compares `603�627` against `603–627` and fails on a citation the overlay had formatted
-    /// perfectly. Nothing about the product: in a real run this text crosses HTTP as JSON, which is
-    /// UTF-8 by definition, and the overlay only ever runs inside WSL.
+    /// perfectly. Nothing about the product: in a real run this text crosses HTTP as JSON, which
+    /// is UTF-8 regardless of what console (if any) the process behind it is attached to.
     fn interpreter(program: &str) -> std::process::Command {
         let mut command = std::process::Command::new(program);
         command.env("PYTHONIOENCODING", "utf-8");
@@ -1167,8 +1167,8 @@ assert "root.joinpath(" in src, "the work dir is no longer composed from parts"
 def layout(root, project, pinned, own):
     parts = [pinned] + ([own] if own and own != pinned else [])
     # `as_posix`, not `str`: the rule under test is which folder nests inside which, and `str`
-    # of a WindowsPath spells the same layout with backslashes. The overlay itself only ever
-    # runs inside WSL, so its own separator is never in question (§214).
+    # of a WindowsPath would spell the same layout with backslashes — a separator this test
+    # is not about (§214).
     return pathlib.Path(root).joinpath(*([project] if project else []), *parts).as_posix()
 
 # A worker nests inside the conversation; the conversation itself does not move.

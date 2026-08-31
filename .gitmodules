@@ -1,0 +1,3 @@
+[submodule "asta-plugins"]
+	path = asta-plugins
+	url = git@github.com-cip:allenai/asta-plugins.git

@@ -44,6 +44,7 @@ dependencies = [
     "xgboost>=3.2.0",
     "langgraph-api>=0.12.6",
     "langgraph-sdk>=0.3.13",
+    "asta",
 ]
 
 [project.optional-dependencies]
@@ -54,3 +55,6 @@ dev = [
 
 [tool.setuptools]
 packages = ["backend", "backend.middleware", "backend.routes"]
+
+[tool.uv.sources]
+asta = { path = "../asta-plugins", editable = true }

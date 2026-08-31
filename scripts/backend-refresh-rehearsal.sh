@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 # Prove that an already-provisioned backend is updated when the bundle changes — in seconds,
-# against throwaway directories, using the real `setup-wsl.sh`.
+# against throwaway directories, using the real `setup-backend.sh`.
 #
 # WHY THIS EXISTS
 #
-# `setup-wsl.sh` said "Mini-Me is already here" and copied nothing, so a backend fix could
-# never reach a machine that had been provisioned once. The app updated weekly; the Python
-# under it did not. A researcher's dataverse explorer ran a `read_search_results` that had
-# been fixed nine days earlier, and the claims recorder written for it was never on the
-# machine at all (docs §283).
+# `setup-backend.sh` (formerly `setup-wsl.sh`) said "Mini-Me is already here" and copied
+# nothing, so a backend fix could never reach a machine that had been provisioned once. The
+# app updated weekly; the Python under it did not. A researcher's dataverse explorer ran a
+# `read_search_results` that had been fixed nine days earlier, and the claims recorder written
+# for it was never on the machine at all (docs §283).
 #
-# That is a shell path on somebody else's Windows box, which is exactly the shape of failure
-# §275 spent four release round-trips on before building an instrument. This is the
-# instrument, written first this time.
+# That is a shell path on somebody else's box, which is exactly the shape of failure §275
+# spent four release round-trips on before building an instrument. This is the instrument,
+# written first this time.
 #
 #   Usage:  bash scripts/backend-refresh-rehearsal.sh
 #
@@ -22,9 +22,19 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SETUP="$HERE/setup-wsl.sh"
+SETUP="$HERE/setup-backend.sh"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
+
+# `setup-backend.sh` also provisions a sibling `asta-plugins` checkout, required by
+# mini-me/pyproject.toml's path dependency on it. This rehearsal only exercises the Mini-Me
+# refresh logic, so give it a fixed, minimal bundled source once — otherwise, with no bundled
+# or local asta-plugins checkout, it would fall through to `git clone` over SSH and hang/fail
+# in a throwaway sandbox with no such access.
+ASTA_BUNDLE="$WORK/asta_bundle"
+mkdir -p "$ASTA_BUNDLE"
+printf '[project]\nname = "asta"\n' > "$ASTA_BUNDLE/pyproject.toml"
+export ASTA_BUNDLED_SOURCE="$ASTA_BUNDLE"
 
 pass=0
 fail=0
@@ -50,7 +60,7 @@ make_bundle() {
 run_setup() {
   MINIME_SETUP_STOP_AFTER_SOURCE=1 MINIME_BUNDLED_SOURCE="$1" \
     bash "$SETUP" "$2" >"$WORK/log" 2>&1 || {
-      printf '    !!  setup-wsl.sh exited non-zero:\n'; sed 's/^/        /' "$WORK/log"; exit 1
+      printf '    !!  setup-backend.sh exited non-zero:\n'; sed 's/^/        /' "$WORK/log"; exit 1
     }
 }
 

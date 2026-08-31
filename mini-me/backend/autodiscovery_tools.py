@@ -35,9 +35,12 @@ archive, so `persist_discovery_outputs` is not a convenience — it is the only
 place a run's results survive.
 """
 
+import asyncio
+import base64
 import json
 import logging
 import shlex
+from pathlib import Path
 from typing import Any
 
 from langchain_core.tools import tool
@@ -45,8 +48,38 @@ from langchain_core.tools import tool
 from backend import diagnostics
 from backend.runtime import _active_sandbox
 
+try:
+    from minime_local.workspace import LocalWorkspaceBackend, run_asta_cli
+except ImportError:  # pragma: no cover - overlay is desktop-only; absent in a hosted deployment
+    LocalWorkspaceBackend = None  # type: ignore[assignment,misc]
+    run_asta_cli = None  # type: ignore[assignment]
+
 #: Reaches the log at INFO — see `backend/diagnostics.py` for why that needs saying.
 logger = diagnostics.arriving(__name__)
+
+
+def _is_local(sandbox: Any) -> bool:
+    """Whether `sandbox` is the desktop app's own local workspace.
+
+    Only then can `asta` be run as a native subprocess of this same interpreter's venv
+    (no shell, no pipes) — a remote sandbox is a different machine, so it keeps running
+    `asta` through its own POSIX shell, unchanged.
+    """
+    return LocalWorkspaceBackend is not None and isinstance(sandbox, LocalWorkspaceBackend)
+
+
+async def _run_local(sandbox: Any, argv: list[str], timeout: int, *, keep_stderr: bool) -> str:
+    """Local twin of `_json_shell`/`_loud_shell`: run `asta` as a native subprocess instead of
+    through the sandbox's shell.
+
+    `keep_stderr` mirrors the redirect each call site already chose: `False` drops it — the same
+    as `_json_shell`'s `2>/dev/null`, so a warning on stderr cannot break a `--format json` parse
+    — and `True` merges it into the returned text, the same as `_loud_shell`'s `2>&1`, for the
+    calls whose failure text is the point.
+    """
+    work_dir = await sandbox.aget_work_dir()
+    stdout, stderr = await run_asta_cli(argv[1:], cwd=work_dir, timeout=timeout)
+    return stdout + (f"\n{stderr}" if (keep_stderr and stderr) else "")
 
 _DRAFT_TIMEOUT_S = 600  # upload of a real dataset goes to GCS through a presigned URL
 _SUBMIT_TIMEOUT_S = 180
@@ -363,6 +396,38 @@ def _configure_shell(run_id: str, staged: str, metadata: dict[str, Any]) -> str:
     )
 
 
+async def _configure_local(sandbox: Any, run_id: str, staged: str, metadata: dict[str, Any]) -> str:
+    """Local twin of `_configure_shell`: write the metadata straight to disk, hand it to the CLI
+    as a native subprocess, then remove it.
+
+    Neither reason `_configure_shell`'s docstring gives for staging through the shell applies
+    here: `awrite` being create-only and `_resolve_for_write` relocating a write outside the work
+    dir are both properties of the deepagents virtual filesystem, not of a plain
+    `pathlib.Path.write_text` against the real work-dir path a local sandbox already is.
+    """
+    work_dir = await sandbox.aget_work_dir()
+    try:
+        # `asyncio.to_thread`: this runs on the event loop, where `langgraph dev`'s blockbuster
+        # guard raises on a synchronous filesystem call (see `tests/test_no_blocking_on_the_loop.py`).
+        await asyncio.to_thread(
+            Path(staged).write_text, json.dumps(metadata, indent=2, ensure_ascii=False)
+        )
+    except OSError as exc:
+        return f"could not stage the configuration file: {exc}"
+    try:
+        stdout, stderr = await run_asta_cli(
+            _build_metadata_command(run_id, staged)[1:], cwd=work_dir, timeout=_STATUS_TIMEOUT_S
+        )
+        # Kept merged, like `_configure_shell`'s `2>&1`: this is one of the two calls that stand
+        # between a researcher's press and their run, and a failure here must say why.
+        return stdout + (f"\n{stderr}" if stderr else "")
+    finally:
+        try:
+            await asyncio.to_thread(Path(staged).unlink)
+        except OSError:
+            pass
+
+
 def _upload_shell(run_id: str, dataset_paths: list[str]) -> str:
     """Upload the datasets, keeping stderr so a failure says why.
 
@@ -476,6 +541,72 @@ def _figures_shell(run_id: str, experiment_id: str, run_dir: str) -> str:
         f"mkdir -p {shlex.quote(run_dir)} && {fetch} > {staged} 2>&1; "
         f"python3 -c {script} {target} {staged}; rm -f {staged}"
     )
+
+
+def _extract_figures(payload: str, run_dir: str) -> dict[str, Any]:
+    """1:1 port of `_FIGURES_PY`'s logic, for **local** execution.
+
+    `_figures_shell` decodes an experiment's figures from its `--format json` response entirely
+    inside the sandbox, because the response is large and the base64 must not cross back to the
+    server. For local execution both concerns are moot — this process already holds `payload` in
+    memory, and it and the sandbox share a filesystem — so this decodes it directly rather than
+    piping it through a second `python3`. Returns the same `{"ok", "figures"/"reason", ...}` shape
+    `_decode_figures` already knows how to read.
+    """
+    brace = payload.find("{")
+    record = None
+    if brace >= 0:
+        try:
+            record = json.loads(payload[brace:])
+        except Exception:
+            record = None
+    if record is None:
+        # Not the same as no figures — a failed fetch and an experiment that drew nothing must
+        # not look alike (§260).
+        return {"ok": False, "reason": " ".join(payload.split())[:300]}
+    experiment = record.get("experiment") or record
+    bundles = experiment.get("rich_outputs") or []
+    out_dir = Path(run_dir)
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return {"ok": False, "reason": f"could not create {run_dir}: {exc}"}
+    written = []
+    for index, bundle in enumerate(bundles, start=1):
+        if not isinstance(bundle, dict):
+            continue
+        encoded = bundle.get("image/png") or bundle.get("image/jpeg")
+        if not isinstance(encoded, str) or len(encoded) < 64:
+            continue
+        suffix = "png" if bundle.get("image/png") else "jpg"
+        name = f"figure-{index:02d}.{suffix}"
+        try:
+            raw = base64.b64decode(encoded, validate=True)
+        except Exception:
+            continue
+        try:
+            (out_dir / name).write_bytes(raw)
+        except OSError:
+            continue
+        written.append(name)
+    return {"ok": True, "figures": written, "bundles": len(bundles)}
+
+
+async def _figures_local(sandbox: Any, run_id: str, experiment_id: str, run_dir: str) -> str:
+    """Local twin of `_figures_shell`: fetch one experiment as a native subprocess and decode its
+    figures directly, then hand back JSON `_decode_figures` already knows how to read.
+
+    Stderr is kept merged in, the same reason `_figures_shell` keeps it: a CLI that printed
+    `Usage:` or an auth error must read as a failure, not as an experiment that drew nothing.
+    """
+    work_dir = await sandbox.aget_work_dir()
+    stdout, stderr = await run_asta_cli(
+        _build_experiment_command(run_id, experiment_id)[1:],
+        cwd=work_dir,
+        timeout=_FIGURE_TIMEOUT_S,
+    )
+    payload = stdout + (f"\n{stderr}" if stderr else "")
+    return json.dumps(_extract_figures(payload, f"{run_dir}/{experiment_id}"))
 
 
 def _decode_figures(output: str) -> tuple[list[str], str | None]:
@@ -661,7 +792,12 @@ async def draft_run(
     except ValueError as exc:
         return {"error": str(exc), "missing": missing}
 
-    created = await _run(sandbox, _json_shell(_build_create_command()), _STATUS_TIMEOUT_S)
+    if _is_local(sandbox):
+        created = await _run_local(
+            sandbox, _build_create_command(), _STATUS_TIMEOUT_S, keep_stderr=False
+        )
+    else:
+        created = await _run(sandbox, _json_shell(_build_create_command()), _STATUS_TIMEOUT_S)
     # `create` prints a bare id, not JSON — so this is the one response that is parsed by looking
     # at the text rather than through `_extract_json`.
     run_id = (created or "").strip().splitlines()[-1].strip() if created.strip() else ""
@@ -672,7 +808,12 @@ async def draft_run(
     uploads = [actual for _, actual, _ in present]
     # Upload first: metadata naming a file the upload did not deliver configures a run against data
     # that is not there, and the service validates the two against each other.
-    uploaded = await _run(sandbox, _upload_shell(run_id, uploads), _DRAFT_TIMEOUT_S)
+    if _is_local(sandbox):
+        uploaded = await _run_local(
+            sandbox, _build_upload_command(run_id, uploads), _DRAFT_TIMEOUT_S, keep_stderr=True
+        )
+    else:
+        uploaded = await _run(sandbox, _upload_shell(run_id, uploads), _DRAFT_TIMEOUT_S)
     if "done" not in (uploaded or "").lower():
         logger.warning("autodiscovery upload run=%s did not confirm: %.300s", run_id, uploaded)
         return {
@@ -684,9 +825,12 @@ async def draft_run(
         }
 
     staged = metadata_path(work_dir, run_id)
-    out = await _run(
-        sandbox, _configure_shell(run_id, staged, metadata), _STATUS_TIMEOUT_S
-    )
+    if _is_local(sandbox):
+        out = await _configure_local(sandbox, run_id, staged, metadata)
+    else:
+        out = await _run(
+            sandbox, _configure_shell(run_id, staged, metadata), _STATUS_TIMEOUT_S
+        )
     if "Metadata saved" not in (out or ""):
         logger.warning("autodiscovery draft run=%s did not confirm metadata: %.400s", run_id, out)
         return {
@@ -714,7 +858,12 @@ async def draft_run(
 
 async def read_credits(sandbox: Any) -> dict[str, Any]:
     """The credit balance, so the approval modal can state the cost against it."""
-    out = await _run(sandbox, _json_shell(_build_credits_command()), _STATUS_TIMEOUT_S)
+    if _is_local(sandbox):
+        out = await _run_local(
+            sandbox, _build_credits_command(), _STATUS_TIMEOUT_S, keep_stderr=False
+        )
+    else:
+        out = await _run(sandbox, _json_shell(_build_credits_command()), _STATUS_TIMEOUT_S)
     payload = _extract_json(out)
     credits = payload.get("credits") if isinstance(payload, dict) else None
     if not isinstance(credits, dict):
@@ -737,7 +886,14 @@ async def read_metadata(sandbox: Any, run_id: str) -> dict[str, Any]:
     """
     if not is_valid_run_id(run_id):
         return {}
-    out = await _run(sandbox, _loud_shell(_build_metadata_get_command(run_id)), _STATUS_TIMEOUT_S)
+    if _is_local(sandbox):
+        out = await _run_local(
+            sandbox, _build_metadata_get_command(run_id), _STATUS_TIMEOUT_S, keep_stderr=True
+        )
+    else:
+        out = await _run(
+            sandbox, _loud_shell(_build_metadata_get_command(run_id)), _STATUS_TIMEOUT_S
+        )
     payload = _extract_json(out)
     if isinstance(payload, dict):
         # The run listing nests this under `run_metadata`; `metadata-get` returns it bare. Accept
@@ -805,9 +961,12 @@ async def update_metadata(
             )
 
     staged = metadata_path(await _work_dir(sandbox), run_id)
-    out = await _run(
-        sandbox, _configure_shell(run_id, staged, updated), _STATUS_TIMEOUT_S
-    )
+    if _is_local(sandbox):
+        out = await _configure_local(sandbox, run_id, staged, updated)
+    else:
+        out = await _run(
+            sandbox, _configure_shell(run_id, staged, updated), _STATUS_TIMEOUT_S
+        )
     if "Metadata saved" not in (out or ""):
         logger.warning("edited metadata for %s did not save: %.400s", run_id, out)
         detail = " ".join((out or "").split())[:300] or "the command printed nothing"
@@ -833,7 +992,12 @@ async def already_submitted(sandbox: Any, run_id: str) -> bool | None:
     """
     if not is_valid_run_id(run_id):
         return None
-    out = await _run(sandbox, _json_shell(_build_status_command(run_id)), _STATUS_TIMEOUT_S)
+    if _is_local(sandbox):
+        out = await _run_local(
+            sandbox, _build_status_command(run_id), _STATUS_TIMEOUT_S, keep_stderr=False
+        )
+    else:
+        out = await _run(sandbox, _json_shell(_build_status_command(run_id)), _STATUS_TIMEOUT_S)
     payload = _extract_json(out)
     if not isinstance(payload, dict):
         logger.warning("could not read run=%s status to check for approval: %.200s", run_id, out)
@@ -876,9 +1040,14 @@ async def submit_run(sandbox: Any, run_id: str, *, approved: int | None = None) 
                 )
             }
 
-    out = await _run(
-        sandbox, _json_shell(_build_submit_command(run_id)), _SUBMIT_TIMEOUT_S
-    )
+    if _is_local(sandbox):
+        out = await _run_local(
+            sandbox, _build_submit_command(run_id), _SUBMIT_TIMEOUT_S, keep_stderr=False
+        )
+    else:
+        out = await _run(
+            sandbox, _json_shell(_build_submit_command(run_id)), _SUBMIT_TIMEOUT_S
+        )
     text = out or ""
     if "Submitted" not in text:
         logger.warning("autodiscovery submit run=%s did not confirm: %.300s", run_id, text)
@@ -899,7 +1068,14 @@ async def poll_discovery_status(sandbox: Any, run_id: str) -> dict[str, Any]:
     if not is_valid_run_id(run_id):
         return {"status": "error", "message": "not a run id"}
 
-    status_out = await _run(sandbox, _json_shell(_build_status_command(run_id)), _STATUS_TIMEOUT_S)
+    if _is_local(sandbox):
+        status_out = await _run_local(
+            sandbox, _build_status_command(run_id), _STATUS_TIMEOUT_S, keep_stderr=False
+        )
+    else:
+        status_out = await _run(
+            sandbox, _json_shell(_build_status_command(run_id)), _STATUS_TIMEOUT_S
+        )
     status_payload = _extract_json(status_out)
     if not isinstance(status_payload, dict):
         # No readable answer is not the same as a finished run. Say running so the next tick tries
@@ -910,9 +1086,14 @@ async def poll_discovery_status(sandbox: Any, run_id: str) -> dict[str, Any]:
     details = status_payload.get("run_details")
     details = details if isinstance(details, dict) else {}
 
-    experiments_out = await _run(
-        sandbox, _json_shell(_build_experiments_command(run_id)), _STATUS_TIMEOUT_S
-    )
+    if _is_local(sandbox):
+        experiments_out = await _run_local(
+            sandbox, _build_experiments_command(run_id), _STATUS_TIMEOUT_S, keep_stderr=False
+        )
+    else:
+        experiments_out = await _run(
+            sandbox, _json_shell(_build_experiments_command(run_id)), _STATUS_TIMEOUT_S
+        )
     experiments_payload = _extract_json(experiments_out)
     experiments_payload = experiments_payload if isinstance(experiments_payload, dict) else {}
     experiments = experiments_payload.get("experiments")
@@ -1125,7 +1306,10 @@ async def fetch_experiment_figures(
     if not is_valid_run_id(run_id) or not is_valid_experiment_id(experiment_id):
         return {"figures": [], "error": "not a run or experiment id"}
     run_dir = f"{await _work_dir(sandbox)}/discovery/{run_id}"
-    out = await _run(sandbox, _figures_shell(run_id, experiment_id, run_dir), _FIGURE_TIMEOUT_S)
+    if _is_local(sandbox):
+        out = await _figures_local(sandbox, run_id, experiment_id, run_dir)
+    else:
+        out = await _run(sandbox, _figures_shell(run_id, experiment_id, run_dir), _FIGURE_TIMEOUT_S)
     names, failure = _decode_figures(out)
     if failure is not None:
         logger.warning(

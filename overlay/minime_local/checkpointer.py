@@ -45,9 +45,11 @@ from typing import AsyncIterator
 
 logger = logging.getLogger(__name__)
 
-#: Beside the pickles it supersedes, inside the distro. **Never on a Windows-visible path**:
-#: SQLite's file locking over WSL's 9p mount is not reliable, and a corrupted database would be
-#: a worse outcome than the slow boot this replaces.
+#: Beside the pickles it supersedes, relative to the checkout. Not a network-mounted path:
+#: SQLite's file locking is not reliable over one (WSL2's old 9p mount was the case that
+#: mattered — gone now that the backend runs natively, docs §292 — but the same caution
+#: would apply to any future network share), and a corrupted database would be a worse
+#: outcome than the slow boot this replaces.
 DIRECTORY = ".langgraph_api"
 FILENAME = "checkpoints.sqlite"
 

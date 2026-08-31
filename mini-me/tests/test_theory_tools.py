@@ -21,7 +21,9 @@ from backend.theory_tools import (
     _extract_json,
     _failure_reason,
     _parse_theories,
+    _poll_argv,
     _poll_command,
+    _reduce_task,
     _run_elapsed_seconds,
     _state_of,
     is_valid_task_id,
@@ -291,6 +293,73 @@ def test_reducer_shrinks_giant_task_under_cap_and_keeps_theories() -> None:
         "N response is gated by co-limiting nutrients"
     ]
     assert parsed["theories"][0]["supporting_papers"][0]["url"].endswith("/CorpusID:286404335")
+
+
+# ---------------------------------------------------------------------------
+# `_reduce_task` — the local-execution twin of `_REDUCE_TASK_PY`, ported rather than
+# piped through a second `python3`. Pinned against the real reducer script so the two
+# stay identical.
+# ---------------------------------------------------------------------------
+
+def test_reduce_task_matches_the_piped_reducer_on_a_giant_completed_task() -> None:
+    task = _giant_completed_task()
+    piped = _extract_json(_run_reducer(task))
+    ported = _reduce_task(task)
+    assert ported == piped
+
+
+def test_reduce_task_forwards_top_level_error_like_the_piped_reducer() -> None:
+    failed_task = {
+        "status": {"state": "failed", "message": None},
+        "error": "theorizer worker crashed",
+        "artifacts": [],
+    }
+    piped = _extract_json(_run_reducer(failed_task))
+    ported = _reduce_task(failed_task)
+    assert ported == piped
+    assert _failure_reason(ported, "failed") == "theorizer worker crashed"
+
+
+def test_poll_argv_is_the_local_twin_of_poll_command() -> None:
+    """No shell, no pipe, but the same subcommand `_poll_command` fetches."""
+    argv = _poll_argv("6580ec74-121a-4757-b5e2-2e1ed9fc210e")
+    assert argv == ["asta", "generate-theories", "task", "6580ec74-121a-4757-b5e2-2e1ed9fc210e"]
+
+
+def test_poll_theory_status_uses_run_asta_cli_when_local(monkeypatch) -> None:
+    """Local execution takes a different path entirely: no shell string, no `_run`, just
+    `run_asta_cli` — mirroring how `theory_tools._is_local` gates it in production."""
+    import backend.theory_tools as module
+
+    task = {
+        "status": {"state": "completed"},
+        "artifacts": [
+            _theory_artifact("T", ["X causes Y"],
+                             [{"displayLabel": "Doe 2020", "s2Metadata": {"corpusId": 99}}])
+        ],
+    }
+    calls = []
+
+    async def fake_run_asta_cli(args, *, cwd, timeout):
+        calls.append((args, cwd, timeout))
+        return json.dumps(task), ""
+
+    class _LocalSandbox:
+        async def aget_work_dir(self) -> str:
+            return "/workspace"
+
+    monkeypatch.setattr(module, "_is_local", lambda sandbox: True)
+    monkeypatch.setattr(module, "run_asta_cli", fake_run_asta_cli)
+
+    res = asyncio.run(
+        poll_theory_status(_LocalSandbox(), "6580ec74-121a-4757-b5e2-2e1ed9fc210e")
+    )
+    assert res["status"] == "completed"
+    assert len(res["theories"]) == 1
+    # The argv dropped the leading "asta" (run_asta_cli already prepends `-m asta.cli`).
+    assert calls == [
+        (["generate-theories", "task", "6580ec74-121a-4757-b5e2-2e1ed9fc210e"], "/workspace", 90)
+    ]
 
 
 def test_poll_command_pipes_task_through_reducer() -> None:

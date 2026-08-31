@@ -27,20 +27,39 @@ drift is caught in CI rather than in a live run — the same discipline that
 ``backend.theory_tools`` applies to the theorizer.
 """
 
+import asyncio
+import base64
 import json
 import logging
 
 from backend import diagnostics
 import re
 import shlex
+from pathlib import Path
 from typing import Any
 
 from langchain_core.tools import tool
 
 from backend.runtime import _active_sandbox
 
+try:
+    from minime_local.workspace import LocalWorkspaceBackend, run_asta_cli
+except ImportError:  # pragma: no cover - overlay is desktop-only; absent in a hosted deployment
+    LocalWorkspaceBackend = None  # type: ignore[assignment,misc]
+    run_asta_cli = None  # type: ignore[assignment]
+
 #: Reaches the log at INFO — see `backend/diagnostics.py` for why that needs saying.
 logger = diagnostics.arriving(__name__)
+
+
+def _is_local(sandbox: Any) -> bool:
+    """Whether `sandbox` is the desktop app's own local workspace.
+
+    Only then can `asta` be run as a native subprocess of this same interpreter's venv
+    (no shell, no pipes) — a remote sandbox is a different machine, so it keeps running
+    `asta` through its own POSIX shell, unchanged.
+    """
+    return LocalWorkspaceBackend is not None and isinstance(sandbox, LocalWorkspaceBackend)
 
 _SUBMIT_TIMEOUT_S = 180
 _STATUS_TIMEOUT_S = 90
@@ -154,6 +173,113 @@ if ef:
     out["error_fields"] = ef
 print(json.dumps(out))
 """
+
+
+def _reduce_task(t: dict[str, Any]) -> dict[str, Any]:
+    """1:1 port of `_REDUCE_TASK_PY`'s logic, for **local** execution.
+
+    Same shrink `_task_shell` performs by piping the fetched task through a second
+    `python3` inside the sandbox — this is a straight port, not a rewrite, so it must
+    return the exact shape `_state_of`/`_analysis_text`/`_artifact_names` already
+    consume, since those stay the single source of truth for both execution paths.
+    """
+    cap = 4000
+
+    def part_text(p: Any) -> str:
+        if not isinstance(p, dict):
+            return ""
+        txt = p.get("text")
+        if isinstance(txt, str) and txt.strip():
+            return txt
+        d = p.get("data")
+        if isinstance(d, dict):
+            outs = []
+            for k in ("summary", "text", "markdown", "description", "message", "short_desc"):
+                v = d.get(k)
+                if isinstance(v, str) and v.strip():
+                    outs.append(v)
+            return "\n".join(outs)
+        if isinstance(d, str):
+            return d
+        return ""
+
+    arts = []
+    for a in t.get("artifacts", []) or []:
+        if not isinstance(a, dict):
+            continue
+        texts = [part_text(p) for p in (a.get("parts") or [])]
+        text = "\n".join(s for s in texts if s)[:cap]
+        arts.append(
+            {
+                "name": a.get("name"),
+                "type": (a.get("metadata") or {}).get("type"),
+                "text": text,
+            }
+        )
+    out: dict[str, Any] = {"status": t.get("status", {}) or {}, "artifacts": arts}
+    ef = {}
+    for k in ("error", "detail", "reason", "message"):
+        v = t.get(k)
+        if isinstance(v, str) and v.strip():
+            ef[k] = v
+    if ef:
+        out["error_fields"] = ef
+    return out
+
+
+def _reduce_figures(t: dict[str, Any], out_dir: str) -> int:
+    """1:1 port of `_FIGURES_PY`'s logic, for **local** execution.
+
+    `_export_shell` decodes the figures DataVoyager embedded as base64 in-sandbox,
+    beside the `asta artifacts` export, because that exporter never writes them as
+    images (docs §242). This does the same decoding directly against the local
+    filesystem instead of piping the task record through a second `python3`.
+    Returns how many figures were written.
+    """
+    found = []
+    for a in t.get("artifacts") or []:
+        for p in a.get("parts") or []:
+            d = p.get("data") or {}
+            # Either shape: figures on the part, or inside the dv_answer log cell.
+            for f in d.get("figures") or []:
+                found.append(f)
+            for entry in d.get("logs") or []:
+                if entry.get("source") != "dv_answer":
+                    continue
+                try:
+                    ans = json.loads(entry.get("content") or "")
+                except Exception:
+                    continue
+                for f in ans.get("figures") or []:
+                    found.append(f)
+    out_path = Path(out_dir)
+    try:
+        out_path.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return 0
+    captions, n = [], 0
+    for f in found:
+        b = f.get("imageb64")
+        if not isinstance(b, str) or not b:
+            continue
+        try:
+            raw = base64.b64decode(b)
+        except Exception:
+            continue
+        n += 1
+        name = f"figure-{n:02d}.png"
+        try:
+            (out_path / name).write_bytes(raw)
+        except OSError:
+            continue
+        cap = str(f.get("caption") or "").strip().replace("\n", " ")
+        captions.append(f"![{cap or name}]({name})")
+    if captions:
+        try:
+            (out_path / "figures.md").write_text("\n\n".join(captions) + "\n")
+        except OSError:
+            pass
+    return n
 
 
 def _submit_shell(
@@ -398,11 +524,84 @@ async def _run(sandbox: Any, command: str, timeout: int) -> str:
     return getattr(resp, "output", "") or ""
 
 
+async def _submit_local(
+    sandbox: Any, question: str, dataset_paths: list[str], context_id: str | None
+) -> str:
+    """Local twin of `_submit_shell`: run `asta analyze-data submit` as a native
+    subprocess and read its `--output` file directly, instead of `cat`-ing it back
+    through a shell pipeline.
+
+    **The clear-before-submit is the same guard `_submit_shell`'s docstring
+    explains** (docs §238): `--output` names one path reused by every submission, so a
+    submission that fails must not leave a *previous* run's response for this one to
+    read as its own.
+    """
+    work_dir = await sandbox.aget_work_dir()
+    output_path = str(Path(work_dir) / ".asta-analyze-data-submit.json")
+    argv = _build_submit_command(
+        question, dataset_paths, context_id=context_id, output_path=output_path
+    )
+    # `asyncio.to_thread` everywhere here: this runs on the event loop, where `langgraph dev`'s
+    # blockbuster guard raises on a synchronous filesystem call (see
+    # `tests/test_no_blocking_on_the_loop.py`).
+    try:
+        await asyncio.to_thread(Path(output_path).unlink)
+    except OSError:
+        pass
+    await run_asta_cli(argv[1:], cwd=work_dir, timeout=_SUBMIT_TIMEOUT_S)
+    try:
+        out = await asyncio.to_thread(Path(output_path).read_text)
+    except OSError:
+        out = ""
+    finally:
+        try:
+            await asyncio.to_thread(Path(output_path).unlink)
+        except OSError:
+            pass
+    return out
+
+
+async def _export_local(sandbox: Any, task_id: str, base_dir: str) -> None:
+    """Local twin of `_export_shell`: fetch the task record, export it via `asta
+    artifacts`, and decode its figures — native subprocess/filesystem calls instead of
+    a sandbox shell pipeline.
+
+    Tolerant the same way the shell version is: `_export_shell` runs the figures step
+    with `;` rather than `&&` because losing the charts to an `asta artifacts` failure
+    would be the wrong trade, so this catches that failure and still decodes figures.
+    """
+    work_dir = await sandbox.aget_work_dir()
+    run_dir = Path(base_dir) / task_id
+    export_dir = run_dir / "export"
+    # `asyncio.to_thread`: see the note in `_submit_local` — this runs on the event loop.
+    await asyncio.to_thread(run_dir.mkdir, parents=True, exist_ok=True)
+    stdout, _stderr = await run_asta_cli(
+        _build_task_command(task_id)[1:], cwd=work_dir, timeout=_EXPORT_TIMEOUT_S
+    )
+    await asyncio.to_thread((run_dir / "task.json").write_text, stdout)
+    try:
+        await run_asta_cli(
+            ["artifacts", "--input", str(run_dir), "--output", str(export_dir), "--format", "md"],
+            cwd=work_dir,
+            timeout=_EXPORT_TIMEOUT_S,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("asta artifacts export failed for %s: %s", task_id, exc)
+    try:
+        task = json.loads(stdout) if stdout.strip() else {}
+    except Exception:
+        task = {}
+    _reduce_figures(task, str(run_dir))
+
+
 async def _submit(
     sandbox: Any, question: str, dataset_paths: list[str], context_id: str | None
 ) -> dict[str, str] | None:
     """Submit a run; return the task id + context id, or None on failure."""
-    out = await _run(sandbox, _submit_shell(question, dataset_paths, context_id), _SUBMIT_TIMEOUT_S)
+    if _is_local(sandbox):
+        out = await _submit_local(sandbox, question, dataset_paths, context_id)
+    else:
+        out = await _run(sandbox, _submit_shell(question, dataset_paths, context_id), _SUBMIT_TIMEOUT_S)
     record = _extract_json(out)
     if not isinstance(record, dict):
         # **No response, no task.** The old code fell back to `_UUID_RE.search(out)` over the whole
@@ -443,8 +642,18 @@ async def poll_analysis_status(
       input-required -> {status:"input-required", task_id, context_id, prompt}
       running        -> {status:"running", task_id, context_id, progress}
     """
-    out = await _run(sandbox, _task_shell(task_id), _STATUS_TIMEOUT_S)
-    task = _extract_json(out)
+    if _is_local(sandbox):
+        work_dir = await sandbox.aget_work_dir()
+        # asta streams progress to stderr and the task JSON to stdout — the remote
+        # path drops stderr the same way, with `2>/dev/null`, before its reducer.
+        stdout, _stderr = await run_asta_cli(
+            _build_task_command(task_id)[1:], cwd=work_dir, timeout=_STATUS_TIMEOUT_S
+        )
+        raw = _extract_json(stdout)
+        task = _reduce_task(raw) if raw is not None else None
+    else:
+        out = await _run(sandbox, _task_shell(task_id), _STATUS_TIMEOUT_S)
+        task = _extract_json(out)
     state = _state_of(task)
     if state == "completed" and task is not None:
         return {
@@ -558,7 +767,10 @@ async def persist_analysis_outputs(
     # entirely in-sandbox so the large record never crosses back; best-effort.
     if status == "completed":
         try:
-            await sandbox.aexecute(_export_shell(task_id, base), timeout=_EXPORT_TIMEOUT_S)
+            if _is_local(sandbox):
+                await _export_local(sandbox, task_id, base)
+            else:
+                await sandbox.aexecute(_export_shell(task_id, base), timeout=_EXPORT_TIMEOUT_S)
             written.append(f"{base}/{task_id}/export")
         except Exception as exc:  # noqa: BLE001
             logger.warning("analyze-data export failed for %s: %s", task_id, exc)

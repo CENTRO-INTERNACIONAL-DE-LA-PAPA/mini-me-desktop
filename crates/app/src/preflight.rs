@@ -4,45 +4,35 @@
 //! that was not already set up produced
 //! `backend did not become healthy within 120 attempts` in the status bar — a true
 //! statement that tells the user nothing they can act on. The real answer is one of a
-//! short list: WSL isn't installed, the checkout isn't there, `uv sync` was never run,
-//! or no model key is stored.
+//! short list: the checkout isn't there, `uv sync` was never run, or no model key is
+//! stored.
 //!
-//! So this module asks those questions directly, **through the same hop the backend
-//! takes** (see [`BackendConfig::shell_argv`]), and returns each answer with the command
-//! that would fix it. §21 settled the shape of P6.4b as "a guided first run"; this is
-//! the guiding part.
+//! So this module asks those questions directly, **through the same shell the backend
+//! launches through** (see [`BackendConfig::shell_argv`]), and returns each answer with the
+//! command that would fix it. §21 settled the shape of P6.4b as "a guided first run"; this
+//! is the guiding part.
 //!
 //! Two rules it follows, both learned from earlier bugs in this repo:
 //!
 //! - **Never cascade.** If the runtime doesn't answer, the checks that run *inside* it
 //!   report `Skip`, not a second failure. Five red lines caused by one missing thing
 //!   sends the user hunting in four wrong places.
-//! - **Never hang.** A half-installed WSL can block instead of failing, and a setup
+//! - **Never hang.** A broken environment can block instead of failing, and a setup
 //!   pane that spins forever is worse than the error message it replaced.
 
 use std::io::Read as _;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::backend::{bundled_backend_dir, quote_path, shell_quote, BackendConfig, Execution};
+use crate::backend::{bundled_backend_dir, quote_path, venv_python, BackendConfig, Execution};
 
-/// Ceiling for one probe. Generous because a **cold** WSL distro genuinely takes
-/// several seconds to boot on the first `wsl.exe` call of a session, and reporting
-/// "WSL is missing" because we gave up at two seconds would be a lie.
+/// Ceiling for one probe. Generous because a cold `uv`/Python environment genuinely takes
+/// several seconds to answer on the first call of a session, and reporting "missing"
+/// because we gave up at two seconds would be a lie.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Why a check was skipped when the runtime itself never answered.
 const RUNTIME_FIRST: &str = "the runtime above has to work";
-
-/// Where the `asta` CLI comes from.
-///
-/// **Public** (`allenai/asta-plugins`, Apache 2.0), unlike Mini-Me itself — so this one
-/// really can be a button: no token, no account, nothing to ask the user for.
-///
-/// Pinned to the version the Asta plugin pins (`skills/asta-cli/SKILL.md`), and the tag
-/// was checked against the remote rather than assumed. Bump both together: a CLI newer
-/// than the skills that drive it is how a subcommand goes missing.
-const ASTA_INSTALL_URL: &str = "git+https://github.com/allenai/asta-plugins.git@v0.101.1";
 
 /// The Asta entitlement the theorizer requires.
 ///
@@ -150,8 +140,7 @@ impl Check {
 #[derive(Debug, Clone, Default)]
 pub struct Report {
     pub checks: Vec<Check>,
-    /// Where the checks ran — the pane's subtitle, because "no checkout" means
-    /// something quite different inside a distro than on this filesystem.
+    /// Where the checks ran — the pane's subtitle.
     pub location: String,
     pub execution: String,
     /// Whether the app provisioned this checkout and may therefore maintain it.
@@ -198,9 +187,8 @@ impl Report {
 
 /// A finished (or abandoned) probe.
 struct Probe {
-    /// False when the program could not even be launched — `wsl.exe` absent, no `bash`.
-    /// Worth distinguishing: "WSL is not installed" and "WSL ran and refused" have
-    /// different fixes.
+    /// False when the program could not even be launched — worth distinguishing from a
+    /// program that ran and refused, since the two have different fixes.
     launched: bool,
     ok: bool,
     stdout: String,
@@ -226,7 +214,7 @@ impl Probe {
 
 /// Run a command and collect its output, giving up after [`PROBE_TIMEOUT`].
 ///
-/// `Command::output()` has no timeout at all, and a broken WSL install can hang rather
+/// `Command::output()` has no timeout at all, and a broken environment can hang rather
 /// than fail. Polling `try_wait` and killing the child on the deadline keeps a bad
 /// machine diagnosable — reading the pipes only after exit is safe here because every
 /// probe's output is a line or two, far below the pipe buffer that would deadlock a
@@ -290,7 +278,7 @@ fn probe(argv: &[String]) -> Probe {
 
 /// Whether the installed backend is the one this app shipped with.
 ///
-/// **The check that was missing for a fortnight.** `setup-wsl.sh` runs only when the Setup pane
+/// **The check that was missing for a fortnight.** `setup-backend.sh` runs only when the Setup pane
 /// offers it, and the pane offered it only when `langgraph.json` was absent — so once a machine
 /// was provisioned, the Python underneath the app never changed again. The app updated weekly and
 /// the backend stayed at whatever shipped the first time: a researcher's dataverse explorer ran a
@@ -354,16 +342,10 @@ fn backend_build(config: &BackendConfig) -> Check {
 
 /// Whether a path exists where the backend would look for it.
 ///
-/// Host mode stats the filesystem directly rather than shelling out — that works on
-/// Linux, macOS *and* native Windows, where there may be no `bash` to ask.
+/// Stats the filesystem directly rather than shelling out — that works on Linux, macOS
+/// *and* native Windows, where there may be no `bash` to ask.
 fn exists(config: &BackendConfig, relative: &str) -> bool {
-    match &config.wsl {
-        Some(_) => {
-            let script = format!("test -e {}/{relative}", quote_path(&config.backend_dir()));
-            probe(&config.shell_argv(&script)).ok
-        }
-        None => config.project_dir.join(relative).exists(),
-    }
+    config.project_dir.join(relative).exists()
 }
 
 /// The file `scripts/package.sh` writes into the bundled backend, naming that build.
@@ -380,64 +362,26 @@ fn bundled_backend_stamp() -> Option<String> {
 }
 
 /// What build of the backend is installed, read where the backend actually lives.
-///
-/// One extra probe, and only on a machine that already has a checkout — the comment on
-/// `discover_checkout` is right that each `wsl.exe` call costs seconds, and this must never
-/// become one per candidate.
 fn installed_backend_stamp(config: &BackendConfig) -> Option<String> {
-    let stamp = match &config.wsl {
-        Some(_) => {
-            let script = format!(
-                "cat {}/{BACKEND_STAMP} 2>/dev/null",
-                quote_path(&config.backend_dir())
-            );
-            let answer = probe(&config.shell_argv(&script));
-            answer.ok.then_some(answer.stdout)?
-        }
-        None => std::fs::read_to_string(config.project_dir.join(BACKEND_STAMP)).ok()?,
-    };
+    let stamp = std::fs::read_to_string(config.project_dir.join(BACKEND_STAMP)).ok()?;
     let stamp = stamp.trim().to_string();
     (!stamp.is_empty()).then_some(stamp)
 }
 
 /// Look for a Mini-Me checkout somewhere other than where we are configured to find one.
-///
-/// Only ever **local to the machine the backend runs on**. A checkout on a Windows drive
-/// is deliberately not offered for adoption even though WSL can reach it at `/mnt/c`:
-/// running the venv over that mount is the placement that makes everything feel broken
-/// (see `owned_wsl_dir`). The setup script still *copies* from there, which is the right
-/// use of a Windows-side checkout — as a source, not as a home.
 fn discover_checkout(config: &BackendConfig) -> Option<String> {
     let configured = config.backend_dir();
-    match &config.wsl {
-        Some(_) => {
-            // One probe for the whole list: each `wsl.exe` call costs seconds, so this
-            // must not become one per candidate.
-            let script = "for d in ~/Mini-Me ~/mini-me ~/Documents/Mini-Me \
-                          ~/.local/share/mini-me-desktop/backend; do \
-                          [ -f \"$d/langgraph.json\" ] && echo \"$d\" && break; done";
-            let found = probe(&config.shell_argv(script));
-            found
-                .stdout
-                .lines()
-                .map(str::trim)
-                .find(|line| !line.is_empty() && *line != configured)
-                .map(str::to_string)
-        }
-        None => {
-            let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-            let home = std::path::PathBuf::from(home);
-            [
-                home.join("Documents/Mini-Me"),
-                home.join("Documents/GitHub/Mini-Me"),
-                home.join("Mini-Me"),
-                std::path::PathBuf::from("../Mini-Me"),
-            ]
-            .into_iter()
-            .find(|dir| dir.join("langgraph.json").is_file() && dir.to_string_lossy() != configured)
-            .map(|dir| dir.to_string_lossy().into_owned())
-        }
-    }
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+    let home = std::path::PathBuf::from(home);
+    [
+        home.join("Documents/Mini-Me"),
+        home.join("Documents/GitHub/Mini-Me"),
+        home.join("Mini-Me"),
+        std::path::PathBuf::from("../Mini-Me"),
+    ]
+    .into_iter()
+    .find(|dir| dir.join("langgraph.json").is_file() && dir.to_string_lossy() != configured)
+    .map(|dir| dir.to_string_lossy().into_owned())
 }
 
 /// Ask every question, in dependency order.
@@ -448,73 +392,64 @@ fn discover_checkout(config: &BackendConfig) -> Option<String> {
 /// are read once, on the main thread, and the answer travels as a bool.
 pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
     let mut checks = Vec::new();
-    let in_wsl = config.wsl.is_some();
 
     // ---------------------------------------------------------------- 1. the runtime
     //
-    // Probed by asking the distro to answer, **not** by parsing `wsl -l`: that command
-    // prints UTF-16LE, which `from_utf8_lossy` turns into NUL-riddled nonsense. Round
-    // -tripping `echo` through bash also proves a distro is actually *usable* rather
-    // than merely registered — a distro can be listed and still fail to start.
-    let runtime = probe(&config.shell_argv("echo ok"));
-    let runtime_ok = runtime.ok && runtime.stdout.contains("ok");
+    // What every fix below needs: a POSIX shell to run through (`shell_argv`), and `uv` —
+    // which provisions and launches the backend's own Python environment. Round-tripping
+    // `echo` through the shell proves it is actually usable, not merely present.
+    let shell = probe(&config.shell_argv("echo ok"));
+    let shell_ok = shell.ok && shell.stdout.contains("ok");
+    let uv = probe(&["uv".to_string(), "--version".to_string()]);
+    let runtime_ok = shell_ok && uv.ok;
     if runtime_ok {
         checks.push(Check::pass(
             "runtime",
-            if in_wsl { "WSL2 runtime" } else { "Shell" },
-            // Not the full location — the header already carries it, and repeating a long
-            // path in a 420px pane pushed everything else off the useful part of the row.
-            if in_wsl {
-                "a distro started and answered".to_string()
-            } else {
-                "bash is available on this machine".to_string()
-            },
+            "Shell",
+            format!("bash and {} are on this machine", uv.stdout.trim()),
         ));
-    } else if in_wsl {
-        // wsl.exe's *own* errors are UTF-16 too, so its stderr is not shown — our
-        // message is more use than a mojibake one anyway.
-        let (detail, fix) = if runtime.launched {
-            (
-                "WSL is present but no distro answered".to_string(),
-                Fix::Run {
-                    label: "Install Ubuntu",
-                    // Deliberately *not* `--no-launch`, though it looks made for this: it
-                    // can install the distro without registering it under
-                    // `HKCU\...\Lxss`, so `wsl -l -v` does not list it and the only cure is
-                    // to run the install again without the flag
-                    // (microsoft/WSL#10646). That failure is indistinguishable from the
-                    // state this button exists to escape. The launch it would have
-                    // suppressed is handled by denying stdin instead — see `elevated`.
-                    argv: elevated(&["wsl.exe", "--install", "-d", "Ubuntu"]),
-                    note: "Windows will ask for admin rights; may need a restart",
-                },
-            )
+    } else if !uv.ok {
+        let install = if cfg!(windows) {
+            Fix::Run {
+                label: "Install uv",
+                argv: vec![
+                    "powershell.exe".into(),
+                    "-NoProfile".into(),
+                    "-Command".into(),
+                    "irm https://astral.sh/uv/install.ps1 | iex".into(),
+                ],
+                note: "installs into your user profile — no admin rights needed",
+            }
         } else {
-            (
-                "wsl.exe was not found — WSL is not installed".to_string(),
-                Fix::Run {
-                    label: "Install WSL",
-                    argv: elevated(&["wsl.exe", "--install"]),
-                    note: "Windows will ask for admin rights, then needs a restart",
-                },
-            )
+            Fix::Run {
+                label: "Install uv",
+                argv: config.shell_argv("curl -LsSf https://astral.sh/uv/install.sh | sh"),
+                note: "installs into your user profile — no admin rights needed",
+            }
         };
-        checks.push(Check::failing(
-            "runtime",
-            "WSL2 runtime",
-            State::Fail,
-            detail,
-            vec![fix],
-        ));
-    } else {
         checks.push(Check::failing(
             "runtime",
             "Shell",
             State::Fail,
-            format!("no usable bash — {}", runtime.message()),
+            "uv is not installed — nothing here can provision or launch the backend".to_string(),
+            vec![install],
+        ));
+    } else {
+        // Worth telling apart: a shell that is simply missing needs installing, one that ran
+        // and refused needs a different kind of attention.
+        let detail = if shell.launched {
+            format!("no usable shell — {}", shell.message())
+        } else {
+            "bash was not found on this machine".to_string()
+        };
+        checks.push(Check::failing(
+            "runtime",
+            "Shell",
+            State::Fail,
+            detail,
             vec![Fix::Manual(
-                "The backend needs a POSIX shell. On Windows that means WSL: unset \
-                 MINIME_BACKEND_WSL to use it (docs §21)."
+                "The backend needs a POSIX shell to run its setup and maintenance commands. \
+                 On Windows, install Git for Windows, which provides one."
                     .into(),
             )],
         ));
@@ -522,7 +457,7 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
 
     // Everything below runs *through* the runtime, so without it they would only
     // restate the failure above.
-    let can_probe = runtime_ok || !in_wsl;
+    let can_probe = runtime_ok;
 
     // -------------------------------------------------------------- 2. the checkout
     let checkout_ok = if can_probe {
@@ -577,9 +512,7 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
     // plain `uv sync` leaves the server libraries installed and the entry point absent
     // — a synced-looking checkout that cannot be launched.
     if checkout_ok {
-        let entry = if in_wsl {
-            ".venv/bin/langgraph"
-        } else if cfg!(windows) {
+        let entry = if cfg!(windows) {
             ".venv/Scripts/langgraph.exe"
         } else {
             ".venv/bin/langgraph"
@@ -632,7 +565,7 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
     // whose virtualenv is not ours to change (docs §96). A researcher who cannot code should
     // never have had to notice a warning to avoid losing their history.
     if checkout_ok {
-        let module = if in_wsl || !cfg!(windows) {
+        let module = if !cfg!(windows) {
             ".venv/lib/python3.12/site-packages/langgraph/checkpoint/sqlite"
         } else {
             ".venv/Lib/site-packages/langgraph/checkpoint/sqlite"
@@ -673,11 +606,11 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
     //
     // The check that exists because this failure is *silent*. Host execution works by
     // putting `overlay/` on the backend's PYTHONPATH so `sitecustomize` swaps the
-    // sandbox class at interpreter startup (docs §18). If that path is not reachable
-    // from the backend — the repo on a drive the distro has not mounted, a UNC path
-    // `wsl_path` cannot translate — Python simply imports nothing, no error is raised,
-    // and the backend quietly tries the *remote* sandbox instead. The user sees an
-    // authentication failure about a service they thought they had stopped using.
+    // sandbox class at interpreter startup (docs §18). If that path is not reachable —
+    // an `MINIME_OVERLAY_DIR` naming somewhere that does not exist on this machine —
+    // Python simply imports nothing, no error is raised, and the backend quietly tries
+    // the *remote* sandbox instead. The user sees an authentication failure about a
+    // service they thought they had stopped using.
     let candidates = config.overlay_candidates();
     if let Some(overlay) = candidates.last().cloned() {
         if can_probe {
@@ -686,11 +619,7 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
             // is worse than reporting nothing — it sends anyone debugging to the wrong file.
             let found = candidates.iter().find(|candidate| {
                 let marker = format!("{}/sitecustomize.py", candidate.trim_end_matches('/'));
-                if in_wsl {
-                    probe(&config.shell_argv(&format!("test -f {}", quote_path(&marker)))).ok
-                } else {
-                    std::path::Path::new(&marker).is_file()
-                }
+                std::path::Path::new(&marker).is_file()
             });
             if let Some(found) = found {
                 let installed = found != &overlay;
@@ -709,12 +638,12 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
                     "Host execution overlay",
                     State::Fail,
                     format!("the backend cannot see {overlay}"),
-                    vec![Fix::Manual(format!(
+                    vec![Fix::Manual(
                         "Host execution would not take effect and the backend would try \
-                         the remote sandbox instead. Put this repo on a local drive, or \
-                         set MINIME_OVERLAY_DIR to a path reachable from {}.",
-                        if in_wsl { "the distro" } else { "the backend" }
-                    ))],
+                         the remote sandbox instead. Set MINIME_OVERLAY_DIR to a path \
+                         reachable from the backend."
+                            .into(),
+                    )],
                 ));
             }
         } else {
@@ -743,101 +672,112 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
     // A warning, not a failure: the coordinator answers perfectly well without `asta`,
     // it just cannot search the literature or run the theorizer. Overstating this would
     // block a first run that would have worked.
+    //
+    // Asta ships as a normal dependency of the backend's own venv now, rather than a
+    // separately installed CLI reached over `PATH` — so it is run as a module of that
+    // same interpreter (`python -m asta.cli ...`), never through a shell.
     if can_probe {
-        let found = probe(&config.shell_argv("command -v asta"));
-        if found.ok {
-            // Installed is not the same as usable. Asta access tokens last seven days, and
-            // an expired login surfaces as "the theorizer returned no task id" — which
-            // names neither the token nor the fix. Ask the CLI directly instead.
-            //
-            // Checked **where the backend runs**: on Windows that is inside the distro, so
-            // being logged in on the Windows side proves nothing at all.
-            let token = probe(&config.shell_argv("asta auth status"));
-            // `Local Token Status` is the CLI's own verdict. Checking for it rather than
-            // trusting the exit code, which is 0 even when signed out.
-            if token.ok && token.stdout.contains("Valid") {
-                let identity = asta_identity(&token.stdout);
-                // Being signed in is not the same as being *entitled*. The theorizer
-                // needs `enroll:theory_generation`, and an account without it fails with
-                // upstream's "the Asta theorizer returned no task id — likely a missing or
-                // expired token", which is a guess and a wrong one: the token is present,
-                // valid, and simply not enrolled. Two real CIP accounts differed on
-                // exactly this, and the error sent the user to re-authenticate for days.
-                //
-                // `print-token` without `--raw` prints the decoded payload, permissions
-                // and all, so this needs no JWT decoding of our own.
-                let claims = probe(&config.shell_argv("asta auth print-token"));
-                let sign_in = Fix::Run {
-                    label: "Sign in again",
-                    argv: config.shell_argv("asta auth login"),
-                    note: "use the account with theory-generation access",
+        match venv_python(&config.project_dir) {
+            None => {
+                checks.push(Check::skip(
+                    "asta",
+                    "Asta CLI",
+                    "the checkout above has to be there",
+                ));
+            }
+            Some(python) => {
+                let asta_argv = |args: &[&str]| -> Vec<String> {
+                    let mut argv =
+                        vec![python.to_string_lossy().into_owned(), "-m".into(), "asta.cli".into()];
+                    argv.extend(args.iter().map(|arg| arg.to_string()));
+                    argv
                 };
-                if claims.ok && !claims.stdout.contains(THEORY_PERMISSION) {
+                let found = probe(&asta_argv(&["--version"]));
+                if found.ok {
+                    // Installed is not the same as usable. Asta access tokens last seven
+                    // days, and an expired login surfaces as "the theorizer returned no
+                    // task id" — which names neither the token nor the fix. Ask the CLI
+                    // directly instead.
+                    let token = probe(&asta_argv(&["auth", "status"]));
+                    // `Local Token Status` is the CLI's own verdict. Checking for it rather
+                    // than trusting the exit code, which is 0 even when signed out.
+                    if token.ok && token.stdout.contains("Valid") {
+                        let identity = asta_identity(&token.stdout);
+                        // Being signed in is not the same as being *entitled*. The theorizer
+                        // needs `enroll:theory_generation`, and an account without it fails
+                        // with upstream's "the Asta theorizer returned no task id — likely a
+                        // missing or expired token", which is a guess and a wrong one: the
+                        // token is present, valid, and simply not enrolled. Two real CIP
+                        // accounts differed on exactly this, and the error sent the user to
+                        // re-authenticate for days.
+                        //
+                        // `print-token` without `--raw` prints the decoded payload,
+                        // permissions and all, so this needs no JWT decoding of our own.
+                        let claims = probe(&asta_argv(&["auth", "print-token"]));
+                        let sign_in = Fix::Run {
+                            label: "Sign in again",
+                            argv: asta_argv(&["auth", "login"]),
+                            note: "use the account with theory-generation access",
+                        };
+                        if claims.ok && !claims.stdout.contains(THEORY_PERMISSION) {
+                            checks.push(Check::failing(
+                                "asta",
+                                "Asta CLI",
+                                State::Warn,
+                                format!("{identity} — this account cannot run the theorizer"),
+                                vec![
+                                    sign_in,
+                                    Fix::Manual(format!(
+                                        "Literature search works; the theorizer needs the \
+                                         `{THEORY_PERMISSION}` permission, which this account \
+                                         does not have. Sign in with the account that does, or \
+                                         ask Asta to enrol this one."
+                                    )),
+                                ],
+                            ));
+                        } else {
+                            checks.push(Check {
+                                id: "asta",
+                                label: "Asta CLI",
+                                state: State::Pass,
+                                // Who, and for how long. On a shared machine "signed in" is
+                                // not enough — someone signed in with the wrong account
+                                // cannot work out why their permissions look odd.
+                                detail: identity,
+                                // A button even when green: when the *refresh* credential
+                                // finally lapses this is the only cure, and a button that
+                                // appears only once you are broken is one you cannot find.
+                                fixes: vec![sign_in],
+                            });
+                        }
+                    } else {
+                        checks.push(Check::failing(
+                            "asta",
+                            "Asta CLI",
+                            State::Warn,
+                            "installed, but not signed in",
+                            vec![Fix::Run {
+                                label: "Sign in to Asta",
+                                argv: asta_argv(&["auth", "login"]),
+                                note: "opens a browser; the app refreshes the token itself after this",
+                            }],
+                        ));
+                    }
+                } else {
                     checks.push(Check::failing(
                         "asta",
                         "Asta CLI",
                         State::Warn,
-                        format!("{identity} — this account cannot run the theorizer"),
-                        vec![
-                            sign_in,
-                            Fix::Manual(format!(
-                                "Literature search works; the theorizer needs the \
-                                 `{THEORY_PERMISSION}` permission, which this account does \
-                                 not have. Sign in with the account that does, or ask Asta \
-                                 to enrol this one."
-                            )),
-                        ],
+                        "not available — literature search and the theorizer need it",
+                        vec![Fix::Manual(
+                            "Asta ships as part of the backend's own Python packages. Run \
+                             \"Install Python packages\" above (or `uv sync --extra dev` in \
+                             the checkout) to pick it up."
+                                .into(),
+                        )],
                     ));
-                } else {
-                    checks.push(Check {
-                        id: "asta",
-                        label: "Asta CLI",
-                        state: State::Pass,
-                        // Who, and for how long. On a shared machine "signed in" is not
-                        // enough — someone signed in with the wrong account cannot work
-                        // out why their permissions look odd.
-                        detail: identity,
-                        // A button even when green: when the *refresh* credential finally
-                        // lapses this is the only cure, and a button that appears only
-                        // once you are broken is one you cannot find.
-                        fixes: vec![sign_in],
-                    });
                 }
-            } else {
-                checks.push(Check::failing(
-                    "asta",
-                    "Asta CLI",
-                    State::Warn,
-                    "installed, but not signed in where the backend runs",
-                    vec![Fix::Run {
-                        label: "Sign in to Asta",
-                        argv: config.shell_argv("asta auth login"),
-                        note: "opens a browser; the app refreshes the token itself after this",
-                    }],
-                ));
             }
-        } else {
-            checks.push(Check::failing(
-                "asta",
-                "Asta CLI",
-                State::Warn,
-                "not installed — literature search and the theorizer need it",
-                vec![
-                    Fix::Run {
-                        label: "Install the Asta CLI",
-                        argv: config.shell_argv(&format!(
-                            "uv tool install {} && uv tool update-shell",
-                            shell_quote(ASTA_INSTALL_URL)
-                        )),
-                        note: "about a minute",
-                    },
-                    Fix::Manual(
-                        "Afterwards, paste ASTA_TOKEN and ASTA_API_KEY in Settings — the \
-                         CLI reads them from its environment when a command runs."
-                            .into(),
-                    ),
-                ],
-            ));
         }
     } else {
         checks.push(Check::skip("asta", "Asta CLI", RUNTIME_FIRST));
@@ -902,10 +842,11 @@ impl std::io::Read for PipeOut {
 ///
 /// This replaces `BufReader::lines().map_while(Result::ok)`, which looks harmless and is
 /// not: `lines()` yields an error on the first byte that is not UTF-8, and `map_while`
-/// stops at the first error. `wsl.exe` writes **UTF-16LE** on Windows, so every line was an
-/// error and the iterator ended immediately — the fix log captured *nothing*, and the app
-/// then told a researcher "the command reported a failure — the last lines say why" with no
-/// lines at all (docs §57).
+/// stops at the first error. `wsl.exe` (and `powershell.exe`, which some fixes still run
+/// through) writes **UTF-16LE** on Windows, so every line was an error and the iterator
+/// ended immediately — the fix log captured *nothing*, and the app then told a researcher
+/// "the command reported a failure — the last lines say why" with no lines at all (docs
+/// §57).
 ///
 /// `read` returns false to stop, which is how a dropped receiver ends the thread.
 fn read_lines(mut pipe: impl std::io::Read, mut send: impl FnMut(String) -> bool) {
@@ -947,9 +888,10 @@ fn read_lines(mut pipe: impl std::io::Read, mut send: impl FnMut(String) -> bool
 
 /// Every line in a block of bytes already in hand, decoded the same way a pipe would be.
 ///
-/// The elevated fix log is a file, not a stream, but it is written by the same Windows tools
-/// in the same UTF-16LE — so it goes through [`read_lines`] rather than a second decoder
+/// Test-only: it exists so the encoding tests below can hand `read_lines` a fixed byte
+/// block instead of a live pipe, through the exact same decoder rather than a second one
 /// that could drift away from it.
+#[cfg(test)]
 fn lines_of(bytes: &[u8]) -> Vec<String> {
     let mut out = Vec::new();
     read_lines(std::io::Cursor::new(bytes), |line| {
@@ -1006,120 +948,15 @@ fn decode(bytes: &[u8], wide: bool) -> String {
 /// sequence would deadlock the moment a chatty child filled the pipe we were not
 /// draining — and `uv` writes its progress to stderr, which is most of what there is to
 /// watch.
-/// A command that needs administrator rights, wrapped so Windows actually asks.
 ///
-/// `wsl --install` requires elevation. Run from the app — which is not elevated, and must
-/// not be — it fails immediately, and on the first clean machine it ever met it did exactly
-/// that (docs §57). A process cannot elevate itself, so the only honest options were to ask
-/// the researcher to open an admin terminal, or to let Windows ask them. `Start-Process
-/// -Verb RunAs` is that prompt.
-///
-/// `-Wait` so the fix's own "finished" means finished, and `$p.ExitCode` so a refused UAC
-/// prompt reports failure rather than success.
-///
-/// The command is run *through `cmd.exe`* only to get `> log 2>&1`. See [`elevated_log`]:
-/// an elevated child cannot write into our pipes, so redirecting to a file is the only way
-/// to find out what it said.
-fn elevated(argv: &[&str]) -> Vec<String> {
-    if !cfg!(windows) {
-        return argv.iter().map(|part| part.to_string()).collect();
-    }
-    // Every part here is a compile-time constant without spaces, so only the log path —
-    // which runs through the user's account name — needs quoting for cmd. Leaving the
-    // first token unquoted also keeps cmd's "strip the outer pair" rule out of it.
-    let command = argv.join(" ");
-    let log = elevated_log().display().to_string();
-    // `< NUL` matters as much as the redirect. `wsl --install -d Ubuntu` finishes by
-    // launching the new distro, which asks — interactively — for a UNIX username and
-    // password. With stdout going to a file that question is *invisible*, and the window
-    // would sit there forever looking finished. At EOF the prompt gives up instead, leaving
-    // a distro that answers as root, which is all the sidecar needs. An elevated fix can
-    // never be interactive anyway: its console is not one we can put a question in.
-    let inner = format!("/c {command} < NUL > \"{log}\" 2>&1");
-    // Single-quoted for PowerShell, doubling any quote inside — nothing here contains one
-    // today, and a future path must not be able to break out of the string.
-    let script = format!(
-        "$p = Start-Process -FilePath 'cmd.exe' -ArgumentList '{}' -Verb RunAs -Wait -PassThru; exit $p.ExitCode",
-        inner.replace('\'', "''")
-    );
-    vec![
-        "powershell.exe".into(),
-        "-NoProfile".into(),
-        "-NonInteractive".into(),
-        "-Command".into(),
-        script,
-    ]
-}
-
-/// Where an elevated fix leaves its output.
-///
-/// `-Verb RunAs` elevates through ShellExecute, which cannot be handed our pipes: the
-/// elevated child gets a console window of its own. On the first machine that had no distro
-/// the researcher watched `wsl.exe` download WSL 2.7.11 in *that* window while our pane
-/// showed a fix which had, as far as the app could tell, printed nothing at all — then said
-/// "done" over a red row (docs §60). Fixing the encoding in §57 could not have helped; the
-/// bytes were never ours to decode.
-///
-/// So the elevated command redirects here, and [`run_streaming`] follows the file while it
-/// grows. In the user's own temp directory rather than a shared one, because the unelevated
-/// app has to be able to delete it; an elevated writer carries the Administrators group and
-/// can write there regardless of which account approved the prompt.
-pub fn elevated_log() -> std::path::PathBuf {
-    std::env::temp_dir().join("mini-me-desktop-elevated.log")
-}
-
-/// Follow the elevated log while the command is still running.
-///
-/// Redirecting the elevated child's output to a file leaves its console blank, and
-/// `wsl --install` downloads for minutes — so without this the pane would sit on "starting…"
-/// with nothing to show for the wait, which is the state a researcher reads as *stuck*.
-/// Re-reading the whole file each pass rather than framing UTF-16 incrementally: it is a few
-/// kilobytes, and a half-decoded surrogate is not worth the cleverness.
-fn tail_file(
-    path: &std::path::Path,
-    done: &std::sync::atomic::AtomicBool,
-    mut send: impl FnMut(String) -> bool,
-) {
-    use std::sync::atomic::Ordering;
-
-    let mut emitted = 0usize;
-    loop {
-        let finished = done.load(Ordering::SeqCst);
-        if let Ok(bytes) = std::fs::read(path) {
-            let lines = lines_of(&bytes);
-            // A line the writer has already terminated is complete and goes out at once —
-            // holding every line back until the next one arrived would show `wsl.exe`'s
-            // progress one step behind for the whole download. Only an *unterminated* tail
-            // waits, because it may be half-written. `Start-Process -Wait` means the writer
-            // is gone before `finished` is set, so nothing is held back forever.
-            let terminated = bytes.ends_with(&[0x0a]) || bytes.ends_with(&[0x0a, 0x00]);
-            let ready = if finished || terminated {
-                lines.len()
-            } else {
-                lines.len().saturating_sub(1)
-            };
-            for line in lines.iter().take(ready).skip(emitted) {
-                if !send(strip_ansi(line)) {
-                    return;
-                }
-            }
-            emitted = emitted.max(ready);
-        }
-        if finished {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(250));
-    }
-}
-
 /// A running repair's process, for as long as stopping it can mean anything.
 ///
-/// **The whole design is "hold the thing we already own".** §168 specified a `setsid` handshake:
-/// publish the Linux process-group id, then kill the group from a second `wsl.exe`. Measured on
-/// the target machine (§170), `setsid` makes `wsl.exe` exit *while the Linux tree keeps running* —
-/// so the elaborate protocol would have detached the repair from the one process the app can
-/// already reach. Killing the attached `wsl.exe` reaps every descendant. So this holds a pid and
-/// nothing else.
+/// **The whole design is "hold the thing we already own".** An earlier version (§168)
+/// specified a `setsid` handshake to publish a detached process-group id and signal it from
+/// a second process — measured (§170) to detach the repair from the one process the app
+/// could actually reach, once the wrapper it went through exited while its own children kept
+/// running. Holding the pid of the process this app itself spawned, and killing its whole
+/// tree directly, is what stayed reachable. So this holds a pid and nothing else.
 ///
 /// The pid cannot be recycled underneath us while it is armed: the waiter thread still holds the
 /// `Child`, so the process is unreaped — a zombie at worst on Unix, a live handle on Windows — and
@@ -1158,9 +995,8 @@ impl Cancel {
 /// Terminate a spawned process and whatever it started.
 #[cfg(windows)]
 fn kill_tree(pid: u32) -> bool {
-    // `/T` for the Windows children the wrapper started, `/F` because a console process given a
-    // polite request during `uv sync` will not take it. The measured result of killing the
-    // attached `wsl.exe` is that its Linux descendants go too (§170).
+    // `/T` for the whole process tree the fix started (`bash`, `uv`, `python`, …), `/F`
+    // because a console process given a polite request during `uv sync` will not take it.
     Command::new("taskkill")
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .stdin(Stdio::null())
@@ -1178,8 +1014,8 @@ fn kill_tree(pid: u32) -> bool {
     // reports nothing for thirty seconds. A test caught this; reasoning had not.
     //
     // This is §26's complaint reproduced in miniature, and it is why the child is spawned into
-    // its own group below. Windows needs none of it: there the wrapper *is* `wsl.exe`, and
-    // killing it takes its descendants (§170).
+    // its own group below. Windows needs none of it: `taskkill /T` already walks the whole
+    // process tree on its own.
     // SAFETY: `pid` names a child this process spawned into its own group and has not reaped.
     unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGTERM) == 0 }
 }
@@ -1192,10 +1028,6 @@ pub fn run_streaming(
     use anyhow::Context as _;
 
     let (program, rest) = argv.split_first().context("empty command")?;
-    // Before the child, so a previous elevated fix's output can never be read as this
-    // one's. After this, the file existing at all means this run wrote it.
-    let elevated_log = elevated_log();
-    let _ = std::fs::remove_file(&elevated_log);
     let mut command = Command::new(program);
     command
         .args(rest)
@@ -1203,9 +1035,9 @@ pub fn run_streaming(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     // Its own process group, so `kill_tree` can signal the whole thing. **Unix only, and that
-    // asymmetry is the measured result rather than an oversight**: on Windows the equivalent
-    // gesture is `setsid` inside WSL, which §170 found makes `wsl.exe` exit while the Linux tree
-    // keeps running — detaching the repair from the one process the app can reach.
+    // asymmetry is the measured result rather than an oversight**: on Windows `taskkill /T`
+    // already walks the process tree, and an equivalent detach-then-signal gesture there was
+    // measured (§170) to lose track of the very process it was meant to reach.
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
@@ -1216,7 +1048,7 @@ pub fn run_streaming(
         .with_context(|| format!("could not start {program}"))?;
 
     // Armed before a single line is read, so a Stop pressed during the first second of a cold
-    // WSL start has something to act on. §168's race test asked exactly this of the control file
+    // start has something to act on. §168's race test asked exactly this of the control file
     // it proposed; here the answer is structural — the pid exists the moment `spawn` returns.
     cancel.arm(child.id());
 
@@ -1235,25 +1067,9 @@ pub fn run_streaming(
         }));
     }
 
-    // Waited off this thread so the tailer below knows when to stop while we are still
-    // draining lines. The pipes have their own readers, so nothing can fill and block.
-    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let waiter = {
-        let done = std::sync::Arc::clone(&done);
-        std::thread::spawn(move || {
-            let status = child.wait();
-            done.store(true, std::sync::atomic::Ordering::SeqCst);
-            status
-        })
-    };
-    readers.push({
-        let tx = tx.clone();
-        let done = std::sync::Arc::clone(&done);
-        let log = elevated_log.clone();
-        std::thread::spawn(move || {
-            tail_file(&log, &done, |line| tx.send(line).is_ok());
-        })
-    });
+    // Waited off this thread so the pipes stay drained while we wait: they have their own
+    // readers, so nothing can fill and block.
+    let waiter = std::thread::spawn(move || child.wait());
     // Our own sender has to go, or the loop below never ends.
     drop(tx);
 
@@ -1419,7 +1235,6 @@ mod tests {
         BackendConfig {
             port: 2024,
             project_dir: PathBuf::from("/nonexistent-checkout"),
-            wsl: None,
             launch_command: vec!["true".into()],
             attach_only: false,
             log_path: PathBuf::from("/dev/null"),
@@ -1453,12 +1268,13 @@ mod tests {
             panic!("expected a runnable fix, got {:?}", checkout.fixes);
         };
         let command = display_argv(argv);
-        assert!(command.contains("setup-wsl.sh"), "{command}");
+        assert!(command.contains("setup-backend.sh"), "{command}");
         assert!(command.contains("/nonexistent-checkout"), "{command}");
 
         // A skip has to name what it is *actually* waiting on. This one said "the
         // runtime above has to work first" on a machine whose runtime was fine — a small
-        // lie that sends the user to check WSL when the checkout is what is missing.
+        // lie that sends the user to check the wrong thing when the checkout is what is
+        // missing.
         let dependencies = report
             .checks
             .iter()
@@ -1475,17 +1291,20 @@ mod tests {
     #[test]
     fn one_missing_runtime_does_not_cascade_into_five_failures() {
         let _env = crate::backend::env_lock::hold();
-        // A machine with no WSL must be told *one* thing. Reporting a missing checkout
-        // and missing dependencies as well would send the user hunting in the distro
-        // they do not have.
-        let mut config = config();
-        config.wsl = Some(crate::backend::WslTarget {
-            // A distro name that cannot exist, so the runtime probe fails the way a
-            // machine without WSL does.
-            distro: Some("no-such-distro-9f3a".into()),
-            dir: "~/Mini-Me".into(),
-        });
-        let report = inspect(&config, true);
+        // A machine with no usable shell or `uv` must be told *one* thing. Reporting a
+        // missing checkout and missing dependencies as well would send the user hunting
+        // for problems that are really just downstream of the one that matters.
+        let real_path = std::env::var_os("PATH");
+        // SAFETY: the lock above serialises every test that touches the environment.
+        unsafe { std::env::set_var("PATH", "") };
+        let report = inspect(&config(), true);
+        // SAFETY: same lock.
+        unsafe {
+            match &real_path {
+                Some(path) => std::env::set_var("PATH", path),
+                None => std::env::remove_var("PATH"),
+            }
+        }
 
         assert_eq!(
             report
@@ -1549,7 +1368,7 @@ mod tests {
     fn a_probe_that_would_hang_forever_is_not_run_forever() {
         // Not a timeout test — that would cost 30 real seconds. This checks the other
         // half: a program that does not exist comes back as *not launched*, which is
-        // what separates "WSL is missing" from "WSL refused".
+        // what separates "the program is missing" from "the program ran and refused".
         let missing = probe(&["no-such-program-4b81".to_string()]);
         assert!(!missing.launched);
         assert!(!missing.ok);
@@ -1646,14 +1465,14 @@ mod tests {
 mod encoding_tests {
     use super::*;
 
-    /// UTF-16LE bytes for a string, as `wsl.exe` writes them.
+    /// UTF-16LE bytes for a string, as `wsl.exe` and `powershell.exe` write them.
     fn utf16(text: &str) -> Vec<u8> {
         text.encode_utf16().flat_map(u16::to_le_bytes).collect()
     }
 
     #[test]
     fn utf16_output_is_read_rather_than_dropped() {
-        // The exact failure from the first clean machine: `wsl.exe` writes UTF-16LE, and
+        // The exact failure from the first clean machine: Windows tools write UTF-16LE, and
         // `BufReader::lines().map_while(Result::ok)` ended at the first line — so the fix
         // log was empty and the app claimed the last lines said why (docs §57).
         let mut bytes = vec![0xff, 0xfe]; // BOM, as Windows tools emit
@@ -1679,47 +1498,12 @@ mod encoding_tests {
     fn a_last_line_without_a_newline_is_not_lost() {
         // Often the *only* line a failing command produces, so losing it loses the reason.
         assert_eq!(
-            lines_of(b"fatal: no such distro"),
-            vec!["fatal: no such distro"]
+            lines_of(b"fatal: no such checkout"),
+            vec!["fatal: no such checkout"]
         );
         assert_eq!(lines_of(&utf16("access denied")), vec!["access denied"]);
     }
 
-    #[test]
-    fn elevation_wraps_the_command_for_windows_only() {
-        let argv = elevated(&["wsl.exe", "--install", "-d", "Ubuntu"]);
-        if cfg!(windows) {
-            assert_eq!(argv[0], "powershell.exe");
-            let script = argv.last().expect("the script");
-            // `RunAs` is the UAC prompt; `-Wait` makes "finished" mean finished; the exit
-            // code is what turns a refused prompt into a reported failure.
-            assert!(script.contains("-Verb RunAs"), "{script}");
-            assert!(script.contains("-Wait"), "{script}");
-            assert!(script.contains("exit $p.ExitCode"), "{script}");
-            assert!(script.contains("wsl.exe --install -d Ubuntu"), "{script}");
-            // Not `--no-launch`, which can leave the distro unregistered
-            // (microsoft/WSL#10646) — the interactive prompt is denied stdin instead, or an
-            // invisible question hangs the window forever (docs §61).
-            assert!(!script.contains("--no-launch"), "{script}");
-            assert!(script.contains("< NUL"), "{script}");
-            // The whole point of going through cmd: an elevated child has its own console,
-            // so without this redirect its output is lost and the pane has nothing to show
-            // (docs §60).
-            let log = elevated_log().display().to_string();
-            assert!(script.contains(&format!("> \"{log}\" 2>&1")), "{script}");
-        } else {
-            // Everywhere else it must stay the plain command, or the Linux dev path breaks.
-            assert_eq!(argv, vec!["wsl.exe", "--install", "-d", "Ubuntu"]);
-        }
-    }
-
-    /// The elevated child writes to a file because its console is not ours (docs §60). Three
-    /// things have to hold: a previous fix's output is never served up as this one's, the
-    /// lines arrive *while* the command runs, and they arrive in order.
-    ///
-    /// One test rather than three because [`elevated_log`] is a single fixed path — which is
-    /// right for an app that runs one fix at a time, and means separate tests would race each
-    /// other over the same file.
     #[cfg(unix)]
     #[test]
     fn stopping_a_repair_kills_it_and_stopping_a_finished_one_reports_nothing_to_do() {
@@ -1766,46 +1550,5 @@ mod encoding_tests {
         // handed to anyone. This is the half that keeps a late click from killing a stranger.
         assert!(!cancel.armed(), "the handle stayed armed after the child was reaped");
         assert!(!cancel.stop());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn an_elevated_fix_log_is_followed_live_and_never_stale() {
-        let log = elevated_log().display().to_string();
-        std::fs::write(&log, b"left over from the last fix\n").expect("seed a stale log");
-
-        let started = Instant::now();
-        let mut seen: Vec<(String, Duration)> = Vec::new();
-        let ok = run_streaming(
-            &[
-                "sh".into(),
-                "-c".into(),
-                // Stands in for the elevated child: writes only to the file, never to the
-                // pipes we hold — which is exactly `wsl.exe` behind a UAC prompt.
-                format!(
-                    "printf 'Descargando: WSL 2.7.11\\n' > '{log}'; sleep 2; \
-                     printf 'Instalando: WSL 2.7.11\\n' >> '{log}'"
-                ),
-            ],
-            &Cancel::default(),
-            |line| seen.push((line, started.elapsed())),
-        )
-        .expect("the command ran");
-        let total = started.elapsed();
-
-        assert!(ok);
-        let lines: Vec<&str> = seen.iter().map(|(line, _)| line.as_str()).collect();
-        assert_eq!(
-            lines,
-            vec!["Descargando: WSL 2.7.11", "Instalando: WSL 2.7.11"]
-        );
-        // The first line has to reach the pane while the command is still going, or the
-        // tailing does nothing that draining at the end would not have done.
-        let first = seen[0].1;
-        assert!(
-            first + Duration::from_secs(1) < total,
-            "the first line arrived at {first:?} of {total:?} — that is not live"
-        );
-        let _ = std::fs::remove_file(&log);
     }
 }

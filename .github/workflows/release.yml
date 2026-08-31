@@ -94,6 +94,23 @@ jobs:
           git config --global url."https://x-access-token:${BACKEND_TOKEN}@github.com/".insteadOf "https://github.com/"
           bash scripts/bundle-backend.sh
 
+      # asta-plugins is a git submodule (`.gitmodules` points at a private repo over an
+      # SSH host alias), so `actions/checkout`'s own `submodules:` support can't reach it —
+      # that only authenticates same-org repos via GITHUB_TOKEN. Rewrite the submodule URL
+      # to HTTPS with a PAT first, same trick as the Mini-Me bundle step above.
+      - name: Fetch the asta-plugins submodule
+        shell: bash
+        env:
+          ASTA_PLUGINS_TOKEN: ${{ secrets.ASTA_PLUGINS_TOKEN }}
+        run: |
+          if [ -z "$ASTA_PLUGINS_TOKEN" ]; then
+            echo "::error::ASTA_PLUGINS_TOKEN is not set. Add a PAT with read access to"
+            echo "::error::allenai/asta-plugins under Settings → Secrets → Actions."
+            exit 1
+          fi
+          git config --global url."https://x-access-token:${ASTA_PLUGINS_TOKEN}@github.com/".insteadOf "git@github.com-cip:"
+          git submodule update --init --recursive
+
       - name: Package
         shell: bash
         run: bash scripts/package.sh
@@ -134,9 +151,8 @@ jobs:
 
             No terminal, no GitHub account, no Python install. The backend is included.
 
-            **The first run installs WSL** if this machine has never had it. That step asks for
-            administrator rights and then **needs a restart** — reopen the app afterwards and the
-            Setup pane picks up where it left off. Nothing to type at any point.
+            **The first run installs the Python packages the backend needs** — a few minutes,
+            shown line by line in the Setup pane. No Linux environment, no restart required.
 
             ## Notes
 

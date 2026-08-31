@@ -529,9 +529,10 @@ async def discovery_figures(request: Request) -> Response:
 async def collect_outside_files(request: Request) -> Response:
     """Copy files this conversation's commands wrote outside it back into it.
 
-    **Backend-side because only the backend can see both ends.** `/tmp` is inside WSL and the
-    desktop app runs on Windows; the conversation folder is on `/mnt/c`. This process is the one
-    with both in its namespace (docs §250's three filesystems).
+    **Backend-side because only the backend can see both ends.** A command can still write to a
+    system temp dir outside the conversation folder (native `/tmp`, or Windows' own AppData temp
+    now that the backend runs natively — docs §292). This process is the one with both in its
+    namespace (docs §250's three filesystems).
 
     **Only what a command was watched writing.** The request carries no paths: the record decides,
     and the record's `wrote` list is the subset confirmed by mtime rather than read off a command's

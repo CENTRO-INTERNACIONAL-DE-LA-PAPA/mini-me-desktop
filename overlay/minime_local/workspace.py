@@ -280,9 +280,9 @@ def current_asta_token() -> str | None:
     **Why the backend mints it rather than receiving it.** Access tokens last seven days,
     and an expired one surfaces as "the theorizer returned no task id" — naming neither
     the token nor the fix. Passing one in as an environment variable turned out to have
-    three separate holes: the value is captured once when a workspace is built, the app
-    only mints while *spawning* (so it never does when it attaches to a backend that is
-    already running), and on Windows it has to survive the crossing into WSL.
+    two separate holes: the value is captured once when a workspace is built, and the
+    app only mints while *spawning* (so it never does when it attaches to a backend
+    that is already running).
 
     Asking the CLI here removes all three. It runs in the same environment as every other
     `asta` command the agent makes, so if those can authenticate, so can this.
@@ -299,7 +299,7 @@ def current_asta_token() -> str | None:
 
     try:
         result = subprocess.run(
-            ["asta", "auth", "print-token", "--raw", "--refresh"],
+            [sys.executable, "-m", "asta.cli", "auth", "print-token", "--raw", "--refresh"],
             capture_output=True,
             text=True,
             timeout=60,
@@ -342,6 +342,55 @@ def _supplied_token() -> str | None:
         )
         return supplied
     return None
+
+
+async def run_asta_cli(
+    args: list[str], *, cwd: str | None = None, timeout: int = 120
+) -> tuple[str, str]:
+    """Run an Asta CLI subcommand as a native subprocess of this interpreter's own venv.
+
+    Used by the four tool files that shell out to ``asta`` (theory, DataVoyager, paper,
+    and autodiscovery tools) **for local execution only** — a remote sandbox still runs
+    ``asta`` through its own POSIX shell, because that shell lives on a different
+    machine than this code does.
+
+    No shell: argv is exec'd directly (``sys.executable -m asta.cli <args>``), so this
+    needs no bash/WSL and no pipe/redirect syntax — just the same interpreter this
+    process itself runs on, with a module flag. Returns ``(stdout, stderr)``, decoded
+    with errors replaced rather than raised, since a caller parsing JSON from stdout
+    should not itself fail on a stray undecodable byte in stderr.
+
+    Mints/refreshes ``ASTA_TOKEN`` the same way ``_execute_with_token`` does for the
+    shell path, so both paths authenticate identically. Offloaded with
+    ``asyncio.to_thread`` because, unlike ``_execute_with_token``, this coroutine is
+    awaited directly from tool code still running on the event loop — and
+    ``current_asta_token`` shells out synchronously, which ``langgraph dev``'s
+    blocking-call guard forbids there (see :func:`current_asta_token`).
+    """
+    token = await asyncio.to_thread(current_asta_token)
+    env = dict(os.environ)
+    if token:
+        env["ASTA_TOKEN"] = token
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "asta.cli",
+        *args,
+        cwd=cwd,
+        env=env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        logger.warning(
+            "minime_local: asta %s timed out after %ss", " ".join(args[:2]), timeout
+        )
+        raise
+    return stdout.decode(errors="replace"), stderr.decode(errors="replace")
 
 
 #: Appended to a failed command's output, so the model can see where it ran.

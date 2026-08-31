@@ -23,6 +23,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -39,7 +40,9 @@ from backend.autodiscovery_tools import (
     _build_status_command,
     _build_submit_command,
     _build_upload_command,
+    _configure_local,
     _configure_shell,
+    _extract_figures,
     _upload_shell,
     _extract_json,
     _figures_shell,
@@ -601,6 +604,61 @@ def test_the_figure_decoder_prefers_png_and_survives_a_bundle_it_cannot_read():
         assert "could not read the fetched response" in missing["reason"]
 
 
+# ---------------------------------------------------------------------------
+# `_extract_figures` — the local-execution twin of `_FIGURES_PY`, decoding directly
+# against the filesystem instead of piping the response through a second `python3`.
+# Pinned against the real script on the same fixtures.
+# ---------------------------------------------------------------------------
+
+
+def _decode_via_piped_script(payload: str, run_dir: str) -> dict:
+    """Run the real `_FIGURES_PY` the way the sandbox does, for parity checks."""
+    with tempfile.TemporaryDirectory() as work:
+        source = os.path.join(work, "response.json")
+        with open(source, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+        out = subprocess.run(
+            [sys.executable, "-c", _FIGURES_PY, run_dir, source],
+            capture_output=True, text=True, timeout=60,
+        )
+        assert out.returncode == 0, out.stderr
+        return json.loads(out.stdout)
+
+
+def test_extract_figures_matches_the_piped_extractor(tmp_path):
+    png = base64_of(b"\x89PNG\r\n\x1a\n" + b"x" * 200)
+    payload = json.dumps({"experiment": {"rich_outputs": [{"image/png": png}]}})
+    piped_dir = tmp_path / "piped"
+    ported_dir = tmp_path / "ported"
+    piped = _decode_via_piped_script(payload, str(piped_dir))
+    ported = _extract_figures(payload, str(ported_dir))
+    assert ported == piped
+    assert (ported_dir / "figure-01.png").read_bytes() == (piped_dir / "figure-01.png").read_bytes()
+
+
+def test_extract_figures_reports_failure_like_the_piped_extractor():
+    """Not the same as no figures (§260): a payload that is not a response at all says why."""
+    payload = "Usage: asta autodiscovery experiment"
+    ported = _extract_figures(payload, "/tmp/unused-for-a-refusal")
+    piped = _decode_via_piped_script(payload, "/tmp/unused-for-a-refusal")
+    assert ported == piped
+    assert ported["ok"] is False
+    assert "Usage: asta autodiscovery" in ported["reason"]
+
+
+def test_extract_figures_tolerates_a_warning_before_the_json():
+    noisy = "WARNING stale token\n" + json.dumps({"experiment": {"rich_outputs": []}})
+    assert _extract_figures(noisy, "/tmp/unused-no-figures") == {
+        "ok": True, "figures": [], "bundles": 0
+    }
+
+
+def base64_of(data: bytes) -> str:
+    import base64
+
+    return base64.b64encode(data).decode()
+
+
 def test_json_is_found_even_when_the_cli_prints_around_it():
     assert _extract_json('WARNING: stale\n{"a": 1}\n') == {"a": 1}
     assert _extract_json('["figure-01.png"]') == ["figure-01.png"]
@@ -737,6 +795,66 @@ def test_only_available_credits_are_reported_as_spendable():
     credits = asyncio.run(read_credits(sandbox))
     assert credits["available"] == 435
     assert credits["granted"] == 500 and credits["pending"] == 60
+
+
+def test_read_credits_uses_run_asta_cli_when_local(monkeypatch):
+    """Local execution runs `asta` as a native subprocess instead of through a sandbox shell —
+    mirroring how `autodiscovery_tools._is_local` gates it in production."""
+    import backend.autodiscovery_tools as module
+
+    calls = []
+
+    async def fake_run_asta_cli(args, *, cwd, timeout):
+        calls.append((args, cwd, timeout))
+        # A brace pair in the noise would corrupt `_extract_json`'s brace-matching if it were
+        # merged in — proving stderr is genuinely dropped here, the same as `_json_shell`'s
+        # `2>/dev/null`, and not merely harmless in this particular fixture.
+        return (
+            json.dumps({"credits": {"available": 435, "granted": 500, "pending": 60}}),
+            "WARNING: {oops}",
+        )
+
+    class _LocalSandbox:
+        async def aget_work_dir(self) -> str:
+            return "/workspace"
+
+    monkeypatch.setattr(module, "_is_local", lambda sandbox: True)
+    monkeypatch.setattr(module, "run_asta_cli", fake_run_asta_cli)
+
+    credits = asyncio.run(read_credits(_LocalSandbox()))
+    assert credits["available"] == 435
+    argv, cwd, timeout = calls[0]
+    assert argv == ["autodiscovery", "credits", "--format", "json"]
+    assert cwd == "/workspace"
+
+
+def test_configure_local_writes_the_metadata_and_removes_it(tmp_path, monkeypatch):
+    """Local twin of the `_configure_shell` staging trick: a plain filesystem write against the
+    real work-dir path, no shell needed to work around `awrite` being create-only."""
+    import backend.autodiscovery_tools as module
+
+    calls = []
+
+    async def fake_run_asta_cli(args, *, cwd, timeout):
+        calls.append((args, cwd, timeout))
+        staged_path = args[-1]
+        # By the time `asta` is invoked, the metadata is already on disk at the staged path.
+        assert json.loads(Path(staged_path).read_text()) == {"n_experiments": 5}
+        return "Metadata saved: gs://x", ""
+
+    class _LocalSandbox:
+        async def aget_work_dir(self) -> str:
+            return str(tmp_path)
+
+    monkeypatch.setattr(module, "run_asta_cli", fake_run_asta_cli)
+
+    staged = str(tmp_path / ".staged.json")
+    out = asyncio.run(_configure_local(_LocalSandbox(), _RUN, staged, {"n_experiments": 5}))
+    assert "Metadata saved" in out
+    assert not Path(staged).exists(), "cleaned up after use"
+    argv, cwd, timeout = calls[0]
+    assert argv == ["autodiscovery", "metadata", _RUN, "--file", staged]
+    assert cwd == str(tmp_path)
 
 
 # ---------------------------------------------------------------------------

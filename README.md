@@ -33,19 +33,18 @@ docs/             the Phase 6 spike plan
 ## Windows (the primary platform)
 
 ~98% of our users are on Windows. The app runs **natively** on Windows (GPUI uses
-DirectX), while the Python backend runs **inside WSL2** — the agent stack shells out
-with POSIX commands and needs `bash`/`python3`/`asta`, which don't behave under
-`cmd.exe`. Inside WSL it's just Linux, and the app reaches it over localhost.
+DirectX), and so does the Python backend — `.venv\Scripts\langgraph.exe`, no Linux
+subsystem involved. Asta is a normal Python dependency of that same venv (a path
+dependency on the vendored `asta-plugins/` submodule), invoked as a plain native
+subprocess (`python -m asta.cli ...`), not a separately installed CLI reached over
+WSL/PATH.
 
 ### For someone who is just using the app
 
 Launch it. The **Setup** pane opens by itself and says what is missing, with a button
-for each thing it can do for you — install WSL, install Mini-Me, install the Python
-packages — showing the output as it runs. Then paste a model key in **Settings**.
-Nothing needs to be typed in a terminal, and nothing needs to be edited in a file.
-
-If a step can't be automated (installing WSL needs administrator rights and a
-restart), the pane says so before you press it, and offers the command to copy.
+for each thing it can do for you — install Mini-Me, install the Python packages —
+showing the output as it runs. Then paste a model key in **Settings**. Nothing needs
+to be typed in a terminal, and nothing needs to be edited in a file.
 
 ### For whoever prepares the build
 
@@ -58,19 +57,20 @@ bash scripts/bundle-backend.sh
 Mini-Me is a **private** repository, so `git clone` wants a personal access token —
 a wall for the people this app is for. That script puts a pinned, unmodified copy in
 `vendor/` (gitignored), and every install after that provisions from it without ever
-contacting GitHub.
+contacting GitHub. `asta-plugins/` ships as a git submodule of this repo instead
+(`git submodule update --init`) and is bundled the same way by `scripts/package.sh`.
 
 ### For development
 
 ```powershell
-$env:MINIME_BACKEND_WSL=1; cargo run -p mini-me-desktop-app
+cargo run -p mini-me-desktop-app
 ```
 
-The app launches the backend inside WSL itself. It provisions into
-`~/.local/share/mini-me-desktop/backend` — on the distro's **own** filesystem, because
-a Python venv reached over `/mnt/c` is slow enough to feel broken. Point it at your
-own checkout with `MINIME_BACKEND_WSL_DIR` (or `MINIME_BACKEND_DIR` outside WSL); the
-app will run that one but **never modify it**, since it may hold your work.
+The app provisions the backend into
+`%LOCALAPPDATA%\mini-me-desktop\backend` by default. Point it at your own checkout
+with `MINIME_BACKEND_DIR`; the app will run that one but **never modify it**, since
+it may hold your work. `asta-plugins/` is expected as a sibling of the backend
+checkout (`../asta-plugins`), matching this repo's own layout.
 
 To see what the pane would say, with no window:
 
@@ -82,30 +82,20 @@ cargo run -p mini-me-desktop-app -- --preflight
 
 Provisioned for you by the Setup pane. By hand, it is:
 
+```powershell
+powershell -File scripts/setup-backend.ps1 [-Dir <target-dir>]
+```
+
 ```bash
-bash scripts/setup-wsl.sh [target-dir]
+bash scripts/setup-backend.sh [target-dir]      # macOS/Linux dev use
 ```
 
 **`--extra dev` matters** (the script passes it) — the LangGraph CLI is an optional
-extra, so plain `uv sync` leaves you with no `langgraph` entry point. Keys do **not**
-go in that checkout's `.env` any more: they live in your OS keychain and travel with
-each request, so the app needs no secrets on disk.
-
-## Git inside WSL asks for a password
-
-Only on the **Windows** side does git have a credential helper; inside the distro it does
-not, so `git pull` there prompts — and GitHub has not accepted account passwords since
-2021, so the prompt cannot be satisfied. Reuse Windows' credential manager:
-
-```bash
-git config --global credential.helper "/mnt/c/Program Files/Git/mingw64/libexec/git-core/git-credential-manager.exe"
-```
-
-(If that path is wrong, `ls /mnt/c/Program\ Files/Git/mingw64/libexec/git-core/ | grep credential`.)
-
-Worth knowing which repo the failure names: `bundle-backend.sh` itself needs **no**
-network, since it clones from a checkout already on the machine. A prompt mentioning
-`mini-me-desktop.git` is the `git pull` in front of it, not the bundle.
+extra, so plain `uv sync` leaves you with no `langgraph` entry point. The same `uv
+sync` also pulls in `asta` itself, from the sibling `asta-plugins/` checkout the
+script provisions alongside the backend. Keys do **not** go in that checkout's `.env`:
+they live in your OS keychain and travel with each request, so the app needs no
+secrets on disk.
 
 ## Release builds need `fxc.exe` (Windows)
 

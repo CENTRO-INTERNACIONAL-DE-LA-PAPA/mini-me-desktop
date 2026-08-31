@@ -16,7 +16,7 @@ sidecar** that the client spawns and supervises.
 | **P6.2.5** — local-first backend (drop LangSmith/WorkOS) | ✅ **done, and now the default** — turns run on the host with no `LANGSMITH_API_KEY`/`WORKOS_*`, via a `PYTHONPATH` overlay that leaves the Mini-Me checkout untouched, and **every `execute` call waits for approval**. `--sandbox` still available. §18/§19 |
 | **P6.3** — port the core panels | ✅ **done** — composer, spine, outputs, sandbox status, agent activity trace, **command palette**; plus conversation continuity (turns used to each start a new thread) |
 | **P6.3.5** — visuals pass, starting with **markdown rendering** | ✅ **verified on Windows** — emphasis, inline code, links, headings, lists and fenced code render; accented Spanish came through intact. Tables deferred by agreement. §16/§23 |
-| **Native-Windows probe** | ✅ **answered** — `cmd.exe` is ruled out by upstream's *own* tool code (POSIX pipes, `mkdir -p`, `shlex.quote`), so WSL2 stays the v1 runtime and the installer's job is guided provisioning. Native-plus-Git-Bash is a documented half-day experiment. §21 |
+| **Native-Windows probe** | ✅ **superseded** — §21 kept WSL2 because upstream's own tool code shells out to `asta` with POSIX syntax; §292 removes that need instead of the shell, by vendoring `asta-plugins` as a real dependency and calling it as a native argv subprocess (no shell) for local execution. WSL2 is gone; the backend runs natively (`.venv/Scripts/langgraph.exe`) on every platform. §21/§292 |
 | **P6.4a** — settings panel + keychain secrets | ✅ **built** — a turn runs with no provider key in the backend's `.env`; keys come from the OS keychain and ride in the run request, and `ctrl-,` opens a Settings pane (provider, model, keys, execution). **Never rendered — needs a look on Windows.** §20/§22/§22b |
 | **P6.4b** — native affordances + shipping | ✅ **ships** — `bundle-backend.sh` → `--release` → `package.sh` gives a 21 MB folder; **the packaged build ran a real turn on Windows**. **Job Object verified 2026-08-01** — after closing the app, `wsl -- pgrep -af "langgraph dev"` prints nothing. Resources resolve beside the executable, and **a file dropped on the window — or added with the composer's clip — becomes part of the question**, with a path the agent can open and a refusal for one it cannot. Remaining: click-to-update, and **actually dragging a file onto a real window**, which nobody has done. §24/§25/§26/§28/§179 |
 | **P6.5** — background work + Jobs panel | ✅ **done, end to end (2026-08-01)** — background work had in fact never run until §39: our graph factory took no `config` and raised `TypeError` at construction. Now a worker generates data, **stops at the approval gate on its own thread**, and the answer reaches it. Failures report the real exception, and the panel shows which subagent is running. §29–§31/§36–§42 |
@@ -16614,3 +16614,39 @@ two days before this section, and it took all five to answer.
 
 *Hundred-and-forty-first: an early return with no log is a decision made where nobody can see it.
 Every one this project has found was hiding a fact somebody was already asking for.*
+
+## 292. WSL2 removed: Asta becomes a vendored dependency, not a shelled-out CLI (2026-08-30)
+
+§21 recommended keeping WSL2 "for v1" because the blocker was in Mini-Me's *own tool code*
+(`theory_tools.py`, `datavoyager_tools.py`, `paper_tools.py`, `autodiscovery_tools.py`), which
+shells out to a separately-installed `asta` CLI with POSIX-only syntax (`shlex.quote`, `|`,
+`2>/dev/null`) that `cmd.exe` cannot run. That evidence still stands — what changed is the
+premise that Asta has to be reached as an external CLI at all.
+
+`asta-plugins` (Asta's own CLI source, `pyproject.toml: name = "asta"`) is now a git submodule
+of this repo. Vendoring it as a real `uv` path dependency of `mini-me/pyproject.toml`
+(`[tool.uv.sources] asta = { path = "../asta-plugins" }`) puts `asta` inside the *same* venv
+`langgraph dev` already runs from. That reframes the §21 blocker: the four tool files no longer
+need a POSIX shell to reach `asta` at all — they spawn it as a plain native subprocess
+(`sys.executable -m asta.cli ...`, argv list, no shell=True, no pipes), which works identically
+on `cmd.exe`, PowerShell, or any Unix shell, because it's just launching the current interpreter
+with a module flag. The `python3 -c "<reducer>"` piping trick (post-processing a completed
+Asta task's JSON) is replaced by plain Python functions operating on the already-parsed dict —
+one interpreter, not two.
+
+This is scoped to **local execution** specifically (`isinstance(sandbox, LocalWorkspaceBackend)`)
+— remote-sandbox execution already runs inside a real Linux sandbox, was never WSL-dependent,
+and is left exactly as it was (`sandbox.aexecute(shell_string)`).
+
+Consequence: `wsl.exe`, `WslTarget`, the distro-mirroring launch path, `WSLENV`, and the
+`wsl --install` guided-provisioning flow (§13, §18–§20's launch-argv design, §170's `taskkill`
+tree-reaping) are deleted from `crates/app/src/backend.rs`/`preflight.rs` — the backend now
+always runs `.venv/Scripts/langgraph.exe` natively, the same host-mode path that already existed
+alongside WSL mode. `scripts/setup-wsl.sh` is replaced by an OS-appropriate pair,
+`scripts/setup-backend.sh` (macOS/Linux) and `scripts/setup-backend.ps1` (native Windows, run
+via `powershell.exe`, never `wsl.exe`) — both now also provision `asta-plugins/` as a sibling
+checkout of the backend, since that's the relative path the `uv.sources` entry expects.
+
+Clean break, not a migration: this app is pre-1.0 with no external users to preserve settings
+for, so an old WSL-shaped `backend_dir` simply fails the "checkout exists" preflight check and
+re-provisions natively — no migration code was written, and none was needed.

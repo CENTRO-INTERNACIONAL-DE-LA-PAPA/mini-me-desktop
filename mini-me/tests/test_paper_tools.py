@@ -11,6 +11,7 @@ The parser fixture is a real `asta papers search` response, trimmed to two recor
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 from backend.paper_tools import (
@@ -18,6 +19,7 @@ from backend.paper_tools import (
     SEARCH_FIELDS,
     _build_search_command,
     _parse_search,
+    find_papers,
     summarise,
 )
 
@@ -85,6 +87,40 @@ def test_a_warning_on_stderr_does_not_cost_the_result():
     assert _parse_search("") == []
     assert _parse_search("command not found: asta") == []
     assert _parse_search("{not json") == []
+
+
+def test_find_papers_uses_run_asta_cli_when_local(monkeypatch) -> None:
+    """Local execution runs `asta` as a native subprocess instead of through a sandbox shell —
+    mirroring how `paper_tools._is_local` gates it in production."""
+    import backend.paper_tools as module
+    from backend.runtime import _active_sandbox
+
+    calls = []
+
+    async def fake_run_asta_cli(args, *, cwd, timeout):
+        calls.append((args, cwd, timeout))
+        return REAL_OUTPUT, "WARNING: rate limit approaching"
+
+    class _LocalSandbox:
+        async def aget_work_dir(self) -> str:
+            return "/workspace"
+
+    monkeypatch.setattr(module, "_is_local", lambda sandbox: True)
+    monkeypatch.setattr(module, "run_asta_cli", fake_run_asta_cli)
+
+    async def go():
+        token = _active_sandbox.set(_LocalSandbox())
+        try:
+            return await find_papers.coroutine(query="late blight resistance", limit=5)
+        finally:
+            _active_sandbox.reset(token)
+
+    answer = json.loads(asyncio.run(go()))
+    # The stderr warning did not cost the result — merged in the same way `aexecute` merges it.
+    assert answer["count"] == 2
+    argv, cwd, timeout = calls[0]
+    assert argv[:2] == ["papers", "search"]
+    assert cwd == "/workspace"
 
 
 def test_every_paper_comes_back_with_a_reference_already_written():

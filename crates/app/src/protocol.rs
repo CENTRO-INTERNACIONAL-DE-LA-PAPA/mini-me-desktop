@@ -1033,7 +1033,7 @@ struct ThreadCreated {
 /// The backend resolves this **per request** — its provider table is even commented
 /// *"provider id (from the panel)"* — so the key travels from the OS keychain into the
 /// request body and never becomes an environment variable, a line in a `.env`, or an
-/// argument on a `wsl.exe` command line (docs §20).
+/// argument on any subprocess's command line (docs §20).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ModelChoice {
     /// `"provider::model_id"`, e.g. `anthropic::claude-sonnet-4-5`.

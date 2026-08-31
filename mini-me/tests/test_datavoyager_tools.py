@@ -30,6 +30,8 @@ from backend.datavoyager_tools import (
     _export_shell,
     _extract_json,
     _failure_reason,
+    _reduce_figures,
+    _reduce_task,
     _split_paths,
     _state_of,
     _status_message_text,
@@ -228,6 +230,26 @@ def test_reducer_forwards_top_level_error() -> None:
 
 
 # ---------------------------------------------------------------------------
+# `_reduce_task` — the local-execution twin of `_REDUCE_TASK_PY`, ported rather than
+# piped through a second `python3`. Pinned against the real reducer script.
+# ---------------------------------------------------------------------------
+
+def test_reduce_task_matches_the_piped_reducer_on_a_giant_completed_task() -> None:
+    task = _giant_completed_task()
+    piped = _extract_json(_run_reducer(task))
+    ported = _reduce_task(task)
+    assert ported == piped
+
+
+def test_reduce_task_forwards_top_level_error_like_the_piped_reducer() -> None:
+    failed = {"status": {"state": "failed", "message": None}, "error": "dv worker crashed"}
+    piped = _extract_json(_run_reducer(failed))
+    ported = _reduce_task(failed)
+    assert ported == piped
+    assert _failure_reason(ported, "failed") == "dv worker crashed"
+
+
+# ---------------------------------------------------------------------------
 # poll_analysis_status — terminal states over a fake (task-fetch) sandbox
 # ---------------------------------------------------------------------------
 
@@ -301,6 +323,38 @@ def test_poll_prefers_untruncated_execute() -> None:
     sb = _UntruncatedSandbox(json.dumps(task))
     res = asyncio.run(poll_analysis_status(sb, _TID))
     assert res["status"] == "completed"
+
+
+def test_poll_analysis_status_uses_run_asta_cli_when_local(monkeypatch) -> None:
+    """Local execution runs `asta` as a native subprocess instead of through a sandbox shell —
+    mirroring how `datavoyager_tools._is_local` gates it in production."""
+    import backend.datavoyager_tools as module
+
+    # Raw (pre-reduction) A2A shape — the CLI's actual output, which `_reduce_task` then shrinks
+    # inside the local branch exactly as `_task_shell`'s piped reducer does for the remote one.
+    task = {
+        "status": {"state": "completed", "message": "done"},
+        "artifacts": [
+            {"name": "Findings", "parts": [{"text": "r=0.9 between X and Y"}]},
+        ],
+    }
+    calls = []
+
+    async def fake_run_asta_cli(args, *, cwd, timeout):
+        calls.append((args, cwd, timeout))
+        return json.dumps(task), ""
+
+    class _LocalSandbox:
+        async def aget_work_dir(self) -> str:
+            return "/workspace"
+
+    monkeypatch.setattr(module, "_is_local", lambda sandbox: True)
+    monkeypatch.setattr(module, "run_asta_cli", fake_run_asta_cli)
+
+    res = asyncio.run(poll_analysis_status(_LocalSandbox(), _TID, "ctx-1"))
+    assert res["status"] == "completed"
+    assert "r=0.9" in res["analysis_text"]
+    assert calls == [(["analyze-data", "task", _TID], "/workspace", 90)]
 
 
 # ---------------------------------------------------------------------------
@@ -668,3 +722,73 @@ def test_a_missing_task_record_is_not_an_error(tmp_path):
         [sys.executable, str(script), str(empty), str(empty)], capture_output=True, text=True
     )
     assert out.returncode == 0, out.stderr
+
+
+# ---------------------------------------------------------------------------
+# `_reduce_figures` — the local-execution twin of `_FIGURES_PY`, decoding directly
+# against the filesystem instead of piping the task record through a second `python3`.
+# Pinned against the real extractor script on the same fixtures.
+# ---------------------------------------------------------------------------
+
+def test_reduce_figures_matches_the_piped_extractor(tmp_path):
+    task = {
+        "artifacts": [
+            {
+                "parts": [
+                    {
+                        "data": {
+                            "logs": [
+                                {
+                                    "source": "dv_answer",
+                                    "content": json.dumps(
+                                        {"figures": [_figure("Ridge importances"),
+                                                      _figure("CV performance")]}
+                                    ),
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+    piped_run, piped_out = _run_extractor(tmp_path / "piped", task)
+    assert piped_out.stdout.strip() == "2", piped_out.stderr
+
+    ported_dir = tmp_path / "ported"
+    n = _reduce_figures(task, str(ported_dir))
+    assert n == 2
+    assert (ported_dir / "figure-01.png").read_bytes() == (piped_run / "figure-01.png").read_bytes()
+    assert (ported_dir / "figures.md").read_text() == (piped_run / "figures.md").read_text()
+
+
+def test_reduce_figures_survives_a_corrupt_figure_like_the_piped_extractor(tmp_path):
+    task = {
+        "artifacts": [
+            {
+                "parts": [
+                    {
+                        "data": {
+                            "logs": [
+                                {
+                                    "source": "dv_answer",
+                                    "content": json.dumps(
+                                        {
+                                            "figures": [
+                                                {"caption": "bad", "imageb64": "!!!not base64!!!"},
+                                                _figure("good"),
+                                            ]
+                                        }
+                                    ),
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+    out_dir = tmp_path / "figs"
+    n = _reduce_figures(task, str(out_dir))
+    assert n == 1
+    assert "good" in (out_dir / "figures.md").read_text()

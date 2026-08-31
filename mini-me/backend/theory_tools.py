@@ -26,7 +26,23 @@ from langchain_core.tools import tool
 
 from backend.runtime import _active_sandbox
 
+try:
+    from minime_local.workspace import LocalWorkspaceBackend, run_asta_cli
+except ImportError:  # pragma: no cover - overlay is desktop-only; absent in a hosted deployment
+    LocalWorkspaceBackend = None  # type: ignore[assignment,misc]
+    run_asta_cli = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
+
+
+def _is_local(sandbox: Any) -> bool:
+    """Whether `sandbox` is the desktop app's own local workspace.
+
+    Only then can `asta` be run as a native subprocess of this same interpreter's venv
+    (no shell, no pipes) — a remote sandbox is a different machine, so it keeps running
+    `asta` through its own POSIX shell, unchanged.
+    """
+    return LocalWorkspaceBackend is not None and isinstance(sandbox, LocalWorkspaceBackend)
 
 _SUBMIT_TIMEOUT_S = 120
 _POLL_TIMEOUT_S = 90
@@ -236,15 +252,107 @@ print(json.dumps(out))
 """
 
 
+def _reduce_task(t: dict[str, Any]) -> dict[str, Any]:
+    """1:1 port of `_REDUCE_TASK_PY`'s logic, for **local** execution.
+
+    Same shrink `_poll_command` performs by piping the fetched task through a second
+    `python3` inside the sandbox: strip the paperstore/extraction bulk, keep only the
+    `theory` artifacts trimmed to what `_parse_theories`/`_state_of` read, and keep the
+    same non-completed-state error passthrough. This is a straight port, not a rewrite —
+    it must return the exact shape `_parse_theories`/`_state_of` already consume, since
+    that parser stays the single source of truth for both execution paths.
+    """
+    st = t.get("status", {}) or {}
+
+    def te(e: dict[str, Any]) -> dict[str, Any]:
+        s = e.get("s2Metadata", {}) or {}
+        return {
+            "displayLabel": e.get("displayLabel"),
+            "s2Metadata": {
+                "title": s.get("title"),
+                "corpusId": s.get("corpusId"),
+                "externalIds": s.get("externalIds"),
+                "url": s.get("url"),
+            },
+        }
+
+    def tc(c: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": n.get("id"),
+                "type": n.get("type"),
+                "title": n.get("title"),
+                "childIds": n.get("childIds"),
+            }
+            for n in c
+            if n.get("type") in ("SECTIONS", "SECTION")
+        ]
+
+    arts = []
+    for a in t.get("artifacts", []) or []:
+        if (a.get("metadata") or {}).get("type") != "theory":
+            continue
+        try:
+            d = a["parts"][0]["data"]
+        except Exception:
+            continue
+        arts.append(
+            {
+                "metadata": {"type": "theory"},
+                "parts": [
+                    {
+                        "data": {
+                            "name": d.get("name"),
+                            "content": tc(d.get("content", []) or []),
+                            "entities": {
+                                k: te(v) for k, v in (d.get("entities", {}) or {}).items()
+                            },
+                        }
+                    }
+                ],
+            }
+        )
+    out: dict[str, Any] = {"status": st, "artifacts": arts}
+    if st.get("state") != "completed":
+        ef = {}
+        for k in ("error", "detail", "reason", "message"):
+            v = t.get(k)
+            if isinstance(v, str) and v.strip():
+                ef[k] = v
+        if ef:
+            out["error_fields"] = ef
+        types = []
+        for a in t.get("artifacts") or []:
+            ty = (a.get("metadata") or {}).get("type")
+            if ty and ty not in types:
+                types.append(ty)
+        if types:
+            out["artifact_types"] = types
+    return out
+
+
 def _poll_command(task_id: str) -> str:
     """Shell command: fetch the task and reduce it in-sandbox to a small record.
 
     asta streams progress to stderr and the task JSON to stdout, so drop stderr
     and pipe stdout through the reducer. `python3` ships with the sandbox image
     (asta itself is a Python CLI).
+
+    **Remote sandboxes only** — that shell lives on a different machine than this
+    code, so it keeps running through it unchanged. Local execution instead runs
+    `_poll_argv` as a native subprocess and reduces the parsed JSON in-process
+    with `_reduce_task`.
     """
     fetch = f"asta generate-theories task {shlex.quote(task_id)} 2>/dev/null"
     return f"{fetch} | python3 -c {shlex.quote(_REDUCE_TASK_PY)}"
+
+
+def _poll_argv(task_id: str) -> list[str]:
+    """argv for fetching a theorizer task (asta CLI v0.101) — local execution's twin of
+    `_poll_command`, minus the shell pipe: the reduction happens in `_reduce_task`
+    instead. Pure, like `_build_submit_command`, so the CLI contract stays unit-testable.
+    """
+    return ["asta", "generate-theories", "task", task_id]
 
 
 async def _run(sandbox: Any, command: str, timeout: int) -> str:
@@ -283,8 +391,15 @@ def _build_submit_command(question: str, max_papers: int, do_novelty: bool) -> l
 
 async def _submit(sandbox: Any, question: str, max_papers: int, do_novelty: bool) -> str | None:
     args = _build_submit_command(question, max_papers, do_novelty)
-    cmd = " ".join(shlex.quote(a) for a in args)
-    out = await _run(sandbox, cmd, _SUBMIT_TIMEOUT_S)
+    if _is_local(sandbox):
+        work_dir = await sandbox.aget_work_dir()
+        # `args[0]` is the literal "asta" the remote shell path invokes by name;
+        # `run_asta_cli` already runs `python -m asta.cli`, so it is dropped here.
+        stdout, stderr = await run_asta_cli(args[1:], cwd=work_dir, timeout=_SUBMIT_TIMEOUT_S)
+        out = f"{stdout}\n{stderr}"
+    else:
+        cmd = " ".join(shlex.quote(a) for a in args)
+        out = await _run(sandbox, cmd, _SUBMIT_TIMEOUT_S)
     match = _UUID_RE.search(out)
     return match.group(0) if match else None
 
@@ -352,8 +467,18 @@ async def poll_theory_status(sandbox: Any, task_id: str) -> dict[str, Any]:
       running   -> {"status":"running","task_id":...,"elapsed_seconds":...,"progress":...}
       failed    -> {"status":"failed"|"canceled","task_id":...,"reason":...}
     """
-    out = await _run(sandbox, _poll_command(task_id), _POLL_TIMEOUT_S)
-    task = _extract_json(out)
+    if _is_local(sandbox):
+        work_dir = await sandbox.aget_work_dir()
+        # asta streams progress to stderr and the task JSON to stdout — the remote
+        # path drops stderr the same way, with `2>/dev/null`, before its reducer.
+        stdout, _stderr = await run_asta_cli(
+            _poll_argv(task_id)[1:], cwd=work_dir, timeout=_POLL_TIMEOUT_S
+        )
+        raw = _extract_json(stdout)
+        task = _reduce_task(raw) if raw is not None else None
+    else:
+        out = await _run(sandbox, _poll_command(task_id), _POLL_TIMEOUT_S)
+        task = _extract_json(out)
     state = _state_of(task)
     if state == "completed" and task is not None:
         return {"status": "completed", "task_id": task_id, **_parse_theories(task)}

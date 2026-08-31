@@ -55,10 +55,10 @@ fn is_name_char(c: char) -> bool {
 
 /// Whether what follows the slash could be a specialist name at all.
 ///
-/// **A path is not a command.** Attaching a file puts its absolute path in the composer, and on
-/// Windows that is a WSL path — `/mnt/c/Users/…/Graph-neural-networks.pdf`. It begins with a slash
-/// and contains no whitespace, so the parser read the entire path as a name and the researcher was
-/// told *no specialist called "mnt/c/Users/LENOVO/Downloads/Graph-neural-networks.pdf"* for a turn
+/// **A path is not a command.** Attaching a file puts its absolute path in the composer — a
+/// path like `/mnt/c/Users/…/Graph-neural-networks.pdf`. It begins with a slash and contains
+/// no whitespace, so the parser read the entire path as a name and the researcher was told
+/// *no specialist called "mnt/c/Users/LENOVO/Downloads/Graph-neural-networks.pdf"* for a turn
 /// that never mentioned a specialist by slash at all (docs §226).
 fn could_be_a_name(name: &str) -> bool {
     name.chars().all(is_name_char)
