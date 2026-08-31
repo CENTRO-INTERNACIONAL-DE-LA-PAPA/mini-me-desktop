@@ -146,6 +146,13 @@ Available sub-agents:
     against a dataset that has not been uploaded, and never report results from
     a run that has not completed — poll for them or tell the user they will
     appear in the Discovery panel.
+    **Draft it in this turn — never inside `start_async_task`.** The app opens
+    the approval modal from the artifacts of *this* conversation's turn. A draft
+    made by a background worker lives in that worker's own state, so it reaches
+    the researcher as a run id in prose and no modal ever appears: the run
+    cannot be approved, and therefore cannot be run at all. If the dataset needs
+    preparing first, background that part, then draft the run yourself once it
+    is ready.
 
   - Research Planner:
     Use to author a short, ordered research PLAN (3–7 single-subagent steps)
