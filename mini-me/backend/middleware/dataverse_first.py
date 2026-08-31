@@ -428,15 +428,46 @@ class SearchResultsFile(AgentMiddleware):
         if not text:
             logger.warning("the saved answer at %s was empty", saved)
             return None
-        try:
-            parsed = json.loads(text)
-        except (ValueError, TypeError):
-            logger.warning("the saved answer at %s is not JSON", saved)
+        return self._payload_from_saved_text(text, saved)
+
+    @classmethod
+    def _payload_from_saved_text(cls, text: str, where: str) -> dict[str, Any] | None:
+        """Every record in a saved answer, however many documents it was written as.
+
+        **A saved file is not one JSON document.** `mcp_tools._mcp_result_to_text` joins the
+        tool's content blocks with `\n---\n`, so a two-block answer is two valid JSON objects
+        with a delimiter between them — and `json.loads` on the whole file fails with *Extra
+        data*, discarding both. That is §292's defect wearing a different separator, in the
+        recovery path §291 added for it.
+
+        Each section is parsed on its own and their records are concatenated, so a multi-block
+        answer files everything rather than nothing. A section that will not parse is skipped and
+        counted, because losing one block of four is a different fact from losing all four.
+        """
+        records: list[Any] = []
+        unreadable = 0
+        sections = [part for part in text.split("\n---\n") if part.strip()]
+        for section in sections:
+            parsed = cls._leading_json(section)
+            if isinstance(parsed, dict):
+                content = parsed.get("content", parsed.get("data"))
+                if isinstance(content, list):
+                    records.extend(content)
+                    continue
+                # A single record, or a shape with no list in it: keep it rather than drop it.
+                records.append(parsed)
+            elif isinstance(parsed, list):
+                records.extend(parsed)
+            else:
+                unreadable += 1
+        if unreadable:
+            logger.warning(
+                "%d of %d section(s) in %s could not be read", unreadable, len(sections), where
+            )
+        if not records:
+            logger.warning("the saved answer at %s held no records", where)
             return None
-        if isinstance(parsed, dict):
-            return parsed
-        # A bare array is a perfectly good answer; wrap it into the shape the caller expects.
-        return {"content": parsed} if isinstance(parsed, list) else None
+        return {"content": records}
 
     # -- keeping what came back ------------------------------------------------------------
 
