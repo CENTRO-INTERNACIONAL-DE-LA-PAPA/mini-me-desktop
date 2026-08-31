@@ -1,8 +1,13 @@
 """Specialist subagent definitions and per-request runtime assembly.
 
-The coordinator delegates to seven specialist subagents (academic research,
+The coordinator delegates to **twelve** specialist subagents: academic research,
 dataverse exploration, data cleaning, EDA, diagnostic + predictive analytics,
-report writing). This module holds their static definitions, the
+report writing, hypothesis generation, the PDF librarian, DataVoyager,
+AutoDiscovery and the research planner. It said seven for as long as there were
+twelve, which is the same kind of drift that left AutoDiscovery out of the
+coordinator's own list of what it may route to (§295) — a count is a claim, and
+`tests/test_every_specialist_is_reachable.py` now holds the lists that matter to
+the registry below. This module holds their static definitions, the
 ``request_diagnostic_context`` interrupt tool, and ``_build_runtime_subagents``,
 which binds the per-request model, MCP tools, and file-sync / artifact-capture
 middleware onto each one. The coordinator's own system prompt lives in
@@ -597,7 +602,7 @@ RESEARCH_PLANNER_SYSTEM_PROMPT = """
             exactly: 'Academic Research', 'Dataverse Explorer', 'Data Cleaning',
             'Exploratory Data Analysis', 'Diagnostic Analytics', 'Predictive
             Analytics', 'Hypothesis Generator', 'PDF Librarian', 'DataVoyager',
-            or 'Report Writer'.
+            'AutoDiscovery', or 'Report Writer'.
           * `prompt` — the ready-to-send message that runs the step, phrased
             "Use the <subagent_name> subagent to …" (snake_case subagent name:
             academic_researcher, dataverse_explorer, data_cleaning,
