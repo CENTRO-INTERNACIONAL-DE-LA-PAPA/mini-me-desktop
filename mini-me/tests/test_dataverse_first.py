@@ -355,7 +355,10 @@ def test_what_the_read_returned_is_kept_in_the_workspace():
     sandbox = _Sandbox()
     rows = [{"global_id": "doi:10.21223/P3/0F9T62", "name": "Late blight trials"}]
     _read_returning({"file_path": "/tmp/mcp/json_files/x.json", "content": rows}, sandbox)
-    assert list(sandbox.written) == ["/home/user/workspace/dataverse_search.json"]
+    assert sorted(sandbox.written) == [
+        "/home/user/workspace/.mini-me/dataverse_search.meta.json",
+        "/home/user/workspace/dataverse_search.json",
+    ], "the records, and what the searches said they found (§300)"
 
     # **Normalised, not verbatim** — this file is what the datasets panel renders now, so it wears
     # the app's shape rather than the MCP's (§290). The original rides along under `raw`.
@@ -483,6 +486,13 @@ def test_a_Command_wrapping_the_answer_is_read_as_well():
 
 
 # --- the copy is the turn's, not the last search's ---------------------------------------------
+
+def _totals(sandbox) -> dict:
+    """What the searches reported about themselves, as the panel reads it."""
+    return json.loads(
+        sandbox.written["/home/user/workspace/.mini-me/dataverse_search.meta.json"]
+    )
+
 
 def _kept_ids(sandbox) -> list[str]:
     """The persistent ids in the file, which is what every one of these tests is really about."""
@@ -1022,3 +1032,93 @@ def test_the_schema_field_names_where_the_identifier_comes_from():
     assert "global_id" in described, "the source field has to be named where it is filled in"
     assert "copied verbatim" in described
     assert "omit the dataset" in described, "and the honest fallback has to be there too"
+
+
+# --- of how many? -------------------------------------------------------------------------------
+
+def _search_answering(middleware, sandbox, payload):
+    """One `SearchCIPDataverse` call through the middleware, answering `payload`."""
+
+    async def handler(_request):
+        return ToolMessage(
+            content=json.dumps(payload), tool_call_id="call_s", name=SEARCH_TOOL
+        )
+
+    return asyncio.run(
+        middleware.awrap_tool_call(_ToolCallRequest(SEARCH_TOOL, {}), handler)
+    )
+
+
+def test_the_denominator_survives_to_the_panel():
+    """**"Found 4,000, showing 29" and "found 29" were the same answer at every layer.**
+
+    The MCP read `total_count` to decide when to stop paging and never returned it (§299). Now it
+    does, and a researcher reading twenty-nine rows can see whether that is the corpus or a
+    sliver of it.
+    """
+    sandbox = _Sandbox()
+    middleware = SearchResultsFile(sandbox)
+    _search_answering(
+        middleware,
+        sandbox,
+        {"output_file": "/tmp/mcp/json_files/x.json", "total_count": 4000, "item_count": 29,
+         "complete": False},
+    )
+    _reads_through(middleware, {"content": [{"global_id": f"doi:1/{n}"} for n in range(29)]})
+
+    totals = _totals(sandbox)
+    assert totals["total_count"] == 4000
+    assert totals["kept"] == 29
+    assert totals["complete"] is False
+
+
+def test_a_whole_small_corpus_says_it_is_whole():
+    """The reassuring case has to be distinguishable, or the warning above means nothing."""
+    sandbox = _Sandbox()
+    middleware = SearchResultsFile(sandbox)
+    _search_answering(
+        middleware, sandbox,
+        {"output_file": "/x.json", "total_count": 3, "item_count": 3, "complete": True},
+    )
+    _reads_through(middleware, {"content": [{"global_id": f"doi:1/{n}"} for n in range(3)]})
+
+    assert _totals(sandbox) == {"total_count": 3, "kept": 3, "complete": True}
+
+
+def test_one_partial_search_makes_the_turn_partial():
+    """A broad search that was cut short is not redeemed by a narrow one that finished.
+
+    The file holds both, so what it holds is incomplete — and the second search's `complete: true`
+    must not overwrite that.
+    """
+    sandbox = _Sandbox()
+    middleware = SearchResultsFile(sandbox)
+    _search_answering(
+        middleware, sandbox,
+        {"output_file": "/x.json", "total_count": 900, "item_count": 100, "complete": False},
+    )
+    _search_answering(
+        middleware, sandbox,
+        {"output_file": "/x.json", "total_count": 4, "item_count": 4, "complete": True},
+    )
+    _reads_through(middleware, {"content": [{"global_id": "doi:1/a"}]})
+
+    totals = _totals(sandbox)
+    assert totals["total_count"] == 900, "the larger denominator is the one that was established"
+    assert totals["complete"] is False
+
+
+def test_an_mcp_that_cannot_say_how_many_is_not_read_as_zero():
+    """A deployment predating §299 answers without `total_count`.
+
+    "We cannot tell you how many matched" is a different fact from "none matched", and the panel
+    has to be able to tell them apart rather than showing `29 of 0`.
+    """
+    sandbox = _Sandbox()
+    middleware = SearchResultsFile(sandbox)
+    _search_answering(middleware, sandbox, {"output_file": "/x.json", "item_count": 29})
+    _reads_through(middleware, {"content": [{"global_id": "doi:1/a"}]})
+
+    totals = _totals(sandbox)
+    assert totals["total_count"] == 0
+    assert totals["complete"] is False, "unknown is not complete"

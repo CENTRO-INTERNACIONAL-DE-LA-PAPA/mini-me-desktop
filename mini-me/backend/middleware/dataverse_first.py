@@ -102,6 +102,15 @@ READ_TOOL = "read_search_results"
 #: copy now accumulates across the turn (§286).
 FIXED_FILENAME = "dataverse_search.json"
 
+#: What the searches themselves reported, beside the records they returned.
+#:
+#: Its own file rather than a wrapper around the array, because the array is what the panel
+#: decodes, what `claims.unsearched` walks and what a researcher opens — three readers that would
+#: all have to learn a new shape to carry one number. Under `.mini-me/` so `workspace::outputs`
+#: does not list it as something the research produced (§300).
+SEARCH_META_DIR = ".mini-me"
+SEARCH_META_NAME = "dataverse_search.meta.json"
+
 #: The sentence `mcp_tools._save_mcp_to_sandbox` hands the model instead of a large answer.
 #:
 #: **This is what `_keep` was trying to parse.** A result over `MCP_TOOL_OUTPUT_MAX_BYTES`
@@ -267,6 +276,13 @@ class SearchResultsFile(AgentMiddleware):
         #: Where the last search said it wrote. Instance state is per-request: the middleware is
         #: constructed in `_build_runtime_subagents`, which runs once per turn.
         self._server_path: str | None = None
+        #: What Dataverse said matched, across every search this turn — the largest, because a
+        #: broad search followed by a narrow one has still established that the broad number
+        #: exists. `0` means no search reported one, which is itself worth showing.
+        self._total_count = 0
+        #: Whether every matching record was retrieved. Starts true and only ever goes false: one
+        #: incomplete search this turn makes the accumulated file incomplete.
+        self._complete = True
         #: Every record read this turn, in the order they were first seen.
         #:
         #: **Per turn, deliberately, and that is the same scope the claims check runs at.**
@@ -473,10 +489,40 @@ class SearchResultsFile(AgentMiddleware):
     # -- keeping what came back ------------------------------------------------------------
 
     def _remember_search(self, result: Any) -> None:
+        """Note where the search wrote, and **how much it found**.
+
+        `total_count` is the number Dataverse reported for the query, across every page — as
+        opposed to `item_count`, which is how many came back. The MCP read it to decide when to
+        stop paging and did not return it until today, so "found 4,000, showing 29" and "found 29"
+        were the same answer at every layer (§299). A caller that cannot see the denominator
+        cannot know to narrow the query, and a researcher reading twenty-nine rows cannot know
+        they are a sliver.
+        """
         payload = self._payload(result)
         path = (payload or {}).get("output_file")
         if isinstance(path, str) and path:
             self._server_path = path
+
+        total = (payload or {}).get("total_count")
+        kept = (payload or {}).get("item_count")
+        if isinstance(total, int) and total > 0:
+            self._total_count = max(self._total_count, total)
+        # `complete` is the search's own verdict and a partial one must not be overwritten by a
+        # later narrow query that happened to finish: once this turn has seen an incomplete
+        # search, what the file holds is incomplete.
+        if (payload or {}).get("complete") is False:
+            self._complete = False
+        if total is None:
+            # Said once per search rather than never: an MCP that predates §299 answers without
+            # it, and "we cannot tell you how many matched" is a different fact from "29 matched".
+            logger.info(
+                "%s answered without total_count — this deployment cannot say how many matched",
+                SEARCH_TOOL,
+            )
+        else:
+            logger.info(
+                "%s found %s and returned %s", SEARCH_TOOL, total, kept
+            )
 
     def _accumulate(self, content: Any) -> list[Any]:
         """Add this read's records to what the turn has already seen, in first-seen order.
@@ -513,6 +559,29 @@ class SearchResultsFile(AgentMiddleware):
             seen.add(key)
             self._kept.append(record)
         return self._kept
+
+    async def _keep_totals(self, work_dir: Any) -> None:
+        """Record what the searches said they found, so the panel can show a denominator.
+
+        Never raises and never costs the records: a count nobody can read is a worse outcome than
+        a count nobody wrote, but only just — and losing the search over it would be far worse.
+        """
+        try:
+            written = await self.sandbox_backend.awrite(
+                f"{str(work_dir).rstrip('/')}/{SEARCH_META_DIR}/{SEARCH_META_NAME}",
+                json.dumps(
+                    {
+                        "total_count": self._total_count,
+                        "kept": len(self._kept),
+                        "complete": self._complete and self._total_count > 0,
+                    },
+                    indent=2,
+                ),
+            )
+            if getattr(written, "error", None):
+                logger.warning("could not keep the search totals: %s", written.error)
+        except Exception:  # noqa: BLE001 — a denominator is not worth a search
+            logger.exception("could not keep the search totals")
 
     async def _keep(self, result: Any) -> None:
         """Write the metadata into the sandbox, where Outputs and the claims check can see it.
@@ -571,6 +640,7 @@ class SearchResultsFile(AgentMiddleware):
                 f"{str(work_dir).rstrip('/')}/{FIXED_FILENAME}",
                 json.dumps(merged, indent=2, ensure_ascii=False),
             )
+            await self._keep_totals(work_dir)
             if getattr(written, "error", None):
                 logger.warning("could not keep %s: %s", FIXED_FILENAME, written.error)
             else:
