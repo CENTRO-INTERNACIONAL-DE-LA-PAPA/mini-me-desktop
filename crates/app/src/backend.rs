@@ -515,6 +515,25 @@ pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
 }
 
+/// Single-quote a value for `powershell -Command`, so a path with spaces survives.
+///
+/// PowerShell's single-quoted strings are literal (no `$`/backtick expansion), and a
+/// literal quote inside one is escaped by doubling it — not by backslash, which is what
+/// [`shell_quote`] uses for `bash`.
+pub(crate) fn ps_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+/// Change into `dir` before running `cmd`, spelled for whichever shell [`BackendConfig::shell_argv`]
+/// will run it through.
+pub(crate) fn in_dir(dir: &str, cmd: &str) -> String {
+    if cfg!(windows) {
+        format!("Set-Location -LiteralPath {}; {cmd}", ps_quote(dir))
+    } else {
+        format!("cd {} && {cmd}", quote_path(dir))
+    }
+}
+
 /// Quote a path for a shell **while leaving a leading `~` able to expand**.
 ///
 /// A checkout path can be typed or configured as `~/Mini-Me`, and `cd '~/Mini-Me'` does not
@@ -608,8 +627,23 @@ impl BackendConfig {
     ///
     /// A **login** shell (`-lc`): `uv` installs itself into `~/.local/bin`, which only a
     /// login shell has on `PATH`.
+    ///
+    /// On Windows this runs through `powershell.exe` instead — there is no WSL or bash
+    /// dependency to provision, since `powershell.exe` ships with every supported Windows.
     pub fn shell_argv(&self, script: &str) -> Vec<String> {
-        vec!["bash".to_string(), "-lc".to_string(), script.to_string()]
+        if cfg!(windows) {
+            vec![
+                "powershell.exe".to_string(),
+                "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
+                "-ExecutionPolicy".to_string(),
+                "Bypass".to_string(),
+                "-Command".to_string(),
+                script.to_string(),
+            ]
+        } else {
+            vec!["bash".to_string(), "-lc".to_string(), script.to_string()]
+        }
     }
 
     /// The checkout path as this machine spells it.
@@ -635,8 +669,10 @@ impl BackendConfig {
         self.overlay_for_backend().into_iter().collect()
     }
 
-    /// The provisioning command: `bash …/setup-backend.sh <checkout>`. Re-running it is safe —
-    /// the script never overwrites a checkout or a `.env`.
+    /// The provisioning command: `bash …/setup-backend.sh <checkout>` on macOS/Linux, or
+    /// `powershell …/setup-backend.ps1 -Dir <checkout>` on Windows — the two scripts are kept
+    /// in step (see `scripts/setup-backend.ps1`'s header). Re-running it is safe: neither
+    /// script ever overwrites a checkout or a `.env`.
     ///
     /// When a backend copy ships with the app, its path is passed in so the script
     /// provisions from it instead of cloning. That is the difference between an install
@@ -644,19 +680,34 @@ impl BackendConfig {
     /// Mini-Me is a private repository (see `scripts/bundle-backend.sh`).
     pub fn setup_script(&self) -> String {
         let spell = |path: &Path| path.to_string_lossy().into_owned();
-        let script = spell(&scripts_dir().join("setup-backend.sh"));
         let mut command = String::new();
-        if let Some(bundled) = bundled_backend_dir() {
+        if cfg!(windows) {
+            let script = spell(&scripts_dir().join("setup-backend.ps1"));
+            if let Some(bundled) = bundled_backend_dir() {
+                command.push_str(&format!(
+                    "$env:MINIME_BUNDLED_SOURCE = {}; ",
+                    ps_quote(&spell(&bundled))
+                ));
+            }
             command.push_str(&format!(
-                "MINIME_BUNDLED_SOURCE={} ",
-                shell_quote(&spell(&bundled))
+                "& {} -Dir {}",
+                ps_quote(&script),
+                ps_quote(&self.backend_dir())
+            ));
+        } else {
+            let script = spell(&scripts_dir().join("setup-backend.sh"));
+            if let Some(bundled) = bundled_backend_dir() {
+                command.push_str(&format!(
+                    "MINIME_BUNDLED_SOURCE={} ",
+                    shell_quote(&spell(&bundled))
+                ));
+            }
+            command.push_str(&format!(
+                "bash {} {}",
+                shell_quote(&script),
+                quote_path(&self.backend_dir())
             ));
         }
-        command.push_str(&format!(
-            "bash {} {}",
-            shell_quote(&script),
-            quote_path(&self.backend_dir())
-        ));
         command
     }
 
@@ -1468,6 +1519,20 @@ mod tests {
             project_dir: PathBuf::from("/home/x/Mini-Me"),
             ..Default::default()
         };
+        #[cfg(windows)]
+        assert_eq!(
+            config.shell_argv("echo ok"),
+            vec![
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "echo ok",
+            ]
+        );
+        #[cfg(not(windows))]
         assert_eq!(config.shell_argv("echo ok"), vec!["bash", "-lc", "echo ok"]);
         assert_eq!(config.backend_dir(), "/home/x/Mini-Me");
     }
@@ -1484,10 +1549,19 @@ mod tests {
         // to copy from and the script never reaches GitHub for it. This assertion used to be
         // `starts_with("bash '")` — true only while a developer tree had no bundled copy, which
         // stopped being the case the moment the backend moved in here.
-        assert!(command.contains("MINIME_BUNDLED_SOURCE="), "{command}");
-        assert!(command.contains("bash '"), "{command}");
-        assert!(command.contains("setup-backend.sh"), "{command}");
-        assert!(command.ends_with("~/'Mini-Me'"), "{command}");
+        assert!(command.contains("MINIME_BUNDLED_SOURCE"), "{command}");
+        #[cfg(windows)]
+        {
+            assert!(command.contains("& '"), "{command}");
+            assert!(command.contains("setup-backend.ps1"), "{command}");
+            assert!(command.ends_with("-Dir '~/Mini-Me'"), "{command}");
+        }
+        #[cfg(not(windows))]
+        {
+            assert!(command.contains("bash '"), "{command}");
+            assert!(command.contains("setup-backend.sh"), "{command}");
+            assert!(command.ends_with("~/'Mini-Me'"), "{command}");
+        }
     }
 
     /// The backend source is found in this repository, without an environment variable.
@@ -1599,6 +1673,15 @@ mod tests {
             setup.contains(".bundled-backend"),
             "setup-backend.sh must read the stamp, or the bundle updates and the machine does not"
         );
+
+        let setup_ps1 = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/setup-backend.ps1"),
+        )
+        .expect("the Windows setup script is in this repo");
+        assert!(
+            setup_ps1.contains(".bundled-backend"),
+            "setup-backend.ps1 must read the stamp too, or a Windows machine never updates"
+        );
     }
 
     #[test]
@@ -1617,8 +1700,16 @@ mod tests {
             ..Default::default()
         };
         let command = config.setup_script();
-        assert!(command.starts_with("MINIME_BUNDLED_SOURCE="), "{command}");
-        assert!(command.contains("setup-backend.sh"), "{command}");
+        #[cfg(windows)]
+        {
+            assert!(command.starts_with("$env:MINIME_BUNDLED_SOURCE"), "{command}");
+            assert!(command.contains("setup-backend.ps1"), "{command}");
+        }
+        #[cfg(not(windows))]
+        {
+            assert!(command.starts_with("MINIME_BUNDLED_SOURCE"), "{command}");
+            assert!(command.contains("setup-backend.sh"), "{command}");
+        }
 
         // No bundle: the variable must be absent rather than empty, or the script would
         // treat "" as a source and skip straight to cloning with a confusing message.

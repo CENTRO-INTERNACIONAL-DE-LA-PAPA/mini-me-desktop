@@ -108,7 +108,7 @@ jobs:
             echo "::error::allenai/asta-plugins under Settings → Secrets → Actions."
             exit 1
           fi
-          git config --global url."https://x-access-token:${ASTA_PLUGINS_TOKEN}@github.com/".insteadOf "git@github.com-cip:"
+          git config --global url."https://x-access-token:${ASTA_PLUGINS_TOKEN}@github.com/".insteadOf "git@github.com:"
           git submodule update --init --recursive
 
       - name: Package

@@ -24,7 +24,7 @@ use std::io::Read as _;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::backend::{bundled_backend_dir, quote_path, venv_python, BackendConfig, Execution};
+use crate::backend::{bundled_backend_dir, in_dir, venv_python, BackendConfig, Execution};
 
 /// Ceiling for one probe. Generous because a cold `uv`/Python environment genuinely takes
 /// several seconds to answer on the first call of a session, and reporting "missing"
@@ -402,11 +402,12 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
     let shell_ok = shell.ok && shell.stdout.contains("ok");
     let uv = probe(&["uv".to_string(), "--version".to_string()]);
     let runtime_ok = shell_ok && uv.ok;
+    let shell_name = if cfg!(windows) { "PowerShell" } else { "bash" };
     if runtime_ok {
         checks.push(Check::pass(
             "runtime",
             "Shell",
-            format!("bash and {} are on this machine", uv.stdout.trim()),
+            format!("{shell_name} and {} are on this machine", uv.stdout.trim()),
         ));
     } else if !uv.ok {
         let install = if cfg!(windows) {
@@ -440,19 +441,25 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
         let detail = if shell.launched {
             format!("no usable shell — {}", shell.message())
         } else {
-            "bash was not found on this machine".to_string()
+            format!("{shell_name} was not found on this machine")
         };
-        checks.push(Check::failing(
-            "runtime",
-            "Shell",
-            State::Fail,
-            detail,
-            vec![Fix::Manual(
+        let fix = if cfg!(windows) {
+            // powershell.exe ships with every supported Windows, so reaching this branch
+            // means something is unusually broken (a locked-down PATH, a corrupted install)
+            // rather than a missing dependency — there is no install step to offer.
+            Fix::Manual(
+                "The backend needs PowerShell to run its setup and maintenance commands, but \
+                 this machine could not run it. Check that powershell.exe is on PATH."
+                    .into(),
+            )
+        } else {
+            Fix::Manual(
                 "The backend needs a POSIX shell to run its setup and maintenance commands. \
                  On Windows, install Git for Windows, which provides one."
                     .into(),
-            )],
-        ));
+            )
+        };
+        checks.push(Check::failing("runtime", "Shell", State::Fail, detail, vec![fix]));
     }
 
     // Everything below runs *through* the runtime, so without it they would only
@@ -531,10 +538,7 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
                 format!("{entry} is missing — the dev extra was never synced"),
                 vec![Fix::Run {
                     label: "Install Python packages",
-                    argv: config.shell_argv(&format!(
-                        "cd {} && uv sync --extra dev",
-                        quote_path(&config.backend_dir())
-                    )),
+                    argv: config.shell_argv(&in_dir(&config.backend_dir(), "uv sync --extra dev")),
                     note: "a few minutes on a cold environment",
                 }],
             ));
@@ -586,9 +590,9 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
                     .to_string(),
                 vec![Fix::Run {
                     label: "Move conversations to SQLite",
-                    argv: config.shell_argv(&format!(
-                        "cd {} && uv pip install langgraph-checkpoint-sqlite",
-                        quote_path(&config.backend_dir())
+                    argv: config.shell_argv(&in_dir(
+                        &config.backend_dir(),
+                        "uv pip install langgraph-checkpoint-sqlite",
                     )),
                     note: "existing conversations stay in the old store until they are opened",
                 }],
@@ -1268,6 +1272,9 @@ mod tests {
             panic!("expected a runnable fix, got {:?}", checkout.fixes);
         };
         let command = display_argv(argv);
+        #[cfg(windows)]
+        assert!(command.contains("setup-backend.ps1"), "{command}");
+        #[cfg(not(windows))]
         assert!(command.contains("setup-backend.sh"), "{command}");
         assert!(command.contains("/nonexistent-checkout"), "{command}");
 

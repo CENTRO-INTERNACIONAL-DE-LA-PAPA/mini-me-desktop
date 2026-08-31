@@ -29,7 +29,7 @@
 set -euo pipefail
 
 REPO_URL="${MINIME_REPO_URL:-https://github.com/CENTRO-INTERNACIONAL-DE-LA-PAPA/Mini-Me.git}"
-ASTA_REPO_URL="${ASTA_REPO_URL:-git@github.com-cip:allenai/asta-plugins.git}"
+ASTA_REPO_URL="${ASTA_REPO_URL:-git@github.com:allenai/asta-plugins.git}"
 DIR="${1:-$HOME/.local/share/mini-me-desktop/backend}"
 # Expand a leading ~ if the caller passed one through as a literal.
 DIR="${DIR/#\~/$HOME}"

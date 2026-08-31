@@ -1,4 +1,4 @@
-# Provision the Mini-Me backend for the desktop app, natively on Windows.
+﻿# Provision the Mini-Me backend for the desktop app, natively on Windows.
 #
 # No WSL: the backend runs on this machine directly (`.venv\Scripts\langgraph.exe`),
 # and Asta is a normal Python dependency of this checkout (a path dependency on the
@@ -33,7 +33,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $RepoUrl = if ($env:MINIME_REPO_URL) { $env:MINIME_REPO_URL } else { "https://github.com/CENTRO-INTERNACIONAL-DE-LA-PAPA/Mini-Me.git" }
-$AstaRepoUrl = if ($env:ASTA_REPO_URL) { $env:ASTA_REPO_URL } else { "git@github.com-cip:allenai/asta-plugins.git" }
+$AstaRepoUrl = if ($env:ASTA_REPO_URL) { $env:ASTA_REPO_URL } else { "git@github.com:allenai/asta-plugins.git" }
 $AstaDir = Join-Path (Split-Path -Parent $Dir) "asta-plugins"
 $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 
@@ -157,6 +157,15 @@ function Provision-Checkout {
         Write-Host "    If you are reading this inside the app, $Name was not bundled"
         Write-Host "    with your copy: ask whoever gave it to you."
         git clone $RepoUrl $TargetDir
+        # $ErrorActionPreference = "Stop" only catches PowerShell-cmdlet errors, never a
+        # non-zero exit code from a native exe like git — without this check a failed
+        # clone falls straight through to "uv sync" resolving against a missing or
+        # half-written checkout, and the error a person sees is that confusing downstream
+        # failure instead of git's own, three steps closer to the truth.
+        if ($LASTEXITCODE -ne 0) {
+            Bad "git clone of $Name failed (exit $LASTEXITCODE) — see the error above"
+            exit 1
+        }
     }
 }
 
@@ -203,6 +212,15 @@ if ($env:MINIME_SETUP_STOP_AFTER_SOURCE) {
 Say "Installing Python packages (a few minutes the first time)"
 Write-Host "    This pulls the scientific stack — PyMC, scikit-learn and friends — and Asta."
 uv sync --extra dev
+# A resolve this size (~270 packages, first run) has room to fail partway — a flaky
+# download, an antivirus lock on a half-written wheel — and without this check that
+# failure was invisible: the script pressed on, and the only sign anything was wrong
+# was ".venv\Scripts\langgraph.exe is missing", several steps later and unconnected
+# to the real cause sitting unremarked in the log above it.
+if ($LASTEXITCODE -ne 0) {
+    Bad "uv sync failed (exit $LASTEXITCODE) — see the error above"
+    exit 1
+}
 
 # Durable conversation storage, installed by default and not left to a checkbox.
 Say "Installing durable conversation storage"
