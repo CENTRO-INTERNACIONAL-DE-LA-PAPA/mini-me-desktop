@@ -16614,3 +16614,52 @@ two days before this section, and it took all five to answer.
 
 *Hundred-and-forty-first: an early return with no log is a decision made where nobody can see it.
 Every one this project has found was hiding a fact somebody was already asking for.*
+
+## 292. JSON, and then a sentence (2026-08-31)
+
+§291's diagnostic answered on the first run, and named a case I had not predicted:
+
+```
+WARNING nothing to keep from read_search_results: no JSON in the answer and no pointer
+        to a saved copy
+```
+
+Three times, beside one `kept … (1 new, 1 this turn)`. So the answer was neither JSON nor a
+pointer — and `MCP_SAVE_THRESHOLDS["dataverse"]` is 512,000, well above a 314 KB read, so nothing
+had been saved and there was no address to follow. Correct, and not the cause.
+
+The cause is one line in `mcp_tools._trim_json_array_text`:
+
+```python
+return json.dumps(result_obj, indent=2) + suffix
+```
+
+Where `suffix` is `"\n\n[60 item(s) omitted — output exceeded 124 KB. Use a lower limit…]"`.
+
+A result over `MCP_TOOL_OUTPUT_MAX_BYTES` keeps as many whole items as fit and announces the rest
+in prose **after** the JSON. Which is right for the model — it reads the sentence and knows to
+narrow. It is fatal for `json.loads`, which requires the entire string to be a value. So a search
+returning a hundred datasets, trimmed to forty, produced **zero**: the same outcome as a search
+that failed, and for three releases it read like one.
+
+`raw_decode` parses from the start and stops where the value ends, which is the shape actually
+being sent. Forty datasets instead of none.
+
+### Three shapes, three paths, and they must not be confused
+
+* **JSON, possibly followed by a sentence** — parse the leading value. A trimmed block can also
+  arrive as a bare array, because `_trim_json_array_text` rebuilds `{wrap_key: kept}` only when
+  the original had an outer key.
+* **A sentence pointing at a file** — follow the address (§291). `raw_decode` refuses this
+  deliberately: the pointer carries a 2 KB *preview*, and parsing it as a payload would file the
+  preview as if it were the whole search.
+* **Neither** — say so, **and quote the first two hundred characters**.
+
+That last part is the lesson repeating. *"No JSON in the answer"* was true, and it cost a release,
+because it does not say what the answer *was*. A pointer, an error page and a shape nobody has met
+all produced the identical sentence. They now come with a sample, which is the difference between
+a diagnosis and a symptom.
+
+*Hundred-and-forty-second: a message that names what did not happen is worth less than one that
+quotes what did. Every diagnostic this project has added twice was added the second time to say
+what it saw.*

@@ -782,3 +782,62 @@ def test_a_small_answer_still_takes_the_direct_path():
     )
     assert _kept_ids(sandbox) == ["doi:1/small"]
     assert sandbox.reads == [], "no file to follow, so none was read"
+
+
+# --- JSON, then a sentence -----------------------------------------------------------------------
+
+def _trimmed_like_upstream(kept: int, dropped: int) -> str:
+    """What `mcp_tools._trim_json_array_text` sends when a result crosses the 128 KB cap.
+
+    Valid JSON, then prose. Reproduced here from that function rather than imagined: it returns
+    `json.dumps(result_obj, indent=2) + suffix`, and the suffix is what `json.loads` chokes on.
+    """
+    rows = [{"name": f"Dataset {n}", "global_id": f"doi:10.21223/P3/ROW{n:03d}"} for n in range(kept)]
+    return json.dumps({"content": rows}, indent=2) + (
+        f"\n\n[{dropped} item(s) omitted — output exceeded 124 KB. "
+        "Use a lower limit or a more specific query for 'read_search_results'.]"
+    )
+
+
+def test_a_trimmed_answer_keeps_the_datasets_that_survived_the_trim():
+    """**Forty datasets, or zero.**
+
+    A search returning a hundred is trimmed to whatever fits in 128 KB and the rest is announced
+    in a sentence appended after the JSON. `json.loads` rejects the whole string, so the file got
+    nothing — the same outcome as a search that failed, which is how it read for three releases
+    (§292).
+    """
+    sandbox = _Sandbox()
+    _answering(SearchResultsFile(sandbox), sandbox, _trimmed_like_upstream(kept=40, dropped=60))
+
+    kept = _kept_ids(sandbox)
+    assert len(kept) == 40, f"kept {len(kept)} of the forty that survived the trim"
+    assert kept[0] == "doi:10.21223/P3/ROW000"
+
+
+def test_a_trimmed_bare_array_is_a_search_result_too():
+    """`_trim_json_array_text` rebuilds `{wrap_key: kept}` only when the original had one."""
+    sandbox = _Sandbox()
+    body = json.dumps([{"global_id": "doi:1/a"}, {"global_id": "doi:1/b"}], indent=2)
+    _answering(SearchResultsFile(sandbox), sandbox, body + "\n\n[8 item(s) omitted — …]")
+    assert _kept_ids(sandbox) == ["doi:1/a", "doi:1/b"]
+
+
+def test_prose_before_the_json_is_still_not_json():
+    """`raw_decode` parses from the start, so a pointer sentence is not mistaken for a payload.
+
+    That case has its own path — following the address — and conflating the two would file a 2 KB
+    preview as if it were the whole search.
+    """
+    assert SearchResultsFile._leading_json("Full result (306 KB) saved to `/x.txt`. {\"a\": 1}") is None
+    assert SearchResultsFile._leading_json("") is None
+    assert SearchResultsFile._leading_json("   {\"a\": 1}  trailing") == {"a": 1}
+
+
+def test_an_unusable_answer_says_what_it_actually_was(caplog):
+    """"no JSON in the answer" was true and cost a release, because it does not say *what*."""
+    sandbox = _Sandbox()
+    with caplog.at_level("WARNING", logger="backend.middleware.dataverse_first"):
+        _answering(SearchResultsFile(sandbox), sandbox, "<html>502 Bad Gateway</html>")
+    said = "\n".join(record.getMessage() for record in caplog.records)
+    assert "the answer began: <html>502 Bad Gateway" in said

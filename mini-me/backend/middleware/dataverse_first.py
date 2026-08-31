@@ -308,16 +308,44 @@ class SearchResultsFile(AgentMiddleware):
         collect(getattr(result, "content", result))
         return found
 
+    @staticmethod
+    def _leading_json(text: str) -> Any:
+        """The JSON value a string *starts* with, ignoring anything after it.
+
+        **`json.loads` requires the whole string to be JSON, and upstream does not send that.**
+        When a result crosses `MCP_TOOL_OUTPUT_MAX_BYTES`, `_trim_json_array_text` keeps as many
+        whole items as fit and appends a sentence:
+
+            json.dumps(result_obj, indent=2) + "\n\n[60 item(s) omitted — output exceeded 124 KB…]"
+
+        Valid JSON followed by prose. `json.loads` rejects all of it, so a search that returned a
+        hundred datasets and was trimmed to forty produced **zero** — the same outcome as a search
+        that failed, and for three releases it read like one (§292).
+
+        `raw_decode` parses from the start and stops where the value ends, which is exactly the
+        shape being sent.
+        """
+        stripped = (text or "").lstrip()
+        if not stripped:
+            return None
+        try:
+            value, _ = json.JSONDecoder().raw_decode(stripped)
+        except ValueError:
+            return None
+        return value
+
     @classmethod
     def _payload(cls, result: Any) -> dict[str, Any] | None:
-        """The JSON object an MCP tool answered with."""
+        """The JSON object an MCP tool answered with, whatever follows it."""
         for text in cls._texts(result):
-            try:
-                parsed = json.loads(text)
-            except (ValueError, TypeError):
-                continue
+            parsed = cls._leading_json(text)
             if isinstance(parsed, dict):
                 return parsed
+            # A trimmed block can arrive as a bare array — `_trim_json_array_text` rebuilds
+            # `{wrap_key: kept}` only when the original had one, and drops the outer keys when
+            # it did not. That is still a search result.
+            if isinstance(parsed, list):
+                return {"content": parsed}
         return None
 
     # -- setting the arguments -------------------------------------------------------------
@@ -472,12 +500,20 @@ class SearchResultsFile(AgentMiddleware):
             capped = any(
                 TRUNCATION_MARKER in text for text in self._texts(result)
             )
+            # **With a sample of what did arrive.** "no JSON in the answer" was true and cost
+            # another release to act on, because it does not say *what* the answer was. Two
+            # hundred characters is enough to recognise a pointer, an error page, or a shape
+            # nobody has met — and this is dataset metadata from a public repository, in a local
+            # log the researcher already reads.
+            texts = self._texts(result)
+            sample = (texts[0][:200].replace("\n", " ") if texts else "nothing at all")
             logger.warning(
-                "nothing to keep from %s: %s",
+                "nothing to keep from %s: %s — the answer began: %s",
                 READ_TOOL,
                 "the answer was capped inline and the full text was not saved anywhere"
                 if capped
                 else "no JSON in the answer and no pointer to a saved copy",
+                sample,
             )
             return
         try:
