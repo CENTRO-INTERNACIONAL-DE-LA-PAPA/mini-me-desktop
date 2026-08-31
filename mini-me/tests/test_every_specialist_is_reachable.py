@@ -136,3 +136,21 @@ def test_a_credit_spending_specialist_says_so_where_the_model_reads_it():
     assert "human press" in bullet.lower() or "approval" in bullet.lower(), (
         "and that it cannot be started without one"
     )
+
+
+def test_the_coordinator_is_told_where_a_draft_has_to_be_made():
+    """**A draft in a background worker cannot be approved, so it cannot be run.**
+
+    `decode_drafts` reads `artifacts.discoveries` from *this* conversation's snapshot, and the
+    background worker is a separate graph with its own state. A run drafted there reaches the
+    researcher as an id in prose and no approval modal ever opens — which is what happened on a
+    real machine the day the coordinator was first told AutoDiscovery existed (§296).
+
+    The deeper gap is that worker artifacts never fold into the snapshot at all. This is the half
+    that costs nothing and unblocks the feature; the other half is in §296.
+    """
+    bullet = COORDINATOR_SYSTEM_PROMPT.split("- AutoDiscovery:")[1].split("\n  - ")[0]
+    assert "start_async_task" in bullet, (
+        "the bullet must name the tool whose drafts cannot be approved"
+    )
+    assert "approval modal" in bullet.lower()
