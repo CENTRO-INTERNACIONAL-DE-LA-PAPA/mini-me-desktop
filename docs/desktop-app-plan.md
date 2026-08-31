@@ -16782,3 +16782,77 @@ A test that cannot fail is worse to own than no test, because it is counted.
 *Hundred-and-forty-fourth: when two consumers share one pipe, the one with the tighter budget sets
 the width for both unless somebody says otherwise. Ask which limits are the constraint and which
 are just the first reader's.*
+
+## 295. A specialist nobody was told about (2026-08-31)
+
+The second audit came back with six defects in `tool_gate.py` and `subagents.py`. One of them
+named something smaller than what was actually there:
+
+> The structured-plan instructions enumerate every relevant specialist except `autodiscovery`,
+> despite it being registered.
+
+True, and it is worse than the planner. `grep -c "^  - " backend/prompts.py` answers **11**, and
+the registry holds **12**. `autodiscovery_subagent` is registered, has its tools wired, has a
+credit gate written for it and a panel in the app — and appears in **none** of the three lists
+that tell a model it exists: the coordinator's *Available sub-agents*, the planner's `action`
+field description, and the planner's own prompt.
+
+So the coordinator has never known it was there. The only way to reach it was to name it in a
+question, and the researcher's conversation list carries the workaround as a title: *"usea
+autodiscovery to test this data"*.
+
+Nothing errored. The specialist simply never ran unless it was asked for by name — an absence, not
+a failure, which is why it survived being registered, gated, tested and shipped.
+
+### The bullet says what it costs
+
+AutoDiscovery spends the researcher's Asta credits, and the standing rule on this project is that
+none may be spent without a human press. `NoSpendingWithoutApproval` enforces that, and it now
+actually ships (§283). But a coordinator that does not know a specialist costs money routes to it
+as freely as to a search, so the bullet says so where the routing decision is made. Naming the cost
+is the cheap half of the defence; the gate is the half that holds.
+
+### A registry is not a routing table
+
+`tests/test_every_specialist_is_reachable.py` holds the two together: every registered subagent
+must be a bullet in the coordinator's prompt, and must be nameable by the planner. Writing it found
+two more things:
+
+* the internal name is `exploratory_data_analysis`, not `eda` — my label table was wrong, and a
+  table generated from the internal names would have agreed with any renaming, including one that
+  left the prompt behind;
+* `research_planner` is deliberately not plannable — a step naming it would plan itself. That is
+  now a **declared** exclusion with a reason, the same shape as `claims.NO_PATHS`, so that "absent
+  from the list" means *somebody decided* rather than *somebody forgot*.
+
+The first version of the cross-check also failed on a label that was plainly present: the prompt is
+a wrapped triple-quoted string, so `'Predictive Analytics'` is split across a line break and eight
+spaces. A test that fails on formatting gets deleted rather than believed, so it normalises
+whitespace.
+
+### And the module said seven
+
+`subagents.py` opened with *"The coordinator delegates to seven specialist subagents"* while
+twelve were registered below it. Corrected. A count is a claim, and this one had been wrong for
+five subagents.
+
+### The rest of the audit, ranked and not acted on
+
+* **P1, `_returned` accepts a failed tool.** Confirmed: it checks `type` and `name` and never
+  `status`, so `ToolMessage(status="error")` satisfies a gate. Real, and the fix is **not** one
+  line: `_gate` forces the tool on every model call until one returns, with no escape, so refusing
+  failures would trap a run whose tool is genuinely broken. That is §278's locked conversation
+  again. It needs a retry budget and a sentence saying the gate gave up, which is a design change
+  and not a patch.
+* **P1, results correlated by tool name rather than call id.** Confirmed by reading. Reachable
+  through a resumed run or a replayed state; a stale `analyze_data` result satisfies the gate for
+  a new dataset.
+* **P2, ordered gates do not enforce causal order**; **P2, a result with no `name` is ignored**;
+  **P2, `request_diagnostic_context()` returns eight empty fields as a success**. All confirmed,
+  all contained.
+* **P3, four subagents have neither artifact capture nor a claims record.** Already stated in the
+  code and on the roadmap.
+
+*Hundred-and-forty-fifth: a component can be registered, wired, gated, tested and shipped, and
+still never run — because being *reachable* is a different property from being *built*, and only
+one of them has a test.*
