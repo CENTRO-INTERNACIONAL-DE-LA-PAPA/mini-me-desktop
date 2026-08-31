@@ -154,3 +154,21 @@ def test_the_coordinator_is_told_where_a_draft_has_to_be_made():
         "the bullet must name the tool whose drafts cannot be approved"
     )
     assert "approval modal" in bullet.lower()
+
+
+def test_the_coordinator_is_told_to_look_before_asking_for_a_path():
+    """**A file bought by a press arrives with no message announcing it.**
+
+    A dataset downloaded from the Datasets panel lands in the working directory silently. The
+    researcher then asked the coordinator to analyse "the files I just downloaded" and it asked
+    for an exact path — to a 994 KB zip sitting beside it, listed in its own Outputs panel (§298).
+
+    That is `_say_where_it_ran`'s lesson at a different moment: the model was not being lazy, it
+    had never been told the file was there and did not think to look.
+    """
+    prompt = COORDINATOR_SYSTEM_PROMPT
+    assert "List the working directory before asking the user for a path" in prompt
+    assert "ls -la" in prompt, "the instruction has to name the thing to run"
+    # And what to do when the listing really is empty — a question naming what was found is one a
+    # researcher can answer; "give me the exact path" is not.
+    assert "which did you mean" in prompt.lower()

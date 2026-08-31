@@ -16959,3 +16959,64 @@ the test calls it. Mutation-checked: counting in-flight downloads again fails it
 *Hundred-and-forty-seventh: the second time you write a test that cannot fail, it is not an
 accident — it is what writing a test against a method on a large struct feels like. Move the logic
 out, or keep writing it.*
+
+## 298. A real DOI that this search never returned (2026-08-31)
+
+The datasets panel showed **29**, and the file behind it holds 29:
+
+```
+01a05961-… (this conversation)   29     ← the panel's number
+01a049f9-…                        1     ← the turn before the cap fix
+```
+
+Panel and file agree. §290 and §294 hold. And beside them, `WHAT WAS CLAIMED` read:
+
+```
+1 subagent answer · 1 claimed something that isn't there
+never returned by the search: doi:10.21223/P3/PN2RGR
+```
+
+`grep -l PN2RGR` across every conversation's search file finds it in exactly one — and it is **not
+this one**. It is `01a04513-…`, a different conversation from two days earlier.
+
+### Worse than a fabrication
+
+§289's six were invented and resolve to nothing. This one is a **real CIP dataset**, published, with
+real authors, that this search did not return. The model knows it — it is in the training data, or
+it is simply the most famous late-blight dataset CIP has.
+
+Which makes it the more dangerous failure. A reader checking §289's DOIs finds nothing and knows
+something is wrong. A reader checking this one finds a real dataset and concludes the citation is
+sound, without ever learning it was never in the search that supposedly produced it. §219 named
+this exactly: *"a persistent id composed from memory is a citation a researcher will paste into a
+paper without checking."*
+
+**The recorder was right, twice, and I doubted it once.** It is the only thing in the system that
+would have caught this.
+
+### And a file nobody told the agent about
+
+The same screenshot shows the researcher asking the coordinator to analyse *"los archivos que acabo
+de bajar"*, and the coordinator answering:
+
+> Necesito la ruta exacta del ZIP adjunto en el sandbox.
+
+The zip was 994 KB, in the conversation's folder, listed in the Outputs panel one pane to the
+right. A dataset downloaded from the panel lands in the working directory **with no message
+announcing it** — unlike an attachment, which arrives as a blockquote the prompt explains at
+length.
+
+So the model was not being lazy. Nothing had told it the file was there and it did not think to
+look, which is `_say_where_it_ran`'s lesson at a different moment: *"The model was guessing,
+because nothing had ever told it."*
+
+The prompt now says to list the working directory before asking for a path, and — when the listing
+genuinely has nothing matching — to name what it *did* find. *"The folder has `x.csv` and `y.zip`;
+which did you mean?"* is a question a researcher can answer. *"Give me the exact path"* is one they
+have to go and look up on the tool's behalf.
+
+The structural half is still open: a downloaded file could announce itself the way an attachment
+does, rather than relying on the model to look.
+
+*Hundred-and-forty-eighth: the citation that survives checking is the one to fear. A wrong answer
+that fails a spot-check protects itself; a right-looking answer from the wrong source does not.*
