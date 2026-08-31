@@ -5,6 +5,17 @@ summary.
 
 ## Core fields to extract
 
+- `persistent_id`
+  - Dataverse field: `global_id` on the search result — **copy it, never compose it**.
+  - If the record instead carries `protocol`, `authority` and `identifier` as
+    separate fields, join them as `<protocol>:<authority>/<identifier>`.
+  - **If no such field is present on the record, omit the dataset.** A CIP DOI is
+    a citation a researcher pastes into a paper: one you reconstructed from a
+    title, from a URL, or from what you already knew about CIP's collections
+    will look exactly like one you read, and it has already reached a
+    researcher's screen that way (docs §289, §298). There is no shape of guess
+    that is better than leaving it out.
+
 - `title`
   - Dataverse field: `title`
 - `description`
@@ -42,10 +53,10 @@ summary.
 ## Required user-facing summary fields
 
 For recommended datasets, return these whenever available:
+- DOI or persistent ID — copied from `global_id`, per the rule above
 - title
 - description
 - authors
-- DOI or persistent ID
 - repository or collection context
 - subjects or keywords
 - file availability

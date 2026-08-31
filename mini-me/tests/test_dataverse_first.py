@@ -962,3 +962,63 @@ def test_the_kept_answer_answers_for_its_own_tool_and_no_other(whole_answer):
     whole_answer(READ_TOOL, '{"content": []}')
     assert mcp_tools.last_full_answer(READ_TOOL) == '{"content": []}'
     assert mcp_tools.last_full_answer("snippet_search") is None, "one answer, and it is named"
+
+
+# --- what the skill teaches --------------------------------------------------------------------
+
+def _skill(name: str) -> str:
+    return (
+        Path(__file__).resolve().parent.parent / "skills" / "dataverse" / "references" / name
+    ).read_text(encoding="utf-8")
+
+
+def test_the_identifier_is_the_one_field_with_a_documented_source():
+    """**The one field that must be copied had nowhere documented to copy it from.**
+
+    `metadata_extraction_rules.md` mapped every core field to its Dataverse source — `title` to
+    `title`, `authors` to `author -> authorName` — and listed the persistent id only under
+    "required summary fields", with no source named. So the model was told to *produce* the one
+    string a researcher pastes into a paper, and given a source for everything else (§299).
+    """
+    rules = _skill("metadata_extraction_rules.md")
+    assert "`persistent_id`" in rules, "the id must be a core field with a source"
+    assert "global_id" in rules, "and the source must be named"
+    assert "copy it, never compose it" in rules.lower()
+    # And the honest fallback, which the other subagents' prompts already carry: omit rather than
+    # guess. A reconstructed DOI is indistinguishable from a read one.
+    assert "omit the dataset" in rules.lower()
+
+
+def test_the_skill_no_longer_teaches_an_argument_that_does_not_exist():
+    """`read_search_results` takes `file_path`. `filename` is a hard error (§220).
+
+    The middleware strips it, so the stale instruction cost nothing but the model's attention —
+    which is not nothing, and is exactly what a skill file spends.
+    """
+    workflow = _skill("discovery_workflow.md")
+    assert 'filename="dataverse_search.json"' not in workflow or "does not exist" in workflow, (
+        "if the old argument is still named, it must be named as the mistake it was"
+    )
+    assert "Call it with no arguments" in workflow
+
+
+def test_the_skill_no_longer_claims_successive_searches_overwrite():
+    """`_accumulate` keeps every search this turn (§286). The doc said the opposite."""
+    workflow = _skill("discovery_workflow.md")
+    assert "simply\n     overwrite this file" not in workflow
+    assert "every result from every search this turn is kept" in " ".join(workflow.split())
+
+
+def test_the_schema_field_names_where_the_identifier_comes_from():
+    """`Field(description=...)` is what the model reads when it fills the field in.
+
+    It said *"Dataset DOI or persistent identifier."* — a description of what the value **is**,
+    with no word about where to get it, while every sibling field read the same declarative way.
+    So the id was one more thing to author (§299).
+    """
+    from backend.schemas import DataVerseFindings
+
+    described = DataVerseFindings.model_fields["persistent_id"].description or ""
+    assert "global_id" in described, "the source field has to be named where it is filled in"
+    assert "copied verbatim" in described
+    assert "omit the dataset" in described, "and the honest fallback has to be there too"
