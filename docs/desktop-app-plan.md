@@ -16663,3 +16663,69 @@ a diagnosis and a symptom.
 *Hundred-and-forty-second: a message that names what did not happen is worth less than one that
 quotes what did. Every diagnostic this project has added twice was added the second time to say
 what it saw.*
+
+## 293. Nine more, found by asking someone else (2026-08-31)
+
+Two defects in `mcp_tools.py` had been found one at a time, each costing a release: the pointer
+nobody followed (§291) and the sentence after the JSON (§292). Rather than wait for the third, the
+researcher offered to put the file in front of another model, and did.
+
+It came back with nine more across seven functions, and it was right about the one that mattered
+most to my own reasoning:
+
+> `_mcp_save_threshold` expects tool names to start with server names such as `dataverse`, but
+> this file itself selects tools named `SearchCIPDataverse`.
+
+`"searchcipdataverse".startswith("dataverse")` is **False**. So both dataverse tools get the
+128,000 fallback and the 512,000 entry written for them has never once applied — which is why a
+314 KB read took the trim path rather than the save path, and why §291's fix addressed the rarer
+of the two.
+
+**Not fixed, deliberately.** Correcting the prefix would make dataverse results *skip* capping
+until 512 KB, handing the model 300 KB of JSON on an ordinary search. The table was written when
+these results were expected to be small; they are not. The cap is doing the right thing by
+accident, and the entry is what is wrong. Recorded here rather than silently repaired, because
+"fix the obvious bug" would have made the product worse.
+
+### The one that broke a fix from two hours earlier
+
+> `_mcp_result_to_text` joins blocks with `\n---\n`, producing two JSON documents separated by a
+> non-JSON delimiter.
+
+§291 taught `_keep` to follow the pointer to the saved file — and then called `json.loads` on the
+whole file. A two-block answer is two documents with a separator, so it fails with *Extra data*
+and discards both. The same defect as §292, wearing a different delimiter, inside the recovery
+path built for §292's sibling. Fixed: each section is parsed on its own and the records
+concatenated, a section that will not parse is skipped **and counted**, because losing one block of
+four is a different fact from losing all four.
+
+### The rest, verified and ranked
+
+Confirmed by reading, not yet acted on. Each is real; none is reachable from the desktop's own
+path today, and all of them change behaviour for every MCP rather than for one tool:
+
+* `_truncate_mcp_content_blocks` **`break`s** at the first over-budget block, so every later block
+  vanishes — and the omission count only counts records dropped *inside* the current block, so the
+  message understates by however many blocks followed. Pure loss, no upside.
+* `_trim_json_array_text` rebuilds `{wrap_key: kept}` and **discards every sibling field** —
+  `total`, `next_cursor`, `facets`. Pagination is lost, so a caller cannot even know to ask again.
+* It takes the **first** top-level list, which is whichever key JSON happened to order first. A
+  `{"facets": [...], "data": [...]}` answer keeps the facets and drops the records.
+* `_truncate_str_result` cuts head and tail at byte offsets that can land inside a token, so
+  neither retained half is recoverable JSON.
+* `_save_mcp_to_sandbox` ignores `awrite`'s return value, and the real contract is
+  `WriteResult(error=...)` rather than an exception — so a failed write emits a success pointer to
+  a file that does not exist. The same shape of mistake §285 fixed in `ledger.append`.
+* Its filename is `<tool>_%Y%m%d_%H%M%S.txt`, and this project has already logged **three searches
+  inside one second** (§283's transcript). The second write silently replaces the first.
+* `_make_mcp_error_handler` turns an exception into prose, so a tool failure and a search with no
+  results reach a JSON consumer identically.
+
+### What asking cost, and what it bought
+
+Twenty minutes of somebody else's compute, against two releases already spent finding two of these
+by symptom. The nine include one that corrected my model of the code and one that broke a fix I had
+shipped ninety minutes earlier and believed in.
+
+*Hundred-and-forty-third: a second reader is cheapest exactly where a first reader has already been
+wrong twice. Both of my errors here were confident.*

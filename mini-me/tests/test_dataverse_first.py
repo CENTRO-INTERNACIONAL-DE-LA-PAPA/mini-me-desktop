@@ -841,3 +841,50 @@ def test_an_unusable_answer_says_what_it_actually_was(caplog):
         _answering(SearchResultsFile(sandbox), sandbox, "<html>502 Bad Gateway</html>")
     said = "\n".join(record.getMessage() for record in caplog.records)
     assert "the answer began: <html>502 Bad Gateway" in said
+
+
+# --- a saved file is not one document -------------------------------------------------------------
+
+def test_a_saved_answer_written_as_several_blocks_files_all_of_them():
+    """**`_mcp_result_to_text` joins content blocks with `\\n---\\n`.**
+
+    Two blocks is two valid JSON documents with a delimiter between them, so `json.loads` on the
+    file fails with *Extra data* and discards both — §292's defect wearing a different separator,
+    inside the recovery path §291 added for it.
+    """
+    first = json.dumps({"content": [{"global_id": "doi:1/a"}, {"global_id": "doi:1/b"}]})
+    second = json.dumps({"content": [{"global_id": "doi:1/c"}]})
+    sandbox = _Sandbox(files={SAVED: f"{first}\n---\n{second}"})
+
+    _answering(SearchResultsFile(sandbox), sandbox, _pointer_text(), artifact={"saved_path": SAVED})
+    assert _kept_ids(sandbox) == ["doi:1/a", "doi:1/b", "doi:1/c"]
+
+
+def test_one_unreadable_block_costs_that_block_and_not_the_file(caplog):
+    """Losing one section of three is a different fact from losing all three, and is said."""
+    good = json.dumps({"content": [{"global_id": "doi:1/kept"}]})
+    sandbox = _Sandbox(files={SAVED: f"{good}\n---\n<html>502</html>"})
+
+    with caplog.at_level("WARNING", logger="backend.middleware.dataverse_first"):
+        _answering(
+            SearchResultsFile(sandbox), sandbox, _pointer_text(), artifact={"saved_path": SAVED}
+        )
+    assert _kept_ids(sandbox) == ["doi:1/kept"]
+    assert any("1 of 2 section(s)" in record.getMessage() for record in caplog.records)
+
+
+def test_a_saved_answer_with_nothing_readable_says_so(caplog):
+    sandbox = _Sandbox(files={SAVED: "<html>502 Bad Gateway</html>"})
+    with caplog.at_level("WARNING", logger="backend.middleware.dataverse_first"):
+        _answering(
+            SearchResultsFile(sandbox), sandbox, _pointer_text(), artifact={"saved_path": SAVED}
+        )
+    assert not sandbox.written
+    assert any("held no records" in record.getMessage() for record in caplog.records)
+
+
+def test_a_saved_block_under_another_key_is_still_records():
+    """`_trim_json_array_text` names the list after whatever key the tool used."""
+    sandbox = _Sandbox(files={SAVED: json.dumps({"data": [{"global_id": "doi:1/x"}]})})
+    _answering(SearchResultsFile(sandbox), sandbox, _pointer_text(), artifact={"saved_path": SAVED})
+    assert _kept_ids(sandbox) == ["doi:1/x"]
