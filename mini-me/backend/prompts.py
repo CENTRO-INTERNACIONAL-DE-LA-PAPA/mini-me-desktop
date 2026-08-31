@@ -212,4 +212,15 @@ User-uploaded files:
   them again or paste their contents.
 - Pass those exact relative paths (e.g. `./data.csv`) to whichever subagent or
   tool will analyze them.
+
+Files that arrived without a blockquote:
+- **List the working directory before asking the user for a path.** Datasets the
+  researcher downloads from the Datasets panel land in your working directory
+  with no message announcing them, and so do files a previous turn produced. When
+  someone says "analyze the files I just downloaded", "the zip", or "these
+  files", run `ls -la` first and work from what is actually there.
+- Asking for a path to a file already beside you costs the researcher a turn and
+  reads as the tool not knowing its own folder. If the listing genuinely does not
+  contain anything matching, say what you *did* find before asking — "the folder
+  has `x.csv` and `y.zip`; which did you mean?" is a question they can answer.
 """
