@@ -11,6 +11,7 @@ hard dependency on the sandbox class.
 """
 
 import asyncio
+import contextvars
 import json
 import os
 from datetime import datetime
@@ -258,6 +259,39 @@ def _truncate_tool_result_any(result: Any, tool_name: str) -> Any:
     return result
 
 
+#: The last answer that was too big to hand the model whole, before it was cut down.
+#:
+#: **The model's budget is not the researcher's.** Everything below this line — the 128 KB cap,
+#: the trimmed array, the pointer — exists so an answer fits in a context window, and all of it is
+#: right for that purpose. None of it is right for the copy kept in the conversation folder, which
+#: a person opens and which the datasets panel renders: a search returning a hundred datasets
+#: should file a hundred, whatever the model was shown (§294).
+#:
+#: A `ContextVar` rather than a return value because the capping happens inside the tool's own
+#: coroutine, several frames below the middleware that wants it, through code this file does not
+#: own. Per-context, so two concurrent tool calls cannot read each other's — the same argument
+#: `minime_local.spine` makes for the same reason.
+#:
+#: Set **only** when the answer was actually too big. Under the cap the model gets the whole thing
+#: and the consumer can read it from the result, so serialising a copy of every small answer would
+#: be pure cost.
+_full_answer: contextvars.ContextVar[tuple[str, str] | None] = contextvars.ContextVar(
+    "minime_full_mcp_answer", default=None
+)
+
+
+def last_full_answer(tool_name: str) -> str | None:
+    """The untruncated text of the most recent oversized call to `tool_name`, if there was one.
+
+    `None` when the last big answer came from a different tool, or when nothing was capped — both
+    of which mean *read the result you were given*, which is already whole.
+    """
+    held = _full_answer.get()
+    if held and held[0] == tool_name:
+        return held[1]
+    return None
+
+
 def _mcp_save_threshold(tool_name: str) -> int:
     """Return the byte threshold for `tool_name` above which we save to disk."""
     for prefix, limit in MCP_SAVE_THRESHOLDS.items():
@@ -373,7 +407,17 @@ def _make_mcp_tools_resilient(tools: list[Any]) -> list[Any]:
             ) -> Any:
                 result = await _orig(*args, **kwargs)
                 threshold = _mcp_save_threshold(_name)
-                if _mcp_result_bytes(result) <= threshold:
+                size = _mcp_result_bytes(result)
+                # Kept whole for whoever files it, before anything below cuts it down for the
+                # model. Bookkeeping must never cost a tool call, so a failure here is silent by
+                # design — the consumer falls back to the capped result, which is today's
+                # behaviour (§294).
+                if size > MCP_TOOL_OUTPUT_MAX_BYTES:
+                    try:
+                        _full_answer.set((_name, _mcp_result_to_text(result)))
+                    except Exception:  # noqa: BLE001
+                        pass
+                if size <= threshold:
                     return result
                 sandbox = _active_sandbox.get()
                 if sandbox is not None:
