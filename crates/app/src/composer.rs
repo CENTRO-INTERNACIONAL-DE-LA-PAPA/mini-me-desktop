@@ -1183,12 +1183,17 @@ impl Element for ComposerElement {
 
         let (selection, cursor) = if selected_range.is_empty() {
             let (row, x) = position(cursor);
+            // Shorter than the row and centred in it, rather than edge to edge — a caret the
+            // full line height touches the row above and below it, which reads as a divider
+            // between rows rather than a mark on one of them.
+            let caret_height = line_height * 0.7;
+            let caret_inset = (line_height - caret_height) / 2.;
             (
                 Vec::new(),
                 Some(fill(
                     Bounds::new(
-                        point(bounds.left() + x, row_top(row)),
-                        gpui::size(px(2.), line_height),
+                        point(bounds.left() + x, row_top(row) + caret_inset),
+                        gpui::size(px(2.), caret_height),
                     ),
                     rgb(theme::accent()),
                 )),
