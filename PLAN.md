@@ -8,8 +8,9 @@ Three jobs. Order set by Piero on 2026-09-01: **`feat/ui-update` first, and noth
 from `feat/wsl2less` until he has spoken to Luciano.**
 
 1. **Adopt `feat/ui-update`** — the split of `main.rs`. ✅ **DONE** — `d51ac4c`.
-2. **Quiet the two diagnostic panels** — WHAT RAN and WHAT WAS CLAIMED. ← next
-3. **Fix the stray-file recovery** — plots written somewhere else, no way to bring them in.
+2. **Quiet the two diagnostic panels** — WHAT RAN and WHAT WAS CLAIMED. ✅ **DONE** — `70544f4`.
+3. **Fix the stray-file recovery** — ⚠️ **HALF DONE** (`70544f4`). The offer is reachable;
+   *detection* still misses a script that writes beside itself. See below.
 4. **`feat/wsl2less`** — *on hold at Piero's instruction.* Not to be touched until he asks.
 
 **A consequence of the hold, recorded so it is not rediscovered:** the `cwd` field job 3
@@ -155,10 +156,26 @@ And the note the researcher actually saw is a third code path: `message.unverifi
 filenames with no directory**. There is nothing there for a button to copy even in
 principle — which is why the fix cannot simply be "put a button on that note".
 
-### The fix
+### Done in `70544f4` — the offer is reachable
 
-**Stop parsing the command string; look at the filesystem.** The colleague's `cwd` field
-makes this possible: we now know where each command actually ran.
+- [x] The button moved out of the WHAT RAN modal onto the answer that named the files.
+- [x] `place_recovery_offer` puts it on the newest flagged answer, and on the newest answer
+      when nothing is flagged — the case a script that writes beside itself produces.
+- [x] `recovery_offer` keeps the note's count and the button's count apart, and says so when
+      they disagree.
+- [x] Three tests, each mutation-checked.
+
+### Still open — detection
+
+The offer can only fetch what `Command.wrote` knows about, and that is still decided by
+`ledger.outside`, which reads **absolute paths out of the command text**. A script that
+writes `missingness.png` next to itself names nothing, so the file is invisible to the
+recovery path however good the button is. **This is the remaining half of the reported
+defect** and it needs the filesystem, not the string.
+
+**Stop parsing the command string; look at the filesystem.** Luciano's `cwd` field makes
+this cheap — but it is on `feat/wsl2less`, which is on hold. Either wait, or derive the
+working directory independently here.
 
 - [ ] **2.1** A test first, red before anything else: a command whose text names no path,
       run in a folder outside the conversation, writing one file — assert it is offered for
