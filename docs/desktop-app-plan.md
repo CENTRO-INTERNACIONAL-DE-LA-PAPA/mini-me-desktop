@@ -17218,3 +17218,52 @@ ran.
 *Hundred-and-fifty-first: a working directory answers where code ran; a conversation directory
 answers who can find the result. Reusing one path for both questions makes each component locally
 consistent and the product wrong at their join.*
+
+## 302. The input's parent is not the output directory (2026-09-01)
+
+A first-turn upload exposed the original Windows dataset as:
+
+`/mnt/c/Users/LENOVO/Documents/workshop mini-me/datasets/native_potato_biodiversity/native_potato_biodiversity_dirty.csv`
+
+The prompt simultaneously claimed that path was *"already saved in the sandbox working
+directory"*. It was not. On a blank conversation the backend had not assigned a thread id, so the
+desktop could not compute the conversation folder. It queued the source, ran the whole model turn
+with the original absolute path, and copied the input into the thread only after the answer
+finished. The cleaning script used the input's parent as `base` and wrote the cleaned CSV, cleaning
+log, profiling summary, quality table, and report beside the researcher's original. Later EDA and
+diagnostic scripts used relative output directories and correctly landed in the thread, which made
+one enquiry split across two unrelated folders.
+
+### Create the address, copy the input, then ask the model
+
+The sidecar already creates the LangGraph thread immediately before `stream_turn`. That is the
+first moment all parts of the workspace address exist, and it is still before any paid model
+request. `Sidecar::submit` now carries each unadopted attachment's Windows source and the exact
+backend reference present in the prompt. After thread creation it copies the source into
+`thread_dir_in(project, thread_id)` on a blocking worker, then replaces the original reference with
+`./<landed-name>` before streaming. A collision suffix returned by `workspace::adopt` is therefore
+also the name the model receives. The researcher's original is copied, never moved or overwritten.
+
+The post-turn adoption pass remains as an idempotent UI-side fallback. If the pre-turn copy fails or
+the input exceeds the 512 MB adoption limit, the absolute reference remains readable and the turn
+is not refused; the execute-tool rule still says every output must be relative to the conversation,
+and §301's command ledger remains the recovery net. True write containment for arbitrary host shell
+commands still requires an isolated writable mount rather than command-string rewriting.
+
+### Spaces are part of a path
+
+The same live command exposed a second hole in the recovery net. `_POSIX_PATH` stopped at
+whitespace, so the path above was recorded only as
+`/mnt/c/Users/LENOVO/Documents/workshop`. Quoted absolute paths now use their closing quote as the
+boundary and preserve embedded spaces; the conservative unquoted parser remains unchanged. That
+lets bounded named-directory observation find confirmed writes if a model still escapes after the
+first-turn race is closed.
+
+The Rust producer test copies a dataset from a `workshop mini-me` directory before the turn,
+asserts the model-facing prompt contains only `./native_potato_biodiversity_dirty.csv`, and proves
+the original remains. A UI seam test proves the source/reference pair reaches the sidecar. The
+Python regression asserts the full quoted path with spaces is one path rather than a truncated
+parent.
+
+*Hundred-and-fifty-second: an attachment is not adopted when a later copy happens; it is adopted
+when every consumer, including the first one, receives the conversation's copy.*

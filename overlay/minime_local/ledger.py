@@ -80,6 +80,12 @@ SYSTEM_PREFIXES = ("/dev/", "/proc/", "/sys/", "/usr/", "/bin/", "/sbin/", "/lib
 # reporting the host of every download as an escaped write is how this becomes noise. Quoting and
 # shell metacharacters end the token, so `'/tmp/x.csv'` yields `/tmp/x.csv`.
 _POSIX_PATH = re.compile(r"(?<![\w:/])(/[A-Za-z0-9._~][^\s'\"<>|;&()\\]*)")
+# A quoted absolute path may contain spaces. Keep this separate from `_POSIX_PATH`: the plain
+# pattern remains intentionally conservative around shell syntax, while quotes give us an exact
+# boundary for the path that actually escaped in §302.
+_QUOTED_POSIX_PATH = re.compile(
+    r"(?P<quote>['\"])(?P<path>/[^'\"\r\n]+)(?P=quote)"
+)
 
 
 def named_paths(command: str) -> list[str]:
@@ -88,9 +94,17 @@ def named_paths(command: str) -> list[str]:
     Order is kept because it is how the command reads, and a researcher scanning the report is
     matching it against something they remember doing.
     """
+    command = command or ""
+    quoted = list(_QUOTED_POSIX_PATH.finditer(command))
+    spans = [(match.start("path"), match.end("path")) for match in quoted]
+    found = [(match.start("path"), match.group("path")) for match in quoted]
+    for match in _POSIX_PATH.finditer(command):
+        if any(start <= match.start(1) < end for start, end in spans):
+            continue
+        found.append((match.start(1), match.group(1).rstrip(".,:")))
+
     seen: list[str] = []
-    for match in _POSIX_PATH.finditer(command or ""):
-        path = match.group(1).rstrip(".,:")
+    for _, path in sorted(found, key=lambda item: item[0]):
         if path and path not in seen:
             seen.append(path)
     return seen

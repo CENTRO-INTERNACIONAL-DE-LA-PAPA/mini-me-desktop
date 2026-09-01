@@ -585,6 +585,17 @@ pub struct Output {
 /// unbounded one is a frozen app as much as a full disk.
 pub const ADOPT_LIMIT: u64 = 512 * 1024 * 1024;
 
+/// One attachment selected before the backend assigned the conversation a thread id.
+///
+/// `reference` is the exact path currently present in the prompt. Once `source` is copied into the
+/// newly created thread directory, that reference is replaced with a relative one before the model
+/// sees the turn.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingAttachment {
+    pub source: PathBuf,
+    pub reference: String,
+}
+
 /// Copy an attached file into the conversation's own folder, and say where it landed.
 ///
 /// # Why attachments are copied at all
@@ -641,6 +652,46 @@ pub fn adopt(folder: &Path, source: &Path) -> Result<PathBuf> {
         }
     }
     anyhow::bail!("{name} already exists a hundred times over in this conversation")
+}
+
+/// Copy first-turn attachments into the conversation and rewrite the prompt to name the copies.
+///
+/// The backend creates a thread only when the first turn starts. Previously the app sent that turn
+/// with the original attachment path and copied the input in only after the answer finished. A
+/// cleaning script reasonably used `input.parent` for its outputs, putting cleaned data and
+/// profiling reports beside the researcher's original file. This runs after thread creation but
+/// before the model request, closing that race.
+///
+/// A failed or oversized adoption leaves its reference untouched: the model can still read the
+/// original, and losing persistence is better than refusing the researcher's question. The
+/// execute-tool rule still requires relative output paths, and the command ledger remains the
+/// recovery net if the model ignores it.
+pub fn adopt_before_turn(
+    folder: &Path,
+    prompt: &str,
+    attachments: &[PendingAttachment],
+) -> String {
+    let mut prepared = prompt.to_string();
+    for attachment in attachments {
+        let size = std::fs::metadata(&attachment.source)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        if size > ADOPT_LIMIT {
+            continue;
+        }
+        match adopt(folder, &attachment.source) {
+            Ok(copy) => {
+                let Some(name) = copy.file_name().map(|name| name.to_string_lossy()) else {
+                    continue;
+                };
+                prepared = prepared.replace(&attachment.reference, &format!("./{name}"));
+            }
+            Err(error) => {
+                tracing::warn!(%error, path = %attachment.source.display(), "could not copy an attachment in before the turn");
+            }
+        }
+    }
+    prepared
 }
 
 /// The path this app can open, for a path the *agent* wrote down.
@@ -2760,6 +2811,41 @@ mod tests {
         assert_eq!(std::fs::read(&landed).expect("readable"), b"%PDF-1.7 a paper");
         // The original is untouched — this copies, it does not move somebody's file.
         assert!(source.exists());
+    }
+
+    /// §302: on a new conversation the thread id arrives only after Send. The copy and prompt
+    /// rewrite must both happen before the model receives that first turn, or a cleaning script
+    /// derives its output directory from the original attachment in Downloads.
+    #[test]
+    fn a_first_turn_reads_the_conversation_copy_not_the_originals_parent() {
+        let home = scratch("before-turn");
+        let source_dir = home.join("workshop mini-me").join("datasets");
+        std::fs::create_dir_all(&source_dir).expect("source folder");
+        let source = source_dir.join("native_potato_biodiversity_dirty.csv");
+        std::fs::write(&source, b"variety,yield\nA,4\n").expect("dataset");
+        let original = "/mnt/c/Users/LENOVO/Documents/workshop mini-me/datasets/native_potato_biodiversity_dirty.csv";
+        let prompt = format!(
+            "> Attached files (already saved in the sandbox working directory): `{original}`\n\nclean it"
+        );
+        let thread = home.join("Mini-Me").join("thread-1");
+
+        let prepared = adopt_before_turn(
+            &thread,
+            &prompt,
+            &[PendingAttachment {
+                source: source.clone(),
+                reference: original.into(),
+            }],
+        );
+
+        assert!(prepared.contains("`./native_potato_biodiversity_dirty.csv`"), "{prepared}");
+        assert!(!prepared.contains(original), "the model was still sent outside the thread");
+        assert_eq!(
+            std::fs::read(thread.join("native_potato_biodiversity_dirty.csv"))
+                .expect("conversation copy"),
+            b"variety,yield\nA,4\n"
+        );
+        assert!(source.exists(), "adoption preserves the researcher's original");
     }
 
     /// Attaching the same paper twice should not litter the folder.

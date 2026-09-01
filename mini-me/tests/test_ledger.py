@@ -65,6 +65,16 @@ def test_paths_come_out_of_quotes_and_in_the_order_written():
     assert ledger.outside(command, WORK) == ["/tmp/second.csv", "/root/first.csv"]
 
 
+def test_a_quoted_path_with_spaces_is_one_path_not_a_truncated_parent():
+    """The live attachment path contains ``workshop mini-me`` and must stay intact."""
+    source = (
+        "/mnt/c/Users/LENOVO/Documents/workshop mini-me/datasets/"
+        "native_potato_biodiversity/native_potato_biodiversity_dirty.csv"
+    )
+    command = f"python3 -c \"import pandas as pd; pd.read_csv('{source}')\""
+    assert ledger.named_paths(command) == [source]
+
+
 def test_an_entry_says_what_ran_and_what_it_named():
     record = ledger.entry(
         "python3 -c \"open('/tmp/x','w')\"",
