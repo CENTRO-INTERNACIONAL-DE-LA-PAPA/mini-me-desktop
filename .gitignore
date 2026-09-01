@@ -11,8 +11,14 @@ Cargo.lock.orig
 .idea/
 .vscode/
 
-# Claude Code session + linked worktrees (never commit — holds build output)
-.claude/
+# Claude Code session state and the linked worktrees under `.claude/worktrees/` — never
+# commit these, they hold whole checkouts and their build output.
+#
+# `.claude/*` rather than `.claude/`: git will not look inside an excluded *directory*, so
+# the negation below cannot rescue anything if the directory itself is the pattern.
+.claude/*
+# ...except skills. A checked-in prompt is source — it is how the team shares one.
+!.claude/skills/
 
 # A Mini-Me copy assembled by scripts/bundle-backend.sh for a packaged build. Still not
 # tracked — it is build output, not source.

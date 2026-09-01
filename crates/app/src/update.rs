@@ -1594,7 +1594,13 @@ mod tests {
             .expect("the helper logs somewhere")
             .to_string_lossy()
             .into_owned();
-        let pane = include_str!("main.rs");
+        // The Setup pane itself lives in components/settings_view.rs (main.rs holds only
+        // state/logic since the UI split); check both so this test does not depend on
+        // exactly which file the rendering code happens to live in.
+        let pane = concat!(
+            include_str!("main.rs"),
+            include_str!("components/settings_view.rs"),
+        );
         assert!(
             pane.contains(&name),
             "the Setup pane does not name {name}, so a failed swap leaves nothing findable"
