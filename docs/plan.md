@@ -1,8 +1,12 @@
 # Working plan — adopt Luciano's branches, recover stray files, quiet the UI
 
-Scratch plan for the work Piero asked for on 2026-09-01. The long-form record stays in
-`docs/desktop-app-plan.md` (§300 is the last entry); this file is the step-by-step for
-three jobs, and gets deleted when they land.
+Step-by-step for the work Piero asked for on 2026-09-01, kept beside
+`docs/desktop-app-plan.md` (the long-form record — §300 is its last entry) rather than
+inside it, because this is a checklist that gets ticked and eventually deleted, not a
+decision worth reading in two years.
+
+**Read `docs/handover.md` first** if you are new to this repo: it carries the rules, the
+failures worth not repeating, and the same open work with more context around each item.
 
 Three jobs. Order set by Piero on 2026-09-01: **`feat/ui-update` first, and nothing
 from `feat/wsl2less` until he has spoken to Luciano.**

@@ -23,11 +23,24 @@ goes away.
 > [`docs/desktop-app-plan.md`](docs/desktop-app-plan.md) — the risk register plus the
 > execution logs (§8–§17).
 
+## Picking this up
+
+New to the repo, or taking over development? Read these two first, in order:
+
+1. [`docs/handover.md`](docs/handover.md) — what the project is, the rules that are not
+   negotiable, the failures that cost weeks and how to avoid repeating them, and how to
+   build, test and release.
+2. [`docs/plan.md`](docs/plan.md) — the open work as a checklist, newest state first.
+
+[`docs/desktop-app-plan.md`](docs/desktop-app-plan.md) is the long-form record behind
+both: one numbered section (§N) per problem and what was done about it. The `§` markers
+in code comments point here, and they are how a decision gets reconstructed later.
+
 ## Layout
 
 ```
 crates/app        the desktop binary (GPUI app + backend supervisor)
-docs/             the Phase 6 spike plan
+docs/             the design record, the handover, and the open-work checklist
 ```
 
 ## Windows (the primary platform)
