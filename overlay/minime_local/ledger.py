@@ -17,17 +17,19 @@ one tool that has never had either.
 
 # What is claimed, exactly
 
-Two things, and neither is "what the command wrote":
+Three things, with deliberately different strengths:
 
 * **The command ran**: its text, its exit code, when, and for how long. Exact.
 * **These absolute paths appear in its text and are not under the conversation folder.** A property
   of the string, checkable by reading it. `python -c "...open('/tmp/x.csv','w')..."` names
   `/tmp/x.csv`, and that is all this says about it.
+* **These files in the command's real working directory changed while it ran.** A bounded
+  filesystem observation, independent of whether the command text named them.
 
-A command can write somewhere it never names — a script it invokes, a library's cache, a relative
-path after a `cd`. This will not see those, and says so. The value is not completeness; it is that
-the failure which actually happened, twice, is the one this makes visible on the day it happens
-rather than a week later.
+A command can still write beyond both views — after changing to a directory it never names,
+through a background process that outlives it, or past the scan's safety limit. The value is not
+completeness; it is that the relative-write failure which actually happened is visible on the day
+it happens rather than a week later.
 """
 
 from __future__ import annotations
@@ -119,6 +121,13 @@ def outside(command: str, work_dir: str | PurePosixPath) -> list[str]:
 #: since it is what a copy button would act on.
 CLOCK_SLACK = 1.0
 
+#: The working-directory scan is on `execute`'s hot path. A command may unpack a dataset or build a
+#: virtualenv, so it has both a depth and an entry budget. Hitting either is reported by
+#: :func:`observed_writes`; a silent cap would merely turn the live defect into a missing-513th-file
+#: defect (§301).
+SCAN_MAX_DEPTH = 3
+SCAN_MAX_ENTRIES = 512
+
 
 def written_during(paths: Iterable[str], start: float, end: float) -> list[str]:
     """Which of `paths` exist as files and were modified while the command ran.
@@ -149,6 +158,162 @@ def written_during(paths: Iterable[str], start: float, end: float) -> list[str]:
     return written
 
 
+def observed_writes(
+    work_dir: str | PurePosixPath,
+    start: float,
+    end: float,
+    *,
+    max_depth: int = SCAN_MAX_DEPTH,
+    max_entries: int = SCAN_MAX_ENTRIES,
+) -> tuple[list[str], bool]:
+    """Files under the command's real cwd whose mtime falls inside its execution window.
+
+    Breadth-first and deterministic so shallow outputs win when the budget is exhausted. Symlinked
+    directories are never followed: the command may create one pointing at a home directory or an
+    ancestor, and this is a bounded observation of one cwd rather than a general filesystem crawl.
+
+    Returns ``(files, truncated)``. The boolean belongs in the record and the warning belongs in the
+    backend log; either without the other leaves one of the researcher and developer unable to tell
+    "nothing was written" from "the scan stopped first".
+    """
+    from pathlib import Path
+
+    root = Path(str(work_dir)).absolute()
+    return _observed_writes_in_roots(
+        [root], start, end, max_depth=max_depth, max_entries=max_entries
+    )
+
+
+def observed_writes_under(
+    paths: Iterable[str],
+    start: float,
+    end: float,
+    *,
+    max_depth: int = SCAN_MAX_DEPTH,
+    max_entries: int = SCAN_MAX_ENTRIES,
+) -> tuple[list[str], bool]:
+    """Files changed beneath directory paths explicitly named by a command.
+
+    A shell's working directory is private state: a process launched in the conversation can run
+    ``cd /tmp/job && python analysis.py`` without changing the cwd visible to its parent. The
+    absolute directory in that command is still useful evidence, but only as a bounded place to
+    observe — never as proof that every existing file there is the command's output.
+
+    The entry budget is shared across all named roots. Nested duplicate roots are collapsed before
+    walking, so repeating a directory in a long command cannot multiply either work or results.
+    Files named directly are handled by :func:`written_during`; this function deliberately walks
+    directories only.
+    """
+    from pathlib import Path
+
+    roots: list[Path] = []
+    for raw in paths:
+        candidate = Path(raw).absolute()
+        try:
+            if candidate.is_symlink() or not candidate.is_dir():
+                continue
+        except OSError:
+            continue
+
+        # Keep only the shallowest distinct roots. This is lexical on purpose: resolving would
+        # follow a symlink, which the observation contract explicitly refuses to do.
+        if any(_is_within(candidate, root) for root in roots):
+            continue
+        roots = [root for root in roots if not _is_within(root, candidate)]
+        roots.append(candidate)
+
+    roots.sort(key=str)
+    return _observed_writes_in_roots(
+        roots, start, end, max_depth=max_depth, max_entries=max_entries
+    )
+
+
+def _is_within(path: Any, parent: Any) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def _observed_writes_in_roots(
+    roots: Iterable[Any],
+    start: float,
+    end: float,
+    *,
+    max_depth: int,
+    max_entries: int,
+) -> tuple[list[str], bool]:
+    """The shared bounded walk behind cwd and command-named-directory observation."""
+    from collections import deque
+
+    roots = list(roots)
+    pending = deque((root, 0) for root in roots)
+    candidates: list[str] = []
+    inspected = 0
+    truncated = False
+
+    while pending:
+        directory, depth = pending.popleft()
+        try:
+            entries = sorted(directory.iterdir(), key=lambda entry: entry.name)
+        except OSError:
+            continue
+        for candidate in entries:
+            if inspected >= max_entries:
+                truncated = True
+                pending.clear()
+                break
+            inspected += 1
+            try:
+                if candidate.is_symlink():
+                    continue
+                if candidate.is_file():
+                    candidates.append(str(candidate.absolute()))
+                elif candidate.is_dir() and candidate.name != RECORD_DIR:
+                    if depth < max_depth:
+                        pending.append((candidate, depth + 1))
+                    else:
+                        truncated = True
+            except OSError:
+                continue
+
+    if truncated:
+        where = ", ".join(str(root) for root in roots)
+        logger.warning(
+            "minime_local: stopped observing writes in %s at the safety limit "
+            "(%d entries, depth %d); later files may be absent from recovery",
+            where,
+            max_entries,
+            max_depth,
+        )
+    return written_during(candidates, start, end), truncated
+
+
+def paths_outside(
+    paths: Iterable[str], work_dir: str | PurePosixPath
+) -> list[str]:
+    """Absolute ``paths`` not inside the researcher's conversation directory.
+
+    Unlike :func:`outside`, these paths came from the filesystem rather than command text. Keeping
+    the two functions separate is the safety property: a named path may be an input, while an
+    observed write is the only kind the recovery button may act on automatically.
+    """
+    from pathlib import Path
+
+    base = Path(str(work_dir)).absolute()
+    reported: list[str] = []
+    for raw in paths:
+        candidate = Path(raw).absolute()
+        try:
+            candidate.relative_to(base)
+        except ValueError:
+            path = str(candidate)
+            if path not in reported:
+                reported.append(path)
+    return reported
+
+
 def entry(
     command: str,
     *,
@@ -157,6 +322,8 @@ def entry(
     work_dir: str | PurePosixPath,
     at: str,
     wrote: list[str] | None = None,
+    cwd: str | PurePosixPath | None = None,
+    scan_truncated: bool = False,
 ) -> dict[str, Any]:
     """One line of the record.
 
@@ -173,9 +340,12 @@ def entry(
         "clipped": clipped,
         "exit": exit_code,
         "seconds": None if seconds is None else round(seconds, 2),
+        "cwd": str(cwd if cwd is not None else work_dir),
         "outside": named,
-        # A subset of `outside`, never more: something the command did not name cannot be checked.
-        "wrote": [path for path in (wrote or []) if path in named],
+        # Independent of `outside`: this list comes from filesystem observation, not string
+        # parsing. A relative write may be here without ever appearing in the command text.
+        "wrote": list(dict.fromkeys(wrote or [])),
+        "scan_truncated": scan_truncated,
     }
 
 

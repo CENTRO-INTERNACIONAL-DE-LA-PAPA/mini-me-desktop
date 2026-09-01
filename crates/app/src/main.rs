@@ -7827,11 +7827,16 @@ mod tests {
         let commands = workspace::decode_commands(
             "{\"command\":\"a\",\"outside\":[\"/tmp/x.png\",\"/tmp/y.png\"],\"wrote\":[\"/tmp/x.png\",\"/tmp/y.png\"]}\n\
              {\"command\":\"b\",\"outside\":[\"/tmp/x.png\"],\"wrote\":[\"/tmp/x.png\"]}\n\
-             {\"command\":\"c\",\"outside\":[\"/tmp/read.csv\"],\"wrote\":[]}",
+             {\"command\":\"c\",\"outside\":[\"/tmp/read.csv\"],\"wrote\":[]}\n\
+             {\"command\":\"python analysis.py\",\"outside\":[],\"wrote\":[\"/tmp/z.png\"]}",
         );
         let files = files_left_outside(&commands);
-        // Two commands, three `wrote` entries, two distinct files — and the read is not among them.
-        assert_eq!(files, vec!["/tmp/x.png".to_string(), "/tmp/y.png".to_string()]);
+        // A duplicate, two named writes, and one relative write found only from cwd observation.
+        assert_eq!(files, vec![
+            "/tmp/x.png".to_string(),
+            "/tmp/y.png".to_string(),
+            "/tmp/z.png".to_string(),
+        ]);
         assert!(!files.contains(&"/tmp/read.csv".to_string()), "a path only named is never copied");
     }
 
@@ -8132,19 +8137,19 @@ mod tests {
     /// What the Outputs panel says about a conversation's commands.
     ///
     /// A free function so the *wording* is testable, because the wording is the feature: the phrase
-    /// that matters names files the panel below it cannot show, and it has to say **named** rather
-    /// than **wrote** — the producer sees paths in a command's text and nothing more.
+    /// that matters names files the panel below it cannot show. It says **wrote** only for a path
+    /// the filesystem observation confirmed and **named** for the weaker command-text evidence.
     #[test]
-    fn the_summary_says_named_and_never_says_wrote() {
+    fn the_summary_uses_the_strongest_evidence_it_has() {
         let fixture = include_str!("../tests/fixtures/command-record.jsonl");
         let commands = workspace::decode_commands(fixture);
         let (summary, loud) = commands_summary(&commands);
 
-        assert!(summary.starts_with("4 commands"), "{summary}");
+        assert!(summary.starts_with("5 commands"), "{summary}");
         assert!(summary.contains("1 failed"), "{summary}");
         // One command is *confirmed* to have written outside, so the line says so — that is a fact
         // about a file, established from its mtime, not a reading of the command's text.
-        assert!(summary.contains("1 wrote a file outside this conversation"), "{summary}");
+        assert!(summary.contains("2 wrote a file outside this conversation"), "{summary}");
         assert!(loud, "something landed outside, so the line is drawn in the accent colour");
     }
 

@@ -188,6 +188,7 @@ impl Workbench {
 }
 
 
+
 impl Workbench {
     pub(crate) fn delete_modal(&self, target: &DeleteTarget, cx: &mut Context<Self>) -> impl IntoElement {
         let (title, body, action) = match target {
@@ -2294,9 +2295,9 @@ impl Workbench {
     /// how it accumulates; it is read to answer "what did that just do", so the last command is the
     /// one being looked for.
     ///
-    /// The heading states the limit rather than burying it in a docstring nobody here will read:
-    /// these are paths the commands *named*, and a command can write somewhere it never names.
-    /// Saying that once, where the list is, is the difference between a report and a false promise.
+    /// The heading states the limit rather than burying it in a docstring nobody here will read.
+    /// The producer checks named paths and performs a bounded scan of the command's real cwd; if
+    /// that scan stops early the row says so rather than turning an incomplete scan into silence.
     pub(crate) fn commands_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let commands = self.thread_commands();
         let escaped = commands.iter().filter(|command| command.escaped()).count();
@@ -2305,8 +2306,9 @@ impl Workbench {
             ui::Label::new(
                 "Every command this conversation ran. A path shown in the accent colour was \
                  watched appearing while the command ran, so the command wrote it; a faint one \
-                 was only mentioned and may have been read. Either way a command can write \
-                 somewhere it never names, and nothing here can see that.",
+                 was only mentioned and may have been read. Observation is bounded to the \
+                 command's working directory; writes elsewhere or past its safety limit may not \
+                 appear.",
             )
             .muted()
             .size(ui::Size::Compact),
@@ -2359,6 +2361,13 @@ impl Workbench {
                         .size(ui::Size::Compact),
                 );
             }
+            if !command.cwd.is_empty() {
+                row = row.child(
+                    ui::Label::new(format!("working directory: {}", command.cwd))
+                        .muted()
+                        .size(ui::Size::Compact),
+                );
+            }
 
             // Two different sentences, because they are two different claims. A file watched to
             // appear during the command is a fact; a path merely mentioned may have been read.
@@ -2372,6 +2381,29 @@ impl Workbench {
                     ui::Label::new(format!("{verb}: {path}"))
                         .colour(tone)
                         .size(ui::Size::Compact),
+                );
+            }
+            // A relative write found by the cwd scan does not appear in `outside`, because that
+            // list means exactly "an absolute path named in the command text". Show both without
+            // forcing one into the other; conflating them is the defect §301 closes.
+            for path in command
+                .wrote
+                .iter()
+                .filter(|path| !command.outside.contains(path))
+            {
+                row = row.child(
+                    ui::Label::new(format!("wrote, outside this conversation: {path}"))
+                        .colour(theme::accent())
+                        .size(ui::Size::Compact),
+                );
+            }
+            if command.scan_truncated {
+                row = row.child(
+                    ui::Label::new(
+                        "working-directory scan stopped at its safety limit; later files may be absent",
+                    )
+                    .colour(theme::warning())
+                    .size(ui::Size::Compact),
                 );
             }
             body = body.child(row);
@@ -2618,4 +2650,3 @@ impl Workbench {
             )
     }
 }
-

@@ -728,24 +728,26 @@ pub struct Command {
     pub exit: Option<i64>,
     /// How long it took, in seconds.
     pub seconds: Option<f64>,
+    /// The command's real working directory, which may be a background worker's folder.
+    pub cwd: String,
     /// **Absolute paths the command named that lie outside this conversation.**
     ///
-    /// Named, not written — the producer is explicit about this and so is the UI that shows it. A
-    /// command can write somewhere it never names, and nothing here can see that.
+    /// Named, not written — the producer is explicit about this and so is the UI that shows it.
     pub outside: Vec<String>,
-    /// The subset of [`Self::outside`] the command is **known** to have written.
+    /// Files the producer observed changing while the command ran, outside the conversation.
     ///
-    /// Decided by the producer from the file's own mtime against the window the command ran in, so
-    /// it is a fact about the file rather than a guess about the string. This is the only list
-    /// anything may act on: `pd.read_csv('/tmp/input.csv')` names a file the researcher owns, and
-    /// treating a named path as output is how a tidy-up steals somebody's data.
+    /// Independent of [`Self::outside`]: a relative output may be here without being named, while a
+    /// named input may be in `outside` without being here. This is the only list anything may act
+    /// on; keeping the two distinct is what prevents recovery from copying a researcher's input.
     pub wrote: Vec<String>,
+    /// Whether the bounded cwd scan stopped before examining everything.
+    pub scan_truncated: bool,
 }
 
 impl Command {
     /// Whether this one named something outside the conversation, written or merely mentioned.
     pub fn escaped(&self) -> bool {
-        !self.outside.is_empty()
+        !self.outside.is_empty() || !self.wrote.is_empty()
     }
 
     /// Whether this one is **known** to have written outside the conversation.
@@ -797,8 +799,10 @@ pub fn decode_commands(text: &str) -> Vec<Command> {
             clipped: value["clipped"].as_bool().unwrap_or(false),
             exit: value["exit"].as_i64(),
             seconds: value["seconds"].as_f64(),
+            cwd: value["cwd"].as_str().unwrap_or_default().to_string(),
             outside: strings(&value["outside"]),
             wrote: strings(&value["wrote"]),
+            scan_truncated: value["scan_truncated"].as_bool().unwrap_or(false),
         })
         .collect()
 }
@@ -2852,7 +2856,10 @@ mod tests {
         let keys: Vec<&str> = first.as_object().expect("an object").keys().map(String::as_str).collect();
 
         // What the decoder demonstrably reads: change a field in the fixture and the value changes.
-        let read = ["at", "command", "clipped", "exit", "seconds", "outside", "wrote"];
+        let read = [
+            "at", "command", "clipped", "exit", "seconds", "cwd", "outside", "wrote",
+            "scan_truncated",
+        ];
         for key in &keys {
             assert!(
                 read.contains(key) || UNREAD.iter().any(|(name, _)| name == key),
@@ -2879,14 +2886,16 @@ mod tests {
     fn every_field_the_overlay_records_is_read_back() {
         let fixture = include_str!("../tests/fixtures/command-record.jsonl");
         let commands = decode_commands(fixture);
-        assert_eq!(commands.len(), 4, "one line per command");
+        assert_eq!(commands.len(), 5, "one line per command");
 
         let first = &commands[0];
         assert_eq!(first.at, "2026-08-25T09:14:03Z");
         assert!(first.text.starts_with("python3 -c"), "{}", first.text);
         assert_eq!(first.exit, Some(0));
         assert_eq!(first.seconds, Some(1.4));
+        assert_eq!(first.cwd, "/mnt/c/Users/piero/Documents/Mini-Me/019ff651-0cd7-71c1");
         assert!(!first.clipped);
+        assert!(!first.scan_truncated);
         assert!(!first.escaped(), "it stayed inside the conversation");
         assert!(!first.failed());
 
@@ -2902,13 +2911,20 @@ mod tests {
         assert!(!broken.escaped(), "and failing is not the same as landing outside");
 
         // **The distinction everything downstream rests on.** The second command named a path it
-        // did not write — that is the read case, and nothing may act on it. The fourth is
-        // confirmed written, and is the only kind a copy button may ever touch.
+        // did not write — that is the read case, and nothing may act on it. The fourth named no
+        // absolute path but its cwd scan observed the relative output, which is the live defect.
         assert!(escaped.escaped() && !escaped.left_files(), "named without writing");
-        let created = &commands[3];
+        let relative = &commands[3];
+        assert!(relative.outside.is_empty(), "nothing absolute appeared in the command text");
+        assert_eq!(relative.cwd, "/tmp/background-worker");
+        assert_eq!(relative.wrote, vec!["/tmp/background-worker/missingness.png".to_string()]);
+        assert!(relative.left_files() && relative.escaped());
+
+        // The fifth is both named and observed. Both shapes are actionable, for different reasons.
+        let created = &commands[4];
         assert_eq!(created.wrote, vec!["/tmp/late-blight.csv".to_string()]);
         assert!(created.left_files());
-        assert_eq!(created.outside, created.wrote, "wrote is always a subset of named");
+        assert_eq!(created.outside, created.wrote);
     }
 
     /// A record written by a process that may have been killed mid-write.
@@ -3232,4 +3248,3 @@ mod tests {
         assert_eq!(windows_path_for("/mnt/c"), None);
     }
 }
-

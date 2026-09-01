@@ -357,8 +357,8 @@ def _provider_of(spec) -> str:
     return head.strip()
 
 
-def _forwarded_config() -> dict:
-    """The run config to start background work with, taken from the live run.
+def _forwarded_config(runtime_config: dict | None = None) -> dict:
+    """The run config to start background work with, taken from the launch tool's runtime.
 
     Upstream's `start_async_task` calls `client.runs.create(thread_id, assistant_id,
     input=…)` and passes **no config at all**. For a hosted deployment that is fine — the
@@ -369,16 +369,23 @@ def _forwarded_config() -> dict:
     * `recursion_limit` falls back to 25, and this background worker is a whole
       coordinator — it burns most of that on middleware before doing any work.
 
-    Reading the parent run's own config means the background worker runs on exactly the
-    model the researcher picked, with exactly the budget their own turns get.
+    Reading the parent run's own config means the background worker runs on exactly the model the
+    researcher picked, with exactly the budget their own turns get. `ToolRuntime.config` is the
+    first source because it crosses the tool boundary explicitly. `get_config()` is only the
+    compatibility fallback; it has already been empty in a real launch while the runtime still
+    carried the thread id (§301).
     """
-    try:
-        from langgraph.config import get_config
+    config = runtime_config or {}
+    if not config:
+        try:
+            from langgraph.config import get_config
 
-        config = get_config() or {}
-    except Exception as exc:  # noqa: BLE001  # no runnable context, or an SDK change
-        logger.warning("minime_local: no live run config to forward to background work: %s", exc)
-        config = {}
+            config = get_config() or {}
+        except Exception as exc:  # noqa: BLE001  # no runnable context, or an SDK change
+            logger.warning(
+                "minime_local: no live run config to forward to background work: %s", exc
+            )
+            config = {}
 
     configurable = config.get("configurable") or {}
     forwarded = {key: configurable[key] for key in FORWARDED_CONFIG_KEYS if configurable.get(key)}
@@ -457,7 +464,7 @@ def _forwarding_config(middleware, specs: list[dict]):
 
         # Read here, at the launch, not when the tool was built — a graph is constructed per
         # request, including read-only ones with no model in them.
-        forwarded = _forwarded_config()
+        forwarded = _forwarded_config(getattr(runtime, "config", None))
         # Mark the run as a background worker, so the graph it builds knows what it is without
         # depending on a ContextVar surviving the trip (docs §114).
         forwarded.setdefault("configurable", {})[BACKGROUND_RUN_KEY] = True
