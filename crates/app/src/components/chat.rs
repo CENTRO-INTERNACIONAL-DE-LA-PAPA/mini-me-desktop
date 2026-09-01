@@ -1139,6 +1139,50 @@ impl Workbench {
             );
         }
 
+        // **And the way to get them back, here, where the note is.** This control has existed
+        // since §279 and lived at the bottom of the WHAT RAN modal: Outputs panel, click the
+        // card, scroll. A researcher whose eight plots landed in another folder read the note
+        // above, found nothing to press, and lost the figures — *"I couldnt bring the plots
+        // because any button appeared!!"*. The offer was two clicks away from the sentence that
+        // explains why it is needed (§301).
+        //
+        // Once per conversation, not once per note: `recovery_on` decides which message carries
+        // it, because `collect_outside` fetches everything whichever button is pressed.
+        if self.recovery_on == Some(index) {
+            if let Some((label, caveat)) = recovery_offer(message.unverified.len(), self.stray.len())
+            {
+                block = block.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .w_full()
+                        .min_w_0()
+                        .gap_1()
+                        .child(
+                            div().flex().flex_row().child(
+                                ui::Button::new(
+                                    ("recover-stray", index),
+                                    if self.collect_in_flight {
+                                        "Bringing them in…".to_string()
+                                    } else {
+                                        label
+                                    },
+                                )
+                                .tone(ui::Tone::Accent)
+                                .size(ui::Size::Compact)
+                                .disabled(self.collect_in_flight)
+                                .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                    workbench.collect_outside(cx);
+                                })),
+                            ),
+                        )
+                        .children(caveat.map(|note| {
+                            ui::Label::new(note).muted().size(ui::Size::Compact)
+                        })),
+                );
+            }
+        }
+
         // Files remain after the answer that explains them. Preserve §162–§164's two bounded
         // galleries here: keeping PR #11's old per-file loop would compile and pass unit tests
         // while silently turning seven plots back into seven full transcript cards.

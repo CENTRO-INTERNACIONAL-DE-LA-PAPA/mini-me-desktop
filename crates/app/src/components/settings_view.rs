@@ -1042,6 +1042,16 @@ impl Workbench {
                     self.draft.async_subagents,
                     2,
                 ),
+                // Named for what it puts on screen, not for the reader it is aimed at: "developer
+                // mode" would be a claim about who deserves it, and the researcher checking a
+                // citation before submission is exactly who needs it most (§301).
+                (
+                    "Show what ran and what was claimed",
+                    "Adds two lines to Outputs comparing what the agent said it did against \
+                     what is in this conversation's folder.",
+                    self.draft.run_record,
+                    3,
+                ),
             ]
         } else {
             Vec::new()
@@ -1054,7 +1064,8 @@ impl Workbench {
                         match toggle {
                             0 => workbench.draft.local_execution = !workbench.draft.local_execution,
                             1 => workbench.draft.approve_execute = !workbench.draft.approve_execute,
-                            _ => workbench.draft.async_subagents = !workbench.draft.async_subagents,
+                            2 => workbench.draft.async_subagents = !workbench.draft.async_subagents,
+                            _ => workbench.draft.run_record = !workbench.draft.run_record,
                         }
                         cx.notify();
                     }),

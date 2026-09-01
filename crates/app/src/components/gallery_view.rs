@@ -2088,6 +2088,18 @@ impl Workbench {
     /// says how many — because that is §160's failure, and the whole point is that it is legible on
     /// the day it happens rather than a week later.
     pub(crate) fn commands_line(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        // **Hidden unless asked for.** *"I dont like to see in the ui the What was claimed and
+        // the what ran because that noise to users."* Gated here rather than at the call site so
+        // both lines and `outputs_are_empty`'s count go quiet together — the panel must not
+        // decide it has something to say and then draw nothing (§277, §301). Kept reachable in
+        // Settings because this is the only thing that checks what was said against what is on
+        // disk, and it has been right twice about a fabricated DOI.
+        // `draft` rather than a mirrored field: it starts as the stored settings and Save writes
+        // it back, so the toggle previews live — which for a control whose whole effect is
+        // "does this appear" is the demonstration, not a leak of unsaved state.
+        if !self.draft.run_record {
+            return None;
+        }
         let commands = self.thread_commands();
         if commands.is_empty() {
             return None;
@@ -2138,6 +2150,18 @@ impl Workbench {
     ///
     /// Shown only when a subagent answered, so an ordinary conversation gains no furniture.
     pub(crate) fn claims_line(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        // **Hidden unless asked for.** *"I dont like to see in the ui the What was claimed and
+        // the what ran because that noise to users."* Gated here rather than at the call site so
+        // both lines and `outputs_are_empty`'s count go quiet together — the panel must not
+        // decide it has something to say and then draw nothing (§277, §301). Kept reachable in
+        // Settings because this is the only thing that checks what was said against what is on
+        // disk, and it has been right twice about a fabricated DOI.
+        // `draft` rather than a mirrored field: it starts as the stored settings and Save writes
+        // it back, so the toggle previews live — which for a control whose whole effect is
+        // "does this appear" is the demonstration, not a leak of unsaved state.
+        if !self.draft.run_record {
+            return None;
+        }
         let claims = self.thread_claims();
         if claims.is_empty() {
             return None;

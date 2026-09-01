@@ -501,12 +501,82 @@ fn files_left_outside(commands: &[workspace::Command]) -> Vec<String> {
     found
 }
 
+/// Which message carries the offer to fetch files written outside this conversation.
+///
+/// `messages` is `(is_from_the_researcher, named_nothing_missing)` per transcript row, which is
+/// everything the rule needs and nothing it does not — a free function so the placement can be
+/// tested without a window, the same reason `commands_summary` is one.
+///
+/// **Newest flagged answer first.** That is the message the researcher is looking at when they
+/// go hunting for a plot, and it is where §279's button should have been all along instead of
+/// two clicks inside a diagnostic modal nobody opens (§301).
+///
+/// **And the newest answer when nothing is flagged, which is not a fallback but the case that
+/// matters.** A script that writes `plot.png` next to itself names no path, so `ledger.outside`
+/// — which reads absolute paths out of the *command text* — records nothing, and no message ever
+/// gets a note. The files are still there and still fetchable, because `wrote` is decided by the
+/// file's own mtime rather than by the string. Anchoring the offer to the note would have hidden
+/// it in exactly the situation that produced eight orphaned figures.
+fn place_recovery_offer(stray: &[String], messages: &[(bool, bool)]) -> Option<usize> {
+    if stray.is_empty() {
+        return None;
+    }
+    let answers = || {
+        messages
+            .iter()
+            .enumerate()
+            .filter(|(_, (from_researcher, _))| !from_researcher)
+    };
+    answers()
+        .filter(|(_, (_, nothing_missing))| !nothing_missing)
+        .next_back()
+        .or_else(|| answers().next_back())
+        .map(|(index, _)| index)
+}
+
+/// The offer beside §175's note, and the caveat that has to travel with it.
+///
+/// **Two different lists, and the wording may not blur them.** The note above is built from names
+/// the *answer* used, parsed out of prose. This button acts on absolute paths a command was
+/// watched writing, decided by the file's own mtime. A name in one is not evidence of a path in
+/// the other — they can overlap completely, partly, or not at all — so the count here is the
+/// button's own and never the note's.
+///
+/// When the button can fetch fewer than the note named, that gap is stated. Pressing a control
+/// that says eight and produces six is how §272's *"I pressed it and nothing happened"* starts,
+/// and the difference is not a failure: a name nothing was seen writing is a name nothing knows
+/// where to look for.
+fn recovery_offer(named: usize, recoverable: usize) -> Option<(String, Option<String>)> {
+    if recoverable == 0 {
+        return None;
+    }
+    let label = format!(
+        "Copy {recoverable} file{} into this conversation",
+        if recoverable == 1 { "" } else { "s" }
+    );
+    // Only when the two counts disagree. Said under every offer, it would be a sentence about
+    // mtime windows under a button that already did exactly what it promised.
+    let caveat = (recoverable < named).then(|| {
+        "only files a command was watched writing can be fetched — a name nothing was seen \
+         writing is one nothing knows where to look for"
+            .to_string()
+    });
+    Some((label, caveat))
+}
+
 /// Whether the Outputs panel has nothing at all to say.
 ///
 /// **A turn that ran commands has something to say even with no files**, and that is not an edge
 /// case — it is the case this whole record exists for. A command that wrote everything to `/tmp`
 /// leaves `files == 0`, and the first version of the panel checked only files and buckets, so it
 /// went silent in exactly the situation §160 describes (§277).
+///
+/// **And with `run_record` off, that silence comes back — on purpose, and only here.** Both lines
+/// are hidden by default now (§301), so a turn that wrote everything to `/tmp` really does leave
+/// this panel with nothing, exactly as before §277. What makes that acceptable is that the thing
+/// §277 was protecting is no longer in this panel: the offer to fetch those files sits on the
+/// answer that named them, in the transcript, and reads `Workbench::stray` — which no setting
+/// gates. The panel going quiet costs a diagnostic line; it cannot cost anybody their figures.
 fn outputs_are_empty(files: usize, buckets: usize, commands: usize, claims: usize) -> bool {
     files == 0 && buckets == 0 && commands == 0 && claims == 0
 }
@@ -2140,6 +2210,23 @@ struct Workbench {
     /// on.
     collecting: Option<Result<protocol::Collected, String>>,
     collect_in_flight: bool,
+    /// Absolute paths this conversation's commands were **watched writing** outside it.
+    ///
+    /// Cached because the offer to fetch them is drawn beside a transcript message, and
+    /// `transcript_message` runs per visible row inside a virtualized list — reading the command
+    /// ledger off disk there would put a file read in the scroll path. Refreshed by
+    /// `check_file_claims`, which already walks the workspace and already re-runs as outputs
+    /// settle, so this costs one more read at the point the answer is being checked anyway.
+    stray: Vec<String>,
+    /// Which transcript message carries the offer, if any.
+    ///
+    /// **One offer per conversation, never one per message.** The files are the conversation's,
+    /// not any single turn's — `collect_outside` fetches all of them whichever button is pressed —
+    /// so repeating the control under every flagged answer would be three buttons that do the
+    /// same thing. It sits on the newest message that named a missing file, which is where the
+    /// researcher is already looking, and on the newest answer otherwise (see
+    /// `Self::place_recovery_offer` for why the second case has to exist at all).
+    recovery_on: Option<usize>,
     /// Whether this install is an unzipped bundle or a `cargo build` inside a checkout.
     ///
     /// Read once at startup rather than per render, and kept beside the standing because the two
@@ -2548,6 +2635,8 @@ impl Workbench {
             delete_interrupts_work: false,
             collecting: None,
             collect_in_flight: false,
+            stray: Vec::new(),
+            recovery_on: None,
             install,
             project: None,
             buckets: Vec::new(),
@@ -5135,6 +5224,24 @@ impl Workbench {
                 self.transcript[index].unverified = missing;
                 changed = true;
             }
+        }
+
+        // **The offer moves with the note, and exists without one.** Refreshed here rather than
+        // at render because both inputs are already in hand: the per-message `unverified` lists
+        // were just recomputed above, and the ledger read is the same kind of cost as the
+        // workspace walk this function opens with.
+        self.stray = files_left_outside(&self.thread_commands());
+        let placed = place_recovery_offer(
+            &self.stray,
+            &self
+                .transcript
+                .iter()
+                .map(|message| (message.role == "you", message.unverified.is_empty()))
+                .collect::<Vec<_>>(),
+        );
+        if self.recovery_on != placed {
+            self.recovery_on = placed;
+            changed = true;
         }
         changed
     }
@@ -7735,6 +7842,73 @@ mod tests {
             "{\"command\":\"python3 read.py\",\"outside\":[\"/tmp/theirs.csv\"],\"wrote\":[]}",
         );
         assert!(files_left_outside(&commands).is_empty());
+    }
+
+    /// **The case that produced eight orphaned figures, as a test.**
+    ///
+    /// A researcher asked for plots. The agent wrote them beside the script it ran, in a folder
+    /// that was not this conversation's, and the answer named them. The note appeared. No button
+    /// did, because §279's control lived at the bottom of the WHAT RAN modal — and none of that
+    /// is visible from any single unit, which is why this asserts the *placement* rather than
+    /// either half of it (§301).
+    #[test]
+    fn the_offer_sits_on_the_answer_that_named_the_missing_files() {
+        let stray = vec!["/tmp/work/missingness.png".to_string()];
+        // (from_researcher, named_nothing_missing) — ask, answer, ask, flagged answer.
+        let transcript = [(true, true), (false, true), (true, true), (false, false)];
+        assert_eq!(place_recovery_offer(&stray, &transcript), Some(3));
+
+        // **Newest, when several answers are flagged.** The oldest is not where anyone is
+        // looking, and one conversation gets one offer however many notes it collected.
+        let twice = [(true, true), (false, false), (true, true), (false, false)];
+        assert_eq!(place_recovery_offer(&stray, &twice), Some(3));
+
+        // Nothing to fetch, nothing to press — whatever the notes say. A note can outlive the
+        // file it named, and a button that fetches nothing is §272's silent press.
+        assert_eq!(place_recovery_offer(&[], &transcript), None);
+    }
+
+    /// **A script that writes beside itself names no path, so no message is ever flagged.**
+    ///
+    /// `ledger::outside` reads absolute paths out of the *command text*; `plt.savefig("a.png")`
+    /// inside `analysis.py` puts none there. But `wrote` is decided by the file's own mtime, so
+    /// the file is known and fetchable while no note exists anywhere. Anchoring the offer to the
+    /// note would hide it precisely here — which is the reported failure, not a corner case.
+    #[test]
+    fn files_written_with_no_note_anywhere_are_still_offered() {
+        let stray = vec!["/tmp/work/correlation_heatmap.png".to_string()];
+        let unflagged = [(true, true), (false, true), (true, true), (false, true)];
+        assert_eq!(place_recovery_offer(&stray, &unflagged), Some(3));
+
+        // Never on the researcher's own message, even when it is the newest thing said.
+        let researcher_last = [(false, true), (true, true)];
+        assert_eq!(place_recovery_offer(&stray, &researcher_last), Some(0));
+        assert_eq!(place_recovery_offer(&stray, &[(true, true)]), None);
+    }
+
+    /// **The button counts its own list, and says so when the two disagree.**
+    ///
+    /// The note is parsed from prose; the button acts on mtime-verified paths. Promising eight
+    /// and delivering six is how "I pressed it and nothing happened" starts (§272).
+    #[test]
+    fn the_offer_never_promises_more_than_it_can_fetch() {
+        assert_eq!(recovery_offer(8, 0), None, "nothing fetchable, nothing offered");
+
+        let (label, caveat) = recovery_offer(6, 6).expect("six named, six fetchable");
+        assert_eq!(label, "Copy 6 files into this conversation");
+        assert!(caveat.is_none(), "the counts agree — no explanation is owed");
+
+        let (label, caveat) = recovery_offer(8, 6).expect("eight named, six fetchable");
+        assert_eq!(label, "Copy 6 files into this conversation", "6, never 8");
+        assert!(
+            caveat.expect("the gap is explained").contains("watched writing"),
+            "the caveat has to say what the button can see"
+        );
+
+        // One file is "file", and the caveat still appears when it is one of several named.
+        let (label, caveat) = recovery_offer(3, 1).expect("one fetchable");
+        assert_eq!(label, "Copy 1 file into this conversation");
+        assert!(caveat.is_some());
     }
 
     /// **The agent's pick has to match the search's row, or the mark never appears.**
