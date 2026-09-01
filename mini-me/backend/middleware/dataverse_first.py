@@ -71,6 +71,7 @@ from typing import Any
 
 from langchain.agents.middleware import AgentMiddleware
 
+from backend import mcp_tools
 from backend.middleware.tool_gate import Step, ToolsBeforeAnswering
 
 logger = logging.getLogger(__name__)
@@ -100,6 +101,15 @@ READ_TOOL = "read_search_results"
 #: cost: *"a record that cries wolf once is a record nobody reads the second time"*. The workspace
 #: copy now accumulates across the turn (§286).
 FIXED_FILENAME = "dataverse_search.json"
+
+#: What the searches themselves reported, beside the records they returned.
+#:
+#: Its own file rather than a wrapper around the array, because the array is what the panel
+#: decodes, what `claims.unsearched` walks and what a researcher opens — three readers that would
+#: all have to learn a new shape to carry one number. Under `.mini-me/` so `workspace::outputs`
+#: does not list it as something the research produced (§300).
+SEARCH_META_DIR = ".mini-me"
+SEARCH_META_NAME = "dataverse_search.meta.json"
 
 #: The sentence `mcp_tools._save_mcp_to_sandbox` hands the model instead of a large answer.
 #:
@@ -266,6 +276,13 @@ class SearchResultsFile(AgentMiddleware):
         #: Where the last search said it wrote. Instance state is per-request: the middleware is
         #: constructed in `_build_runtime_subagents`, which runs once per turn.
         self._server_path: str | None = None
+        #: What Dataverse said matched, across every search this turn — the largest, because a
+        #: broad search followed by a narrow one has still established that the broad number
+        #: exists. `0` means no search reported one, which is itself worth showing.
+        self._total_count = 0
+        #: Whether every matching record was retrieved. Starts true and only ever goes false: one
+        #: incomplete search this turn makes the accumulated file incomplete.
+        self._complete = True
         #: Every record read this turn, in the order they were first seen.
         #:
         #: **Per turn, deliberately, and that is the same scope the claims check runs at.**
@@ -308,16 +325,44 @@ class SearchResultsFile(AgentMiddleware):
         collect(getattr(result, "content", result))
         return found
 
+    @staticmethod
+    def _leading_json(text: str) -> Any:
+        """The JSON value a string *starts* with, ignoring anything after it.
+
+        **`json.loads` requires the whole string to be JSON, and upstream does not send that.**
+        When a result crosses `MCP_TOOL_OUTPUT_MAX_BYTES`, `_trim_json_array_text` keeps as many
+        whole items as fit and appends a sentence:
+
+            json.dumps(result_obj, indent=2) + "\n\n[60 item(s) omitted — output exceeded 124 KB…]"
+
+        Valid JSON followed by prose. `json.loads` rejects all of it, so a search that returned a
+        hundred datasets and was trimmed to forty produced **zero** — the same outcome as a search
+        that failed, and for three releases it read like one (§292).
+
+        `raw_decode` parses from the start and stops where the value ends, which is exactly the
+        shape being sent.
+        """
+        stripped = (text or "").lstrip()
+        if not stripped:
+            return None
+        try:
+            value, _ = json.JSONDecoder().raw_decode(stripped)
+        except ValueError:
+            return None
+        return value
+
     @classmethod
     def _payload(cls, result: Any) -> dict[str, Any] | None:
-        """The JSON object an MCP tool answered with."""
+        """The JSON object an MCP tool answered with, whatever follows it."""
         for text in cls._texts(result):
-            try:
-                parsed = json.loads(text)
-            except (ValueError, TypeError):
-                continue
+            parsed = cls._leading_json(text)
             if isinstance(parsed, dict):
                 return parsed
+            # A trimmed block can arrive as a bare array — `_trim_json_array_text` rebuilds
+            # `{wrap_key: kept}` only when the original had one, and drops the outer keys when
+            # it did not. That is still a search result.
+            if isinstance(parsed, list):
+                return {"content": parsed}
         return None
 
     # -- setting the arguments -------------------------------------------------------------
@@ -400,23 +445,84 @@ class SearchResultsFile(AgentMiddleware):
         if not text:
             logger.warning("the saved answer at %s was empty", saved)
             return None
-        try:
-            parsed = json.loads(text)
-        except (ValueError, TypeError):
-            logger.warning("the saved answer at %s is not JSON", saved)
+        return self._payload_from_saved_text(text, saved)
+
+    @classmethod
+    def _payload_from_saved_text(cls, text: str, where: str) -> dict[str, Any] | None:
+        """Every record in a saved answer, however many documents it was written as.
+
+        **A saved file is not one JSON document.** `mcp_tools._mcp_result_to_text` joins the
+        tool's content blocks with `\n---\n`, so a two-block answer is two valid JSON objects
+        with a delimiter between them — and `json.loads` on the whole file fails with *Extra
+        data*, discarding both. That is §292's defect wearing a different separator, in the
+        recovery path §291 added for it.
+
+        Each section is parsed on its own and their records are concatenated, so a multi-block
+        answer files everything rather than nothing. A section that will not parse is skipped and
+        counted, because losing one block of four is a different fact from losing all four.
+        """
+        records: list[Any] = []
+        unreadable = 0
+        sections = [part for part in text.split("\n---\n") if part.strip()]
+        for section in sections:
+            parsed = cls._leading_json(section)
+            if isinstance(parsed, dict):
+                content = parsed.get("content", parsed.get("data"))
+                if isinstance(content, list):
+                    records.extend(content)
+                    continue
+                # A single record, or a shape with no list in it: keep it rather than drop it.
+                records.append(parsed)
+            elif isinstance(parsed, list):
+                records.extend(parsed)
+            else:
+                unreadable += 1
+        if unreadable:
+            logger.warning(
+                "%d of %d section(s) in %s could not be read", unreadable, len(sections), where
+            )
+        if not records:
+            logger.warning("the saved answer at %s held no records", where)
             return None
-        if isinstance(parsed, dict):
-            return parsed
-        # A bare array is a perfectly good answer; wrap it into the shape the caller expects.
-        return {"content": parsed} if isinstance(parsed, list) else None
+        return {"content": records}
 
     # -- keeping what came back ------------------------------------------------------------
 
     def _remember_search(self, result: Any) -> None:
+        """Note where the search wrote, and **how much it found**.
+
+        `total_count` is the number Dataverse reported for the query, across every page — as
+        opposed to `item_count`, which is how many came back. The MCP read it to decide when to
+        stop paging and did not return it until today, so "found 4,000, showing 29" and "found 29"
+        were the same answer at every layer (§299). A caller that cannot see the denominator
+        cannot know to narrow the query, and a researcher reading twenty-nine rows cannot know
+        they are a sliver.
+        """
         payload = self._payload(result)
         path = (payload or {}).get("output_file")
         if isinstance(path, str) and path:
             self._server_path = path
+
+        total = (payload or {}).get("total_count")
+        kept = (payload or {}).get("item_count")
+        if isinstance(total, int) and total > 0:
+            self._total_count = max(self._total_count, total)
+        # `complete` is the search's own verdict and a partial one must not be overwritten by a
+        # later narrow query that happened to finish: once this turn has seen an incomplete
+        # search, what the file holds is incomplete.
+        if (payload or {}).get("complete") is False:
+            self._complete = False
+        if total is None:
+            # Said once per search rather than never: an MCP that predates §299 answers without
+            # it, and "we cannot tell you how many matched" is a different fact from "29 matched".
+            logger.info(
+                "%s answered without total_count — this deployment cannot say how many matched",
+                SEARCH_TOOL,
+            )
+        else:
+            logger.info(
+                "%s found %s and returned %s", SEARCH_TOOL, total, kept
+            )
 
     def _accumulate(self, content: Any) -> list[Any]:
         """Add this read's records to what the turn has already seen, in first-seen order.
@@ -454,6 +560,29 @@ class SearchResultsFile(AgentMiddleware):
             self._kept.append(record)
         return self._kept
 
+    async def _keep_totals(self, work_dir: Any) -> None:
+        """Record what the searches said they found, so the panel can show a denominator.
+
+        Never raises and never costs the records: a count nobody can read is a worse outcome than
+        a count nobody wrote, but only just — and losing the search over it would be far worse.
+        """
+        try:
+            written = await self.sandbox_backend.awrite(
+                f"{str(work_dir).rstrip('/')}/{SEARCH_META_DIR}/{SEARCH_META_NAME}",
+                json.dumps(
+                    {
+                        "total_count": self._total_count,
+                        "kept": len(self._kept),
+                        "complete": self._complete and self._total_count > 0,
+                    },
+                    indent=2,
+                ),
+            )
+            if getattr(written, "error", None):
+                logger.warning("could not keep the search totals: %s", written.error)
+        except Exception:  # noqa: BLE001 — a denominator is not worth a search
+            logger.exception("could not keep the search totals")
+
     async def _keep(self, result: Any) -> None:
         """Write the metadata into the sandbox, where Outputs and the claims check can see it.
 
@@ -462,7 +591,17 @@ class SearchResultsFile(AgentMiddleware):
         """
         if self.sandbox_backend is None:
             return
-        payload = self._payload(result)
+        # **The whole answer first, and this is the order that matters.** `_payload` reads what
+        # the *model* was given, which for a large search is a trimmed array — forty of a hundred
+        # datasets, and the sentence saying so. The researcher's copy has no reason to inherit a
+        # context budget, so if `mcp_tools` kept the untruncated answer aside, that is what gets
+        # filed (§294).
+        payload = None
+        whole = mcp_tools.last_full_answer(READ_TOOL)
+        if whole:
+            payload = self._payload_from_saved_text(whole, "the untruncated answer")
+        if not payload or "content" not in payload:
+            payload = self._payload(result)
         if not payload or "content" not in payload:
             # Too big to hand to the model, so it went to a file and we were given the address.
             payload = await self._payload_behind_pointer(result)
@@ -472,12 +611,20 @@ class SearchResultsFile(AgentMiddleware):
             capped = any(
                 TRUNCATION_MARKER in text for text in self._texts(result)
             )
+            # **With a sample of what did arrive.** "no JSON in the answer" was true and cost
+            # another release to act on, because it does not say *what* the answer was. Two
+            # hundred characters is enough to recognise a pointer, an error page, or a shape
+            # nobody has met — and this is dataset metadata from a public repository, in a local
+            # log the researcher already reads.
+            texts = self._texts(result)
+            sample = (texts[0][:200].replace("\n", " ") if texts else "nothing at all")
             logger.warning(
-                "nothing to keep from %s: %s",
+                "nothing to keep from %s: %s — the answer began: %s",
                 READ_TOOL,
                 "the answer was capped inline and the full text was not saved anywhere"
                 if capped
                 else "no JSON in the answer and no pointer to a saved copy",
+                sample,
             )
             return
         try:
@@ -493,6 +640,7 @@ class SearchResultsFile(AgentMiddleware):
                 f"{str(work_dir).rstrip('/')}/{FIXED_FILENAME}",
                 json.dumps(merged, indent=2, ensure_ascii=False),
             )
+            await self._keep_totals(work_dir)
             if getattr(written, "error", None):
                 logger.warning("could not keep %s: %s", FIXED_FILENAME, written.error)
             else:

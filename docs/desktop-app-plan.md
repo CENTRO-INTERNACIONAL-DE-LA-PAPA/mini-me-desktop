@@ -16615,38 +16615,531 @@ two days before this section, and it took all five to answer.
 *Hundred-and-forty-first: an early return with no log is a decision made where nobody can see it.
 Every one this project has found was hiding a fact somebody was already asking for.*
 
-## 292. WSL2 removed: Asta becomes a vendored dependency, not a shelled-out CLI (2026-08-30)
+## 292. JSON, and then a sentence (2026-08-31)
 
-§21 recommended keeping WSL2 "for v1" because the blocker was in Mini-Me's *own tool code*
-(`theory_tools.py`, `datavoyager_tools.py`, `paper_tools.py`, `autodiscovery_tools.py`), which
-shells out to a separately-installed `asta` CLI with POSIX-only syntax (`shlex.quote`, `|`,
-`2>/dev/null`) that `cmd.exe` cannot run. That evidence still stands — what changed is the
-premise that Asta has to be reached as an external CLI at all.
+§291's diagnostic answered on the first run, and named a case I had not predicted:
 
-`asta-plugins` (Asta's own CLI source, `pyproject.toml: name = "asta"`) is now a git submodule
-of this repo. Vendoring it as a real `uv` path dependency of `mini-me/pyproject.toml`
-(`[tool.uv.sources] asta = { path = "../asta-plugins" }`) puts `asta` inside the *same* venv
-`langgraph dev` already runs from. That reframes the §21 blocker: the four tool files no longer
-need a POSIX shell to reach `asta` at all — they spawn it as a plain native subprocess
-(`sys.executable -m asta.cli ...`, argv list, no shell=True, no pipes), which works identically
-on `cmd.exe`, PowerShell, or any Unix shell, because it's just launching the current interpreter
-with a module flag. The `python3 -c "<reducer>"` piping trick (post-processing a completed
-Asta task's JSON) is replaced by plain Python functions operating on the already-parsed dict —
-one interpreter, not two.
+```
+WARNING nothing to keep from read_search_results: no JSON in the answer and no pointer
+        to a saved copy
+```
 
-This is scoped to **local execution** specifically (`isinstance(sandbox, LocalWorkspaceBackend)`)
-— remote-sandbox execution already runs inside a real Linux sandbox, was never WSL-dependent,
-and is left exactly as it was (`sandbox.aexecute(shell_string)`).
+Three times, beside one `kept … (1 new, 1 this turn)`. So the answer was neither JSON nor a
+pointer — and `MCP_SAVE_THRESHOLDS["dataverse"]` is 512,000, well above a 314 KB read, so nothing
+had been saved and there was no address to follow. Correct, and not the cause.
 
-Consequence: `wsl.exe`, `WslTarget`, the distro-mirroring launch path, `WSLENV`, and the
-`wsl --install` guided-provisioning flow (§13, §18–§20's launch-argv design, §170's `taskkill`
-tree-reaping) are deleted from `crates/app/src/backend.rs`/`preflight.rs` — the backend now
-always runs `.venv/Scripts/langgraph.exe` natively, the same host-mode path that already existed
-alongside WSL mode. `scripts/setup-wsl.sh` is replaced by an OS-appropriate pair,
-`scripts/setup-backend.sh` (macOS/Linux) and `scripts/setup-backend.ps1` (native Windows, run
-via `powershell.exe`, never `wsl.exe`) — both now also provision `asta-plugins/` as a sibling
-checkout of the backend, since that's the relative path the `uv.sources` entry expects.
+The cause is one line in `mcp_tools._trim_json_array_text`:
 
-Clean break, not a migration: this app is pre-1.0 with no external users to preserve settings
-for, so an old WSL-shaped `backend_dir` simply fails the "checkout exists" preflight check and
-re-provisions natively — no migration code was written, and none was needed.
+```python
+return json.dumps(result_obj, indent=2) + suffix
+```
+
+Where `suffix` is `"\n\n[60 item(s) omitted — output exceeded 124 KB. Use a lower limit…]"`.
+
+A result over `MCP_TOOL_OUTPUT_MAX_BYTES` keeps as many whole items as fit and announces the rest
+in prose **after** the JSON. Which is right for the model — it reads the sentence and knows to
+narrow. It is fatal for `json.loads`, which requires the entire string to be a value. So a search
+returning a hundred datasets, trimmed to forty, produced **zero**: the same outcome as a search
+that failed, and for three releases it read like one.
+
+`raw_decode` parses from the start and stops where the value ends, which is the shape actually
+being sent. Forty datasets instead of none.
+
+### Three shapes, three paths, and they must not be confused
+
+* **JSON, possibly followed by a sentence** — parse the leading value. A trimmed block can also
+  arrive as a bare array, because `_trim_json_array_text` rebuilds `{wrap_key: kept}` only when
+  the original had an outer key.
+* **A sentence pointing at a file** — follow the address (§291). `raw_decode` refuses this
+  deliberately: the pointer carries a 2 KB *preview*, and parsing it as a payload would file the
+  preview as if it were the whole search.
+* **Neither** — say so, **and quote the first two hundred characters**.
+
+That last part is the lesson repeating. *"No JSON in the answer"* was true, and it cost a release,
+because it does not say what the answer *was*. A pointer, an error page and a shape nobody has met
+all produced the identical sentence. They now come with a sample, which is the difference between
+a diagnosis and a symptom.
+
+*Hundred-and-forty-second: a message that names what did not happen is worth less than one that
+quotes what did. Every diagnostic this project has added twice was added the second time to say
+what it saw.*
+
+## 293. Nine more, found by asking someone else (2026-08-31)
+
+Two defects in `mcp_tools.py` had been found one at a time, each costing a release: the pointer
+nobody followed (§291) and the sentence after the JSON (§292). Rather than wait for the third, the
+researcher offered to put the file in front of another model, and did.
+
+It came back with nine more across seven functions, and it was right about the one that mattered
+most to my own reasoning:
+
+> `_mcp_save_threshold` expects tool names to start with server names such as `dataverse`, but
+> this file itself selects tools named `SearchCIPDataverse`.
+
+`"searchcipdataverse".startswith("dataverse")` is **False**. So both dataverse tools get the
+128,000 fallback and the 512,000 entry written for them has never once applied — which is why a
+314 KB read took the trim path rather than the save path, and why §291's fix addressed the rarer
+of the two.
+
+**Not fixed, deliberately.** Correcting the prefix would make dataverse results *skip* capping
+until 512 KB, handing the model 300 KB of JSON on an ordinary search. The table was written when
+these results were expected to be small; they are not. The cap is doing the right thing by
+accident, and the entry is what is wrong. Recorded here rather than silently repaired, because
+"fix the obvious bug" would have made the product worse.
+
+### The one that broke a fix from two hours earlier
+
+> `_mcp_result_to_text` joins blocks with `\n---\n`, producing two JSON documents separated by a
+> non-JSON delimiter.
+
+§291 taught `_keep` to follow the pointer to the saved file — and then called `json.loads` on the
+whole file. A two-block answer is two documents with a separator, so it fails with *Extra data*
+and discards both. The same defect as §292, wearing a different delimiter, inside the recovery
+path built for §292's sibling. Fixed: each section is parsed on its own and the records
+concatenated, a section that will not parse is skipped **and counted**, because losing one block of
+four is a different fact from losing all four.
+
+### The rest, verified and ranked
+
+Confirmed by reading, not yet acted on. Each is real; none is reachable from the desktop's own
+path today, and all of them change behaviour for every MCP rather than for one tool:
+
+* `_truncate_mcp_content_blocks` **`break`s** at the first over-budget block, so every later block
+  vanishes — and the omission count only counts records dropped *inside* the current block, so the
+  message understates by however many blocks followed. Pure loss, no upside.
+* `_trim_json_array_text` rebuilds `{wrap_key: kept}` and **discards every sibling field** —
+  `total`, `next_cursor`, `facets`. Pagination is lost, so a caller cannot even know to ask again.
+* It takes the **first** top-level list, which is whichever key JSON happened to order first. A
+  `{"facets": [...], "data": [...]}` answer keeps the facets and drops the records.
+* `_truncate_str_result` cuts head and tail at byte offsets that can land inside a token, so
+  neither retained half is recoverable JSON.
+* `_save_mcp_to_sandbox` ignores `awrite`'s return value, and the real contract is
+  `WriteResult(error=...)` rather than an exception — so a failed write emits a success pointer to
+  a file that does not exist. The same shape of mistake §285 fixed in `ledger.append`.
+* Its filename is `<tool>_%Y%m%d_%H%M%S.txt`, and this project has already logged **three searches
+  inside one second** (§283's transcript). The second write silently replaces the first.
+* `_make_mcp_error_handler` turns an exception into prose, so a tool failure and a search with no
+  results reach a JSON consumer identically.
+
+### What asking cost, and what it bought
+
+Twenty minutes of somebody else's compute, against two releases already spent finding two of these
+by symptom. The nine include one that corrected my model of the code and one that broke a fix I had
+shipped ninety minutes earlier and believed in.
+
+*Hundred-and-forty-third: a second reader is cheapest exactly where a first reader has already been
+wrong twice. Both of my errors here were confident.*
+
+## 294. The model's budget is not the researcher's (2026-08-31)
+
+§292 recovered forty of a hundred datasets where the file had been getting none. Forty is not a
+hundred, and the reason it was ever forty is that the researcher's copy was being read out of the
+model's plate.
+
+Everything in `mcp_tools` — the 128 KB cap, the trimmed array, the pointer, the head-and-tail
+elision — exists so an answer fits in a context window. All of it is right for that. **None of it
+has anything to do with the file a person opens**, which the datasets panel now renders (§290). A
+search returning a hundred datasets should file a hundred, whatever the model was shown.
+
+So `_capped` keeps the untruncated text aside before anything cuts it down, and
+`SearchResultsFile._keep` reads that first:
+
+```python
+whole = mcp_tools.last_full_answer(READ_TOOL)   # a hundred
+...
+payload = self._payload(result)                 # forty, and a sentence
+```
+
+The model still sees forty and the note telling it to narrow, which is what it should see. The
+panel gets all hundred.
+
+### Why a ContextVar
+
+The capping happens inside the tool's own coroutine, several frames below the middleware that
+wants the result, through a wrapper this file does not own — the same shape of problem
+`minime_local.spine` has with `_project_namespace`, and the same answer. Per-context, so two
+concurrent tool calls cannot read each other's, and named by tool, because reading it blind would
+file a paper search as datasets. There is a test for exactly that.
+
+Set **only** when something was actually capped. Under the cap the model has the whole answer and
+the consumer can read it from the result, so serialising a copy of every small MCP answer would be
+cost with no buyer.
+
+### The order, which is the whole change
+
+Whole answer, then the model's copy, then the pointer. Getting that backwards would file forty and
+never look further, which is precisely what three releases did.
+
+### A test that asserted nothing
+
+The first version of the last test here read `mcp_tools`' source and checked that a guard appeared
+within a few lines of a call — an assertion that could pass while meaning nothing, and would have
+kept passing through a refactor that broke the property. Replaced with a direct test of
+`last_full_answer`, which is the whole contract between the two files.
+
+A test that cannot fail is worse to own than no test, because it is counted.
+
+*Hundred-and-forty-fourth: when two consumers share one pipe, the one with the tighter budget sets
+the width for both unless somebody says otherwise. Ask which limits are the constraint and which
+are just the first reader's.*
+
+## 295. A specialist nobody was told about (2026-08-31)
+
+The second audit came back with six defects in `tool_gate.py` and `subagents.py`. One of them
+named something smaller than what was actually there:
+
+> The structured-plan instructions enumerate every relevant specialist except `autodiscovery`,
+> despite it being registered.
+
+True, and it is worse than the planner. `grep -c "^  - " backend/prompts.py` answers **11**, and
+the registry holds **12**. `autodiscovery_subagent` is registered, has its tools wired, has a
+credit gate written for it and a panel in the app — and appears in **none** of the three lists
+that tell a model it exists: the coordinator's *Available sub-agents*, the planner's `action`
+field description, and the planner's own prompt.
+
+So the coordinator has never known it was there. The only way to reach it was to name it in a
+question, and the researcher's conversation list carries the workaround as a title: *"usea
+autodiscovery to test this data"*.
+
+Nothing errored. The specialist simply never ran unless it was asked for by name — an absence, not
+a failure, which is why it survived being registered, gated, tested and shipped.
+
+### The bullet says what it costs
+
+AutoDiscovery spends the researcher's Asta credits, and the standing rule on this project is that
+none may be spent without a human press. `NoSpendingWithoutApproval` enforces that, and it now
+actually ships (§283). But a coordinator that does not know a specialist costs money routes to it
+as freely as to a search, so the bullet says so where the routing decision is made. Naming the cost
+is the cheap half of the defence; the gate is the half that holds.
+
+### A registry is not a routing table
+
+`tests/test_every_specialist_is_reachable.py` holds the two together: every registered subagent
+must be a bullet in the coordinator's prompt, and must be nameable by the planner. Writing it found
+two more things:
+
+* the internal name is `exploratory_data_analysis`, not `eda` — my label table was wrong, and a
+  table generated from the internal names would have agreed with any renaming, including one that
+  left the prompt behind;
+* `research_planner` is deliberately not plannable — a step naming it would plan itself. That is
+  now a **declared** exclusion with a reason, the same shape as `claims.NO_PATHS`, so that "absent
+  from the list" means *somebody decided* rather than *somebody forgot*.
+
+The first version of the cross-check also failed on a label that was plainly present: the prompt is
+a wrapped triple-quoted string, so `'Predictive Analytics'` is split across a line break and eight
+spaces. A test that fails on formatting gets deleted rather than believed, so it normalises
+whitespace.
+
+### And the module said seven
+
+`subagents.py` opened with *"The coordinator delegates to seven specialist subagents"* while
+twelve were registered below it. Corrected. A count is a claim, and this one had been wrong for
+five subagents.
+
+### The rest of the audit, ranked and not acted on
+
+* **P1, `_returned` accepts a failed tool.** Confirmed: it checks `type` and `name` and never
+  `status`, so `ToolMessage(status="error")` satisfies a gate. Real, and the fix is **not** one
+  line: `_gate` forces the tool on every model call until one returns, with no escape, so refusing
+  failures would trap a run whose tool is genuinely broken. That is §278's locked conversation
+  again. It needs a retry budget and a sentence saying the gate gave up, which is a design change
+  and not a patch.
+* **P1, results correlated by tool name rather than call id.** Confirmed by reading. Reachable
+  through a resumed run or a replayed state; a stale `analyze_data` result satisfies the gate for
+  a new dataset.
+* **P2, ordered gates do not enforce causal order**; **P2, a result with no `name` is ignored**;
+  **P2, `request_diagnostic_context()` returns eight empty fields as a success**. All confirmed,
+  all contained.
+* **P3, four subagents have neither artifact capture nor a claims record.** Already stated in the
+  code and on the roadmap.
+
+*Hundred-and-forty-fifth: a component can be registered, wired, gated, tested and shipped, and
+still never run — because being *reachable* is a different property from being *built*, and only
+one of them has a test.*
+
+## 296. A draft nobody could approve (2026-08-31)
+
+v0.3.24 told the coordinator that AutoDiscovery exists (§295). The researcher asked for a run, and
+the gate held perfectly:
+
+> I can't start that run myself. AutoDiscovery is human-gated and only starts when you approve the
+> draft in the app modal. Use this drafted run: `934d0b29-…`
+
+Which is the correct refusal, quoting the bullet written the same day. And then:
+
+> I didnt see any approval because it drafted. No panel of approval appear.
+
+**Nothing spent, and nothing could.** The credit gate is not the problem — it is working exactly as
+designed, and `no_spending.py` blocks the shell path while the route-side nonce blocks the rest.
+The problem is that the only door to approval never opened, so the feature is unreachable in both
+directions.
+
+### Where the door is
+
+`open_approval` is fed by `decode_drafts(artifacts)`, which reads `artifacts.discoveries` with
+`status == "awaiting_approval"` **from this conversation's snapshot**. The coordinator delegated
+the work to a background worker, which is a separate graph (`BACKGROUND_GRAPH_ID`) with its own
+state. Its artifacts never fold into the coordinator's snapshot, so `snapshot.drafts` was empty and
+`open_approval` never ran.
+
+That is §259 one level further out — *"a snapshot arrives in two places, and one of them ignored
+`drafts`"* — and the reason it had never been seen is that until this morning nothing routed to
+AutoDiscovery unless the researcher named it, which puts the draft in the coordinator's own turn.
+**Making a component reachable is what exposes the paths nobody had walked.**
+
+### The half that costs nothing
+
+The coordinator's bullet now says where a draft has to be made: in the turn, never inside
+`start_async_task`, and if the dataset needs preparing first then background *that* and draft the
+run afterwards. A test holds the sentence, because a prompt line with no test is a suggestion.
+
+This does not close the gap. A worker that drafts a run anyway — because a future prompt drifts, or
+because a subagent does it — still produces an unapprovable draft, and the app has no route to ask
+*"are there drafted runs on this thread?"*: every discovery route is keyed by a `run_id` the app
+would have to already know.
+
+### The half that does not
+
+Two candidate shapes, neither built tonight:
+
+* the poll route that reports a finished worker also reports its drafts, folding them into the
+  snapshot the gate already reads — smallest change, and it keeps one door;
+* a `GET /discovery/{thread_id}/drafts` the app can ask on its own — more honest, since the gate
+  would then depend on nothing having remembered to forward anything.
+
+The second is better and the first is cheaper. It is a decision about the one code path in this
+product that spends money, taken at the end of a very long session, and it is the wrong hour to
+make it.
+
+*Hundred-and-forty-sixth: a guard that cannot be satisfied is a guard that has failed, however
+correctly it refuses. "Nothing was spent" and "nothing could be run" were the same sentence here.*
+
+## 297. Pick several, then ask (2026-08-31)
+
+The researcher described the flow they wanted three days before it existed:
+
+> *"desde el modal podemos seleccionar los dois, descargar uno o varios y después pedirle a la app
+> que analice lo que queramos"*
+
+§290 made the modal show what the search returned rather than what the model retyped. This adds the
+half that made that worth doing: a tick on each fetchable row, and one button that says how many
+files it will bring in.
+
+The agent's opinion stays where §290 put it — a mark and a sort. The selection is the researcher's.
+Those are different things and the modal now shows both without confusing them.
+
+### Where the tick can be
+
+Under exactly the condition the download button is: a dataset the access route says is entirely
+public, not already here, not in flight. A row that cannot be fetched must not be tickable, or the
+count on the button promises work that will not happen — which is §279's lesson about the copy
+button, on a different control.
+
+The row that carries **no identifier** — the one `normalise` emits when it meets a Dataverse layout
+it does not know — renders and cannot be ticked. It has no key to be ticked by, and an empty key
+would collide with every other unmapped row in the same search.
+
+### One call per file, not a batch
+
+`download_dataset` already guards its own id against a second start, reports its own failure, and
+refreshes Outputs when a file lands. A batch route would reimplement all three and report **one**
+outcome for several files, which is precisely the shape §279 had to undo. So the button loops, and
+says once, up front, how many are coming — because the per-file statuses that follow overwrite each
+other and the researcher pressed one button.
+
+### A test that agreed with itself
+
+The first version of the count test re-implemented the filter and asserted against its own copy. It
+would have passed whatever `picked_datasets` did. That is the shape §294 threw away a few hours
+earlier, written again the same day by the same author.
+
+The filter is now `still_fetchable`, a free function for the reason `commands_summary` is one, and
+the test calls it. Mutation-checked: counting in-flight downloads again fails it.
+
+*Hundred-and-forty-seventh: the second time you write a test that cannot fail, it is not an
+accident — it is what writing a test against a method on a large struct feels like. Move the logic
+out, or keep writing it.*
+
+## 298. A real DOI that this search never returned (2026-08-31)
+
+The datasets panel showed **29**, and the file behind it holds 29:
+
+```
+01a05961-… (this conversation)   29     ← the panel's number
+01a049f9-…                        1     ← the turn before the cap fix
+```
+
+Panel and file agree. §290 and §294 hold. And beside them, `WHAT WAS CLAIMED` read:
+
+```
+1 subagent answer · 1 claimed something that isn't there
+never returned by the search: doi:10.21223/P3/PN2RGR
+```
+
+`grep -l PN2RGR` across every conversation's search file finds it in exactly one — and it is **not
+this one**. It is `01a04513-…`, a different conversation from two days earlier.
+
+### Worse than a fabrication
+
+§289's six were invented and resolve to nothing. This one is a **real CIP dataset**, published, with
+real authors, that this search did not return. The model knows it — it is in the training data, or
+it is simply the most famous late-blight dataset CIP has.
+
+Which makes it the more dangerous failure. A reader checking §289's DOIs finds nothing and knows
+something is wrong. A reader checking this one finds a real dataset and concludes the citation is
+sound, without ever learning it was never in the search that supposedly produced it. §219 named
+this exactly: *"a persistent id composed from memory is a citation a researcher will paste into a
+paper without checking."*
+
+**The recorder was right, twice, and I doubted it once.** It is the only thing in the system that
+would have caught this.
+
+### And a file nobody told the agent about
+
+The same screenshot shows the researcher asking the coordinator to analyse *"los archivos que acabo
+de bajar"*, and the coordinator answering:
+
+> Necesito la ruta exacta del ZIP adjunto en el sandbox.
+
+The zip was 994 KB, in the conversation's folder, listed in the Outputs panel one pane to the
+right. A dataset downloaded from the panel lands in the working directory **with no message
+announcing it** — unlike an attachment, which arrives as a blockquote the prompt explains at
+length.
+
+So the model was not being lazy. Nothing had told it the file was there and it did not think to
+look, which is `_say_where_it_ran`'s lesson at a different moment: *"The model was guessing,
+because nothing had ever told it."*
+
+The prompt now says to list the working directory before asking for a path, and — when the listing
+genuinely has nothing matching — to name what it *did* find. *"The folder has `x.csv` and `y.zip`;
+which did you mean?"* is a question a researcher can answer. *"Give me the exact path"* is one they
+have to go and look up on the tool's behalf.
+
+The structural half is still open: a downloaded file could announce itself the way an attachment
+does, rather than relying on the model to look.
+
+*Hundred-and-forty-eighth: the citation that survives checking is the one to fear. A wrong answer
+that fails a spot-check protects itself; a right-looking answer from the wrong source does not.*
+
+## 299. Two audits, and the field with no source (2026-08-31)
+
+The researcher had had enough of partial fixes on the same symptom, and offered the thing that
+actually breaks the loop: *"incluso si deseas genera subagentes para que verifiquen"*, plus the
+location of the MCP's own source. Two read-only audits ran in parallel — one over the MCP, one over
+our side.
+
+### The MCP is remote
+
+`MCP_SERVER_CONFIGS` points at `https://dataverse-cip.fastmcp.app/mcp`. The source at
+`AskPapa/mcp_server_stdio` is where the fixes would go, and **nothing there reaches a researcher
+until somebody redeploys it.** That has to be said before proposing a line of it.
+
+### Why 29 and not 100
+
+`SearchCIPDataverse` paginates, reads `total_count` from Dataverse, uses it to decide when to
+stop — and never returns it. `SearchInfo` carries `status`, `message`, `output_file`, `item_count`
+and nothing else. **"Found 4,000, returning 29" is byte-identical to "found 29"**, for the model
+and for us.
+
+Four further paths to a short answer, none of which report anything:
+
+* `current += per_page` advances by the *requested* page size rather than `len(items)`, so any
+  short page silently skips the difference;
+* a missing or zero `total_count` makes `current + per_page >= 0` true immediately — the loop
+  breaks after one page and reports success;
+* a mid-pagination `RequestError` returns from inside the loop, discarding every page already
+  collected;
+* `raise_for_status()` throws `HTTPStatusError`, which is **not** a `RequestError` subclass, so a
+  4xx/5xx escapes uncaught — no `SearchInfo`, no file, and the previous search's file still on
+  disk to be read as if current.
+
+And `read_search_results` discards the directory it is handed, searching only its own default —
+so any search written elsewhere is unreadable, which the shipped example prompt instructs.
+
+### There is no way to reference a row
+
+Twenty-two tools; every one that takes a dataset takes a DOI or a numeric id. No ordinal, no
+"the third result", no server-side memory of the last search. **The model must retype an
+identifier.** That was the design question this audit existed to answer, and the answer is no.
+
+### The field with no source
+
+Our own audit found the sharper half. `metadata_extraction_rules.md` — the skill file that is the
+model's manual for this task — maps every core field to where it comes from: `title` → `title`,
+`authors` → `author -> authorName`, and so on for eight fields. The persistent id appears only
+further down, under *"required user-facing summary fields"*, **with no source named**.
+
+So the one string a researcher pastes into a paper was the one field the model was asked to produce
+rather than to copy. The schema said the same: `Field(description="Dataset DOI or persistent
+identifier.")` — what the value *is*, never where to get it, phrased exactly like every sibling.
+
+`subagents.py` did carry the rule in prose — *"Report the `persistent_id` exactly as it appears"* —
+and `tool_gate.py:36` states this project's own verdict on that: **"if it must be true, it cannot be
+asked for."** One line of prose against a manual and a schema that both said *author it*.
+
+All three now name `global_id` as the source, say *copy, never compose*, and give the fallback the
+other subagents already had: **omit the dataset rather than guess.** A reconstructed identifier is
+indistinguishable from a read one, which is why omission is the only honest alternative.
+
+### And a clobber of mine
+
+§290 pointed the panel at the search's own file. The audit found the reopen path still doing
+`workbench.datasets = snapshot.datasets` thirty lines after `reload_datasets()` — so a **reopened**
+conversation rendered the model's retyped rows while a live one rendered the file's. Two paths, one
+panel, different sources, and only one of them came from Dataverse. Fixed.
+
+### What is still not prevented
+
+None of this stops a model writing a DOI in **prose**, and nothing can. What it does is remove
+every place the product asked it to invent one, and keep `WHAT WAS CLAIMED` — which caught both
+real cases — as the thing that says so when it happens anyway.
+
+*Hundred-and-forty-ninth: when a model gets one field wrong and the rest right, look at what the
+instructions say about that field. Ours documented a source for every field except the one that
+mattered.*
+
+## 300. Of how many? (2026-08-31)
+
+The MCP is deployed with §299's fixes, so `SearchCIPDataverse` now answers with `total_count` and
+`complete`. This is the other end of that wire: the number reaching the researcher rather than
+stopping at the model's context.
+
+`SearchResultsFile` reads both off the search's answer and writes them beside the records, in
+`.mini-me/dataverse_search.meta.json` — its own file rather than a wrapper around the array,
+because the array has three readers (the panel decodes it, `claims.unsearched` walks it, a
+researcher opens it) and all three would have to learn a new shape to carry one integer.
+
+The panel heading and the modal title now read **`datasets · 29 of 4000`**, from one function, so
+they cannot come to disagree about the same list.
+
+### Three states, not two
+
+`total_count: 0` is **not** zero matches. It is a deployment that could not say — an MCP predating
+§299, or an instance where Dataverse omitted the field. `29 of 0` would be a claim about the corpus
+and a confident-looking one, so `denominator()` answers `None` and the heading says `29`.
+
+Two more cases where a denominator would mislead rather than inform:
+
+* **equal to the count** — `29 of 29` is noise on every complete search, which is most of them;
+* **smaller than the count** — several searches accumulate past any single query's match count
+  (§286), and `40 of 29` reads as a bug in the app rather than as a fact about Dataverse.
+
+Both answer `None`. The rule is that a denominator appears only when it tells the researcher
+something they did not already have.
+
+### One partial search makes the turn partial
+
+`complete` starts true and only ever goes false. A broad search that was cut short is not redeemed
+by a narrow one that finished afterwards: the file holds both, so what the file holds is
+incomplete, and a later `complete: true` must not overwrite that. The largest `total_count` wins
+for the same reason — a broad search having established that four thousand exist is not unsaid by
+a narrow one matching four.
+
+### What this does not do
+
+It does not make the search complete. It makes the incompleteness visible, which is the difference
+between a researcher who narrows their query and one who cites twenty-nine of four thousand
+believing that was the corpus.
+
+*Hundred-and-fiftieth: a number a system uses internally and does not return is a number it has
+decided its user does not need. That decision is almost never made on purpose.*

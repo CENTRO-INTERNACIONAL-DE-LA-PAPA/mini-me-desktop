@@ -1216,6 +1216,43 @@ fn bare_persistent_id(identifier: &str) -> String {
     lowered.trim_matches('/').to_string()
 }
 
+/// The ticked datasets that can still be fetched, in the order the list shows them.
+///
+/// A free function for the reason `commands_summary` is one: the button's label is a promise about
+/// how many files will arrive, and a promise is worth testing without a window. The first version
+/// of its test re-implemented this filter and therefore agreed with itself whatever the code did —
+/// which is the shape of test §294 threw away a few hours earlier.
+///
+/// Three sets, and the arithmetic between them is the part that goes wrong: a pick whose file has
+/// already landed, or whose download is in flight, is not another file.
+fn still_fetchable(
+    datasets: &[protocol::Dataset],
+    picked: &std::collections::HashSet<String>,
+    downloaded: &std::collections::HashMap<String, String>,
+    downloading: &std::collections::HashSet<String>,
+) -> Vec<protocol::Dataset> {
+    datasets
+        .iter()
+        .filter(|dataset| picked.contains(&dataset.persistent_id))
+        .filter(|dataset| !downloaded.contains_key(&dataset.persistent_id))
+        .filter(|dataset| !downloading.contains(&dataset.persistent_id))
+        .cloned()
+        .collect()
+}
+
+/// How many datasets to say there are, with a denominator when one was reported.
+///
+/// A free function so the wording is testable without a window, and so the panel heading and the
+/// modal title read the same — two derivations of "29 of 4,000" is two chances to disagree about
+/// what the researcher is looking at.
+fn datasets_heading(shown: usize, totals: workspace::SearchTotals) -> String {
+    match totals.denominator() {
+        // **"of" and not "/"**, because this is a sentence a researcher reads once and acts on.
+        Some(total) => format!("{shown} of {total}"),
+        None => shown.to_string(),
+    }
+}
+
 fn ranked(experiments: &[discovery::Experiment], loudest_first: bool) -> Vec<usize> {
     let mut order: Vec<usize> = (0..experiments.len()).collect();
     order.sort_by(|&a, &b| {
@@ -3265,6 +3302,15 @@ struct Workbench {
     /// **A mark on a row, never the row itself.** An identifier that is not in the search has
     /// nothing to mark, which is the whole point: it cannot be rendered, so it cannot be cited.
     recommended_ids: Vec<String>,
+    /// The datasets the researcher has ticked, by `persistent_id`.
+    ///
+    /// **Theirs, not the agent's.** The agent's opinion is a mark and a sort (§290); this is the
+    /// selection, and the whole flow the researcher described is *"select the dois, download one
+    /// or many and then ask the app to analyze whatever we want"* (§297). Cleared when the
+    /// conversation changes, and a pick drops itself once its file has landed.
+    dataset_picks: std::collections::HashSet<String>,
+    /// What this conversation's searches reported finding — the denominator, when there is one.
+    search_totals: workspace::SearchTotals,
     /// Documents the librarian indexed. See [`protocol::Document`].
     documents: Vec<protocol::Document>,
     /// What checking each reference against Crossref found, keyed by its citation text.
@@ -3809,6 +3855,8 @@ impl Workbench {
             datasets: Vec::new(),
             recommended_datasets: Vec::new(),
             recommended_ids: Vec::new(),
+            dataset_picks: std::collections::HashSet::new(),
+            search_totals: workspace::SearchTotals::default(),
             documents: Vec::new(),
             checked: HashMap::new(),
             repaired: HashMap::new(),
@@ -6429,6 +6477,9 @@ impl Workbench {
                     // until the next turn happens to answer.
                     workbench.recommended_ids.clear();
                     workbench.recommended_datasets.clear();
+                    // A tick is about *these* rows. Carrying it across would offer to fetch a
+                    // dataset the researcher chose while reading a different search.
+                    workbench.dataset_picks.clear();
                     workbench.reload_datasets();
                     // Figures this conversation produced are still on disk, so they can
                     // be shown again — history the transcript alone cannot carry.
@@ -6461,8 +6512,20 @@ impl Workbench {
                             // a conversation whose citations are all silently unverified.
                             workbench.resolve_sources(cx);
                         }
+                        // **Not `workbench.datasets`.** §290 pointed the panel at the search's
+                        // own file; this line went on overwriting it with the model's retyped
+                        // list every time a conversation was reopened, so the live path and the
+                        // reopen path rendered different things and only one of them came from
+                        // Dataverse. What the model chose is a mark and a sort, and nothing else.
                         if !snapshot.datasets.is_empty() {
-                            workbench.datasets = snapshot.datasets;
+                            workbench.recommended_ids = snapshot
+                                .datasets
+                                .iter()
+                                .map(|dataset| bare_persistent_id(&dataset.persistent_id))
+                                .filter(|id| !id.is_empty())
+                                .collect();
+                            workbench.recommended_datasets = snapshot.datasets;
+                            workbench.reload_datasets();
                         }
                         if !snapshot.documents.is_empty() {
                             workbench.documents = snapshot.documents;
@@ -15774,6 +15837,56 @@ impl Workbench {
     /// Which is the sandbox's working directory as well, so the archive is both something the
     /// researcher can open in Explorer and something the analysis subagents can read — the whole
     /// reason this is a button rather than a tool the model calls.
+    /// Tick or untick one dataset.
+    fn toggle_dataset_pick(&mut self, id: String, cx: &mut Context<Self>) {
+        if !self.dataset_picks.remove(&id) {
+            self.dataset_picks.insert(id);
+        }
+        cx.notify();
+    }
+
+    /// The ticked datasets that can still be fetched, **in the order the list shows them**.
+    ///
+    /// Read off `self.datasets` rather than out of the set, so the button's count and the order
+    /// things arrive both match what is on screen. A pick whose file already landed, or whose
+    /// download is in flight, is not offered again — the count would otherwise promise work that
+    /// will not happen.
+    fn picked_datasets(&self) -> Vec<protocol::Dataset> {
+        still_fetchable(
+            &self.datasets,
+            &self.dataset_picks,
+            &self.downloaded,
+            &self.downloading,
+        )
+    }
+
+    /// Fetch every ticked dataset.
+    ///
+    /// One call per dataset rather than a batch route: `download_dataset` already guards its own
+    /// id against a second start, reports its own failure, and refreshes Outputs when a file
+    /// lands. A batch would have to reimplement all three and would report one outcome for
+    /// several files, which is the shape §279 had to undo for the copy button.
+    fn download_picked(&mut self, cx: &mut Context<Self>) {
+        let wanted = self.picked_datasets();
+        if wanted.is_empty() {
+            return;
+        }
+        // Said once, up front, because the per-file statuses that follow overwrite each other and
+        // the researcher pressed one button.
+        self.say(
+            format!(
+                "fetching {} dataset{} into this conversation",
+                wanted.len(),
+                if wanted.len() == 1 { "" } else { "s" }
+            ),
+            cx,
+        );
+        for dataset in wanted {
+            self.dataset_picks.remove(&dataset.persistent_id);
+            self.download_dataset(dataset, cx);
+        }
+    }
+
     fn download_dataset(&mut self, dataset: protocol::Dataset, cx: &mut Context<Self>) {
         let Some(folder) = self.thread_workspace() else {
             self.status = "Start a conversation before downloading — the file needs a folder to \
@@ -15823,7 +15936,13 @@ impl Workbench {
     /// which is how five distinct records from one multi-site study rendered as five identical
     /// rows (see [`protocol::Dataset`]).
     fn datasets_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        ui::Modal::new("datasets", format!("Datasets · {}", self.datasets.len()))
+        ui::Modal::new(
+            "datasets",
+            format!(
+                "Datasets · {}",
+                datasets_heading(self.datasets.len(), self.search_totals)
+            ),
+        )
             .width(720.)
             .focus(&self.delete_focus)
             .body(
@@ -15867,17 +15986,35 @@ impl Workbench {
                             }),
                     ),
             )
-            .actions(
-                ui::actions().child(div().flex_grow()).child(
-                    ui::Button::new("datasets-close", "Close").on_click(cx.listener(
-                        |workbench, _event, _window, cx| {
-                            workbench.datasets_open = false;
-                            workbench.restore_focus = true;
-                            cx.notify();
-                        },
-                    )),
-                ),
-            )
+            .actions({
+                // Named in words, and only when it has something to do — the same rule the copy
+                // button follows (§279): a control that says "Download 0" is one somebody presses
+                // to find out what it means.
+                let picked = self.picked_datasets().len();
+                let mut actions = ui::actions().child(div().flex_grow());
+                if picked > 0 {
+                    actions = actions.child(
+                        ui::Button::new(
+                            "datasets-download-picked",
+                            format!(
+                                "Download {picked} dataset{} into this conversation",
+                                if picked == 1 { "" } else { "s" }
+                            ),
+                        )
+                        .tone(ui::Tone::Accent)
+                        .on_click(cx.listener(|workbench, _event, _window, cx| {
+                            workbench.download_picked(cx);
+                        })),
+                    );
+                }
+                actions.child(ui::Button::new("datasets-close", "Close").on_click(cx.listener(
+                    |workbench, _event, _window, cx| {
+                        workbench.datasets_open = false;
+                        workbench.restore_focus = true;
+                        cx.notify();
+                    },
+                )))
+            })
             .footer(
                 ui::Label::new(
                     "Only datasets whose files are all public can be downloaded. Restricted ones \
@@ -16021,8 +16158,40 @@ impl Workbench {
                 if access.refusal().is_none() {
                     let offer = access.offer();
                     let wanted = dataset.clone();
+                    let picked = self.dataset_picks.contains(&id);
+                    let pick_id = id.clone();
                     row = row.child(
-                        div().px_2().pb_1().child(
+                        div().px_2().pb_1().flex().flex_row().items_center().gap_2().child(
+                            // The tick. Deliberately a word rather than a checkbox glyph: this
+                            // list is read by someone deciding what to keep, and "selected" says
+                            // what the state is without needing the convention explained.
+                            div()
+                                .id(SharedString::from(format!("pick-{pick_id}")))
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(rgb(if picked {
+                                    theme::accent()
+                                } else {
+                                    theme::border()
+                                }))
+                                .text_xs()
+                                .text_color(rgb(if picked {
+                                    theme::accent()
+                                } else {
+                                    theme::text_muted()
+                                }))
+                                .hover(|style| {
+                                    let fill = theme::hover_over(theme::surface());
+                                    style.bg(rgb(fill)).cursor_pointer()
+                                })
+                                .child(if picked { "✓ selected" } else { "select" })
+                                .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                                    cx.stop_propagation();
+                                    workbench.toggle_dataset_pick(pick_id.clone(), cx);
+                                })),
+                        ).child(
                             ui::Button::new(SharedString::from(format!("get-{id}")), offer)
                                 // Accent, because this is the action the list exists for and it
                                 // must read as a control rather than as more of the row.
@@ -16869,6 +17038,10 @@ impl Workbench {
     /// wrote none — a sandboxed deployment, or a conversation from before the file existed — so
     /// that switching to the search's own answer never empties a panel that used to have rows.
     fn reload_datasets(&mut self) {
+        self.search_totals = self
+            .thread_workspace()
+            .map(|dir| workspace::search_totals(&dir))
+            .unwrap_or_default();
         let found = self
             .thread_workspace()
             .map(|dir| workspace::datasets(&dir))
@@ -17335,7 +17508,13 @@ impl Workbench {
                 .rounded_md()
                 .text_color(rgb(theme::text()))
                 .text_sm()
-                .child(format!("{label} · {count}"));
+                // The datasets bucket carries a denominator when a search reported one, so the
+                // panel and the modal say the same thing about the same list (§300).
+                .child(if label == "datasets" {
+                    format!("{label} · {}", datasets_heading(count, self.search_totals))
+                } else {
+                    format!("{label} · {count}")
+                });
             if openable {
                 heading = heading
                     // Said as well as coloured. A hover-only affordance is one a researcher finds
@@ -17952,6 +18131,96 @@ mod tests {
         let (said, shouted) = claims_summary(&blind);
         assert_eq!(said, "1 subagent answer · 1 could not be checked");
         assert!(!shouted, "it is not an accusation; nothing was compared");
+    }
+
+    /// **A count with no denominator is not an answer, and `29 of 0` is worse than either.**
+    ///
+    /// The MCP read `total_count` to decide when to stop paging and never returned it, so
+    /// twenty-nine rows read exactly like a thorough search of a twenty-nine dataset corpus
+    /// (§299). Now that it does, the panel and the modal say so — and both say it the same way,
+    /// because the wording lives in one function.
+    #[test]
+    fn the_heading_says_of_how_many_only_when_something_said_so() {
+        use workspace::SearchTotals;
+
+        let partial = SearchTotals { total: 4000, kept: 29, complete: false };
+        assert_eq!(datasets_heading(29, partial), "29 of 4000");
+
+        // Nothing reported a total. `29 of 0` would be a claim about the corpus, and a
+        // confident-looking one — a deployment that cannot count is not a corpus of nothing.
+        let unknown = SearchTotals { total: 0, kept: 29, complete: false };
+        assert_eq!(datasets_heading(29, unknown), "29");
+        assert_eq!(unknown.denominator(), None);
+
+        // The whole corpus. A denominator equal to the count is noise, not reassurance.
+        let whole = SearchTotals { total: 29, kept: 29, complete: true };
+        assert_eq!(datasets_heading(29, whole), "29");
+
+        // And a total smaller than what is on screen — several searches this turn, accumulated
+        // past any single query's match count. Showing "40 of 29" would read as a bug.
+        let accumulated = SearchTotals { total: 29, kept: 40, complete: false };
+        assert_eq!(datasets_heading(40, accumulated), "40");
+    }
+
+    /// **The count on the button is the number of files that will arrive.**
+    ///
+    /// Read off the list rather than out of the set, so a tick on a dataset that has since been
+    /// fetched, or is being fetched, stops being counted. Otherwise the label promises work that
+    /// will not happen — which is `files_left_outside`'s lesson (§279) on a different control.
+    #[test]
+    fn the_selection_counts_only_what_can_still_be_fetched() {
+        let rows = workspace::decode_datasets(include_str!(
+            "../tests/fixtures/dataverse-search.json"
+        ));
+        let ids: Vec<String> = rows
+            .iter()
+            .map(|dataset| dataset.persistent_id.clone())
+            .filter(|id| !id.is_empty())
+            .collect();
+        assert!(ids.len() >= 3, "the fixture has enough rows to select among");
+
+        let picked: std::collections::HashSet<String> = ids.iter().cloned().collect();
+        let downloaded: std::collections::HashMap<String, String> =
+            [(ids[0].clone(), "a.csv".to_string())].into_iter().collect();
+        let downloading: std::collections::HashSet<String> =
+            [ids[1].clone()].into_iter().collect();
+
+        let offered = still_fetchable(&rows, &picked, &downloaded, &downloading);
+        let offered_ids: Vec<&String> = offered.iter().map(|d| &d.persistent_id).collect();
+
+        assert_eq!(
+            offered.len(),
+            ids.len() - 2,
+            "one already here and one in flight are not two more files"
+        );
+        assert!(!offered_ids.contains(&&ids[0]) && !offered_ids.contains(&&ids[1]));
+        // And order follows the list, because that is the order the rows are read in.
+        assert_eq!(offered_ids.first(), Some(&&ids[2]));
+
+        // Nothing ticked is nothing offered — the button must not appear at all.
+        assert!(still_fetchable(&rows, &Default::default(), &downloaded, &downloading).is_empty());
+    }
+
+    /// A row with no identifier cannot be ticked, because there is nothing to tick it by.
+    ///
+    /// The producer emits one when it meets a Dataverse layout it does not know (§290). It renders
+    /// — losing a row silently is worse — but it must not join a selection keyed by identifier,
+    /// where an empty key would collide with every other unmapped row.
+    #[test]
+    fn an_unidentified_dataset_is_never_part_of_a_selection() {
+        let rows = workspace::decode_datasets(include_str!(
+            "../tests/fixtures/dataverse-search.json"
+        ));
+        let unmapped = rows.last().expect("the layout nobody has met");
+        assert_eq!(unmapped.persistent_id, "");
+
+        // The tick lives under the same condition as the download button, and that condition needs
+        // an identifier to ask the access route about at all.
+        let selectable: Vec<&protocol::Dataset> = rows
+            .iter()
+            .filter(|dataset| !dataset.persistent_id.is_empty())
+            .collect();
+        assert_eq!(selectable.len(), rows.len() - 1);
     }
 
     /// A real file in the researcher's own Downloads folder is not a missing file.

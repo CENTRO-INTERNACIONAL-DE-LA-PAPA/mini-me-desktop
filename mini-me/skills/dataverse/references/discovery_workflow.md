@@ -8,19 +8,28 @@ For CIP Dataverse, use this sequence:
 
 1. `SearchCIPDataverse`
    - Use targeted search queries.
-   - **Always set `output_filename="dataverse_search.json"`.** Never use any
-     other name. Successive searches in the same conversation simply
-     overwrite this file.
+   - **Do not pass `output_filename`.** The middleware sets it, and it sets the
+     one name the reader looks for. This document used to tell you to set it
+     yourself; that instruction moved into code because a rule two tools must
+     agree on is not something to remember across a long episode.
    - Prefer dataset-level search unless the user specifically wants files.
+   - Several narrow searches are better than one broad one, and every result
+     from every search this turn is kept — a dataset found on your first query
+     is still available to recommend after your fifth.
 
 2. `read_search_results`
-   - **Always call this with `filename="dataverse_search.json"`** (the same
-     fixed name used in step 1). Do not invent, shorten, or vary the
-     filename — any mismatch causes `read_search_results` to fail with
-     "File ... not found".
+   - **Call it with no arguments.** The middleware supplies the path.
+   - This document used to say *"always call this with
+     `filename="dataverse_search.json"`"*. That argument **does not exist** —
+     the tool takes `file_path`, and passing `filename` is a hard error that
+     made every read fail for nine days (docs §220/§221). The middleware now
+     strips it, so following the old instruction cost nothing but your
+     attention. It is corrected here so it costs neither.
    - Identify the top candidate datasets.
-   - Extract dataset title, DOI/persistent ID, description snippets, authors,
-     and other visible metadata when present.
+   - **Copy** each dataset's `global_id` verbatim as its DOI/persistent ID, and
+     extract title, description snippets, authors and other visible metadata
+     when present. A dataset whose record carries no identifier field is
+     omitted, not guessed at — see `metadata_extraction_rules.md`.
    - Use dataset-level fields already present in search results such as
      `fileCount`, keywords, subjects, publications, repository context, and
      authors whenever available.

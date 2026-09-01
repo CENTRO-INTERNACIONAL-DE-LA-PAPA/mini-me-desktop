@@ -819,7 +819,15 @@ def _is_supported_artifact_file(path: str) -> bool:
 class DataVerseFindings(BaseModel):
     """Represents the findings from a Dataverse search."""
     title: str = Field(description="Dataset title.")
-    persistent_id: str = Field(description="Dataset DOI or persistent identifier.")
+    persistent_id: str = Field(
+        description=(
+            "The dataset's DOI or persistent identifier, **copied verbatim from the "
+            "`global_id` of the search result you read**. Never compose one from a title, "
+            "a URL, or from what you already know about CIP's collections: a reconstructed "
+            "identifier looks exactly like a read one and a researcher pastes it into a "
+            "paper. If the record carries no identifier, omit the dataset instead."
+        )
+    )
     doi_url: str | None = Field(default=None, description="Dataset DOI URL when available.")
     description: str | None = Field(default=None, description="Concise dataset description.")
     authors: List[str] = Field(default_factory=list, description="Dataset authors when available.")
@@ -885,7 +893,7 @@ class PlanStep(BaseModel):
             "'Academic Research', 'Dataverse Explorer', 'Data Cleaning', "
             "'Exploratory Data Analysis', 'Diagnostic Analytics', 'Predictive "
             "Analytics', 'Hypothesis Generator', 'PDF Librarian', 'DataVoyager', "
-            "or 'Report Writer'."
+            "'AutoDiscovery', or 'Report Writer'."
         ),
     )
     prompt: str = Field(

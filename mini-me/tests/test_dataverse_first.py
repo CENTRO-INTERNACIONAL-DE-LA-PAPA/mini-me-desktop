@@ -355,7 +355,10 @@ def test_what_the_read_returned_is_kept_in_the_workspace():
     sandbox = _Sandbox()
     rows = [{"global_id": "doi:10.21223/P3/0F9T62", "name": "Late blight trials"}]
     _read_returning({"file_path": "/tmp/mcp/json_files/x.json", "content": rows}, sandbox)
-    assert list(sandbox.written) == ["/home/user/workspace/dataverse_search.json"]
+    assert sorted(sandbox.written) == [
+        "/home/user/workspace/.mini-me/dataverse_search.meta.json",
+        "/home/user/workspace/dataverse_search.json",
+    ], "the records, and what the searches said they found (§300)"
 
     # **Normalised, not verbatim** — this file is what the datasets panel renders now, so it wears
     # the app's shape rather than the MCP's (§290). The original rides along under `raw`.
@@ -483,6 +486,13 @@ def test_a_Command_wrapping_the_answer_is_read_as_well():
 
 
 # --- the copy is the turn's, not the last search's ---------------------------------------------
+
+def _totals(sandbox) -> dict:
+    """What the searches reported about themselves, as the panel reads it."""
+    return json.loads(
+        sandbox.written["/home/user/workspace/.mini-me/dataverse_search.meta.json"]
+    )
+
 
 def _kept_ids(sandbox) -> list[str]:
     """The persistent ids in the file, which is what every one of these tests is really about."""
@@ -782,3 +792,333 @@ def test_a_small_answer_still_takes_the_direct_path():
     )
     assert _kept_ids(sandbox) == ["doi:1/small"]
     assert sandbox.reads == [], "no file to follow, so none was read"
+
+
+# --- JSON, then a sentence -----------------------------------------------------------------------
+
+def _trimmed_like_upstream(kept: int, dropped: int) -> str:
+    """What `mcp_tools._trim_json_array_text` sends when a result crosses the 128 KB cap.
+
+    Valid JSON, then prose. Reproduced here from that function rather than imagined: it returns
+    `json.dumps(result_obj, indent=2) + suffix`, and the suffix is what `json.loads` chokes on.
+    """
+    rows = [{"name": f"Dataset {n}", "global_id": f"doi:10.21223/P3/ROW{n:03d}"} for n in range(kept)]
+    return json.dumps({"content": rows}, indent=2) + (
+        f"\n\n[{dropped} item(s) omitted — output exceeded 124 KB. "
+        "Use a lower limit or a more specific query for 'read_search_results'.]"
+    )
+
+
+def test_a_trimmed_answer_keeps_the_datasets_that_survived_the_trim():
+    """**Forty datasets, or zero.**
+
+    A search returning a hundred is trimmed to whatever fits in 128 KB and the rest is announced
+    in a sentence appended after the JSON. `json.loads` rejects the whole string, so the file got
+    nothing — the same outcome as a search that failed, which is how it read for three releases
+    (§292).
+    """
+    sandbox = _Sandbox()
+    _answering(SearchResultsFile(sandbox), sandbox, _trimmed_like_upstream(kept=40, dropped=60))
+
+    kept = _kept_ids(sandbox)
+    assert len(kept) == 40, f"kept {len(kept)} of the forty that survived the trim"
+    assert kept[0] == "doi:10.21223/P3/ROW000"
+
+
+def test_a_trimmed_bare_array_is_a_search_result_too():
+    """`_trim_json_array_text` rebuilds `{wrap_key: kept}` only when the original had one."""
+    sandbox = _Sandbox()
+    body = json.dumps([{"global_id": "doi:1/a"}, {"global_id": "doi:1/b"}], indent=2)
+    _answering(SearchResultsFile(sandbox), sandbox, body + "\n\n[8 item(s) omitted — …]")
+    assert _kept_ids(sandbox) == ["doi:1/a", "doi:1/b"]
+
+
+def test_prose_before_the_json_is_still_not_json():
+    """`raw_decode` parses from the start, so a pointer sentence is not mistaken for a payload.
+
+    That case has its own path — following the address — and conflating the two would file a 2 KB
+    preview as if it were the whole search.
+    """
+    assert SearchResultsFile._leading_json("Full result (306 KB) saved to `/x.txt`. {\"a\": 1}") is None
+    assert SearchResultsFile._leading_json("") is None
+    assert SearchResultsFile._leading_json("   {\"a\": 1}  trailing") == {"a": 1}
+
+
+def test_an_unusable_answer_says_what_it_actually_was(caplog):
+    """"no JSON in the answer" was true and cost a release, because it does not say *what*."""
+    sandbox = _Sandbox()
+    with caplog.at_level("WARNING", logger="backend.middleware.dataverse_first"):
+        _answering(SearchResultsFile(sandbox), sandbox, "<html>502 Bad Gateway</html>")
+    said = "\n".join(record.getMessage() for record in caplog.records)
+    assert "the answer began: <html>502 Bad Gateway" in said
+
+
+# --- a saved file is not one document -------------------------------------------------------------
+
+def test_a_saved_answer_written_as_several_blocks_files_all_of_them():
+    """**`_mcp_result_to_text` joins content blocks with `\\n---\\n`.**
+
+    Two blocks is two valid JSON documents with a delimiter between them, so `json.loads` on the
+    file fails with *Extra data* and discards both — §292's defect wearing a different separator,
+    inside the recovery path §291 added for it.
+    """
+    first = json.dumps({"content": [{"global_id": "doi:1/a"}, {"global_id": "doi:1/b"}]})
+    second = json.dumps({"content": [{"global_id": "doi:1/c"}]})
+    sandbox = _Sandbox(files={SAVED: f"{first}\n---\n{second}"})
+
+    _answering(SearchResultsFile(sandbox), sandbox, _pointer_text(), artifact={"saved_path": SAVED})
+    assert _kept_ids(sandbox) == ["doi:1/a", "doi:1/b", "doi:1/c"]
+
+
+def test_one_unreadable_block_costs_that_block_and_not_the_file(caplog):
+    """Losing one section of three is a different fact from losing all three, and is said."""
+    good = json.dumps({"content": [{"global_id": "doi:1/kept"}]})
+    sandbox = _Sandbox(files={SAVED: f"{good}\n---\n<html>502</html>"})
+
+    with caplog.at_level("WARNING", logger="backend.middleware.dataverse_first"):
+        _answering(
+            SearchResultsFile(sandbox), sandbox, _pointer_text(), artifact={"saved_path": SAVED}
+        )
+    assert _kept_ids(sandbox) == ["doi:1/kept"]
+    assert any("1 of 2 section(s)" in record.getMessage() for record in caplog.records)
+
+
+def test_a_saved_answer_with_nothing_readable_says_so(caplog):
+    sandbox = _Sandbox(files={SAVED: "<html>502 Bad Gateway</html>"})
+    with caplog.at_level("WARNING", logger="backend.middleware.dataverse_first"):
+        _answering(
+            SearchResultsFile(sandbox), sandbox, _pointer_text(), artifact={"saved_path": SAVED}
+        )
+    assert not sandbox.written
+    assert any("held no records" in record.getMessage() for record in caplog.records)
+
+
+def test_a_saved_block_under_another_key_is_still_records():
+    """`_trim_json_array_text` names the list after whatever key the tool used."""
+    sandbox = _Sandbox(files={SAVED: json.dumps({"data": [{"global_id": "doi:1/x"}]})})
+    _answering(SearchResultsFile(sandbox), sandbox, _pointer_text(), artifact={"saved_path": SAVED})
+    assert _kept_ids(sandbox) == ["doi:1/x"]
+
+
+# --- the whole answer, not the model's share ------------------------------------------------------
+
+@pytest.fixture
+def whole_answer():
+    """Set what `mcp_tools` kept aside, and clear it after — a ContextVar leaks between tests."""
+    from backend import mcp_tools
+
+    tokens = []
+
+    def keep(tool_name, text):
+        tokens.append(mcp_tools._full_answer.set((tool_name, text)))
+
+    yield keep
+    for token in reversed(tokens):
+        mcp_tools._full_answer.reset(token)
+
+
+def _trimmed_and_whole(kept: int, total: int) -> tuple[str, str]:
+    rows = [{"name": f"Dataset {n}", "global_id": f"doi:10.21223/P3/ROW{n:03d}"} for n in range(total)]
+    trimmed = json.dumps({"content": rows[:kept]}, indent=2) + (
+        f"\n\n[{total - kept} item(s) omitted — output exceeded 124 KB.]"
+    )
+    return trimmed, json.dumps({"content": rows})
+
+
+def test_the_file_gets_the_hundred_the_model_was_spared(whole_answer):
+    """**The model's budget is not the researcher's.**
+
+    A hundred datasets, trimmed to forty for the context window. The model should see forty and a
+    sentence telling it to narrow; the conversation folder has no reason to inherit that limit
+    (§294).
+    """
+    trimmed, whole = _trimmed_and_whole(kept=40, total=100)
+    whole_answer(READ_TOOL, whole)
+    sandbox = _Sandbox()
+
+    _answering(SearchResultsFile(sandbox), sandbox, trimmed)
+    assert len(_kept_ids(sandbox)) == 100, "the file takes the whole answer, not the model's share"
+
+
+def test_without_a_kept_answer_nothing_changes(whole_answer):
+    """Under the cap there is nothing to keep aside, and the result is already whole."""
+    sandbox = _Sandbox()
+    _answering(
+        SearchResultsFile(sandbox), sandbox, json.dumps({"content": [{"global_id": "doi:1/small"}]})
+    )
+    assert _kept_ids(sandbox) == ["doi:1/small"]
+
+
+def test_a_big_answer_from_another_tool_is_not_mistaken_for_this_one(whole_answer):
+    """The ContextVar holds one answer. Reading it blind would file a paper search as datasets."""
+    trimmed, whole = _trimmed_and_whole(kept=2, total=50)
+    whole_answer("snippet_search", whole)
+    sandbox = _Sandbox()
+
+    _answering(SearchResultsFile(sandbox), sandbox, trimmed)
+    assert len(_kept_ids(sandbox)) == 2, "the trimmed dataverse answer, not asta's fifty"
+
+
+def test_the_kept_answer_answers_for_its_own_tool_and_no_other(whole_answer):
+    """`last_full_answer` is the whole contract between the two files, so test it directly.
+
+    A source-inspection test stood here first and could pass while asserting nothing, which is a
+    worse thing to own than no test at all.
+    """
+    from backend import mcp_tools
+
+    assert mcp_tools.last_full_answer(READ_TOOL) is None, "nothing capped yet"
+
+    whole_answer(READ_TOOL, '{"content": []}')
+    assert mcp_tools.last_full_answer(READ_TOOL) == '{"content": []}'
+    assert mcp_tools.last_full_answer("snippet_search") is None, "one answer, and it is named"
+
+
+# --- what the skill teaches --------------------------------------------------------------------
+
+def _skill(name: str) -> str:
+    return (
+        Path(__file__).resolve().parent.parent / "skills" / "dataverse" / "references" / name
+    ).read_text(encoding="utf-8")
+
+
+def test_the_identifier_is_the_one_field_with_a_documented_source():
+    """**The one field that must be copied had nowhere documented to copy it from.**
+
+    `metadata_extraction_rules.md` mapped every core field to its Dataverse source — `title` to
+    `title`, `authors` to `author -> authorName` — and listed the persistent id only under
+    "required summary fields", with no source named. So the model was told to *produce* the one
+    string a researcher pastes into a paper, and given a source for everything else (§299).
+    """
+    rules = _skill("metadata_extraction_rules.md")
+    assert "`persistent_id`" in rules, "the id must be a core field with a source"
+    assert "global_id" in rules, "and the source must be named"
+    assert "copy it, never compose it" in rules.lower()
+    # And the honest fallback, which the other subagents' prompts already carry: omit rather than
+    # guess. A reconstructed DOI is indistinguishable from a read one.
+    assert "omit the dataset" in rules.lower()
+
+
+def test_the_skill_no_longer_teaches_an_argument_that_does_not_exist():
+    """`read_search_results` takes `file_path`. `filename` is a hard error (§220).
+
+    The middleware strips it, so the stale instruction cost nothing but the model's attention —
+    which is not nothing, and is exactly what a skill file spends.
+    """
+    workflow = _skill("discovery_workflow.md")
+    assert 'filename="dataverse_search.json"' not in workflow or "does not exist" in workflow, (
+        "if the old argument is still named, it must be named as the mistake it was"
+    )
+    assert "Call it with no arguments" in workflow
+
+
+def test_the_skill_no_longer_claims_successive_searches_overwrite():
+    """`_accumulate` keeps every search this turn (§286). The doc said the opposite."""
+    workflow = _skill("discovery_workflow.md")
+    assert "simply\n     overwrite this file" not in workflow
+    assert "every result from every search this turn is kept" in " ".join(workflow.split())
+
+
+def test_the_schema_field_names_where_the_identifier_comes_from():
+    """`Field(description=...)` is what the model reads when it fills the field in.
+
+    It said *"Dataset DOI or persistent identifier."* — a description of what the value **is**,
+    with no word about where to get it, while every sibling field read the same declarative way.
+    So the id was one more thing to author (§299).
+    """
+    from backend.schemas import DataVerseFindings
+
+    described = DataVerseFindings.model_fields["persistent_id"].description or ""
+    assert "global_id" in described, "the source field has to be named where it is filled in"
+    assert "copied verbatim" in described
+    assert "omit the dataset" in described, "and the honest fallback has to be there too"
+
+
+# --- of how many? -------------------------------------------------------------------------------
+
+def _search_answering(middleware, sandbox, payload):
+    """One `SearchCIPDataverse` call through the middleware, answering `payload`."""
+
+    async def handler(_request):
+        return ToolMessage(
+            content=json.dumps(payload), tool_call_id="call_s", name=SEARCH_TOOL
+        )
+
+    return asyncio.run(
+        middleware.awrap_tool_call(_ToolCallRequest(SEARCH_TOOL, {}), handler)
+    )
+
+
+def test_the_denominator_survives_to_the_panel():
+    """**"Found 4,000, showing 29" and "found 29" were the same answer at every layer.**
+
+    The MCP read `total_count` to decide when to stop paging and never returned it (§299). Now it
+    does, and a researcher reading twenty-nine rows can see whether that is the corpus or a
+    sliver of it.
+    """
+    sandbox = _Sandbox()
+    middleware = SearchResultsFile(sandbox)
+    _search_answering(
+        middleware,
+        sandbox,
+        {"output_file": "/tmp/mcp/json_files/x.json", "total_count": 4000, "item_count": 29,
+         "complete": False},
+    )
+    _reads_through(middleware, {"content": [{"global_id": f"doi:1/{n}"} for n in range(29)]})
+
+    totals = _totals(sandbox)
+    assert totals["total_count"] == 4000
+    assert totals["kept"] == 29
+    assert totals["complete"] is False
+
+
+def test_a_whole_small_corpus_says_it_is_whole():
+    """The reassuring case has to be distinguishable, or the warning above means nothing."""
+    sandbox = _Sandbox()
+    middleware = SearchResultsFile(sandbox)
+    _search_answering(
+        middleware, sandbox,
+        {"output_file": "/x.json", "total_count": 3, "item_count": 3, "complete": True},
+    )
+    _reads_through(middleware, {"content": [{"global_id": f"doi:1/{n}"} for n in range(3)]})
+
+    assert _totals(sandbox) == {"total_count": 3, "kept": 3, "complete": True}
+
+
+def test_one_partial_search_makes_the_turn_partial():
+    """A broad search that was cut short is not redeemed by a narrow one that finished.
+
+    The file holds both, so what it holds is incomplete — and the second search's `complete: true`
+    must not overwrite that.
+    """
+    sandbox = _Sandbox()
+    middleware = SearchResultsFile(sandbox)
+    _search_answering(
+        middleware, sandbox,
+        {"output_file": "/x.json", "total_count": 900, "item_count": 100, "complete": False},
+    )
+    _search_answering(
+        middleware, sandbox,
+        {"output_file": "/x.json", "total_count": 4, "item_count": 4, "complete": True},
+    )
+    _reads_through(middleware, {"content": [{"global_id": "doi:1/a"}]})
+
+    totals = _totals(sandbox)
+    assert totals["total_count"] == 900, "the larger denominator is the one that was established"
+    assert totals["complete"] is False
+
+
+def test_an_mcp_that_cannot_say_how_many_is_not_read_as_zero():
+    """A deployment predating §299 answers without `total_count`.
+
+    "We cannot tell you how many matched" is a different fact from "none matched", and the panel
+    has to be able to tell them apart rather than showing `29 of 0`.
+    """
+    sandbox = _Sandbox()
+    middleware = SearchResultsFile(sandbox)
+    _search_answering(middleware, sandbox, {"output_file": "/x.json", "item_count": 29})
+    _reads_through(middleware, {"content": [{"global_id": "doi:1/a"}]})
+
+    totals = _totals(sandbox)
+    assert totals["total_count"] == 0
+    assert totals["complete"] is False, "unknown is not complete"

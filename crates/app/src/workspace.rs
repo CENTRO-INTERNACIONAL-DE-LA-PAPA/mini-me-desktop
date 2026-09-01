@@ -925,6 +925,54 @@ pub fn decode_datasets(text: &str) -> Vec<crate::protocol::Dataset> {
         .collect()
 }
 
+/// What this conversation's searches said they found, beside what they returned.
+///
+/// **A count with no denominator is not an answer.** Until §299 the MCP read `total_count` to
+/// decide when to stop paging and never returned it, so twenty-nine rows on screen were
+/// indistinguishable from a thorough search of a twenty-nine dataset corpus. A researcher
+/// choosing what to cite has to be able to see which one they are looking at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SearchTotals {
+    /// What Dataverse reported matched the query. `0` means no search could say — which is a
+    /// third state, not zero matches, and is why [`Self::denominator`] answers `None` for it.
+    pub total: u64,
+    /// How many records the conversation's folder actually holds.
+    pub kept: u64,
+    /// Whether every match was retrieved. False for a capped search, a failed page, or a
+    /// deployment that reports no total at all.
+    pub complete: bool,
+}
+
+impl SearchTotals {
+    /// The number to show after the count, when one can honestly be shown.
+    ///
+    /// `None` when no search reported a total, so the panel says `29` rather than `29 of 0` —
+    /// the second is a lie about the corpus, and the more confident-looking of the two. Also
+    /// `None` when the total is not larger than what is held: a denominator equal to the count is
+    /// noise, and one smaller than it reads as a bug.
+    pub fn denominator(&self) -> Option<u64> {
+        (self.total > 0 && self.total > self.kept).then_some(self.total)
+    }
+}
+
+/// Read what the searches reported, or nothing if they reported nothing.
+pub fn search_totals(conversation: &Path) -> SearchTotals {
+    let path = conversation
+        .join(RECORD_DIR)
+        .join("dataverse_search.meta.json");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return SearchTotals::default();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return SearchTotals::default();
+    };
+    SearchTotals {
+        total: value["total_count"].as_u64().unwrap_or(0),
+        kept: value["kept"].as_u64().unwrap_or(0),
+        complete: value["complete"].as_bool().unwrap_or(false),
+    }
+}
+
 /// A bounded view of everything a conversation wrote.
 ///
 /// `truncated` is deliberately part of the result rather than a log line. The person looking at
