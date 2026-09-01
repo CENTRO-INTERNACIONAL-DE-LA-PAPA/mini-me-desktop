@@ -65,6 +65,16 @@ def test_paths_come_out_of_quotes_and_in_the_order_written():
     assert ledger.outside(command, WORK) == ["/tmp/second.csv", "/root/first.csv"]
 
 
+def test_a_quoted_path_with_spaces_is_one_path_not_a_truncated_parent():
+    """The live attachment path contains ``workshop mini-me`` and must stay intact."""
+    source = (
+        "/mnt/c/Users/LENOVO/Documents/workshop mini-me/datasets/"
+        "native_potato_biodiversity/native_potato_biodiversity_dirty.csv"
+    )
+    command = f"python3 -c \"import pandas as pd; pd.read_csv('{source}')\""
+    assert ledger.named_paths(command) == [source]
+
+
 def test_an_entry_says_what_ran_and_what_it_named():
     record = ledger.entry(
         "python3 -c \"open('/tmp/x','w')\"",
@@ -116,19 +126,20 @@ def test_an_unwritable_record_costs_the_researcher_nothing(tmp_path: Path):
     ledger.append(blocked, ledger.entry("echo hi", exit_code=0, seconds=0, work_dir=blocked, at="t"))
 
 
-def test_nothing_here_claims_to_know_what_was_written():
-    """The one thing this module must never be read as saying.
+def test_the_cwd_scan_does_not_claim_to_see_another_directory(tmp_path: Path):
+    """Observation has a boundary; a file outside the scanned cwd stays unknown."""
+    import time
 
-    A command can write somewhere it never names — a script it invokes, a library's cache, a
-    relative path after a `cd`. `execute_rule.py` refuses to make a guard out of string matching
-    for exactly this reason, and a docstring here that promised containment would be the §252
-    mistake in a third place.
-    """
-    source = Path(ledger.__file__).read_text()
-    assert "what the command wrote" in source, "the limit has to be stated in the module itself"
-    assert "write somewhere it never names" in source, "and the way it is incomplete, named"
-    # A command that writes without naming: this reports nothing, and that is correct behaviour.
-    assert ledger.outside("bash prepared-script.sh", WORK) == []
+    command_dir = tmp_path / "command"
+    command_dir.mkdir()
+    elsewhere = tmp_path / "elsewhere.csv"
+    started = time.time()
+    elsewhere.write_text("outside the observation")
+    finished = time.time()
+
+    found, truncated = ledger.observed_writes(command_dir, started, finished)
+    assert found == []
+    assert not truncated
 
 
 def test_a_real_command_through_the_real_backend_lands_in_the_record(tmp_path, monkeypatch):
@@ -214,6 +225,18 @@ def _sample() -> list[dict]:
             work_dir=work,
             at="2026-08-25T09:15:00Z",
         ),
+        # The live defect: the command named no absolute path, but the bounded cwd observation saw
+        # the relative output. `outside` and `wrote` must therefore be able to disagree in both
+        # directions rather than one being forced into a subset of the other.
+        ledger.entry(
+            "python analysis.py",
+            exit_code=0,
+            seconds=3.2,
+            work_dir=work,
+            cwd="/tmp/background-worker",
+            at="2026-08-25T09:15:20Z",
+            wrote=["/tmp/background-worker/missingness.png"],
+        ),
         # The strong case: named *and* confirmed written, which is the only one a copy button may
         # ever act on. Passed explicitly because deciding it needs a filesystem and this is a
         # fixture, not a run.
@@ -254,6 +277,9 @@ def test_the_fixture_covers_both_branches_the_client_can_get_wrong():
         "and one that named a path without writing it — the read case, which is the whole reason "
         "`wrote` exists and the one a copy button must never touch"
     )
+    assert any(e["wrote"] and not e["outside"] for e in entries), (
+        "and one relative write found from the cwd rather than the command string"
+    )
 
 
 def test_both_execute_tools_reach_the_record(tmp_path, monkeypatch):
@@ -285,6 +311,65 @@ def test_both_execute_tools_reach_the_record(tmp_path, monkeypatch):
     assert [entry["exit"] for entry in written] == [0, 0], (
         f"both tools must actually work, not merely be recorded: {written}"
     )
+
+
+def test_a_nested_worker_records_with_its_conversation_without_offering_visible_files(
+    tmp_path, monkeypatch
+):
+    """The worker owns the cwd; the researcher-facing conversation owns the record.
+
+    A correctly pinned worker is nested under the conversation, so its relative file is already in
+    Outputs and must not get a redundant recovery offer. Its command still belongs in the
+    conversation's record rather than a hidden `.mini-me` folder under the worker.
+    """
+    from minime_local import workspace as ws
+
+    monkeypatch.setenv("MINIME_LOCAL_WORKSPACE", str(tmp_path))
+    monkeypatch.setattr(
+        ws,
+        "_configurable",
+        lambda: {ws.WORKSPACE_THREAD_KEY: "conversation"},
+    )
+    ws._PINNED_BY_THREAD.clear()
+    ws._PROJECT_BY_THREAD.clear()
+
+    worker = ws.LocalWorkspaceBackend("worker-thread")
+    assert worker._conversation_dir == tmp_path / "conversation"
+    assert worker._work_dir == tmp_path / "conversation" / "worker-thread"
+    result = worker.execute("python3 -c \"open('plot.png','w').write('plot')\"")
+    assert result.exit_code == 0, result.output
+
+    entries = ledger.read(worker._conversation_dir)
+    assert len(entries) == 1, "the command joins the conversation's record"
+    assert entries[0]["cwd"] == str(worker._work_dir), "where it really ran stays observable"
+    assert entries[0]["wrote"] == [], "the plot is already inside the conversation"
+    assert (worker._work_dir / "plot.png").is_file()
+    assert not (worker._work_dir / ledger.RECORD_DIR).exists(), "no hidden worker-only record"
+
+
+def test_the_worker_pin_comes_from_its_tool_runtime_when_context_is_empty(monkeypatch):
+    """The launch tool is handed the parent config even when `get_config()` cannot see it.
+
+    Losing this pin is the second half of the live complaint: the worker then gets a sibling folder
+    that is "inside" to itself and invisible to the researcher's conversation.
+    """
+    from minime_local import async_agents
+    from minime_local.workspace import WORKSPACE_THREAD_KEY
+
+    runtime_config = {
+        "recursion_limit": 37,
+        "configurable": {
+            "thread_id": "researcher-conversation",
+            "model_config": {"default": "openrouter::test-model"},
+        },
+    }
+    forwarded = async_agents._forwarded_config(runtime_config)
+
+    assert forwarded["recursion_limit"] == 37
+    assert forwarded["configurable"][WORKSPACE_THREAD_KEY] == "researcher-conversation"
+    assert forwarded["configurable"]["model_config"] == runtime_config["configurable"][
+        "model_config"
+    ]
 
 
 def test_a_command_that_raises_is_still_timed_out_of_the_record(tmp_path, monkeypatch):
@@ -347,8 +432,92 @@ def test_paths_that_are_not_files_are_left_alone(tmp_path: Path):
     assert ledger.written_during([str(missing), str(a_directory)], start, end) == []
 
 
-def test_wrote_is_never_more_than_what_was_named():
-    """Something the command did not name cannot have been checked, so it cannot be claimed."""
+def test_a_relative_write_from_an_outside_cwd_is_offered_for_recovery(tmp_path: Path):
+    """The eight orphaned plots, across the whole producer seam.
+
+    The command text names no absolute output. It runs in a worker directory outside the
+    researcher's conversation and writes beside its script. The command record must live with the
+    conversation, keep the empty named-path list honest, and still offer the file the filesystem
+    observed appearing during the command.
+    """
+    import subprocess
+    import sys
+    import time
+
+    from minime_local.workspace import _record
+
+    conversation = tmp_path / "conversation"
+    command_dir = tmp_path / "background-worker"
+    conversation.mkdir()
+    command_dir.mkdir()
+    script = command_dir / "analysis.py"
+    script.write_text("from pathlib import Path\nPath('missingness.png').write_text('plot')\n")
+    old = time.time() - 3600
+    os.utime(script, (old, old))
+
+    started = time.monotonic()
+    completed = subprocess.run(
+        [sys.executable, "analysis.py"], cwd=command_dir, check=False, capture_output=True, text=True
+    )
+    elapsed = time.monotonic() - started
+    assert completed.returncode == 0, completed.stderr
+
+    _record(
+        "python analysis.py",
+        {"exit_code": completed.returncode, "output": completed.stdout},
+        command_dir,
+        elapsed,
+        conversation_dir=conversation,
+    )
+
+    entries = ledger.read(conversation)
+    assert len(entries) == 1, "the worker's record must join the conversation that can recover it"
+    assert entries[0]["outside"] == [], "a relative write did not name an absolute path"
+    assert entries[0]["wrote"] == [str(command_dir / "missingness.png")]
+    assert ledger.collectable(conversation) == [str(command_dir / "missingness.png")]
+
+
+def test_a_relative_write_after_shell_cd_is_offered_for_recovery(tmp_path: Path, monkeypatch):
+    """The exact live miss: the process starts inside, then its shell changes directory.
+
+    A parent process cannot read its child's final cwd. The absolute directory named by ``cd`` is
+    therefore the observation root, while the file's mtime — not the path string — is what makes
+    the relative PNG safe to offer. An older file beside it proves the directory is not treated as
+    a bag of outputs.
+    """
+    import shlex
+    import time
+
+    from minime_local.workspace import LocalWorkspaceBackend
+
+    workspaces = tmp_path / "workspaces"
+    external = tmp_path / "temporary-job"
+    external.mkdir()
+    existing = external / "the-researchers-own.csv"
+    existing.write_text("theirs")
+    long_ago = time.time() - 3600
+    os.utime(existing, (long_ago, long_ago))
+    monkeypatch.setenv("MINIME_LOCAL_WORKSPACE", str(workspaces))
+
+    backend = LocalWorkspaceBackend("shell-cd")
+    completed = backend.execute(
+        f"cd {shlex.quote(str(external))} && "
+        "python3 -c \"from pathlib import Path; "
+        "Path('missingness.png').write_text('plot')\""
+    )
+    assert completed.exit_code == 0, completed.output
+
+    conversation = workspaces / "shell-cd"
+    entries = ledger.read(conversation)
+    assert len(entries) == 1
+    assert entries[0]["cwd"] == str(conversation), "the parent-visible cwd stays honest"
+    assert entries[0]["outside"] == [str(external)]
+    assert entries[0]["wrote"] == [str(external / "missingness.png")]
+    assert ledger.collectable(conversation) == [str(external / "missingness.png")]
+
+
+def test_observed_writes_are_kept_distinct_from_named_paths():
+    """A relative output may be observed without weakening what `outside` means."""
     record = ledger.entry(
         "python3 -c \"open('/tmp/named.csv','w')\"",
         exit_code=0,
@@ -358,7 +527,51 @@ def test_wrote_is_never_more_than_what_was_named():
         wrote=["/tmp/named.csv", "/tmp/never-mentioned.csv"],
     )
     assert record["outside"] == ["/tmp/named.csv"]
-    assert record["wrote"] == ["/tmp/named.csv"]
+    assert record["wrote"] == ["/tmp/named.csv", "/tmp/never-mentioned.csv"]
+
+
+def test_the_cwd_scan_says_when_either_safety_limit_bites(tmp_path: Path, caplog):
+    import time
+
+    for name in ("a.csv", "b.csv", "c.csv"):
+        (tmp_path / name).write_text(name)
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / "deep.csv").write_text("deep")
+    start, end = time.time() - 1, time.time() + 1
+
+    with caplog.at_level("WARNING", logger="minime_local.ledger"):
+        found, count_cut = ledger.observed_writes(
+            tmp_path, start, end, max_entries=2, max_depth=3
+        )
+        shallow, depth_cut = ledger.observed_writes(
+            tmp_path, start, end, max_entries=20, max_depth=0
+        )
+
+    assert count_cut and len(found) <= 2, "the entry budget is a real bound"
+    assert depth_cut and str(nested / "deep.csv") not in shallow, "depth zero never descends"
+    warnings = [record.getMessage() for record in caplog.records]
+    assert len([message for message in warnings if "safety limit" in message]) == 2
+
+
+def test_named_directory_scans_share_one_entry_budget(tmp_path: Path):
+    """Naming more roots must not multiply the hot-path filesystem allowance."""
+    import time
+
+    first = tmp_path / "a-job"
+    second = tmp_path / "b-job"
+    first.mkdir()
+    second.mkdir()
+    (first / "one.png").write_text("one")
+    (second / "two.png").write_text("two")
+    start, end = time.time() - 1, time.time() + 1
+
+    found, truncated = ledger.observed_writes_under(
+        [str(first), str(second)], start, end, max_entries=1, max_depth=3
+    )
+
+    assert truncated
+    assert found == [str(first / "one.png")], "one shared entry budget stops before root two"
 
 
 def test_a_real_command_records_what_it_wrote_and_not_what_it_read(tmp_path, monkeypatch):

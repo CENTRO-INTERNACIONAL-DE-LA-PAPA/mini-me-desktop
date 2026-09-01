@@ -17143,3 +17143,127 @@ believing that was the corpus.
 
 *Hundred-and-fiftieth: a number a system uses internally and does not return is a number it has
 decided its user does not need. That decision is almost never made on purpose.*
+
+## 301. The directory that ran it is not the conversation that owns it (2026-09-01)
+
+The recovery button from §279/§300 could act only on `Command.wrote`, and the producer made that
+list a subset of absolute paths parsed from the command string. That made
+`python analysis.py` + `plt.savefig("missingness.png")` impossible to recover by construction:
+`outside` was empty, so `wrote` was forced empty after the file had already appeared on disk.
+
+The second conflation was an address. `_record` had one `work_dir` for both **where the command
+ran** and **which conversation owns its record**. A background worker has its own cwd. Treating that
+folder as the comparison base makes its outputs "inside" to the worker even when they are outside
+the conversation the researcher can see; writing `.mini-me/commands.jsonl` there also means the app
+never reads the evidence.
+
+### Two addresses, two kinds of evidence
+
+`LocalWorkspaceBackend` now keeps `_conversation_dir` separately from `_work_dir`. Commands still
+run in the latter. The command record is appended to the former, and the former is the boundary
+used to decide whether an observed file needs recovery.
+
+The record likewise keeps two independent lists:
+
+* `outside` remains exactly the absolute paths named by the command text. It is useful evidence but
+  may name the researcher's input, so nothing acts on it.
+* `wrote` is the files whose mtimes fell inside the command window. It may contain a relative
+  output that never appeared in `outside`, and it remains the only list the copy button acts on.
+
+`cwd` records where the command really ran. The app reads and shows it rather than asking a future
+diagnosis to reconstruct the value from a path. `scan_truncated` crosses the same Python/Rust
+contract and is shown in WHAT RAN when the observation stopped early.
+
+### A bounded observation, not a filesystem crawler
+
+Two places can need scanning: a cwd outside the owning conversation, and an external directory
+whose absolute path the command names. The second is how a shell that starts inside the
+conversation and runs `cd /tmp/job && python analysis.py` exposes the relative output its parent
+process cannot otherwise locate. Named directories are evidence about **where to look**, never
+evidence that their existing contents are outputs; only files whose mtimes fall inside the command
+window enter `wrote`.
+
+Both walks use one bounded implementation. It is breadth-first, does not follow symlinks, skips the
+recorder's own `.mini-me` directory, and stops at depth 3 or 512 entries. The budget is shared across
+all command-named roots, and nested duplicate roots are collapsed before walking. When either limit
+bites it writes a warning to the backend log **and** sets `scan_truncated`; a silent limit would
+merely rename this defect to "the 513th plot disappeared".
+
+This still cannot see a dynamically chosen directory the command never names (for example a bare
+`cd "$tmpdir"` after `tmpdir=$(mktemp -d)`), or a background process that writes after the command
+window. The UI says that boundary rather than claiming the machine was searched.
+
+### The worker pin uses the value the tool was actually handed
+
+The background launch wrapper used ambient `get_config()`, despite its `ToolRuntime` argument
+already carrying the parent run's config. Ambient context has been empty on a real launch. The
+explicit runtime config now wins and `get_config()` is only a compatibility fallback, so the
+worker's own LangGraph thread remains pinned to the researcher's conversation without forwarding
+`thread_id` as the worker's state id.
+
+One producer test runs a real relative-write script in an outside cwd, records it against a
+different conversation directory, and reads the recoverable path back. Another reproduces the live
+`cd /tmp/job` command, proves a new relative PNG is offered, and proves an older file beside it is
+not. A third runs a pinned worker in its nested directory and proves its command joins the
+conversation record while its already-visible plot is not offered. The generated five-line fixture
+includes the otherwise impossible shape `outside: []`, `wrote: [missingness.png]`; Rust asserts
+every field and the recovery list consumes that shape.
+
+Mutation checks broke five different joins and each named test failed: dropping cwd-observed files
+from `wrote`; dropping command-named-directory observations; writing a worker record into its own
+cwd; ignoring `ToolRuntime.config`; and dropping `wrote` in the Rust decoder. Disabling the entry
+cap separately failed the safety-limit test. Each mutation was then restored before the full suites
+ran.
+
+*Hundred-and-fifty-first: a working directory answers where code ran; a conversation directory
+answers who can find the result. Reusing one path for both questions makes each component locally
+consistent and the product wrong at their join.*
+
+## 302. The input's parent is not the output directory (2026-09-01)
+
+A first-turn upload exposed the original Windows dataset as:
+
+`/mnt/c/Users/LENOVO/Documents/workshop mini-me/datasets/native_potato_biodiversity/native_potato_biodiversity_dirty.csv`
+
+The prompt simultaneously claimed that path was *"already saved in the sandbox working
+directory"*. It was not. On a blank conversation the backend had not assigned a thread id, so the
+desktop could not compute the conversation folder. It queued the source, ran the whole model turn
+with the original absolute path, and copied the input into the thread only after the answer
+finished. The cleaning script used the input's parent as `base` and wrote the cleaned CSV, cleaning
+log, profiling summary, quality table, and report beside the researcher's original. Later EDA and
+diagnostic scripts used relative output directories and correctly landed in the thread, which made
+one enquiry split across two unrelated folders.
+
+### Create the address, copy the input, then ask the model
+
+The sidecar already creates the LangGraph thread immediately before `stream_turn`. That is the
+first moment all parts of the workspace address exist, and it is still before any paid model
+request. `Sidecar::submit` now carries each unadopted attachment's Windows source and the exact
+backend reference present in the prompt. After thread creation it copies the source into
+`thread_dir_in(project, thread_id)` on a blocking worker, then replaces the original reference with
+`./<landed-name>` before streaming. A collision suffix returned by `workspace::adopt` is therefore
+also the name the model receives. The researcher's original is copied, never moved or overwritten.
+
+The post-turn adoption pass remains as an idempotent UI-side fallback. If the pre-turn copy fails or
+the input exceeds the 512 MB adoption limit, the absolute reference remains readable and the turn
+is not refused; the execute-tool rule still says every output must be relative to the conversation,
+and §301's command ledger remains the recovery net. True write containment for arbitrary host shell
+commands still requires an isolated writable mount rather than command-string rewriting.
+
+### Spaces are part of a path
+
+The same live command exposed a second hole in the recovery net. `_POSIX_PATH` stopped at
+whitespace, so the path above was recorded only as
+`/mnt/c/Users/LENOVO/Documents/workshop`. Quoted absolute paths now use their closing quote as the
+boundary and preserve embedded spaces; the conservative unquoted parser remains unchanged. That
+lets bounded named-directory observation find confirmed writes if a model still escapes after the
+first-turn race is closed.
+
+The Rust producer test copies a dataset from a `workshop mini-me` directory before the turn,
+asserts the model-facing prompt contains only `./native_potato_biodiversity_dirty.csv`, and proves
+the original remains. A UI seam test proves the source/reference pair reaches the sidecar. The
+Python regression asserts the full quoted path with spaces is one path rather than a truncated
+parent.
+
+*Hundred-and-fifty-second: an attachment is not adopted when a later copy happens; it is adopted
+when every consumer, including the first one, receives the conversation's copy.*

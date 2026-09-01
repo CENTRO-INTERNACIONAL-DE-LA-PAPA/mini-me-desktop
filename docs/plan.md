@@ -13,14 +13,13 @@ from `feat/wsl2less` until he has spoken to Luciano.**
 
 1. **Adopt `feat/ui-update`** — the split of `main.rs`. ✅ **DONE** — `d51ac4c`.
 2. **Quiet the two diagnostic panels** — WHAT RAN and WHAT WAS CLAIMED. ✅ **DONE** — `70544f4`.
-3. **Fix the stray-file recovery** — ⚠️ **HALF DONE** (`70544f4`). The offer is reachable;
-   *detection* still misses a script that writes beside itself. See below.
+3. **Fix the stray-file recovery** — ✅ **DONE** (`70544f4` plus §301). The offer is reachable,
+   and bounded cwd observation now detects a script that writes beside itself.
 4. **`feat/wsl2less`** — *on hold at Piero's instruction.* Not to be touched until he asks.
 
-**A consequence of the hold, recorded so it is not rediscovered:** the `cwd` field job 3
-wants lives on `feat/wsl2less`. Job 3 can still move the *existing* recovery button
-somewhere reachable — that works off `Command.wrote`, which exists today — but improving
-*detection* of stray files waits for `cwd` or an independent derivation of it.
+**A consequence of the hold, recorded so it is not rediscovered:** the `cwd` field first appeared
+on `feat/wsl2less`, but §301 derived it independently without adopting that branch. The WSL-less
+work remains untouched and on hold.
 
 ---
 
@@ -169,7 +168,7 @@ principle — which is why the fix cannot simply be "put a button on that note".
       they disagree.
 - [x] Three tests, each mutation-checked.
 
-### Still open — detection
+### Detection — done in §301
 
 The offer can only fetch what `Command.wrote` knows about, and that is still decided by
 `ledger.outside`, which reads **absolute paths out of the command text**. A script that
@@ -181,28 +180,28 @@ defect** and it needs the filesystem, not the string.
 this cheap — but it is on `feat/wsl2less`, which is on hold. Either wait, or derive the
 working directory independently here.
 
-- [ ] **2.1** A test first, red before anything else: a command whose text names no path,
+- [x] **2.1** A test first, red before anything else: a command whose text names no path,
       run in a folder outside the conversation, writing one file — assert it is offered for
       recovery. This is the exact case that produced eight orphaned plots and today it
       passes silently.
-- [ ] **2.2** In the overlay, record files that **appeared in the command's own `cwd`
+- [x] **2.2** In the overlay, record files that **appeared in the command's own `cwd`
       during its window**, by mtime, alongside the existing named-path list. `written_during`
       already does the mtime work and `CLOCK_SLACK` already handles the coarseness. Keep
       the two lists distinct: a named path may be the researcher's own input, and a
       discovered one is a file we watched appear. Only the second may be acted on
       automatically — the existing comment on `Command.wrote` is right and stays right.
-- [ ] **2.3** Bound the scan. An agent can create a virtualenv or unpack a dataset; walking
+- [x] **2.3** Bound the scan. An agent can create a virtualenv or unpack a dataset; walking
       an unbounded tree per command is not acceptable in `execute`'s hot path. Cap depth
       and count, and say when the cap bites — a silent cap turns this defect into a
       missing-513th-file defect.
-- [ ] **2.4** Handle the worker-folder case: a sibling thread's folder is not "inside" for
+- [x] **2.4** Handle the worker-folder case: a sibling thread's folder is not "inside" for
       the researcher looking at *this* conversation, whatever it is for the worker.
-- [ ] **2.5** **Move the offer to where the researcher already is.** The message that named
+- [x] **2.5** **Move the offer to where the researcher already is.** The message that named
       the files is the place — that is where they looked, and the note is already there.
       The button belongs beside it, not inside a modal.
-- [ ] **2.6** Two-sided contract test: the Python producer writes the fixture, the Rust
+- [x] **2.6** Two-sided contract test: the Python producer writes the fixture, the Rust
       decoder asserts every key is read or declared-unread with a reason.
-- [ ] **2.7** Mutation-check every fix: revert it, confirm a **named** test fails. Three
+- [x] **2.7** Mutation-check every fix: revert it, confirm a **named** test fails. Three
       tests this month asserted nothing — one inspected module source for a guard, one
       re-implemented the filter it was testing, one handed out prepared pages ignoring the
       argument whose handling was the fix. Assume the same of these until proven.

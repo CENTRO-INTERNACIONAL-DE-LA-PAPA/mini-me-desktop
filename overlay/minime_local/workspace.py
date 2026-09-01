@@ -355,7 +355,14 @@ def _exit_and_output(result: Any) -> tuple[Any, str]:
     return getattr(result, "exit_code", None), getattr(result, "output", "") or ""
 
 
-def _record(command: str, result: Any, work_dir: Any, seconds: float) -> None:
+def _record(
+    command: str,
+    result: Any,
+    work_dir: Any,
+    seconds: float,
+    *,
+    conversation_dir: Any | None = None,
+) -> None:
     """Add this command to the conversation's own record. **Never raises.**
 
     Every command, not only the failures `_log_failure` keeps: the ones that matter most are the
@@ -369,20 +376,37 @@ def _record(command: str, result: Any, work_dir: Any, seconds: float) -> None:
     try:
         exit_code, _ = _exit_and_output(result)
         finished = time.time()
+        owner = conversation_dir if conversation_dir is not None else work_dir
         record = ledger.entry(
             command,
             exit_code=exit_code,
             seconds=seconds,
-            work_dir=work_dir,
+            work_dir=owner,
+            cwd=work_dir,
             at=datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
         )
-        # Which of the named paths the command actually *wrote*, decided by the file's own mtime
-        # against the window this command ran in. Done here rather than in `entry` because it needs
-        # the filesystem, and it needs to happen now: a minute later the answer has changed.
-        record["wrote"] = ledger.written_during(
-            record["outside"], finished - (seconds or 0.0), finished
+        started = finished - (seconds or 0.0)
+        # Two independent observations. The first checks paths named in the command; the second
+        # scans both named external directories and the command's real cwd. The directory scan is
+        # how `cd /tmp/job && python analysis.py` and an outside worker writing
+        # `missingness.png` are found. Only filesystem-observed writes reach `wrote`; `outside`
+        # remains the weaker string claim.
+        named_writes = ledger.written_during(record["outside"], started, finished)
+        tree_writes, tree_truncated = ledger.observed_writes_under(
+            record["outside"], started, finished
         )
-        ledger.append(work_dir, record)
+        # A cwd already beneath the conversation is visible in Outputs, including a correctly
+        # pinned worker's nested folder. Scanning it would spend the 512-entry budget on files the
+        # app already has. The scan exists for the distinct case: a real command cwd outside the
+        # conversation that owns this record.
+        if ledger.paths_outside([str(work_dir)], owner):
+            cwd_writes, truncated = ledger.observed_writes(work_dir, started, finished)
+        else:
+            cwd_writes, truncated = [], False
+        observed_outside = ledger.paths_outside(tree_writes + cwd_writes, owner)
+        record["wrote"] = list(dict.fromkeys(named_writes + observed_outside))
+        record["scan_truncated"] = tree_truncated or truncated
+        ledger.append(owner, record)
     except Exception:  # noqa: BLE001 — a diagnostic must never be what takes `execute` down
         logger.debug("minime_local: could not record a command", exc_info=True)
 
@@ -554,10 +578,13 @@ class LocalWorkspaceBackend(LocalShellBackend):
         #
         # The coordinator's own runs are unaffected: `workspace_thread` returns their own id, the
         # two are equal, and there is nothing to nest.
-        parts = [self._thread_id]
+        self._conversation_dir = root.joinpath(
+            *([project] if project else []), self._thread_id
+        )
+        parts: list[str] = []
         if thread_id and thread_id != self._thread_id:
             parts.append(thread_id)
-        self._work_dir = root.joinpath(*([project] if project else []), *parts)
+        self._work_dir = self._conversation_dir.joinpath(*parts)
         # **The value everything else depends on, printed once.**
         #
         # A background worker that cannot find a file the conversation just wrote has exactly two
@@ -712,7 +739,13 @@ class LocalWorkspaceBackend(LocalShellBackend):
             result = super().execute(command, timeout=timeout)
         finally:
             elapsed = time.monotonic() - started
-        _record(command, result, self._work_dir, elapsed)
+        _record(
+            command,
+            result,
+            self._work_dir,
+            elapsed,
+            conversation_dir=self._conversation_dir,
+        )
         return result
 
     # -- the surface upstream added on top of deepagents -------------------------

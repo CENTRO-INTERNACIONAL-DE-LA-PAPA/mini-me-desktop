@@ -1541,6 +1541,19 @@ fn awaiting_adoption(attachments: &[Attachment]) -> Vec<std::path::PathBuf> {
         .collect()
 }
 
+/// The same first-turn attachments, with the prompt reference the sidecar must replace after the
+/// backend assigns the thread id and before it starts the model run.
+fn attachments_for_turn(attachments: &[Attachment]) -> Vec<workspace::PendingAttachment> {
+    attachments
+        .iter()
+        .filter(|attachment| !attachment.adopted)
+        .map(|attachment| workspace::PendingAttachment {
+            source: attachment.source.clone(),
+            reference: attachment.reference.clone(),
+        })
+        .collect()
+}
+
 /// The turn to send: the blockquote, then what they typed.
 fn with_attachments(typed: &str, attachments: &[Attachment]) -> String {
     match attached_blockquote(attachments) {
@@ -3864,11 +3877,14 @@ impl Workbench {
         // taking the list before them would drop a researcher's attachments on a turn that never
         // ran. They are cleared here, where the turn is certain to go.
         let prompt = with_attachments(&prompt, &self.attachments);
-        // **A file attached before the conversation existed is copied in afterwards.**
-        // `thread_workspace()` is `None` until the backend assigns a thread id on the first turn,
-        // so "new conversation, attach, ask" — the ordinary flow, and the one §228 was written for
-        // — silently skipped the copy. The turn that follows carries the absolute path, which the
-        // agent reads perfectly well; what was missing is the file being *kept* (docs §236).
+        // The first turn is the only time attachments can exist before their thread folder. Keep
+        // both addresses: the source to copy after the backend creates the thread, and the exact
+        // prompt reference to replace with `./name` before the model sees it (§302).
+        let attachments_for_turn = attachments_for_turn(&self.attachments);
+        // Keep a UI-side fallback too. The sidecar now copies these after thread creation and
+        // before streaming (§302); this later pass is idempotent when that worked and preserves the
+        // old recovery path if preparing the turn was interrupted after the model had already read
+        // the original.
         self.pending_adoption
             .extend(awaiting_adoption(&self.attachments));
         self.attachments.clear();
@@ -3893,7 +3909,7 @@ impl Workbench {
             self.pending_title = Some(protocol::title_from_prompt(&prompt));
         }
 
-        let mut events = self.sidecar.submit(prompt);
+        let mut events = self.sidecar.submit(prompt, attachments_for_turn);
         cx.spawn(async move |this, cx| {
             while let Some(event) = events.next().await {
                 // `Err` here means the view is gone (window closed) — stop pumping.
@@ -4021,11 +4037,12 @@ impl Workbench {
         cx.notify();
     }
 
-    /// Copy in the files that were attached before this conversation had a folder.
+    /// Confirm first-turn attachments are in the folder once control returns to the UI.
     ///
-    /// Runs once the turn has finished, which is the first moment `thread_workspace()` can answer.
-    /// Failures are logged and dropped: the turn already ran and the agent already read the file
-    /// from where it was, so nothing here is worth interrupting a researcher over.
+    /// The sidecar now performs the important copy before streaming (§302). This second idempotent
+    /// pass keeps the UI resilient to an interrupted preparation task and refreshes the folder once
+    /// the turn is back on the main thread. Failures are logged and dropped: the turn already ran
+    /// and the agent already read the file, so nothing here is worth interrupting a researcher over.
     fn adopt_pending(&mut self, cx: &mut Context<Self>) {
         if self.pending_adoption.is_empty() {
             return;
@@ -5299,8 +5316,7 @@ impl Workbench {
         {
             self.sidecar.rename_conversation(thread_id, title);
         }
-        // And the same reason attachments wait: the folder they belong in did not exist when they
-        // were chosen. Now it does.
+        // Idempotent confirmation on the UI side; the model-facing copy happened before streaming.
         self.adopt_pending(cx);
         self.refresh_conversations(cx);
         self.pending_approval = None;
@@ -7827,11 +7843,16 @@ mod tests {
         let commands = workspace::decode_commands(
             "{\"command\":\"a\",\"outside\":[\"/tmp/x.png\",\"/tmp/y.png\"],\"wrote\":[\"/tmp/x.png\",\"/tmp/y.png\"]}\n\
              {\"command\":\"b\",\"outside\":[\"/tmp/x.png\"],\"wrote\":[\"/tmp/x.png\"]}\n\
-             {\"command\":\"c\",\"outside\":[\"/tmp/read.csv\"],\"wrote\":[]}",
+             {\"command\":\"c\",\"outside\":[\"/tmp/read.csv\"],\"wrote\":[]}\n\
+             {\"command\":\"python analysis.py\",\"outside\":[],\"wrote\":[\"/tmp/z.png\"]}",
         );
         let files = files_left_outside(&commands);
-        // Two commands, three `wrote` entries, two distinct files — and the read is not among them.
-        assert_eq!(files, vec!["/tmp/x.png".to_string(), "/tmp/y.png".to_string()]);
+        // A duplicate, two named writes, and one relative write found only from cwd observation.
+        assert_eq!(files, vec![
+            "/tmp/x.png".to_string(),
+            "/tmp/y.png".to_string(),
+            "/tmp/z.png".to_string(),
+        ]);
         assert!(!files.contains(&"/tmp/read.csv".to_string()), "a path only named is never copied");
     }
 
@@ -8132,19 +8153,19 @@ mod tests {
     /// What the Outputs panel says about a conversation's commands.
     ///
     /// A free function so the *wording* is testable, because the wording is the feature: the phrase
-    /// that matters names files the panel below it cannot show, and it has to say **named** rather
-    /// than **wrote** — the producer sees paths in a command's text and nothing more.
+    /// that matters names files the panel below it cannot show. It says **wrote** only for a path
+    /// the filesystem observation confirmed and **named** for the weaker command-text evidence.
     #[test]
-    fn the_summary_says_named_and_never_says_wrote() {
+    fn the_summary_uses_the_strongest_evidence_it_has() {
         let fixture = include_str!("../tests/fixtures/command-record.jsonl");
         let commands = workspace::decode_commands(fixture);
         let (summary, loud) = commands_summary(&commands);
 
-        assert!(summary.starts_with("4 commands"), "{summary}");
+        assert!(summary.starts_with("5 commands"), "{summary}");
         assert!(summary.contains("1 failed"), "{summary}");
         // One command is *confirmed* to have written outside, so the line says so — that is a fact
         // about a file, established from its mtime, not a reading of the command's text.
-        assert!(summary.contains("1 wrote a file outside this conversation"), "{summary}");
+        assert!(summary.contains("2 wrote a file outside this conversation"), "{summary}");
         assert!(loud, "something landed outside, so the line is drawn in the accent colour");
     }
 
@@ -8287,6 +8308,28 @@ mod tests {
             attached("SOC_Covariables_TESTV5.csv", "/mnt/c/Users/x/Downloads/SOC_Covariables_TESTV5.csv"),
         ]);
         assert_eq!(waiting.len(), 2, "both were sent from outside the folder");
+    }
+
+    #[test]
+    fn a_first_turn_hands_the_source_and_its_prompt_reference_to_the_sidecar() {
+        let source = std::path::PathBuf::from(
+            r"C:\Users\LENOVO\Documents\workshop mini-me\dataset.csv",
+        );
+        let reference = "/mnt/c/Users/LENOVO/Documents/workshop mini-me/dataset.csv";
+        let attachment = Attachment {
+            label: "dataset.csv".into(),
+            source: source.clone(),
+            adopted: false,
+            reference: reference.into(),
+        };
+
+        assert_eq!(
+            attachments_for_turn(&[attachment]),
+            vec![workspace::PendingAttachment {
+                source,
+                reference: reference.into(),
+            }]
+        );
     }
 
     #[test]
