@@ -696,6 +696,8 @@ pub struct Command {
     pub exit: Option<i64>,
     /// How long it took, in seconds.
     pub seconds: Option<f64>,
+    /// Where it ran.
+    pub cwd: String,
     /// **Absolute paths the command named that lie outside this conversation.**
     ///
     /// Named, not written — the producer is explicit about this and so is the UI that shows it. A
@@ -765,6 +767,7 @@ pub fn decode_commands(text: &str) -> Vec<Command> {
             clipped: value["clipped"].as_bool().unwrap_or(false),
             exit: value["exit"].as_i64(),
             seconds: value["seconds"].as_f64(),
+            cwd: value["cwd"].as_str().unwrap_or_default().to_string(),
             outside: strings(&value["outside"]),
             wrote: strings(&value["wrote"]),
         })
@@ -2820,7 +2823,7 @@ mod tests {
         let keys: Vec<&str> = first.as_object().expect("an object").keys().map(String::as_str).collect();
 
         // What the decoder demonstrably reads: change a field in the fixture and the value changes.
-        let read = ["at", "command", "clipped", "exit", "seconds", "outside", "wrote"];
+        let read = ["at", "command", "clipped", "exit", "seconds", "cwd", "outside", "wrote"];
         for key in &keys {
             assert!(
                 read.contains(key) || UNREAD.iter().any(|(name, _)| name == key),
@@ -2854,6 +2857,7 @@ mod tests {
         assert!(first.text.starts_with("python3 -c"), "{}", first.text);
         assert_eq!(first.exit, Some(0));
         assert_eq!(first.seconds, Some(1.4));
+        assert_eq!(first.cwd, "/mnt/c/Users/piero/Documents/Mini-Me/019ff651-0cd7-71c1");
         assert!(!first.clipped);
         assert!(!first.escaped(), "it stayed inside the conversation");
         assert!(!first.failed());

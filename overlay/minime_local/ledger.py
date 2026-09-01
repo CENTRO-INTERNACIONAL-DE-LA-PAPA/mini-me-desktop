@@ -173,6 +173,7 @@ def entry(
         "clipped": clipped,
         "exit": exit_code,
         "seconds": None if seconds is None else round(seconds, 2),
+        "cwd": str(work_dir),
         "outside": named,
         # A subset of `outside`, never more: something the command did not name cannot be checked.
         "wrote": [path for path in (wrote or []) if path in named],

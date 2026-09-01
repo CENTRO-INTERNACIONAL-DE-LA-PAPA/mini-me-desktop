@@ -16873,6 +16873,14 @@ impl Workbench {
                 );
             }
 
+            if !command.cwd.is_empty() {
+                row = row.child(
+                    ui::Label::new(format!("in {}", command.cwd))
+                        .muted()
+                        .size(ui::Size::Compact),
+                );
+            }
+
             // Two different sentences, because they are two different claims. A file watched to
             // appear during the command is a fact; a path merely mentioned may have been read.
             for path in &command.outside {
