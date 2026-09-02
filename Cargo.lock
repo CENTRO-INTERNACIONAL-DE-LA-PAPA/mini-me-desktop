@@ -3262,6 +3262,7 @@ version = "0.3.29"
 dependencies = [
  "anyhow",
  "base64",
+ "embed-resource",
  "flate2",
  "futures",
  "gpui",

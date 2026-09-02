@@ -1,0 +1,5 @@
+// The resource that gives the .exe its icon — Explorer, the taskbar, and the window's
+// titlebar all read this, not anything GPUI sets at runtime: gpui's own `WindowOptions` /
+// `TitlebarOptions` have no icon field at all, since on Windows the icon is a property of
+// the executable, not the window.
+1 ICON "../../assets/icon.ico"
