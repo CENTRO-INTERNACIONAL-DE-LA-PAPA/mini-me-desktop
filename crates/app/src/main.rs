@@ -39,14 +39,10 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use futures::StreamExt;
 use gpui::{
-    actions, div, prelude::*, px, rgb, size, App, Application, AssetSource, Bounds, ClipboardItem, Context, Entity, Focusable,
-    KeyBinding, ListAlignment, ListState, SharedString,
-    Window, WindowBounds,
-    WindowOptions,
+    App, Application, AssetSource, Bounds, ClipboardItem, Context, Entity, Focusable, KeyBinding, ListAlignment, ListState, SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div, prelude::*, px, rgb, size,
 };
 
 use ui::common::horizontal_drag_offset;
-use ui::common::app_icon;
 use ui::provenance_view::{link_for, provenance_svg};
 use composer::{Composer, ComposerEvent};
 use protocol::{AgentRef, ApprovalRequest, Bucket, Project, TurnEvent};
@@ -1086,17 +1082,6 @@ fn summary_for(tasks: &[protocol::AsyncTask], plan: &[protocol::Todo]) -> Option
         return None;
     }
     Some(format!("step {} of {total}", done + 1))
-}
-
-
-
-
-/// A one-line tooltip.
-///
-/// GPUI wants a whole view for a tooltip, so this is the smallest one that renders text —
-/// and having it means a control can be an icon without becoming a guess.
-struct Hint {
-    text: SharedString,
 }
 
 
@@ -2714,7 +2699,7 @@ impl Workbench {
             provenance_focus: cx.focus_handle(),
             about_focus: cx.focus_handle(),
             delete_focus: cx.focus_handle(),
-            sidebar_width: 240.,
+            sidebar_width: 320.,
             panel_width: 320.,
             dragging: None,
             toasts: Vec::new(),
@@ -7385,11 +7370,9 @@ impl Render for Workbench {
                     div()
                         .id("toggle-left-sidebar")
                         .child(
-                            app_icon(
-                                "icons/sidebar-simple-left.svg",
-                                theme::text(),
-                                Some(ui::IconSize::Small.px())
-                            )
+                            ui::Icon::new("icons/sidebar-simple-left.svg")
+                                .size(ui::IconSize::Small)
+                                .colour(theme::text())
                         )
                         .w(px(30.))
                         .h(px(30.))
@@ -7419,9 +7402,9 @@ impl Render for Workbench {
             //
             // Not before the first question: an empty road beside an empty transcript is a frame
             // around nothing, and the empty state has its own things to say.
-            .when(!self.transcript.is_empty(), |body| {
-                body.child(self.road_strip(cx))
-            })
+            // .when(!self.transcript.is_empty(), |body| {
+            //     body.child(self.road_strip(cx))
+            // })
             .child(self.chat_pane(cx));
 
         // The right-hand slot belongs to the research panel alone. Setup used to take it,
@@ -7433,11 +7416,11 @@ impl Render for Workbench {
             body.child(
                 div()
                     .id("toggle-right-panel")
-                    .child(app_icon(
-                        "icons/sidebar-simple-right.svg",
-                        theme::text(),
-                        Some(ui::IconSize::Small.px()),
-                    ))
+                    .child(
+                        ui::Icon::new("icons/sidebar-simple-right.svg")
+                            .size(ui::IconSize::Small)
+                            .colour(theme::text())
+                    )
                     .w(px(30.))
                     .h(px(30.))
                     .bg(rgb(theme::surface()))
@@ -9115,8 +9098,9 @@ mod tests {
         // multiplies by `style.text.color`, so whether an icon appears is decided entirely by
         // the element's own colour and not by anything in these bytes. That assertion passed
         // just as happily when all four icons rendered nothing at all, which is the state this
-        // PR arrived in. What replaces it is `app_icon` taking `ink` as an argument, so the
-        // compiler refuses a call site that forgets (docs §157).
+        // PR arrived in. What replaces it is `ui::Icon` taking a colour, defaulted rather than
+        // required now that it lives behind a builder, but still impossible to omit by accident
+        // the way a bare `svg()` call was (docs §157).
     }
 
     #[test]
@@ -10665,6 +10649,10 @@ fn main() {
             .open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("Mini-Me Desktop".into()),
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 },
                 |window, cx| cx.new(|cx| Workbench::new(sidecar.clone(), window, cx)),

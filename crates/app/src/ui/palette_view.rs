@@ -236,7 +236,7 @@ impl Workbench {
                             .text_color(rgb(theme::text_muted()))
                             .text_xs()
                             .child("↑↓ select ·")
-                            .child(app_icon("icons/enter.svg", theme::text_muted(), None))
+                            .child(ui::Icon::new("icons/enter.svg").colour(theme::text_muted()))
                             .child("run · esc close"),
                     ),
             )

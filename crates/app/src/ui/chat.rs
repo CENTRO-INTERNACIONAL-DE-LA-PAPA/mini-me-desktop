@@ -68,7 +68,7 @@ pub(crate) fn fold_steps(steps: &[String]) -> Vec<String> {
 
 /// A labelled, bulleted list of spine entries.
 pub(crate) fn spine_list(label: &'static str, items: &[String], bullet: &'static str) -> impl IntoElement {
-    let mut list = div().flex().flex_col().gap_1().child(section_label(label));
+    let mut list = div().flex().flex_col().gap_1().child(ui::Label::new(label).colour(theme::text_faint()).size(ui::Size::Compact));
     for item in items {
         list = list.child(
             div()
@@ -848,19 +848,19 @@ impl Workbench {
                                         div()
                                             .absolute()
                                             .left(px(0.))
-                                            .child(app_icon_at("icons/agent-ellipse.svg", 0xF47920, 18.)),
+                                            .child(ui::Icon::new("icons/agent-ellipse.svg").size(ui::IconSize::Small).colour(0xF47920)),
                                     )
                                     .child(
                                         div()
                                             .absolute()
                                             .left(px(9.))
-                                            .child(app_icon_at("icons/agent-ellipse.svg", 0x20ADF4, 18.)),
+                                            .child(ui::Icon::new("icons/agent-ellipse.svg").size(ui::IconSize::Small).colour(0x20ADF4)),
                                     )
                                     .child(
                                         div()
                                             .absolute()
                                             .left(px(18.))
-                                            .child(app_icon_at("icons/agent-ellipse.svg", 0xF42091, 18.)),
+                                            .child(ui::Icon::new("icons/agent-ellipse.svg").size(ui::IconSize::Small).colour(0xF42091)),
                                     ),
                             )
                             .child("What are you working on?"),
@@ -957,7 +957,7 @@ impl Workbench {
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .child(section_label("PICK UP WHERE YOU LEFT OFF"))
+                    .child(ui::Label::new("PICK UP WHERE YOU LEFT OFF").colour(theme::text_faint()).size(ui::Size::Compact))
                     .child(cards),
             );
         }
@@ -1016,7 +1016,7 @@ impl Workbench {
                     .when(leading, |row| row.hover(|style| style.cursor_pointer()))
                     .child(
                         div()
-                            .child(app_icon(icon, theme::accent(), Some(ui::IconSize::Medium.px())))
+                            .child(ui::Icon::new(icon).size(ui::IconSize::Medium).colour(theme::accent()))
                     )
                     .child(
                         div()
@@ -1406,11 +1406,11 @@ impl Workbench {
                     .py_2()
                     .text_base()
                     .text_color(rgb(theme::text()))
-                    .child(app_icon(
-                        "icons/chat-circle-dots.svg",
-                        theme::text(),
-                        Some(ui::IconSize::Small.px()),
-                    ))
+                    .child(
+                        ui::Icon::new("icons/chat-circle-dots.svg")
+                            .size(ui::IconSize::Small)
+                            .colour(theme::text())
+                    )
                     .child(title)
             }))
             .child(
@@ -1425,7 +1425,7 @@ impl Workbench {
                     // the transcript and nowhere else.
                     .group(SCROLL_GROUP)
                     .child(col)
-                    .children(list_scrollbar(&list_state)),
+                    .children(ui::list_scrollbar(&list_state)),
             );
         // Above the composer, so the decision sits where the user's attention already
         // is and cannot be scrolled out of view.
@@ -1643,7 +1643,7 @@ impl Workbench {
             )
             .child(
                 ui::Button::new("attach-file")
-                    .icon("icons/plus.svg")
+                    .icon(ui::Icon::new("icons/plus.svg"))
                     .style(ui::ButtonStyle::SecondaryWhite)
                     .border(false)
                     .tooltip("Add a file from this computer")
@@ -1654,7 +1654,7 @@ impl Workbench {
             .child(self.composer.clone())
             .child(
                 ui::Button::new("send-turn")
-                    .icon(send_icon)
+                    .icon(ui::Icon::new(send_icon))
                     .style(send_style)
                     .border(false)
                     .disabled(send_disabled)

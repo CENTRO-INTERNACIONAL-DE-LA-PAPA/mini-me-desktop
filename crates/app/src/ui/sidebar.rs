@@ -90,7 +90,7 @@ impl Workbench {
         at: gpui::Point<gpui::Pixels>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let mut panel = menu_card();
+        let mut panel = ui::menu_card();
         for row in open.rows() {
             let chosen = open.clone();
             let id = row.id;
@@ -192,30 +192,27 @@ impl Workbench {
                 .flex_grow()
                 .items_center()
                 .justify_center()
-                .py_1()
-                .text_sm()
-                .text_color(rgb(if active { theme::accent() } else { theme::text_muted() }))
-                .text_center()
-                .when(active, |tab| tab.bg(rgb(theme::accent_soft())))
-                .child(label)
-                .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                    workbench.sidebar_view = view;
-                    cx.notify();
-                }))
+                .child(ui::Button::new(SharedString::from(format!("sidebar-tab-{label}")))
+                    .text(label)
+                    .active(active)
+                    .selection(true)
+                    .style(ui::ButtonStyle::Secondary)
+                    .border(false)
+                    .alignment(ui::Alignment::Center)
+                    .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                        workbench.sidebar_view = view;
+                        cx.notify();
+                    }))
+                )          
         };
         div()
             .flex_none()
             .flex()
             .flex_row()
-            .gap_1()
-            .mx_2()
-            .mt_2()
             .rounded_md()
-            .rounded_b_none()
             .border_1()
-            .border_b_0()
             .border_color(rgb(theme::border()))
-            .hover(|style| style.text_color(rgb(theme::text())).cursor_pointer())
+            // .hover(|style| style.text_color(rgb(theme::text())).cursor_pointer())
             .bg(rgb(theme::background()))
             .child(tab(
                 "Conversations",
@@ -267,7 +264,6 @@ impl Workbench {
             .flex_grow()
             .min_w_0()
             .overflow_y_scroll()
-            .p_2()
             // One consistent gap for every row the list holds — conversation rows, the
             // draft placeholder, and the New Conversation/Project row at the end — rather
             // than the near-invisible `gap_px()` this used to be, which read as uneven next
@@ -405,11 +401,11 @@ impl Workbench {
                                 .gap_2()
                                 .flex_grow()
                                 .min_w_0()
-                                .child(app_icon(
-                                    "icons/folder.svg",
-                                    theme::text(),
-                                    Some(ui::IconSize::Small.px()),
-                                ))
+                                .child(
+                                    ui::Icon::new("icons/folder.svg")
+                                        .size(ui::IconSize::Small)
+                                        .colour(theme::text())
+                                )
                                 .child(
                                     div()
                                         .text_color(rgb(theme::text()))
@@ -483,13 +479,13 @@ impl Workbench {
         // controls rather than as the next thing to do with what's above it.
         list = list.child(match self.sidebar_view {
             SidebarView::Conversations => ui::Button::new("sidebar-new-conversation")
-                .icon("icons/plus.svg")
+                .icon(ui::Icon::new("icons/plus.svg"))
                 .text("New Conversation")
                 .on_click(cx.listener(|workbench, _event, window, cx| {
                     workbench.run_sidebar_menu(&SidebarMenu::New, "menu-new-conversation", window, cx);
                 })),
             SidebarView::Projects => ui::Button::new("sidebar-new-project")
-                .icon("icons/plus.svg")
+                .icon(ui::Icon::new("icons/plus.svg"))
                 .text("New Project")
                 .on_click(cx.listener(|workbench, _event, window, cx| {
                     workbench.run_sidebar_menu(&SidebarMenu::New, "menu-new-project", window, cx);
@@ -502,9 +498,8 @@ impl Workbench {
             .w(px(self.sidebar_width))
             .h_full()
             .flex_none()
-            // A rounded card on the window background, the way Zed's panels sit, rather
-            // than a full-bleed slab meeting the next panel at a hairline (docs §50).
             .m_2()
+            .p_4()
             .rounded_lg()
             .overflow_hidden()
             .bg(rgb(theme::surface()))
@@ -517,8 +512,6 @@ impl Workbench {
                     .items_center()
                     .justify_between()
                     .flex_none()
-                    .px_3()
-                    .py_2()
                     .child(
                         div()
                             .id("home")
@@ -534,7 +527,7 @@ impl Workbench {
                     )
                     .child(
                         ui::Button::new("toggle-left-sidebar")
-                            .icon("icons/sidebar-simple-left.svg")
+                            .icon(ui::Icon::new("icons/sidebar-simple-left.svg"))
                             .style(ui::ButtonStyle::SecondaryWhite)
                             .border(false)
                             .on_click(cx.listener(|workbench, _event, _window, cx| {
@@ -545,34 +538,11 @@ impl Workbench {
                     ),
             )
             .child(self.sidebar_view_toggle(cx))
-            .child(
-                div()
-                    .flex_none()
-                    .m_2()
-                    .mt_0()
-                    .px_2p5()
-                    .py_1p5()
-                    .rounded_md()
-                    .rounded_t_none()
-                    .bg(rgb(theme::surface()))
-                    .border_1()
-                    .text_color(rgb(theme::text_muted()))
-                    .border_color(rgb(theme::border()))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap_2()
-                            .text_sm()
-                            .child(app_icon("icons/magnifying-glass.svg", theme::text_muted(), Some(ui::IconSize::Small.px())))
-                            .child(self.conversation_query.clone()),
-                    )
-            )
+            .child(ui::SearchBar::new(self.conversation_query.clone()))
             .child(list)
             .child(
                 ui::Button::new("open-settings")
-                    .icon("icons/gear-six.svg")
+                    .icon(ui::Icon::new("icons/gear-six.svg"))
                     .text("Settings")
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
                         workbench.run_command(Command::OpenSettings, cx);
@@ -653,235 +623,236 @@ impl Workbench {
     }
 }
 
+// ToDo: [!!] ROAD COMMENTED FOR NOW UNTIL IMPLEMENTED IN CHAT [!!] 
 
-impl Workbench {
-    /// The road: where this enquiry has been, down the left edge of the chat.
-    ///
-    /// **Why a strip and not the modal.** The provenance modal has held this since §75 and it is
-    /// the wrong place for the question people actually ask, which is *where am I* — a question
-    /// you have while the turn is running and will not interrupt it to open a window for. The
-    /// modal answers *what happened*, afterwards, in detail. This answers the live one, and costs
-    /// 172px to do it.
-    ///
-    /// Fed from [`provenance::Record`], which is already written on every frame that carries an
-    /// agent ([`Self::note_provenance`]) — so nothing new is collected, something already
-    /// collected is finally shown while it still matters.
-    pub(crate) fn road_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        const OPEN: f32 = 172.;
-        const FOLDED: f32 = 38.;
-        /// The dot's own size, and the gutter it is centred in.
-        const DOT: f32 = 9.;
-        const GUTTER: f32 = 12.;
-        /// How tall a stage's row is, which is the distance the connector has to span.
-        ///
-        /// Folded, the rail is the *whole* content — no labels, so the rows close up and the dots
-        /// read as one strung line rather than as marks scattered down a margin.
-        const ROW_OPEN: f32 = 46.;
-        const ROW_FOLDED: f32 = 26.;
+// impl Workbench {
+//     /// The road: where this enquiry has been, down the left edge of the chat.
+//     ///
+//     /// **Why a strip and not the modal.** The provenance modal has held this since §75 and it is
+//     /// the wrong place for the question people actually ask, which is *where am I* — a question
+//     /// you have while the turn is running and will not interrupt it to open a window for. The
+//     /// modal answers *what happened*, afterwards, in detail. This answers the live one, and costs
+//     /// 172px to do it.
+//     ///
+//     /// Fed from [`provenance::Record`], which is already written on every frame that carries an
+//     /// agent ([`Self::note_provenance`]) — so nothing new is collected, something already
+//     /// collected is finally shown while it still matters.
+//     pub(crate) fn road_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
+//         const OPEN: f32 = 172.;
+//         const FOLDED: f32 = 38.;
+//         /// The dot's own size, and the gutter it is centred in.
+//         const DOT: f32 = 9.;
+//         const GUTTER: f32 = 12.;
+//         /// How tall a stage's row is, which is the distance the connector has to span.
+//         ///
+//         /// Folded, the rail is the *whole* content — no labels, so the rows close up and the dots
+//         /// read as one strung line rather than as marks scattered down a margin.
+//         const ROW_OPEN: f32 = 46.;
+//         const ROW_FOLDED: f32 = 26.;
 
-        let stages = self.provenance.road();
-        // The stage still producing output. Only meaningful while a turn is in flight: after it
-        // ends, every stage has been seen and none is running. The *strongest true statement*
-        // available — we know which invocation spoke most recently, and nothing else (§74).
-        let running = self
-            .streaming
-            .then(|| stages.iter().max_by_key(|stage| stage.last_seen))
-            .flatten()
-            .map(|stage| stage.name.clone());
+//         let stages = self.provenance.road();
+//         // The stage still producing output. Only meaningful while a turn is in flight: after it
+//         // ends, every stage has been seen and none is running. The *strongest true statement*
+//         // available — we know which invocation spoke most recently, and nothing else (§74).
+//         let running = self
+//             .streaming
+//             .then(|| stages.iter().max_by_key(|stage| stage.last_seen))
+//             .flatten()
+//             .map(|stage| stage.name.clone());
 
-        let mut strip = div()
-            .flex()
-            .flex_col()
-            .flex_none()
-            .h_full()
-            .w(px(if self.road_open { OPEN } else { FOLDED }))
-            .pt(px(18.))
-            .pb(px(14.))
-            .when(self.road_open, |strip| strip.px(px(14.)).gap_3())
-            .when(!self.road_open, |strip| strip.items_center().gap_2())
-            // One step up from the pane's `background`, which is what makes it read as a rail
-            // rather than as the transcript with something in the margin.
-            .m_1()
-            .rounded_lg()
-            .overflow_hidden()
-            .bg(rgb(theme::surface()))
-            .border_1()
-            .border_color(rgb(theme::border()));
+//         let mut strip = div()
+//             .flex()
+//             .flex_col()
+//             .flex_none()
+//             .h_full()
+//             .w(px(if self.road_open { OPEN } else { FOLDED }))
+//             .pt(px(18.))
+//             .pb(px(14.))
+//             .when(self.road_open, |strip| strip.px(px(14.)).gap_3())
+//             .when(!self.road_open, |strip| strip.items_center().gap_2())
+//             // One step up from the pane's `background`, which is what makes it read as a rail
+//             // rather than as the transcript with something in the margin.
+//             .m_1()
+//             .rounded_lg()
+//             .overflow_hidden()
+//             .bg(rgb(theme::surface()))
+//             .border_1()
+//             .border_color(rgb(theme::border()));
 
-        // Header: the name, and the chevron that folds it. Folded, the chevron is the whole
-        // header — there is no room for a word and no need for one.
-        strip = strip.child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .w_full()
-                .flex_none()
-                // Folded, the chevron is the header's only child, and `justify_between` puts a
-                // lone child at the start — so it sat against the left edge above a rail that
-                // §169 had just centred. Same one-line fix as the stage rows below it.
-                .when(!self.road_open, |header| header.justify_center())
-                .when(self.road_open, |header| {
-                    header.child(
-                        div()
-                            .text_color(rgb(theme::text_faint()))
-                            .text_size(px(11.))
-                            .child("THE ROAD"),
-                    )
-                })
-                .child(
-                    div()
-                        .id("fold-road")
-                        .flex_none()
-                        .text_color(rgb(theme::text_faint()))
-                        .text_size(px(12.))
-                        .hover(|style| style.text_color(rgb(theme::accent())).cursor_pointer())
-                        .child(if self.road_open { "‹" } else { "›" })
-                        .on_click(cx.listener(|workbench, _event, _window, cx| {
-                            workbench.toggle_road(cx);
-                        })),
-                ),
-        );
+//         // Header: the name, and the chevron that folds it. Folded, the chevron is the whole
+//         // header — there is no room for a word and no need for one.
+//         strip = strip.child(
+//             div()
+//                 .flex()
+//                 .flex_row()
+//                 .items_center()
+//                 .justify_between()
+//                 .w_full()
+//                 .flex_none()
+//                 // Folded, the chevron is the header's only child, and `justify_between` puts a
+//                 // lone child at the start — so it sat against the left edge above a rail that
+//                 // §169 had just centred. Same one-line fix as the stage rows below it.
+//                 .when(!self.road_open, |header| header.justify_center())
+//                 .when(self.road_open, |header| {
+//                     header.child(
+//                         div()
+//                             .text_color(rgb(theme::text_faint()))
+//                             .text_size(px(11.))
+//                             .child("THE ROAD"),
+//                     )
+//                 })
+//                 .child(
+//                     div()
+//                         .id("fold-road")
+//                         .flex_none()
+//                         .text_color(rgb(theme::text_faint()))
+//                         .text_size(px(12.))
+//                         .hover(|style| style.text_color(rgb(theme::accent())).cursor_pointer())
+//                         .child(if self.road_open { "‹" } else { "›" })
+//                         .on_click(cx.listener(|workbench, _event, _window, cx| {
+//                             workbench.toggle_road(cx);
+//                         })),
+//                 ),
+//         );
 
-        if stages.is_empty() {
-            // Folded, an explanation would not fit and the empty gutter says it anyway.
-            if self.road_open {
-                strip = strip.child(
-                    div()
-                        .text_color(rgb(theme::text_faint()))
-                        .text_size(px(11.))
-                        .line_height(px(16.))
-                        .child("The specialists this enquiry consults appear here as it reaches them."),
-                );
-            }
-            return strip;
-        }
+//         if stages.is_empty() {
+//             // Folded, an explanation would not fit and the empty gutter says it anyway.
+//             if self.road_open {
+//                 strip = strip.child(
+//                     div()
+//                         .text_color(rgb(theme::text_faint()))
+//                         .text_size(px(11.))
+//                         .line_height(px(16.))
+//                         .child("The specialists this enquiry consults appear here as it reaches them."),
+//                 );
+//             }
+//             return strip;
+//         }
 
-        let mut body = div().flex().flex_col().flex_grow().min_h_0().w_full();
-        let last = stages.len().saturating_sub(1);
-        for (at, stage) in stages.iter().enumerate() {
-            let is_running = running.as_deref() == Some(stage.name.as_str());
+//         let mut body = div().flex().flex_col().flex_grow().min_h_0().w_full();
+//         let last = stages.len().saturating_sub(1);
+//         for (at, stage) in stages.iter().enumerate() {
+//             let is_running = running.as_deref() == Some(stage.name.as_str());
 
-            // The dot, and the connector that continues down to the next one. Both live in a
-            // fixed-width gutter so every label starts on the same x whatever the dot is doing.
-            let gutter = div()
-                .flex()
-                .flex_col()
-                .items_center()
-                .flex_none()
-                .w(px(GUTTER))
-                .child(
-                    div()
-                        .flex_none()
-                        .size(px(DOT))
-                        .rounded_full()
-                        // Filled when it has been, ringed while it is. A ring is a shape that
-                        // has not closed, which is the state it stands for.
-                        .when(is_running, |dot| {
-                            dot.border_2().border_color(rgb(theme::running()))
-                        })
-                        .when(!is_running, |dot| dot.bg(rgb(theme::accent()))),
-                )
-                .when(at < last, |gutter| {
-                    gutter.child(
-                        div()
-                            .flex_grow()
-                            .w(px(2.))
-                            .min_h(px(14.))
-                            .bg(rgb(theme::border_strong())),
-                    )
-                });
+//             // The dot, and the connector that continues down to the next one. Both live in a
+//             // fixed-width gutter so every label starts on the same x whatever the dot is doing.
+//             let gutter = div()
+//                 .flex()
+//                 .flex_col()
+//                 .items_center()
+//                 .flex_none()
+//                 .w(px(GUTTER))
+//                 .child(
+//                     div()
+//                         .flex_none()
+//                         .size(px(DOT))
+//                         .rounded_full()
+//                         // Filled when it has been, ringed while it is. A ring is a shape that
+//                         // has not closed, which is the state it stands for.
+//                         .when(is_running, |dot| {
+//                             dot.border_2().border_color(rgb(theme::running()))
+//                         })
+//                         .when(!is_running, |dot| dot.bg(rgb(theme::accent()))),
+//                 )
+//                 .when(at < last, |gutter| {
+//                     gutter.child(
+//                         div()
+//                             .flex_grow()
+//                             .w(px(2.))
+//                             .min_h(px(14.))
+//                             .bg(rgb(theme::border_strong())),
+//                     )
+//                 });
 
-            let mut row = div()
-                .flex()
-                .flex_row()
-                // **Stretch, not `items_start`.** The connector below the dot is `flex_grow`, and
-                // it can only grow inside a gutter that has a height to grow into. `items_start`
-                // aligns children to the top *and leaves them at their content height*, so the
-                // gutter stood 23px — a 9px dot plus the connector's 14px minimum — while the row
-                // beside it stood at 46px for a two-line label. The line stopped a third of the
-                // way down and every dot hung under a stub (§169).
-                .w_full()
-                .min_w_0()
-                // Folded, the gutter is the row's only child, so a full-width row left it against
-                // the edge. The rail is the whole strip at 38px and belongs down its middle.
-                .when(!self.road_open, |row| row.justify_center())
-                .when(at < last, |row| {
-                    row.min_h(px(if self.road_open { ROW_OPEN } else { ROW_FOLDED }))
-                })
-                .child(gutter);
+//             let mut row = div()
+//                 .flex()
+//                 .flex_row()
+//                 // **Stretch, not `items_start`.** The connector below the dot is `flex_grow`, and
+//                 // it can only grow inside a gutter that has a height to grow into. `items_start`
+//                 // aligns children to the top *and leaves them at their content height*, so the
+//                 // gutter stood 23px — a 9px dot plus the connector's 14px minimum — while the row
+//                 // beside it stood at 46px for a two-line label. The line stopped a third of the
+//                 // way down and every dot hung under a stub (§169).
+//                 .w_full()
+//                 .min_w_0()
+//                 // Folded, the gutter is the row's only child, so a full-width row left it against
+//                 // the edge. The rail is the whole strip at 38px and belongs down its middle.
+//                 .when(!self.road_open, |row| row.justify_center())
+//                 .when(at < last, |row| {
+//                     row.min_h(px(if self.road_open { ROW_OPEN } else { ROW_FOLDED }))
+//                 })
+//                 .child(gutter);
 
-            if self.road_open {
-                // `visited twice · 11s` — the count and how long it was producing. Not
-                // `6 found · Asta`: nothing on this side knows how many results a specialist
-                // returned, or which of them Asta served.
-                let note = if is_running {
-                    format!("running · {}", duration_label(stage.busy_ms))
-                } else if stage.visits > 1 {
-                    format!(
-                        "visited {} times · {}",
-                        stage.visits,
-                        duration_label(stage.busy_ms)
-                    )
-                } else {
-                    duration_label(stage.busy_ms)
-                };
-                row = row.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_grow()
-                        .min_w_0()
-                        // Its own, now that the row stretches: the column fills the row height and
-                        // its two lines stack at the top, where the row's `items_start` used to
-                        // put them.
-                        .items_start()
-                        .pl_2()
-                        // Pulls the label's cap-height level with the dot beside it.
-                        .mt(px(-3.))
-                        .child(
-                            ui::Label::new(stage.name.replace('_', " "))
-                                .colour(if is_running { theme::running() } else { theme::text() })
-                                .ellipsis(),
-                        )
-                        .child(
-                            div()
-                                .text_color(rgb(theme::text_faint()))
-                                .text_size(px(11.))
-                                .child(note),
-                        ),
-                );
-            }
-            body = body.child(row);
-        }
-        strip = strip.child(body);
+//             if self.road_open {
+//                 // `visited twice · 11s` — the count and how long it was producing. Not
+//                 // `6 found · Asta`: nothing on this side knows how many results a specialist
+//                 // returned, or which of them Asta served.
+//                 let note = if is_running {
+//                     format!("running · {}", duration_label(stage.busy_ms))
+//                 } else if stage.visits > 1 {
+//                     format!(
+//                         "visited {} times · {}",
+//                         stage.visits,
+//                         duration_label(stage.busy_ms)
+//                     )
+//                 } else {
+//                     duration_label(stage.busy_ms)
+//                 };
+//                 row = row.child(
+//                     div()
+//                         .flex()
+//                         .flex_col()
+//                         .flex_grow()
+//                         .min_w_0()
+//                         // Its own, now that the row stretches: the column fills the row height and
+//                         // its two lines stack at the top, where the row's `items_start` used to
+//                         // put them.
+//                         .items_start()
+//                         .pl_2()
+//                         // Pulls the label's cap-height level with the dot beside it.
+//                         .mt(px(-3.))
+//                         .child(
+//                             ui::Label::new(stage.name.replace('_', " "))
+//                                 .colour(if is_running { theme::running() } else { theme::text() })
+//                                 .ellipsis(),
+//                         )
+//                         .child(
+//                             div()
+//                                 .text_color(rgb(theme::text_faint()))
+//                                 .text_size(px(11.))
+//                                 .child(note),
+//                         ),
+//                 );
+//             }
+//             body = body.child(row);
+//         }
+//         strip = strip.child(body);
 
-        // Pinned to the bottom by the body's `flex_grow` above it.
-        if self.road_open {
-            strip = strip
-                .child(
-                    div().w_full().flex_none().child(
-                        ui::Button::new("road-full-graph")
-                            .text("Full graph")
-                            .style(ui::ButtonStyle::Primary)
-                            .on_click(cx.listener(|workbench, _event, _window, cx| {
-                                workbench.provenance_view = ProvenanceView::Graph;
-                                workbench.provenance_open = true;
-                                cx.notify();
-                            })),
-                    ),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .text_color(rgb(theme::text_faint()))
-                        .text_size(px(11.))
-                        .line_height(px(15.))
-                        .child("Written beside this conversation's files, so it survives a reload."),
-                );
-        }
-        strip
-    }
-}
+//         // Pinned to the bottom by the body's `flex_grow` above it.
+//         if self.road_open {
+//             strip = strip
+//                 .child(
+//                     div().w_full().flex_none().child(
+//                         ui::Button::new("road-full-graph")
+//                             .text("Full graph")
+//                             .style(ui::ButtonStyle::Primary)
+//                             .on_click(cx.listener(|workbench, _event, _window, cx| {
+//                                 workbench.provenance_view = ProvenanceView::Graph;
+//                                 workbench.provenance_open = true;
+//                                 cx.notify();
+//                             })),
+//                     ),
+//                 )
+//                 .child(
+//                     div()
+//                         .flex_none()
+//                         .text_color(rgb(theme::text_faint()))
+//                         .text_size(px(11.))
+//                         .line_height(px(15.))
+//                         .child("Written beside this conversation's files, so it survives a reload."),
+//                 );
+//         }
+//         strip
+//     }
+// }
 

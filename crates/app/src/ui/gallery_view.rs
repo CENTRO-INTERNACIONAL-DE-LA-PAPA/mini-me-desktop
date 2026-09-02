@@ -618,7 +618,7 @@ impl Workbench {
                     // A non-image in the set still needs a tile, or the counter and the strip
                     // disagree about how many there are.
                     .when(!is_image, |tile| {
-                        tile.child(app_icon_at(glyph, ink, 18.))
+                        tile.child(ui::Icon::new(glyph).size(ui::IconSize::Small).colour(ink))
                     })
                     .on_click(cx.listener(move |workbench, _event, _window, cx| {
                         if let Some(preview) = workbench.preview.as_mut() {
@@ -710,7 +710,7 @@ impl Workbench {
             .border_b_1()
             .border_color(rgb(theme::border()))
             .child(
-                app_icon_at(glyph, ink, 15.),
+                ui::Icon::new(glyph).size(ui::IconSize::Small).colour(ink),
             )
             .child(
                 ui::Label::new(output.name.clone())
@@ -1102,7 +1102,7 @@ impl Workbench {
                 .flex_none()
                 .px_2()
                 .child(
-                    app_icon_at(glyph, ink, 24.),
+                    ui::Icon::new(glyph).size(ui::IconSize::Large).colour(ink),
                 )
                 .child(
                     div()
@@ -1194,7 +1194,7 @@ impl Workbench {
             .bg(rgb(theme::elevated()))
             .hover(|style| style.bg(rgb(theme::accent_soft())).cursor_pointer())
             .child(
-                app_icon_at(glyph, ink, 15.),
+                ui::Icon::new(glyph).size(ui::IconSize::Small).colour(ink),
             )
             .child(
                 div()
@@ -1256,7 +1256,7 @@ impl Workbench {
                     .py_2()
                     .child(
                         ui::Button::new("toggle-right-panel")
-                            .icon("icons/sidebar-simple-right.svg")
+                            .icon(ui::Icon::new("icons/sidebar-simple-right.svg"))
                             .style(ui::ButtonStyle::SecondaryWhite)
                             .border(false)
                             .on_click(cx.listener(|workbench, _event, _window, cx| {
@@ -1267,7 +1267,7 @@ impl Workbench {
                     ),
             )
             .child(self.artifacts_contents(cx))
-            .children(scrollbar(&self.panel_scroll))
+            .children(ui::scrollbar(&self.panel_scroll))
     }
 }
 
@@ -1376,7 +1376,14 @@ impl Workbench {
                     .justify_between()
                     .w_full()
                     .min_w_0()
-                    .child(section_label("MISSION"))
+                    // `flex_none`-wrapped: this heading sits in a `justify_between` row beside
+                    // the Edit action, and `Label` is always `w_full()` — unwrapped it would
+                    // stretch to fill the row and push Edit out of the split the row wants.
+                    .child(
+                        div().flex_none().child(
+                            ui::Label::new("MISSION").colour(theme::text_faint()).size(ui::Size::Compact),
+                        ),
+                    )
                     .when(!self.editing_mission, |heading| {
                         heading.child(
                             div()
@@ -1433,7 +1440,7 @@ impl Workbench {
                 .flex()
                 .flex_col()
                 .gap_2()
-                .child(section_label("SUGGESTED NEXT"));
+                .child(ui::Label::new("SUGGESTED NEXT").colour(theme::text_faint()).size(ui::Size::Compact));
             for (index, suggestion) in project.suggestions.iter().enumerate() {
                 let prompt = suggestion.prompt.clone();
                 suggestions = suggestions.child(
@@ -1613,7 +1620,13 @@ impl Workbench {
                     .w_full()
                     .min_w_0()
                     .gap_2()
-                    .child(section_label("PLAN"))
+                    // `flex_none`-wrapped: `justify_between` needs this heading to stay
+                    // content-width, and `Label` is always `w_full()` on its own.
+                    .child(
+                        div().flex_none().child(
+                            ui::Label::new("PLAN").colour(theme::text_faint()).size(ui::Size::Compact),
+                        ),
+                    )
                     .child(
                         div()
                             .flex_none()
@@ -1742,7 +1755,7 @@ impl Workbench {
                 .w_full()
                 .min_w_0()
                 .child(body)
-                .children(scrollbar(&self.jobs_scroll)),
+                .children(ui::scrollbar(&self.jobs_scroll)),
         )
     }
 }
@@ -2121,7 +2134,7 @@ impl Workbench {
                     workbench.commands_open = true;
                     cx.notify();
                 }))
-                .child(section_label("WHAT RAN"))
+                .child(ui::Label::new("WHAT RAN").colour(theme::text_faint()).size(ui::Size::Compact))
                 .child(
                     ui::Label::new(summary)
                         .colour(tone)
@@ -2183,7 +2196,7 @@ impl Workbench {
                     workbench.claims_open = true;
                     cx.notify();
                 }))
-                .child(section_label("WHAT WAS CLAIMED"))
+                .child(ui::Label::new("WHAT WAS CLAIMED").colour(theme::text_faint()).size(ui::Size::Compact))
                 .child(
                     ui::Label::new(summary)
                         .colour(tone)
@@ -2255,7 +2268,11 @@ impl Workbench {
         section = section.children(said);
 
         if count > 0 {
-            section = section.child(section_label_owned(format!("FILES · {count}")));
+            section = section.child(
+                ui::Label::new(format!("FILES · {count}"))
+                    .colour(theme::text_faint())
+                    .size(ui::Size::Compact),
+            );
         }
 
         if listing.as_ref().is_some_and(|listing| listing.truncated) {

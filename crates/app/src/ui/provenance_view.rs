@@ -509,7 +509,7 @@ impl Workbench {
         // Which turn the graph is showing. Only on the graph — the timeline is one row per turn
         // already, so filtering it to a turn would leave a chart of one bar.
         let rail = if view == ProvenanceView::Graph && self.provenance.turns.len() > 1 {
-            let mut rail = rail.child(div().pt_3().child(section_label("TURNS"))).child(
+            let mut rail = rail.child(div().pt_3().child(ui::Label::new("TURNS").colour(theme::text_faint()).size(ui::Size::Compact))).child(
                 ui::NavEntry::new(
                     "prov-turn-all",
                     format!("All {}", self.provenance.turns.len()),

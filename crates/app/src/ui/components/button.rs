@@ -2,7 +2,7 @@
 
 use gpui::{div, prelude::*, rgb, App, ClickEvent, ElementId, IntoElement, SharedString, Window};
 
-use super::{Icon, IconSize, OnClick};
+use super::{Hint, Icon, IconSize, OnClick};
 use crate::theme;
 
 /// Which of the app's four button looks a [`Button`] wears.
@@ -66,8 +66,8 @@ impl ButtonStyle {
 /// Where a [`Button`]'s icon and text sit inside it, when the button is wider than its content.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Alignment {
-    Left,
     #[default]
+    Left,
     Center,
     Right,
 }
@@ -94,7 +94,7 @@ pub enum Alignment {
 #[derive(IntoElement)]
 pub struct Button {
     id: ElementId,
-    icon: Option<&'static str>,
+    icon: Option<Icon>,
     text: Option<SharedString>,
     style: ButtonStyle,
     alignment: Alignment,
@@ -127,7 +127,7 @@ impl Button {
         }
     }
 
-    pub fn icon(mut self, icon: &'static str) -> Self {
+    pub fn icon(mut self, icon: Icon) -> Self {
         self.icon = Some(icon);
         self
     }
@@ -214,6 +214,7 @@ impl RenderOnce for Button {
             .items_center()
             .gap_2()
             .px_2p5()
+            .py_1p5()
             .rounded_md()
             .bg(rgb(style.bg()))
             .text_color(rgb(text_colour))
@@ -227,16 +228,19 @@ impl RenderOnce for Button {
             button = button.border_1().border_color(rgb(border_colour));
         }
         if let Some(icon) = self.icon {
-            button = button.py_2p5();
-            button = button.child(Icon::new(icon).size(IconSize::Small).colour(text_colour));
+            button = button.p_2();
+            // Size and colour are the button's to decide, not the caller's — an icon that
+            // came in some other size or shade would make one button read as a different
+            // family from the rest. `Button` always renders it at `IconSize::Small`, tinted
+            // to match its own resolved text colour.
+            button = button.child(icon.size(IconSize::Small).colour(text_colour));
         }
         if let Some(text) = self.text {
-            button = button.py_1p5();
             button = button.child(text);
         }
         if let Some(tooltip) = self.tooltip.clone() {
             button = button.tooltip(move |_window, cx| {
-                cx.new(|_| crate::Hint { text: tooltip.clone() }).into()
+                cx.new(|_| Hint { text: tooltip.clone() }).into()
             });
         }
         if self.disabled {

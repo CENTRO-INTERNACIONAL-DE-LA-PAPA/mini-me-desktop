@@ -166,7 +166,7 @@ impl Workbench {
                     .w_full()
                     .min_w_0()
                     .child(list)
-                    .children(scrollbar(&self.model_scroll)),
+                    .children(ui::scrollbar(&self.model_scroll)),
             )
             // **Said, not implied by an empty box.** A filter matching nothing and a provider
             // that returned nothing look identical otherwise, and only one of them is fixed by
@@ -266,7 +266,7 @@ impl Workbench {
                         div()
                             .id(SharedString::from(format!("remove-theme-hint-{remove_name}")))
                             .tooltip(|_window, cx| {
-                                cx.new(|_| Hint {
+                                cx.new(|_| ui::Hint {
                                     text: "remove this installed file and every palette in it"
                                         .into(),
                                 })
@@ -368,7 +368,7 @@ impl Workbench {
             .min_w_0()
             .gap_1()
             .pt_2()
-            .child(section_label("GET MORE"))
+            .child(ui::Label::new("GET MORE").colour(theme::text_faint()).size(ui::Size::Compact))
             .child(self.filter_field(self.gallery_query.clone(), cx));
 
         if !self.gallery_note.is_empty() {
@@ -451,7 +451,7 @@ impl Workbench {
                     .w_full()
                     .min_w_0()
                     .child(list)
-                    .children(scrollbar(&self.theme_scroll)),
+                    .children(ui::scrollbar(&self.theme_scroll)),
             )
             .child(gallery)
             .child(
@@ -616,7 +616,7 @@ impl Workbench {
             .w_full()
             .min_w_0()
             .gap_3()
-            .child(section_label("PER SPECIALIST"));
+            .child(ui::Label::new("PER SPECIALIST").colour(theme::text_faint()).size(ui::Size::Compact));
 
         if specialists.is_empty() {
             return rows.child(

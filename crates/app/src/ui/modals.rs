@@ -15,7 +15,7 @@ use gpui::{
 impl Workbench {
     pub(crate) fn context_menu(&self, open: menu::ContextMenu, cx: &mut Context<Self>) -> impl IntoElement {
         let target = open.target;
-        let mut panel = menu_card();
+        let mut panel = ui::menu_card();
 
         for &item in open.items() {
             let enabled = self.menu_item_enabled(item, target, cx);
@@ -416,11 +416,11 @@ impl Workbench {
                  literature, find datasets, clean and analyse tabular data, build models, and \
                  write the findings up.",
             ))
-            .child(section_label("THE SPECIALISTS"))
+            .child(ui::Label::new("THE SPECIALISTS").colour(theme::text_faint()).size(ui::Size::Compact))
             .child(team)
-            .child(section_label("WHERE THE DATA COMES FROM"))
+            .child(ui::Label::new("WHERE THE DATA COMES FROM").colour(theme::text_faint()).size(ui::Size::Compact))
             .child(sources)
-            .child(section_label("THIS BUILD"))
+            .child(ui::Label::new("THIS BUILD").colour(theme::text_faint()).size(ui::Size::Compact))
             // **Because a tester's report is unusable without it.** The app has never shown its
             // own version anywhere: not in the window, not in the log, not in the About page. It
             // logged the *backend* checkout's commit as its very first line (§115) and said nothing
@@ -456,7 +456,7 @@ impl Workbench {
                     )
                     .children(self.update_action(cx)),
             )
-            .child(section_label("WHERE CODE RUNS"))
+            .child(ui::Label::new("WHERE CODE RUNS").colour(theme::text_faint()).size(ui::Size::Compact))
             .child(
                 div()
                     .flex()
@@ -466,7 +466,7 @@ impl Workbench {
                     .child(ui::Label::new(execution.0).colour(theme::accent()))
                     .child(ui::Label::new(execution.1).muted().size(ui::Size::Compact)),
             )
-            .child(section_label("CITING THIS WORK"))
+            .child(ui::Label::new("CITING THIS WORK").colour(theme::text_faint()).size(ui::Size::Compact))
             .child(ui::Label::new(
                 "Literature search is powered by Asta, from the Allen Institute for AI. If your \
                  work uses output produced with it, please cite AstaBench:",
@@ -1015,7 +1015,7 @@ impl Workbench {
                 .min_w_0()
                 .flex_none()
                 .gap_1()
-                .child(section_label(heading));
+                .child(ui::Label::new(heading).colour(theme::text_faint()).size(ui::Size::Compact));
             for block in markdown::parse(body) {
                 rendered = rendered.child(
                     div()
@@ -1044,7 +1044,7 @@ impl Workbench {
                         .min_w_0()
                         .flex_none()
                         .gap_1()
-                        .child(section_label("FIGURES"))
+                        .child(ui::Label::new("FIGURES").colour(theme::text_faint()).size(ui::Size::Compact))
                         .children(paths.iter().enumerate().map(|(at, path)| {
                             let opening = path.clone();
                             div()
@@ -1308,7 +1308,7 @@ impl Workbench {
                 .w_full()
                 .min_w_0()
                 .gap_1()
-                .child(section_label("EXPERIMENTS TO RUN"))
+                .child(ui::Label::new("EXPERIMENTS TO RUN").colour(theme::text_faint()).size(ui::Size::Compact))
                 .child(
                     div()
                         .flex()
@@ -1373,7 +1373,7 @@ impl Workbench {
                 .w_full()
                 .min_w_0()
                 .gap_1()
-                .child(section_label("WHAT TO EXPLORE"))
+                .child(ui::Label::new("WHAT TO EXPLORE").colour(theme::text_faint()).size(ui::Size::Compact))
                 .child(self.filter_field(self.intent_field.clone(), cx))
                 .child(
                     ui::Label::new(
@@ -2004,15 +2004,20 @@ impl Workbench {
                     .pt_2()
                     .border_t_1()
                     .border_color(rgb(theme::border()))
-                    .child(section_label_owned(match self.unverified_sources() {
-                        // **Counted where the eye lands, not only marked row by row.** Silence
-                        // under a reference means "nothing wrong with this one", and until §185
-                        // it also meant "nothing checked this one" — so a researcher scanning
-                        // fourteen citations had no way to know how many needed them. The header
-                        // says how many, and the rows say which (docs §185).
-                        0 => format!("SOURCES · {}", self.sources.len()),
-                        n => format!("SOURCES · {} · {n} UNVERIFIED", self.sources.len()),
-                    }))
+                    .child(
+                        ui::Label::new(match self.unverified_sources() {
+                            // **Counted where the eye lands, not only marked row by row.**
+                            // Silence under a reference means "nothing wrong with this one", and
+                            // until §185 it also meant "nothing checked this one" — so a
+                            // researcher scanning fourteen citations had no way to know how many
+                            // needed them. The header says how many, and the rows say which
+                            // (docs §185).
+                            0 => format!("SOURCES · {}", self.sources.len()),
+                            n => format!("SOURCES · {} · {n} UNVERIFIED", self.sources.len()),
+                        })
+                        .colour(theme::text_faint())
+                        .size(ui::Size::Compact),
+                    )
             });
 
         // A quiet line while the registry is being asked, and nothing at all once it is done.

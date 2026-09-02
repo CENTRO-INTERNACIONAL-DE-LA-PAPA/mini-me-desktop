@@ -11,21 +11,12 @@ use crate::theme;
 
 /// The three icon sizes used app-wide. Not an arbitrary `f32`, so every icon in the app is one
 /// of exactly three sizes rather than whatever pixel value a call site guessed.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum IconSize {
+    #[default]
     Small,
     Medium,
     Large,
-}
-
-impl IconSize {
-    pub const fn px(self) -> f32 {
-        match self {
-            IconSize::Small => 18.0,
-            IconSize::Medium => 20.0,
-            IconSize::Large => 22.0,
-        }
-    }
 }
 
 #[derive(IntoElement)]
@@ -39,7 +30,7 @@ impl Icon {
     pub fn new(path: &'static str) -> Self {
         Self {
             path,
-            size: IconSize::Medium,
+            size: IconSize::default(),
             colour: theme::text_muted(),
         }
     }
@@ -57,10 +48,19 @@ impl Icon {
 
 impl RenderOnce for Icon {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let size_px;
+        if self.size == IconSize::Small {
+            size_px = 18.0;
+        } else if self.size == IconSize::Medium {
+            size_px = 20.0;
+        } else {
+            size_px = 22.0;
+        }
+
         gpui::svg()
             .path(self.path)
-            .w(gpui::px(self.size.px()))
-            .h(gpui::px(self.size.px()))
+            .w(gpui::px(size_px))
+            .h(gpui::px(size_px))
             .flex_none()
             .text_color(rgb(self.colour))
     }
