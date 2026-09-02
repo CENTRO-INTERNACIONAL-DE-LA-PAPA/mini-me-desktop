@@ -15,59 +15,28 @@ use gpui::{
 impl Workbench {
     pub(crate) fn context_menu(&self, open: menu::ContextMenu, cx: &mut Context<Self>) -> impl IntoElement {
         let target = open.target;
-        let mut panel = ui::menu_card();
+        let mut popup = ui::Menu::new(open.at)
+            // A right-click elsewhere re-opens this menu at the new spot, and that handler is
+            // the only one that should decide whether it closes.
+            .ignore_right_click(true);
 
         for &item in open.items() {
             let enabled = self.menu_item_enabled(item, target, cx);
-            let shortcut = item.shortcut(target);
-            panel = panel.child(
-                div()
-                    .id(SharedString::from(format!("menu-{}", item.label())))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .gap_4()
-                    .px_3()
-                    .py_1()
-                    .text_sm()
-                    .text_color(rgb(if enabled {
-                        theme::text()
-                    } else {
-                        theme::text_faint()
-                    }))
-                    .when(enabled, |row| {
-                        row.hover(|style| style.bg(rgb(theme::accent_soft())).cursor_pointer())
-                            .on_click(cx.listener(move |workbench, _event, window, cx| {
-                                workbench.run_menu_item(item, target, window, cx);
-                            }))
-                    })
-                    .child(item.label())
-                    .child(
-                        div()
-                            .text_color(rgb(theme::text_faint()))
-                            .text_xs()
-                            .child(shortcut),
-                    ),
+            popup = popup.item(
+                ui::MenuItem::new(SharedString::from(format!("menu-{}", item.label())), item.label())
+                    .trailing(item.shortcut(target))
+                    .disabled(!enabled)
+                    .on_click(cx.listener(move |workbench, _event, window, cx| {
+                        workbench.run_menu_item(item, target, window, cx);
+                    })),
             );
         }
 
         // Clicking anywhere else closes it, which is the only way out most people look for.
-        gpui::deferred(gpui::anchored().position(open.at).snap_to_window().child(
-            panel.on_mouse_down_out(cx.listener(
-                |workbench, event: &gpui::MouseDownEvent, _window, cx| {
-                    // A right-click elsewhere re-opens the menu at the new spot, and
-                    // that handler is the only one that should decide. Closing here as
-                    // well would race it, and which one won would depend on paint
-                    // order — sometimes leaving no menu at all.
-                    if event.button == gpui::MouseButton::Right {
-                        return;
-                    }
-                    workbench.context_menu = None;
-                    cx.notify();
-                },
-            )),
-        ))
+        popup.on_dismiss(cx.listener(|workbench, _event, _window, cx| {
+            workbench.context_menu = None;
+            cx.notify();
+        }))
     }
 }
 
@@ -1319,7 +1288,7 @@ impl Workbench {
                         .children(BUDGET_PRESETS.iter().map(|&preset| {
                             ui::Button::new(SharedString::from(format!("budget-{preset}")))
                                 .text(preset.to_string())
-                                .selection(true)
+                                .toggle(true)
                                 .active(preset == experiments)
                             .on_click(cx.listener(move |workbench, _event, _window, cx| {
                                 if let Some(approval) = workbench.approving.as_mut() {

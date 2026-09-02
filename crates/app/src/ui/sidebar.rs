@@ -90,43 +90,85 @@ impl Workbench {
         at: gpui::Point<gpui::Pixels>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let mut panel = ui::menu_card();
+        let mut menu = ui::Menu::new(at);
         for row in open.rows() {
             let chosen = open.clone();
             let id = row.id;
-            panel = panel.child(
-                div()
-                    .id(id)
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .w_full()
-                    .min_w_0()
-                    .px_3()
-                    .py_1()
-                    .text_sm()
-                    .text_color(rgb(if row.danger {
-                        theme::error()
-                    } else {
-                        theme::text()
-                    }))
-                    .hover(|style| style.bg(rgb(theme::accent_soft())).cursor_pointer())
-                    .child(row.label)
+            menu = menu.item(
+                ui::MenuItem::new(id, row.label)
+                    .danger(row.danger)
                     .on_click(cx.listener(move |workbench, _event, window, cx| {
                         workbench.sidebar_menu = None;
                         workbench.run_sidebar_menu(&chosen, id, window, cx);
                     })),
             );
         }
+        menu.on_dismiss(cx.listener(|workbench, _event, _window, cx| {
+            workbench.sidebar_menu = None;
+            cx.notify();
+        }))
+    }
+}
 
-        gpui::deferred(
-            gpui::anchored().position(at).snap_to_window().child(
-                panel.on_mouse_down_out(cx.listener(|workbench, _event: &gpui::MouseDownEvent, _window, cx| {
-                    workbench.sidebar_menu = None;
-                    cx.notify();
-                })),
+
+impl Workbench {
+    /// What each row does. **Nothing new lives here** — every arm calls a method the sidebar
+    /// already had, which is the rule this file follows: the sidebar owns everything a sidebar
+    /// row can do, the same way `context_menu` owns the right-click menu's own dispatch.
+    fn run_sidebar_menu(
+        &mut self,
+        open: &SidebarMenu,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match (open, id) {
+            (SidebarMenu::New, "menu-new-conversation") => self.new_thread_in(None, cx),
+            (SidebarMenu::New, "menu-new-project") => {
+                // The project picker already knows how to name one that does not exist yet —
+                // typing offers `New project “…”` as its first row. `NewProject` only changes
+                // what choosing does: start a conversation there, rather than move the open one.
+                self.open_picker = Some((Picker::NewProject, gpui::point(px(24.), px(120.))));
+                self.project_query.update(cx, |query, cx| {
+                    query.set_text("", cx);
+                    query.set_placeholder("Create", cx);
+                });
+                cx.notify();
+            }
+            (SidebarMenu::Conversation(conversation), "menu-rename") => {
+                self.start_rename(conversation.thread_id.clone(), window, cx)
+            }
+            (SidebarMenu::Conversation(conversation), "menu-delete") => {
+                self.request_delete(DeleteTarget::Conversation(conversation.clone()), window, cx)
+            }
+            (SidebarMenu::Project { name, .. }, "menu-new-here") => {
+                self.new_thread_in(Some(name.clone()), cx)
+            }
+            (SidebarMenu::Project { name, .. }, "menu-open-folder") => {
+                if let Some(dir) =
+                    workspace::project_folder(name).map(|folder| workspace::root().join(folder))
+                {
+                    if let Err(error) = workspace::open(&dir) {
+                        tracing::warn!(%error, "could not open a project");
+                    }
+                }
+            }
+            (
+                SidebarMenu::Project {
+                    name,
+                    conversations,
+                },
+                "menu-delete-project",
+            ) => self.request_delete(
+                DeleteTarget::Project {
+                    name: name.clone(),
+                    conversations: conversations.clone(),
+                },
+                window,
+                cx,
             ),
-        )
+            _ => {}
+        }
     }
 }
 
@@ -195,7 +237,7 @@ impl Workbench {
                 .child(ui::Button::new(SharedString::from(format!("sidebar-tab-{label}")))
                     .text(label)
                     .active(active)
-                    .selection(true)
+                    .toggle(true)
                     .style(ui::ButtonStyle::Secondary)
                     .border(false)
                     .alignment(ui::Alignment::Center)
@@ -238,26 +280,10 @@ impl Workbench {
         // before a thread exists, so it is what tells the draft row where to sit: under the
         // project it was started in, not always in the Conversations tab (§263).
         let draft_project = current.is_none().then(|| self.sidecar.project()).flatten();
-        // The same scorer the command palette uses, so "pap" finds "Rendimiento de papa"
-        // and typing feels the way Zed's file finder does rather than like a substring
-        // match that misses the obvious (docs §49).
         let query = self.conversation_query.read(cx).text().to_string();
-        let mut ranked: Vec<(i32, &protocol::Conversation)> = self
-            .conversations
-            .iter()
-            .filter_map(|conversation| {
-                match_score(&query, &conversation.title).map(|score| (score, conversation))
-            })
-            .collect();
-        if !query.trim().is_empty() {
-            ranked.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
-        }
-        let matched: Vec<&protocol::Conversation> = ranked
-            .into_iter()
-            .map(|(_, conversation)| conversation)
-            .collect();
+        let matched = self.matching_conversations(&query);
 
-        let mut list = div()
+        let list = div()
             .id("conversations")
             .flex()
             .flex_col()
@@ -270,227 +296,44 @@ impl Workbench {
             // to a bordered row like the New Conversation button.
             .gap_1();
 
-        // No thread yet — either the app just opened or "New Conversation" was just pressed —
-        // reads as a chat with nowhere to find it again: the list looked unchanged while the
-        // transcript already had. A row here is that chat's placeholder until either a message
-        // gives it a real thread (§262), or another conversation is opened and it quietly stops
-        // existing — it was never saved anywhere to begin with.
-        if self.sidebar_view == SidebarView::Conversations
-            && draft_project.is_none()
-            && current.is_none()
-            && query.trim().is_empty()
-        {
-            list = list.child(ui::ListRow::new("draft-conversation", "Untitled Conversation").selected(true));
-        }
-
-        if matched.is_empty() && self.sidebar_view == SidebarView::Conversations {
-            list = list.child(
-                div()
-                    .p_2()
-                    .text_color(rgb(theme::text_faint()))
-                    .text_xs()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_2()
-                    // The mark goes where the researcher is already looking. A sentence alone
-                    // said the same thing and said it motionlessly, which is what a hung window
-                    // also looks like (§177).
-                    .when(!self.conversations_loaded, |row| {
-                        row.child(
-                            // Muted, matching the sentence beside it: this reports a state, and
-                            // the accent in this app means "act on me".
-                            ui::Spinner::new("loading-conversations")
-                                .colour(theme::text_muted()),
-                        )
-                    })
-                    .child(if !self.conversations_loaded {
-                        // The backend takes seconds to boot from cold, and this list is
-                        // the first thing anyone looks at.
-                        "Loading your conversations…"
-                    } else if self.conversations.is_empty() {
-                        "Conversations you start will appear here."
-                    } else {
-                        "Nothing matches that."
-                    }),
-            );
-        }
-
-        // Grouped by project, ungrouped last.
-        //
-        // A heading per project rather than an indent or a colour: the sidebar is scanned, and a
-        // name is the only marker that survives being glanced at. The order is alphabetical with
-        // ungrouped work pinned to the bottom, so the list does not reshuffle as work moves
-        // between projects — a sidebar that reorders itself is one nobody builds a memory of
-        // (docs §106, §154).
-        let mut grouped: std::collections::BTreeMap<Option<String>, Vec<&protocol::Conversation>> =
-            std::collections::BTreeMap::new();
-        // Seeded with every project that has a folder, so one nothing is filed under yet still
-        // gets a heading. Naming a project used to create the folder and show nothing at all —
-        // the sidebar could only see a project through a conversation (§167).
-        //
-        // Not while a search is running: a filter is a way to find work, and an empty project
-        // matches nothing, so leaving them in would make searching look broken.
-        if self.conversation_query.read(cx).text().trim().is_empty() {
-            for name in &self.folder_projects {
-                grouped.entry(Some(name.clone())).or_default();
-            }
-        }
-        for conversation in &matched {
-            grouped
-                .entry(conversation.project.clone())
-                .or_default()
-                .push(conversation);
-        }
-        let mut ordered: Vec<(Option<String>, Vec<&protocol::Conversation>)> =
-            grouped.into_iter().collect();
-        ordered.sort_by(|a, b| match (&a.0, &b.0) {
-            (None, None) => std::cmp::Ordering::Equal,
-            (None, _) => std::cmp::Ordering::Greater,
-            (_, None) => std::cmp::Ordering::Less,
-            (Some(a), Some(b)) => a.cmp(b),
-        });
-        // A named project always gets its heading now, even when it is the only group. The
-        // heading is no longer decoration: it owns New here, Open folder and Delete project, so
-        // hiding it would hide the only project-delete affordance (§155). Ungrouped work alone
-        // still needs no heading because it is not a project and has no project folder to delete.
-        let projects_only = self.sidebar_view == SidebarView::Projects;
-        // Headings only exist to carry New here / Open folder / Delete project for a named
-        // project. The Conversations tab never shows a project group any more (see below), so
-        // its one remaining group — the ungrouped bucket — has nothing a heading would add.
-        let show_headings = projects_only;
-
-        for (project, conversations) in ordered {
-            // The Conversations tab is ungrouped work only: a conversation filed under a
-            // project belongs to that project's own row in the Projects tab, not to a second
-            // copy sitting here under a label (§211).
-            if !projects_only && project.is_some() {
-                continue;
-            }
-            // The Projects tab lists projects, not the ungrouped-work bucket — that heading
-            // exists to give the workspace root somewhere to open from, not to stand in for a
-            // project that can be deleted.
-            if projects_only && project.is_none() {
-                continue;
-            }
-            if show_headings {
-                let heading = project
-                    .clone()
-                    .unwrap_or_else(|| UNGROUPED_PROJECT_LABEL.to_string());
-                list = list.child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .gap_2()
-                        .w_full()
-                        .min_w_0()
-                        // Matches the `px_2()` every row below it sits at — without it the
-                        // heading's edges sat flush with the list's own padding while every
-                        // row under it was inset a further step, so the two never lined up.
-                        .px_2()
-                        .pt_2()
-                        .pb_1()
-                        .group(SharedString::from(format!("head-{heading}")))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap_2()
-                                .flex_grow()
-                                .min_w_0()
-                                .child(
-                                    ui::Icon::new("icons/folder.svg")
-                                        .size(ui::IconSize::Small)
-                                        .colour(theme::text())
-                                )
-                                .child(
-                                    div()
-                                        .text_color(rgb(theme::text()))
-                                        .text_xs()
-                                        .child(heading.to_uppercase()),
-                                ),
-                        )
-                        // One `⋮` where four hover-revealed characters used to be. Only a named
-                        // project gets one: "Ungrouped Conversations" is the workspace root, which
-                        // is not a project and cannot be deleted or started "in" (§165).
-                        .when_some(project.clone(), |header, name| {
-                            header.child(self.sidebar_menu_button(
-                                format!("head-menu-{name}"),
-                                SidebarMenu::Project {
-                                    // All conversations in the project, not merely the rows that
-                                    // survived the sidebar search. A filter is a way to find
-                                    // work, never a deletion boundary (§155).
-                                    conversations: self
-                                        .conversations
-                                        .iter()
-                                        .filter(|conversation| {
-                                            conversation.project.as_deref() == Some(name.as_str())
-                                        })
-                                        .cloned()
-                                        .collect(),
-                                    name,
-                                },
-                                cx,
-                            ))
-                        }),
-                );
-            }
-            if projects_only {
-                // A draft started "in" this project — via its own ⋮ menu — belongs nested
-                // under it too, not in the Conversations tab where nothing would show it was
-                // ever created (§263).
-                let draft_here = draft_project.as_deref() == project.as_deref() && project.is_some();
-                // Indented, with a rule down the left so the block reads as *inside* the
-                // project it's filed under rather than as a second, unrelated list starting
-                // right after the heading.
-                if !conversations.is_empty() || draft_here {
-                    let mut nested = div()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .min_w_0()
-                        .ml_2()
-                        .pl_2()
-                        .border_l_1()
-                        .border_color(rgb(theme::border()));
-                    if draft_here {
-                        nested = nested.child(
-                            ui::ListRow::new("draft-conversation", "Untitled Conversation")
-                                .selected(true),
-                        );
-                    }
-                    for conversation in conversations {
-                        nested = nested.child(self.conversation_row(conversation, current.as_deref(), cx));
-                    }
-                    list = list.child(nested);
-                }
-                continue;
-            }
-            for conversation in conversations {
-                list = list.child(self.conversation_row(conversation, current.as_deref(), cx));
-            }
-        }
+        let mut list = match self.sidebar_view {
+            SidebarView::Conversations => self.conversations_tab_rows(
+                list,
+                &matched,
+                draft_project.is_none() && current.is_none() && query.trim().is_empty(),
+                current.as_deref(),
+                cx,
+            ),
+            SidebarView::Projects => self.projects_tab_rows(
+                list,
+                &matched,
+                draft_project.as_deref(),
+                current.as_deref(),
+                query.trim().is_empty(),
+                cx,
+            ),
+        };
 
         // Right below the last row, inside the same scrolling list — not pinned to the
         // bottom of the sidebar the way Settings is, or it would read as one of the fixed
         // controls rather than as the next thing to do with what's above it.
-        list = list.child(match self.sidebar_view {
-            SidebarView::Conversations => ui::Button::new("sidebar-new-conversation")
-                .icon(ui::Icon::new("icons/plus.svg"))
-                .text("New Conversation")
-                .on_click(cx.listener(|workbench, _event, window, cx| {
-                    workbench.run_sidebar_menu(&SidebarMenu::New, "menu-new-conversation", window, cx);
-                })),
-            SidebarView::Projects => ui::Button::new("sidebar-new-project")
-                .icon(ui::Icon::new("icons/plus.svg"))
-                .text("New Project")
-                .on_click(cx.listener(|workbench, _event, window, cx| {
-                    workbench.run_sidebar_menu(&SidebarMenu::New, "menu-new-project", window, cx);
-                })),
-        });
+        list = list.child(
+            div()
+            .child(match self.sidebar_view {
+                SidebarView::Conversations => ui::Button::new("sidebar-new-conversation")
+                    .icon(ui::Icon::new("icons/plus.svg"))
+                    .text("New Conversation")
+                    .on_click(cx.listener(|workbench, _event, window, cx| {
+                        workbench.run_sidebar_menu(&SidebarMenu::New, "menu-new-conversation", window, cx);
+                    })),
+                SidebarView::Projects => ui::Button::new("sidebar-new-project")
+                    .icon(ui::Icon::new("icons/plus.svg"))
+                    .text("New Project")
+                    .on_click(cx.listener(|workbench, _event, window, cx| {
+                        workbench.run_sidebar_menu(&SidebarMenu::New, "menu-new-project", window, cx);
+                    })),
+            }).mt_2()
+        );
 
         div()
             .flex()
@@ -499,7 +342,8 @@ impl Workbench {
             .h_full()
             .flex_none()
             .m_2()
-            .p_4()
+            .p_3()
+            .gap_5()
             .rounded_lg()
             .overflow_hidden()
             .bg(rgb(theme::surface()))
@@ -537,8 +381,14 @@ impl Workbench {
                             })),
                     ),
             )
-            .child(self.sidebar_view_toggle(cx))
-            .child(ui::SearchBar::new(self.conversation_query.clone()))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(self.sidebar_view_toggle(cx))
+                    .child(ui::SearchBar::new(self.conversation_query.clone()))
+            )
             .child(list)
             .child(
                 ui::Button::new("open-settings")
@@ -548,6 +398,357 @@ impl Workbench {
                         workbench.run_command(Command::OpenSettings, cx);
                     })),
             )
+    }
+
+    /// Every conversation whose title matches `query`, ranked best-first.
+    ///
+    /// The same scorer the command palette uses, so "pap" finds "Rendimiento de papa" and
+    /// typing feels the way Zed's file finder does rather than like a substring match that
+    /// misses the obvious (docs §49). An empty query matches everything and leaves it in
+    /// launch order rather than re-sorting it by a score that is meaningless for "nothing typed".
+    fn matching_conversations(&self, query: &str) -> Vec<&protocol::Conversation> {
+        let mut ranked: Vec<(i32, &protocol::Conversation)> = self
+            .conversations
+            .iter()
+            .filter_map(|conversation| {
+                match_score(query, &conversation.title).map(|score| (score, conversation))
+            })
+            .collect();
+        if !query.trim().is_empty() {
+            ranked.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+        }
+        ranked.into_iter().map(|(_, conversation)| conversation).collect()
+    }
+
+    /// The Conversations tab: everything not filed under a project, flat — no headings, no
+    /// grouping. A conversation filed under a project belongs to that project's own block in
+    /// the Projects tab, not to a second copy sitting here too (§211).
+    fn conversations_tab_rows(
+        &self,
+        mut list: gpui::Stateful<Div>,
+        matched: &[&protocol::Conversation],
+        show_draft: bool,
+        current: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<Div> {
+        // No thread yet — either the app just opened or "New Conversation" was just pressed —
+        // reads as a chat with nowhere to find it again: the list looked unchanged while the
+        // transcript already had. A row here is that chat's placeholder until either a message
+        // gives it a real thread (§262), or another conversation is opened and it quietly stops
+        // existing — it was never saved anywhere to begin with.
+        if show_draft {
+            list = list.child(ui::ListRow::new("draft-conversation", "Untitled Conversation").selected(true));
+        }
+
+        let ungrouped: Vec<&protocol::Conversation> = matched
+            .iter()
+            .copied()
+            .filter(|conversation| conversation.project.is_none())
+            .collect();
+
+        if ungrouped.is_empty() {
+            return list.child(
+                div()
+                    .p_2()
+                    .text_color(rgb(theme::text_faint()))
+                    .text_xs()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    // The mark goes where the researcher is already looking. A sentence alone
+                    // said the same thing and said it motionlessly, which is what a hung window
+                    // also looks like (§177).
+                    .when(!self.conversations_loaded, |row| {
+                        row.child(
+                            // Muted, matching the sentence beside it: this reports a state, and
+                            // the accent in this app means "act on me".
+                            ui::Spinner::new("loading-conversations").colour(theme::text_muted()),
+                        )
+                    })
+                    .child(if !self.conversations_loaded {
+                        // The backend takes seconds to boot from cold, and this list is
+                        // the first thing anyone looks at.
+                        "Loading your conversations…"
+                    } else if self.conversations.is_empty() {
+                        "Conversations you start will appear here."
+                    } else {
+                        "Nothing matches that."
+                    }),
+            );
+        }
+
+        for conversation in ungrouped {
+            list = list.child(self.conversation_row(conversation, current, cx));
+        }
+        list
+    }
+
+    /// The Projects tab: one heading per project — its name, an icon, and the `⋮` that carries
+    /// New here / Open folder / Delete project — with that project's conversations nested under
+    /// it in an indented, left-ruled block.
+    fn projects_tab_rows(
+        &self,
+        mut list: gpui::Stateful<Div>,
+        matched: &[&protocol::Conversation],
+        draft_project: Option<&str>,
+        current: Option<&str>,
+        query_is_empty: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<Div> {
+        // Alphabetical, naturally — a plain `String` key needs no comparator the way the old
+        // `Option<String>`-keyed map did to push the ungrouped bucket to the end, because this
+        // tab never has an ungrouped bucket to push.
+        let mut grouped: std::collections::BTreeMap<String, Vec<&protocol::Conversation>> =
+            std::collections::BTreeMap::new();
+        // Seeded with every project that has a folder, so one nothing is filed under yet still
+        // gets a heading. Naming a project used to create the folder and show nothing at all —
+        // the sidebar could only see a project through a conversation (§167).
+        //
+        // Not while a search is running: a filter is a way to find work, and an empty project
+        // matches nothing, so leaving them in would make searching look broken.
+        if query_is_empty {
+            for name in &self.folder_projects {
+                grouped.entry(name.clone()).or_default();
+            }
+        }
+        for conversation in matched {
+            if let Some(name) = &conversation.project {
+                grouped.entry(name.clone()).or_default().push(conversation);
+            }
+        }
+
+        // Same three states the Conversations tab already explains (docs §177: a still list
+        // reads as a hang, not as "nothing happened yet") — this tab just never said any of
+        // them, so a cold launch showed an empty Projects tab with no sign it was still asking.
+        if grouped.is_empty() {
+            return list.child(
+                div()
+                    .p_2()
+                    .text_color(rgb(theme::text_faint()))
+                    .text_xs()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .when(!self.conversations_loaded, |row| {
+                        row.child(
+                            ui::Spinner::new("loading-projects").colour(theme::text_muted()),
+                        )
+                    })
+                    .child(if !self.conversations_loaded {
+                        "Loading your conversations…"
+                    } else if !query_is_empty {
+                        "Nothing matches that."
+                    } else {
+                        "Projects you create will appear here."
+                    }),
+            );
+        }
+
+        for (project, conversations) in grouped {
+            list = list.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .w_full()
+                    .min_w_0()
+                    // Matches the `px_2()` every row below it sits at — without it the
+                    // heading's edges sat flush with the list's own padding while every
+                    // row under it was inset a further step, so the two never lined up.
+                    .px_2()
+                    .pt_2()
+                    .pb_1()
+                    .group(SharedString::from(format!("head-{project}")))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_2()
+                            .flex_grow()
+                            .min_w_0()
+                            .child(
+                                ui::Icon::new("icons/folder.svg")
+                                    .size(ui::IconSize::Small)
+                                    .colour(theme::text_muted()),
+                            )
+                            .child(
+                                div()
+                                    .text_color(rgb(theme::text_muted()))
+                                    .text_sm()
+                                    .child(project.clone()),
+                            ),
+                    )
+                    // One `⋮` where four hover-revealed characters used to be.
+                    .child(self.sidebar_menu_button(
+                        format!("head-menu-{project}"),
+                        SidebarMenu::Project {
+                            // All conversations in the project, not merely the rows that
+                            // survived the sidebar search. A filter is a way to find work,
+                            // never a deletion boundary (§155).
+                            conversations: self
+                                .conversations
+                                .iter()
+                                .filter(|conversation| conversation.project.as_deref() == Some(project.as_str()))
+                                .cloned()
+                                .collect(),
+                            name: project.clone(),
+                        },
+                        cx,
+                    )),
+            );
+
+            // A draft started "in" this project — via its own ⋮ menu — belongs nested under
+            // it too, not in the Conversations tab where nothing would show it was ever
+            // created (§263).
+            let draft_here = draft_project == Some(project.as_str());
+            // Loading, not empty: the backend hasn't answered yet, so every project's own
+            // conversations are still missing — not just this one — and skipping the nested
+            // block entirely (as an actually-empty project would) left nothing here to say so.
+            if conversations.is_empty() && !draft_here && !self.conversations_loaded {
+                list = list.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .min_w_0()
+                        .ml_2()
+                        .pl_2()
+                        .border_l_1()
+                        .border_color(rgb(theme::border()))
+                        .child(
+                            div()
+                                .p_2()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_2()
+                                .text_color(rgb(theme::text_faint()))
+                                .text_xs()
+                                .child(
+                                    ui::Spinner::new(SharedString::from(format!(
+                                        "loading-project-{project}"
+                                    )))
+                                    .colour(theme::text_muted()),
+                                )
+                                .child("Loading…"),
+                        ),
+                );
+                continue;
+            }
+            if conversations.is_empty() && !draft_here {
+                continue;
+            }
+            // Indented, with a rule down the left so the block reads as *inside* the project
+            // it's filed under rather than as a second, unrelated list starting right after
+            // the heading.
+            let mut nested = div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .min_w_0()
+                .ml_2()
+                .pl_2()
+                .border_l_1()
+                .border_color(rgb(theme::border()));
+            if draft_here {
+                nested = nested
+                    .child(ui::ListRow::new("draft-conversation", "Untitled Conversation").selected(true));
+            }
+            for conversation in conversations {
+                nested = nested.child(self.conversation_row(conversation, current, cx));
+            }
+            list = list.child(nested);
+        }
+        list
+    }
+}
+
+
+/// A conversation row: `ui::ButtonStyle::SecondaryWhite`'s colours (this list already sits on
+/// `surface()`, so that's the style that blends in and lifts on hover the way every other
+/// control here does), tighter vertical padding than `ui::Button`'s, and its own `⋮` menu drawn
+/// as a child of the same box rather than a sibling beside it.
+///
+/// Not built on `ui::Button`: a `Button` plus a separate menu button next to it are two boxes,
+/// each with their own background and hover state, and the row read as two adjacent controls
+/// rather than one — which is exactly what this replaces. A generic ui/components version of
+/// "a row with a trailing menu" is a reasonable follow-up once more than one caller wants it;
+/// today only the sidebar does.
+#[derive(gpui::IntoElement)]
+struct ConversationRow {
+    id: gpui::ElementId,
+    title: SharedString,
+    active: bool,
+    menu: Option<gpui::AnyElement>,
+    on_click: Option<Box<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static>>,
+}
+
+impl ConversationRow {
+    fn new(id: impl Into<gpui::ElementId>, title: impl Into<SharedString>) -> Self {
+        Self {
+            id: id.into(),
+            title: title.into(),
+            active: false,
+            menu: None,
+            on_click: None,
+        }
+    }
+
+    /// The currently open conversation — [`ui::ButtonStyle::Primary`]'s colours, matching how
+    /// every other toggle in the app marks "this one, of these".
+    fn active(mut self, active: bool) -> Self {
+        self.active = active;
+        self
+    }
+
+    fn menu(mut self, menu: impl IntoElement) -> Self {
+        self.menu = Some(menu.into_any_element());
+        self
+    }
+
+    fn on_click(
+        mut self,
+        handler: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_click = Some(Box::new(handler));
+        self
+    }
+}
+
+impl RenderOnce for ConversationRow {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let (text_colour, bg, hover_bg) = if self.active {
+            (theme::accent(), theme::accent_soft(), theme::accent_soft())
+        } else {
+            (theme::text_muted(), theme::surface(), theme::background())
+        };
+        let mut row = div()
+            .id(self.id)
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .w_full()
+            .min_w_0()
+            .px_2p5()
+            .py_1()
+            .rounded_md()
+            .bg(rgb(bg))
+            .text_color(rgb(text_colour))
+            .text_sm()
+            .hover(move |style| style.cursor_pointer().bg(rgb(hover_bg)))
+            .child(div().min_w_0().flex_grow().truncate().child(self.title));
+        if let Some(menu) = self.menu {
+            row = row.child(menu);
+        }
+        match self.on_click {
+            Some(handler) => row.on_click(move |event, window, cx| handler(event, window, cx)),
+            None => row,
+        }
     }
 }
 
@@ -569,13 +770,25 @@ impl Workbench {
         // Renaming happens in place, in the row itself — the pattern every chat app
         // uses, and the one that keeps the name next to the thing being named.
         if renaming {
+            // Same shape as `ConversationRow` — padding, radius, the row's own background —
+            // so renaming reads as this row turning editable, not as a different control
+            // dropped in its place. The accent border only shows up once the field actually
+            // has focus, the same way `filter_field` marks its own.
             return div()
+                .track_focus(&self.rename_editor.focus_handle(cx))
+                .flex()
+                .flex_row()
+                .items_center()
                 .w_full()
                 .min_w_0()
-                .px_2()
+                .gap_1()
+                .px_2p5()
                 .py_1()
+                .rounded_md()
+                .bg(rgb(theme::surface()))
                 .border_1()
-                .border_color(rgb(theme::accent()))
+                .border_color(rgb(theme::border()))
+                .in_focus(|style| style.border_color(rgb(theme::accent())))
                 .child(self.rename_editor.clone())
                 .into_any_element();
         }
@@ -609,9 +822,9 @@ impl Workbench {
         }
 
         let open = thread_id.clone();
-        ui::ListRow::new(SharedString::from(format!("conv-{thread_id}")), conversation.title.clone())
-            .selected(selected)
-            .trailing(self.sidebar_menu_button(
+        ConversationRow::new(SharedString::from(format!("conv-{thread_id}")), conversation.title.clone())
+            .active(selected)
+            .menu(self.sidebar_menu_button(
                 format!("row-menu-{thread_id}"),
                 SidebarMenu::Conversation(conversation.clone()),
                 cx,

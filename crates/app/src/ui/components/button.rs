@@ -100,8 +100,8 @@ pub struct Button {
     alignment: Alignment,
     /// Whether this button is a toggle rather than a one-shot action — [`Button::active`] only
     /// means anything when this is set.
-    selection: bool,
-    /// The toggle's own on/off value. Ignored unless [`Button::selection`] is set, the same way
+    toggle: bool,
+    /// The toggle's own on/off value. Ignored unless [`Button::toggle`] is set, the same way
     /// a checkbox's checked-ness means nothing until it is one.
     active: bool,
     border: bool,
@@ -118,7 +118,7 @@ impl Button {
             text: None,
             style: ButtonStyle::default(),
             alignment: Alignment::default(),
-            selection: false,
+            toggle: false,
             active: false,
             border: true,
             disabled: false,
@@ -149,12 +149,12 @@ impl Button {
 
     /// Marks this as an on/off control rather than a one-shot action. [`Button::active`] sets
     /// which one it currently is.
-    pub fn selection(mut self, selection: bool) -> Self {
-        self.selection = selection;
+    pub fn toggle(mut self, toggle: bool) -> Self {
+        self.toggle = toggle;
         self
     }
 
-    /// The toggle's current value — has no effect unless [`Button::selection`] is set. When on,
+    /// The toggle's current value — has no effect unless [`Button::toggle`] is set. When on,
     /// the button always wears [`ButtonStyle::Primary`], whatever [`Button::style`] was given:
     /// "on" has one look app-wide, not one per caller.
     pub fn active(mut self, active: bool) -> Self {
@@ -193,7 +193,7 @@ impl Button {
 
 impl RenderOnce for Button {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let style = if self.selection && self.active {
+        let style = if self.toggle && self.active {
             ButtonStyle::Primary
         } else {
             self.style
@@ -206,9 +206,6 @@ impl RenderOnce for Button {
 
         let mut button = div()
             .id(self.id)
-            // Never absorbs the row's spare width. Its absence is two of the four
-            // `flex_none` bugs.
-            .flex_none()
             .flex()
             .flex_row()
             .items_center()
@@ -218,7 +215,10 @@ impl RenderOnce for Button {
             .rounded_md()
             .bg(rgb(style.bg()))
             .text_color(rgb(text_colour))
-            .text_sm();
+            .text_sm()
+            // Never absorbs the row's spare width. Its absence is two of the four
+            // `flex_none` bugs.
+            .flex_none();
         button = match self.alignment {
             Alignment::Left => button.justify_start(),
             Alignment::Center => button.justify_center(),
@@ -312,14 +312,14 @@ mod tests {
     }
 
     #[test]
-    fn an_active_selection_button_always_wears_primary() {
+    fn an_active_toggle_button_always_wears_primary() {
         let _theme = crate::theme::theme_lock::hold();
         theme::apply(&theme::MINI_ME_DARK);
-        let on = Button::new("b").style(ButtonStyle::Secondary).selection(true).active(true);
+        let on = Button::new("b").style(ButtonStyle::Secondary).toggle(true).active(true);
         assert_eq!(on.style, ButtonStyle::Secondary, "the field itself is unchanged");
         // The override happens at render time, not by mutating `style` — this asserts the
         // input the render reads from, since the resolved colour is only visible mid-render.
-        assert!(on.selection && on.active);
+        assert!(on.toggle && on.active);
     }
 
     #[test]

@@ -563,27 +563,32 @@ impl Workbench {
             );
         }
 
-        list = list.child(
-            picker_row(UNGROUPED_PROJECT_LABEL, current.is_none(), None).on_click(
-                cx.listener(move |workbench, _event, _window, cx| choose(workbench, None, cx)),
-            ),
-        );
-
-        for name in names {
-            if !typed.is_empty() && crate::match_score(&typed, &name).is_none() {
-                continue;
-            }
-            let chosen = name.clone();
+        // Naming a new project is its own thing, not a choice between the projects that already
+        // exist: "Ungrouped Conversations" and every other project are answers to "where should
+        // this go", which is not the question "New project…" asked.
+        if !starting_new {
             list = list.child(
-                picker_row(
-                    name.clone(),
-                    current.as_deref() == Some(name.as_str()),
-                    None,
-                )
-                .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                    choose(workbench, Some(chosen.clone()), cx);
-                })),
+                picker_row(UNGROUPED_PROJECT_LABEL, current.is_none(), None).on_click(
+                    cx.listener(move |workbench, _event, _window, cx| choose(workbench, None, cx)),
+                ),
             );
+
+            for name in names {
+                if !typed.is_empty() && crate::match_score(&typed, &name).is_none() {
+                    continue;
+                }
+                let chosen = name.clone();
+                list = list.child(
+                    picker_row(
+                        name.clone(),
+                        current.as_deref() == Some(name.as_str()),
+                        None,
+                    )
+                    .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                        choose(workbench, Some(chosen.clone()), cx);
+                    })),
+                );
+            }
         }
 
         div()

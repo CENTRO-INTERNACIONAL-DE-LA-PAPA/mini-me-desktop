@@ -3417,63 +3417,6 @@ impl Workbench {
 
 
 
-    /// What each row does. **Nothing new lives here** — every arm calls a method the sidebar
-    /// already had, which is the rule `menu.rs` states for the right-click menu and the reason
-    /// this change is a rearrangement rather than a feature with its own behaviour.
-    fn run_sidebar_menu(
-        &mut self,
-        open: &SidebarMenu,
-        id: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match (open, id) {
-            (SidebarMenu::New, "menu-new-conversation") => self.new_thread_in(None, cx),
-            (SidebarMenu::New, "menu-new-project") => {
-                // The project picker already knows how to name one that does not exist yet —
-                // typing offers `New project “…”` as its first row. `NewProject` only changes
-                // what choosing does: start a conversation there, rather than move the open one.
-                self.open_picker = Some((Picker::NewProject, gpui::point(px(24.), px(120.))));
-                self.project_query.update(cx, |query, cx| query.set_text("", cx));
-                cx.notify();
-            }
-            (SidebarMenu::Conversation(conversation), "menu-rename") => {
-                self.start_rename(conversation.thread_id.clone(), window, cx)
-            }
-            (SidebarMenu::Conversation(conversation), "menu-delete") => {
-                self.request_delete(DeleteTarget::Conversation(conversation.clone()), window, cx)
-            }
-            (SidebarMenu::Project { name, .. }, "menu-new-here") => {
-                self.new_thread_in(Some(name.clone()), cx)
-            }
-            (SidebarMenu::Project { name, .. }, "menu-open-folder") => {
-                if let Some(dir) =
-                    workspace::project_folder(name).map(|folder| workspace::root().join(folder))
-                {
-                    if let Err(error) = workspace::open(&dir) {
-                        tracing::warn!(%error, "could not open a project");
-                    }
-                }
-            }
-            (
-                SidebarMenu::Project {
-                    name,
-                    conversations,
-                },
-                "menu-delete-project",
-            ) => self.request_delete(
-                DeleteTarget::Project {
-                    name: name.clone(),
-                    conversations: conversations.clone(),
-                },
-                window,
-                cx,
-            ),
-            _ => {}
-        }
-    }
-
-
     /// Copy the selected transcript text.
     ///
     /// Reached from `ctrl-c` when the composer declines it, so the ordinary shortcut works on
@@ -6371,6 +6314,10 @@ impl Workbench {
                 }
                 // Anchored under the sidebar, where the projects it is about are listed.
                 self.open_picker = Some((Picker::Project, gpui::point(px(24.), px(120.))));
+                // Reverts whatever "New project…" last left it as — the same entity is reused
+                // for both prompts (see `Picker::NewProject`'s open handler).
+                self.project_query
+                    .update(cx, |query, cx| query.set_placeholder("Find or name a project", cx));
                 cx.notify();
             }
             Command::OpenAbout => {
