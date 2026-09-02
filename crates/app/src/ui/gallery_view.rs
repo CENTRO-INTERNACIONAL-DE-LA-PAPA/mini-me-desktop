@@ -5,7 +5,7 @@
 #![allow(unused_imports)]
 
 use crate::*;
-use crate::components::{common::*, sidebar::*, chat::*, provenance_view::*, settings_view::*, palette_view::*, modals::*, status_bar::*};
+use crate::ui::{common::*, sidebar::*, chat::*, provenance_view::*, settings_view::*, palette_view::*, modals::*, status_bar::*};
 use gpui::{
     actions, div, img, prelude::*, px, relative, rgb, size, svg, App, Application, AssetSource,
     Bounds, ClipboardItem, Context, Div, Entity, Focusable, FontStyle, FontWeight, HighlightStyle,
@@ -1255,9 +1255,10 @@ impl Workbench {
                     .px_3()
                     .py_2()
                     .child(
-                        ui::IconButton::new("toggle-right-panel", "icons/sidebar-simple-right.svg")
-                            .icon_size(ui::IconSize::Small.px())
-                            .ink(theme::text())
+                        ui::Button::new("toggle-right-panel")
+                            .icon("icons/sidebar-simple-right.svg")
+                            .style(ui::ButtonStyle::SecondaryWhite)
+                            .border(false)
                             .on_click(cx.listener(|workbench, _event, _window, cx| {
                                 workbench.panel_open = false;
                                 workbench.remember_panels();
@@ -1885,11 +1886,9 @@ impl Workbench {
                     .flex_row()
                     .gap_2()
                     .child(
-                        ui::Button::new(
-                            SharedString::from(format!("bg-approve-{task_id}")),
-                            "Approve",
-                        )
-                        .tone(ui::Tone::Accent)
+                        ui::Button::new(SharedString::from(format!("bg-approve-{task_id}")))
+                        .text("Approve")
+                        .style(ui::ButtonStyle::Primary)
                         .on_click(cx.listener({
                             let task_id = task_id.clone();
                             move |workbench, _event, _window, cx| {
@@ -1898,10 +1897,8 @@ impl Workbench {
                         })),
                     )
                     .child(
-                        ui::Button::new(
-                            SharedString::from(format!("bg-reject-{task_id}")),
-                            "Reject",
-                        )
+                        ui::Button::new(SharedString::from(format!("bg-reject-{task_id}")))
+                        .text("Reject")
                         .on_click(cx.listener({
                             let task_id = task_id.clone();
                             move |workbench, _event, _window, cx| {
@@ -1924,13 +1921,8 @@ impl Workbench {
                 ("conv", "Approve everything in this conversation", true),
             ] {
                 row = row.child(
-                    ui::Button::new(
-                        SharedString::from(format!("bg-approve-{suffix}-{task_id}")),
-                        label,
-                    )
-                    // `text_xs` in the original: these sit under the pair above and
-                    // are the wider-scope variants of it, not peers.
-                    .size(ui::Size::Compact)
+                    ui::Button::new(SharedString::from(format!("bg-approve-{suffix}-{task_id}")))
+                    .text(label)
                     .on_click(cx.listener({
                         let task_id = task_id.clone();
                         move |workbench, _event, _window, cx| {

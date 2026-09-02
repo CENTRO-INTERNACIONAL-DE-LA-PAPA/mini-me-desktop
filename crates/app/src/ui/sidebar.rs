@@ -5,7 +5,7 @@
 #![allow(unused_imports)]
 
 use crate::*;
-use crate::components::{common::*, chat::*, gallery_view::*, provenance_view::*, settings_view::*, palette_view::*, modals::*, status_bar::*};
+use crate::ui::{common::*, chat::*, gallery_view::*, provenance_view::*, settings_view::*, palette_view::*, modals::*, status_bar::*};
 use gpui::{
     actions, div, img, prelude::*, px, relative, rgb, size, svg, App, Application, AssetSource,
     Bounds, ClipboardItem, Context, Div, Entity, Focusable, FontStyle, FontWeight, HighlightStyle,
@@ -482,28 +482,18 @@ impl Workbench {
         // bottom of the sidebar the way Settings is, or it would read as one of the fixed
         // controls rather than as the next thing to do with what's above it.
         list = list.child(match self.sidebar_view {
-            SidebarView::Conversations => ui::IconTextButton::new(
-                "sidebar-new-conversation",
-                "icons/plus.svg",
-                "New Conversation",
-            )
-            // Flush with the rows above it — the list already supplies the padding they
-            // sit in, so this keeps its own `m_2()` off rather than stacking a second inset.
-            .margin(false)
-            .full_width(true)
-            .on_click(cx.listener(|workbench, _event, window, cx| {
-                workbench.run_sidebar_menu(&SidebarMenu::New, "menu-new-conversation", window, cx);
-            })),
-            SidebarView::Projects => ui::IconTextButton::new(
-                "sidebar-new-project",
-                "icons/plus.svg",
-                "New Project",
-            )
-            .margin(false)
-            .full_width(true)
-            .on_click(cx.listener(|workbench, _event, window, cx| {
-                workbench.run_sidebar_menu(&SidebarMenu::New, "menu-new-project", window, cx);
-            })),
+            SidebarView::Conversations => ui::Button::new("sidebar-new-conversation")
+                .icon("icons/plus.svg")
+                .text("New Conversation")
+                .on_click(cx.listener(|workbench, _event, window, cx| {
+                    workbench.run_sidebar_menu(&SidebarMenu::New, "menu-new-conversation", window, cx);
+                })),
+            SidebarView::Projects => ui::Button::new("sidebar-new-project")
+                .icon("icons/plus.svg")
+                .text("New Project")
+                .on_click(cx.listener(|workbench, _event, window, cx| {
+                    workbench.run_sidebar_menu(&SidebarMenu::New, "menu-new-project", window, cx);
+                })),
         });
 
         div()
@@ -543,9 +533,10 @@ impl Workbench {
                             .child("Mini-Me App"),
                     )
                     .child(
-                        ui::IconButton::new("toggle-left-sidebar", "icons/sidebar-simple-left.svg")
-                            .icon_size(ui::IconSize::Small.px())
-                            .ink(theme::text())
+                        ui::Button::new("toggle-left-sidebar")
+                            .icon("icons/sidebar-simple-left.svg")
+                            .style(ui::ButtonStyle::SecondaryWhite)
+                            .border(false)
                             .on_click(cx.listener(|workbench, _event, _window, cx| {
                                 workbench.sidebar_open = !workbench.sidebar_open;
                                 workbench.remember_panels();
@@ -580,7 +571,9 @@ impl Workbench {
             )
             .child(list)
             .child(
-                ui::IconTextButton::new("open-settings", "icons/gear-six.svg", "Settings")
+                ui::Button::new("open-settings")
+                    .icon("icons/gear-six.svg")
+                    .text("Settings")
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
                         workbench.run_command(Command::OpenSettings, cx);
                     })),
@@ -869,9 +862,9 @@ impl Workbench {
             strip = strip
                 .child(
                     div().w_full().flex_none().child(
-                        ui::Button::new("road-full-graph", "Full graph")
-                            .tone(ui::Tone::Accent)
-                            .size(ui::Size::Compact)
+                        ui::Button::new("road-full-graph")
+                            .text("Full graph")
+                            .style(ui::ButtonStyle::Primary)
                             .on_click(cx.listener(|workbench, _event, _window, cx| {
                                 workbench.provenance_view = ProvenanceView::Graph;
                                 workbench.provenance_open = true;

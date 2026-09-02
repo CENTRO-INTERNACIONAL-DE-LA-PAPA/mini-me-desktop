@@ -11,7 +11,6 @@
 
 mod backend;
 mod catalogue;
-mod components;
 mod composer;
 mod dataverse;
 mod discovery;
@@ -46,9 +45,9 @@ use gpui::{
     WindowOptions,
 };
 
-use components::common::horizontal_drag_offset;
-use components::common::app_icon;
-use components::provenance_view::{link_for, provenance_svg};
+use ui::common::horizontal_drag_offset;
+use ui::common::app_icon;
+use ui::provenance_view::{link_for, provenance_svg};
 use composer::{Composer, ComposerEvent};
 use protocol::{AgentRef, ApprovalRequest, Bucket, Project, TurnEvent};
 use sidecar::Sidecar;
@@ -8373,7 +8372,7 @@ mod tests {
         assert!(!is_search_record(&record("my_papers.json")));
     }
     use super::*;
-    use crate::components::{chat::*, common::*, gallery_view::*, provenance_view::*};
+    use crate::ui::{chat::*, common::*, gallery_view::*, provenance_view::*};
 
     #[gpui::test]
     fn a_long_transcript_builds_only_rows_near_the_viewport(

@@ -5,7 +5,7 @@
 #![allow(unused_imports)]
 
 use crate::*;
-use crate::components::{common::*, sidebar::*, chat::*, gallery_view::*, provenance_view::*, palette_view::*, modals::*, status_bar::*};
+use crate::ui::{common::*, sidebar::*, chat::*, gallery_view::*, provenance_view::*, palette_view::*, modals::*, status_bar::*};
 use gpui::{
     actions, div, img, prelude::*, px, relative, rgb, size, svg, App, Application, AssetSource,
     Bounds, ClipboardItem, Context, Div, Entity, Focusable, FontStyle, FontWeight, HighlightStyle,
@@ -273,11 +273,10 @@ impl Workbench {
                                 .into()
                             })
                             .child(
-                                ui::Button::new(
-                                    SharedString::from(format!("remove-theme-{remove_name}")),
-                                    "remove",
-                                )
-                                .size(ui::Size::Compact)
+                                ui::Button::new(SharedString::from(format!(
+                                    "remove-theme-{remove_name}"
+                                )))
+                                .text("remove")
                                 .on_click(cx.listener(
                                     move |workbench, _event, _window, cx| {
                                         // The theme row itself selects and closes the picker.
@@ -812,15 +811,13 @@ impl Workbench {
     pub(crate) fn setup_actions(&self, cx: &mut Context<Self>) -> impl IntoElement {
         ui::actions()
             .child(
-                ui::Button::new(
-                    "recheck",
-                    if self.checking {
+                ui::Button::new("recheck")
+                    .text(if self.checking {
                         "Checking…"
                     } else {
                         "Re-check"
-                    },
-                )
-                .tone(ui::Tone::Accent)
+                    })
+                .style(ui::ButtonStyle::Primary)
                 .on_click(
                     cx.listener(|workbench, _event, _window, cx| workbench.run_preflight(cx)),
                 ),
@@ -828,12 +825,12 @@ impl Workbench {
             // Beside Re-check because this is where someone comes when something is wrong,
             // and "restart it" is the second thing anyone tries after "check again".
             .child(
-                ui::Button::new("restart-backend", "Restart backend").on_click(
+                ui::Button::new("restart-backend").text("Restart backend").on_click(
                     cx.listener(|workbench, _event, _window, cx| workbench.restart_backend(cx)),
                 ),
             )
             .child(
-                ui::Button::new("close-setup", "Close").on_click(cx.listener(
+                ui::Button::new("close-setup").text("Close").on_click(cx.listener(
                     |workbench, _event, _window, cx| {
                         workbench.settings_open = false;
                         workbench.restore_focus = true;
@@ -1075,14 +1072,15 @@ impl Workbench {
 
         let actions = ui::actions()
             .child(
-                ui::Button::new("save-settings", "Save")
-                    .tone(ui::Tone::Accent)
+                ui::Button::new("save-settings")
+                    .text("Save")
+                    .style(ui::ButtonStyle::Primary)
                     .on_click(
                         cx.listener(|workbench, _event, _window, cx| workbench.save_settings(cx)),
                     ),
             )
             .child(
-                ui::Button::new("close-settings", "Close").on_click(cx.listener(
+                ui::Button::new("close-settings").text("Close").on_click(cx.listener(
                     |workbench, _event, _window, cx| {
                         // Closing without saving puts the saved palette back — the preview was a
                         // look, not a change.
@@ -1243,11 +1241,12 @@ impl Workbench {
                                         ui::actions()
                                             .gap_2()
                                             .child(
-                                                ui::Button::new(
-                                                    SharedString::from(format!("run-{}", check.id)),
-                                                    *label,
-                                                )
-                                                .tone(ui::Tone::Accent)
+                                                ui::Button::new(SharedString::from(format!(
+                                                    "run-{}",
+                                                    check.id
+                                                )))
+                                                .text(*label)
+                                                .style(ui::ButtonStyle::Primary)
                                                 .disabled(busy)
                                                 .on_click(cx.listener({
                                                     let argv = argv.clone();
@@ -1268,13 +1267,11 @@ impl Workbench {
                                             // administers the machine — should not have to
                                             // retype it.
                                             .child(
-                                                ui::Button::new(
-                                                    SharedString::from(format!(
-                                                        "copy-{}",
-                                                        check.id
-                                                    )),
-                                                    "Copy ⧉",
-                                                )
+                                                ui::Button::new(SharedString::from(format!(
+                                                    "copy-{}",
+                                                    check.id
+                                                )))
+                                                .text("Copy ⧉")
                                                 .on_click(cx.listener({
                                                     let command = command.clone();
                                                     move |workbench, _event, _window, cx| {
@@ -1292,11 +1289,12 @@ impl Workbench {
                             }
                             preflight::Fix::Adopt { label, dir } => {
                                 row = row.child(
-                                    ui::Button::new(
-                                        SharedString::from(format!("adopt-{}", check.id)),
-                                        *label,
-                                    )
-                                    .tone(ui::Tone::Accent)
+                                    ui::Button::new(SharedString::from(format!(
+                                        "adopt-{}",
+                                        check.id
+                                    )))
+                                    .text(*label)
+                                    .style(ui::ButtonStyle::Primary)
                                     .on_click(cx.listener({
                                         let dir = dir.clone();
                                         move |workbench, _event, _window, cx| {
@@ -1380,9 +1378,9 @@ impl Workbench {
                         // it; §146 was right to refuse the version that could not (docs §172).
                         .when(!fix.done, |header| {
                             header.child(
-                                ui::Button::new("stop-fix", "Stop")
-                                    .tone(ui::Tone::Danger)
-                                    .size(ui::Size::Compact)
+                                ui::Button::new("stop-fix")
+                                    .text("Stop")
+                                    .style(ui::ButtonStyle::Danger)
                                     // Inert while there is nothing to act on: after Stop has
                                     // been asked, and in the moment before `spawn` returns a
                                     // pid. A live-looking button with no process behind it is
@@ -1416,8 +1414,9 @@ impl Workbench {
                         .flex_row()
                         .gap_2()
                         .child(
-                            ui::Button::new("open-signin", "Open the sign-in page")
-                                .tone(ui::Tone::Accent)
+                            ui::Button::new("open-signin")
+                                .text("Open the sign-in page")
+                                .style(ui::ButtonStyle::Primary)
                                 .on_click(cx.listener({
                                     let link = link.clone();
                                     move |workbench, _event, _window, cx| {
@@ -1436,7 +1435,7 @@ impl Workbench {
                         // the code in that URL is short-lived, so retyping it is not an
                         // option.
                         .child(
-                            ui::Button::new("copy-signin", "Copy ⧉").on_click(cx.listener({
+                            ui::Button::new("copy-signin").text("Copy ⧉").on_click(cx.listener({
                                 let link = link.clone();
                                 move |workbench, _event, _window, cx| {
                                     cx.write_to_clipboard(ClipboardItem::new_string(link.clone()));
