@@ -7315,31 +7315,50 @@ impl Render for Workbench {
             .when(!self.sidebar_open, |body| {
                 body.child(
                     div()
-                        .id("toggle-left-sidebar")
-                        .child(
-                            ui::Icon::new("icons/sidebar-simple-left.svg")
-                                .size(ui::IconSize::Small)
-                                .colour(theme::text())
-                        )
-                        .w(px(30.))
-                        .h(px(30.))
-                        .bg(rgb(theme::surface()))
-                        .m_2()
-                        .mt_3()
-                        .border_1()
-                        .border_color(rgb(theme::border()))
-                        .flex_none()
-                        .p_4()
                         .flex()
-                        .rounded_lg()
-                        .items_center()
-                        .justify_center()
-                        .hover(|style| style.cursor_pointer())
-                        .on_click(cx.listener(|workbench, _event, _window, cx| {
-                            workbench.sidebar_open = !workbench.sidebar_open;
-                            workbench.remember_panels();
-                            cx.notify();
-                        })),
+                        .flex_col()
+                        .flex_none()
+                        .m_2()
+                        .mr_0()
+                        .gap_1()
+                        .justify_between()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_none()
+                                .gap_1()
+                                .child(
+                                    ui::Button::new("toggle-left-sidebar")
+                                        .icon(ui::Icon::new("icons/sidebar-simple-left.svg"))
+                                        .style(ui::ButtonStyle::SecondaryWhite)
+                                        .border(true)
+                                        .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                            workbench.sidebar_open = !workbench.sidebar_open;
+                                            workbench.remember_panels();
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    ui::Button::new("new-conversation")
+                                        .icon(ui::Icon::new("icons/plus.svg"))
+                                        .style(ui::ButtonStyle::SecondaryWhite)
+                                        .border(true)
+                                        .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                            let project = workbench.sidecar.project();
+                                            workbench.new_thread_in(project, cx);
+                                        })),
+                                )
+                        )
+                         .child(
+                            ui::Button::new("open-settings")
+                                .icon(ui::Icon::new("icons/gear-six.svg"))
+                                .style(ui::ButtonStyle::SecondaryWhite)
+                                .border(true)
+                                .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                    workbench.run_command(Command::OpenSettings, cx);
+                                })),
+                        )
                     )
             })
             // **Its own card, not a strip inside the conversation's.** It lived inside the chat

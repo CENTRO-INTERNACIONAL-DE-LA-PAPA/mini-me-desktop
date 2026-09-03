@@ -131,7 +131,7 @@ impl Workbench {
                 self.open_picker = Some((Picker::NewProject, gpui::point(px(24.), px(120.))));
                 self.project_query.update(cx, |query, cx| {
                     query.set_text("", cx);
-                    query.set_placeholder("Create", cx);
+                    query.set_placeholder("Create Project", cx);
                 });
                 cx.notify();
             }
@@ -437,7 +437,7 @@ impl Workbench {
         // gives it a real thread (§262), or another conversation is opened and it quietly stops
         // existing — it was never saved anywhere to begin with.
         if show_draft {
-            list = list.child(ui::ListRow::new("draft-conversation", "Untitled Conversation").selected(true));
+            list = list.child(ConversationRow::new("draft-conversation", "Untitled Conversation").active(true));
         }
 
         let ungrouped: Vec<&protocol::Conversation> = matched
@@ -656,7 +656,7 @@ impl Workbench {
                 .border_color(rgb(theme::border()));
             if draft_here {
                 nested = nested
-                    .child(ui::ListRow::new("draft-conversation", "Untitled Conversation").selected(true));
+                    .child(ConversationRow::new("draft-conversation", "Untitled Conversation").active(true));
             }
             for conversation in conversations {
                 nested = nested.child(self.conversation_row(conversation, current, cx));

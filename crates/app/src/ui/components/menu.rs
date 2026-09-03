@@ -34,7 +34,7 @@ pub fn menu_card() -> Div {
         .rounded_md()
         .bg(rgb(theme::elevated()))
         .border_1()
-        .border_color(rgb(theme::border_strong()))
+        .border_color(rgb(theme::border()))
         .occlude()
         .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
             cx.stop_propagation();
