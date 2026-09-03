@@ -5,45 +5,55 @@ description: Build or edit mini-me-desktop's GPUI UI (crates/app/src) using its 
 
 # mini-me-desktop UI
 
-GPUI ships primitives, not components. This app's `ui.rs` and `theme.rs` exist
-because the same handful of layout bugs kept getting rewritten at each call
-site. **Reach for the existing pieces before writing raw `div()` chains.**
+GPUI ships primitives, not components. This app's `ui/components/` and
+`theme.rs` exist because the same handful of layout bugs kept getting
+rewritten at each call site. **Reach for the existing pieces before writing
+raw `div()` chains.**
 
 ## Reference these files directly
 
-- [`crates/app/src/ui.rs`](../../../crates/app/src/ui.rs) — the reusable
-  controls and shared conventions (`Tone`, `Size`, `IconSize`) this app is
-  built from. Skim what's actually defined there before building anything —
-  this list grows over time, so don't rely on a fixed set of names.
+- [`crates/app/src/ui/components/`](../../../crates/app/src/ui/components) —
+  the reusable controls this app is built from, one file per control
+  (`button.rs`, `label.rs`, `icon.rs`, `modal.rs`, …), re-exported as
+  `ui::Button`, `ui::Label`, `ui::Icon`, etc. from
+  [`ui/components/mod.rs`](../../../crates/app/src/ui/components/mod.rs).
+  Skim what's actually defined there before building anything — this list
+  grows over time, so don't rely on a fixed set of names.
 - [`crates/app/src/theme.rs`](../../../crates/app/src/theme.rs) — the palette,
   as roles (`theme::accent()`, `theme::text_muted()`, `theme::border()`, …),
   live-swappable at runtime.
-- [`crates/app/src/components/common.rs`](../../../crates/app/src/components/common.rs)
-  — small shared helpers (`app_icon`, `section_label`) that don't rise to a
-  full `ui.rs` type yet.
+- [`crates/app/src/ui/common.rs`](../../../crates/app/src/ui/common.rs) —
+  small shared helpers (`app_icon`, `section_label`) that don't rise to a
+  full component yet. This lives alongside the app's views
+  (`ui/chat.rs`, `ui/sidebar.rs`, …), not inside `ui/components/` — it's a
+  view-level helper, not part of the component library.
 
 ## Building a control
 
-1. **Check `ui.rs` first.** Whatever shape you're about to hand-build — a
-   bordered clickable, body text in a flex row, a floating dialog, an
-   icon-only or icon+label button, a selectable list row — look for a type
-   that already matches before writing a raw `div()` chain.
+1. **Check `ui/components/` first.** Whatever shape you're about to
+   hand-build — a bordered clickable, body text in a flex row, a floating
+   dialog, an icon-only or icon+label button, a selectable list row — look
+   for a type that already matches before writing a raw `div()` chain.
 2. **Colours always come from `theme::*()`, never a literal hex.** These are
    atomic-backed getters, not consts — hardcoding a colour is invisible to
    theme switching and to the WCAG-AA tests in `theme.rs`.
-3. **Tone communicates intent, not decoration.** `Tone::Accent` means "the
-   action this pane exists for" — reserve it for the one actionable thing.
-   Everything else is `Tone::Quiet` (the default). `Tone::Danger` is for a
-   confirmed, irreversible action only.
-4. **Icon sizing goes through `IconSize`** (`ui.rs`): `IconSize::Small.px()` /
-   `Medium` / `Large`, not a magic `f32` literal at the call site.
-5. If nothing in `ui.rs` fits, look at whether it's closer to a
+3. **`Button` is a template, not a wrapper.** It takes a `ButtonStyle`
+   (`Primary`, `Secondary`, `SecondaryWhite`, `Danger`) rather than per-call
+   colours — see the Design Guide below for what each one means and its
+   hover rule. `Secondary` is the default, reserve `Primary` for the one
+   actionable thing a pane exists for, and `Danger` for a confirmed,
+   irreversible action only.
+4. **Icon sizing goes through `IconSize`** (`ui/components/icon.rs`):
+   `IconSize::Small` / `Medium` / `Large`, not a magic `f32` literal at the
+   call site. An icon-only button is `ui::Button::new(id).icon(path).border(false)`
+   — there is no separate icon-button type.
+5. If nothing in `ui/components/` fits, look at whether it's closer to a
    **borderless clickable row** (sidebar entries, menu rows, gallery cards) —
    those are intentionally left as one-off rows rather than forced into a
    bordered-button type, since a row with its own layout wearing a button's
    shape is how the component set drifts. Match the nearest existing row
-   before inventing a new pattern, and only add a new type to `ui.rs` when
-   the shape genuinely recurs.
+   before inventing a new pattern, and only add a new file to
+   `ui/components/` when the shape genuinely recurs.
 
 ## Design Guide
 
@@ -95,7 +105,7 @@ These are the general design rules you should follow when building the UI.
 - If a text has an icon next to it, the icon should be on the left side of the text and have a `gap_2()` between the icon and the text. Also, it should have `items_center()` to make sure the icon and text are aligned properly.
 - Before placing an element inside an existing container, check what horizontal
   padding/margin its siblings already use and match it, rather than trusting the
-  element's own default — a component's own margin can stack with the container's
-  padding (use `ui::IconTextButton`'s `.margin(false)` / `.full_width(true)` to avoid
-  that), and a heading with no horizontal padding of its own won't line up with rows
-  that have theirs.
+  element's own default. `ui::Button` never manages its own margin or width — it is
+  always content-sized with no `m_*()` of its own — so a caller that needs it flush
+  with full-width rows above it, or spaced from a container that supplies no padding
+  of its own, wraps it in its own `div()` rather than expecting the button to do it.

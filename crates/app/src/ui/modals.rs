@@ -5,7 +5,7 @@
 #![allow(unused_imports)]
 
 use crate::*;
-use crate::components::{common::*, sidebar::*, chat::*, gallery_view::*, provenance_view::*, settings_view::*, palette_view::*, status_bar::*};
+use crate::ui::{common::*, sidebar::*, chat::*, gallery_view::*, provenance_view::*, settings_view::*, palette_view::*, status_bar::*};
 use gpui::{
     actions, div, img, prelude::*, px, relative, rgb, size, svg, App, Application, AssetSource,
     Bounds, ClipboardItem, Context, Div, Entity, Focusable, FontStyle, FontWeight, HighlightStyle,
@@ -15,59 +15,28 @@ use gpui::{
 impl Workbench {
     pub(crate) fn context_menu(&self, open: menu::ContextMenu, cx: &mut Context<Self>) -> impl IntoElement {
         let target = open.target;
-        let mut panel = menu_card();
+        let mut popup = ui::Menu::new(open.at)
+            // A right-click elsewhere re-opens this menu at the new spot, and that handler is
+            // the only one that should decide whether it closes.
+            .ignore_right_click(true);
 
         for &item in open.items() {
             let enabled = self.menu_item_enabled(item, target, cx);
-            let shortcut = item.shortcut(target);
-            panel = panel.child(
-                div()
-                    .id(SharedString::from(format!("menu-{}", item.label())))
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .gap_4()
-                    .px_3()
-                    .py_1()
-                    .text_sm()
-                    .text_color(rgb(if enabled {
-                        theme::text()
-                    } else {
-                        theme::text_faint()
-                    }))
-                    .when(enabled, |row| {
-                        row.hover(|style| style.bg(rgb(theme::accent_soft())).cursor_pointer())
-                            .on_click(cx.listener(move |workbench, _event, window, cx| {
-                                workbench.run_menu_item(item, target, window, cx);
-                            }))
-                    })
-                    .child(item.label())
-                    .child(
-                        div()
-                            .text_color(rgb(theme::text_faint()))
-                            .text_xs()
-                            .child(shortcut),
-                    ),
+            popup = popup.item(
+                ui::MenuItem::new(SharedString::from(format!("menu-{}", item.label())), item.label())
+                    .trailing(item.shortcut(target))
+                    .disabled(!enabled)
+                    .on_click(cx.listener(move |workbench, _event, window, cx| {
+                        workbench.run_menu_item(item, target, window, cx);
+                    })),
             );
         }
 
         // Clicking anywhere else closes it, which is the only way out most people look for.
-        gpui::deferred(gpui::anchored().position(open.at).snap_to_window().child(
-            panel.on_mouse_down_out(cx.listener(
-                |workbench, event: &gpui::MouseDownEvent, _window, cx| {
-                    // A right-click elsewhere re-opens the menu at the new spot, and
-                    // that handler is the only one that should decide. Closing here as
-                    // well would race it, and which one won would depend on paint
-                    // order — sometimes leaving no menu at all.
-                    if event.button == gpui::MouseButton::Right {
-                        return;
-                    }
-                    workbench.context_menu = None;
-                    cx.notify();
-                },
-            )),
-        ))
+        popup.on_dismiss(cx.listener(|workbench, _event, _window, cx| {
+            workbench.context_menu = None;
+            cx.notify();
+        }))
     }
 }
 
@@ -157,15 +126,18 @@ impl Workbench {
             .actions(
                 ui::actions()
                     .child(div().flex_grow())
-                    .child(ui::Button::new("provider-cancel", "Cancel").on_click(cx.listener(
-                        |workbench, _event, _window, cx| {
-                            workbench.confirming_provider = None;
-                            cx.notify();
-                        },
-                    )))
                     .child(
-                        ui::Button::new("provider-confirm", "Switch provider")
-                            .tone(ui::Tone::Accent)
+                        ui::Button::new("provider-cancel").text("Cancel").on_click(cx.listener(
+                            |workbench, _event, _window, cx| {
+                                workbench.confirming_provider = None;
+                                cx.notify();
+                            },
+                        )),
+                    )
+                    .child(
+                        ui::Button::new("provider-confirm")
+                            .text("Switch provider")
+                            .style(ui::ButtonStyle::Primary)
                             .on_click(cx.listener(move |workbench, _event, _window, cx| {
                                 workbench.confirming_provider = None;
                                 workbench.draft.provider = spec.id.to_string();
@@ -267,7 +239,7 @@ impl Workbench {
                 ui::actions()
                     .child(div().flex_grow())
                     .child(
-                        ui::Button::new("delete-cancel", "Cancel").on_click(cx.listener(
+                        ui::Button::new("delete-cancel").text("Cancel").on_click(cx.listener(
                             |workbench, _event, _window, cx| {
                                 workbench.confirming_delete = None;
                                 workbench.restore_focus = true;
@@ -276,8 +248,9 @@ impl Workbench {
                         )),
                     )
                     .child(
-                        ui::Button::new("delete-confirm", action)
-                            .tone(ui::Tone::Danger)
+                        ui::Button::new("delete-confirm")
+                            .text(action)
+                            .style(ui::ButtonStyle::Danger)
                             .on_click(cx.listener(|workbench, _event, _window, cx| {
                                 workbench.confirm_delete(cx);
                             })),
@@ -412,11 +385,11 @@ impl Workbench {
                  literature, find datasets, clean and analyse tabular data, build models, and \
                  write the findings up.",
             ))
-            .child(section_label("THE SPECIALISTS"))
+            .child(ui::Label::new("THE SPECIALISTS").colour(theme::text_faint()).size(ui::Size::Compact))
             .child(team)
-            .child(section_label("WHERE THE DATA COMES FROM"))
+            .child(ui::Label::new("WHERE THE DATA COMES FROM").colour(theme::text_faint()).size(ui::Size::Compact))
             .child(sources)
-            .child(section_label("THIS BUILD"))
+            .child(ui::Label::new("THIS BUILD").colour(theme::text_faint()).size(ui::Size::Compact))
             // **Because a tester's report is unusable without it.** The app has never shown its
             // own version anywhere: not in the window, not in the log, not in the About page. It
             // logged the *backend* checkout's commit as its very first line (§115) and said nothing
@@ -452,7 +425,7 @@ impl Workbench {
                     )
                     .children(self.update_action(cx)),
             )
-            .child(section_label("WHERE CODE RUNS"))
+            .child(ui::Label::new("WHERE CODE RUNS").colour(theme::text_faint()).size(ui::Size::Compact))
             .child(
                 div()
                     .flex()
@@ -462,7 +435,7 @@ impl Workbench {
                     .child(ui::Label::new(execution.0).colour(theme::accent()))
                     .child(ui::Label::new(execution.1).muted().size(ui::Size::Compact)),
             )
-            .child(section_label("CITING THIS WORK"))
+            .child(ui::Label::new("CITING THIS WORK").colour(theme::text_faint()).size(ui::Size::Compact))
             .child(ui::Label::new(
                 "Literature search is powered by Asta, from the Allen Institute for AI. If your \
                  work uses output produced with it, please cite AstaBench:",
@@ -501,7 +474,7 @@ impl Workbench {
             .focus(&self.about_focus)
             .body(body)
             .actions(ui::actions().child(div().flex_grow()).child(
-                ui::Button::new("about-close", "Close").on_click(cx.listener(
+                ui::Button::new("about-close").text("Close").on_click(cx.listener(
                     |workbench, _event, _window, cx| {
                         workbench.about_open = false;
                         workbench.restore_focus = true;
@@ -661,15 +634,15 @@ impl Workbench {
                 .w_full()
                 .min_w_0()
                 .child(
-                    ui::Button::new("approve", "Approve")
-                        .tone(ui::Tone::Accent)
+                    ui::Button::new("approve").text("Approve")
+                        .style(ui::ButtonStyle::Primary)
                         .on_click(
                             cx.listener(|workbench, _event, _window, cx| {
                                 workbench.decide(true, cx)
                             }),
                         ),
                 )
-                .child(ui::Button::new("reject", "Reject").on_click(
+                .child(ui::Button::new("reject").text("Reject").on_click(
                     cx.listener(|workbench, _event, _window, cx| workbench.decide(false, cx)),
                 ))
                 // Bounded to *this turn*, and nothing is persisted. A permanent
@@ -685,8 +658,7 @@ impl Workbench {
                 // clicking — which is how a gate becomes a formality.
                 .child(div().flex_grow())
                 .child(
-                    ui::Button::new("approve-turn", "Approve the rest of this turn")
-                        .size(ui::Size::Compact)
+                    ui::Button::new("approve-turn").text("Approve the rest of this turn")
                         .on_click(cx.listener(|workbench, _event, _window, cx| {
                             workbench.approve_rest_of_turn = true;
                             workbench.decide(true, cx);
@@ -699,11 +671,8 @@ impl Workbench {
                 // closing the app ends it, nothing is written to disk, and the status bar
                 // says so for as long as it holds (docs §41).
                 .child(
-                    ui::Button::new(
-                        "approve-conversation",
-                        "Approve everything in this conversation",
-                    )
-                    .size(ui::Size::Compact)
+                    ui::Button::new("approve-conversation")
+                    .text("Approve everything in this conversation")
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
                         workbench.approve_conversation = true;
                         workbench.decide(true, cx);
@@ -973,8 +942,7 @@ impl Workbench {
                     .size(ui::Size::Compact),
                 )
                 .child(
-                    ui::Button::new("discovery-back", "All experiments")
-                        .size(ui::Size::Compact)
+                    ui::Button::new("discovery-back").text("All experiments")
                         .on_click(cx.listener(|workbench, _event, _window, cx| {
                             workbench.select_experiment(None, cx);
                         })),
@@ -1016,7 +984,7 @@ impl Workbench {
                 .min_w_0()
                 .flex_none()
                 .gap_1()
-                .child(section_label(heading));
+                .child(ui::Label::new(heading).colour(theme::text_faint()).size(ui::Size::Compact));
             for block in markdown::parse(body) {
                 rendered = rendered.child(
                     div()
@@ -1045,7 +1013,7 @@ impl Workbench {
                         .min_w_0()
                         .flex_none()
                         .gap_1()
-                        .child(section_label("FIGURES"))
+                        .child(ui::Label::new("FIGURES").colour(theme::text_faint()).size(ui::Size::Compact))
                         .children(paths.iter().enumerate().map(|(at, path)| {
                             let opening = path.clone();
                             div()
@@ -1184,15 +1152,12 @@ impl Workbench {
                         // developers, and §199's rule is that an affordance nobody can name is one
                         // they conclude does not exist.
                         .child(
-                            ui::Button::new(
-                                "discovery-sort",
-                                if view.loudest_first {
-                                    "Biggest shift first"
-                                } else {
-                                    "Smallest shift first"
-                                },
-                            )
-                            .size(ui::Size::Compact)
+                            ui::Button::new("discovery-sort")
+                            .text(if view.loudest_first {
+                                "Biggest shift first"
+                            } else {
+                                "Smallest shift first"
+                            })
                             .on_click(cx.listener(|workbench, _event, _window, cx| {
                                 if let Some(view) = workbench.discovery_open.as_mut() {
                                     view.loudest_first = !view.loudest_first;
@@ -1201,11 +1166,8 @@ impl Workbench {
                             })),
                         )
                         .child(
-                            ui::Button::new(
-                                "discovery-expand",
-                                if view.expanded { "Shrink" } else { "Full screen" },
-                            )
-                            .size(ui::Size::Compact)
+                            ui::Button::new("discovery-expand")
+                            .text(if view.expanded { "Shrink" } else { "Full screen" })
                             .on_click(cx.listener(|workbench, _event, _window, cx| {
                                 if let Some(view) = workbench.discovery_open.as_mut() {
                                     view.expanded = !view.expanded;
@@ -1247,7 +1209,7 @@ impl Workbench {
             ui::actions()
                 .child(div().flex_grow())
                 .child(
-                    ui::Button::new("discovery-close", "Close").on_click(cx.listener(
+                    ui::Button::new("discovery-close").text("Close").on_click(cx.listener(
                         |workbench, _event, _window, cx| {
                             workbench.discovery_open = None;
                             cx.notify();
@@ -1315,7 +1277,7 @@ impl Workbench {
                 .w_full()
                 .min_w_0()
                 .gap_1()
-                .child(section_label("EXPERIMENTS TO RUN"))
+                .child(ui::Label::new("EXPERIMENTS TO RUN").colour(theme::text_faint()).size(ui::Size::Compact))
                 .child(
                     div()
                         .flex()
@@ -1324,16 +1286,10 @@ impl Workbench {
                         .items_center()
                         .gap_1()
                         .children(BUDGET_PRESETS.iter().map(|&preset| {
-                            ui::Button::new(
-                                SharedString::from(format!("budget-{preset}")),
-                                preset.to_string(),
-                            )
-                            .size(ui::Size::Compact)
-                            .tone(if preset == experiments {
-                                ui::Tone::Accent
-                            } else {
-                                ui::Tone::Quiet
-                            })
+                            ui::Button::new(SharedString::from(format!("budget-{preset}")))
+                                .text(preset.to_string())
+                                .toggle(true)
+                                .active(preset == experiments)
                             .on_click(cx.listener(move |workbench, _event, _window, cx| {
                                 if let Some(approval) = workbench.approving.as_mut() {
                                     approval.experiments = preset;
@@ -1342,8 +1298,7 @@ impl Workbench {
                             }))
                         }))
                         .child(
-                            ui::Button::new("budget-down", "−")
-                                .size(ui::Size::Compact)
+                            ui::Button::new("budget-down").text("−")
                                 .disabled(experiments <= 1)
                                 .on_click(cx.listener(|workbench, _event, _window, cx| {
                                     if let Some(approval) = workbench.approving.as_mut() {
@@ -1354,9 +1309,8 @@ impl Workbench {
                                 })),
                         )
                         .child(
-                            ui::Button::new("budget-up", "+")
-                                .size(ui::Size::Compact)
-                                .disabled(experiments >= MAX_BUDGET)
+                            ui::Button::new("budget-up").text("+")
+                                                                .disabled(experiments >= MAX_BUDGET)
                                 .on_click(cx.listener(|workbench, _event, _window, cx| {
                                     if let Some(approval) = workbench.approving.as_mut() {
                                         approval.experiments =
@@ -1388,7 +1342,7 @@ impl Workbench {
                 .w_full()
                 .min_w_0()
                 .gap_1()
-                .child(section_label("WHAT TO EXPLORE"))
+                .child(ui::Label::new("WHAT TO EXPLORE").colour(theme::text_faint()).size(ui::Size::Compact))
                 .child(self.filter_field(self.intent_field.clone(), cx))
                 .child(
                     ui::Label::new(
@@ -1416,7 +1370,7 @@ impl Workbench {
                 ui::actions()
                     .child(div().flex_grow())
                     .child(
-                        ui::Button::new("discovery-reject", "Not now")
+                        ui::Button::new("discovery-reject").text("Not now")
                             .disabled(approval.submitting)
                             .on_click(cx.listener(|workbench, _event, _window, cx| {
                                 if let Some(approval) = workbench.approving.take() {
@@ -1431,15 +1385,13 @@ impl Workbench {
                             })),
                     )
                     .child(
-                        ui::Button::new(
-                            "discovery-approve",
-                            if approval.submitting {
-                                "Starting…".to_string()
-                            } else {
-                                format!("Run {experiments} and spend {experiments}")
-                            },
-                        )
-                        .tone(ui::Tone::Accent)
+                        ui::Button::new("discovery-approve")
+                        .text(if approval.submitting {
+                            "Starting…".to_string()
+                        } else {
+                            format!("Run {experiments} and spend {experiments}")
+                        })
+                        .style(ui::ButtonStyle::Primary)
                         // Not while a press is in flight, and not for a budget the balance cannot
                         // cover: the service would refuse it, and letting someone press a button
                         // that fails is worse than not offering it.
@@ -1536,20 +1488,18 @@ impl Workbench {
                 let mut actions = ui::actions().child(div().flex_grow());
                 if picked > 0 {
                     actions = actions.child(
-                        ui::Button::new(
-                            "datasets-download-picked",
-                            format!(
-                                "Download {picked} dataset{} into this conversation",
-                                if picked == 1 { "" } else { "s" }
-                            ),
-                        )
-                        .tone(ui::Tone::Accent)
+                        ui::Button::new("datasets-download-picked")
+                        .text(format!(
+                            "Download {picked} dataset{} into this conversation",
+                            if picked == 1 { "" } else { "s" }
+                        ))
+                        .style(ui::ButtonStyle::Primary)
                         .on_click(cx.listener(|workbench, _event, _window, cx| {
                             workbench.download_picked(cx);
                         })),
                     );
                 }
-                actions.child(ui::Button::new("datasets-close", "Close").on_click(cx.listener(
+                actions.child(ui::Button::new("datasets-close").text("Close").on_click(cx.listener(
                     |workbench, _event, _window, cx| {
                         workbench.datasets_open = false;
                         workbench.restore_focus = true;
@@ -1740,10 +1690,11 @@ impl Workbench {
                                     workbench.toggle_dataset_pick(pick_id.clone(), cx);
                                 })),
                         ).child(
-                            ui::Button::new(SharedString::from(format!("get-{id}")), offer)
+                            ui::Button::new(SharedString::from(format!("get-{id}")))
+                                .text(offer)
                                 // Accent, because this is the action the list exists for and it
                                 // must read as a control rather than as more of the row.
-                                .tone(ui::Tone::Accent)
+                                .style(ui::ButtonStyle::Primary)
                                 .on_click(cx.listener(move |workbench, _event, _window, cx| {
                                     // Belt as well as braces: the opener is a sibling now, so
                                     // nothing is behind this — but a future nesting must not
@@ -1796,7 +1747,7 @@ impl Workbench {
             )
             .actions(
                 ui::actions().child(div().flex_grow()).child(
-                    ui::Button::new("documents-close", "Close").on_click(cx.listener(
+                    ui::Button::new("documents-close").text("Close").on_click(cx.listener(
                         |workbench, _event, _window, cx| {
                             workbench.documents_open = false;
                             workbench.restore_focus = true;
@@ -1978,7 +1929,7 @@ impl Workbench {
             )
             .actions(
                 ui::actions().child(div().flex_grow()).child(
-                    ui::Button::new("sources-close", "Close").on_click(cx.listener(
+                    ui::Button::new("sources-close").text("Close").on_click(cx.listener(
                         |workbench, _event, _window, cx| {
                             workbench.sources_open = false;
                             workbench.restore_focus = true;
@@ -2022,15 +1973,20 @@ impl Workbench {
                     .pt_2()
                     .border_t_1()
                     .border_color(rgb(theme::border()))
-                    .child(section_label_owned(match self.unverified_sources() {
-                        // **Counted where the eye lands, not only marked row by row.** Silence
-                        // under a reference means "nothing wrong with this one", and until §185
-                        // it also meant "nothing checked this one" — so a researcher scanning
-                        // fourteen citations had no way to know how many needed them. The header
-                        // says how many, and the rows say which (docs §185).
-                        0 => format!("SOURCES · {}", self.sources.len()),
-                        n => format!("SOURCES · {} · {n} UNVERIFIED", self.sources.len()),
-                    }))
+                    .child(
+                        ui::Label::new(match self.unverified_sources() {
+                            // **Counted where the eye lands, not only marked row by row.**
+                            // Silence under a reference means "nothing wrong with this one", and
+                            // until §185 it also meant "nothing checked this one" — so a
+                            // researcher scanning fourteen citations had no way to know how many
+                            // needed them. The header says how many, and the rows say which
+                            // (docs §185).
+                            0 => format!("SOURCES · {}", self.sources.len()),
+                            n => format!("SOURCES · {} · {n} UNVERIFIED", self.sources.len()),
+                        })
+                        .colour(theme::text_faint())
+                        .size(ui::Size::Compact),
+                    )
             });
 
         // A quiet line while the registry is being asked, and nothing at all once it is done.
@@ -2460,16 +2416,14 @@ impl Workbench {
         let mut actions = ui::actions().child(div().flex_grow());
         if written > 0 {
             actions = actions.child(
-                ui::Button::new(
-                    "collect-outside",
-                    if self.collect_in_flight {
-                        "Bringing them in…".to_string()
-                    } else {
-                        // Named in words: what the press will do, and to how many.
-                        format!("Copy {written} file{} into this conversation", if written == 1 { "" } else { "s" })
-                    },
-                )
-                .tone(ui::Tone::Accent)
+                ui::Button::new("collect-outside")
+                .text(if self.collect_in_flight {
+                    "Bringing them in…".to_string()
+                } else {
+                    // Named in words: what the press will do, and to how many.
+                    format!("Copy {written} file{} into this conversation", if written == 1 { "" } else { "s" })
+                })
+                .style(ui::ButtonStyle::Primary)
                 .on_click(cx.listener(|workbench, _event, _window, cx| {
                     workbench.collect_outside(cx);
                 })),
@@ -2482,7 +2436,7 @@ impl Workbench {
             .body(body)
             .actions(
                 actions.child(
-                    ui::Button::new("commands-close", "Close").on_click(cx.listener(
+                    ui::Button::new("commands-close").text("Close").on_click(cx.listener(
                         |workbench, _event, _window, cx| {
                             workbench.commands_open = false;
                             workbench.restore_focus = true;
@@ -2639,7 +2593,7 @@ impl Workbench {
             .body(body)
             .actions(
                 ui::actions().child(div().flex_grow()).child(
-                    ui::Button::new("claims-close", "Close").on_click(cx.listener(
+                    ui::Button::new("claims-close").text("Close").on_click(cx.listener(
                         |workbench, _event, _window, cx| {
                             workbench.claims_open = false;
                             workbench.restore_focus = true;

@@ -5,7 +5,7 @@
 #![allow(unused_imports)]
 
 use crate::*;
-use crate::components::{common::*, sidebar::*, chat::*, gallery_view::*, settings_view::*, palette_view::*, modals::*, status_bar::*};
+use crate::ui::{common::*, sidebar::*, chat::*, gallery_view::*, settings_view::*, palette_view::*, modals::*, status_bar::*};
 use gpui::{
     actions, div, img, prelude::*, px, relative, rgb, size, svg, App, Application, AssetSource,
     Bounds, ClipboardItem, Context, Div, Entity, Focusable, FontStyle, FontWeight, HighlightStyle,
@@ -509,7 +509,7 @@ impl Workbench {
         // Which turn the graph is showing. Only on the graph — the timeline is one row per turn
         // already, so filtering it to a turn would leave a chart of one bar.
         let rail = if view == ProvenanceView::Graph && self.provenance.turns.len() > 1 {
-            let mut rail = rail.child(div().pt_3().child(section_label("TURNS"))).child(
+            let mut rail = rail.child(div().pt_3().child(ui::Label::new("TURNS").colour(theme::text_faint()).size(ui::Size::Compact))).child(
                 ui::NavEntry::new(
                     "prov-turn-all",
                     format!("All {}", self.provenance.turns.len()),
@@ -566,8 +566,8 @@ impl Workbench {
             .actions(
                 ui::actions()
                     .child(
-                        ui::Button::new("provenance-mermaid", "Copy as Mermaid")
-                            .size(ui::Size::Compact)
+                        ui::Button::new("provenance-mermaid")
+                            .text("Copy as Mermaid")
                             .disabled(self.provenance.is_empty())
                             .on_click(cx.listener(|workbench, _event, _window, cx| {
                                 let text = mermaid(&workbench.provenance.graph_of(workbench.provenance_turn));
@@ -576,9 +576,9 @@ impl Workbench {
                             })),
                     )
                     .child(
-                        ui::Button::new("provenance-svg", "Save as SVG")
-                            .tone(ui::Tone::Accent)
-                            .size(ui::Size::Compact)
+                        ui::Button::new("provenance-svg")
+                            .text("Save as SVG")
+                            .style(ui::ButtonStyle::Primary)
                             .disabled(self.provenance.is_empty() || self.thread_workspace().is_none())
                             .on_click(cx.listener(|workbench, _event, _window, cx| {
                                 workbench.save_provenance_svg(cx);
@@ -586,7 +586,7 @@ impl Workbench {
                     )
                     .child(div().flex_grow())
                     .child(
-                        ui::Button::new("provenance-close", "Close").on_click(cx.listener(
+                        ui::Button::new("provenance-close").text("Close").on_click(cx.listener(
                             |workbench, _event, _window, cx| {
                                 workbench.provenance_open = false;
                                 workbench.restore_focus = true;

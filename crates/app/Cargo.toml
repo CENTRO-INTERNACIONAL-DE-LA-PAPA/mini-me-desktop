@@ -103,3 +103,10 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_JobObjects",
     "Win32_System_Threading",
 ] }
+
+# Embeds assets/icon.ico into the .exe (see build.rs) — the taskbar and titlebar icon are a
+# resource on the binary, not something gpui's WindowOptions can set at runtime. Pinned to the
+# version already in this tree: gpui's own build.rs uses the same crate to embed its DPI-
+# awareness manifest, so this adds no new dependency resolution.
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3.0.11"

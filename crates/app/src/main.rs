@@ -11,7 +11,6 @@
 
 mod backend;
 mod catalogue;
-mod components;
 mod composer;
 mod dataverse;
 mod discovery;
@@ -40,15 +39,11 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use futures::StreamExt;
 use gpui::{
-    actions, div, prelude::*, px, rgb, size, App, Application, AssetSource, Bounds, ClipboardItem, Context, Entity, Focusable,
-    KeyBinding, ListAlignment, ListState, SharedString,
-    Window, WindowBounds,
-    WindowOptions,
+    App, Application, AssetSource, Bounds, ClipboardItem, Context, Entity, Focusable, KeyBinding, ListAlignment, ListState, SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div, prelude::*, px, rgb, size,
 };
 
-use components::common::horizontal_drag_offset;
-use components::common::app_icon;
-use components::provenance_view::{link_for, provenance_svg};
+use ui::common::horizontal_drag_offset;
+use ui::provenance_view::{link_for, provenance_svg};
 use composer::{Composer, ComposerEvent};
 use protocol::{AgentRef, ApprovalRequest, Bucket, Project, TurnEvent};
 use sidecar::Sidecar;
@@ -1087,17 +1082,6 @@ fn summary_for(tasks: &[protocol::AsyncTask], plan: &[protocol::Todo]) -> Option
         return None;
     }
     Some(format!("step {} of {total}", done + 1))
-}
-
-
-
-
-/// A one-line tooltip.
-///
-/// GPUI wants a whole view for a tooltip, so this is the smallest one that renders text —
-/// and having it means a control can be an icon without becoming a guess.
-struct Hint {
-    text: SharedString,
 }
 
 
@@ -2715,7 +2699,7 @@ impl Workbench {
             provenance_focus: cx.focus_handle(),
             about_focus: cx.focus_handle(),
             delete_focus: cx.focus_handle(),
-            sidebar_width: 240.,
+            sidebar_width: 320.,
             panel_width: 320.,
             dragging: None,
             toasts: Vec::new(),
@@ -3431,63 +3415,6 @@ impl Workbench {
         cx.notify();
     }
 
-
-
-    /// What each row does. **Nothing new lives here** — every arm calls a method the sidebar
-    /// already had, which is the rule `menu.rs` states for the right-click menu and the reason
-    /// this change is a rearrangement rather than a feature with its own behaviour.
-    fn run_sidebar_menu(
-        &mut self,
-        open: &SidebarMenu,
-        id: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match (open, id) {
-            (SidebarMenu::New, "menu-new-conversation") => self.new_thread_in(None, cx),
-            (SidebarMenu::New, "menu-new-project") => {
-                // The project picker already knows how to name one that does not exist yet —
-                // typing offers `New project “…”` as its first row. `NewProject` only changes
-                // what choosing does: start a conversation there, rather than move the open one.
-                self.open_picker = Some((Picker::NewProject, gpui::point(px(24.), px(120.))));
-                self.project_query.update(cx, |query, cx| query.set_text("", cx));
-                cx.notify();
-            }
-            (SidebarMenu::Conversation(conversation), "menu-rename") => {
-                self.start_rename(conversation.thread_id.clone(), window, cx)
-            }
-            (SidebarMenu::Conversation(conversation), "menu-delete") => {
-                self.request_delete(DeleteTarget::Conversation(conversation.clone()), window, cx)
-            }
-            (SidebarMenu::Project { name, .. }, "menu-new-here") => {
-                self.new_thread_in(Some(name.clone()), cx)
-            }
-            (SidebarMenu::Project { name, .. }, "menu-open-folder") => {
-                if let Some(dir) =
-                    workspace::project_folder(name).map(|folder| workspace::root().join(folder))
-                {
-                    if let Err(error) = workspace::open(&dir) {
-                        tracing::warn!(%error, "could not open a project");
-                    }
-                }
-            }
-            (
-                SidebarMenu::Project {
-                    name,
-                    conversations,
-                },
-                "menu-delete-project",
-            ) => self.request_delete(
-                DeleteTarget::Project {
-                    name: name.clone(),
-                    conversations: conversations.clone(),
-                },
-                window,
-                cx,
-            ),
-            _ => {}
-        }
-    }
 
 
     /// Copy the selected transcript text.
@@ -6387,6 +6314,10 @@ impl Workbench {
                 }
                 // Anchored under the sidebar, where the projects it is about are listed.
                 self.open_picker = Some((Picker::Project, gpui::point(px(24.), px(120.))));
+                // Reverts whatever "New project…" last left it as — the same entity is reused
+                // for both prompts (see `Picker::NewProject`'s open handler).
+                self.project_query
+                    .update(cx, |query, cx| query.set_placeholder("Find or name a project", cx));
                 cx.notify();
             }
             Command::OpenAbout => {
@@ -7384,33 +7315,50 @@ impl Render for Workbench {
             .when(!self.sidebar_open, |body| {
                 body.child(
                     div()
-                        .id("toggle-left-sidebar")
-                        .child(
-                            app_icon(
-                                "icons/sidebar-simple-left.svg",
-                                theme::text(),
-                                Some(ui::IconSize::Small.px())
-                            )
-                        )
-                        .w(px(30.))
-                        .h(px(30.))
-                        .bg(rgb(theme::surface()))
-                        .m_2()
-                        .mt_3()
-                        .border_1()
-                        .border_color(rgb(theme::border()))
-                        .flex_none()
-                        .p_4()
                         .flex()
-                        .rounded_lg()
-                        .items_center()
-                        .justify_center()
-                        .hover(|style| style.cursor_pointer())
-                        .on_click(cx.listener(|workbench, _event, _window, cx| {
-                            workbench.sidebar_open = !workbench.sidebar_open;
-                            workbench.remember_panels();
-                            cx.notify();
-                        })),
+                        .flex_col()
+                        .flex_none()
+                        .m_2()
+                        .mr_0()
+                        .gap_1()
+                        .justify_between()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_none()
+                                .gap_1()
+                                .child(
+                                    ui::Button::new("toggle-left-sidebar")
+                                        .icon(ui::Icon::new("icons/sidebar-simple-left.svg"))
+                                        .style(ui::ButtonStyle::SecondaryWhite)
+                                        .border(true)
+                                        .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                            workbench.sidebar_open = !workbench.sidebar_open;
+                                            workbench.remember_panels();
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    ui::Button::new("new-conversation")
+                                        .icon(ui::Icon::new("icons/plus.svg"))
+                                        .style(ui::ButtonStyle::SecondaryWhite)
+                                        .border(true)
+                                        .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                            let project = workbench.sidecar.project();
+                                            workbench.new_thread_in(project, cx);
+                                        })),
+                                )
+                        )
+                         .child(
+                            ui::Button::new("open-settings")
+                                .icon(ui::Icon::new("icons/gear-six.svg"))
+                                .style(ui::ButtonStyle::SecondaryWhite)
+                                .border(true)
+                                .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                    workbench.run_command(Command::OpenSettings, cx);
+                                })),
+                        )
                     )
             })
             // **Its own card, not a strip inside the conversation's.** It lived inside the chat
@@ -7420,9 +7368,9 @@ impl Render for Workbench {
             //
             // Not before the first question: an empty road beside an empty transcript is a frame
             // around nothing, and the empty state has its own things to say.
-            .when(!self.transcript.is_empty(), |body| {
-                body.child(self.road_strip(cx))
-            })
+            // .when(!self.transcript.is_empty(), |body| {
+            //     body.child(self.road_strip(cx))
+            // })
             .child(self.chat_pane(cx));
 
         // The right-hand slot belongs to the research panel alone. Setup used to take it,
@@ -7434,11 +7382,11 @@ impl Render for Workbench {
             body.child(
                 div()
                     .id("toggle-right-panel")
-                    .child(app_icon(
-                        "icons/sidebar-simple-right.svg",
-                        theme::text(),
-                        Some(ui::IconSize::Small.px()),
-                    ))
+                    .child(
+                        ui::Icon::new("icons/sidebar-simple-right.svg")
+                            .size(ui::IconSize::Small)
+                            .colour(theme::text())
+                    )
                     .w(px(30.))
                     .h(px(30.))
                     .bg(rgb(theme::surface()))
@@ -8373,7 +8321,7 @@ mod tests {
         assert!(!is_search_record(&record("my_papers.json")));
     }
     use super::*;
-    use crate::components::{chat::*, common::*, gallery_view::*, provenance_view::*};
+    use crate::ui::{chat::*, common::*, gallery_view::*, provenance_view::*};
 
     #[gpui::test]
     fn a_long_transcript_builds_only_rows_near_the_viewport(
@@ -9116,8 +9064,9 @@ mod tests {
         // multiplies by `style.text.color`, so whether an icon appears is decided entirely by
         // the element's own colour and not by anything in these bytes. That assertion passed
         // just as happily when all four icons rendered nothing at all, which is the state this
-        // PR arrived in. What replaces it is `app_icon` taking `ink` as an argument, so the
-        // compiler refuses a call site that forgets (docs §157).
+        // PR arrived in. What replaces it is `ui::Icon` taking a colour, defaulted rather than
+        // required now that it lives behind a builder, but still impossible to omit by accident
+        // the way a bare `svg()` call was (docs §157).
     }
 
     #[test]
@@ -10666,6 +10615,10 @@ fn main() {
             .open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("Mini-Me Desktop".into()),
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 },
                 |window, cx| cx.new(|cx| Workbench::new(sidecar.clone(), window, cx)),

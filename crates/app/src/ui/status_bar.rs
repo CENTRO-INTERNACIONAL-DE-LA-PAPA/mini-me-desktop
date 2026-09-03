@@ -5,7 +5,7 @@
 #![allow(unused_imports)]
 
 use crate::*;
-use crate::components::{common::*, sidebar::*, chat::*, gallery_view::*, provenance_view::*, settings_view::*, palette_view::*, modals::*};
+use crate::ui::{common::*, sidebar::*, chat::*, gallery_view::*, provenance_view::*, settings_view::*, palette_view::*, modals::*};
 use gpui::{
     actions, div, img, prelude::*, px, relative, rgb, size, svg, App, Application, AssetSource,
     Bounds, ClipboardItem, Context, Div, Entity, Focusable, FontStyle, FontWeight, HighlightStyle,
@@ -126,8 +126,8 @@ impl Workbench {
         Some(
             column
                 .child(
-                    ui::Button::new("take-update", label)
-                        .size(ui::Size::Compact)
+                    ui::Button::new("take-update")
+                        .text(label)
                         .on_click(cx.listener(|workbench, _event, _window, cx| {
                             workbench.take_update(cx);
                         })),
@@ -165,9 +165,9 @@ impl Workbench {
                 .items_center()
                 .gap_1()
                 .child(
-                    ui::Button::new("restart-to-update", "Restart to Update")
-                        .tone(ui::Tone::Accent)
-                        .size(ui::Size::Chip)
+                    ui::Button::new("restart-to-update")
+                        .text("Restart to Update")
+                        .style(ui::ButtonStyle::Primary)
                         .on_click(cx.listener(|workbench, _event, _window, cx| {
                             workbench.restart_to_update(cx);
                         })),
@@ -175,8 +175,8 @@ impl Workbench {
                 // Sent away for this session only. The staged folder stays, so dismissing costs
                 // nothing but the reminder, and next launch offers it again.
                 .child(
-                    ui::Button::new("dismiss-update", "×")
-                        .size(ui::Size::Chip)
+                    ui::Button::new("dismiss-update")
+                        .text("×")
                         .on_click(cx.listener(|workbench, _event, _window, cx| {
                             workbench.update_dismissed = true;
                             cx.notify();
@@ -231,9 +231,9 @@ impl Workbench {
             // permanent by inconvenience. Click to hand the gate back.
             .when(self.approve_conversation, |bar| {
                 bar.child(
-                    ui::Button::new("revoke-approval", "approving everything — click to stop")
-                        .tone(ui::Tone::Accent)
-                        .size(ui::Size::Chip)
+                    ui::Button::new("revoke-approval")
+                        .text("approving everything — click to stop")
+                        .style(ui::ButtonStyle::Primary)
                         .on_click(cx.listener(|workbench, _event, _window, cx| {
                             workbench.approve_conversation = false;
                             workbench.approve_tasks.clear();

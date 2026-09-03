@@ -5,7 +5,7 @@
 #![allow(unused_imports)]
 
 use crate::*;
-use crate::components::{common::*, sidebar::*, gallery_view::*, provenance_view::*, settings_view::*, palette_view::*, modals::*, status_bar::*};
+use crate::ui::{common::*, sidebar::*, gallery_view::*, provenance_view::*, settings_view::*, palette_view::*, modals::*, status_bar::*};
 use gpui::{
     actions, div, img, prelude::*, px, relative, rgb, size, svg, App, Application, AssetSource,
     Bounds, ClipboardItem, Context, Div, Entity, Focusable, FontStyle, FontWeight, HighlightStyle,
@@ -68,7 +68,7 @@ pub(crate) fn fold_steps(steps: &[String]) -> Vec<String> {
 
 /// A labelled, bulleted list of spine entries.
 pub(crate) fn spine_list(label: &'static str, items: &[String], bullet: &'static str) -> impl IntoElement {
-    let mut list = div().flex().flex_col().gap_1().child(section_label(label));
+    let mut list = div().flex().flex_col().gap_1().child(ui::Label::new(label).colour(theme::text_faint()).size(ui::Size::Compact));
     for item in items {
         list = list.child(
             div()
@@ -716,9 +716,9 @@ impl Workbench {
             .min_w_0()
             .pt_1()
             .child(
-                ui::Button::new("export-pdf", "Save as PDF with references")
-                    .tone(ui::Tone::Accent)
-                    .size(ui::Size::Compact)
+                ui::Button::new("export-pdf")
+                    .text("Save as PDF with references")
+                    .style(ui::ButtonStyle::Primary)
                     // Disabled rather than hidden, so the affordance is discoverable before
                     // there is a report to use it on.
                     .disabled(self.reports.is_empty())
@@ -727,8 +727,8 @@ impl Workbench {
                     })),
             )
             .child(
-                ui::Button::new("export-bibtex", "Copy BibTeX")
-                    .size(ui::Size::Compact)
+                ui::Button::new("export-bibtex")
+                    .text("Copy BibTeX")
                     .disabled(bibtex.is_empty())
                     .on_click(cx.listener(move |workbench, _event, _window, cx| {
                         let entries = bibtex.matches("@misc").count();
@@ -737,8 +737,8 @@ impl Workbench {
                     })),
             )
             .child(
-                ui::Button::new("export-rerun", "Re-run this turn")
-                    .size(ui::Size::Compact)
+                ui::Button::new("export-rerun")
+                    .text("Re-run this turn")
                     .disabled(again.is_none() || self.streaming)
                     .on_click(cx.listener(move |workbench, _event, _window, cx| {
                         // Into the composer, not straight to the backend. Re-running is a
@@ -848,19 +848,19 @@ impl Workbench {
                                         div()
                                             .absolute()
                                             .left(px(0.))
-                                            .child(app_icon_at("icons/agent-ellipse.svg", 0xF47920, 18.)),
+                                            .child(ui::Icon::new("icons/agent-ellipse.svg").size(ui::IconSize::Small).colour(0xF47920)),
                                     )
                                     .child(
                                         div()
                                             .absolute()
                                             .left(px(9.))
-                                            .child(app_icon_at("icons/agent-ellipse.svg", 0x20ADF4, 18.)),
+                                            .child(ui::Icon::new("icons/agent-ellipse.svg").size(ui::IconSize::Small).colour(0x20ADF4)),
                                     )
                                     .child(
                                         div()
                                             .absolute()
                                             .left(px(18.))
-                                            .child(app_icon_at("icons/agent-ellipse.svg", 0xF42091, 18.)),
+                                            .child(ui::Icon::new("icons/agent-ellipse.svg").size(ui::IconSize::Small).colour(0xF42091)),
                                     ),
                             )
                             .child("What are you working on?"),
@@ -957,7 +957,7 @@ impl Workbench {
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .child(section_label("PICK UP WHERE YOU LEFT OFF"))
+                    .child(ui::Label::new("PICK UP WHERE YOU LEFT OFF").colour(theme::text_faint()).size(ui::Size::Compact))
                     .child(cards),
             );
         }
@@ -1016,7 +1016,7 @@ impl Workbench {
                     .when(leading, |row| row.hover(|style| style.cursor_pointer()))
                     .child(
                         div()
-                            .child(app_icon(icon, theme::accent(), Some(ui::IconSize::Medium.px())))
+                            .child(ui::Icon::new(icon).size(ui::IconSize::Medium).colour(theme::accent()))
                     )
                     .child(
                         div()
@@ -1160,20 +1160,17 @@ impl Workbench {
                         .gap_1()
                         .child(
                             div().flex().flex_row().child(
-                                ui::Button::new(
-                                    ("recover-stray", index),
-                                    if self.collect_in_flight {
+                                ui::Button::new(("recover-stray", index))
+                                    .text(if self.collect_in_flight {
                                         "Bringing them in…".to_string()
                                     } else {
                                         label
-                                    },
-                                )
-                                .tone(ui::Tone::Accent)
-                                .size(ui::Size::Compact)
-                                .disabled(self.collect_in_flight)
-                                .on_click(cx.listener(|workbench, _event, _window, cx| {
-                                    workbench.collect_outside(cx);
-                                })),
+                                    })
+                                    .style(ui::ButtonStyle::Primary)
+                                    .disabled(self.collect_in_flight)
+                                    .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                        workbench.collect_outside(cx);
+                                    })),
                             ),
                         )
                         .children(caveat.map(|note| {
@@ -1409,11 +1406,11 @@ impl Workbench {
                     .py_2()
                     .text_base()
                     .text_color(rgb(theme::text()))
-                    .child(app_icon(
-                        "icons/chat-circle-dots.svg",
-                        theme::text(),
-                        Some(ui::IconSize::Small.px()),
-                    ))
+                    .child(
+                        ui::Icon::new("icons/chat-circle-dots.svg")
+                            .size(ui::IconSize::Small)
+                            .colour(theme::text())
+                    )
                     .child(title)
             }))
             .child(
@@ -1428,7 +1425,7 @@ impl Workbench {
                     // the transcript and nowhere else.
                     .group(SCROLL_GROUP)
                     .child(col)
-                    .children(list_scrollbar(&list_state)),
+                    .children(ui::list_scrollbar(&list_state)),
             );
         // Above the composer, so the decision sits where the user's attention already
         // is and cannot be scrolled out of view.
@@ -1590,17 +1587,18 @@ impl Workbench {
         // near-universal rule, and a send/stop toggle in the composer is how the running
         // state is expressed without adding a second control (docs §52).
         let has_text = !self.composer.read(cx).text().trim().is_empty();
-        let (send_icon, ink, hint) = if self.streaming {
-            ("icons/stop-circle.svg", theme::error(), "Stop this turn")
+        let (send_icon, send_style, hint) = if self.streaming {
+            ("icons/stop-circle.svg", ui::ButtonStyle::Danger, "Stop this turn")
         } else if has_text {
-            ("icons/paper-plane-right.svg", theme::accent(), "Send")
+            ("icons/paper-plane-right.svg", ui::ButtonStyle::Primary, "Send")
         } else {
             (
                 "icons/paper-plane-right.svg",
-                theme::text_muted(),
+                ui::ButtonStyle::SecondaryWhite,
                 "Type a question first",
             )
         };
+        let send_disabled = !has_text && !self.streaming;
 
         div()
             .flex()
@@ -1644,9 +1642,10 @@ impl Workbench {
                 }),
             )
             .child(
-                ui::IconButton::new("attach-file", "icons/plus.svg")
-                    .icon_size(ui::IconSize::Medium.px())
-                    .hover_ink(theme::accent())
+                ui::Button::new("attach-file")
+                    .icon(ui::Icon::new("icons/plus.svg"))
+                    .style(ui::ButtonStyle::SecondaryWhite)
+                    .border(false)
                     .tooltip("Add a file from this computer")
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
                         workbench.choose_files(cx);
@@ -1654,10 +1653,11 @@ impl Workbench {
             )
             .child(self.composer.clone())
             .child(
-                ui::IconButton::new("send-turn", send_icon)
-                    .icon_size(ui::IconSize::Medium.px())
-                    .ink(ink)
-                    .hoverable(has_text && !self.streaming || self.streaming)
+                ui::Button::new("send-turn")
+                    .icon(ui::Icon::new(send_icon))
+                    .style(send_style)
+                    .border(false)
+                    .disabled(send_disabled)
                     .tooltip(hint)
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
                         if workbench.streaming {
