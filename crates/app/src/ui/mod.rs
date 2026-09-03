@@ -5,6 +5,7 @@
 pub(crate) mod common;
 pub(crate) mod sidebar;
 pub(crate) mod chat;
+pub(crate) mod chat_input;
 pub(crate) mod gallery_view;
 pub(crate) mod provenance_view;
 pub(crate) mod settings_view;

@@ -318,6 +318,7 @@ const SCROLL_GROUP: &str = "scroll-region";
 /// before §174 found that half of it never applied.
 const TRANSCRIPT_INSET: f32 = 16.;
 
+
 /// How many references the side panel lists before offering the rest in one press.
 ///
 /// Four, the same count the image gallery shows before its `+N` tile (§152). Enough to see whose
@@ -2267,8 +2268,19 @@ struct Workbench {
     sidebar_menu: Option<(SidebarMenu, gpui::Point<gpui::Pixels>)>,
     /// Which of the two sidebar lists — Conversations or Projects — is showing.
     sidebar_view: SidebarView,
-    /// Which row of the `/name` picker is chosen. Reset on every keystroke.
-    subagent_selected: usize,
+    /// Whether the pointer is over the agent indicator, and separately whether it is over the
+    /// menu that indicator opens — tracked apart, and the menu shown while either is true, so
+    /// moving from one into the other never crosses a gap that would count as having left
+    /// either one (§263).
+    agent_pill_hovered: bool,
+    agent_menu_hovered: bool,
+    /// Where the menu's own list scrolls to, tracked the same way every other picker's list is
+    /// (`theme_scroll`, `model_scroll`).
+    agent_menu_scroll: gpui::ScrollHandle,
+    /// Which specialist the next turn is addressed to, chosen from the agent indicator rather
+    /// than typed — kept apart from the composer's own text so picking one, unlike the old
+    /// `/name` prefix, leaves nothing in the box to read or delete (§263).
+    current_subagent: Option<String>,
     /// An open choice popup: which choice, and where its trigger was clicked.
     open_picker: Option<(Picker, gpui::Point<gpui::Pixels>)>,
     /// Pane widths, in pixels, and which edge is being dragged.
@@ -2489,10 +2501,9 @@ impl Workbench {
             ComposerEvent::Submit(text) => workbench.submitted(text.clone(), cx),
         })
         .detach();
-        // Observed as well as subscribed: the `/name` picker filters on every keystroke, and
-        // without this the list would only refresh on the next unrelated render.
-        cx.observe(&composer, |workbench, _composer, cx| {
-            workbench.subagent_selected = 0;
+        // Observed as well as subscribed: the agent indicator reads off the composer's text on
+        // every keystroke, and without this it would only refresh on the next unrelated render.
+        cx.observe(&composer, |_workbench, _composer, cx| {
             cx.notify();
         })
         .detach();
@@ -2693,7 +2704,10 @@ impl Workbench {
             warming: false,
             sidebar_menu: None,
             sidebar_view: SidebarView::default(),
-            subagent_selected: 0,
+            agent_pill_hovered: false,
+            agent_menu_hovered: false,
+            agent_menu_scroll: gpui::ScrollHandle::new(),
+            current_subagent: None,
             open_picker: None,
             settings_focus: cx.focus_handle(),
             provenance_focus: cx.focus_handle(),
@@ -3784,6 +3798,15 @@ impl Workbench {
             cx.notify();
             return;
         }
+        // The agent indicator's own choice, folded into the same `/name` prefix `subagent::parse`
+        // already reads below — one path rather than two, so resolving, refusing an unknown
+        // name, and background dispatch all still happen exactly once. Skipped if the composer
+        // text is already its own `/name` command: someone who typed one by hand meant that one,
+        // not whatever the indicator happens to be showing.
+        let prompt = match &self.current_subagent {
+            Some(name) if subagent::parse(&prompt).is_none() => format!("/{name} {prompt}"),
+            _ => prompt,
+        };
         // `/name …` names a specialist. Resolved *before* anything is sent, because the failure
         // this guards against is silent: sent as prose, `/eda-subagent do the thing` is a
         // ten-minute wait for a turn that was never delegated (§55, §76).
@@ -3929,38 +3952,23 @@ impl Workbench {
         self.say(outcome, cx);
     }
 
-    /// Enter, in the composer.
-    ///
-    /// While a name is still being typed, Enter **completes** rather than sends — the way
-    /// completion works in a shell, and the reason two Enters is the natural rhythm here: one to
-    /// settle the specialist, one to send the request. It cannot send by accident, because a
-    /// half-typed name is never a real one.
+    /// Enter, in the composer. Always sends — picking a specialist is the agent indicator's
+    /// job now (§263), not something typing `/name` and pressing Enter twice does.
     fn submitted(&mut self, text: String, cx: &mut Context<Self>) {
-        if subagent::completing(&text) {
-            let agents = workspace::subagents();
-            let query = subagent::parse(&text).map(|c| c.name).unwrap_or_default();
-            let matched = subagent::ranked(&query, &agents);
-            if let Some(chosen) =
-                matched.get(self.subagent_selected.min(matched.len().saturating_sub(1)))
-            {
-                self.choose_subagent(&chosen.name, cx);
-                return;
-            }
-            // Nothing matched. Fall through, so `start_turn` refuses by name and suggests —
-            // silence here would look like a key that does nothing.
-        }
         self.start_turn(text, cx);
     }
 
-    /// Put a chosen name in the composer, ready for the request.
+    /// Address the next turn to a specialist, or (`None`) back to the coordinator, and close
+    /// the menu that offered the choice — picking is the thing hovering the indicator was for.
     ///
-    /// The trailing space is the point: it closes the picker and puts the caret where the
-    /// sentence continues.
-    fn choose_subagent(&mut self, name: &str, cx: &mut Context<Self>) {
-        let filled = format!("/{name} ");
-        self.composer
-            .update(cx, |composer, cx| composer.set_text(filled, cx));
-        self.subagent_selected = 0;
+    /// Nothing is written into the composer. The old `/name` prefix left a name in the box
+    /// nobody typed, sitting there to be read twice (once in the indicator, once in the text)
+    /// or accidentally deleted; kept apart, the composer holds only what was actually typed
+    /// (§263).
+    fn choose_subagent(&mut self, name: Option<String>, cx: &mut Context<Self>) {
+        self.current_subagent = name;
+        self.agent_pill_hovered = false;
+        self.agent_menu_hovered = false;
         cx.notify();
     }
 
@@ -4511,6 +4519,9 @@ impl Workbench {
         // thread-independent, so it stays — same rule as `New thread`.
         self.transcript.clear();
         self.reset_transcript_list();
+        // Addressed to a specialist belongs to the conversation being left, same as the tasks
+        // and jobs below — the one being opened gets a coordinator turn until asked otherwise.
+        self.current_subagent = None;
         // Read back from the thread being opened, below. Cleared first so a failure to load
         // shows the new conversation as having no record rather than the previous one's.
         self.provenance = provenance::Record::default();
@@ -5469,6 +5480,9 @@ impl Workbench {
         self.project = None;
         self.refresh_project(cx);
         self.transcript.clear();
+        // Addressed to a specialist is a property of *this* enquiry, not a standing default —
+        // the one just left keeps nothing that would carry it forward either.
+        self.current_subagent = None;
         // A conversation fetch started before this can still land after it — see the guard
         // in `open_conversation`'s completion — but the screen itself must not keep showing
         // "opening…" for a conversation that was just left (§262).

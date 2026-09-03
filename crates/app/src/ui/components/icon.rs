@@ -13,6 +13,7 @@ use crate::theme;
 /// of exactly three sizes rather than whatever pixel value a call site guessed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum IconSize {
+    ExtraSmall,
     #[default]
     Small,
     Medium,
@@ -49,7 +50,9 @@ impl Icon {
 impl RenderOnce for Icon {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let size_px;
-        if self.size == IconSize::Small {
+        if self.size == IconSize::ExtraSmall {
+            size_px = 14.0;
+        } else if self.size == IconSize::Small {
             size_px = 18.0;
         } else if self.size == IconSize::Medium {
             size_px = 20.0;

@@ -34,6 +34,53 @@
 
 use crate::workspace::Subagent;
 
+/// How a specialist reads in the UI: its name formatted for reading, and the colour its dot is
+/// tinted — `academic_researcher` becomes `("Academic Researcher", 0xF47920)`.
+///
+/// Colours are placeholders — nothing here claims meaning beyond letting the same specialist
+/// read as the same dot everywhere it appears (the indicator above the composer, its own row in
+/// the menu). Named explicitly rather than assigned in registry order, because that order is the
+/// backend's and can be rebuilt any time the overlay reassembles the coordinator (§55) — a
+/// colour tied to position would then reshuffle across every specialist for no reason visible to
+/// whoever is looking at it. A specialist this table doesn't yet name — one the backend has added
+/// since this was last written — still gets its name formatted and falls back to grey, which is
+/// not a broken lookup, just one not yet given its own colour.
+pub fn display(name: &str) -> (String, u32) {
+    let display_name = match name {
+        "academic_researcher" => "Academic Researcher".into(),
+        "dataverse_explorer" => "Dataverse Explorer".into(),
+        "data_cleaning" => "Data Cleaning".into(),
+        "exploratory_data_analysis" => "Exploratory Data Analysis".into(),
+        "diagnostic_analytics" => "Diagnostic Analytics".into(),
+        "predictive_analytics" => "Predictive Analytics".into(),
+        "report_writer" => "Report Writer".into(),
+        "hypothesis_generator" => "Hypothesis Generator".into(),
+        "pdf_librarian" => "PDF Librarian".into(),
+        "data_voyager" => "Data Voyager".into(),
+        "autodiscovery" => "AutoDiscovery".into(),
+        "research_planner" => "Research Planner".into(),
+        // A specialist this table doesn't yet name — added since this was last written — is
+        // still shown as something, rather than failing to compile or panicking on it.
+        _ => name.to_string(),
+    };
+    let colour = match name {
+        "academic_researcher" => 0xF47920,
+        "dataverse_explorer" => 0x20ADF4,
+        "data_cleaning" => 0xF42091,
+        "exploratory_data_analysis" => 0x8B5CF6,
+        "diagnostic_analytics" => 0x22C55E,
+        "predictive_analytics" => 0xEAB308,
+        "report_writer" => 0x06B6D4,
+        "hypothesis_generator" => 0xEF4444,
+        "pdf_librarian" => 0x14B8A6,
+        "data_voyager" => 0xEC4899,
+        "autodiscovery" => 0xF97316,
+        "research_planner" => 0x3B82F6,
+        _ => crate::theme::text_faint(),
+    };
+    (display_name, colour)
+}
+
 /// A `/name …` typed into the composer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Command {
@@ -83,19 +130,6 @@ pub fn parse(input: &str) -> Option<Command> {
         name: name.to_string(),
         prompt: prompt.to_string(),
     })
-}
-
-/// Whether the picker should be showing for this input.
-///
-/// Only while the *name* is being typed. The first space settles it, and a picker that stayed
-/// open over the prompt would cover the transcript for the rest of the sentence.
-pub fn completing(text: &str) -> bool {
-    match text.strip_prefix('/') {
-        // Same rule as `parse`, or the picker opens over the transcript for the length of a
-        // pasted path and the two disagree about what a command is.
-        Some(rest) => !rest.contains(char::is_whitespace) && could_be_a_name(rest),
-        None => false,
-    }
 }
 
 /// The specialists worth showing for a partly-typed name, best first.
@@ -198,22 +232,6 @@ mod tests {
     }
 
     #[test]
-    fn the_picker_opens_on_a_slash_and_closes_on_the_first_space() {
-        assert!(
-            completing("/"),
-            "a bare slash is where completion is most needed"
-        );
-        assert!(completing("/eda"));
-        // The space settles the name. Staying open would cover the transcript for the rest of
-        // the sentence, and there is nothing left to complete.
-        assert!(!completing("/eda "));
-        assert!(!completing("/eda make a chart"));
-        assert!(!completing("hello"));
-        assert!(!completing(""));
-        assert!(!completing("see data/raw.csv"));
-    }
-
-    #[test]
     fn the_name_stops_at_the_first_space_and_the_rest_is_the_prompt() {
         let command = parse("/exploratory_data_analysis make an EDA of data.csv").unwrap();
         assert_eq!(command.name, "exploratory_data_analysis");
@@ -305,8 +323,6 @@ mod tests {
             parse(turn).is_none(),
             "a path must reach the agent as a path, not be rejected as a specialist name"
         );
-        // And the picker must not open over the transcript while it sits there.
-        assert!(!completing("/mnt/c/Users/LENOVO/Downloads/Graph-neural-networks.pdf"));
     }
 
     #[test]
@@ -324,18 +340,9 @@ mod tests {
         }
     }
 
-    /// The picker opens on the bare slash, which is the whole point of it opening early.
-    #[test]
-    fn a_bare_slash_is_still_a_command() {
-        let command = parse("/").expect("a command");
-        assert_eq!(command.name, "");
-        assert!(completing("/"));
-    }
-
     /// A half-typed name keeps working — the guard must not fire on a prefix.
     #[test]
-    fn a_partly_typed_name_still_completes() {
-        assert!(completing("/pdf_l"));
+    fn a_partly_typed_name_still_parses() {
         assert_eq!(parse("/pdf_l").expect("a command").name, "pdf_l");
     }
 
