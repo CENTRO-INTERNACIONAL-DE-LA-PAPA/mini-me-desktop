@@ -9,6 +9,7 @@
 //! nothing but render methods, and one nobody calls is a feature that stopped being drawn.
 #![allow(unused_imports)]
 
+use crate::ui::IconSize::Medium;
 use crate::*;
 use crate::ui::{common::*, sidebar::*, gallery_view::*, provenance_view::*, settings_view::*, palette_view::*, modals::*, status_bar::*};
 use gpui::{
@@ -45,7 +46,6 @@ impl Workbench {
             .items_center()
             .gap_2()
             .flex_none()
-            .m_2()
             .px_2()
             .py_1()
             .rounded_lg()
@@ -213,6 +213,7 @@ impl Workbench {
                 .flex_none()
                 .px_3()
                 .py_1()
+                .left_2()
                 .rounded_md()
                 .rounded_b_none()
                 .bg(rgb(theme::surface()))
@@ -227,22 +228,17 @@ impl Workbench {
                             current_display
                                 .as_ref()
                                 .map(|(_, colour)| *colour)
-                                .unwrap_or_else(theme::text_muted),
+                                .unwrap_or(0xFFFFFF),
                         ),
                 )
                 .child(
-                    ui::Label::new(
-                        current_display
+                    div()
+                        .text_xs()
+                        .text_color(rgb(theme::text_muted()))
+                        .child(current_display
                             .as_ref()
                             .map(|(name, _)| name.clone())
-                            .unwrap_or_else(|| "Auto".to_string()),
-                    )
-                    .colour(if current.is_some() {
-                        theme::text()
-                    } else {
-                        theme::text_muted()
-                    })
-                    .size(ui::Size::Regular),
+                            .unwrap_or_else(|| "Auto".to_string()),)
                 )
                 .on_hover(cx.listener(|workbench, hovering: &bool, _window, cx| {
                     workbench.agent_pill_hovered = *hovering;
@@ -292,16 +288,24 @@ impl Workbench {
                     .child(
                         ui::Icon::new("icons/agent-ellipse.svg")
                             .size(ui::IconSize::ExtraSmall)
-                            .colour(theme::text_muted()),
+                            .colour(0xFFFFFF),
                     )
                     .child(
-                        ui::Label::new("Auto")
-                            .colour(if current.is_none() {
-                                theme::text()
-                            } else {
-                                theme::text_muted()
-                            })
-                            .ellipsis(),
+                        div()
+                            .flex()
+                            .flex_col()
+                            .min_w_0()
+                            .child(
+                                ui::Label::new("Auto")
+                                    .colour(theme::text())
+                                    .ellipsis(),
+                            )
+                            .child(
+                                ui::Label::new("Chooses the best specialist for each turn")
+                                    .colour(theme::text_muted())
+                                    .size(ui::Size::Compact)
+                                    .ellipsis(),
+                            ),
                     )
                     .on_click(cx.listener(|workbench, _event, _window, cx| {
                         workbench.choose_subagent(None, cx);
@@ -326,7 +330,6 @@ impl Workbench {
         }
         for agent in &agents {
             let chosen = agent.name.clone();
-            let selected = current.is_some_and(|c| c.name == agent.name);
             let (label, colour) = subagent::display(&agent.name);
             list = list.child(
                 div()
@@ -334,7 +337,7 @@ impl Workbench {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_2()
+                    .gap_3()
                     .w_full()
                     .min_w_0()
                     .px_3()
@@ -352,11 +355,7 @@ impl Workbench {
                             .min_w_0()
                             .child(
                                 ui::Label::new(label)
-                                    .colour(if selected {
-                                        theme::text()
-                                    } else {
-                                        theme::text_muted()
-                                    })
+                                    .colour(theme::text())
                                     .ellipsis(),
                             )
                             // The description is not decoration: none of these names says
@@ -381,14 +380,7 @@ impl Workbench {
     }
 }
 
-/// `composer_row`'s own `.m_2()` — 8px on every side, sitting *outside* its border/background
-/// box. `composer_input`'s own top edge lands there, not on the composer's visible box, so
-/// anchoring straight to it left the indicator floating 8px above the composer with a visible
-/// gap. Named so the two can't quietly drift apart the next time either one changes.
-const COMPOSER_MARGIN: f32 = 8.;
-
-/// Positions an element's bottom-left corner at the composer's own visible top edge — inside
-/// `composer_row`'s margin, not at `composer_input`'s box edge — so it grows upward from there,
+/// Positions an element's bottom-left corner at the composer's own visible top edge,
 /// `TRANSCRIPT_INSET` in from the left, regardless of the element's own height. Shared by both
 /// the closed (trigger only) and open (trigger plus menu) shapes `agent_menu` returns, since both
 /// anchor the same way.
@@ -396,6 +388,6 @@ fn anchor_above_composer(child: impl IntoElement) -> impl IntoElement {
     gpui::anchored()
         .position_mode(gpui::AnchoredPositionMode::Local)
         .anchor(gpui::Corner::BottomLeft)
-        .position(gpui::point(px(TRANSCRIPT_INSET), px(COMPOSER_MARGIN)))
+        .position(gpui::point(px(TRANSCRIPT_INSET), px(0.)))
         .child(child)
 }

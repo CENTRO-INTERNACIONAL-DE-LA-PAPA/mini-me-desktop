@@ -51,7 +51,7 @@ impl RenderOnce for Icon {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let size_px;
         if self.size == IconSize::ExtraSmall {
-            size_px = 14.0;
+            size_px = 12.0;
         } else if self.size == IconSize::Small {
             size_px = 18.0;
         } else if self.size == IconSize::Medium {

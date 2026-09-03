@@ -893,7 +893,6 @@ impl Workbench {
             .w_full()
             .min_w_0();
         for (at, (icon, label, prompt)) in MOVES.into_iter().enumerate() {
-            let leading = at == 0;
             moves = moves.child(
                 div()
                     .id(SharedString::from(format!("start-{at}")))
@@ -907,17 +906,9 @@ impl Workbench {
                     .px_2p5()
                     .rounded_lg()
                     .border_1()
-                    // The first is marked, not louder: one suggestion carrying the accent is a
-                    // recommendation, three would be a menu shouting.
-                    .when(leading, |row| {
-                        row.bg(rgb(theme::accent_soft()))
-                            .border_color(rgb(theme::accent()))
-                    })
-                    .when(!leading, |row| row.border_color(rgb(theme::border())))
-                    .when(!leading, |row| {
-                        row.hover(|style| style.bg(rgb(theme::surface())).cursor_pointer())
-                    })
-                    .when(leading, |row| row.hover(|style| style.cursor_pointer()))
+                    .bg(rgb(theme::surface()))
+                    .text_color(rgb(theme::text_muted()))
+                    .hover(|style| style.text_color(rgb(theme::accent())).cursor_pointer().bg(rgb(theme::accent_soft())).border_color(rgb(theme::accent())))
                     .child(
                         div()
                             .child(ui::Icon::new(icon).size(ui::IconSize::Medium).colour(theme::accent()))
@@ -926,9 +917,7 @@ impl Workbench {
                         div()
                             .flex_grow()
                             .min_w_0()
-                            .text_color(rgb(theme::text_muted()))
                             .text_sm()
-                            .when(leading, |row| row.text_color(rgb(theme::accent())))
                             .child(label),
                     )
                     .on_click(cx.listener(move |workbench, _event, window, cx| {
@@ -1302,20 +1291,63 @@ impl Workbench {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_2()
+                    .gap_3()
                     .flex_none()
                     .w_full()
                     .min_w_0()
-                    .px_4()
-                    .py_2()
-                    .text_base()
+                    .px_2()
+                    .pb_3()
                     .text_color(rgb(theme::text()))
                     .child(
                         ui::Icon::new("icons/chat-circle-dots.svg")
                             .size(ui::IconSize::Small)
                             .colour(theme::text())
                     )
-                    .child(title)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .text_base()
+                            .child(title)
+                            // The conversation's own workspace, said once here instead of
+                            // repeated inline on every attached turn (§267) — see
+                            // `without_attached_blockquote`. Only the thread's own folder name
+                            // (a UUID) is shown — the parent directories are the same on every
+                            // conversation, so naming them again here is noise, not information.
+                            .children(self.thread_workspace().map(|dir| {
+                                let id = dir
+                                    .file_name()
+                                    .map(|name| name.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| dir.display().to_string());
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_1()
+                                    .text_xs()
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_color(rgb(theme::text_muted()))
+                                            .child("Local Workspace:"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("open-thread-workspace")
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_color(rgb(theme::accent()))
+                                            .underline()
+                                            .child(format!("/{}", id))
+                                            .hover(|style| style.cursor_pointer())
+                                            .on_click(move |_event, _window, _cx| {
+                                                if let Err(error) = workspace::open(&dir) {
+                                                    tracing::warn!(%error, "could not open the workspace folder");
+                                                }
+                                            }),
+                                    )
+                            }))
+                    )
             }))
             .child(
                 div()
@@ -1345,6 +1377,7 @@ impl Workbench {
             // them happened to be showing (§263).
             .child(self.composer_input(cx));
 
+        // The actual middle panel
         div()
             .flex()
             // A row now: the road, then everything else.
@@ -1353,6 +1386,8 @@ impl Workbench {
             .min_w_0()
             .h_full()
             .m_2()
+            .p_3()
+            .gap_5()
             .rounded_lg()
             .overflow_hidden()
             .bg(rgb(theme::background()))

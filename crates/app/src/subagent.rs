@@ -76,7 +76,7 @@ pub fn display(name: &str) -> (String, u32) {
         "data_voyager" => 0xEC4899,
         "autodiscovery" => 0xF97316,
         "research_planner" => 0x3B82F6,
-        _ => crate::theme::text_faint(),
+        _ => 0xFFFFFF,
     };
     (display_name, colour)
 }

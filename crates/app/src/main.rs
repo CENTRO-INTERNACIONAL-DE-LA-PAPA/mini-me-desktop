@@ -1514,6 +1514,21 @@ fn attached_blockquote(attachments: &[Attachment]) -> Option<String> {
     ))
 }
 
+/// What `with_attachments` sent the coordinator, minus the blockquote it may have prepended.
+///
+/// The coordinator and three subagent prompts still need that blockquote — it is how they learn
+/// where an attached file landed — so it stays in what `start_turn_as` submits. It no longer
+/// belongs in the *transcript*, though: the path it names is the conversation's workspace, which
+/// is the same on every turn, and repeating it mid-conversation was noise where the researcher
+/// was reading what they actually typed. The chat header now says it once, instead (§267).
+fn without_attached_blockquote(prompt: &str) -> &str {
+    const PREFIX: &str = "> Attached files (already saved in the sandbox working directory): ";
+    match prompt.strip_prefix(PREFIX).and_then(|rest| rest.find("\n\n").map(|at| &rest[at + 2..])) {
+        Some(typed) => typed,
+        None => prompt,
+    }
+}
+
 /// The sources of every attachment that is not yet inside the conversation's folder.
 ///
 /// Pure so the rule is testable without a window: a file already copied in must not be copied
@@ -3852,7 +3867,8 @@ impl Workbench {
         // coordinator is what the work responded to.
         self.provenance
             .begin_turn(prompt.clone(), provenance::now_ms());
-        self.transcript.push(Message::new("you", prompt.clone()));
+        self.transcript
+            .push(Message::new("you", without_attached_blockquote(&prompt).to_string()));
         // The assistant message — text *and* activity — streams into this entry.
         self.transcript.push(Message::new("mini-me", String::new()));
         if first_turn {
@@ -7322,6 +7338,7 @@ impl Render for Workbench {
             // separate bugs (§40, §48, §51).
             .min_h_0()
             .w_full()
+            .mb_4()
             .when(self.sidebar_open, |body| {
                 body.child(self.rail(cx))
                     .child(self.divider(Divider::Sidebar, cx))
@@ -9839,6 +9856,17 @@ mod tests {
             subagent::parse(&quoted).is_none(),
             "which is why `start_turn_as` resolves the specialist first: {quoted}"
         );
+    }
+
+    /// What lands in the transcript is what the researcher typed — the blockquote naming where
+    /// the file went is for the coordinator, and the chat header says that once instead of §267
+    /// repeating it inline on every attached turn.
+    #[test]
+    fn the_transcript_shows_what_was_typed_not_the_blockquote_sent_alongside_it() {
+        let sent = with_attachments("profile this", &[attached("a.csv", "./a.csv")]);
+        assert_eq!(without_attached_blockquote(&sent), "profile this");
+        // Nothing attached: the blockquote was never prepended, so there is nothing to strip.
+        assert_eq!(without_attached_blockquote("what is late blight?"), "what is late blight?");
     }
 
     #[test]
