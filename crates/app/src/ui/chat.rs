@@ -509,102 +509,6 @@ impl Workbench {
 
 
 impl Workbench {
-    /// The `/name` picker, shown above the composer.
-    ///
-    /// Above it for the same reason the approval card is (§40): that is where attention already
-    /// is, and it cannot be scrolled away from. A plain flex child rather than a floating popup —
-    /// no position to measure, and it behaves like part of the composer, which is what it is.
-    pub(crate) fn subagent_picker(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        let text = self.composer.read(cx).text().to_string();
-        if !subagent::completing(&text) {
-            return None;
-        }
-        let agents = workspace::subagents();
-        let query = subagent::parse(&text).map(|c| c.name).unwrap_or_default();
-        let matched = subagent::ranked(&query, &agents);
-
-        let mut list = div()
-            .id("subagent-picker")
-            .flex()
-            .flex_col()
-            .flex_none()
-            .w_full()
-            .min_w_0()
-            .mx_2()
-            .max_h(px(220.))
-            .overflow_y_scroll()
-            .rounded_lg()
-            .bg(rgb(theme::elevated()))
-            .border_1()
-            .border_color(rgb(theme::border_strong()));
-
-        if agents.is_empty() {
-            // The registry is written when the backend assembles a coordinator, so before the
-            // first turn there is nothing to offer. Say which, rather than showing an empty box.
-            list = list.child(
-                div()
-                    .p_2()
-                    .text_color(rgb(theme::text_muted()))
-                    .text_sm()
-                    .child(
-                        "No specialist list yet. It is written when the backend builds a \
-                         coordinator, so ask one ordinary question first — and if you just \
-                         updated the app, restart the backend (ctrl-p → Restart).",
-                    ),
-            );
-        } else if matched.is_empty() {
-            list = list.child(
-                div()
-                    .p_2()
-                    .text_color(rgb(theme::text_muted()))
-                    .text_sm()
-                    .child(format!("No specialist matches \"{query}\".")),
-            );
-        }
-
-        let selected = self.subagent_selected.min(matched.len().saturating_sub(1));
-        for (index, agent) in matched.iter().enumerate() {
-            let chosen = agent.name.clone();
-            list = list.child(
-                div()
-                    .id(SharedString::from(format!("subagent-{}", agent.name)))
-                    .flex()
-                    .flex_col()
-                    .w_full()
-                    .min_w_0()
-                    .px_3()
-                    .py_1()
-                    .gap_px()
-                    .when(index == selected, |row| row.bg(rgb(theme::accent_soft())))
-                    .hover(|style| style.bg(rgb(theme::overlay())).cursor_pointer())
-                    .child(
-                        ui::Label::new(format!("/{}", agent.name))
-                            .colour(if index == selected {
-                                theme::text()
-                            } else {
-                                theme::text_muted()
-                            })
-                            .ellipsis(),
-                    )
-                    // The description is not decoration: none of these names says what it does,
-                    // and the request's own guesses show that nobody can be expected to know.
-                    .child(
-                        ui::Label::new(agent.description.clone())
-                            .colour(theme::text_faint())
-                            .size(ui::Size::Compact)
-                            .ellipsis(),
-                    )
-                    .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                        workbench.choose_subagent(&chosen, cx);
-                    })),
-            );
-        }
-        Some(list.into_any_element())
-    }
-}
-
-
-impl Workbench {
     /// Who was consulted for this answer, how long it took, how many steps.
     ///
     /// The path reads `academic_researcher → theorizer → data_analysis · 19s · 4 steps`, which is
@@ -989,7 +893,6 @@ impl Workbench {
             .w_full()
             .min_w_0();
         for (at, (icon, label, prompt)) in MOVES.into_iter().enumerate() {
-            let leading = at == 0;
             moves = moves.child(
                 div()
                     .id(SharedString::from(format!("start-{at}")))
@@ -1003,17 +906,9 @@ impl Workbench {
                     .px_2p5()
                     .rounded_lg()
                     .border_1()
-                    // The first is marked, not louder: one suggestion carrying the accent is a
-                    // recommendation, three would be a menu shouting.
-                    .when(leading, |row| {
-                        row.bg(rgb(theme::accent_soft()))
-                            .border_color(rgb(theme::accent()))
-                    })
-                    .when(!leading, |row| row.border_color(rgb(theme::border())))
-                    .when(!leading, |row| {
-                        row.hover(|style| style.bg(rgb(theme::surface())).cursor_pointer())
-                    })
-                    .when(leading, |row| row.hover(|style| style.cursor_pointer()))
+                    .bg(rgb(theme::surface()))
+                    .text_color(rgb(theme::text_muted()))
+                    .hover(|style| style.text_color(rgb(theme::accent())).cursor_pointer().bg(rgb(theme::accent_soft())).border_color(rgb(theme::accent())))
                     .child(
                         div()
                             .child(ui::Icon::new(icon).size(ui::IconSize::Medium).colour(theme::accent()))
@@ -1022,9 +917,7 @@ impl Workbench {
                         div()
                             .flex_grow()
                             .min_w_0()
-                            .text_color(rgb(theme::text_muted()))
                             .text_sm()
-                            .when(leading, |row| row.text_color(rgb(theme::accent())))
                             .child(label),
                     )
                     .on_click(cx.listener(move |workbench, _event, window, cx| {
@@ -1398,20 +1291,63 @@ impl Workbench {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap_2()
+                    .gap_3()
                     .flex_none()
                     .w_full()
                     .min_w_0()
-                    .px_4()
-                    .py_2()
-                    .text_base()
+                    .px_2()
+                    .pb_3()
                     .text_color(rgb(theme::text()))
                     .child(
                         ui::Icon::new("icons/chat-circle-dots.svg")
                             .size(ui::IconSize::Small)
                             .colour(theme::text())
                     )
-                    .child(title)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .text_base()
+                            .child(title)
+                            // The conversation's own workspace, said once here instead of
+                            // repeated inline on every attached turn (§267) — see
+                            // `without_attached_blockquote`. Only the thread's own folder name
+                            // (a UUID) is shown — the parent directories are the same on every
+                            // conversation, so naming them again here is noise, not information.
+                            .children(self.thread_workspace().map(|dir| {
+                                let id = dir
+                                    .file_name()
+                                    .map(|name| name.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| dir.display().to_string());
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap_1()
+                                    .text_xs()
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_color(rgb(theme::text_muted()))
+                                            .child("Local Workspace:"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("open-thread-workspace")
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_color(rgb(theme::accent()))
+                                            .underline()
+                                            .child(format!("/{}", id))
+                                            .hover(|style| style.cursor_pointer())
+                                            .on_click(move |_event, _window, _cx| {
+                                                if let Err(error) = workspace::open(&dir) {
+                                                    tracing::warn!(%error, "could not open the workspace folder");
+                                                }
+                                            }),
+                                    )
+                            }))
+                    )
             }))
             .child(
                 div()
@@ -1435,9 +1371,13 @@ impl Workbench {
         let column = column
             .children(self.collected_banner(cx))
             .children(self.attachment_chips(cx))
-            .children(self.subagent_picker(cx))
-            .child(self.composer_row(cx));
+            // The indicator anchors to *this* box, not the transcript's — `collected_banner`
+            // and `attachment_chips` above are both optional, so anything anchored further up
+            // the tree would land a different distance from the composer depending on which of
+            // them happened to be showing (§263).
+            .child(self.composer_input(cx));
 
+        // The actual middle panel
         div()
             .flex()
             // A row now: the road, then everything else.
@@ -1446,6 +1386,8 @@ impl Workbench {
             .min_w_0()
             .h_full()
             .m_2()
+            .p_3()
+            .gap_5()
             .rounded_lg()
             .overflow_hidden()
             .bg(rgb(theme::background()))
@@ -1577,101 +1519,4 @@ impl Workbench {
     }
 }
 
-
-impl Workbench {
-    /// The input row: the text field plus a Send affordance.
-    pub(crate) fn composer_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        // Three states, which is what every shipped chat composer converged on: a filled
-        // circular button that sends, the same button greyed when there is nothing to
-        // send, and a stop control while a turn streams. Empty-means-disabled is the
-        // near-universal rule, and a send/stop toggle in the composer is how the running
-        // state is expressed without adding a second control (docs §52).
-        let has_text = !self.composer.read(cx).text().trim().is_empty();
-        let (send_icon, send_style, hint) = if self.streaming {
-            ("icons/stop-circle.svg", ui::ButtonStyle::Danger, "Stop this turn")
-        } else if has_text {
-            ("icons/paper-plane-right.svg", ui::ButtonStyle::Primary, "Send")
-        } else {
-            (
-                "icons/paper-plane-right.svg",
-                ui::ButtonStyle::SecondaryWhite,
-                "Type a question first",
-            )
-        };
-        let send_disabled = !has_text && !self.streaming;
-
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_2()
-            .flex_none()
-            .m_2()
-            .px_2()
-            .py_1()
-            .rounded_lg()
-            .text_sm()
-            // The composer reads as one field with a control inside it, rather than a
-            // text box sitting next to an unrelated button.
-            .bg(rgb(theme::surface()))
-            .border_1()
-            .border_color(rgb(theme::border()))
-            // Which field has the keyboard is otherwise invisible — there is a caret, and it
-            // is two pixels wide. `in_focus` rather than `focus` because the thing with the
-            // focus is a child entity, not this box.
-            .track_focus(&self.composer.focus_handle(cx))
-            // .in_focus(|style| style.border_color(rgb(theme::accent())))
-            // **Feedback for a gesture that had none.** A file dragged over the window changed
-            // nothing on screen, so there was no way to tell the app would take it until you
-            // let go. Lit here rather than over the whole window because this is where the
-            // file lands: it becomes part of the question, and the drop does not send it.
-            //
-            // A style refinement rather than a flag on `Workbench`, deliberately. gpui clears
-            // `active_drag` on `FileDropEvent::Exited` but dispatches that event to no element,
-            // so a flag set on enter would have no way to learn the drag left the window and
-            // would stay lit until the next drop.
-            .drag_over::<gpui::ExternalPaths>(|style, _paths, _window, _cx| {
-                style
-                    .bg(rgb(theme::accent_soft()))
-                    .border_color(rgb(theme::accent()))
-            })
-            .on_mouse_down(
-                gpui::MouseButton::Right,
-                cx.listener(|workbench, event: &gpui::MouseDownEvent, _window, cx| {
-                    workbench.open_context_menu(event.position, menu::Target::Composer, cx);
-                }),
-            )
-            .child(
-                ui::Button::new("attach-file")
-                    .icon(ui::Icon::new("icons/plus.svg"))
-                    .style(ui::ButtonStyle::SecondaryWhite)
-                    .border(false)
-                    .tooltip("Add a file from this computer")
-                    .on_click(cx.listener(|workbench, _event, _window, cx| {
-                        workbench.choose_files(cx);
-                    })),
-            )
-            .child(self.composer.clone())
-            .child(
-                ui::Button::new("send-turn")
-                    .icon(ui::Icon::new(send_icon))
-                    .style(send_style)
-                    .border(false)
-                    .disabled(send_disabled)
-                    .tooltip(hint)
-                    .on_click(cx.listener(|workbench, _event, _window, cx| {
-                        if workbench.streaming {
-                            workbench.stop_turn(cx);
-                            return;
-                        }
-                        // Same path as Enter. Calling the entity directly rather than
-                        // dispatching an action keeps this working regardless of where
-                        // focus is when the button is clicked.
-                        workbench
-                            .composer
-                            .update(cx, |composer, cx| composer.submit_now(cx));
-                    })),
-            )
-    }
-}
 

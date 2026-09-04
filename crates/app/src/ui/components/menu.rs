@@ -129,7 +129,7 @@ impl RenderOnce for MenuItem {
         if self.disabled {
             return row;
         }
-        row = row.hover(|style| style.bg(rgb(theme::accent_soft())).cursor_pointer());
+        row = row.hover(|style| style.bg(rgb(theme::background())).cursor_pointer());
         match self.on_click {
             Some(handler) => row.on_click(move |event, window, cx| handler(event, window, cx)),
             None => row,
