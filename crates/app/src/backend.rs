@@ -1385,7 +1385,7 @@ impl BackendSupervisor {
 /// in the backend *process*, so an attached one may be running an older copy than this app
 /// ships — and every symptom of that is identical to a broken feature (docs §80). Matching on
 /// prose to find that out is how the two get confused.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize)]
 pub enum Started {
     /// Already healthy, so it was left running by an earlier session — possibly an earlier
     /// *version*.
@@ -1748,15 +1748,21 @@ mod tests {
     /// catch the mistake and never fires on correct code.
     #[test]
     fn a_test_that_changes_a_shared_global_holds_its_lock() {
-        let sources: [(&str, &str); 8] = [
+        // `main.rs`'s own `fn main()` follows its test module in source order, so the last
+        // test's chunk (everything up to the next literal `#[test]`, or EOF when there is
+        // none) would otherwise swallow it — and `fn main()` registers a Tauri command whose
+        // name happens to contain one of the write patterns below without being one. Cut
+        // there rather than weaken the pattern: `fn main()` is never a test.
+        let main_rs = include_str!("main.rs");
+        let main_rs_tests_only = main_rs.split("\nfn main() {").next().unwrap_or(main_rs);
+        let sources: [(&str, &str); 7] = [
             ("workspace.rs", include_str!("workspace.rs")),
             ("backend.rs", include_str!("backend.rs")),
             ("preflight.rs", include_str!("preflight.rs")),
             ("settings.rs", include_str!("settings.rs")),
             ("sidecar.rs", include_str!("sidecar.rs")),
             ("theme.rs", include_str!("theme.rs")),
-            ("ui/components/button.rs", include_str!("ui/components/button.rs")),
-            ("main.rs", include_str!("main.rs")),
+            ("main.rs", main_rs_tests_only),
         ];
         let mut unguarded = Vec::new();
         for (lock, writes, what) in GUARDED {

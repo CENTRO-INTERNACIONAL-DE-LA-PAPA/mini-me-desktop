@@ -11,41 +11,30 @@
 
 mod backend;
 mod catalogue;
-mod composer;
+mod commands;
 mod dataverse;
 mod discovery;
 mod gallery;
 mod markdown;
-mod menu;
-mod notify;
 mod preflight;
 mod protocol;
 mod provenance;
 mod references;
-mod selection;
 mod settings;
 mod sidecar;
 mod subagent;
 mod theme;
-mod ui;
 mod update;
 mod workspace;
 
-use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context as _;
 use futures::StreamExt;
-use gpui::{
-    App, Application, AssetSource, Bounds, ClipboardItem, Context, Entity, Focusable, KeyBinding, ListAlignment, ListState, SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div, prelude::*, px, rgb, size,
-};
 
-use ui::common::horizontal_drag_offset;
-use ui::provenance_view::{link_for, provenance_svg};
-use composer::{Composer, ComposerEvent};
-use protocol::{AgentRef, ApprovalRequest, Bucket, Project, TurnEvent};
+use protocol::{AgentRef, Bucket, TurnEvent};
 use sidecar::Sidecar;
 
 // ---- Palette (placeholder; align with the web app's tokens in P6.3) --------
@@ -59,137 +48,6 @@ use sidecar::Sidecar;
 /// already typed, to be deleted before the real one could be asked (docs §87).
 const CHECK_PROMPT: &str = "In one short paragraph, what is your role as the Mini-Me coordinator?";
 
-/// The reference the Allen Institute asks for when work uses Asta.
-///
-/// Held as a constant so the About box and anything else that needs it cannot disagree, and
-/// written out in full rather than linked: a researcher pasting this into a manuscript should not
-/// have to open a browser to finish the job.
-const ASTA_CITATION: &str = "AstaBench: Rigorous Benchmarking of AI Agents with a Scientific \
-     Research Suite. arXiv:2510.21652 — https://arxiv.org/abs/2510.21652";
-
-/// The root workspace said as a useful place rather than as the absence of organisation.
-///
-/// `None` remains the metadata value and the files remain directly under `Documents/Mini-Me`;
-/// this is only the researcher-facing name requested in §154, so it cannot become a second
-/// project registry or collide with a real folder of the same name.
-const UNGROUPED_PROJECT_LABEL: &str = "Ungrouped Conversations";
-const ICON_PATHS: [&str; 31] = [
-    "icons/settings.svg",
-    "icons/conversations.svg",
-    "icons/research.svg",
-    "icons/road.svg",
-    "icons/enter.svg",
-    "icons/attach.svg",
-    "icons/file-table.svg",
-    "icons/file-image.svg",
-    "icons/file-code.svg",
-    "icons/file-notebook.svg",
-    "icons/file-data.svg",
-    "icons/file-web.svg",
-    "icons/file-text.svg",
-    "icons/file-log.svg",
-    "icons/file-doc.svg",
-    "icons/file-archive.svg",
-    "icons/file-db.svg",
-    "icons/file-blank.svg",
-    "icons/folder.svg",
-    "icons/agent-ellipse.svg",
-    "icons/binoculars.svg",
-    "icons/book-open-text.svg",
-    "icons/broom.svg",
-    "icons/chat-circle-dots.svg",
-    "icons/gear-six.svg",
-    "icons/magnifying-glass.svg",
-    "icons/paper-plane-right.svg",
-    "icons/pencil.svg",
-    "icons/plus.svg",
-    "icons/sidebar-simple-left.svg",
-    "icons/sidebar-simple-right.svg",
-];
-
-/// The four small UI icons, compiled into the executable rather than read beside it.
-///
-/// Windows installs do not preserve a source-tree-relative assets directory. GPUI still needs an
-/// [`AssetSource`] to resolve `svg().path(...)`, so embedding the hand-authored files makes the
-/// packaged and development builds follow the same path (docs §157).
-struct Assets;
-
-impl AssetSource for Assets {
-    fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
-        let bytes: Option<&'static [u8]> = match path {
-            "icons/settings.svg" => Some(include_bytes!("../assets/icons/settings.svg")),
-            "icons/conversations.svg" => {
-                Some(include_bytes!("../assets/icons/conversations.svg"))
-            }
-            "icons/research.svg" => Some(include_bytes!("../assets/icons/research.svg")),
-            "icons/road.svg" => Some(include_bytes!("../assets/icons/road.svg")),
-            "icons/enter.svg" => Some(include_bytes!("../assets/icons/enter.svg")),
-            "icons/attach.svg" => Some(include_bytes!("../assets/icons/attach.svg")),
-            "icons/file-table.svg" => Some(include_bytes!("../assets/icons/file-table.svg")),
-            "icons/file-image.svg" => Some(include_bytes!("../assets/icons/file-image.svg")),
-            "icons/file-code.svg" => Some(include_bytes!("../assets/icons/file-code.svg")),
-            "icons/file-notebook.svg" => Some(include_bytes!("../assets/icons/file-notebook.svg")),
-            "icons/file-data.svg" => Some(include_bytes!("../assets/icons/file-data.svg")),
-            "icons/file-web.svg" => Some(include_bytes!("../assets/icons/file-web.svg")),
-            "icons/file-text.svg" => Some(include_bytes!("../assets/icons/file-text.svg")),
-            "icons/file-log.svg" => Some(include_bytes!("../assets/icons/file-log.svg")),
-            "icons/file-doc.svg" => Some(include_bytes!("../assets/icons/file-doc.svg")),
-            "icons/file-archive.svg" => Some(include_bytes!("../assets/icons/file-archive.svg")),
-            "icons/file-db.svg" => Some(include_bytes!("../assets/icons/file-db.svg")),
-            "icons/file-blank.svg" => Some(include_bytes!("../assets/icons/file-blank.svg")),
-            "icons/agent-ellipse.svg" => Some(include_bytes!("../assets/icons/agent-ellipse.svg")),
-            "icons/binoculars.svg" => Some(include_bytes!("../assets/icons/binoculars.svg")),
-            "icons/book-open-text.svg" => Some(include_bytes!("../assets/icons/book-open-text.svg")),
-            "icons/broom.svg" => Some(include_bytes!("../assets/icons/broom.svg")),
-            "icons/chat-circle-dots.svg" => Some(include_bytes!("../assets/icons/chat-circle-dots.svg")),
-            "icons/gear-six.svg" => Some(include_bytes!("../assets/icons/gear-six.svg")),
-            "icons/magnifying-glass.svg" => Some(include_bytes!("../assets/icons/magnifying-glass.svg")),
-            "icons/paper-plane-right.svg" => Some(include_bytes!("../assets/icons/paper-plane-right.svg")),
-            "icons/pencil.svg" => Some(include_bytes!("../assets/icons/pencil.svg")),
-            "icons/plus.svg" => Some(include_bytes!("../assets/icons/plus.svg")),
-            "icons/sidebar-simple-left.svg" => Some(include_bytes!("../assets/icons/sidebar-simple-left.svg")),
-            "icons/sidebar-simple-right.svg" => Some(include_bytes!("../assets/icons/sidebar-simple-right.svg")),
-            "icons/folder.svg" => Some(include_bytes!("../assets/icons/folder.svg")),
-            _ => None,
-        };
-        Ok(bytes.map(Cow::Borrowed))
-    }
-
-    fn list(&self, path: &str) -> anyhow::Result<Vec<SharedString>> {
-        Ok(ICON_PATHS
-            .iter()
-            .filter(|asset| path.is_empty() || asset.starts_with(path))
-            .copied()
-            .map(SharedString::from)
-            .collect())
-    }
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-/// One edge of the provenance graph, reduced to what the canvas needs to draw it.
-///
-/// Not `Arc` — that name is `std::sync::Arc` in this module, and the sidecar is behind one.
-struct EdgeArc {
-    from: f32,
-    to: f32,
-    /// Rows skipped, which decides how far the curve bows out.
-    span: f32,
-    weight: f32,
-    colour: u32,
-    dashed: bool,
-}
 
 
 
@@ -271,6 +129,36 @@ struct MenuRow {
     id: &'static str,
     label: String,
     danger: bool,
+}
+
+impl SidebarMenu {
+    pub(crate) fn rows(&self) -> Vec<MenuRow> {
+        let row = |id, label: String| MenuRow {
+            id,
+            label,
+            danger: false,
+        };
+        let danger = |id, label: String| MenuRow {
+            id,
+            label,
+            danger: true,
+        };
+        match self {
+            Self::New => vec![
+                row("menu-new-conversation", "New conversation".into()),
+                row("menu-new-project", "New project…".into()),
+            ],
+            Self::Conversation(_) => vec![
+                row("menu-rename", "Rename".into()),
+                danger("menu-delete", "Delete".into()),
+            ],
+            Self::Project { name, .. } => vec![
+                row("menu-new-here", format!("New conversation in {name}")),
+                row("menu-open-folder", "Open folder".into()),
+                danger("menu-delete-project", "Delete project".into()),
+            ],
+        }
+    }
 }
 
 /// Which of the two sidebar lists is showing.
@@ -880,14 +768,6 @@ impl JobTally {
 /// It has to be one calculation. The first Windows pass found a painted thumb that could not be
 /// dragged at all; letting its hit-testing use a second set of numbers would be the same defect
 /// one layer later (docs §158).
-#[derive(Clone, Copy, Debug)]
-struct HorizontalScrollMetrics {
-    overflow: gpui::Pixels,
-    viewport: gpui::Pixels,
-    thumb: gpui::Pixels,
-    travel: gpui::Pixels,
-    progress: f32,
-}
 
 
 
@@ -1028,14 +908,6 @@ impl Preview {
 }
 
 
-/// One mouse-held gallery thumb.
-struct GalleryScrollDrag {
-    handle: gpui::ScrollHandle,
-    track_left: gpui::Pixels,
-    grab_x: gpui::Pixels,
-    travel: gpui::Pixels,
-    overflow: gpui::Pixels,
-}
 
 
 
@@ -1089,228 +961,6 @@ fn summary_for(tasks: &[protocol::AsyncTask], plan: &[protocol::Todo]) -> Option
 
 
 
-
-actions!(
-    workbench,
-    [
-        TogglePalette,
-        PaletteNext,
-        PalettePrev,
-        PaletteDismiss,
-        ToggleSettings,
-        Dismiss,
-        CopySelection,
-        SelectAllTranscript
-    ]
-);
-
-/// The editable fields in Settings, in the order they are shown.
-///
-/// Secret fields never display what is stored — the keychain is write-only from here, and
-/// the panel says "stored" or "not set" beside them. A field left blank on save keeps
-/// whatever is already in the keychain; that is what lets someone change their model
-/// without re-pasting a key.
-/// Which edge is being dragged.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Divider {
-    Sidebar,
-    Panel,
-}
-
-/// Which choice a popup is currently open for.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Picker {
-    Theme,
-    Model,
-    /// Which project the open conversation is filed under.
-    Project,
-    /// Which project a *new* conversation should start in. Same list, same "New project “…”"
-    /// row; only what choosing does differs, so naming a project is one gesture either way.
-    NewProject,
-    /// A model for one specialist, by its index in the registry.
-    ///
-    /// The index rather than the name because a `Picker` is `Copy` and lives in a field that is
-    /// compared on every frame; the name is one lookup away and the registry does not reorder
-    /// within a session.
-    Subagent(usize),
-}
-
-/// A page of the preferences window.
-///
-/// Setup is one of these rather than a pane of its own. It used to live in the right-hand
-/// slot, which meant opening it *closed the research panel* and cost the chat 420px for as
-/// long as it was open — and it is the same kind of thing as the rest of this window: something
-/// you visit, change, and leave. Zed puts every one of these behind one nav rail, and the
-/// screenshots of it are what settled the shape (docs §68).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-enum Section {
-    Appearance,
-    #[default]
-    Model,
-    Research,
-    Backend,
-    Setup,
-}
-
-impl Section {
-    /// In rail order.
-    const ALL: [Section; 5] = [
-        Section::Appearance,
-        Section::Model,
-        Section::Research,
-        Section::Backend,
-        Section::Setup,
-    ];
-
-    fn label(self) -> &'static str {
-        match self {
-            Section::Appearance => "Appearance",
-            Section::Model => "Model",
-            Section::Research => "Research",
-            Section::Backend => "Backend",
-            Section::Setup => "Setup",
-        }
-    }
-
-    fn id(self) -> &'static str {
-        match self {
-            Section::Appearance => "appearance",
-            Section::Model => "model",
-            Section::Research => "research",
-            Section::Backend => "backend",
-            Section::Setup => "setup",
-        }
-    }
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum Field {
-    ModelId,
-    BaseUrl,
-    ApiKey,
-    AstaToken,
-    AstaApiKey,
-    Port,
-}
-
-impl Field {
-    const ALL: [Field; 6] = [
-        Field::ModelId,
-        Field::BaseUrl,
-        Field::ApiKey,
-        Field::AstaToken,
-        Field::AstaApiKey,
-        Field::Port,
-    ];
-
-    fn label(self) -> &'static str {
-        match self {
-            Field::ModelId => "Or type any model id",
-            Field::BaseUrl => "Base URL",
-            Field::ApiKey => "API key",
-            Field::AstaToken => "Asta token",
-            Field::AstaApiKey => "Asta API key",
-            Field::Port => "Backend port",
-        }
-    }
-
-    /// Which page of the preferences window this field appears on.
-    fn section(self) -> Section {
-        match self {
-            Field::ModelId | Field::BaseUrl | Field::ApiKey => Section::Model,
-            Field::AstaToken | Field::AstaApiKey => Section::Research,
-            Field::Port => Section::Backend,
-        }
-    }
-
-    fn placeholder(self) -> &'static str {
-        match self {
-            Field::ModelId => "e.g. a model released after this build",
-            Field::BaseUrl => "https://… (custom providers only)",
-            Field::ApiKey => "paste to set — stored in the OS keychain",
-            Field::AstaToken => "paste to set",
-            Field::AstaApiKey => "paste to set",
-            Field::Port => "2024",
-        }
-    }
-
-    fn is_secret(self) -> bool {
-        matches!(self, Field::ApiKey | Field::AstaToken | Field::AstaApiKey)
-    }
-
-    /// The keychain entry a secret field writes to. `None` for the provider key, whose
-    /// name depends on the provider currently chosen.
-    fn secret_name(self) -> Option<&'static str> {
-        match self {
-            Field::AstaToken => Some("ASTA_TOKEN"),
-            Field::AstaApiKey => Some("ASTA_API_KEY"),
-            _ => None,
-        }
-    }
-}
-
-/// Bindings the workbench itself owns. `ctrl-p`/`cmd-p` is deliberately *not*
-/// scoped to a key context: it has to open the palette while the chat composer has
-/// focus, which is where focus almost always is.
-fn workbench_key_bindings() -> Vec<KeyBinding> {
-    let palette = Some("Palette");
-    let mut bindings = vec![
-        KeyBinding::new("escape", PaletteDismiss, palette),
-        KeyBinding::new("down", PaletteNext, palette),
-        KeyBinding::new("up", PalettePrev, palette),
-        // Escape everywhere else. Bound with **no** key context, because the composer
-        // almost always has focus and a binding scoped to the workbench would never be
-        // reached from there — the reason Escape did nothing to a modal (docs §58).
-        //
-        // It also **outranks** the palette binding above, which is the opposite of what this
-        // comment used to claim. `Keymap::binding_enabled` scores a context-less binding at
-        // `contexts.len()` — deeper than any predicate can match — and actions stop propagation
-        // during the bubble phase, so `PaletteDismiss` is never reached (docs §84). The palette
-        // is therefore closed by `dismiss` like every other overlay, and the binding above is
-        // kept only for the arrow keys it sits beside.
-        KeyBinding::new("escape", Dismiss, None),
-    ];
-    for modifier in ["cmd", "ctrl"] {
-        bindings.push(KeyBinding::new(
-            &format!("{modifier}-p"),
-            TogglePalette,
-            None,
-        ));
-        bindings.push(KeyBinding::new(
-            &format!("{modifier}-,"),
-            ToggleSettings,
-            None,
-        ));
-        // Also unscoped, and for the same reason Escape is: focus lives in the composer,
-        // so a workbench-scoped binding would never be reached. The composer's own
-        // `ctrl-c` is more specific and still wins — it just declines the action when it
-        // has nothing selected, which is what lets a transcript selection be copied
-        // without first clicking somewhere to move focus (docs §62).
-        bindings.push(KeyBinding::new(
-            &format!("{modifier}-c"),
-            CopySelection,
-            None,
-        ));
-        bindings.push(KeyBinding::new(
-            &format!("{modifier}-shift-a"),
-            SelectAllTranscript,
-            None,
-        ));
-    }
-    bindings
-}
-
-/// Which face of the provenance record is showing.
-///
-/// One modal, two views, one dataset (docs §74). They are not alternatives so much as two
-/// distances: the timeline is what happened, in order, with durations; the graph is the shape that
-/// falls out of it once invocations collapse into kinds. The timeline earns its keep on the first
-/// conversation, the graph on the tenth — when the loop is the thing worth seeing.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum ProvenanceView {
-    Timeline,
-    Graph,
-}
 
 /// One command-palette entry.
 ///
@@ -1726,15 +1376,6 @@ fn looks_like_a_setup_failure(message: &str) -> bool {
     MARKERS.iter().any(|marker| message.contains(marker))
 }
 
-fn merge_spine(previous: Option<&Project>, incoming: Project) -> Project {
-    let mut merged = incoming;
-    if merged.suggestions.is_empty() {
-        if let Some(previous) = previous {
-            merged.suggestions = previous.suggestions.clone();
-        }
-    }
-    merged
-}
 
 /// The unit a centred confirmation is about.
 ///
@@ -2021,5612 +1662,6 @@ fn one_line(prompt: &str) -> String {
     }
 }
 
-/// Root view: the three-pane research workbench.
-/// A setup command the app is running for the user, and its output so far.
-struct RunningFix {
-    label: String,
-    /// A sign-in URL the command printed, if any. See [`Workbench::open_link`] — the
-    /// command runs *inside the distro*, which has no browser, so the link has to be
-    /// opened out here on the host.
-    link: Option<String>,
-    /// The last [`FIX_LOG_LINES`] lines. Capped because `uv sync` prints hundreds and
-    /// the pane is 420px wide — the tail is the part that matters.
-    lines: Vec<String>,
-    /// What *we* have to say about the run — the verdict, and what to do next. Kept apart
-    /// from `lines` because it is not output: pushing "— finished" in with the command's own
-    /// lines is why a fix that printed nothing showed a box containing one dash instead of
-    /// admitting there was nothing to show (docs §60).
-    notes: Vec<String>,
-    /// Which check this fix belongs to, so a re-check can tell whether it worked.
-    check_id: &'static str,
-    done: bool,
-    ok: bool,
-    /// The way to stop it, for as long as there is a process to stop (docs §172).
-    cancel: preflight::Cancel,
-    /// Set once Stop has been pressed, so the pane can say *stopping* rather than claiming a
-    /// finish it has not seen. §168's rule: **stopped** is only true once the command has
-    /// actually exited, and that arrives as `FixEvent::Finished` like any other ending.
-    stopping: bool,
-}
-
-/// How much of a fix's output the pane keeps.
-const FIX_LOG_LINES: usize = 200;
-
-struct Workbench {
-    /// The project spine from `GET /project`. `None` until the first fetch lands
-    /// (or if the backend isn't up yet) — the panel says so rather than lying.
-    project: Option<Project>,
-    /// Research outputs, from the latest `values` snapshot of the current run.
-    buckets: Vec<Bucket>,
-    /// Long jobs (theorizer, DataVoyager) started by a turn and still being watched.
-    /// Kept for the whole session so a finished one stays visible rather than vanishing.
-    jobs: Vec<protocol::Job>,
-    /// Work handed to a background Mini-Me, and whether it is stopped at the gate.
-    tasks: Vec<protocol::AsyncTask>,
-    transcript: Vec<Message>,
-    /// Reports already written to disk this session, so each is announced once rather than on
-    /// every `values` frame of the turn that produced it.
-    saved_reports: std::collections::HashSet<std::path::PathBuf>,
-    /// The reports this conversation has produced, bodies included, newest last.
-    reports: Vec<protocol::Report>,
-    /// Whole citations, for a rendered report's bibliography. Not the panel's truncated ones.
-    sources: Vec<protocol::Source>,
-    /// Datasets the explorer recommended, whole. See [`protocol::Dataset`].
-    /// The rows the panel shows: **what the search returned**, read from the conversation's
-    /// own `dataverse_search.json`.
-    ///
-    /// Until §290 this was the model's structured answer — seven fields per row retyped by a
-    /// language model out of a file it had just read — and on a real turn six of six
-    /// `persistent_id`s were composed rather than copied. A researcher was one click from pasting
-    /// a fabricated DOI into a paper.
-    datasets: Vec<protocol::Dataset>,
-    /// The model's own answer, kept as the fallback for a run that wrote no file — a sandboxed
-    /// deployment, or a conversation from before the file existed. Never preferred over it.
-    recommended_datasets: Vec<protocol::Dataset>,
-    /// The identifiers the model put forward, bare, for marking rows it chose.
-    ///
-    /// **A mark on a row, never the row itself.** An identifier that is not in the search has
-    /// nothing to mark, which is the whole point: it cannot be rendered, so it cannot be cited.
-    recommended_ids: Vec<String>,
-    /// The datasets the researcher has ticked, by `persistent_id`.
-    ///
-    /// **Theirs, not the agent's.** The agent's opinion is a mark and a sort (§290); this is the
-    /// selection, and the whole flow the researcher described is *"select the dois, download one
-    /// or many and then ask the app to analyze whatever we want"* (§297). Cleared when the
-    /// conversation changes, and a pick drops itself once its file has landed.
-    dataset_picks: std::collections::HashSet<String>,
-    /// What this conversation's searches reported finding — the denominator, when there is one.
-    search_totals: workspace::SearchTotals,
-    /// Documents the librarian indexed. See [`protocol::Document`].
-    documents: Vec<protocol::Document>,
-    /// What checking each reference against Crossref found, keyed by its citation text.
-    ///
-    /// **Keyed by the citation, not by position and not by DOI.** Not by position because a turn
-    /// can add sources while a check is running, and a verdict shown against the wrong reference
-    /// is worse than none. Not by DOI because the references that most need an answer are the
-    /// ones that have no DOI at all — which is the shape a fabricated citation takes.
-    checked: HashMap<String, references::Verdict>,
-    /// What the registry had for each bad citation, once it has been asked.
-    ///
-    /// `None` records **asked, and there is no such work** — which is not an absence of
-    /// information, it is the most important thing this feature can tell anyone. A reference
-    /// whose DOI is unregistered *and* whose text matches nothing in the registry was not
-    /// mis-transcribed; it does not describe a paper that exists.
-    repaired: HashMap<String, Option<references::Repair>>,
-
-    /// How many references are still being resolved.
-    ///
-    /// A count rather than a flag, because sources arrive across several turns and a second
-    /// batch can start while the first is still going.
-    resolving: usize,
-    /// Whether the About window is showing.
-    about_open: bool,
-    /// Whether the provenance window is showing, and which of its two views.
-    provenance_open: bool,
-    provenance_view: ProvenanceView,
-    /// Which turn the graph is filtered to, or `None` for the whole conversation.
-    provenance_turn: Option<usize>,
-    /// What this conversation consulted, and in what order (docs §73–§75).
-    ///
-    /// Held here rather than derived from `transcript` because the transcript deliberately does
-    /// not survive a reload: `conversation_messages` returns role and text only, since the
-    /// activity trace was assembled from a stream that is over. This record is written to the
-    /// thread's directory as turns finish, which makes it the one part of a turn's activity that
-    /// can be reopened — and "track his work by conversation" is the whole request.
-    provenance: provenance::Record,
-    sidecar: Arc<Sidecar>,
-    /// Status line text (backend/stream progress, not model output).
-    status: String,
-    /// True while a turn is in flight — gates the run button.
-    streaming: bool,
-    /// Set when the last turn failed, rendered in the status line.
-    error: Option<String>,
-    /// The text field. Owns its own focus/selection state.
-    composer: Entity<Composer>,
-    /// Command palette: open flag, the highlighted row, and its own query field.
-    /// The query is a second `Composer`, kept alive across opens so its
-    /// subscriptions are registered once rather than per-open.
-    palette_open: bool,
-    palette_selected: usize,
-    palette_query: Entity<Composer>,
-    /// Settings pane: open flag, the draft being edited, and one field per input.
-    settings_open: bool,
-    draft: settings::Settings,
-    fields: Vec<(Field, Entity<Composer>)>,
-    /// What the last save did, shown in the pane. Never contains a secret.
-    settings_note: String,
-    /// Setup pane: open flag, the last report, and whether checks are in flight.
-    /// `None` before the first run — the pane says "checking…" rather than "all clear".
-    /// Which page of the preferences window is showing.
-    settings_section: Section,
-    report: Option<preflight::Report>,
-    checking: bool,
-    /// Set when a fix has just succeeded, so the re-check it triggered is compared against
-    /// the row it was meant to fix. See [`Workbench::judge_finished_fix`].
-    judge_after_recheck: bool,
-    /// A fix the app is running for the user: what it is, and what it has printed so far.
-    /// `Some` means a command is live, which is what disables the other buttons.
-    running_fix: Option<RunningFix>,
-    /// A run paused at the approval gate: the command it wants to run, awaiting a
-    /// decision. While this is set the turn is *open*, not finished.
-    pending_approval: Option<ApprovalRequest>,
-    /// The user approved everything remaining in *this* turn. Never persisted, and reset
-    /// by [`Workbench::finish_turn`] — see the button's comment for why it is bounded.
-    approve_rest_of_turn: bool,
-    /// The user approved everything for the rest of this **conversation**, foreground and
-    /// background alike.
-    ///
-    /// Turn scope was too small in practice: one analysis is a dozen commands across
-    /// several turns, and a researcher who must click Approve twelve times stops reading
-    /// by the third. This is the wider grant they asked for — still **never persisted**,
-    /// still gone on "New thread" or a restart, and announced in the status bar the whole
-    /// time it is in force, so it cannot be in effect without being visible (docs §41).
-    approve_conversation: bool,
-    /// Where this build stands against the newest published one, once GitHub has been asked.
-    ///
-    /// `None` until the answer arrives, which is the state the About page renders as "checking".
-    /// The check runs once per launch and never blocks anything: an app that will not open because
-    /// github.com is unreachable would be a worse failure than the one it exists to fix.
-    update: Option<update::Standing>,
-    /// How far a *taken* update has got, once the button has been pressed.
-    ///
-    /// Separate from `update` because they answer different questions — "is there a newer build"
-    /// survives a failed download, and a failed download must not erase the fact that one exists.
-    taking: Option<update::Fetch>,
-    /// The researcher sent the update chip away for this session.
-    ///
-    /// Not persisted, and deliberately: an update dismissed forever is an install that never
-    /// updates, which is the thing this whole flow exists to prevent. It comes back next launch,
-    /// which is also when there is something new to say.
-    update_dismissed: bool,
-    /// The record of what this conversation ran is open.
-    ///
-    /// A modal rather than a panel section: the list is long by nature, and the question it answers
-    /// — *what did that turn actually do* — is asked occasionally and read closely, which is the
-    /// opposite of what a permanently-visible section is for.
-    commands_open: bool,
-    /// The record of what this conversation's subagents *claimed* is open.
-    ///
-    /// A second modal rather than a tab inside the first, because they answer different questions
-    /// about different actors: `WHAT RAN` is the shell, this is what a subagent said it produced.
-    /// Folding them together would make the shorter one — usually this one — the harder to find.
-    claims_open: bool,
-    /// The delete being confirmed would interrupt background work that says it is still running.
-    ///
-    /// Carried to the confirmation modal so the sentence that asks can say so. Not a refusal:
-    /// see `ask_to_delete` for what refusing cost.
-    delete_interrupts_work: bool,
-    /// What came back from the last press of "Bring them in", or that one is in flight.
-    ///
-    /// Kept so the modal can report *what happened to each file* rather than a count. A partial
-    /// result is the normal case — `/tmp` is swept — and "3 of 5" is not something anyone can act
-    /// on.
-    collecting: Option<Result<protocol::Collected, String>>,
-    collect_in_flight: bool,
-    /// Absolute paths this conversation's commands were **watched writing** outside it.
-    ///
-    /// Cached because the offer to fetch them is drawn beside a transcript message, and
-    /// `transcript_message` runs per visible row inside a virtualized list — reading the command
-    /// ledger off disk there would put a file read in the scroll path. Refreshed by
-    /// `check_file_claims`, which already walks the workspace and already re-runs as outputs
-    /// settle, so this costs one more read at the point the answer is being checked anyway.
-    stray: Vec<String>,
-    /// Which transcript message carries the offer, if any.
-    ///
-    /// **One offer per conversation, never one per message.** The files are the conversation's,
-    /// not any single turn's — `collect_outside` fetches all of them whichever button is pressed —
-    /// so repeating the control under every flagged answer would be three buttons that do the
-    /// same thing. It sits on the newest message that named a missing file, which is where the
-    /// researcher is already looking, and on the newest answer otherwise (see
-    /// `Self::place_recovery_offer` for why the second case has to exist at all).
-    recovery_on: Option<usize>,
-    /// Whether this install is an unzipped bundle or a `cargo build` inside a checkout.
-    ///
-    /// Read once at startup rather than per render, and kept beside the standing because the two
-    /// together decide what the About page may offer — a source build is told about a new release
-    /// and pointedly not offered a button that would unzip over its worktree.
-    install: update::Layout,
-    /// Filters the *installed* theme list. With a hundred palettes installed, a list you
-    /// can only scroll is a list you cannot use.
-    theme_filter: Entity<Composer>,
-    /// Narrows the model picker. Necessary rather than a nicety: a gateway's catalogue runs to
-    /// several hundred ids, and a scroll box is not a way to find `deepseek` among them (§188).
-    model_filter: Entity<Composer>,
-    /// Filter for the project picker, which doubles as the field a new project is named in.
-    project_query: Entity<Composer>,
-    theme_scroll: gpui::ScrollHandle,
-    model_scroll: gpui::ScrollHandle,
-    /// What the gallery search box holds, and what it found.
-    gallery_query: Entity<Composer>,
-    gallery_results: Vec<gallery::Listing>,
-    gallery_note: String,
-    /// Measured variable-height rows and their scroll position. `uniform_list` would assign a
-    /// one-line question and a two-page answer the same height (docs §156).
-    transcript_list: ListState,
-    /// Selected transcript text, and the span registry a drag hit-tests against.
-    /// See [`selection`] — the registry is rebuilt every frame, the selection is not.
-    text_selection: selection::Transcript,
-    /// An open right-click menu, if any.
-    context_menu: Option<menu::ContextMenu>,
-    /// Projects that have a folder, including ones nothing is filed under yet.
-    ///
-    /// Read alongside the conversation list rather than per frame: the sidebar renders on every
-    /// frame and this is a directory listing, which has no business on the render thread.
-    folder_projects: Vec<String>,
-    /// A conversation is being fetched. Its own flag rather than a status string, because the
-    /// status bar is prose and prose cannot be asked a question (§177).
-    opening: bool,
-    /// The agent graph has not finished building. §176 measured that wait at fifteen seconds on
-    /// a real machine, which is far too long to leave a window looking idle.
-    warming: bool,
-    /// An open sidebar `⋮` or `New` menu, and where its corner goes.
-    sidebar_menu: Option<(SidebarMenu, gpui::Point<gpui::Pixels>)>,
-    /// Which of the two sidebar lists — Conversations or Projects — is showing.
-    sidebar_view: SidebarView,
-    /// Whether the pointer is over the agent indicator, and separately whether it is over the
-    /// menu that indicator opens — tracked apart, and the menu shown while either is true, so
-    /// moving from one into the other never crosses a gap that would count as having left
-    /// either one (§263).
-    agent_pill_hovered: bool,
-    agent_menu_hovered: bool,
-    /// Where the menu's own list scrolls to, tracked the same way every other picker's list is
-    /// (`theme_scroll`, `model_scroll`).
-    agent_menu_scroll: gpui::ScrollHandle,
-    /// Which specialist the next turn is addressed to, chosen from the agent indicator rather
-    /// than typed — kept apart from the composer's own text so picking one, unlike the old
-    /// `/name` prefix, leaves nothing in the box to read or delete (§263).
-    current_subagent: Option<String>,
-    /// An open choice popup: which choice, and where its trigger was clicked.
-    open_picker: Option<(Picker, gpui::Point<gpui::Pixels>)>,
-    /// Pane widths, in pixels, and which edge is being dragged.
-    ///
-    /// Both were fixed numbers. 240px of conversation list is generous on a laptop and mean on
-    /// a 4K monitor, and the person who knows which is the one looking at it.
-    sidebar_width: f32,
-    panel_width: f32,
-    dragging: Option<Divider>,
-    /// The preferences window's own focus, for pages that have no field to put it in.
-    settings_focus: gpui::FocusHandle,
-    /// The provenance window's own focus. It has no field at all, and §71 is the reason it
-    /// needs one anyway: focus left on an element the open pane no longer renders means key
-    /// bindings — Escape among them — simply stop arriving.
-    provenance_focus: gpui::FocusHandle,
-    /// The About window's own focus, for the same reason (docs §71).
-    about_focus: gpui::FocusHandle,
-    /// The delete warning's focus. It has buttons but no text field, so leaving focus on the
-    /// sidebar row it covers would make Escape depend on an element hidden behind the modal.
-    delete_focus: gpui::FocusHandle,
-    /// Recent outcomes, newest last, each fading on its own timer.
-    ///
-    /// The status bar holds exactly one line, so an outcome worth reading — "copied 12 lines",
-    /// "settings saved" — was routinely overwritten by the next thing that happened before
-    /// anyone looked at it. These stack instead. Deliberately **only** for things a person
-    /// did: streaming progress still goes to the status bar, because a toast per token would
-    /// be a wall of them.
-    toasts: Vec<SharedString>,
-    panel_scroll: gpui::ScrollHandle,
-    /// One horizontal position per output folder gallery.
-    ///
-    /// A single handle would make scrolling one folder move every other folder too. The full
-    /// folder path plus its surface owns the state, matching §152's rule that each agent-chosen
-    /// folder is one independent photo-like collection.
-    output_gallery_scrolls: std::cell::RefCell<HashMap<String, gpui::ScrollHandle>>,
-    /// The gallery thumb currently held by the mouse, if any.
-    ///
-    /// Kept separately from pane resizing because both are drags but their units differ: pane
-    /// dividers follow window pixels directly, while a gallery thumb maps a short track onto a
-    /// wider hidden content range (docs §158).
-    gallery_scroll_drag: Option<GalleryScrollDrag>,
-    /// The palette on screen right now, which is not always the saved one: the picker
-    /// applies as you point at it so a theme can be judged by looking at it.
-    applied_theme: String,
-    /// Whether the conversation sidebar is showing. A researcher deep in one thread
-    /// wants the screen, not the list.
-    sidebar_open: bool,
-    /// Whether the research panel on the right is showing.
-    panel_open: bool,
-    /// Whether the road strip down the left of the chat is showing.
-    road_open: bool,
-    /// What each output file turned out to be, keyed by path and stamped with the modification
-    /// time it was measured at.
-    ///
-    /// The panel redraws on every frame — every streamed token, every scroll — and measuring a
-    /// CSV means reading it. Without this, a turn that produced a 20 MB dataset would re-read
-    /// that dataset sixty times a second on the thread drawing the window.
-    ///
-    /// A `RefCell` because the panel renders from `&self`, and a cache that could only be filled
-    /// from `&mut self` would have to be refreshed by `render` for a panel that may not even be
-    /// open. Never borrowed across a call that could re-enter.
-    shapes: std::cell::RefCell<HashMap<PathBuf, (std::time::SystemTime, workspace::Shape)>>,
-    /// The first rows of each table, for the cards in the transcript. Same key, same reason as
-    /// [`Self::shapes`]; `None` records "looked, and it is not a table we can split", so a
-    /// Markdown file is not re-opened on every frame to find that out again.
-    #[allow(clippy::type_complexity)]
-    previews:
-        std::cell::RefCell<HashMap<PathBuf, (std::time::SystemTime, Option<Vec<Vec<String>>>)>>,
-    /// What the sidebar's search box holds. Empty means "show everything".
-    conversation_query: Entity<Composer>,
-    /// A file being previewed in the centre, if any — and the set it can be stepped through.
-    preview: Option<Preview>,
-    /// The researcher's past conversations, newest first.
-    conversations: Vec<protocol::Conversation>,
-    /// How the app got hold of the backend it is talking to. `None` until it has one.
-    backend_start: Option<backend::Started>,
-    /// Whether the list has ever come back. `false` means *loading*, which is not the same as
-    /// empty — and saying "conversations you start will appear here" over a list that is merely
-    /// still arriving is a claim the researcher has none (docs §79).
-    conversations_loaded: bool,
-    /// A name to give the current conversation once its thread exists.
-    pending_title: Option<String>,
-    /// The thread whose name is being edited, if any.
-    renaming: Option<String>,
-    /// Whether the mission at the top of the research panel is being edited in place.
-    editing_mission: bool,
-    /// The coordinator's own plan for this conversation, when it wrote one. See [`protocol::Todo`].
-    plan: Vec<protocol::Todo>,
-    /// Who wrote each file, as the backend recorded it — see [`workspace::authorship`].
-    authorship: std::collections::HashMap<String, String>,
-    /// The manifest's size and mtime when it was last read, so a frame that changed nothing
-    /// costs one `stat` rather than a parse.
-    authorship_stamp: Option<(std::time::SystemTime, u64)>,
-    /// The conversation or project whose delete control opened the centred warning.
-    ///
-    /// This used to be an inline yes/no row. It could not say that saved files now go too, and a
-    /// project delete needs a count and a path; destructive scope belongs where it can be read
-    /// before acting (§155).
-    confirming_delete: Option<DeleteTarget>,
-    /// A provider the researcher has clicked but not yet confirmed — see [`Workbench::provider_modal`].
-    confirming_provider: Option<&'static settings::Provider>,
-    /// What each provider last said it offers — see [`catalogue`]. Read from disk at launch and
-    /// replaced in place when a refresh lands, so the picker never blocks on the network.
-    catalogue: catalogue::Catalogue,
-    /// Whose key the API-key field is about to set.
-    ///
-    /// **Separate from the coordinator's provider on purpose.** A specialist may run on a second
-    /// provider — the request path has always sent a key per provider (`extra_keys`) — but the
-    /// field wrote to whichever provider was *selected*, so filing an Anthropic key meant
-    /// switching to Anthropic, pasting, saving, and switching back, with §186's confirmation
-    /// interrupting each hop. Asked after meeting exactly that: *"do I have the ability to select
-    /// the models for the subagents using independent API keys?"* (docs §191).
-    key_target: String,
-    /// Whether the whole reference list is open over the workbench.
-    sources_open: bool,
-    /// The datasets modal, which the Outputs heading opens.
-    datasets_open: bool,
-    /// The library modal, which the Outputs heading opens.
-    documents_open: bool,
-    /// Files chosen or dropped, waiting to go with the next question.
-    attachments: Vec<Attachment>,
-    /// Attachments sent before this conversation had a folder, to copy in once it does.
-    pending_adoption: Vec<std::path::PathBuf>,
-    /// Whether this launch has already collected runs that finished unattended (§243).
-    swept: bool,
-    /// Runs collected this launch, still to be told about. Cleared when the researcher opens one
-    /// or dismisses the banner.
-    collected_runs: Vec<(String, protocol::Job)>,
-    /// Whether this window is the one the researcher is looking at.
-    ///
-    /// Read by `notify_if_away`, and the whole reason a toast is not noise: the banner (§244) and
-    /// the jobs row already speak to somebody with the window open. Starts `true`, because a window
-    /// that has just been opened is the one in front of them.
-    window_active: bool,
-    /// A finished discovery run being read. See [`DiscoveryView`].
-    discovery_open: Option<DiscoveryView>,
-    /// A discovery run whose budget is waiting on the researcher. See [`Approval`].
-    ///
-    /// The one modal in this app that guards money, which is why it is a modal at all: §244 argued
-    /// a banner beats a modal for something already true, and this is the opposite — nothing
-    /// proceeds until it is answered and the wrong answer cannot be taken back.
-    approving: Option<Approval>,
-    /// Runs the researcher declined, so rejecting one does not reopen it on the next snapshot.
-    ///
-    /// Kept in memory only. The artifact still says `awaiting_approval`, because that is the
-    /// truth — the run is drafted and unspent — and a rejection is "not now", not a deletion.
-    declined: std::collections::HashSet<String>,
-    /// The intent being edited in the approval modal. The one descriptive field worth changing at
-    /// the gate, because it is what the run spends its experiments on.
-    intent_field: Entity<Composer>,
-    /// Whether `BACKGROUND JOBS` is unfolded. Starts open, and reopens by itself the moment a
-    /// worker stops at the approval gate — the researcher's press is respected everywhere except
-    /// where it would hide a question addressed to them (§245).
-    jobs_expanded: bool,
-    /// Where the jobs list is scrolled to, so the offset survives the rebuild every stream event
-    /// causes. Without a handle of its own the list would jump back to the top on each tick.
-    jobs_scroll: gpui::ScrollHandle,
-    /// Narrows the open reference list. Only the modal reads it — the panel's four are a
-    /// preview, and filtering something that shows four of seventeen would be a filter whose
-    /// result you cannot see (§197).
-    sources_filter: Entity<Composer>,
-    datasets_filter: Entity<Composer>,
-    documents_filter: Entity<Composer>,
-    /// What the files API said about each dataset, by `persistent_id`.
-    ///
-    /// Absent means *not asked yet*, and the same three-state distinction `repaired` needs
-    /// applies: a dataset still being checked must not render the message meant for one that came
-    /// back restricted. `Err` carries the reason so a row can say why it has no button rather
-    /// than quietly having none.
-    dataset_access: HashMap<String, Result<dataverse::Access, String>>,
-    /// Datasets whose access is in flight, so the check is not started twice.
-    checking_access: HashSet<String>,
-    /// Downloads in flight, by `persistent_id`.
-    downloading: HashSet<String>,
-    /// Where a finished download landed, so the row can say so instead of offering again.
-    downloaded: HashMap<String, String>,
-    /// The confirmed target awaiting its backend and filesystem results.
-    ///
-    /// Optimistically removing the row made a failed or interrupted request look successful
-    /// until restart, when the durable conversation — and therefore its project — returned
-    /// (§154). Keep it visible as pending until the server has actually deleted it.
-    deleting: Option<DeleteTarget>,
-    /// The field that edits it. One shared editor rather than one per row — only one
-    /// name can be edited at a time, and a Composer per conversation would be an entity
-    /// per row for a list that can run to hundreds.
-    rename_editor: Entity<Composer>,
-    /// The field that edits the mission, live in the panel.
-    mission_editor: Entity<Composer>,
-    /// Background tasks whose remaining commands are pre-approved, by task id.
-    ///
-    /// Separate from the turn grant because a background worker has no turn to belong to:
-    /// it runs on its own thread for minutes, and its gate would otherwise need an answer
-    /// per command from someone who has gone back to work.
-    approve_tasks: std::collections::HashSet<String>,
-    /// Set when focus must return to the composer but no `Window` is at hand — an
-    /// entity subscription doesn't get one. `render` does, so it settles the debt
-    /// there. Without this, activating a command with Enter would leave focus on a
-    /// field that is no longer rendered and typing would go nowhere.
-    restore_focus: bool,
-}
-
-impl Workbench {
-    fn new(sidecar: Arc<Sidecar>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        // Opens empty. The placeholder says what to do, which is all a first launch needs.
-        let composer = cx.new(|cx| {
-            let mut composer = Composer::new(
-                cx,
-                "Ask Mini-Me…  (Enter to send, Shift-Enter for a new line)",
-            );
-            // A research question is a paragraph, so this field is genuinely several rows and needs
-            // arrow-up and arrow-down to walk them (§204).
-            composer.set_multiline(true);
-            composer
-        });
-        // The composer only reports *that* text was submitted; deciding it means
-        // "run a coordinator turn" stays here.
-        cx.subscribe(&composer, |workbench, _composer, event, cx| match event {
-            ComposerEvent::Submit(text) => workbench.submitted(text.clone(), cx),
-        })
-        .detach();
-        // Observed as well as subscribed: the agent indicator reads off the composer's text on
-        // every keystroke, and without this it would only refresh on the next unrelated render.
-        cx.observe(&composer, |_workbench, _composer, cx| {
-            cx.notify();
-        })
-        .detach();
-
-        // Filtering installed themes, as you type — this one is local, so every keystroke
-        // is free.
-        let theme_filter = cx.new(|cx| Composer::new(cx, "Filter themes"));
-        let model_filter = cx.new(|cx| Composer::new(cx, "Filter models"));
-        let documents_filter = cx.new(|cx| Composer::new(cx, "Filter by title, tag or summary"));
-        cx.observe(&documents_filter, |_workbench, _field, cx| cx.notify())
-            .detach();
-        let datasets_filter = cx.new(|cx| Composer::new(cx, "Filter by title, author or DOI"));
-        cx.observe(&datasets_filter, |_workbench, _field, cx| cx.notify())
-            .detach();
-        let sources_filter = cx.new(|cx| Composer::new(cx, "Filter by author, title or year"));
-        let intent_field = cx.new(|cx| {
-            Composer::new(cx, "What should the search focus on? (not the answer you expect)")
-        });
-        cx.observe(&intent_field, |_workbench, _field, cx| cx.notify())
-            .detach();
-
-        // Told rather than sampled. Reading `is_window_active()` inside `render` would work and
-        // would tie a fact about the OS to how often we happen to draw; this fires exactly when it
-        // changes, which is what a notification decision needs.
-        cx.observe_window_activation(window, |workbench, window, _cx| {
-            workbench.window_active = window.is_window_active();
-        })
-        .detach();
-        cx.observe(&sources_filter, |_workbench, _field, cx| cx.notify())
-            .detach();
-        cx.observe(&model_filter, |_workbench, _field, cx| cx.notify())
-            .detach();
-        let project_query = cx.new(|cx| Composer::new(cx, "Find or name a project"));
-        cx.observe(&project_query, |_workbench, _field, cx| cx.notify())
-            .detach();
-        cx.observe(&theme_filter, |_workbench, _field, cx| cx.notify())
-            .detach();
-
-        // Searching Zed's theme gallery. Submits rather than filtering as you type: each
-        // keystroke would be an HTTP request to somebody else's server.
-        let gallery_query = cx.new(|cx| Composer::new(cx, "Search Zed's theme gallery"));
-        cx.subscribe(&gallery_query, |workbench, _query, event, cx| match event {
-            ComposerEvent::Submit(text) => workbench.search_gallery(text.clone(), cx),
-        })
-        .detach();
-
-        // Filtering the conversation list. Never submits — it filters as you type, which
-        // is what "fast" means for a list this small.
-        let conversation_query = cx.new(|cx| Composer::new(cx, "Search conversations"));
-        cx.observe(&conversation_query, |_workbench, _query, cx| cx.notify())
-            .detach();
-
-        // Renaming a conversation. Submit commits the new name; the sidebar row is
-        // replaced by this field while it is in force.
-        let rename_editor = cx.new(|cx| Composer::new(cx, "Name this conversation"));
-        cx.subscribe(
-            &rename_editor,
-            |workbench, _editor, event, cx| match event {
-                ComposerEvent::Submit(text) => workbench.commit_rename(text.clone(), cx),
-            },
-        )
-        .detach();
-
-        // Editing the mission, in the panel where it is read. Same shape as renaming, and for the
-        // same reason: the field replaces the text it is editing rather than opening somewhere
-        // else, so the researcher is looking at the thing they are changing.
-        let mission_editor = cx.new(|cx| {
-            let mut editor = Composer::new(cx, "What is this project trying to find out?");
-            // Capped at 500 characters by the backend, which is still four or five rows.
-            editor.set_multiline(true);
-            // Enter on an empty field means "clear the mission", which the backend accepts and
-            // which is the only way back to the derived one. Without this, emptying the field and
-            // pressing Enter would do nothing and look broken.
-            editor.set_submits_empty(true);
-            editor
-        });
-        cx.subscribe(
-            &mission_editor,
-            |workbench, _editor, event, cx| match event {
-                ComposerEvent::Submit(text) => workbench.commit_mission(text.clone(), cx),
-            },
-        )
-        .detach();
-
-        let palette_query = cx.new(|cx| {
-            let mut query = Composer::new(cx, "Type a command…");
-            // Enter in the palette means "run the highlighted command", which has to
-            // work before anything is typed.
-            query.set_submits_empty(true);
-            query
-        });
-        cx.subscribe(&palette_query, |workbench, _query, event, cx| match event {
-            ComposerEvent::Submit(_) => workbench.activate_palette(cx),
-        })
-        .detach();
-        // Re-filter as the user types: editing the query notifies the *query*, and
-        // without observing it the list would only refresh on the next unrelated
-        // render.
-        cx.observe(&palette_query, |workbench, _query, cx| {
-            workbench.palette_selected = 0;
-            cx.notify();
-        })
-        .detach();
-
-        // One field per input. Created up front so each keeps its own focus and
-        // selection state for the life of the window.
-        let fields: Vec<(Field, Entity<Composer>)> = Field::ALL
-            .into_iter()
-            .map(|field| {
-                let composer = cx.new(|cx| {
-                    let mut composer = Composer::new(cx, field.placeholder());
-                    composer.set_masked(field.is_secret());
-                    composer
-                });
-                (field, composer)
-            })
-            .collect();
-
-        // Read once. It used to be read twice in this literal and the panel states would have
-        // made it three — one file, opened three times, in a constructor.
-        let stored = settings::Settings::load();
-
-        // Which folder this executable sits in, decided once. `current_exe` failing is not a
-        // reason to fail the launch — it just means no update is ever offered, which is the safe
-        // direction for a decision about replacing files.
-        let install = std::env::current_exe()
-            .as_deref()
-            .map_or(update::Layout::Source, update::layout);
-        tracing::info!(install = ?install, "the shape of this install");
-
-        let mut workbench = Self {
-            update: None,
-            taking: None,
-            update_dismissed: false,
-            commands_open: false,
-            claims_open: false,
-            delete_interrupts_work: false,
-            collecting: None,
-            collect_in_flight: false,
-            stray: Vec::new(),
-            recovery_on: None,
-            install,
-            project: None,
-            buckets: Vec::new(),
-            jobs: Vec::new(),
-            tasks: Vec::new(),
-            transcript: Vec::new(),
-            saved_reports: std::collections::HashSet::new(),
-            reports: Vec::new(),
-            sources: Vec::new(),
-            datasets: Vec::new(),
-            recommended_datasets: Vec::new(),
-            recommended_ids: Vec::new(),
-            dataset_picks: std::collections::HashSet::new(),
-            search_totals: workspace::SearchTotals::default(),
-            documents: Vec::new(),
-            checked: HashMap::new(),
-            repaired: HashMap::new(),
-            resolving: 0,
-            about_open: false,
-            provenance_open: false,
-            provenance_view: ProvenanceView::Timeline,
-            provenance_turn: None,
-            provenance: provenance::Record::default(),
-            sidecar,
-            status: "idle — type a prompt and press Enter".to_string(),
-            streaming: false,
-            error: None,
-            composer,
-            palette_open: false,
-            palette_selected: 0,
-            palette_query,
-            settings_open: false,
-            draft: stored.clone(),
-            fields,
-            settings_note: String::new(),
-            settings_section: Section::default(),
-            report: None,
-            checking: false,
-            judge_after_recheck: false,
-            running_fix: None,
-            pending_approval: None,
-            approve_rest_of_turn: false,
-            approve_conversation: false,
-            theme_filter,
-            model_filter,
-            project_query,
-            theme_scroll: gpui::ScrollHandle::new(),
-            model_scroll: gpui::ScrollHandle::new(),
-            gallery_query,
-            gallery_results: Vec::new(),
-            gallery_note: String::new(),
-            transcript_list: ListState::new(0, ListAlignment::Top, px(240.)),
-            text_selection: selection::Transcript::default(),
-            context_menu: None,
-            folder_projects: Vec::new(),
-            opening: false,
-            warming: false,
-            sidebar_menu: None,
-            sidebar_view: SidebarView::default(),
-            agent_pill_hovered: false,
-            agent_menu_hovered: false,
-            agent_menu_scroll: gpui::ScrollHandle::new(),
-            current_subagent: None,
-            open_picker: None,
-            settings_focus: cx.focus_handle(),
-            provenance_focus: cx.focus_handle(),
-            about_focus: cx.focus_handle(),
-            delete_focus: cx.focus_handle(),
-            sidebar_width: 320.,
-            panel_width: 320.,
-            dragging: None,
-            toasts: Vec::new(),
-            panel_scroll: gpui::ScrollHandle::new(),
-            output_gallery_scrolls: std::cell::RefCell::new(HashMap::new()),
-            gallery_scroll_drag: None,
-            applied_theme: stored.theme.clone(),
-            sidebar_open: stored.sidebar_open,
-            panel_open: stored.panel_open,
-            road_open: stored.road_open,
-            shapes: std::cell::RefCell::new(HashMap::new()),
-            previews: std::cell::RefCell::new(HashMap::new()),
-            conversation_query,
-            preview: None,
-            conversations: Vec::new(),
-            conversations_loaded: false,
-            backend_start: None,
-            pending_title: None,
-            renaming: None,
-            editing_mission: false,
-            plan: Vec::new(),
-            authorship: std::collections::HashMap::new(),
-            authorship_stamp: None,
-            confirming_delete: None,
-            confirming_provider: None,
-            catalogue: catalogue::load(),
-            key_target: stored.provider.clone(),
-            sources_open: false,
-            datasets_open: false,
-            documents_open: false,
-            attachments: Vec::new(),
-            pending_adoption: Vec::new(),
-            swept: false,
-            collected_runs: Vec::new(),
-            window_active: true,
-            discovery_open: None,
-            approving: None,
-            declined: std::collections::HashSet::new(),
-            intent_field,
-            jobs_expanded: true,
-            jobs_scroll: gpui::ScrollHandle::new(),
-            sources_filter,
-            datasets_filter,
-            documents_filter,
-            dataset_access: HashMap::new(),
-            checking_access: HashSet::new(),
-            downloading: HashSet::new(),
-            downloaded: HashMap::new(),
-            deleting: None,
-            rename_editor,
-            mission_editor,
-            approve_tasks: std::collections::HashSet::new(),
-            restore_focus: false,
-        };
-        // Fill the editable fields from what is stored, and open Settings on a fresh
-        // install instead of letting the first turn fail against a backend with no key.
-        let draft = workbench.draft.clone();
-        for (field, composer) in &workbench.fields {
-            let value = match field {
-                Field::ModelId => draft.model_id.clone(),
-                Field::BaseUrl => draft.base_url.clone(),
-                Field::Port => draft.backend_port.to_string(),
-                // Secrets are never read back out of the keychain into the UI.
-                _ => continue,
-            };
-            composer.update(cx, |composer, cx| composer.set_text(value, cx));
-        }
-        let has_key = settings::secret(&draft.key_name()).is_some();
-        if !draft.problems(has_key).is_empty() {
-            workbench.settings_open = true;
-            workbench.settings_note =
-                "Add a model key to get started — it goes into your OS keychain.".to_string();
-        }
-
-        // Check the machine on every launch, and let the *first* report decide which pane
-        // the user lands on. A missing key is a Settings problem; a missing WSL or backend
-        // is a Setup problem, and Setup has to win — pasting a key into an app that cannot
-        // start its backend fixes nothing, and the first thing a new user sees should be
-        // the thing actually standing in their way.
-        workbench.run_preflight(cx);
-
-        // A launch opens at the workspace root. The previous project used to be a second project
-        // registry in settings.toml, despite §106 defining a project solely by the conversations
-        // filed under it. That stale value resurrected an empty project and silently filed the
-        // morning's first conversation inside it (§154). Opening a saved conversation or using a
-        // project heading's `+` remains the explicit way to enter one.
-        workbench.sidecar.set_project(None);
-        // Populate the spine if a backend is already listening. This does not
-        // start one — see `Sidecar::fetch_project`.
-        workbench.refresh_project(cx);
-        // Start the backend now and list the history once it answers. Both matter for the
-        // first ten seconds: the sidebar was empty until the researcher had already asked
-        // something, which made the app look as if it had never been used (docs §50).
-        workbench.warm_up(cx);
-        workbench
-    }
-
-    /// Start watching a long job the turn left running, if it isn't already watched.
-    ///
-    /// A `values` snapshot repeats every artifact it knows about on every frame, so this
-    /// is called many times for the same job — keyed on the task id, and already-finished
-    /// jobs are recorded without spawning a poller that would have nothing to wait for.
-    fn track_job(&mut self, job: protocol::Job, cx: &mut Context<Self>) {
-        if let Some(existing) = self.jobs.iter_mut().find(|k| k.task_id == job.task_id) {
-            // Trust the snapshot for a status we don't have yet, but never let it walk a
-            // finished job back to running.
-            if !existing.is_finished() {
-                existing.status = job.status;
-            }
-            return;
-        }
-        let finished = job.is_finished();
-        self.jobs.push(job.clone());
-        if finished {
-            return;
-        }
-
-        self.status = format!(
-            "{} running in the background ({}) — you can keep working",
-            job.kind.label(),
-            job.kind.expected(job.size)
-        );
-        let mut updates = self.sidecar.watch_job(job);
-        cx.spawn(async move |this, cx| {
-            while let Some(update) = updates.next().await {
-                let carry_on = this.update(cx, |workbench, cx| {
-                    let finished = update.is_finished();
-                    let label = update.kind.label();
-                    let succeeded = update.succeeded();
-                    if let Some(tracked) = workbench
-                        .jobs
-                        .iter_mut()
-                        .find(|k| k.task_id == update.task_id)
-                    {
-                        tracked.status = update.status.clone();
-                    }
-                    if finished {
-                        workbench.status = if succeeded {
-                            format!("{label} finished — its results are in the sandbox")
-                        } else {
-                            format!("{label} ended: {}", update.status)
-                        };
-                        // **Write the ending down, not just the beginning.** §258 recorded
-                        // `running` at approval — correctly, it was — and nothing ever recorded
-                        // the end. So every launch after read `running` from the artifact, drew
-                        // `running · usually 25–40 min` for a run that had finished hours before,
-                        // and corrected it on the first poll: the same flicker, forever (§261).
-                        if update.kind == protocol::JobKind::Discovery {
-                            workbench.record_discovery_status(
-                                update.task_id.clone(),
-                                &update.status,
-                                cx,
-                            );
-                        }
-                        // The one message that can reach somebody who left. A forty-minute run
-                        // that ends while they are in Excel is exactly what the roadmap's
-                        // notification item was for.
-                        workbench.notify_if_away(
-                            &if succeeded {
-                                format!("{label} finished")
-                            } else {
-                                format!("{label} stopped")
-                            },
-                            &if update.question.is_empty() {
-                                "Its results are in its conversation.".to_string()
-                            } else {
-                                update.question.clone()
-                            },
-                        );
-                        // The route wrote the outcome into the sandbox as it reported it,
-                        // so the spine and outputs have something new to show.
-                        workbench.refresh_project(cx);
-                    }
-                    cx.notify();
-                });
-                if carry_on.is_err() {
-                    break;
-                }
-            }
-        })
-        .detach();
-        cx.notify();
-    }
-
-    /// Start watching a background worker's thread, if it isn't already watched.
-    ///
-    /// `owner` is the conversation whose snapshot carried this task. Passed in rather than looked
-    /// up, because the two call sites are the only places that know it for certain and the answer
-    /// has to survive the researcher moving on to another conversation (docs §159). Stamped
-    /// *before* the watcher is armed, so the poll — which mutates only status, pending, error and
-    /// activity — carries it for the task's whole life.
-    fn track_task(&mut self, owner: &str, mut task: protocol::AsyncTask, cx: &mut Context<Self>) {
-        task.owner = owner.to_string();
-        if let Some(existing) = self.tasks.iter_mut().find(|t| t.task_id == task.task_id) {
-            // The snapshot knows the status the coordinator last recorded; the *watcher*
-            // knows whether it is stopped at the gate right now. Never let a stale
-            // snapshot erase a pending approval the user is looking at.
-            if existing.pending.is_none() && !existing.is_finished() {
-                existing.status = task.status;
-            }
-            // A task already being watched keeps the owner it was first seen with: re-stamping
-            // would reintroduce the drift this argument exists to prevent, on any later snapshot
-            // that arrives from somewhere else.
-            if existing.owner.is_empty() {
-                existing.owner = task.owner;
-            }
-            return;
-        }
-        let finished = task.is_finished();
-        self.tasks.push(task.clone());
-        if finished {
-            return;
-        }
-
-        let mut updates = self.sidecar.watch_task(task);
-        cx.spawn(async move |this, cx| {
-            while let Some(update) = updates.next().await {
-                let carry_on = this.update(cx, |workbench, cx| {
-                    let finished = update.is_finished();
-                    let waiting = update.needs_approval();
-                    let succeeded = update.succeeded();
-                    let task_id = update.task_id.clone();
-                    // Read before `update` is moved into the tracked slot below.
-                    let worker = update.agent_name.replace('_', " ");
-                    if let Some(tracked) = workbench
-                        .tasks
-                        .iter_mut()
-                        .find(|t| t.task_id == update.task_id)
-                    {
-                        *tracked = update;
-                    }
-                    // Already granted, for this task or for the whole conversation:
-                    // answer it rather than asking again. The command still lands in the
-                    // card, so what ran stays reviewable — this removes the interruption,
-                    // not the record.
-                    if waiting
-                        && (workbench.approve_conversation
-                            || workbench.approve_tasks.contains(&task_id))
-                    {
-                        workbench.decide_task(task_id, true, cx);
-                        cx.notify();
-                        return;
-                    }
-                    if waiting {
-                        workbench.status = "a background task is waiting for your approval".into();
-                        // **More deserving of a toast than a finished run.** This one is stopped
-                        // and cannot continue: §31 is the record of such a task hanging with
-                        // nothing on screen able to answer it, and a researcher who stepped away
-                        // has no way to learn it is their turn.
-                        workbench.notify_if_away(
-                            "A background task needs your approval",
-                            &worker,
-                        );
-                        // Unfold the panel section that holds the Approve button. The fold is the
-                        // researcher's to set, but a folded section is the one state in which a
-                        // question addressed to them is invisible — so the gate appearing opens
-                        // it, and a press after that is respected (§245).
-                        workbench.jobs_expanded = true;
-                    } else if finished {
-                        workbench.status = if succeeded {
-                            "a background task finished".into()
-                        } else {
-                            "a background task stopped".into()
-                        };
-                        workbench.notify_if_away(
-                            if succeeded {
-                                "A background task finished"
-                            } else {
-                                "A background task stopped"
-                            },
-                            &worker,
-                        );
-                        workbench.collect_plots();
-                        workbench.settle_outputs(cx);
-                        workbench.refresh_project(cx);
-                    }
-                    cx.notify();
-                });
-                if carry_on.is_err() {
-                    break;
-                }
-            }
-        })
-        .detach();
-        cx.notify();
-    }
-
-    /// Answer a background worker's approval request.
-    fn decide_task(&mut self, task_id: String, approve: bool, cx: &mut Context<Self>) {
-        let Some(task) = self.tasks.iter_mut().find(|t| t.task_id == task_id) else {
-            return;
-        };
-        let Some(request) = task.pending.take() else {
-            return;
-        };
-        // One answer per held action, in order — the agent validates the count — and each carries
-        // the id of the interrupt that raised it, which is what lets several specialists be
-        // answered at once (§215).
-        let answers = protocol::Answer::all(&request, decision_for(approve));
-        let thread_id = task.thread_id.clone();
-        // **The task's own owner, not the conversation on screen.** Answering an approval is the
-        // moment a background worker is told where to write, and it happens whenever the
-        // researcher gets to it — by then they may have pressed New thread or opened something
-        // else. Sending the open conversation put a worker's figures into a conversation that
-        // never asked for them (docs §159). Unknown stays unknown: `None` sends no key, and the
-        // backend falls back to the sibling folder it used before, which is at least visible.
-        let owner = task.owning_conversation().map(str::to_string);
-        if owner.is_none() {
-            tracing::warn!(
-                task = %task_id,
-                worker = %thread_id,
-                "answering a background task whose owning conversation was never recorded — \
-                 its files may land beside the conversation instead of inside it"
-            );
-        }
-        task.status = "running".into();
-        self.sidecar.decide_task(thread_id, owner, answers);
-        self.status = if approve {
-            "background task approved — running…"
-        } else {
-            "background task rejected"
-        }
-        .into();
-        cx.notify();
-    }
-
-    /// Open the platform's file chooser, and add whatever comes back.
-    ///
-    /// **The affordance dragging never had.** §28 accepted a drop anywhere on the window and
-    /// then said so in one line of the empty state — which vanishes the moment a conversation
-    /// has anything in it, leaving the feature invisible for the whole rest of the session.
-    /// Dragging is also the harder gesture on the platform this app is for: it needs Explorer
-    /// and a *not*-maximised window side by side, which is not how anyone works.
-    ///
-    /// Files only. `can_select_mixed_files_and_dirs` is `false` on Windows — the
-    /// `FOS_PICKFOLDERS` flag toggles the dialog between the two rather than widening it — so
-    /// asking for both would silently give a folder picker to someone looking for a CSV.
-    /// Dragging still accepts a folder, which is the gesture that suits one anyway.
-    fn choose_files(&mut self, cx: &mut Context<Self>) {
-        if self.streaming {
-            self.status = "finish this turn before adding files".into();
-            cx.notify();
-            return;
-        }
-        let chosen = cx.prompt_for_paths(gpui::PathPromptOptions {
-            files: true,
-            directories: false,
-            multiple: true,
-            prompt: None,
-        });
-        cx.spawn(async move |this, cx| {
-            // Three outcomes worth telling apart: paths, a cancel, and a picker that would
-            // not open. Only the last is a problem, and it is the one a silent `_ => {}`
-            // would turn into a button that does nothing.
-            match chosen.await {
-                Ok(Ok(Some(paths))) => {
-                    let _ = this.update(cx, |workbench, cx| workbench.add_files(&paths, cx));
-                }
-                Ok(Ok(None)) => {}
-                Ok(Err(error)) => {
-                    let _ = this.update(cx, |workbench, cx| {
-                        workbench.error = Some(format!("could not open the file chooser: {error}"));
-                        cx.notify();
-                    });
-                }
-                Err(_) => {}
-            }
-        })
-        .detach();
-    }
-
-    /// Put files into the question being written — dropped on the window, or chosen.
-    ///
-    /// The one thing the web app cannot do: the researcher's data is already on this
-    /// machine, and this is the whole distance between "here is my CSV" and an analysis —
-    /// no upload, no copy, no bucket.
-    fn add_files(&mut self, paths: &[std::path::PathBuf], cx: &mut Context<Self>) {
-        if paths.is_empty() {
-            return;
-        }
-        if self.streaming {
-            self.status = "finish this turn before adding files".into();
-            cx.notify();
-            return;
-        }
-        // Checked before anything is written into the composer, because the alternative is a
-        // turn that runs for a minute and then reports a missing file. A share the agent
-        // cannot reach is worth one sentence now rather than a puzzle later (§179).
-        let (usable, unreachable): (Vec<_>, Vec<_>) = paths
-            .iter()
-            .partition(|path| self.sidecar.can_open(path.as_path()));
-        // Named, never counted: "1 of 3 added" leaves the researcher hunting for which one,
-        // and which one is the only actionable part of the sentence.
-        let skipped = unreachable
-            .iter()
-            .map(|path| file_label(path))
-            .collect::<Vec<_>>()
-            .join(", ");
-        if usable.is_empty() {
-            self.error = Some(format!(
-                "{skipped} is on a network share the agent cannot open — copy it to this \
-                 computer first"
-            ));
-            cx.notify();
-            return;
-        }
-
-        // **Copied into the conversation first.** An attachment used to be referenced where it
-        // lay, so `pdf_librarian` indexed `…/Downloads/Graph-neural-networks.pdf` and the claims
-        // recorder said so (§227). Downloads is a folder people empty; a conversation reopened
-        // next month would hold a library index, a citation and an analysis all naming a path
-        // that resolves to nothing. Copying makes the input part of the conversation the same way
-        // its outputs are.
-        //
-        // Falls back to referencing in place — with the reason said out loud — rather than
-        // refusing. A researcher who dropped a file wants to ask about it, and an attachment that
-        // does not persist is far better than one that does not arrive.
-        let folder = self.thread_workspace();
-        let mut adopted: Vec<std::path::PathBuf> = Vec::new();
-        let mut left_where_they_are: Vec<String> = Vec::new();
-        for path in &usable {
-            let Some(folder) = folder.as_ref() else {
-                adopted.push(path.to_path_buf());
-                continue;
-            };
-            let size = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
-            if size > workspace::ADOPT_LIMIT {
-                left_where_they_are.push(file_label(path));
-                adopted.push(path.to_path_buf());
-                continue;
-            }
-            match workspace::adopt(folder, path) {
-                Ok(copy) => adopted.push(copy),
-                Err(error) => {
-                    tracing::warn!(%error, "could not copy an attachment in");
-                    left_where_they_are.push(file_label(path));
-                    adopted.push(path.to_path_buf());
-                }
-            }
-        }
-
-        // **Beside the composer, not inside it.** The path used to be written into the text, which
-        // meant a researcher looking at three wrapped lines of
-        // `/mnt/c/Users/…/Mini-Me/01a01ae5-27e8-…/New Phytologist - 2013 - …pdf` where a filename
-        // would do, and no way to drop one without editing something they had not typed (§231).
-        //
-        // `./name` for a file that was copied in, because the conversation's folder *is* the
-        // agent's working directory and that is the form four backend prompts ask for. The
-        // absolute path for one that had to stay put — it is outside the workspace, so a relative
-        // reference would resolve to nothing.
-        for path in &adopted {
-            let label = file_label(path);
-            let inside = folder
-                .as_ref()
-                .is_some_and(|dir| path.parent() == Some(dir.as_path()));
-            let reference = if inside {
-                format!("./{label}")
-            } else {
-                self.sidecar.path_for_backend(path)
-            };
-            if self
-                .attachments
-                .iter()
-                .any(|held| held.reference == reference)
-            {
-                continue;
-            }
-            self.attachments.push(Attachment {
-                label,
-                source: path.to_path_buf(),
-                adopted: inside,
-                reference,
-            });
-        }
-        self.restore_focus = true;
-        // Says what to do next, because the composer no longer does. With the prepared
-        // question gone (§180) there is a path sitting in the field and nothing asking
-        // anything, and one line is cheaper than leaving a researcher to infer it.
-        self.status = match usable.len() {
-            1 => format!(
-                "added {} — say what you want done with it",
-                file_label(usable[0])
-            ),
-            n => format!("added {n} files — say what you want done with them"),
-        };
-        // Assigned rather than only set, so a second add clears the first one's warning. A
-        // stale "left out yield.csv" beside a composer that no longer mentions it is worse
-        // than the older, already-seen error this replaces.
-        self.error = if !unreachable.is_empty() {
-            Some(format!(
-                "left out {skipped} — on a network share the agent cannot open"
-            ))
-        } else if !left_where_they_are.is_empty() {
-            // Not a failure, and said anyway: the file is in the turn either way, but it will
-            // not travel with the conversation, and the researcher is the only one who can
-            // decide whether that matters.
-            Some(format!(
-                "{} stayed where it is rather than being copied in — move or delete it and this \
-                 conversation loses it",
-                left_where_they_are.join(", ")
-            ))
-        } else {
-            None
-        };
-        cx.notify();
-    }
-
-    /// Run the first-run checks and show the result.
-    ///
-    /// The keychain lookup happens **here**, on the main thread, and travels as a bool —
-    /// the Linux keychain client panics if called from a Tokio worker (docs §22).
-    fn run_preflight(&mut self, cx: &mut Context<Self>) {
-        if self.checking {
-            return;
-        }
-        self.checking = true;
-        let has_key = settings::secret(&settings::Settings::load().key_name()).is_some();
-        let mut results = self.sidecar.preflight(has_key);
-        cx.spawn(async move |this, cx| {
-            if let Some(report) = results.next().await {
-                let _ = this.update(cx, |workbench, cx| {
-                    workbench.checking = false;
-                    // Name the *first* blocker rather than a count: "2 to fix" still
-                    // leaves the user opening the pane to find out what.
-                    workbench.status = match report.first_problem() {
-                        Some(check) => format!("setup: {} — {}", check.label, check.detail),
-                        None => format!("setup: {}", report.summary()),
-                    };
-                    // Only the first report may open a pane by itself. After that the user
-                    // has seen the state of things, and a background re-check yanking the
-                    // pane open under their cursor would be rude.
-                    let first = workbench.report.is_none();
-                    let blocked = !report.ready();
-                    workbench.report = Some(report);
-                    if std::mem::take(&mut workbench.judge_after_recheck) {
-                        workbench.judge_finished_fix();
-                    }
-                    if first && blocked {
-                        // The first report is the guided first run: open the window on the
-                        // page that says what is wrong.
-                        workbench.settings_section = Section::Setup;
-                        workbench.settings_open = true;
-                    }
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
-        cx.notify();
-    }
-
-    /// Show the Setup pane, re-checking as it opens — a stale report is worse than none,
-    /// because the whole point is to reflect what the machine is like *now*.
-    fn open_setup(&mut self, cx: &mut Context<Self>) {
-        self.settings_section = Section::Setup;
-        self.settings_open = true;
-        self.run_preflight(cx);
-    }
-
-    /// Point the app at a checkout the user already has.
-    ///
-    /// Recorded as **not owned**, which is the whole point: the app will run this backend
-    /// but will never `git checkout` or re-sync it, because that would destroy work in a
-    /// clone somebody else is responsible for.
-    fn adopt_checkout(&mut self, dir: String, cx: &mut Context<Self>) {
-        let mut settings = settings::Settings::load();
-        settings.backend_dir = dir.clone();
-        settings.backend_dir_owned = false;
-        match settings.save() {
-            Ok(()) => {
-                self.draft = settings;
-                // The launch command is built at startup from this path, so it cannot
-                // take effect until the app restarts — say so plainly instead of leaving
-                // the user to wonder why the row is still red.
-                self.status = format!("using {dir} — restart the app to launch it");
-                self.settings_note = format!("Backend set to {dir}. Restart to use it.");
-            }
-            Err(error) => self.status = format!("could not save that choice: {error:#}"),
-        }
-        self.run_preflight(cx);
-    }
-
-
-
-    /// Report the outcome of something the user did.
-    ///
-    /// Goes to the status bar *and* to a toast that lingers past the next status change. Use
-    /// it for results — copied, saved, stopped, deleted — never for progress.
-    fn say(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
-        let text = text.into();
-        self.status = text.to_string();
-        self.toasts.push(text);
-        // Bounded, so a burst cannot fill the window with its own history.
-        if self.toasts.len() > 3 {
-            self.toasts.remove(0);
-        }
-        // Each toast retires on its own timer rather than all of them on a shared one, so a
-        // second message does not cut the first one's time short.
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_secs(4))
-                .await;
-            let _ = this.update(cx, |workbench, cx| {
-                if !workbench.toasts.is_empty() {
-                    workbench.toasts.remove(0);
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-
-    /// Open or close a choice popup, remembering where its trigger was.
-    ///
-    /// The position comes from the click rather than from the trigger's bounds: the same thing
-    /// the right-click menu does (§64), and it needs no element to measure.
-    fn toggle_picker(
-        &mut self,
-        picker: Picker,
-        at: gpui::Point<gpui::Pixels>,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_picker = match self.open_picker {
-            Some((open, _)) if open == picker => None,
-            _ => Some((picker, at)),
-        };
-        cx.notify();
-    }
-
-
-    /// Open the right-click menu at a point, over whatever was clicked.
-    fn open_context_menu(
-        &mut self,
-        at: gpui::Point<gpui::Pixels>,
-        target: menu::Target,
-        cx: &mut Context<Self>,
-    ) {
-        self.context_menu = Some(menu::ContextMenu::new(at, target));
-        cx.notify();
-    }
-
-    /// Whether an item would actually do something if it were clicked.
-    ///
-    /// Drives the greying, and is checked again when the item runs — the two must agree, so
-    /// they read the same state rather than each deciding for themselves.
-    fn menu_item_enabled(&self, item: menu::Item, target: menu::Target, cx: &App) -> bool {
-        match (item, target) {
-            (menu::Item::Copy, menu::Target::Transcript) => {
-                self.text_selection.selected_text().is_some()
-            }
-            (menu::Item::Copy, menu::Target::Composer)
-            | (menu::Item::Cut, menu::Target::Composer) => {
-                let composer = self.composer.read(cx);
-                composer.has_selection() && (item == menu::Item::Copy || composer.is_editable())
-            }
-            // Not whether the clipboard has anything — reading it on every frame to grey a
-            // row is a syscall for a cosmetic, and a paste of nothing is harmless.
-            (menu::Item::Paste, _) => self.composer.read(cx).is_editable(),
-            (menu::Item::SelectAll, menu::Target::Composer) => {
-                !self.composer.read(cx).text().is_empty()
-            }
-            (menu::Item::SelectAll, menu::Target::Transcript) => !self.transcript.is_empty(),
-            (menu::Item::CopyLastAnswer, _) => self
-                .transcript
-                .iter()
-                .any(|message| message.role == "mini-me" && !message.body.is_empty()),
-            // Cut in the transcript is never offered; see `ContextMenu::items`.
-            (menu::Item::Cut, menu::Target::Transcript) => false,
-        }
-    }
-
-    fn run_menu_item(
-        &mut self,
-        item: menu::Item,
-        target: menu::Target,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.context_menu = None;
-        match (item, target) {
-            (menu::Item::Copy, menu::Target::Transcript) => self.copy_selected_text(cx),
-            (menu::Item::SelectAll, menu::Target::Transcript) => self.select_whole_transcript(cx),
-            (menu::Item::CopyLastAnswer, _) => self.run_command(Command::CopyLastAnswer, cx),
-            (menu::Item::Copy, menu::Target::Composer) => {
-                self.composer.update(cx, |composer, cx| {
-                    composer.copy_to_clipboard(cx);
-                });
-            }
-            (menu::Item::Cut, menu::Target::Composer) => {
-                self.composer.update(cx, |composer, cx| {
-                    composer.cut_to_clipboard(window, cx);
-                });
-            }
-            (menu::Item::Paste, _) => {
-                self.composer.update(cx, |composer, cx| {
-                    composer.paste_from_clipboard(window, cx);
-                });
-            }
-            (menu::Item::SelectAll, menu::Target::Composer) => {
-                self.composer.update(cx, |composer, cx| {
-                    composer.select_all_text(cx);
-                });
-            }
-            (menu::Item::Cut, menu::Target::Transcript) => {}
-        }
-        // A menu item that edited or selected the prompt should leave the caret where the
-        // user can carry on typing.
-        if target == menu::Target::Composer {
-            self.composer.read(cx).focus_handle(cx).focus(window);
-        }
-        cx.notify();
-    }
-
-
-
-    /// Copy the selected transcript text.
-    ///
-    /// Reached from `ctrl-c` when the composer declines it, so the ordinary shortcut works on
-    /// the transcript without the user having to click somewhere first to move focus.
-    fn copy_selection(&mut self, _: &CopySelection, _window: &mut Window, cx: &mut Context<Self>) {
-        self.copy_selected_text(cx);
-    }
-
-    /// The work behind [`Self::copy_selection`], without the `Window` an action handler is
-    /// handed — so the command palette, which has none, can run it too.
-    fn copy_selected_text(&mut self, cx: &mut Context<Self>) {
-        let Some(text) = self.text_selection.selected_text() else {
-            // Nothing selected here either. Say nothing rather than claiming a copy — an
-            // empty clipboard reported as success is worse than silence.
-            return;
-        };
-        let lines = text.lines().count();
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
-        self.say(
-            format!(
-                "copied {lines} line{} from the transcript",
-                if lines == 1 { "" } else { "s" }
-            ),
-            cx,
-        );
-    }
-
-    /// Select the whole transcript.
-    ///
-    /// `ctrl-shift-a`, not `ctrl-a`: that one belongs to the composer, where it selects the
-    /// prompt being typed, and taking it would break the field people use constantly to fix
-    /// what they are writing.
-    fn select_all_transcript(
-        &mut self,
-        _: &SelectAllTranscript,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.select_whole_transcript(cx);
-    }
-
-    fn select_whole_transcript(&mut self, cx: &mut Context<Self>) {
-        let text = self.transcript.iter().map(Message::selection_text)
-            .filter(|message| !message.is_empty()).collect::<Vec<_>>().join("\n");
-        self.text_selection.select_all(text);
-        // Only reports a count once there is something to count: on the very first frame the
-        // registry is still empty, and "selected 0 messages" would be a lie about a feature
-        // rather than a fact about the conversation.
-        self.status = match self.text_selection.selected_text() {
-            Some(text) => format!("selected {} lines — ctrl-c to copy", text.lines().count()),
-            None => "there is nothing in the transcript to select yet".into(),
-        };
-        cx.notify();
-    }
-
-    /// Whether the named row is still not passing, according to the latest report.
-    fn still_unfixed(&self, check_id: &str) -> bool {
-        self.report.as_ref().is_some_and(|report| {
-            report
-                .checks
-                .iter()
-                .any(|check| check.id == check_id && check.state != preflight::State::Pass)
-        })
-    }
-
-    /// What colour the app's own remarks about a fix should be.
-    ///
-    /// Read from the current report rather than stored, so "restart Windows" is amber while
-    /// it is still true and goes quiet by itself once the row it names turns green.
-    fn fix_tone(&self, fix: &RunningFix) -> u32 {
-        if !fix.done {
-            theme::text_muted()
-        } else if !fix.ok {
-            theme::error()
-        } else if self.still_unfixed(fix.check_id) {
-            theme::warning()
-        } else {
-            theme::text_muted()
-        }
-    }
-
-    /// Say so when a fix reported success and changed nothing.
-    ///
-    /// A machine with WSL but no distro ran `wsl --install -d Ubuntu`, which installed the
-    /// WSL runtime, exited 0 — and left the distro unregistered until Windows restarts. The
-    /// pane said "Install Ubuntu — done" directly above the same red row it had started
-    /// from, which reads as a bug in the app rather than as a step the user still has to
-    /// take (docs §60).
-    ///
-    /// The verdict is drawn from the re-check, never from the command's own words: `wsl.exe`
-    /// speaks the system language — the machine this came from printed *"Descargando:
-    /// Subsistema de Windows para Linux"* — so matching on "restart" would have failed for
-    /// exactly the user who needed it.
-    fn judge_finished_fix(&mut self) {
-        let check_id = match &self.running_fix {
-            Some(fix) if fix.ok => fix.check_id,
-            _ => return,
-        };
-        if !self.still_unfixed(check_id) {
-            return;
-        }
-        let Some(fix) = self.running_fix.as_mut() else {
-            return;
-        };
-        // Only the runtime row installs WSL itself, and only Windows reboots for it.
-        if check_id == "runtime" && cfg!(windows) {
-            fix.notes.push(
-                "— That installed WSL, but Windows has to restart before a distro can \
-                 start. Restart this machine, open the app again, and this row should be \
-                 green."
-                    .into(),
-            );
-        } else {
-            fix.notes.push(
-                "— It reported success but the check still fails. The output above is the \
-                 best clue; the sidecar log below has the rest."
-                    .into(),
-            );
-        }
-    }
-
-    /// Run a fix on the user's behalf, streaming its output into the pane.
-    ///
-    /// Re-checks automatically when it finishes, so a successful install turns its own
-    /// row green without the user having to work out that they should press Re-check.
-    /// Stop the repair that is running, if one is.
-    ///
-    /// **Says `stopping`, not `stopped`.** The only honest report of a stop is the command
-    /// actually exiting, which arrives as `FixEvent::Finished` on the same channel as any other
-    /// ending — so this asks, marks the pane, and waits to be told. §146 refused a Stop button
-    /// precisely because the version that flips a label without owning a process claims the
-    /// machine stopped changing when it has not.
-    ///
-    /// A repair that finished between the click and this call is **stopped**, not an error:
-    /// `Cancel::stop` reports there was nothing to signal, and there being nothing left to stop
-    /// is the outcome the button was pressed for.
-    fn stop_fix(&mut self, cx: &mut Context<Self>) {
-        let Some(fix) = self.running_fix.as_mut() else {
-            return;
-        };
-        if fix.done || fix.stopping {
-            return;
-        }
-        fix.stopping = true;
-        if fix.cancel.stop() {
-            fix.notes.push("— asked to stop; waiting for the command to exit".into());
-            self.status = "stopping the repair…".into();
-        } else {
-            // Nothing was armed: it had already exited and the Finished event is on its way.
-            fix.notes.push("— it had already finished".into());
-            self.status = "the repair had already finished".into();
-        }
-        cx.notify();
-    }
-
-    fn start_fix(
-        &mut self,
-        label: String,
-        argv: Vec<String>,
-        check_id: &'static str,
-        cx: &mut Context<Self>,
-    ) {
-        if self.running_fix.as_ref().is_some_and(|fix| !fix.done) {
-            return;
-        }
-        self.status = format!("running: {label}");
-        let (events, cancel) = self.sidecar.run_fix(argv);
-        self.running_fix = Some(RunningFix {
-            label,
-            link: None,
-            lines: Vec::new(),
-            notes: Vec::new(),
-            check_id,
-            done: false,
-            ok: false,
-            cancel: cancel.clone(),
-            stopping: false,
-        });
-        let mut events = events;
-        cx.spawn(async move |this, cx| {
-            while let Some(event) = events.next().await {
-                let update = this.update(cx, |workbench, cx| {
-                    let Some(fix) = workbench.running_fix.as_mut() else {
-                        return;
-                    };
-                    match event {
-                        sidecar::FixEvent::Line(line) => {
-                            // `asta auth login` prints its device-activation URL and then
-                            // tries to open it with `gio`, which fails inside WSL: no
-                            // browser there. Catching the URL is what lets the app open it
-                            // on the host, where the browser is (docs §32c).
-                            if fix.link.is_none() {
-                                fix.link = first_url(&line);
-                            }
-                            fix.lines.push(line);
-                            if fix.lines.len() > FIX_LOG_LINES {
-                                fix.lines.remove(0);
-                            }
-                        }
-                        sidecar::FixEvent::Finished { ok, note } => {
-                            fix.done = true;
-                            fix.ok = ok;
-                            fix.notes.push(format!("— {note}"));
-                            // Credentials are read into the backend's environment when it
-                            // *starts*, so signing in while it runs changes nothing until
-                            // it is restarted. Saying so is the difference between a fix
-                            // that works and one that looks broken — signing in from this
-                            // pane and then watching the same failure is exactly what
-                            // happened the first time (docs §32).
-                            if ok && fix.label.contains("Sign in") {
-                                fix.notes.push(
-                                    "— Close and reopen the app: the backend reads your \
-                                     Asta sign-in when it starts."
-                                        .into(),
-                                );
-                            }
-                            workbench.status =
-                                format!("{}: {note}", if ok { "done" } else { "failed" });
-                            // Re-check on success so the row the user just fixed goes
-                            // green by itself — and so that a fix which succeeded without
-                            // fixing anything gets found out. See `judge_finished_fix`.
-                            if ok {
-                                workbench.judge_after_recheck = true;
-                                workbench.run_preflight(cx);
-                            }
-                        }
-                    }
-                    cx.notify();
-                });
-                if update.is_err() {
-                    break;
-                }
-            }
-        })
-        .detach();
-        cx.notify();
-    }
-
-    /// Pull the project spine in the background and swap it in when it arrives.
-    fn refresh_project(&self, cx: &mut Context<Self>) {
-        let mut results = self.sidecar.fetch_project();
-        cx.spawn(async move |this, cx| {
-            if let Some(outcome) = results.next().await {
-                let _ = this.update(cx, |workbench, cx| {
-                    match outcome {
-                        Ok(project) => {
-                            workbench.project =
-                                Some(merge_spine(workbench.project.as_ref(), project))
-                        }
-                        // A missing spine is not worth interrupting the user for —
-                        // the panel already shows an honest placeholder.
-                        Err(error) => tracing::debug!(%error, "could not load the project spine"),
-                    }
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
-    }
-
-    /// Kick off one coordinator turn and pump its events into the transcript.
-    fn start_turn(&mut self, prompt: String, cx: &mut Context<Self>) {
-        self.start_turn_as(prompt, subagent::Dispatch::default(), cx);
-    }
-
-    /// Ask the current provider what it offers, if nobody has asked today.
-    ///
-    /// **Called when the Model pane opens, not on a timer.** A background poll would spend a
-    /// researcher's key on a request they cannot see, and the only moment the answer matters is
-    /// the moment somebody is looking at the list. Opening the pane is that moment.
-    ///
-    /// Silent on failure by design. This is a nicety on top of a curated list that already works:
-    /// offline, rate-limited or a gateway that does not serve `/models` all mean *"keep the list
-    /// you have"*, and an error toast for a thing nobody asked for is noise.
-    fn refresh_models(&mut self, cx: &mut Context<Self>) {
-        let Some(spec) = settings::provider(&self.draft.provider) else {
-            return;
-        };
-        let Some((url, auth)) = catalogue::endpoint(spec.id, &self.draft.base_url) else {
-            return;
-        };
-        let now = provenance::now_ms();
-        if !self
-            .catalogue
-            .get(spec.id)
-            .is_none_or(|listing| listing.is_stale(now))
-        {
-            return;
-        }
-        // Read here, on the main thread — the keychain is not safe to touch from a Tokio worker.
-        let key = settings::secret(&format!("llm:{}", spec.id));
-        let mut done = self.sidecar.refresh_models(
-            spec.id.to_string(),
-            url,
-            auth,
-            key,
-            now,
-        );
-        cx.spawn(async move |this, cx| {
-            if let Some(outcome) = done.next().await {
-                let _ = this.update(cx, |workbench, cx| match outcome {
-                    Ok((provider, count)) => {
-                        // Re-read rather than patch: the file is the record, and another provider
-                        // may have been written while this one was in flight.
-                        workbench.catalogue = catalogue::load();
-                        tracing::info!(%provider, count, "model list refreshed");
-                        cx.notify();
-                    }
-                    Err(error) => tracing::debug!(%error, "could not refresh the model list"),
-                });
-            }
-        })
-        .detach();
-    }
-
-    /// The one thing stopping a turn from reaching the provider that was actually chosen.
-    ///
-    /// Read from the **saved** settings rather than from `self.draft`, because the draft is what
-    /// somebody is halfway through editing and the request is built from what was saved. Only
-    /// the two failures that silently redirect a turn — a missing key and a custom provider with
-    /// no endpoint — because a wrong *model id* fails loudly, from the provider you picked, in a
-    /// sentence that names the model.
-    fn provider_blocker(&self) -> Option<String> {
-        let stored = settings::Settings::load();
-        let has_key = settings::secret(&stored.key_name()).is_some();
-        if let Some(blocker) = stored.misdirects_a_turn(has_key) {
-            return blocker.into();
-        }
-        // **And the specialists.** §186's gate read the coordinator alone, so an override to an
-        // unkeyed provider sailed through and failed minutes later inside a worker, billed to an
-        // account the researcher had never opened (§212). Refused here for the same reason and in
-        // the same place: before anything is spent.
-        //
-        // The keychain read stays on this thread, which is why `unkeyed_specialists` takes the
-        // lookup rather than doing it — `secret` is not async-safe.
-        stored
-            .unkeyed_specialists(|id| settings::secret(&format!("llm:{id}")).is_some())
-            .into_iter()
-            .next()
-    }
-
-    /// Start a turn, choosing how a `/name` command should reach its specialist.
-    fn start_turn_as(
-        &mut self,
-        prompt: String,
-        dispatch: subagent::Dispatch,
-        cx: &mut Context<Self>,
-    ) {
-        if self.streaming || prompt.trim().is_empty() {
-            return;
-        }
-
-        // **Refuse rather than fall through to somebody else's account.** `problems()` has always
-        // been computed and, in `main`'s own words, *"warned, not fatal"* — logged at launch and
-        // shown in the pane. A turn ran regardless, and the consequence was not a clear failure:
-        // with no key for the chosen provider, `run_request_body` omits `__llm_keys` **entirely**,
-        // and `base_url` lives inside that block. The backend then builds a bare OpenAI client,
-        // picks up whatever `OPENAI_API_KEY` the distro happens to hold, and bills a provider
-        // nobody selected. Reported as *"this is weird, I set OpenRouter and I have credits"* —
-        // with an out-of-credits page for OpenAI (docs §186).
-        if let Some(problem) = self.provider_blocker() {
-            self.error = Some(format!("{problem} — Settings › Model"));
-            self.settings_section = Section::Model;
-            self.settings_open = true;
-            cx.notify();
-            return;
-        }
-        // The agent indicator's own choice, folded into the same `/name` prefix `subagent::parse`
-        // already reads below — one path rather than two, so resolving, refusing an unknown
-        // name, and background dispatch all still happen exactly once. Skipped if the composer
-        // text is already its own `/name` command: someone who typed one by hand meant that one,
-        // not whatever the indicator happens to be showing.
-        let prompt = match &self.current_subagent {
-            Some(name) if subagent::parse(&prompt).is_none() => format!("/{name} {prompt}"),
-            _ => prompt,
-        };
-        // `/name …` names a specialist. Resolved *before* anything is sent, because the failure
-        // this guards against is silent: sent as prose, `/eda-subagent do the thing` is a
-        // ten-minute wait for a turn that was never delegated (§55, §76).
-        let prompt = match subagent::parse(&prompt) {
-            None => prompt,
-            Some(command) => match self.resolve_subagent(&command, dispatch, cx) {
-                Some(turn) => turn,
-                None => return,
-            },
-        };
-        // **After the specialist is resolved, and after every early return.**
-        //
-        // Order first: `subagent::parse` needs the prompt to *begin* with `/name`, so a blockquote
-        // prepended above would hide the command and send it as prose — the ten-minute
-        // never-delegated turn of §55 and §76, reachable by attaching a file.
-        //
-        // Placement second: `provider_blocker` and `resolve_subagent` both refuse and return, and
-        // taking the list before them would drop a researcher's attachments on a turn that never
-        // ran. They are cleared here, where the turn is certain to go.
-        let prompt = with_attachments(&prompt, &self.attachments);
-        // The first turn is the only time attachments can exist before their thread folder. Keep
-        // both addresses: the source to copy after the backend creates the thread, and the exact
-        // prompt reference to replace with `./name` before the model sees it (§302).
-        let attachments_for_turn = attachments_for_turn(&self.attachments);
-        // Keep a UI-side fallback too. The sidecar now copies these after thread creation and
-        // before streaming (§302); this later pass is idempotent when that worked and preserves the
-        // old recovery path if preparing the turn was interrupted after the model had already read
-        // the original.
-        self.pending_adoption
-            .extend(awaiting_adoption(&self.attachments));
-        self.attachments.clear();
-        self.streaming = true;
-        self.error = None;
-        self.status = "starting…".into();
-        self.composer
-            .update(cx, |composer, cx| composer.set_disabled(true, cx));
-        // Name the conversation after the first thing asked. A sidebar of "New
-        // conversation" is a sidebar of nothing, and every chat app auto-titles for
-        // exactly this reason; the researcher can rename it whenever they like.
-        let first_turn = self.transcript.is_empty();
-        // Open a row in the provenance record for this question. The prompt sent is what is
-        // recorded, not what was typed — for a `/name` command those differ, and what reached the
-        // coordinator is what the work responded to.
-        self.provenance
-            .begin_turn(prompt.clone(), provenance::now_ms());
-        self.transcript
-            .push(Message::new("you", without_attached_blockquote(&prompt).to_string()));
-        // The assistant message — text *and* activity — streams into this entry.
-        self.transcript.push(Message::new("mini-me", String::new()));
-        if first_turn {
-            self.pending_title = Some(protocol::title_from_prompt(&prompt));
-        }
-
-        let mut events = self.sidecar.submit(prompt, attachments_for_turn);
-        cx.spawn(async move |this, cx| {
-            while let Some(event) = events.next().await {
-                // `Err` here means the view is gone (window closed) — stop pumping.
-                if this
-                    .update(cx, |workbench, cx| {
-                        workbench.apply(event, cx);
-                        cx.notify();
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .detach();
-
-        cx.notify();
-    }
-
-    /// Stop the backend and start it again.
-    ///
-    /// The app *attaches* to a healthy backend rather than replacing it, which is right for
-    /// speed and wrong after an update: the Python overlay lives in that process's memory, so a
-    /// newly-pulled app kept talking to a server holding the previous one — with no symptom
-    /// except a feature that did nothing (docs §79).
-    fn restart_backend(&mut self, cx: &mut Context<Self>) {
-        if self.streaming {
-            self.say("can't restart the backend mid-turn", cx);
-            return;
-        }
-        self.status = "restarting the backend…".into();
-        let mut done = self.sidecar.restart_backend();
-        cx.spawn(async move |this, cx| {
-            let outcome = done.next().await;
-            let _ = this.update(cx, |workbench, cx| {
-                match outcome {
-                    Some(Ok(status)) => {
-                        workbench.backend_start = Some(status);
-                        workbench.say("backend restarted", cx)
-                    }
-                    Some(Err(error)) => workbench.say(format!("restart failed: {error:#}"), cx),
-                    None => workbench.say("restart reported nothing back", cx),
-                }
-                // Everything read from the backend is now a fresh process's answer, including
-                // the specialist list the overlay writes as it assembles a coordinator.
-                workbench.conversations_loaded = false;
-                workbench.refresh_conversations(cx);
-                workbench.run_preflight(cx);
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    /// Stop the turn in flight.
-    ///
-    /// Closes the turn here *and* asks the backend to abandon the run. Only aborting our own
-    /// stream would leave the graph running with nobody reading it — `on_disconnect` defaults
-    /// to `continue` — which for an agent that spends tokens per step is the expensive kind
-    /// of silence (docs §63).
-    ///
-    /// Whatever already streamed in stays. It is real work, the reader may well want it, and
-    /// deleting the thing they were reading is not what stop means anywhere else.
-    fn stop_turn(&mut self, cx: &mut Context<Self>) {
-        let told_backend = self.sidecar.cancel_turn();
-        self.streaming = false;
-        self.pending_approval = None;
-        self.composer
-            .update(cx, |composer, cx| composer.set_disabled(false, cx));
-        if let Some(message) = self.transcript.last_mut() {
-            if message.role == "mini-me" {
-                message.stopped = true;
-                // The steps are why it was still going; leave them open on a stopped turn so
-                // the reason is on screen rather than one click away.
-                message.steps_expanded = true;
-            }
-        }
-        if let Some(last) = self.transcript.len().checked_sub(1) {
-            self.invalidate_transcript_message(last);
-        }
-        // Said differently in the two cases because they are different: one stopped the run,
-        // the other only stopped us watching it.
-        let outcome = if told_backend {
-            "turn stopped"
-        } else {
-            "stopped watching — the run had not reported an id yet, so the backend may still \
-             be finishing it"
-        };
-        self.say(outcome, cx);
-    }
-
-    /// Enter, in the composer. Always sends — picking a specialist is the agent indicator's
-    /// job now (§263), not something typing `/name` and pressing Enter twice does.
-    fn submitted(&mut self, text: String, cx: &mut Context<Self>) {
-        self.start_turn(text, cx);
-    }
-
-    /// Address the next turn to a specialist, or (`None`) back to the coordinator, and close
-    /// the menu that offered the choice — picking is the thing hovering the indicator was for.
-    ///
-    /// Nothing is written into the composer. The old `/name` prefix left a name in the box
-    /// nobody typed, sitting there to be read twice (once in the indicator, once in the text)
-    /// or accidentally deleted; kept apart, the composer holds only what was actually typed
-    /// (§263).
-    fn choose_subagent(&mut self, name: Option<String>, cx: &mut Context<Self>) {
-        self.current_subagent = name;
-        self.agent_pill_hovered = false;
-        self.agent_menu_hovered = false;
-        cx.notify();
-    }
-
-    /// Confirm first-turn attachments are in the folder once control returns to the UI.
-    ///
-    /// The sidecar now performs the important copy before streaming (§302). This second idempotent
-    /// pass keeps the UI resilient to an interrupted preparation task and refreshes the folder once
-    /// the turn is back on the main thread. Failures are logged and dropped: the turn already ran
-    /// and the agent already read the file, so nothing here is worth interrupting a researcher over.
-    fn adopt_pending(&mut self, cx: &mut Context<Self>) {
-        if self.pending_adoption.is_empty() {
-            return;
-        }
-        let Some(folder) = self.thread_workspace() else {
-            return;
-        };
-        let mut kept = 0usize;
-        for source in std::mem::take(&mut self.pending_adoption) {
-            let size = std::fs::metadata(&source).map(|meta| meta.len()).unwrap_or(0);
-            if size > workspace::ADOPT_LIMIT {
-                continue;
-            }
-            match workspace::adopt(&folder, &source) {
-                Ok(_) => kept += 1,
-                Err(error) => tracing::warn!(%error, "could not copy an attachment in later"),
-            }
-        }
-        if kept > 0 {
-            tracing::info!(kept, "copied attachments into the conversation");
-            // So Outputs shows them beside everything else the turn produced.
-            self.refresh_project(cx);
-        }
-    }
-
-
-
-
-    /// Turn a `/name …` into the turn to send, or refuse and say why.
-    ///
-    /// Every rejection leaves the prompt where it was, so nothing typed is lost to a typo.
-    fn resolve_subagent(
-        &mut self,
-        command: &subagent::Command,
-        dispatch: subagent::Dispatch,
-        cx: &mut Context<Self>,
-    ) -> Option<String> {
-        let agents = workspace::subagents();
-        if agents.is_empty() {
-            // The registry is written when the backend assembles a coordinator, so before the
-            // first turn there is genuinely nothing to check against. Saying that is better than
-            // rejecting a name that may well be correct.
-            self.say(
-                "no specialist list yet — ask one ordinary question first, then /name works",
-                cx,
-            );
-            return None;
-        }
-        if !subagent::known(&command.name, &agents) {
-            // Name the nearest thing rather than only the mistake: the names the request
-            // imagined are not the ones the backend uses, so "did you mean" is the useful half.
-            let nearest = subagent::ranked(&command.name, &agents)
-                .first()
-                .map(|agent| format!(" — did you mean /{}?", agent.name))
-                .unwrap_or_default();
-            self.say(
-                format!("no specialist called \"{}\"{nearest}", command.name),
-                cx,
-            );
-            return None;
-        }
-        if command.prompt.trim().is_empty() {
-            self.say(format!("say what {} should do", command.name), cx);
-            return None;
-        }
-        Some(subagent::turn(&command.name, &command.prompt, dispatch))
-    }
-
-    fn apply(&mut self, event: TurnEvent, cx: &mut Context<Self>) {
-        match event {
-            TurnEvent::Status(status) => self.status = status,
-            // Recorded by the sidecar as it passes; nothing here needs it, and putting a
-            // uuid in the status line would only push out something a person can read.
-            TurnEvent::Started { .. } => {}
-            TurnEvent::Token(text) => {
-                if let Some(last) = self.transcript.last_mut() {
-                    last.push_body(&text);
-                }
-            }
-            // Activity attaches to the in-flight assistant message, so it sits with
-            // the answer it produced instead of in a panel the user has to correlate.
-            TurnEvent::Step { agent, label } => {
-                if let Some(agent) = &agent {
-                    self.note_provenance(agent);
-                }
-                if let Some(message) = self.transcript.last_mut() {
-                    match agent {
-                        None => message.steps.push(label),
-                        Some(agent) => trace_for(message, &agent).steps.push(label),
-                    }
-                }
-            }
-            // The run is holding a command at the gate. Keep the turn open and show it.
-            TurnEvent::Approval(request) => {
-                let commands = request.actions.len();
-                self.pending_approval = Some(request);
-                // Already decided for this turn: answer without asking again. The command
-                // is still recorded in the trace, so what ran remains reviewable — this
-                // removes the interruption, not the record.
-                if self.approve_rest_of_turn || self.approve_conversation {
-                    self.status = if self.approve_conversation {
-                        "approved (rest of conversation) — running…".into()
-                    } else {
-                        "approved (rest of turn) — running…".into()
-                    };
-                    self.decide(true, cx);
-                    return;
-                }
-                self.status = if commands == 1 {
-                    "waiting for your approval".into()
-                } else {
-                    format!("waiting for your approval ({commands} commands)")
-                };
-                // The composer stays disabled: this turn is still running, it is just
-                // paused on a question for the user.
-            }
-            TurnEvent::SubagentToken { agent, text } => {
-                self.note_provenance(&agent);
-                if let Some(message) = self.transcript.last_mut() {
-                    trace_for(message, &agent).push_text(&text);
-                }
-            }
-            // Each `values` event is a *whole* snapshot, so replace rather than
-            // merge. The spine rides along in the same payload, which keeps the
-            // mission current without another HTTP round trip.
-            TurnEvent::Snapshot(snapshot) => {
-                self.save_reports(&snapshot.reports, cx);
-                if !snapshot.reports.is_empty() {
-                    self.reports = snapshot.reports.clone();
-                }
-                if !snapshot.sources.is_empty() {
-                    self.sources = snapshot.sources.clone();
-                    // Verified as it arrives, not when someone thinks to ask.
-                    self.resolve_sources(cx);
-                }
-                if !snapshot.datasets.is_empty() {
-                    // What the model *chose*, which is a different claim from what the search
-                    // *found*. Kept apart deliberately — §289.
-                    self.recommended_ids = snapshot
-                        .datasets
-                        .iter()
-                        .map(|dataset| bare_persistent_id(&dataset.persistent_id))
-                        .filter(|id| !id.is_empty())
-                        .collect();
-                    self.recommended_datasets = snapshot.datasets.clone();
-                }
-                self.reload_datasets();
-                if !snapshot.documents.is_empty() {
-                    self.documents = snapshot.documents.clone();
-                }
-                if let Some(project) = snapshot.project {
-                    self.project = Some(merge_spine(self.project.as_ref(), project));
-                }
-                if !snapshot.buckets.is_empty() {
-                    self.buckets = snapshot.buckets;
-                }
-                // **Replaced, not merged.** A plan is a whole statement about the current
-                // intention: the model rewrites the list to reorder or drop a step, so keeping
-                // the old items when a shorter list arrives would show work the agent has
-                // abandoned. Guarded on non-empty for the opposite reason — a frame that carries
-                // no `todos` at all is silent about the plan, not a claim there isn't one (§209).
-                if !snapshot.todos.is_empty() {
-                    self.plan = snapshot.todos;
-                }
-                // The conversation this stream belongs to, and so the owner of any worker it
-                // launched. Safe to read here and nowhere else: `apply` only runs mid-turn, and
-                // both `New thread` and opening another conversation refuse while streaming — so
-                // the open thread cannot have moved by the time this line runs.
-                let owner = self.sidecar.thread_id().unwrap_or_default();
-                self.adopt_background_work(
-                    &snapshot.drafts,
-                    snapshot.jobs,
-                    snapshot.tasks,
-                    &owner,
-                    cx,
-                );
-            }
-            TurnEvent::Done => {
-                self.streaming = false;
-                self.finish_turn(cx);
-                self.status = "done".into();
-                if let Some(last) = self.transcript.last() {
-                    if last.body.is_empty() {
-                        self.status = "done — but no assistant text arrived".into();
-                    }
-                }
-            }
-            TurnEvent::Error(message) => {
-                self.streaming = false;
-                self.finish_turn(cx);
-                self.status = "failed".into();
-                // A failure to *start* is a setup problem, not a turn problem, and
-                // "backend did not become healthy within 120 attempts" tells the user
-                // nothing they can act on. Open the diagnosis instead of the log path.
-                if looks_like_a_setup_failure(&message) {
-                    self.error = Some(format!("{message} — see Setup for what is missing"));
-                    self.open_setup(cx);
-                    return;
-                }
-                // Point at the sidecar log: backend-side failures (a missing key,
-                // a bad graph import) surface there, not in the HTTP error.
-                self.error = Some(format!(
-                    "{message} — sidecar log: {}",
-                    self.sidecar.log_path()
-                ));
-            }
-        }
-    }
-
-    /// A turn ended (either way): collapse its activity trace, drop the assistant
-    /// placeholder if nothing at all arrived, and hand the field back to the user.
-    /// Reload the conversation list from the backend.
-    ///
-    /// Cheap, and called whenever a turn ends or a name changes, because a sidebar that
-    /// is only correct at launch is worse than none: it teaches the researcher to distrust
-    /// it, and then they stop looking.
-    /// Ask once, at launch, whether a newer build exists.
-    ///
-    /// **Not on a button.** A button nobody presses is a check that never runs, and the person
-    /// who most needs the answer is the one who does not know to look for it. This is the quiet
-    /// half: it asks, records, and shows the answer where the version already is. Nothing pops up
-    /// and nothing is downloaded — pressing to take an update stays a separate, deliberate act.
-    fn check_for_update(&mut self, cx: &mut Context<Self>) {
-        let mut answer = self.sidecar.check_for_update();
-        cx.spawn(async move |workbench, cx| {
-            let Some(standing) = answer.next().await else {
-                return;
-            };
-            let _ = workbench.update(cx, |workbench, cx| {
-                match &standing {
-                    update::Standing::Behind(release) => tracing::info!(
-                        running = %env!("CARGO_PKG_VERSION"),
-                        published = %release.tag,
-                        "a newer build is published"
-                    ),
-                    // Nothing else to do here; the fetch is started below, once the standing is
-                    // recorded, because `take_update` reads it off `self`.
-                    // Logged at `warn` rather than swallowed: a check that has been silently
-                    // failing for a month looks exactly like an app that is up to date.
-                    update::Standing::Unknown(reason) => {
-                        tracing::warn!(%reason, "could not check for a newer build");
-                    }
-                    other => tracing::info!(standing = ?other, "checked for a newer build"),
-                }
-                // Read off the *answer*, not off the field: taking it from `workbench.update`
-                // reads the previous value, which is `None` on the only check that ever runs — so
-                // the download would never start and nothing would say why.
-                let behind = matches!(standing, update::Standing::Behind(_));
-                workbench.update = Some(standing);
-                // **Downloaded without being asked**, which is what "Restart to Update" requires:
-                // a button offering a restart has to have something staged to restart into. Ten
-                // megabytes, once per published release, on a machine that just fetched a graph.
-                // Nothing is *installed* without a press — that is the part that matters.
-                if behind && matches!(workbench.install, update::Layout::Packaged(_)) {
-                    workbench.take_update(cx);
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-
-    /// The update that is downloaded and ready to install, if there is one.
-    ///
-    /// **One reader, used by both the chip and the press.** They used to ask different questions:
-    /// the chip wanted a staged download on a packaged install, and the press *also* required the
-    /// standing to still be `Behind`. Any state satisfying the first and not the second would draw
-    /// a button that returned without doing anything and without saying why — §259's shape, in the
-    /// one place where the symptom is "I pressed it and nothing happened".
-    fn ready_update(&self) -> Option<(std::path::PathBuf, std::path::PathBuf, String)> {
-        let Some(update::Fetch::Ready(staged, _)) = &self.taking else {
-            return None;
-        };
-        let update::Layout::Packaged(install) = &self.install else {
-            return None;
-        };
-        let Some(update::Standing::Behind(release)) = &self.update else {
-            return None;
-        };
-        Some((install.clone(), staged.clone(), release.tag.clone()))
-    }
-
-    /// Restart into the update that is already downloaded.
-    ///
-    /// The last thing this process does. A helper is spawned that waits for this window to close,
-    /// moves the folders and starts the new build — see `update::swap_script` for why the order is
-    /// what it is. **If the helper cannot even start, the app stays open and says so**, because
-    /// quitting after a failed spawn would look exactly like a successful update that lost the app.
-    fn restart_to_update(&mut self, cx: &mut Context<Self>) {
-        let Some((install, staged, tag)) = self.ready_update() else {
-            // Not reachable through the chip, which asks the same question — kept because a
-            // keyboard path or a stale click could still land here.
-            tracing::warn!("restart was pressed with nothing staged to restart into");
-            return;
-        };
-        let plan = update::Swap::plan(std::process::id(), &install, &staged, &tag);
-        tracing::info!(
-            pid = plan.pid,
-            install = %plan.install.display(),
-            staged = %plan.staged.display(),
-            log = %plan.log.display(),
-            "restarting into a new build"
-        );
-        match update::begin_swap(&plan) {
-            Ok(()) => {
-                // The helper is waiting on this pid, so the last useful act is to stop existing.
-                self.status = "restarting into the new build…".into();
-                cx.notify();
-                cx.quit();
-            }
-            Err(reason) => {
-                tracing::warn!(%reason, "could not start the updater");
-                self.taking = Some(update::Fetch::Failed(reason.clone()));
-                self.error = Some(format!("could not restart to update: {reason}"));
-                cx.notify();
-            }
-        }
-    }
-
-
-    /// Download the published build and stage it beside this one.
-    ///
-    /// Only reachable when the standing is `Behind` **and** the install is a bundle, so the two
-    /// refusals in `update.rs` gate the button rather than being re-argued here.
-    fn take_update(&mut self, cx: &mut Context<Self>) {
-        let Some(update::Standing::Behind(release)) = self.update.clone() else {
-            return;
-        };
-        let update::Layout::Packaged(install) = self.install.clone() else {
-            return;
-        };
-        if matches!(self.taking, Some(update::Fetch::Progress(..))) {
-            return; // already going; a second press must not start a second download
-        }
-        tracing::info!(tag = %release.tag, bytes = release.size, "taking an update");
-        self.taking = Some(update::Fetch::Progress(0, release.size));
-        let mut steps = self.sidecar.take_update(release, install);
-        cx.spawn(async move |workbench, cx| {
-            while let Some(step) = steps.next().await {
-                let done = !matches!(step, update::Fetch::Progress(..));
-                let updated = workbench.update(cx, |workbench, cx| {
-                    match &step {
-                        update::Fetch::Ready(root, integrity) => tracing::info!(
-                            staged = %root.display(),
-                            checked = ?integrity,
-                            "an update is downloaded and verified"
-                        ),
-                        update::Fetch::Failed(reason) => {
-                            tracing::warn!(%reason, "could not take the update");
-                        }
-                        update::Fetch::Progress(..) => {}
-                    }
-                    workbench.taking = Some(step);
-                    cx.notify();
-                });
-                // The window has gone. Stop rather than keep decoding a download nobody waits for.
-                if updated.is_err() || done {
-                    return;
-                }
-            }
-        })
-        .detach();
-        cx.notify();
-    }
-
-    /// Bring the backend up at launch, then show the history it has.
-    fn warm_up(&mut self, cx: &mut Context<Self>) {
-        self.status = "starting the agent…".into();
-        // Alongside the backend rather than after it: the two are unrelated, and an update check
-        // that waited for a graph to build would be a check that never ran on a slow launch.
-        self.check_for_update(cx);
-        let mut ready = self.sidecar.warm_up();
-        cx.spawn(async move |this, cx| {
-            let status = ready.next().await;
-            let Some(status) = status else {
-                return;
-            };
-            // Populate names as soon as the server can answer. Graph construction is unrelated to
-            // `/threads/search`; making the list wait for it would fix the first-click pause by
-            // creating the same pause in the sidebar instead (docs §176).
-            let graph = this.update(cx, |workbench, cx| {
-                workbench.status = "loading research tools…".into();
-                workbench.warming = true;
-                // Remembered, not just announced. Whether this app started the backend decides
-                // whether it is running this app's overlay, and the status line is gone by the
-                // time that matters (docs §80).
-                workbench.backend_start = Some(status);
-                workbench.refresh_conversations(cx);
-                workbench.refresh_project(cx);
-                cx.notify();
-                workbench.sidecar.warm_graph()
-            });
-            let Ok(mut graph) = graph else {
-                return;
-            };
-            let outcome = graph.next().await;
-            let _ = this.update(cx, |workbench, cx| {
-                workbench.warming = false;
-                match outcome {
-                    Some(Ok(())) => workbench.status = status.label().into(),
-                    Some(Err(error)) => {
-                        // Startup remains usable: a dependency may be temporarily unreachable,
-                        // and the first real turn will surface its contextual error. What must not
-                        // happen is the status bar claiming the graph is ready, or waiting forever.
-                        tracing::warn!(%error, "agent graph did not finish warming at startup");
-                        workbench.status = "backend started; research tools are not ready".into();
-                    }
-                    None => {
-                        workbench.status = "backend started; research tools are not ready".into();
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        // Also ask straight away: a backend left running from a previous session answers
-        // immediately, and waiting on the spawn would hide the list for no reason.
-        self.refresh_conversations(cx);
-    }
-
-    /// Ask the backend once per launch whether any background run finished unattended.
-    ///
-    /// Polling a run's route is what makes `routes/artifacts.py` write its charts and metrics into
-    /// the conversation's folder, so this *is* the collection — not a notification about it.
-    fn sweep_finished_jobs(&mut self, cx: &mut Context<Self>) {
-        if self.swept {
-            return;
-        }
-        let mut answer = self.sidecar.sweep_finished_jobs();
-        cx.spawn(async move |this, cx| {
-            if let Some(outcome) = answer.next().await {
-                let _ = this.update(cx, |workbench, cx| {
-                    match outcome {
-                        // Could not ask. Leave `swept` false so the next refresh tries again.
-                        None => {}
-                        Some(collected) => {
-                            workbench.swept = true;
-                            // **Announced once, ever.** "Finished" stays true forever, so the
-                            // sweep re-collects the same completed run on every launch — and
-                            // without this it re-announced it too, every time (§250).
-                            let announced = workspace::announced_runs();
-                            let fresh: Vec<(String, protocol::Job)> = collected
-                                .into_iter()
-                                .filter(|(_, job)| !announced.contains(&job.task_id))
-                                .collect();
-                            if !fresh.is_empty() {
-                                workspace::remember_announced(
-                                    &fresh
-                                        .iter()
-                                        .map(|(_, job)| job.task_id.clone())
-                                        .collect::<Vec<_>>(),
-                                );
-                                // Kept rather than only announced: the status line is a strip at
-                                // the bottom of the window that the next thing to happen
-                                // overwrites, and this is the one message the app has that the
-                                // researcher cannot arrive at any other way (§244).
-                                workbench.collected_runs = fresh;
-                                // Their outputs just landed on disk.
-                                workbench.refresh_project(cx);
-                            }
-                        }
-                    }
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
-    }
-
-    fn refresh_conversations(&mut self, cx: &mut Context<Self>) {
-        // Read from disk rather than from `self.draft`, which is the Settings pane's editing
-        // buffer — the same argument `remember_panels` makes. The migration must be decided by
-        // what is *stored*, because that is what survives to the next launch.
-        let adopt = !settings::Settings::load().adopted_untagged;
-        // **Read here, not in the answer.** Projects are directories on this machine and the
-        // backend has nothing to do with them, but hanging the read off a successful HTTP reply
-        // meant a cold launch — where the first refresh reliably fires before the server is up,
-        // as `list_conversations` itself documents — showed no project headings at all until some
-        // later refresh happened to succeed. An empty project would simply not be there on the
-        // launch after it was created (§167).
-        self.folder_projects = workspace::projects();
-        // **Collected here because this is the call that already runs at launch and keeps
-        // retrying.** A run finishing unattended is not collected by anything else (§243), and the
-        // first attempt reliably loses the race with the starting server — so it is tried again on
-        // each refresh until the search actually answers, then never again this launch.
-        self.sweep_finished_jobs(cx);
-        let mut updates = self.sidecar.list_conversations(adopt);
-        cx.spawn(async move |this, cx| {
-            if let Some(answer) = updates.next().await {
-                let _ = this.update(cx, |workbench, cx| {
-                    workbench.conversations = answer.conversations;
-                    // Again on the answer, because a turn may have created a project folder
-                    // while this request was in flight. Cheap: one `read_dir` of a directory
-                    // holding a handful of entries.
-                    workbench.folder_projects = workspace::projects();
-                    // Only on a real answer. A failed fetch sends nothing, so the list keeps
-                    // saying "loading" rather than claiming the researcher has none — a
-                    // backend that is still booting will answer the next refresh.
-                    workbench.conversations_loaded = true;
-                    if answer.scanned {
-                        workbench.remember_adoption();
-                    }
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
-    }
-
-    /// Record that §90's pre-tag scan has run, so it can never run again.
-    ///
-    /// Deliberately *not* conditional on having adopted anything: an installation with no
-    /// untagged threads is exactly the one that must stop scanning, and it is the one where
-    /// deleting every conversation used to bring the leftovers back (docs §166).
-    fn remember_adoption(&self) {
-        let mut stored = settings::Settings::load();
-        if stored.adopted_untagged {
-            return;
-        }
-        stored.adopted_untagged = true;
-        if let Err(error) = stored.save() {
-            // The scan did run; all that failed is remembering it. Worth a log because the
-            // consequence is a repeat scan, which is the defect this whole field exists for.
-            tracing::warn!(%error, "could not record that the pre-tag scan has run");
-        }
-    }
-
-    /// Reopen a past conversation: switch threads and rebuild the transcript.
-    fn open_conversation(&mut self, thread_id: String, cx: &mut Context<Self>) {
-        if self.streaming {
-            self.status = "can't switch conversations mid-turn".into();
-            return;
-        }
-        if self.sidecar.thread_id().as_deref() == Some(thread_id.as_str()) {
-            return;
-        }
-        // Clear what belongs to the conversation being left. The spine is
-        // thread-independent, so it stays — same rule as `New thread`.
-        self.transcript.clear();
-        self.reset_transcript_list();
-        // Addressed to a specialist belongs to the conversation being left, same as the tasks
-        // and jobs below — the one being opened gets a coordinator turn until asked otherwise.
-        self.current_subagent = None;
-        // Read back from the thread being opened, below. Cleared first so a failure to load
-        // shows the new conversation as having no record rather than the previous one's.
-        self.provenance = provenance::Record::default();
-        self.text_selection.clear_document();
-        self.buckets.clear();
-        self.tasks.clear();
-        self.jobs.clear();
-        self.plan.clear();
-        // The record of who wrote what belongs to the conversation being left. Cleared with the
-        // stamp, or the next frame would see an unchanged `None` and keep the old map.
-        self.authorship.clear();
-        self.authorship_stamp = None;
-        self.error = None;
-        self.approve_conversation = false;
-        self.approve_tasks.clear();
-        self.status = "opening…".into();
-        self.opening = true;
-
-        // Adopt the project it is filed under *before* the fetch, so `thread_workspace` — which
-        // the figures and the provenance record are read from — is looking in the right folder
-        // by the time they land.
-        let filed = self
-            .conversations
-            .iter()
-            .find(|conversation| conversation.thread_id == thread_id)
-            .and_then(|conversation| conversation.project.clone());
-        self.sidecar.set_project(filed);
-        self.project = None;
-        // Kept before the id is handed to the sidecar: any worker in this conversation's state
-        // belongs to *this* conversation, and that is the fact `decide_task` needs later.
-        let owner = thread_id.clone();
-        let mut messages = self.sidecar.open_conversation(thread_id);
-        cx.spawn(async move |this, cx| {
-            if let Some((messages, snapshot)) = messages.next().await {
-                let _ = this.update(cx, |workbench, cx| {
-                    // The user can leave — a new thread, a different conversation — while this
-                    // fetch is still in flight. Landing it anyway would push a stranger's
-                    // messages into whatever is open by the time the response arrives.
-                    if workbench.sidecar.thread_id().as_deref() != Some(owner.as_str()) {
-                        return;
-                    }
-                    for (role, body) in messages {
-                        // Roles come back as the two the transcript renders; anything
-                        // else was filtered out server-side by `decode_stored_message`.
-                        let role = if role == "you" { "you" } else { "mini-me" };
-                        workbench.transcript.push(Message::new(role, body));
-                    }
-                    // Datasets likewise: the search results are a file in this conversation's
-                    // folder, so reopening it shows what the searches found rather than nothing
-                    // until the next turn happens to answer.
-                    workbench.recommended_ids.clear();
-                    workbench.recommended_datasets.clear();
-                    // A tick is about *these* rows. Carrying it across would offer to fetch a
-                    // dataset the researcher chose while reading a different search.
-                    workbench.dataset_picks.clear();
-                    workbench.reload_datasets();
-                    // Figures this conversation produced are still on disk, so they can
-                    // be shown again — history the transcript alone cannot carry.
-                    workbench.collect_plots();
-                    // Same argument, for the same reason: the record of what was consulted is
-                    // on disk because the stream it came from is over (docs §73).
-                    if let Some(dir) = workbench.thread_workspace() {
-                        workbench.provenance = provenance::load(&dir);
-                    }
-                    // **And pick up any long run still going.** A theorizer or DataVoyager task
-                    // lives on Asta's own service, keyed by a task id the thread's artifacts
-                    // carry — so closing the window never stopped the work, only our watching of
-                    // it. The state we just fetched for the messages already holds those ids,
-                    // and `track_job` re-arms the poll that persists the result (docs §102).
-                    if let Some(snapshot) = snapshot {
-                        if !snapshot.buckets.is_empty() {
-                            workbench.buckets = snapshot.buckets;
-                        }
-                        // **The reference list survives a reload too.** Restoring `buckets` and
-                        // not `sources` left the panel with the plain bucket rendering — a name,
-                        // a count and `+13 more` — while everything §185 to §195 built sat on
-                        // `self.sources`: the unverified count, the provenance note, the link,
-                        // the row you can press. Reported as *"when I reload the conversation I
-                        // cannot see the interaction of sources"*, and the two lists looked
-                        // similar enough that the difference read as the feature being broken
-                        // rather than as a second renderer (docs §196).
-                        if !snapshot.sources.is_empty() {
-                            workbench.sources = snapshot.sources;
-                            // Checked on reopen as on arrival, or a conversation returned to is
-                            // a conversation whose citations are all silently unverified.
-                            workbench.resolve_sources(cx);
-                        }
-                        // **Not `workbench.datasets`.** §290 pointed the panel at the search's
-                        // own file; this line went on overwriting it with the model's retyped
-                        // list every time a conversation was reopened, so the live path and the
-                        // reopen path rendered different things and only one of them came from
-                        // Dataverse. What the model chose is a mark and a sort, and nothing else.
-                        if !snapshot.datasets.is_empty() {
-                            workbench.recommended_ids = snapshot
-                                .datasets
-                                .iter()
-                                .map(|dataset| bare_persistent_id(&dataset.persistent_id))
-                                .filter(|id| !id.is_empty())
-                                .collect();
-                            workbench.recommended_datasets = snapshot.datasets;
-                            workbench.reload_datasets();
-                        }
-                        if !snapshot.documents.is_empty() {
-                            workbench.documents = snapshot.documents;
-                        }
-                        if !snapshot.reports.is_empty() {
-                            workbench.reports = snapshot.reports;
-                        }
-                        // Restored with them, and for §196's reason: a conversation reopened
-                        // mid-plan showing no plan reads as the feature being broken.
-                        if !snapshot.todos.is_empty() {
-                            workbench.plan = snapshot.todos;
-                        }
-                        if let Some(project) = snapshot.project {
-                            workbench.project =
-                                Some(merge_spine(workbench.project.as_ref(), project));
-                        }
-                        // The same call the streaming path makes, and the point of it being a
-                        // call: this site used to handle jobs and tasks and quietly ignore
-                        // `drafts` (§259).
-                        workbench.adopt_background_work(
-                            &snapshot.drafts,
-                            snapshot.jobs,
-                            snapshot.tasks,
-                            &owner,
-                            cx,
-                        );
-                    }
-                    workbench.opening = false;
-                    workbench.status = "done".into();
-                    workbench.refresh_project(cx);
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
-        cx.notify();
-    }
-
-    /// Open the centred warning for a conversation or a whole project.
-    fn request_delete(
-        &mut self,
-        target: DeleteTarget,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.deleting.is_some() {
-            return;
-        }
-        let current_is_targeted = self
-            .sidecar
-            .thread_id()
-            .is_some_and(|thread_id| target.contains_thread(&thread_id));
-        if self.streaming && current_is_targeted {
-            self.say(
-                format!(
-                    "can't delete this {} while its turn is running",
-                    target.noun()
-                ),
-                cx,
-            );
-            return;
-        }
-        // **A warning now, not a refusal.** A background worker can still be writing beneath the
-        // conversation directory after the foreground turn ends, and deleting that tree underneath
-        // it can lose the remainder of its work — so the modal says so, in the sentence that asks.
-        //
-        // It used to refuse outright, and that was worse than the thing it prevented: a task that
-        // never reaches a terminal state locks the conversation **forever**. It happened while the
-        // app was being shown to a colleague — a paper search that had said "running" for over an
-        // hour, and no way to remove the conversation at all. A guard with no way past it is a
-        // guard that eventually holds the wrong thing (§278).
-        self.delete_interrupts_work =
-            current_is_targeted && self.tasks.iter().any(|task| !task.is_finished());
-        self.confirming_delete = Some(target);
-        window.focus(&self.delete_focus);
-        cx.notify();
-    }
-
-    /// Carry out exactly what the modal named: durable threads first, managed files second.
-    fn confirm_delete(&mut self, cx: &mut Context<Self>) {
-        let Some(target) = self.confirming_delete.take() else {
-            return;
-        };
-        if self.deleting.is_some() {
-            return;
-        }
-        let noun = target.noun();
-        self.status = format!("deleting {noun}…");
-        self.deleting = Some(target.clone());
-        let mut deleted = self
-            .sidecar
-            .delete_conversations(target.thread_ids(), target.files());
-        cx.spawn(async move |this, cx| {
-            let result = deleted.next().await;
-            let _ = this.update(cx, |workbench, cx| {
-                workbench.deleting = None;
-                match resolve_delete(target.noun(), result) {
-                    DeleteResolution::Remove { files_error } => {
-                        let removed = target.thread_ids();
-                        workbench
-                            .conversations
-                            .retain(|conversation| !removed.contains(&conversation.thread_id));
-                        // The folder went with them, so the heading must too. Re-read rather
-                        // than removing by name: deleting a conversation can empty a project and
-                        // take its folder as well (§155), and that is the same fact (§167).
-                        workbench.folder_projects = workspace::projects();
-                        // If it was the open one, leave a genuinely ungrouped empty slate rather
-                        // than a transcript and project whose thread no longer exists (§154).
-                        let open_was_removed = workbench
-                            .sidecar
-                            .thread_id()
-                            .is_some_and(|thread_id| target.contains_thread(&thread_id));
-                        let active_project_was_removed = workbench
-                            .sidecar
-                            .project()
-                            .is_some_and(|name| !project_exists(&workbench.conversations, &name));
-                        if open_was_removed {
-                            workbench.sidecar.reset_thread();
-                            workbench.transcript.clear();
-                            workbench.provenance = provenance::Record::default();
-                            workbench
-                                .text_selection
-                                .update(|selection| selection.clear());
-                            workbench.buckets.clear();
-                            workbench.tasks.clear();
-                            workbench.jobs.clear();
-                        }
-                        if open_was_removed || active_project_was_removed {
-                            // Also covers an empty "new conversation here" slate whose thread has
-                            // not been created yet. Leaving only its project key alive would make
-                            // the next question recreate the project just deleted (§155).
-                            workbench.sidecar.set_project(None);
-                            workbench.project = None;
-                            workbench.refresh_project(cx);
-                        }
-                        match files_error {
-                            None => workbench.say(format!("{} deleted", target.noun()), cx),
-                            Some(error) => {
-                                // The irreversible server half succeeded, so restoring the row
-                                // would be another lie. Keep the recoverable folder and say where
-                                // synchronization stopped instead (§155).
-                                workbench.error = Some(format!(
-                                    "The {} was deleted, but its saved folder remains: {error}",
-                                    target.noun()
-                                ));
-                                workbench.say(
-                                    format!(
-                                        "{} deleted; its saved folder could not be removed",
-                                        target.noun()
-                                    ),
-                                    cx,
-                                );
-                            }
-                        }
-                    }
-                    DeleteResolution::Keep(error) => {
-                        // Keep the row because the backend kept the conversation. Claiming
-                        // success here is the precise defect that only restart exposed. A project
-                        // batch can have succeeded partly before one request failed, so refresh
-                        // instead of assuming our captured list is still authoritative (§155).
-                        workbench.error = Some(error);
-                        workbench.status = format!("{} was not fully deleted", target.noun());
-                        workbench.refresh_conversations(cx);
-                    }
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-        cx.notify();
-    }
-
-    /// Begin renaming a conversation, with its current name in the field.
-    fn start_rename(&mut self, thread_id: String, window: &mut Window, cx: &mut Context<Self>) {
-        let current = self
-            .conversations
-            .iter()
-            .find(|conversation| conversation.thread_id == thread_id)
-            .map(|conversation| conversation.title.clone())
-            .unwrap_or_default();
-        self.renaming = Some(thread_id);
-        self.rename_editor.update(cx, |editor, cx| {
-            editor.set_text(&current, cx);
-        });
-        // Focus the field, or the researcher clicks "rename" and types into the composer.
-        self.rename_editor.read(cx).focus_handle(cx).focus(window);
-        cx.notify();
-    }
-
-    /// Commit the new name — locally first, so the list never lags the typing.
-    fn commit_rename(&mut self, title: String, cx: &mut Context<Self>) {
-        let Some(thread_id) = self.renaming.take() else {
-            return;
-        };
-        let title = title.trim().to_string();
-        if !title.is_empty() {
-            if let Some(conversation) = self
-                .conversations
-                .iter_mut()
-                .find(|conversation| conversation.thread_id == thread_id)
-            {
-                conversation.title = title.clone();
-            }
-            self.sidecar.rename_conversation(thread_id, title);
-        }
-        self.restore_focus = true;
-        cx.notify();
-    }
-
-    /// Re-read who wrote what, but only when the record itself has moved.
-    ///
-    /// The manifest is append-only and grows by a line per file, so parsing it on every frame of
-    /// a streaming answer would be real work for an answer that changes a few times a turn. Size
-    /// **and** mtime, because an append that lands inside one filesystem timestamp tick still
-    /// changes the length.
-    fn refresh_authorship(&mut self) {
-        let Some(dir) = self.thread_workspace() else {
-            self.authorship.clear();
-            self.authorship_stamp = None;
-            return;
-        };
-        let stamp = std::fs::metadata(dir.join(workspace::AUTHORSHIP))
-            .ok()
-            .and_then(|meta| meta.modified().ok().map(|at| (at, meta.len())));
-        if stamp == self.authorship_stamp {
-            return;
-        }
-        self.authorship_stamp = stamp;
-        self.authorship = workspace::authorship(&dir);
-    }
-
-    /// Begin editing the mission, with the current one in the field.
-    fn start_mission_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let current = self
-            .project
-            .as_ref()
-            .map(|project| project.mission.clone())
-            .unwrap_or_default();
-        self.editing_mission = true;
-        self.mission_editor.update(cx, |editor, cx| {
-            editor.set_text(&current, cx);
-        });
-        // Same reason as `start_rename`: without this the researcher presses the mission and
-        // types into the composer at the bottom of the window.
-        self.mission_editor.read(cx).focus_handle(cx).focus(window);
-        cx.notify();
-    }
-
-    /// Save a hand-edited mission, and show what the store actually kept.
-    ///
-    /// **Not optimistic**, unlike renaming a conversation. A name is ours and lives on the thread;
-    /// a mission is the backend's, which caps it at 500 characters and collapses whitespace before
-    /// storing it — and it is read back into the coordinator's system prompt on the next turn
-    /// (`backend/middleware/project.py`). Showing the typed text and letting the stored text
-    /// differ would mean the panel disagreed with what the agent is actually working to.
-    fn commit_mission(&mut self, mission: String, cx: &mut Context<Self>) {
-        if !self.editing_mission {
-            return;
-        }
-        self.editing_mission = false;
-        self.restore_focus = true;
-        let mission = mission.trim().to_string();
-        let mut saved = self.sidecar.set_mission(mission);
-        self.status = "saving the mission…".into();
-        cx.notify();
-        cx.spawn(async move |this, cx| {
-            if let Some(outcome) = saved.next().await {
-                let _ = this.update(cx, |workbench, cx| {
-                    match outcome {
-                        // Only the spine's own fields: `PATCH /project` cannot return live
-                        // suggestions — its docstring says so, because they are derived from a
-                        // running thread's artifacts — and taking its empty list wholesale would
-                        // clear the advice on screen as a side effect of an unrelated edit.
-                        Ok(project) => {
-                            workbench.project =
-                                Some(merge_spine(workbench.project.as_ref(), project));
-                            workbench.status = "mission saved".into();
-                        }
-                        Err(error) => {
-                            // Said out loud, and the panel keeps the mission the backend still
-                            // holds. A silent failure here is the worst kind: the researcher
-                            // believes the agent has been redirected and it has not.
-                            workbench.status = format!("could not save the mission: {error}");
-                        }
-                    }
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
-    }
-
-    /// Note that a specialist produced something, now.
-    ///
-    /// Called from every frame that carries an [`AgentRef`], which is what makes the interval an
-    /// *arrival* interval — narrower than the execution it stands for, and honest about it
-    /// (docs §74). Cheap by construction: a scan of one turn's invocations, which is single
-    /// digits even on a heavily delegated question.
-    fn note_provenance(&mut self, agent: &AgentRef) {
-        self.provenance
-            .observe(&agent.ns, &agent.name, provenance::now_ms());
-    }
-
-    /// Put every report this turn has produced on disk, beside the figures and the data.
-    ///
-    /// **Because otherwise there is no report.** A report artifact is `{title, markdown}` living
-    /// in the run's state — unlike a figure, which a plotting script writes to the workspace, or a
-    /// dataset, which is a file by nature. So the agent would say "the report is in the Outputs
-    /// panel", which was true, and the researcher would open the thread's folder and find seven
-    /// files, none of them the report (docs §89).
-    ///
-    /// Called on every `values` snapshot, which is often; [`workspace::save_report`] skips a write
-    /// whose content is already there, so the cost is a read per report per frame and the file's
-    /// timestamp stays honest.
-    fn save_reports(&mut self, reports: &[protocol::Report], cx: &mut Context<Self>) {
-        if reports.is_empty() {
-            return;
-        }
-        let Some(dir) = self.thread_workspace() else {
-            return;
-        };
-        for report in reports {
-            match workspace::save_report(&dir, &report.title, &report.markdown) {
-                Ok(path) => {
-                    if self.saved_reports.insert(path.clone()) {
-                        // Said once per report, because a file appearing silently in a folder is
-                        // not something anyone notices — and not finding it was the whole
-                        // complaint.
-                        let name = path
-                            .file_name()
-                            .map(|name| name.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        self.say(format!("saved {name}"), cx);
-                    }
-                }
-                Err(error) => tracing::warn!(%error, "could not save a report"),
-            }
-        }
-    }
-
-    /// Typeset the newest report into this conversation's folder.
-    ///
-    /// The markdown is already on disk beside it — that is what `save_reports` fixed — so this is
-    /// the second half of the same answer: *"how do we render it as a PDF?"* Through the backend,
-    /// which has done it since before this app existed (`backend/routes/rendering.py`) and does it
-    /// with the figures resolved and the citations laid out.
-    fn render_report(&mut self, cx: &mut Context<Self>) {
-        let Some(report) = self.reports.last().cloned() else {
-            self.say("no report in this conversation yet", cx);
-            return;
-        };
-        let Some(dir) = self.thread_workspace() else {
-            self.say("no conversation folder yet", cx);
-            return;
-        };
-        let into = dir.join(workspace::report_filename(&report.title));
-        self.say(format!("rendering {}…", report.title), cx);
-        let mut rendered = self.sidecar.render_report(
-            report.title.clone(),
-            report.markdown.clone(),
-            // Whole. This used to map each source down to its citation, under a comment claiming
-            // the template took a list of strings — it takes a list of objects, and the mismatch
-            // was a 502 on every report that had a source to cite (§141). The `link` it now
-            // carries is the one the backend supplied, so the bibliography's DOIs resolve.
-            self.sources.clone(),
-            self.used_asta(),
-            into,
-        );
-        cx.spawn(async move |this, cx| {
-            if let Some(result) = rendered.next().await {
-                let _ = this.update(cx, |workbench, cx| {
-                    match result {
-                        Ok(path) => {
-                            let name = path
-                                .file_name()
-                                .map(|name| name.to_string_lossy().into_owned())
-                                .unwrap_or_default();
-                            workbench.say(format!("saved {name}"), cx);
-                            // Opened, because a PDF is made to be looked at and the folder is
-                            // one more step between the researcher and the thing they asked for.
-                            if let Err(error) = workspace::open(&path) {
-                                tracing::warn!(%error, "could not open the rendered report");
-                            }
-                        }
-                        // Surfaced whole: a Typst compile fails for reasons that are in the
-                        // message, and "could not render" alone would waste the only useful part.
-                        Err(error) => workbench.error = Some(format!("{error:#}")),
-                    }
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
-    }
-
-    /// Persist this conversation's record, if there is a conversation to persist it under.
-    ///
-    /// A failure is reported in the status line rather than swallowed. This is the researcher's
-    /// record of their own enquiry, and a provenance file that silently stopped being written
-    /// would be discovered weeks later, as a gap — which is precisely the failure §81 spent four
-    /// attempts on. It does not interrupt the turn, which has already succeeded.
-    fn save_provenance(&mut self) {
-        let Some(dir) = self.thread_workspace() else {
-            return;
-        };
-        if self.provenance.is_empty() {
-            return;
-        }
-        if let Err(error) = provenance::save(&dir, &self.provenance) {
-            tracing::warn!(%error, "could not write the provenance record");
-            self.error = Some(format!(
-                "could not save this conversation's provenance: {error}"
-            ));
-        }
-    }
-
-    /// The thread's own output directory, or `None` before the first turn creates one.
-    fn thread_workspace(&self) -> Option<std::path::PathBuf> {
-        let project = self.sidecar.project();
-        self.sidecar
-            .thread_id()
-            .map(|thread_id| workspace::thread_dir_in(project.as_deref(), &thread_id))
-    }
-
-    /// Attach any output not already on screen to the newest answer.
-    ///
-    /// A diff rather than a report, because nothing reports it: a figure is written by a
-    /// plotting script inside `execute`, which registers no artifact (docs §42), and so is the
-    /// cleaned CSV beside it.
-    ///
-    /// Diffed against **what the transcript already shows**, not against a snapshot taken
-    /// when the turn began. A background worker finishes on its own schedule — often
-    /// between turns, sometimes minutes after the turn that started it — and a
-    /// start-of-turn snapshot simply missed those (docs §43). This way the call is safe to
-    /// make from anywhere, as often as we like.
-    fn collect_plots(&mut self) {
-        let shown: std::collections::HashSet<_> = self
-            .transcript
-            .iter()
-            .flat_map(|message| message.outputs.iter().map(|output| output.path.clone()))
-            .collect();
-        let mut produced: Vec<workspace::Output> = self
-            .thread_workspace()
-            .map(|dir| workspace::outputs(&dir))
-            .unwrap_or_default()
-            .into_iter()
-            .flat_map(|(_, items)| items)
-            .filter(|output| !shown.contains(&output.path))
-            .collect();
-        // Oldest first, so a turn's files read in the order they were written — which for an
-        // analysis script is the order the work went in. Sorted on the stamp rather than by
-        // reversing what `outputs` returned: that is grouped by kind *and then* newest-first, so
-        // reversing it would have put every figure after every stray file rather than putting
-        // anything in chronological order.
-        produced.sort_by_key(|output| output.modified);
-        if produced.is_empty() {
-            return;
-        }
-        if let Some(message) = self
-            .transcript
-            .iter_mut()
-            .rev()
-            .find(|message| message.role == "mini-me")
-        {
-            message.outputs.extend(produced);
-        }
-    }
-
-    /// Re-read files after a writer has reported completion and evict any image decode cached
-    /// while that writer still had the file open.
-    ///
-    /// The Outputs panel scans on every paint, which made a just-created PNG visible *before* it
-    /// was necessarily complete. GPUI correctly cached that first decode failure by path, but a
-    /// later paint asked for the same path and received the same failure forever; restarting the
-    /// application was the only thing that cleared it. Two bounded follow-up passes cover the
-    /// Windows/WSL filesystem hand-off without turning the whole workspace into a permanent
-    /// polling loop (docs §158).
-    /// Compare what each answer *said* it wrote against what the folder holds.
-    ///
-    /// **The claim was never checked against the data.** An answer would list ten filenames and
-    /// the Outputs panel would show none of them; twice a turn reported plots saved after the
-    /// command that would have written them failed (§42). The prompt forbids inventing charts,
-    /// which is a rule with nothing behind it — this is the something.
-    ///
-    /// Recomputed over **every** assistant message, not just the last, and re-run as outputs
-    /// settle. The workspace only grows, so a name that was missing when the turn ended and is
-    /// present two seconds later stops being flagged on its own. That self-correction is the
-    /// reason this is cheap to be wrong about in one direction and not the other.
-    ///
-    /// Matched on basename: an answer may write `outputs/plots/a.png` for a file the workspace
-    /// holds at another depth, and the question is whether the file exists — not whether the
-    /// model recited its path correctly.
-    fn check_file_claims(&mut self) -> bool {
-        let present: std::collections::HashSet<String> = self
-            .thread_workspace()
-            .map(|dir| workspace::outputs(&dir))
-            .unwrap_or_default()
-            .into_iter()
-            .flat_map(|(_kind, items)| items)
-            .filter_map(|output| {
-                std::path::Path::new(&output.name)
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .map(|name| name.to_ascii_lowercase())
-            })
-            .collect();
-
-        // **A name the researcher introduced is not a claim the agent made.** Dropped files are
-        // read where they lie rather than copied in (§13), so an answer discussing `kiwi.csv`
-        // from the desktop would otherwise be flagged for not holding a file that was never
-        // supposed to be here.
-        let from_researcher: std::collections::HashSet<String> = self
-            .transcript
-            .iter()
-            .filter(|message| message.role == "you")
-            .flat_map(|message| named_files(&message.body))
-            .map(|name| name.to_ascii_lowercase())
-            .collect();
-
-        // **A file a run has not finished writing is not a file that is missing.** DataVoyager and
-        // the theorizer submit and return immediately; their outputs land at
-        // `analysis/<task_id>.md` when the run reaches a terminal state, twenty to forty minutes
-        // later. So the answer that says *"the results will appear in the Analysis panel when the
-        // run completes"* was flagged for not holding a file it had just explained was forthcoming
-        // — the one shape of false alarm this note cannot afford, since §175's whole argument is
-        // that it reports a check rather than a verdict (docs §240).
-        //
-        // Matched on the task id, which is what the filename is built from, and only while the job
-        // is unfinished: once it completes the file must be there, and if it is not, that is worth
-        // exactly the warning this note gives.
-        let awaited: Vec<String> = self
-            .jobs
-            .iter()
-            .filter(|job| !job.is_finished())
-            .map(|job| job.task_id.to_ascii_lowercase())
-            .filter(|id| !id.is_empty())
-            .collect();
-
-        let mut changed = false;
-        for index in 0..self.transcript.len() {
-            if self.transcript[index].role == "you" {
-                continue;
-            }
-            let missing: Vec<String> = named_files(&self.transcript[index].body)
-                .into_iter()
-                .filter(|name| {
-                    let name = name.to_ascii_lowercase();
-                    !present.contains(&name)
-                        && !from_researcher.contains(&name)
-                        && !awaited.iter().any(|id| name.contains(id.as_str()))
-                })
-                .collect();
-            if self.transcript[index].unverified != missing {
-                self.transcript[index].unverified = missing;
-                changed = true;
-            }
-        }
-
-        // **The offer moves with the note, and exists without one.** Refreshed here rather than
-        // at render because both inputs are already in hand: the per-message `unverified` lists
-        // were just recomputed above, and the ledger read is the same kind of cost as the
-        // workspace walk this function opens with.
-        self.stray = files_left_outside(&self.thread_commands());
-        let placed = place_recovery_offer(
-            &self.stray,
-            &self
-                .transcript
-                .iter()
-                .map(|message| (message.role == "you", message.unverified.is_empty()))
-                .collect::<Vec<_>>(),
-        );
-        if self.recovery_on != placed {
-            self.recovery_on = placed;
-            changed = true;
-        }
-        changed
-    }
-
-    fn settle_outputs(&mut self, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            for delay in [250, 1_000] {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(delay))
-                    .await;
-                if this
-                    .update(cx, |workbench, cx| {
-                        workbench.collect_plots();
-                        if workbench.check_file_claims() {
-                            // The note changes a row's height, and a virtualized list caches
-                            // heights until told otherwise (§156).
-                            workbench.invalidate_all_transcript_messages();
-                        }
-                        let figures: Vec<std::path::PathBuf> = workbench
-                            .thread_workspace()
-                            .map(|dir| workspace::outputs(&dir))
-                            .unwrap_or_default()
-                            .into_iter()
-                            .flat_map(|(_, items)| items)
-                            .filter(|output| output.kind == workspace::Kind::Figure)
-                            .map(|output| output.path)
-                            .collect();
-                        for path in figures {
-                            gpui::ImageSource::from(path).remove_asset(cx);
-                        }
-                        cx.notify();
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .detach();
-    }
-
-    fn finish_turn(&mut self, cx: &mut Context<Self>) {
-        self.collect_plots();
-        self.check_file_claims();
-        self.settle_outputs(cx);
-        // Written here, and only here, for the same reason the title is: the thread id does not
-        // exist until the turn has run, so there is no directory to write into before this point.
-        // A turn stopped or failed still gets recorded — what was consulted before it stopped is
-        // part of the enquiry, and §63 already settled that a cut-off turn is worth keeping.
-        self.save_provenance();
-        // The thread id does not exist until the turn has run, which is why the title
-        // waits until here rather than being set when the prompt was typed.
-        if let (Some(title), Some(thread_id)) =
-            (self.pending_title.take(), self.sidecar.thread_id())
-        {
-            self.sidecar.rename_conversation(thread_id, title);
-        }
-        // Idempotent confirmation on the UI side; the model-facing copy happened before streaming.
-        self.adopt_pending(cx);
-        self.refresh_conversations(cx);
-        self.pending_approval = None;
-        // Blanket approval expires with the turn it was given for. Carrying it into the
-        // next question would turn a bounded decision into a permanent one, which is
-        // exactly what the button is worded to avoid.
-        self.approve_rest_of_turn = false;
-        // While a turn runs the trace is the only sign of progress; once the answer
-        // is there, the answer is the point.
-        if let Some(message) = self.transcript.last_mut() {
-            for trace in &mut message.agents {
-                trace.expanded = false;
-            }
-            message.steps_expanded = false;
-        }
-        if self
-            .transcript
-            .last()
-            .is_some_and(|message| message.role == "mini-me" && message.is_silent())
-        {
-            self.transcript.pop();
-        }
-        self.invalidate_all_transcript_messages();
-        self.composer
-            .update(cx, |composer, cx| composer.set_disabled(false, cx));
-        // A turn can change the spine — the mission is derived from the first
-        // question, and completed/pending shift as work lands.
-        self.refresh_project(cx);
-    }
-
-
-    /// Look for themes in Zed's gallery.
-    fn search_gallery(&mut self, query: String, cx: &mut Context<Self>) {
-        if query.trim().is_empty() {
-            return;
-        }
-        self.gallery_note = "searching…".into();
-        let mut results = self.sidecar.search_themes(query);
-        cx.spawn(async move |this, cx| {
-            if let Some(outcome) = results.next().await {
-                let _ = this.update(cx, |workbench, cx| {
-                    match outcome {
-                        Ok(found) => {
-                            workbench.gallery_note = if found.is_empty() {
-                                "no themes matched".into()
-                            } else {
-                                format!("{} themes", found.len())
-                            };
-                            workbench.gallery_results = found;
-                        }
-                        // Most likely a proxy or no network, which is a normal state on a
-                        // work laptop and not a reason for anything to look broken.
-                        Err(error) => workbench.gallery_note = error,
-                    }
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
-        cx.notify();
-    }
-
-    /// Download one, then show it in the list above.
-    fn install_theme(&mut self, id: String, cx: &mut Context<Self>) {
-        self.gallery_note = format!("installing {id}…");
-        let mut done = self.sidecar.install_theme(id);
-        cx.spawn(async move |this, cx| {
-            if let Some(outcome) = done.next().await {
-                let _ = this.update(cx, |workbench, cx| {
-                    workbench.gallery_note = match outcome {
-                        Ok(names) => format!("installed {} palettes", names.len()),
-                        Err(error) => error,
-                    };
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
-        cx.notify();
-    }
-
-    /// Remove the JSON file behind an installed palette and keep the live theme valid.
-    ///
-    /// One Zed file can carry a whole family, so the picker removes the file rather than
-    /// pretending one palette inside it is independently installed. If the file supplied the
-    /// current palette, a built-in with the same name is revealed and reapplied; if no such name
-    /// remains, both the draft and the trigger move to the default. Leaving the deleted name in
-    /// either place would make Settings display a choice the next launch cannot load (docs §181).
-    fn uninstall_theme(&mut self, path: PathBuf, name: String, cx: &mut Context<Self>) {
-        let removed = settings::available_theme_entries()
-            .iter()
-            .filter(|entry| entry.source.as_deref() == Some(path.as_path()))
-            .count();
-
-        match settings::uninstall_theme_file(&path) {
-            Ok(()) => {
-                let survivors = settings::available_themes();
-                if theme_after_removal(&self.applied_theme, &survivors).is_some() {
-                    self.applied_theme = theme::DEFAULT_NAME.to_string();
-                    self.draft.theme = theme::DEFAULT_NAME.to_string();
-                }
-                // Also matters when the removed file overrode a built-in: the name remains, but
-                // its palette has changed back to the bundled one and the next frame must too.
-                settings::apply_theme(&self.draft);
-
-                // **And `settings.toml` too, now rather than on Save.** Everything else in this
-                // pane is a draft, and dismissing it reloads the file on the stated grounds that
-                // *"an unsaved palette was a look, not a change"*. Deleting a file is not a look.
-                // Leaving the removed name on disk meant Esc restored a palette whose JSON was
-                // gone: the dropdown read `Catppuccin Mocha` over a window painted in the
-                // default, and no restart cleared it.
-                //
-                // Checked against the stored name rather than the live one — they differ the
-                // moment somebody previews a theme before removing another — and written through
-                // a fresh load rather than by saving `self.draft`, which may be holding model or
-                // key edits they have not chosen to keep.
-                let mut stored = settings::Settings::load();
-                if let Some(replacement) = theme_after_removal(&stored.theme, &survivors) {
-                    stored.theme = replacement;
-                    if let Err(error) = stored.save() {
-                        tracing::warn!(%error, "could not write the removed theme out of settings");
-                    }
-                }
-                self.gallery_note = if removed > 1 {
-                    format!("removed {removed} palettes from the installed family")
-                } else {
-                    format!("removed {name}")
-                };
-            }
-            Err(error) => self.gallery_note = format!("could not remove {name}: {error:#}"),
-        }
-        cx.notify();
-    }
-
-
-
-    /// Put text into one of the Settings fields.
-    fn set_field(&mut self, field: Field, text: &str, cx: &mut Context<Self>) {
-        let Some((_, composer)) = self.fields.iter().find(|(name, _)| *name == field) else {
-            return;
-        };
-        let composer = composer.clone();
-        let text = text.to_string();
-        composer.update(cx, |composer, cx| composer.set_text(text, cx));
-    }
-
-    /// What a Settings field currently holds, falling back when it is empty.
-    fn field_text_or(&self, field: Field, fallback: &str, cx: &App) -> String {
-        let text = self
-            .fields
-            .iter()
-            .find(|(name, _)| *name == field)
-            .map(|(_, composer)| composer.read(cx).text().to_string())
-            .unwrap_or_default();
-        if text.trim().is_empty() {
-            fallback.to_string()
-        } else {
-            text
-        }
-    }
-
-
-
-    /// File the open conversation under a project, moving its folder to match.
-    ///
-    /// **The folder moves first, and a failure stops there.** If the metadata were written first
-    /// and the move then failed, the app would believe the conversation lives somewhere its files
-    /// are not — which is the §89 shape again, and worse here because it would look like the
-    /// files had been deleted.
-    fn file_in_project(&mut self, project: Option<String>, cx: &mut Context<Self>) {
-        self.open_picker = None;
-        self.project_query
-            .update(cx, |query, cx| query.set_text("", cx));
-        let Some(thread_id) = self.sidecar.thread_id() else {
-            return;
-        };
-        if self.streaming {
-            self.say(
-                "can't move a conversation mid-turn — its folder is in use",
-                cx,
-            );
-            return;
-        }
-        let from = self.sidecar.project();
-        if from == project {
-            return;
-        }
-        if let Err(error) = workspace::move_thread(from.as_deref(), project.as_deref(), &thread_id)
-        {
-            self.error = Some(format!("{error:#}"));
-            cx.notify();
-            return;
-        }
-        self.sidecar.set_project(project.clone());
-        self.say(
-            match &project {
-                Some(name) => format!("filed under {name}"),
-                None => "filed under Ungrouped Conversations".to_string(),
-            },
-            cx,
-        );
-        self.sidecar.set_thread_project(thread_id, project);
-        // The spine belongs to the project now, so moving between them changes which one the
-        // panel shows. Cleared first: a stale mission above a new project's empty list reads as
-        // that project having inherited the old one's work (docs §109).
-        self.project = None;
-        self.refresh_project(cx);
-        self.refresh_conversations(cx);
-    }
-
-    /// Start a fresh conversation in a named project.
-    ///
-    /// The `+` beside a project heading. Same as `New thread` but without the step of starting
-    /// somewhere else and filing afterwards — which is a folder move for something that had not
-    /// needed to be anywhere yet.
-    fn new_thread_in(&mut self, project: Option<String>, cx: &mut Context<Self>) {
-        if self.streaming {
-            self.say("can't start a new thread mid-turn", cx);
-            return;
-        }
-        self.sidecar.reset_thread();
-        self.sidecar.set_project(project.clone());
-        self.project = None;
-        self.refresh_project(cx);
-        self.transcript.clear();
-        // Addressed to a specialist is a property of *this* enquiry, not a standing default —
-        // the one just left keeps nothing that would carry it forward either.
-        self.current_subagent = None;
-        // A conversation fetch started before this can still land after it — see the guard
-        // in `open_conversation`'s completion — but the screen itself must not keep showing
-        // "opening…" for a conversation that was just left (§262).
-        self.opening = false;
-        // A new conversation is a new enquiry. The one just left keeps its own record on disk,
-        // where reopening it will find it.
-        self.provenance = provenance::Record::default();
-        self.text_selection.update(|selection| selection.clear());
-        self.buckets.clear();
-        self.tasks.clear();
-        self.jobs.clear();
-        self.plan.clear();
-        // The record of who wrote what belongs to the conversation being left. Cleared with the
-        // stamp, or the next frame would see an unchanged `None` and keep the old map.
-        self.authorship.clear();
-        self.authorship_stamp = None;
-        self.error = None;
-        // Blanket approval is scoped to the conversation, so it ends with it — together with
-        // every per-task grant, whose tasks belonged to that conversation too.
-        self.approve_conversation = false;
-        self.approve_tasks.clear();
-        self.refresh_conversations(cx);
-        self.status = match project {
-            Some(name) => format!("new conversation in {name}"),
-            None => "new conversation in Ungrouped Conversations".into(),
-        };
-        cx.notify();
-    }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    /// The first rows of a table, measured at most once per version of the file.
-    ///
-    /// Cached beside the shape and for the same reason: this renders on every frame of a
-    /// streaming answer, and a preview that re-read the file each time would be doing disk I/O
-    /// sixty times a second on the thread drawing the window.
-    fn preview_of(&self, output: &workspace::Output, rows: usize) -> Option<Vec<Vec<String>>> {
-        if let Some(entry) = self.previews.borrow().get(&output.path) {
-            if entry.0 == output.modified {
-                return entry.1.clone();
-            }
-        }
-        let found = workspace::table_preview(&output.path, rows);
-        self.previews
-            .borrow_mut()
-            .insert(output.path.clone(), (output.modified, found.clone()));
-        found
-    }
-
-
-    /// The provenance turn that produced the assistant message at `index`, if it can be known.
-    ///
-    /// **Matched from the end, not the start.** Reopening a conversation loads its messages from
-    /// the server and its record from disk, and the two have different lengths on purpose: the
-    /// activity trace does not survive a reload (§46) while the record does. Counting forwards
-    /// would then pair message three with turn three and be wrong by however many turns the
-    /// reload dropped. Both grow at the tail, so aligning the tails is the pairing that holds.
-    fn turn_for(&self, index: usize) -> Option<&provenance::Turn> {
-        let after = self
-            .transcript
-            .iter()
-            .skip(index + 1)
-            .filter(|message| message.role != "you")
-            .count();
-        let at = self.provenance.turns.len().checked_sub(after + 1)?;
-        self.provenance.turns.get(at)
-    }
-
-
-
-
-    /// Resolve every source this conversation has gathered, without being asked.
-    ///
-    /// **No button.** Verifying a citation is work the app can do and the researcher cannot —
-    /// it takes a network call per reference and a title comparison, and the answer is the same
-    /// every time. Putting it behind a control asked them to request a check on data we had
-    /// already decided to show them, which is the wrong way round: either it is worth verifying,
-    /// in which case do it, or it is not, in which case do not offer it.
-    ///
-    /// Runs in the background as sources arrive, only for citations not already answered, so a
-    /// turn that adds a reference resolves that one rather than all fourteen again.
-    ///
-    /// **What leaves the machine**, since this now happens on its own: a DOI, and — for a
-    /// reference whose DOI is wrong or absent — the citation text, which is a reference to
-    /// published work. Both go to `crossref.org` and nowhere else. Never the question, never the
-    /// conversation, never a file.
-    fn resolve_sources(&mut self, cx: &mut Context<Self>) {
-        let mut wanted: Vec<(String, Option<String>, String)> = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for source in &self.sources {
-            if self.checked.contains_key(&source.citation)
-                || !seen.insert(source.citation.clone())
-            {
-                continue;
-            }
-            let link = link_for(source);
-            // A corpus-id link needs no registry call: it was built from the id in the search
-            // result (`overlay/minime_local/sources.py`), so there is nothing composed in it to
-            // be wrong. Settled here, and settled as the *strongest* verdict rather than as
-            // "nothing to check".
-            if link.as_deref().is_some_and(references::is_corpus_link) {
-                self.checked
-                    .insert(source.citation.clone(), references::Verdict::FromSearch);
-                continue;
-            }
-            wanted.push((
-                source.citation.clone(),
-                link.as_deref().and_then(references::doi_in),
-                source.citation.clone(),
-            ));
-        }
-        if wanted.is_empty() {
-            return;
-        }
-
-        self.resolving += wanted.len();
-        let mut results = self.sidecar.resolve_references(wanted);
-        cx.spawn(async move |this, cx| {
-            while let Some((key, verdict, repair)) = results.next().await {
-                if this
-                    .update(cx, |workbench, cx| {
-                        workbench.resolving = workbench.resolving.saturating_sub(1);
-                        workbench.checked.insert(key.clone(), verdict);
-                        // Recorded either way. A row that stayed blank after being looked up
-                        // looked exactly like one never looked up, which is how "found nothing"
-                        // and "did nothing" became the same thing on screen.
-                        workbench.repaired.insert(key, repair);
-                        cx.notify();
-                    })
-                    .is_err()
-                {
-                    return;
-                }
-            }
-            // Nothing is announced. A toast per turn saying the references checked out is noise;
-            // the row says what it found, and only a problem is worth an eye.
-            let _ = this.update(cx, |workbench, cx| {
-                workbench.resolving = 0;
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    /// Whether an Asta-backed specialist actually ran in this conversation.
-    ///
-    /// **What the report footer's attribution should be decided by.** That footer reads
-    /// *"Academic literature search performed using Asta tools (Allen Institute for AI)"*, and
-    /// the backend's default test for it is `len(sources) > 0` — the number of citation objects
-    /// the *model* emitted. Those are different claims. A run in which the model wrote five
-    /// references from memory produces five sources, no Asta call, and a report crediting AI2
-    /// for it (docs §119).
-    ///
-    /// Attribution is a claim about what happened, so it is answered from the record of what
-    /// happened: the specialists the provenance record saw run, crossed with the ones the
-    /// backend's own registry describes as using Asta.
-    ///
-    /// Conservative in the one direction that matters. An unreadable or absent registry means no
-    /// specialist is known to use Asta, so nothing is credited — a missing acknowledgement is a
-    /// thing a researcher can add, and a false one is a thing they have to retract.
-    fn used_asta(&self) -> bool {
-        let asta: std::collections::HashSet<String> = workspace::subagents()
-            .into_iter()
-            .filter(workspace::Subagent::uses_asta)
-            .map(|subagent| subagent.name)
-            .collect();
-        if asta.is_empty() {
-            return false;
-        }
-        self.provenance
-            .road()
-            .iter()
-            .any(|stage| asta.contains(&stage.name))
-    }
-
-    /// Write the graph beside the conversation's own files, and open it.
-    fn save_provenance_svg(&mut self, cx: &mut Context<Self>) {
-        let Some(dir) = self.thread_workspace() else {
-            self.say("ask something first — there is no folder to save into yet", cx);
-            return;
-        };
-        let graph = self.provenance.graph_of(self.provenance_turn);
-        // Named for the turn it shows, so exporting turn 2 and then turn 3 gives two files
-        // rather than one overwritten one.
-        let name = match self.provenance_turn {
-            Some(at) => format!("provenance-turn-{}.svg", at + 1),
-            None => "provenance.svg".to_string(),
-        };
-        let path = dir.join(&name);
-        if let Err(error) = std::fs::create_dir_all(&dir)
-            .and_then(|_| std::fs::write(&path, provenance_svg(&graph)))
-        {
-            self.say(format!("could not save {name}: {error}"), cx);
-            return;
-        }
-        self.say(format!("saved {name} beside this conversation's files"), cx);
-        if let Err(error) = workspace::open(&path) {
-            tracing::warn!(%error, "could not open the provenance drawing");
-        }
-    }
-
-
-    /// Fold the road, and remember that it is folded.
-    fn toggle_road(&mut self, cx: &mut Context<Self>) {
-        self.road_open = !self.road_open;
-        self.remember_panels();
-        cx.notify();
-    }
-
-    /// Persist which panels are open.
-    ///
-    /// Re-read from disk and written back rather than saving `self.draft`, which is the *Settings
-    /// pane's* editing buffer: someone with half-typed changes in that pane who then folds a panel
-    /// must not have those changes committed by the fold.
-    fn remember_panels(&self) {
-        let mut stored = settings::Settings::load();
-        if stored.sidebar_open == self.sidebar_open
-            && stored.panel_open == self.panel_open
-            && stored.road_open == self.road_open
-        {
-            return;
-        }
-        stored.sidebar_open = self.sidebar_open;
-        stored.panel_open = self.panel_open;
-        stored.road_open = self.road_open;
-        if let Err(error) = stored.save() {
-            // Not a toast. The panel *did* fold; all that failed is remembering it for next
-            // time, and a modal about that would be louder than the thing it reports.
-            tracing::warn!(%error, "could not remember which panels are open");
-        }
-    }
-
-
-
-    fn sync_transcript_list(&self) {
-        let wanted = self.transcript.len() + usize::from(self.streaming);
-        let present = self.transcript_list.item_count();
-        if wanted > present {
-            self.transcript_list.splice(present..present, wanted - present);
-        } else if wanted < present {
-            self.transcript_list.splice(wanted..present, 0);
-        }
-        // GPUI requires a splice when a measured row changes height. Only the in-flight answer
-        // changes token by token, so finished rows stay cached (§156).
-        if self.streaming && !self.transcript.is_empty() {
-            let last = self.transcript.len() - 1;
-            self.transcript_list.splice(last..last + 1, 1);
-        }
-    }
-
-    fn invalidate_transcript_message(&self, index: usize) {
-        if index < self.transcript_list.item_count() {
-            self.transcript_list.splice(index..index + 1, 1);
-        }
-    }
-
-    fn reset_transcript_list(&self) {
-        self.transcript_list.reset(self.transcript.len());
-    }
-
-    fn invalidate_all_transcript_messages(&self) {
-        let count = self.transcript.len().min(self.transcript_list.item_count());
-        for index in 0..count {
-            self.transcript_list.splice(index..index + 1, 1);
-        }
-    }
-
-    /// Whether anything the researcher is waiting for is in flight.
-    ///
-    /// **One question, five sources.** The status bar's mark used to be shown for two of them —
-    /// a streaming turn and a running setup fix — so the app was visibly busy exactly when it was
-    /// least likely to be mistaken for stuck, and perfectly still through the fifteen-second graph
-    /// build at launch (§176) and the pause while a conversation loads. Those are the waits that
-    /// read as a hang (§177).
-    fn is_waiting(&self) -> bool {
-        self.streaming
-            || self.running_fix.as_ref().is_some_and(|fix| !fix.done)
-            || self.warming
-            || self.opening
-            || !self.conversations_loaded
-    }
-
-
-    /// Answer the pending approval and pump the continuation into the same turn.
-    fn decide(&mut self, approve: bool, cx: &mut Context<Self>) {
-        let Some(request) = self.pending_approval.take() else {
-            return;
-        };
-        // Exactly one answer per held action, in the order they were presented — the agent
-        // validates the count and errors out if it disagrees.
-        let answers = protocol::Answer::all(&request, decision_for(approve));
-        self.status = if approve {
-            "approved — running…"
-        } else {
-            "rejected"
-        }
-        .into();
-
-        let mut events = self.sidecar.resume(answers);
-        cx.spawn(async move |this, cx| {
-            while let Some(event) = events.next().await {
-                if this
-                    .update(cx, |workbench, cx| {
-                        workbench.apply(event, cx);
-                        cx.notify();
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .detach();
-        cx.notify();
-    }
-
-
-    // ---- Command palette ------------------------------------------------------
-
-    /// The commands matching the current query, best first.
-    fn palette_commands(&self, cx: &App) -> Vec<Command> {
-        let query = self.palette_query.read(cx).text().to_string();
-        let mut scored: Vec<(i32, usize, Command)> = Command::ALL
-            .into_iter()
-            .enumerate()
-            .filter_map(|(index, command)| {
-                match_score(&query, command.label()).map(|score| (score, index, command))
-            })
-            .collect();
-        // Declaration order breaks ties, so an empty query lists the commands in the
-        // order they are written rather than an arbitrary one.
-        scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-        scored.into_iter().map(|(_, _, command)| command).collect()
-    }
-
-    fn toggle_palette(&mut self, _: &TogglePalette, window: &mut Window, cx: &mut Context<Self>) {
-        if self.palette_open {
-            self.close_palette(window, cx);
-            return;
-        }
-        self.palette_open = true;
-        self.palette_selected = 0;
-        self.palette_query
-            .update(cx, |query, cx| query.set_text("", cx));
-        let focus = self.palette_query.focus_handle(cx);
-        window.focus(&focus);
-        cx.notify();
-    }
-
-    /// Close the palette and hand focus back to the composer — otherwise focus would
-    /// be left on a field that is no longer rendered and typing would go nowhere.
-    fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.palette_open = false;
-        self.palette_query
-            .update(cx, |query, cx| query.set_text("", cx));
-        let focus = self.composer.focus_handle(cx);
-        window.focus(&focus);
-        cx.notify();
-    }
-
-    /// Which row is chosen, and what it would run.
-    ///
-    /// **One function for all three callers.** The row that was drawn as chosen, the row the
-    /// arrow keys move from, and the command Enter runs each used to clamp `palette_selected`
-    /// their own way — and the activation path did not clamp at all. So whenever the index
-    /// outran a filtered list, the palette highlighted the last row and Enter ran either the
-    /// wrong command or, past the end, nothing whatsoever (docs §69).
-    fn palette_choice(&self, commands: &[Command]) -> Option<(usize, Command)> {
-        let index = self.palette_selected.min(commands.len().checked_sub(1)?);
-        Some((index, commands[index]))
-    }
-
-    fn move_palette_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let commands = self.palette_commands(cx);
-        let Some((current, _)) = self.palette_choice(&commands) else {
-            return;
-        };
-        // Wrap, so `up` from the first row lands on the last.
-        self.palette_selected =
-            (current as isize + delta).rem_euclid(commands.len() as isize) as usize;
-        cx.notify();
-    }
-
-    fn activate_palette(&mut self, cx: &mut Context<Self>) {
-        let commands = self.palette_commands(cx);
-        let Some((_, command)) = self.palette_choice(&commands) else {
-            // Said out loud. This branch used to return in silence, which is
-            // indistinguishable from a command that ran and did nothing — and that is
-            // exactly how it was reported (docs §69).
-            self.status = "no command matches what you typed".into();
-            self.palette_open = false;
-            self.restore_focus = true;
-            cx.notify();
-            return;
-        };
-        self.palette_open = false;
-        self.palette_query
-            .update(cx, |query, cx| query.set_text("", cx));
-        self.restore_focus = true;
-        self.run_command(command, cx);
-        cx.notify();
-    }
-
-    // ---- Settings ---------------------------------------------------------------
-
-    /// Escape: close the innermost thing that is open.
-    ///
-    /// One at a time and inside-out, which is what the key means everywhere else: from a
-    /// file preview it returns to Settings if that was open behind it, not to nothing.
-    fn dismiss(&mut self, _: &Dismiss, window: &mut Window, cx: &mut Context<Self>) {
-        // Innermost first, the rule §58 settled: a menu open over a modal closes the menu.
-        if self.context_menu.take().is_some() {
-            cx.notify();
-            return;
-        }
-        if self.sidebar_menu.take().is_some() {
-            cx.notify();
-            return;
-        }
-        if self.open_picker.take().is_some() {
-            cx.notify();
-            return;
-        }
-        // Above the preview because it paints above it, and here at all because the scoped
-        // `PaletteDismiss` binding cannot fire — see `workbench_key_bindings`. The footer has
-        // promised "esc close" the whole time (docs §84).
-        if self.palette_open {
-            self.close_palette(window, cx);
-            return;
-        }
-        if self.confirming_delete.take().is_some() {
-            self.restore_focus = true;
-            cx.notify();
-            return;
-        }
-        if self.sources_open {
-            self.sources_open = false;
-            self.restore_focus = true;
-            cx.notify();
-            return;
-        }
-        if self.datasets_open {
-            self.datasets_open = false;
-            self.restore_focus = true;
-            cx.notify();
-            return;
-        }
-        if self.documents_open {
-            self.documents_open = false;
-            self.restore_focus = true;
-            cx.notify();
-            return;
-        }
-        if self.commands_open {
-            self.commands_open = false;
-            self.restore_focus = true;
-            cx.notify();
-            return;
-        }
-        if self.claims_open {
-            self.claims_open = false;
-            self.restore_focus = true;
-            cx.notify();
-            return;
-        }
-        if self.confirming_provider.take().is_some() {
-            // Escape leaves the provider as it was: this modal exists precisely so the change
-            // needs a deliberate press, and dismissing is not one.
-            cx.notify();
-            return;
-        }
-        if self.preview.take().is_some() {
-            cx.notify();
-            return;
-        }
-        if self.renaming.take().is_some() {
-            self.restore_focus = true;
-            cx.notify();
-            return;
-        }
-        if self.editing_mission {
-            // Escape abandons the edit and leaves the stored mission alone — nothing was sent
-            // until Enter, so there is nothing to undo.
-            self.editing_mission = false;
-            self.restore_focus = true;
-            cx.notify();
-            return;
-        }
-        if self.about_open {
-            self.about_open = false;
-            self.restore_focus = true;
-            cx.notify();
-            return;
-        }
-        if self.provenance_open {
-            self.provenance_open = false;
-            self.restore_focus = true;
-            cx.notify();
-            return;
-        }
-        if self.settings_open {
-            // Same as Close: an unsaved palette was a look, not a change.
-            let saved = settings::Settings::load();
-            self.applied_theme = saved.theme.clone();
-            settings::apply_theme(&saved);
-            self.settings_open = false;
-            self.restore_focus = true;
-            cx.notify();
-        }
-    }
-
-    fn toggle_settings(&mut self, _: &ToggleSettings, window: &mut Window, cx: &mut Context<Self>) {
-        if self.settings_open {
-            self.settings_open = false;
-            self.restore_focus = true;
-            cx.notify();
-            return;
-        }
-        self.open_settings(Some(window), cx);
-    }
-
-    /// Load the stored settings into the draft and show the pane.
-    ///
-    /// Secret fields open **empty**: what is in the keychain is never read back into the
-    /// UI. The row says "stored" or "not set" instead, and leaving a field blank on save
-    /// keeps whatever is already there — so changing your model does not mean re-pasting
-    /// your key.
-    fn open_settings(&mut self, window: Option<&mut Window>, cx: &mut Context<Self>) {
-        self.draft = settings::Settings::load();
-        // The *live* palette, not the saved one. Reloading the whole draft used to reset
-        // the screen to whatever was last saved the instant the pane opened, so clicking
-        // the mark at top-left threw away the theme being looked at (docs §50).
-        self.draft.theme = self.applied_theme.clone();
-        self.settings_note.clear();
-        // Opened by the keyboard or the palette rather than from Setup, so it lands on the
-        // page most people came for. Reaching Setup is now one click in the rail.
-        if self.settings_section == Section::Setup {
-            self.settings_section = Section::Model;
-        }
-        // The one moment a fresh list is worth a request: somebody is about to read it.
-        self.refresh_models(cx);
-        let values: Vec<(Field, String)> = self
-            .fields
-            .iter()
-            .map(|(field, _)| {
-                let value = match field {
-                    Field::ModelId => self.draft.model_id.clone(),
-                    Field::BaseUrl => self.draft.base_url.clone(),
-                    Field::Port => self.draft.backend_port.to_string(),
-                    _ => String::new(),
-                };
-                (*field, value)
-            })
-            .collect();
-        for ((_, composer), (_, value)) in self.fields.iter().zip(values) {
-            composer.update(cx, |composer, cx| composer.set_text(value, cx));
-        }
-        self.settings_open = true;
-        if let Some(window) = window {
-            self.focus_settings_page(window, cx);
-        }
-        cx.notify();
-    }
-
-    fn field_text(&self, field: Field, cx: &App) -> String {
-        self.fields
-            .iter()
-            .find(|(candidate, _)| *candidate == field)
-            .map(|(_, composer)| composer.read(cx).text().trim().to_string())
-            .unwrap_or_default()
-    }
-
-    /// Write the draft: settings to `settings.toml`, secrets to the OS keychain.
-    fn save_settings(&mut self, cx: &mut Context<Self>) {
-        self.draft.model_id = self.field_text(Field::ModelId, cx);
-        self.draft.base_url = self.field_text(Field::BaseUrl, cx);
-        let port = self.field_text(Field::Port, cx);
-        if let Ok(port) = port.parse::<u16>() {
-            self.draft.backend_port = port;
-        } else if !port.is_empty() {
-            self.settings_note = format!("{port:?} is not a port number — not saved.");
-            cx.notify();
-            return;
-        }
-
-        let mut stored = Vec::new();
-        // Only non-empty fields are written, so a blank field means "leave it alone"
-        // rather than "delete my key".
-        let key_name = format!("llm:{}", self.key_target);
-        let secrets: Vec<(String, String)> = self
-            .fields
-            .iter()
-            .filter(|(field, _)| field.is_secret())
-            .filter_map(|(field, composer)| {
-                let value = composer.read(cx).text().trim().to_string();
-                if value.is_empty() {
-                    return None;
-                }
-                let name = field
-                    .secret_name()
-                    .map(str::to_string)
-                    .unwrap_or_else(|| key_name.clone());
-                Some((name, value))
-            })
-            .collect();
-        for (name, value) in &secrets {
-            match settings::set_secret(name, value) {
-                Ok(()) => stored.push(name.clone()),
-                Err(error) => {
-                    // Say which keychain failed, not the value.
-                    self.settings_note = format!("Could not store {name}: {error:#}");
-                    cx.notify();
-                    return;
-                }
-            }
-        }
-
-        if let Err(error) = self.draft.save() {
-            self.settings_note = format!("Could not write settings: {error:#}");
-            cx.notify();
-            return;
-        }
-
-        // Clear the secret fields once written — nothing is gained by leaving a key on
-        // screen, and the row now reports it as stored.
-        for (field, composer) in &self.fields {
-            if field.is_secret() {
-                composer.update(cx, |composer, cx| composer.set_text("", cx));
-            }
-        }
-
-        // The model takes effect on the next turn, because the backend resolves it per
-        // request. The port and execution locality are baked into the launch command, so
-        // those need a restart — say so rather than letting the user wonder.
-        self.sidecar.set_model(model_choice(&self.draft));
-        let mut note = String::from("Saved.");
-        if !stored.is_empty() {
-            note.push_str(&format!(" Stored: {}.", stored.join(", ")));
-        }
-        note.push_str(" Model applies to the next turn; port and execution need a restart.");
-        self.settings_note = note;
-        // A toast as well as the note: the note lives inside a window the user is about to
-        // close, and "did that save?" is the question this whole pane exists to answer.
-        self.say(
-            if stored.is_empty() {
-                "settings saved".to_string()
-            } else {
-                format!("settings saved — stored {}", stored.join(", "))
-            },
-            cx,
-        );
-        // Saving is finishing. Leaving the window up after it put a note inside a pane the user
-        // had already decided to leave, so the only visible answer to "did that work?" was a
-        // sentence they had to go back and look for — which is exactly what the toast above
-        // exists to avoid (docs §88).
-        self.settings_open = false;
-        self.restore_focus = true;
-        cx.notify();
-    }
-
-    /// The Settings pane, in place of the artifacts panel.
-    /// The preferences window: rail on the left, the chosen page on the right.
-    ///
-    /// Every page goes through here, so the frame, the scrolling and the pinned actions are
-    /// decided once. `ui::Modal` is what enforces that the actions cannot end up inside the
-    /// part that scrolls.
-    fn preferences_window(
-        &self,
-        body: impl IntoElement,
-        actions: impl IntoElement,
-        cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
-        let current = self.settings_section;
-        let mut rail = ui::nav_rail();
-        for section in Section::ALL {
-            rail = rail.child(
-                ui::NavEntry::new(section.id(), section.label(), section == current).on_click(
-                    cx.listener(move |workbench, _event, window, cx| {
-                        workbench.settings_section = section;
-                        // The field that had focus may not exist on the new page, and focus on
-                        // an unrendered element stops key bindings arriving (docs §71).
-                        workbench.focus_settings_page(window, cx);
-                        // Landing on Setup should show what is true *now*: a stale report is
-                        // the one thing worse than none (the reason `open_setup` re-checks).
-                        if section == Section::Setup {
-                            workbench.run_preflight(cx);
-                        }
-                        cx.notify();
-                    }),
-                ),
-            );
-        }
-
-        let mut footer = div().flex().flex_col().gap_1();
-        // What is still missing, before the user finds out from a failed turn. Shown on every
-        // page, because the page you are on is rarely the one with the problem.
-        let has_key = settings::secret(&self.draft.key_name()).is_some()
-            || !self.field_text(Field::ApiKey, cx).is_empty();
-        for problem in self.draft.problems(has_key) {
-            footer = footer.child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .text_color(rgb(theme::error()))
-                    .text_xs()
-                    .child(problem),
-            );
-        }
-        if !self.settings_note.is_empty() {
-            footer = footer.child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .text_color(rgb(theme::text_muted()))
-                    .text_xs()
-                    .child(self.settings_note.clone()),
-            );
-        }
-        footer = footer.child(
-            div()
-                .text_color(rgb(theme::text_faint()))
-                .text_xs()
-                .child(format!(
-                    "Keys live in your OS keychain, never in a file. {}",
-                    settings::settings_path().display()
-                )),
-        );
-
-        ui::Modal::new("settings", "SETTINGS")
-            .focus(&self.settings_focus)
-            // Wider than the 520px column it replaces: the rail takes 150 of it, and the
-            // Setup page has a check, a reason and two buttons to fit on a line.
-            .width(760.)
-            .nav(rail)
-            .body(body)
-            .actions(actions)
-            .footer(footer)
-            .into_any_element()
-    }
-
-    /// Put the keyboard somewhere that exists on the page being shown.
-    ///
-    /// It used to focus `fields.first()` unconditionally — which is the Model page's first
-    /// field. On Appearance or Setup that element is not rendered at all, and focus sitting on
-    /// something that is not on screen means **key bindings stop arriving**: Escape did nothing
-    /// until you clicked a page that happened to contain that field (docs §71).
-    ///
-    /// Pages with no fields focus the window itself, so Escape always has somewhere to come
-    /// from.
-    fn focus_settings_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let section = self.settings_section;
-        let field = self
-            .fields
-            .iter()
-            .find(|(field, _)| field.section() == section)
-            .map(|(_, composer)| composer.focus_handle(cx));
-        window.focus(&field.unwrap_or_else(|| self.settings_focus.clone()));
-    }
-
-
-
-
-    fn run_command(&mut self, command: Command, cx: &mut Context<Self>) {
-        match command {
-            // Same path as Enter in the composer and as the Send button.
-            Command::RunTurn => self
-                .composer
-                .update(cx, |composer, cx| composer.submit_now(cx)),
-            Command::NewThread => {
-                // Ordinary New always means the root workspace. Starting within a project has
-                // its own explicit `+` beside that heading; inheriting the open/remembered project
-                // made conversations start already filed and revived deleted headings (§154).
-                //
-                // `new_thread_in` clears `tasks` and `jobs` as well, which is the §159 fix: this
-                // path used to leave the previous conversation's pending approvals on screen and
-                // clickable, and answering one then named the wrong conversation as the worker's
-                // owner. Both routes now clear the same state because there is only one route.
-                self.new_thread_in(None, cx);
-            }
-            Command::RefreshSpine => {
-                self.refresh_project(cx);
-                self.status = "refreshing the project spine…".into();
-            }
-            Command::ExpandTraces => self.set_all_traces_expanded(true),
-            Command::CollapseTraces => self.set_all_traces_expanded(false),
-            Command::CopyLastAnswer => {
-                let answer = self
-                    .transcript
-                    .iter()
-                    .rev()
-                    .find(|message| message.role == "mini-me" && !message.body.is_empty())
-                    .map(|message| message.body.clone());
-                match answer {
-                    Some(answer) => {
-                        cx.write_to_clipboard(ClipboardItem::new_string(answer));
-                        self.say("last answer copied", cx);
-                    }
-                    None => self.status = "no answer to copy yet".into(),
-                }
-            }
-            // Both reachable by keyboard already; here so they can be *found*, which for a
-            // reader who has never met this app is the difference between a feature that
-            // exists and one that does not.
-            // Whether work blocks is a property of the work, not something to encode in
-            // punctuation — so background dispatch is a command rather than a `/name!` syntax
-            // nobody would discover (docs §77).
-            Command::RestartBackend => self.restart_backend(cx),
-            Command::SpecialistInBackground => {
-                let typed = self.composer.read(cx).text().trim().to_string();
-                if subagent::parse(&typed).is_none() {
-                    self.say("type /name and what it should do first", cx);
-                    return;
-                }
-                self.composer
-                    .update(cx, |composer, cx| composer.set_text("", cx));
-                self.start_turn_as(typed, subagent::Dispatch::Background, cx);
-            }
-            Command::CopySelected => self.copy_selected_text(cx),
-            Command::SelectWhole => self.select_whole_transcript(cx),
-            Command::RenderReport => self.render_report(cx),
-            Command::FileInProject => {
-                if self.sidecar.thread_id().is_none() {
-                    self.say(
-                        "ask something first — there is no conversation to file yet",
-                        cx,
-                    );
-                    return;
-                }
-                // Anchored under the sidebar, where the projects it is about are listed.
-                self.open_picker = Some((Picker::Project, gpui::point(px(24.), px(120.))));
-                // Reverts whatever "New project…" last left it as — the same entity is reused
-                // for both prompts (see `Picker::NewProject`'s open handler).
-                self.project_query
-                    .update(cx, |query, cx| query.set_placeholder("Find or name a project", cx));
-                cx.notify();
-            }
-            Command::OpenAbout => {
-                self.about_open = true;
-                cx.notify();
-            }
-            Command::OpenProvenance => {
-                self.provenance_open = true;
-                cx.notify();
-            }
-            Command::OpenSettings => self.open_settings(None, cx),
-            Command::OpenSetup => self.open_setup(cx),
-            Command::Quit => cx.quit(),
-        }
-    }
-
-    fn set_all_traces_expanded(&mut self, expanded: bool) {
-        for message in &mut self.transcript {
-            message.steps_expanded = expanded;
-            for trace in &mut message.agents {
-                trace.expanded = expanded;
-            }
-        }
-        self.invalidate_all_transcript_messages();
-    }
-
-
-
-
-    /// One line for the status bar: what is being worked on, and how far through.
-    ///
-    /// **An unfinished worker outranks the conversation's own plan**, because a worker is the thing
-    /// running while nobody is looking — the conversation's plan belongs to a turn the researcher
-    /// is already watching. With several workers the busiest wins; a column of them belongs in the
-    /// panel, not in a single line.
-    ///
-    /// `None` when there is nothing with a plan, which leaves the bar exactly as it was. This line
-    /// adds a denominator to a wait; it does not become another thing always on screen.
-    fn work_summary(&self) -> Option<String> {
-        summary_for(&self.tasks, &self.plan)
-    }
-
-
-
-
-
-
-
-    /// Long jobs still running, and the ones that finished this session.
-    ///
-    /// The theorizer and DataVoyager return a task id immediately and finish minutes
-    /// later, so without this the answer to "is it still going?" was nothing at all —
-    /// and, worse, nobody was collecting the result (docs §29).
-    ///
-    /// **Foldable, and bounded when open.** Asked for directly: *"we need to make the ui of
-    /// background jobs plegable and scrolable. when we have a lot of text like for data voyager
-    /// its disruptive at sight."* A job row carries the question it was launched with, and a
-    /// DataVoyager question is a paragraph *by design* — the four rules in `subagents.py` make it
-    /// name the datasets, name the methods and ask for the numbers — so one row could fill the
-    /// column and push `OUTPUTS` and `SOURCES` off the bottom of it. Three bounds, cheapest
-    /// first: the question is clipped to [`JOB_QUESTION_CHARS`], the list scrolls within
-    /// [`JOBS_BODY_HEIGHT`], and the section folds to a single line.
-    ///
-    /// **What folds is the noise, not the question being asked of you.** A worker stopped at the
-    /// approval gate is pinned above the scroller, because its Approve button is the one control
-    /// in this section that something is *waiting on* — the rule the card itself follows (§40),
-    /// one level out. The gate also opens the section when it appears, so a fold can hide it only
-    /// by a deliberate press; folded, the heading still reads `1 waiting for you`.
-    ///
-    /// **Two call sites, one per frame.** `artifacts_contents` renders this either from its
-    /// no-spine early return or from the full panel, never both, so the fixed element ids below
-    /// cannot collide the way two sibling `datasets-heading`s once did.
-    /// Raise a desktop notification, but only for somebody who is not looking.
-    ///
-    /// The one thing in this app that can reach a researcher who switched to Excel. Three callers,
-    /// all of them the same kind of event: long work that ended, and long work that stopped needing
-    /// a decision. Suppressed when the window is active, because the banner and the jobs row are
-    /// already saying it there and a toast on top would be the third voice.
-    fn notify_if_away(&self, title: &str, body: &str) {
-        if !notify::worth_interrupting(self.window_active) {
-            return;
-        }
-        notify::toast(title, body);
-    }
-
-    /// Record a discovery run's status when a poll observes it changing.
-    ///
-    /// Sends no budget: `n_experiments` was written at approval and is not this call's business —
-    /// a status update that also restated the budget would be a second chance to get it wrong.
-    fn record_discovery_status(&mut self, run_id: String, status: &str, cx: &mut Context<Self>) {
-        let mut answer = self
-            .sidecar
-            .discovery_status_changed(run_id.clone(), status.to_string());
-        cx.spawn(async move |_workbench, _cx| {
-            if let Some(Err(error)) = answer.next().await {
-                tracing::warn!(
-                    %error,
-                    run = %run_id,
-                    "could not record a discovery run's status; the row will be corrected by a poll"
-                );
-            }
-        })
-        .detach();
-    }
-
-    /// Tell the conversation's own record that an approved run is now running.
-    ///
-    /// Fire-and-forget with a warning on failure: the run is already paying for itself on Asta and
-    /// nothing here can undo that, so a state update that does not land must not look like a failed
-    /// submit. The cost of losing it is a row missing after a reload, which is what §258 was.
-    fn record_discovery_started(
-        &mut self,
-        run_id: String,
-        experiments: u32,
-        status: &str,
-        cx: &mut Context<Self>,
-    ) {
-        let mut answer =
-            self.sidecar
-                .discovery_started(run_id.clone(), experiments, status.to_string());
-        cx.spawn(async move |_workbench, _cx| {
-            if let Some(Err(error)) = answer.next().await {
-                tracing::warn!(
-                    %error,
-                    run = %run_id,
-                    "could not record that a discovery run started; it is running regardless"
-                );
-            }
-        })
-        .detach();
-    }
-
-    /// Open a finished discovery run and fetch its experiments.
-    ///
-    /// One request for the whole tree — §247 established that the experiments endpoint returns
-    /// every node complete, so the graph does not cost a call per node. Figures are not fetched
-    /// here; they live only in the per-experiment response and are worth ~458KB each.
-    fn open_discovery(&mut self, run_id: String, name: String, cx: &mut Context<Self>) {
-        tracing::info!(run = %run_id, "opening a discovery run");
-        // **Ours first.** The poll route writes `discovery/<run_id>.json` into this conversation's
-        // folder the moment a run finishes, because the service forgets its datasets after a week
-        // (§247). So a finished run is already on disk, and asking the service again on every open
-        // was a wait for something we owned (§261).
-        let stored = self
-            .thread_workspace()
-            .and_then(|folder| workspace::discovery_record(&folder, &run_id));
-        if let Some(record) = stored {
-            let experiments = discovery::decode_experiments(&record);
-            if !experiments.is_empty() {
-                tracing::info!(
-                    run = %run_id,
-                    experiments = experiments.len(),
-                    "read a discovery run from this conversation's folder"
-                );
-                self.discovery_open = Some(DiscoveryView {
-                    run_id,
-                    name,
-                    experiments,
-                    selected: None,
-                    expanded: false,
-                    loudest_first: true,
-                    figures: std::collections::HashMap::new(),
-                    fetching: None,
-                    loading: false,
-                    // The file only exists once the run reached a terminal state, so its presence
-                    // *is* the completeness — no need to ask.
-                    complete: true,
-                    error: None,
-                });
-                cx.notify();
-                return;
-            }
-        }
-
-        self.discovery_open = Some(DiscoveryView {
-            run_id: run_id.clone(),
-            name,
-            experiments: Vec::new(),
-            selected: None,
-            expanded: false,
-            loudest_first: true,
-            figures: std::collections::HashMap::new(),
-            fetching: None,
-            loading: true,
-            complete: false,
-            error: None,
-        });
-        let mut answer = self.sidecar.discovery_run(run_id.clone());
-        cx.spawn(async move |workbench, cx| {
-            if let Some(outcome) = answer.next().await {
-                let _ = workbench.update(cx, |workbench, cx| {
-                    let Some(view) = workbench.discovery_open.as_mut() else {
-                        return;
-                    };
-                    // A different run may have been opened while this was in flight.
-                    if view.run_id != run_id {
-                        return;
-                    }
-                    view.loading = false;
-                    match outcome {
-                        Ok(payload) => {
-                            view.experiments = discovery::decode_experiments(&payload);
-                            view.complete = discovery::finished(&payload);
-                            tracing::info!(
-                                run = %run_id,
-                                experiments = view.experiments.len(),
-                                "read a discovery run"
-                            );
-                        }
-                        Err(error) => {
-                            tracing::warn!(%error, run = %run_id, "could not read a discovery run");
-                            view.error = Some(error);
-                        }
-                    }
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
-        cx.notify();
-    }
-
-    /// Open an experiment, or go back to the list.
-    ///
-    /// One path for the node, the row and the back button, so opening an experiment always fetches
-    /// its figures — the first version had three call sites and only text to show, which is how the
-    /// figures route came to exist without a caller (§257).
-    fn select_experiment(&mut self, at: Option<usize>, cx: &mut Context<Self>) {
-        let wanted = self.discovery_open.as_mut().and_then(|view| {
-            view.selected = at;
-            at.and_then(|at| view.experiments.get(at))
-                .map(|experiment| experiment.id.clone())
-        });
-        if let Some(experiment_id) = wanted {
-            self.fetch_figures(experiment_id, cx);
-        }
-        cx.notify();
-    }
-
-    /// Fetch one experiment's figures, once.
-    ///
-    /// Called when an experiment is opened rather than when the run is read: this is the expensive
-    /// endpoint, and fetching all of them up front would be megabytes for plots nobody looked at.
-    fn fetch_figures(&mut self, experiment_id: String, cx: &mut Context<Self>) {
-        let Some(view) = self.discovery_open.as_mut() else {
-            return;
-        };
-        // Already have them, or already asking. An empty vec counts as having them.
-        if view.figures.contains_key(&experiment_id) || view.fetching.as_deref() == Some(&experiment_id) {
-            return;
-        }
-        let run_id = view.run_id.clone();
-
-        // **On disk already, for a finished run.** The poll route decodes every experiment's plots
-        // when the run ends (§263), so the ordinary case needs no request at all — which is what
-        // was asked for: *"maybe we can improve this logic."*
-        let stored = self.thread_workspace().map(|folder| {
-            workspace::discovery_figures(&folder, &run_id, &experiment_id)
-        });
-        if let Some(paths) = stored.filter(|paths| !paths.is_empty()) {
-            tracing::info!(
-                run = %run_id,
-                experiment = %experiment_id,
-                figures = paths.len(),
-                "read an experiment's figures from this conversation's folder"
-            );
-            if let Some(view) = self.discovery_open.as_mut() {
-                view.figures.insert(experiment_id, paths);
-            }
-            cx.notify();
-            return;
-        }
-
-        let Some(view) = self.discovery_open.as_mut() else {
-            return;
-        };
-        view.fetching = Some(experiment_id.clone());
-
-        let mut answer = self
-            .sidecar
-            .discovery_figures(run_id.clone(), experiment_id.clone());
-        cx.spawn(async move |workbench, cx| {
-            if let Some(outcome) = answer.next().await {
-                let _ = workbench.update(cx, |workbench, cx| {
-                    let Some(view) = workbench.discovery_open.as_mut() else {
-                        return;
-                    };
-                    if view.run_id != run_id {
-                        return; // a different run was opened while this was in flight
-                    }
-                    if view.fetching.as_deref() == Some(experiment_id.as_str()) {
-                        view.fetching = None;
-                    }
-                    match outcome {
-                        Ok(paths) => {
-                            tracing::info!(
-                                run = %run_id,
-                                experiment = %experiment_id,
-                                figures = paths.len(),
-                                "decoded an experiment's figures"
-                            );
-                            // Recorded even when empty, so "none" stops looking like "loading".
-                            view.figures.insert(experiment_id.clone(), paths);
-                        }
-                        Err(error) => {
-                            // Deliberately not recorded: an absent key means "ask again", and
-                            // caching a failure as an empty list would turn a transient error into
-                            // an experiment that permanently drew nothing (§260).
-                            tracing::warn!(
-                                %error,
-                                experiment = %experiment_id,
-                                "could not decode an experiment's figures"
-                            );
-                            view.error = Some(format!("could not read figures: {error}"));
-                        }
-                    }
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
-        cx.notify();
-    }
-
-    /// The colours a node is drawn in, from how far it moved a belief.
-    ///
-    /// Returns `(fill, ink, border)`. Three bands rather than a ramp, because the scale of
-    /// `surprise` is not documented and a gradient over it would imply precision nobody has.
-    fn node_colours(&self, experiment: &discovery::Experiment) -> (u32, u32, u32) {
-        // A pure mapping from the band to three colours. The *decision* — that status outranks the
-        // score — lives in `discovery::loudness`, where it can be tested without a window.
-        match discovery::loudness(experiment) {
-            discovery::Loudness::Running => {
-                (theme::surface(), theme::text_muted(), theme::running())
-            }
-            discovery::Loudness::Failed => {
-                (theme::surface(), theme::text_muted(), theme::error())
-            }
-            discovery::Loudness::Loud => {
-                let fill = theme::accent();
-                (fill, theme::ink_on(fill), fill)
-            }
-            discovery::Loudness::Middling => (
-                theme::surface(),
-                theme::text(),
-                theme::border_strong(),
-            ),
-            discovery::Loudness::Quiet => {
-                (theme::surface(), theme::text_faint(), theme::border())
-            }
-        }
-    }
-
-
-    /// How much of an experiment's hypothesis a list row shows.
-    ///
-    /// The hypothesis is a sentence the service wrote to be read whole, so the row shows enough to
-    /// tell two apart and the detail below shows all of it.
-    const HYPOTHESIS_CHARS: usize = 90;
-
-
-
-
-    /// Adopt the background work a snapshot describes: drafts, long jobs, and workers.
-    ///
-    /// **One method, because there are two places a snapshot arrives and they drifted.** A live
-    /// turn's `values` event is one; opening a conversation and reading its stored state is the
-    /// other. The streaming path called `open_approval` and the opening path did not, so a drafted
-    /// run was offered — or, after §258, repaired — only while a turn was running. Reopen the
-    /// conversation and the drafted run was decoded, dropped from the job list because
-    /// `awaiting_approval` is not a job, and adopted by nobody: *"I still cant see the ui for the
-    /// background job"* (§259).
-    ///
-    /// Drafts first, because a drafted run is not among the jobs — it is a question, and one that
-    /// must not be buried under the rows of things already running.
-    fn adopt_background_work(
-        &mut self,
-        drafts: &[protocol::Draft],
-        jobs: Vec<protocol::Job>,
-        tasks: Vec<protocol::AsyncTask>,
-        owner: &str,
-        cx: &mut Context<Self>,
-    ) {
-        self.open_approval(drafts, cx);
-        for job in jobs {
-            self.track_job(job, cx);
-        }
-        for task in tasks {
-            // Into the provenance record as well as the Jobs panel. A background worker runs on
-            // its own LangGraph thread, so none of its events reach this conversation's stream —
-            // the `async_tasks` map is the only trace on this side, and the record had never been
-            // told about it. Which is why the graph showed nothing for work a researcher had
-            // explicitly handed off (docs §111).
-            self.provenance.observe_background(
-                &format!("async:{}", task.task_id),
-                &task.agent_name,
-                provenance::now_ms(),
-            );
-            self.track_task(owner, task, cx);
-        }
-    }
-
-    /// Open the budget gate for a run that is drafted and unspent.
-    ///
-    /// Called from a snapshot rather than from a press, because the researcher never asked for
-    /// this modal — the agent drafted a run and something has to ask them whether to pay for it.
-    /// Ignores a run they already declined, and never replaces a gate already on screen: a second
-    /// draft arriving mid-decision must not move the button under the pointer.
-    fn open_approval(&mut self, drafts: &[protocol::Draft], cx: &mut Context<Self>) {
-        if self.approving.is_some() {
-            return;
-        }
-        let Some(draft) = drafts
-            .iter()
-            .find(|draft| !self.declined.contains(&draft.run_id))
-        else {
-            return;
-        };
-        // **Ask the service before asking the researcher.** The gate used to open immediately and
-        // fill in the cost when it arrived, which was fine until a run could already have been
-        // approved — and one can, because the artifact saying `awaiting_approval` is a turn's
-        // record and approving is not a turn. Offering to spend credits on a finished run is worse
-        // than a second of delay, and the answer brings the cost and the token with it, so the
-        // modal now opens complete or not at all (§258).
-        let draft = draft.clone();
-        let mut answer = self.sidecar.discovery_draft(draft.run_id.clone());
-        cx.spawn(async move |workbench, cx| {
-            let Some(outcome) = answer.next().await else {
-                return;
-            };
-            let _ = workbench.update(cx, |workbench, cx| {
-                // Something else may have opened a gate while this was in flight.
-                if workbench.approving.is_some() {
-                    return;
-                }
-                let cost = match outcome {
-                    Ok(cost) => cost,
-                    Err(error) => {
-                        // Cannot tell whether it was approved, so do not ask for money. The draft
-                        // keeps its status and the next snapshot tries again.
-                        tracing::warn!(
-                            %error,
-                            run = %draft.run_id,
-                            "could not check a drafted run; not offering the gate"
-                        );
-                        return;
-                    }
-                };
-                if cost.submitted {
-                    // Already running or finished. Adopt it as a job so it appears where a
-                    // researcher expects, and never ask about its budget again.
-                    tracing::info!(
-                        run = %draft.run_id,
-                        "a drafted run had already been approved; tracking it instead of asking"
-                    );
-                    workbench.declined.insert(draft.run_id.clone());
-                    // What the service says it *is*, not an assumption that it is running. A
-                    // finished run adopted as "running" showed "usually 25–40 min" until the first
-                    // poll corrected it, on a row somebody was already reading (§260).
-                    let status = if cost.status.is_empty() {
-                        "running".to_string()
-                    } else {
-                        cost.status.clone()
-                    };
-                    workbench.track_job(
-                        protocol::Job {
-                            kind: protocol::JobKind::Discovery,
-                            task_id: draft.run_id.clone(),
-                            question: draft.name.clone(),
-                            context_id: None,
-                            status: status.clone(),
-                            size: Some(u64::from(cost.experiments)),
-                        },
-                        cx,
-                    );
-                    // And correct the record, so the next launch does not have to ask again.
-                    workbench.record_discovery_started(
-                        draft.run_id.clone(),
-                        cost.experiments.max(1),
-                        &status,
-                        cx,
-                    );
-                    cx.notify();
-                    return;
-                }
-
-                tracing::info!(
-                    run = %draft.run_id,
-                    experiments = draft.experiments,
-                    "asking the researcher to approve a discovery budget"
-                );
-                // Whatever the agent drafted, clamped into what the service will accept — so the
-                // number on screen is always one that can actually be submitted.
-                let experiments = opening_budget(draft.experiments);
-                workbench.intent_field.update(cx, |field, cx| {
-                    field.set_text(draft.intent.clone(), cx);
-                });
-                workbench.approving = Some(Approval {
-                    draft: draft.clone(),
-                    experiments,
-                    cost: Some(cost),
-                    error: None,
-                    submitting: false,
-                });
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    /// Ask the backend what this run costs, and for the token that authorises submitting it.
-    ///
-    /// Called when the gate opens and again after a failed submit. The modal renders without the
-    /// answer — the run's own experiment count is the price either way — so a slow lookup delays
-    /// the balance and the press, never the reading.
-    fn refresh_approval(&mut self, run_id: String, cx: &mut Context<Self>) {
-        let mut answer = self.sidecar.discovery_draft(run_id.clone());
-        cx.spawn(async move |workbench, cx| {
-            if let Some(outcome) = answer.next().await {
-                let _ = workbench.update(cx, |workbench, cx| {
-                    let Some(approval) = workbench.approving.as_mut() else {
-                        return;
-                    };
-                    // The gate may have been answered and reopened for a different run while this
-                    // was in flight; a balance belonging to another run would be a wrong number
-                    // next to a price, and a token for another run would be refused.
-                    if approval.draft.run_id != run_id {
-                        return;
-                    }
-                    match outcome {
-                        Ok(cost) => approval.cost = Some(cost),
-                        Err(error) => {
-                            tracing::warn!(%error, "could not read the discovery credit balance");
-                        }
-                    }
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
-    }
-
-    /// Spend the credits. The only place in this app that does.
-    fn approve_discovery(&mut self, cx: &mut Context<Self>) {
-        let Some(approval) = self.approving.as_mut() else {
-            return;
-        };
-        if approval.submitting {
-            return; // the press already landed; a second one would be a second charge
-        }
-        approval.submitting = true;
-        approval.error = None;
-        let run_id = approval.draft.run_id.clone();
-        let experiments = approval.experiments;
-        let kind = approval.draft.name.clone();
-        let intent = self.intent_field.read(cx).text().trim().to_string();
-        // The token the draft lookup issued. Without it the submit is refused — which is the point,
-        // and also why a modal opened before the lookup answered cannot be pressed (§252).
-        let Some(approval) = approval
-            .cost
-            .as_ref()
-            .map(|cost| cost.approval.clone())
-            .filter(|token| !token.is_empty())
-        else {
-            approval.submitting = false;
-            approval.error = Some(
-                "still checking the cost with the service — try again in a moment".to_string(),
-            );
-            cx.notify();
-            return;
-        };
-        tracing::info!(run = %run_id, experiments, "approving a discovery run");
-
-        let mut answer = self
-            .sidecar
-            .submit_discovery(run_id.clone(), approval, experiments, intent);
-        cx.spawn(async move |workbench, cx| {
-            if let Some(outcome) = answer.next().await {
-                let _ = workbench.update(cx, |workbench, cx| {
-                    match outcome {
-                        Ok(()) => {
-                            workbench.approving = None;
-                            workbench.status =
-                                format!("{kind} running in the background ({} experiments)", experiments);
-                            // Start watching it immediately rather than waiting for the next
-                            // turn's snapshot: the researcher just paid for it, and a run with no
-                            // row is a run they cannot see.
-                            workbench.track_job(
-                                protocol::Job {
-                                    kind: protocol::JobKind::Discovery,
-                                    task_id: run_id.clone(),
-                                    question: kind.clone(),
-                                    context_id: None,
-                                    status: "running".to_string(),
-                                    size: Some(u64::from(experiments)),
-                                },
-                                cx,
-                            );
-                            // **And write it down.** The line above is why the row appears in
-                            // *this* session; this is why it is still there after a reload. The
-                            // artifact is written by a turn and approval is not a turn, so without
-                            // this it says `awaiting_approval` forever and `decode_jobs` — which
-                            // skips that by design — drops a run that is genuinely working (§258).
-                            workbench.record_discovery_started(
-                                run_id.clone(),
-                                experiments,
-                                "running",
-                                cx,
-                            );
-                        }
-                        Err(error) => {
-                            tracing::warn!(%error, run = %run_id, "a discovery submit failed");
-                            let still_open = workbench
-                                .approving
-                                .as_ref()
-                                .is_some_and(|open| open.draft.run_id == run_id);
-                            if let Some(approval) = workbench.approving.as_mut() {
-                                approval.submitting = false;
-                                approval.error = Some(error);
-                                // The token is gone from this side's point of view whether or not
-                                // the backend spent it, so the modal re-fetches one. Without this
-                                // a recoverable failure — a configuration change that did not
-                                // save — left the next press answering "this submit carries no
-                                // valid approval", which is a dead end rather than a retry (§255).
-                                approval.cost = None;
-                            }
-                            if still_open {
-                                workbench.refresh_approval(run_id.clone(), cx);
-                            }
-                        }
-                    }
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
-        cx.notify();
-    }
-
-
-
-
-
-    /// Research outputs from the current run, grouped by kind.
-    ///
-    /// Fed by the `values` stream event, so it fills in as a turn produces papers,
-    /// datasets, theories and reports — not only at the end.
-    /// What this conversation has cited, numbered.
-    ///
-    /// `[n]` in the accent because a source is something you can act on — it opens. The number is
-    /// the same one the agent's prose uses, so `[3]` in an answer and `[3]` here are the same
-    /// paper without the researcher having to match titles.
-    ///
-    /// Whole strings, not split into title and venue: `Snapshot::sources` carries a citation as
-    /// one line of the agent's own text, in whatever form it wrote it. Splitting it into
-    /// `Plant Pathology · 2021 · CIP Dataverse` would mean parsing prose into fields and being
-    /// confidently wrong about some of them — a bibliography that quietly mis-attributes is worse
-    /// than one that is merely plain.
-    /// Where each source came from, positionally — one entry per `self.sources`.
-    ///
-    /// **One function, three readers.** The header's count, the note under a row and the `annote`
-    /// in an exported `.bib` all have to mean the same thing by "unverified", and three
-    /// re-derivations of that from two maps is three chances to drift. Positional so the export
-    /// can zip it against the same slice it is already walking.
-    fn source_origins(&self) -> Vec<references::Origin> {
-        self.sources
-            .iter()
-            .map(|source| {
-                references::origin(
-                    self.checked.get(&source.citation),
-                    self.repaired.get(&source.citation).map(Option::is_some),
-                )
-            })
-            .collect()
-    }
-
-    /// How many references nothing has confirmed — the number a subject-matter expert owns.
-    fn unverified_sources(&self) -> usize {
-        self.source_origins()
-            .into_iter()
-            .filter(|origin| origin.needs_a_human())
-            .count()
-    }
-
-    /// Open the dataset list, and start asking the server about each one.
-    ///
-    /// Checked on open rather than on arrival: a turn can recommend dozens, and asking about
-    /// datasets nobody has looked at would be a burst of requests to CIP for nothing. Opening the
-    /// list is the moment the answers become worth having.
-    fn open_datasets(&mut self, cx: &mut Context<Self>) {
-        // Both halves, because "the modal is not working" has two causes and they need telling
-        // apart: the press never arriving, and the press arriving with nothing to show.
-        tracing::info!(
-            datasets = self.datasets.len(),
-            "opening the dataset list"
-        );
-        self.datasets_open = true;
-        for id in self
-            .datasets
-            .iter()
-            .map(|dataset| dataset.persistent_id.clone())
-            .collect::<Vec<_>>()
-        {
-            self.check_access(id, cx);
-        }
-        cx.notify();
-    }
-
-    /// Ask the server what a dataset holds, once, when the row first needs to know.
-    ///
-    /// **Not from `file_access_summary`.** That field exists on `DataVerseFindings` and is prose a
-    /// model wrote; the search results carry no access field at all. Whether a researcher may
-    /// have these files is the server's answer, and gating a download on a sentence would be the
-    /// same mistake as trusting a citation nobody checked (docs §223).
-    fn check_access(&mut self, persistent_id: String, cx: &mut Context<Self>) {
-        if self.dataset_access.contains_key(&persistent_id)
-            || !self.checking_access.insert(persistent_id.clone())
-        {
-            return;
-        }
-        let mut answer = self.sidecar.dataset_access(persistent_id.clone());
-        cx.spawn(async move |this, cx| {
-            if let Some(outcome) = answer.next().await {
-                let _ = this.update(cx, |workbench, cx| {
-                    workbench.checking_access.remove(&persistent_id);
-                    workbench.dataset_access.insert(persistent_id, outcome);
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
-    }
-
-    /// Fetch a dataset into this conversation's folder.
-    ///
-    /// Which is the sandbox's working directory as well, so the archive is both something the
-    /// researcher can open in Explorer and something the analysis subagents can read — the whole
-    /// reason this is a button rather than a tool the model calls.
-    /// Tick or untick one dataset.
-    fn toggle_dataset_pick(&mut self, id: String, cx: &mut Context<Self>) {
-        if !self.dataset_picks.remove(&id) {
-            self.dataset_picks.insert(id);
-        }
-        cx.notify();
-    }
-
-    /// The ticked datasets that can still be fetched, **in the order the list shows them**.
-    ///
-    /// Read off `self.datasets` rather than out of the set, so the button's count and the order
-    /// things arrive both match what is on screen. A pick whose file already landed, or whose
-    /// download is in flight, is not offered again — the count would otherwise promise work that
-    /// will not happen.
-    fn picked_datasets(&self) -> Vec<protocol::Dataset> {
-        still_fetchable(
-            &self.datasets,
-            &self.dataset_picks,
-            &self.downloaded,
-            &self.downloading,
-        )
-    }
-
-    /// Fetch every ticked dataset.
-    ///
-    /// One call per dataset rather than a batch route: `download_dataset` already guards its own
-    /// id against a second start, reports its own failure, and refreshes Outputs when a file
-    /// lands. A batch would have to reimplement all three and would report one outcome for
-    /// several files, which is the shape §279 had to undo for the copy button.
-    fn download_picked(&mut self, cx: &mut Context<Self>) {
-        let wanted = self.picked_datasets();
-        if wanted.is_empty() {
-            return;
-        }
-        // Said once, up front, because the per-file statuses that follow overwrite each other and
-        // the researcher pressed one button.
-        self.say(
-            format!(
-                "fetching {} dataset{} into this conversation",
-                wanted.len(),
-                if wanted.len() == 1 { "" } else { "s" }
-            ),
-            cx,
-        );
-        for dataset in wanted {
-            self.dataset_picks.remove(&dataset.persistent_id);
-            self.download_dataset(dataset, cx);
-        }
-    }
-
-    fn download_dataset(&mut self, dataset: protocol::Dataset, cx: &mut Context<Self>) {
-        let Some(folder) = self.thread_workspace() else {
-            self.status = "Start a conversation before downloading — the file needs a folder to \
-                           land in."
-                .to_string();
-            cx.notify();
-            return;
-        };
-        let id = dataset.persistent_id.clone();
-        if !self.downloading.insert(id.clone()) {
-            return;
-        }
-        self.status = format!("Downloading {}…", dataset.title);
-        let mut answer = self.sidecar.download_dataset(id.clone(), folder);
-        cx.spawn(async move |this, cx| {
-            if let Some(outcome) = answer.next().await {
-                let _ = this.update(cx, |workbench, cx| {
-                    workbench.downloading.remove(&id);
-                    match outcome {
-                        Ok(path) => {
-                            let name = path
-                                .file_name()
-                                .map(|name| name.to_string_lossy().to_string())
-                                .unwrap_or_else(|| path.display().to_string());
-                            workbench.status =
-                                format!("{name} is in this conversation's folder");
-                            workbench.downloaded.insert(id, name);
-                            // So Outputs shows it beside everything else the turn produced.
-                            workbench.refresh_project(cx);
-                        }
-                        Err(error) => {
-                            tracing::warn!(%error, "a dataset download failed");
-                            workbench.status = format!("Could not download: {error}");
-                        }
-                    }
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
-    }
-
-
-
-
-
-
-
-
-
-    /// What a file turned out to be, measured at most once per version of it.
-    ///
-    /// Keyed on modification time, so a dataset the agent rewrites is re-measured and one it
-    /// leaves alone is not. A file that has vanished between the directory listing and this call
-    /// reports its size only, which is what the row falls back to anyway.
-    fn shape_of(&self, output: &workspace::Output) -> workspace::Shape {
-        if let Some((seen, shape)) = self.shapes.borrow().get(&output.path) {
-            if *seen == output.modified {
-                return *shape;
-            }
-        }
-        let shape = workspace::shape(&output.path, output.bytes);
-        self.shapes
-            .borrow_mut()
-            .insert(output.path.clone(), (output.modified, shape));
-        shape
-    }
-
-    /// Copy the files this conversation's commands wrote outside it back into it.
-    ///
-    /// **A press, and only ever a copy.** Automatic would be wrong twice over: a named path can be
-    /// the researcher's own input, and a script often reads back what it just wrote. The backend
-    /// decides *which* files from its own record — this sends no paths, because a request that
-    /// could name one would be a file-copier pointed at anything.
-    fn collect_outside(&mut self, cx: &mut Context<Self>) {
-        // **Logged before anything can fail**, so "I pressed it and nothing happened" stops being
-        // indistinguishable from "the press never arrived". §272 cost four rounds to learn that an
-        // absent message and an absent action look identical from the other end of a report.
-        let waiting = self.thread_commands();
-        tracing::info!(
-            commands = waiting.len(),
-            files = files_left_outside(&waiting).len(),
-            in_flight = self.collect_in_flight,
-            // **The folder this side read**, so it can be compared with the one the backend names
-            // in its answer. The app counted files written outside and the backend counted none,
-            // which means the two are reading different records — and neither count can say that.
-            read_from = ?self.thread_workspace(),
-            "asked to bring outside files into the conversation"
-        );
-        if self.collect_in_flight {
-            return;
-        }
-        self.collect_in_flight = true;
-        self.collecting = None;
-        cx.notify();
-
-        let mut answer = self.sidecar.collect_outside();
-        cx.spawn(async move |workbench, cx| {
-            if let Some(outcome) = answer.next().await {
-                let _ = workbench.update(cx, |workbench, cx| {
-                    workbench.collect_in_flight = false;
-                    // **Say it out loud.** `say` puts the outcome in the status bar *and* in a
-                    // toast that outlives the next status change — it has existed for exactly this
-                    // since §41, and the first version of this button used none of it, so a press
-                    // that worked and a press that did nothing looked identical.
-                    match &outcome {
-                        Ok(collected) => {
-                            tracing::info!(
-                                brought = collected.brought.len(),
-                                refused = collected.refused.len(),
-                                note = %collected.note,
-                                "brought files into the conversation"
-                            );
-                            workbench.say(collected_sentence(collected), cx);
-                        }
-                        Err(error) => {
-                            tracing::warn!(%error, "could not bring the files in");
-                            workbench.say(format!("could not bring the files in: {error}"), cx);
-                        }
-                    }
-                    workbench.collecting = Some(outcome);
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
-    }
-
-
-
-    /// The commands this conversation recorded, oldest first.
-    fn thread_commands(&self) -> Vec<workspace::Command> {
-        self.thread_workspace()
-            .map(|dir| workspace::commands(&dir))
-            .unwrap_or_default()
-    }
-
-    /// Re-read the datasets this conversation's searches returned.
-    ///
-    /// **The file wins whenever there is one.** The model's answer is kept only for a run that
-    /// wrote none — a sandboxed deployment, or a conversation from before the file existed — so
-    /// that switching to the search's own answer never empties a panel that used to have rows.
-    pub(crate) fn reload_datasets(&mut self) {
-        self.search_totals = self
-            .thread_workspace()
-            .map(|dir| workspace::search_totals(&dir))
-            .unwrap_or_default();
-        let found = self
-            .thread_workspace()
-            .map(|dir| workspace::datasets(&dir))
-            .unwrap_or_default();
-        self.datasets = if found.is_empty() {
-            self.recommended_datasets.clone()
-        } else {
-            found
-        };
-    }
-
-    /// Whether the agent put this row forward, matched on the bare identifier.
-    pub(crate) fn was_recommended(&self, dataset: &protocol::Dataset) -> bool {
-        let id = bare_persistent_id(&dataset.persistent_id);
-        !id.is_empty() && self.recommended_ids.contains(&id)
-    }
-
-    /// The claims this conversation's subagents recorded, oldest first.
-    pub(crate) fn thread_claims(&self) -> Vec<workspace::Claim> {
-        self.thread_workspace()
-            .map(|dir| workspace::claims(&dir))
-            .unwrap_or_default()
-    }
-
-}
-
-impl Render for Workbench {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.restore_focus {
-            self.restore_focus = false;
-            let composer = self.composer.focus_handle(cx);
-            window.focus(&composer);
-        }
-        // Once per frame, and only actually read when the record has changed. Both the panel and
-        // every transcript block need it, and doing it in each would be a file read per message
-        // per frame — the mistake `shape_of` is cached to avoid.
-        self.refresh_authorship();
-
-        // `relative` so the palette's `absolute` overlay is positioned against the
-        // window rather than the page origin.
-        // The panels sit in a row; the status bar spans the **window** beneath them.
-        //
-        // It used to live inside the chat pane, so it was only as wide as the chat and its
-        // controls slid left and right whenever a panel was collapsed. A status bar that
-        // moves is one you have to look for. Zed's runs the full width for the same
-        // reason, and its buttons are always in the same place (docs §53).
-        let mut body = div()
-            .flex()
-            .flex_row()
-            .flex_grow()
-            // Without this the row refuses to shrink below its content and pushes the
-            // status bar off the bottom — the flex default that has now cost four
-            // separate bugs (§40, §48, §51).
-            .min_h_0()
-            .w_full()
-            .mb_4()
-            .when(self.sidebar_open, |body| {
-                body.child(self.rail(cx))
-                    .child(self.divider(Divider::Sidebar, cx))
-            })
-            .when(!self.sidebar_open, |body| {
-                body.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .flex_none()
-                        .m_2()
-                        .mr_0()
-                        .gap_1()
-                        .justify_between()
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .flex_none()
-                                .gap_1()
-                                .child(
-                                    ui::Button::new("toggle-left-sidebar")
-                                        .icon(ui::Icon::new("icons/sidebar-simple-left.svg"))
-                                        .style(ui::ButtonStyle::SecondaryWhite)
-                                        .border(true)
-                                        .on_click(cx.listener(|workbench, _event, _window, cx| {
-                                            workbench.sidebar_open = !workbench.sidebar_open;
-                                            workbench.remember_panels();
-                                            cx.notify();
-                                        })),
-                                )
-                                .child(
-                                    ui::Button::new("new-conversation")
-                                        .icon(ui::Icon::new("icons/plus.svg"))
-                                        .style(ui::ButtonStyle::SecondaryWhite)
-                                        .border(true)
-                                        .on_click(cx.listener(|workbench, _event, _window, cx| {
-                                            let project = workbench.sidecar.project();
-                                            workbench.new_thread_in(project, cx);
-                                        })),
-                                )
-                        )
-                         .child(
-                            ui::Button::new("open-settings")
-                                .icon(ui::Icon::new("icons/gear-six.svg"))
-                                .style(ui::ButtonStyle::SecondaryWhite)
-                                .border(true)
-                                .on_click(cx.listener(|workbench, _event, _window, cx| {
-                                    workbench.run_command(Command::OpenSettings, cx);
-                                })),
-                        )
-                    )
-            })
-            // **Its own card, not a strip inside the conversation's.** It lived inside the chat
-            // pane's border, so the two read as one panel with a notch cut out of it while the
-            // sidebar and the research panel each sat on their own — *"the conversation panel is
-            // colliding with the road"*. Same treatment as its neighbours now (§173).
-            //
-            // Not before the first question: an empty road beside an empty transcript is a frame
-            // around nothing, and the empty state has its own things to say.
-            // .when(!self.transcript.is_empty(), |body| {
-            //     body.child(self.road_strip(cx))
-            // })
-            .child(self.chat_pane(cx));
-
-        // The right-hand slot belongs to the research panel alone. Setup used to take it,
-        // which meant diagnosing a problem hid the outputs you were diagnosing it about.
-        body = if self.panel_open {
-            body.child(self.divider(Divider::Panel, cx))
-                .child(self.artifacts_panel(cx))
-        } else {
-            body.child(
-                div()
-                    .id("toggle-right-panel")
-                    .child(
-                        ui::Icon::new("icons/sidebar-simple-right.svg")
-                            .size(ui::IconSize::Small)
-                            .colour(theme::text())
-                    )
-                    .w(px(30.))
-                    .h(px(30.))
-                    .bg(rgb(theme::surface()))
-                    .m_2()
-                    .mt_4()
-                    .border_1()
-                    .border_color(rgb(theme::border()))
-                    .flex_none()
-                    .p_3()
-                    .flex()
-                    .rounded_lg()
-                    .items_center()
-                    .justify_center()
-                    .hover(|style| style.cursor_pointer())
-                    .on_click(cx.listener(|workbench, _event, _window, cx| {
-                        workbench.panel_open = !workbench.panel_open;
-                        workbench.remember_panels();
-                        cx.notify();
-                    })),
-            )
-        };
-
-        let root = div()
-            // An id makes the root a drop target; without one the platform's file-drop
-            // event has nowhere to land.
-            .id("workbench")
-            .relative()
-            .flex()
-            .flex_col()
-            .size_full()
-            .bg(rgb(theme::background()))
-            .text_color(rgb(theme::text()))
-            .on_action(cx.listener(Self::toggle_palette))
-            .on_action(cx.listener(Self::toggle_settings))
-            .on_action(cx.listener(Self::dismiss))
-            .on_mouse_move(
-                cx.listener(|workbench, event: &gpui::MouseMoveEvent, window, cx| {
-                    if let Some(drag) = workbench.gallery_scroll_drag.as_ref() {
-                        // A release outside the narrow track may not deliver its mouse-up to the
-                        // thumb. The move event still tells us the button is no longer held, so
-                        // end the drag here as well instead of letting the next click move a rail
-                        // the researcher is no longer touching (docs §158).
-                        if !event.dragging() {
-                            workbench.gallery_scroll_drag = None;
-                            cx.notify();
-                            return;
-                        }
-                        let offset_x = horizontal_drag_offset(
-                            event.position.x,
-                            drag.track_left,
-                            drag.grab_x,
-                            drag.travel,
-                            drag.overflow,
-                        );
-                        let offset_y = drag.handle.offset().y;
-                        drag.handle.set_offset(gpui::point(offset_x, offset_y));
-                        cx.notify();
-                        return;
-                    }
-                    let Some(edge) = workbench.dragging else {
-                        return;
-                    };
-                    // Clamped so a pane can be made narrow but never vanish: a panel dragged
-                    // to nothing is one the user has no handle left to drag back.
-                    let width = match edge {
-                        Divider::Sidebar => f32::from(event.position.x),
-                        Divider::Panel => {
-                            f32::from(window.viewport_size().width - event.position.x)
-                        }
-                    };
-                    let width = width.clamp(160., 640.);
-                    match edge {
-                        Divider::Sidebar => workbench.sidebar_width = width,
-                        Divider::Panel => workbench.panel_width = width,
-                    }
-                    cx.notify();
-                }),
-            )
-            .on_mouse_up(
-                gpui::MouseButton::Left,
-                cx.listener(|workbench, _event: &gpui::MouseUpEvent, _window, cx| {
-                    if workbench.dragging.take().is_some()
-                        || workbench.gallery_scroll_drag.take().is_some()
-                    {
-                        cx.notify();
-                    }
-                }),
-            )
-            .on_action(cx.listener(Self::copy_selection))
-            .on_action(cx.listener(Self::select_all_transcript))
-            // Anywhere on the window, not a designated strip: someone dragging a file has
-            // their eyes on the file, not on a target.
-            .on_drop(
-                cx.listener(|workbench, paths: &gpui::ExternalPaths, _window, cx| {
-                    workbench.add_files(paths.paths(), cx);
-                }),
-            )
-            .child(body)
-            .child(self.status_bar(cx))
-            .child(self.toasts(cx));
-
-        // Settings floats rather than displacing a panel, so opening it no longer costs
-        // the chat 420px for as long as it is open.
-        let root = if self.settings_open {
-            root.child(self.settings_pane(cx))
-        } else {
-            root
-        };
-
-        let root = if self.about_open {
-            root.child(self.about_modal(cx))
-        } else {
-            root
-        };
-
-        let root = if self.provenance_open {
-            root.child(self.provenance_modal(cx))
-        } else {
-            root
-        };
-
-        // The preview floats over the workbench but under destructive confirmation and the
-        // palette: it is a thing you open, look at, and dismiss, not a place you navigate to
-        // (docs §49, §155).
-        let root = match &self.preview {
-            Some(preview) => root.child(self.preview_modal(
-                preview.current().clone(),
-                &preview.items,
-                preview.at,
-                cx,
-            )),
-            None => root,
-        };
-
-        let root = if self.sources_open {
-            root.child(self.sources_modal(cx))
-        } else {
-            root
-        };
-
-        let root = if self.datasets_open {
-            root.child(self.datasets_modal(cx))
-        } else {
-            root
-        };
-
-        let root = if self.documents_open {
-            root.child(self.documents_modal(cx))
-        } else {
-            root
-        };
-
-        let root = if self.commands_open {
-            root.child(self.commands_modal(cx))
-        } else {
-            root
-        };
-
-        let root = if self.claims_open {
-            root.child(self.claims_modal(cx))
-        } else {
-            root
-        };
-
-        // The budget gate, mounted before the confirmations below it. Nothing else in this app
-        // guards money, and the researcher did not ask for it — a drafted run did.
-        let root = match self.discovery_open.clone() {
-            Some(view) => root.child(self.discovery_modal(&view, cx)),
-            None => root,
-        };
-
-        let root = match self.approving.clone() {
-            Some(approval) => root.child(self.approval_modal(&approval, cx)),
-            None => root,
-        };
-
-        let root = match &self.confirming_delete {
-            Some(target) => root.child(self.delete_modal(target, cx)),
-            None => root,
-        };
-
-        // Above Settings, and that is not cosmetic: the pill that raises it lives *inside* the
-        // Settings pane, which mounts later and would otherwise draw straight over it.
-        let root = match self.confirming_provider {
-            Some(spec) => root.child(self.provider_modal(spec, cx)),
-            None => root,
-        };
-
-        let root = if self.palette_open {
-            root.child(self.palette(cx))
-        } else {
-            root
-        };
-
-        let root = root.children(self.picker_popup(cx));
-
-        // Both menus last, and `deferred` inside, so they paint over every pane they might open
-        // across instead of being clipped by the one they opened in.
-        let root = match &self.sidebar_menu {
-            Some((open, at)) => root.child(self.sidebar_menu_element(open.clone(), *at, cx)),
-            None => root,
-        };
-        match &self.context_menu {
-            Some(open) => root.child(self.context_menu(open.clone(), cx)),
-            None => root,
-        }
-    }
-}
-
 /// Decode a whole captured SSE stream into the transcript state it would produce.
 ///
 /// Shared by `--replay` and the fixture test, so both exercise the same path the
@@ -7713,6 +1748,763 @@ fn replay(path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub(crate) fn bibliography(sources: &[protocol::Source], origins: &[references::Origin]) -> String {
+    let mut out = String::new();
+    for (at, source) in sources.iter().enumerate() {
+        let citation = source.citation.trim();
+        if citation.is_empty() {
+            continue;
+        }
+        // Braces and backslashes are BibTeX's own syntax; left in they would truncate the entry
+        // at the first one and take the rest of the file with it.
+        let safe = citation.replace('\\', "\\\\").replace(['{', '}'], "");
+        out.push_str(&format!("@misc{{minime{},\n  note = {{{safe}}},\n", at + 1));
+        if let Some(url) = link_for(source) {
+            out.push_str(&format!("  url = {{{url}}},\n"));
+        }
+        // A disagreement travels with the entry rather than being resolved here. A reference
+        // manager shows `annote`, and someone importing forty references should not have to come
+        // back to this window to find out which two were doubtful.
+        //
+        // **And which ones nothing checked.** This is the copy that leaves the app — into Zotero,
+        // into a manuscript, into a colleague's inbox — so it is the one place the distinction
+        // most needs to survive. The panel can be re-read; an exported `.bib` is on its own, and
+        // the note has to travel with the entry it belongs to (docs §185).
+        match (disputed_link(source), origins.get(at)) {
+            (Some(written), _) => out.push_str(&format!(
+                "  annote = {{unverified: the citation text gives {written}}},\n"
+            )),
+            (None, Some(origin)) if origin.needs_a_human() => out.push_str(
+                "  annote = {unverified: this reference came from the model, not from a search — \
+                 confirm it before citing},\n",
+            ),
+            (None, _) => {}
+        }
+        out.push_str("}\n\n");
+    }
+    out
+}
+
+
+/// Where a source's `link` should point: the paper's own page on Semantic Scholar.
+///
+/// Asked for directly — *"when I press it I am redirected to the paper in semantic scholar not to
+/// the article in the main page where the article was published"* — and it is the better default
+/// anyway: the publisher's landing page is often a paywall, while the Semantic Scholar record
+/// carries the abstract, the citation graph and whatever open-access copy exists.
+///
+/// `api.semanticscholar.org/<id>` 301-redirects to the paper page for **both** id forms, verified
+/// against the live service:
+///
+/// ```text
+/// CorpusID:45447591                     → /paper/117e16e7774ff0616b461a075feadcee7a33d793
+/// DOI:10.1016/0304-3878(92)90044-a      → /paper/bbec167725ba916adafcaa221f934b759e2cd131
+/// ```
+///
+/// In preference order: the corpus id the search itself returned; the DOI the registry says this
+/// citation describes; the DOI the citation carries, when that one checked out. Failing all three
+/// — a thesis in a university repository, say — whatever link the source came with, because a
+/// working link to the right document beats a Semantic Scholar page that does not exist.
+pub(crate) fn scholar_link(
+    source: &protocol::Source,
+    verdict: Option<&references::Verdict>,
+    repair: Option<&references::Repair>,
+) -> Option<String> {
+    let existing = link_for(source);
+
+    // Trustworthy by construction: built from the `corpusId` in the search result this paper came
+    // from. Nothing composed it, so there is nothing to check.
+    if existing.as_deref().is_some_and(references::is_corpus_link) {
+        return existing;
+    }
+
+    // The work the registry says this citation describes. Checked, so usable.
+    if let Some(repair) = repair {
+        return Some(format!("https://api.semanticscholar.org/DOI:{}", repair.doi));
+    }
+
+    // The citation's own DOI — **only once it has been verified**.
+    //
+    // This is the line that shipped wrong, and it made things worse rather than merely failing.
+    // It used to wrap *any* DOI, verified or not, as `api.semanticscholar.org/DOI:<doi>`. An
+    // invented DOI is a real DOI belonging to somebody else, so instead of 404ing it resolved —
+    // cleanly, to a real Semantic Scholar page. A researcher clicking `link` on a paper about
+    // potato late blight was taken to one about recombination in the mammalian germ line, with no
+    // warning, because the row renders before the check returns.
+    //
+    // Routing through Semantic Scholar removed the one accidental safeguard a bad DOI had: that
+    // it often did not resolve at all. So the guard has to be explicit. An unverified identifier
+    // written by a model is not a link; it is a claim awaiting a check.
+    if matches!(verdict, Some(references::Verdict::Confirmed)) {
+        if let Some(doi) = existing.as_deref().and_then(references::doi_in) {
+            return Some(format!("https://api.semanticscholar.org/DOI:{doi}"));
+        }
+    }
+
+    // A link that carries no identifier at all — a thesis in a university repository — is the
+    // model's, and unverifiable, but at least it is not dressed up as a resolved paper. Kept only
+    // when there is no DOI in it to be wrong about.
+    match existing.as_deref().and_then(references::doi_in) {
+        Some(_) => None,
+        None => existing,
+    }
+}
+
+
+/// The link to actually use for a source.
+///
+/// The backend's own field first, and the URL inside the citation only when there is no field.
+/// See [`protocol::Source`] for why that order is not arbitrary: one is what Semantic Scholar
+/// returned, the other is what the model wrote down.
+pub(crate) fn link_for(source: &protocol::Source) -> Option<String> {
+    source
+        .link
+        .clone()
+        .or_else(|| first_url(&source.citation))
+}
+
+
+/// The URL written into the citation text, when it contradicts the structured one.
+///
+/// `None` when they agree, when either is missing, or when they differ only in the ways URLs
+/// harmlessly differ — a trailing slash, `http` against `https`, or the `doi.org` host spelled
+/// with `dx.`. Those are the same resolver and flagging them would train people to ignore this.
+pub(crate) fn disputed_link(source: &protocol::Source) -> Option<String> {
+    let structured = source.link.as_deref()?;
+    let written = first_url(&source.citation)?;
+    let normalise = |url: &str| {
+        url.trim_end_matches('/')
+            .replace("http://", "https://")
+            .replace("://dx.doi.org/", "://doi.org/")
+            .to_ascii_lowercase()
+    };
+    (normalise(structured) != normalise(&written)).then_some(written)
+}
+
+
+/// A citation with its URL removed, and the punctuation left tidy.
+///
+/// So the prose can be read as prose and the link shown once, on its own line, where it cannot
+/// wrap into something that looks mistyped.
+pub(crate) fn without_url(citation: &str) -> String {
+    let Some(url) = first_url(citation) else {
+        return citation.trim().to_string();
+    };
+    let Some(at) = citation.find(&url) else {
+        return citation.trim().to_string();
+    };
+    let mut out = String::with_capacity(citation.len());
+    out.push_str(&citation[..at]);
+    out.push_str(&citation[at + url.len()..]);
+    // "…potato. https://doi.org/10.1/x." leaves "…potato. ." behind.
+    out.trim().trim_end_matches(['.', ',', ';', ' ']).trim().to_string()
+}
+
+
+/// The provenance graph as a Mermaid `flowchart`.
+///
+/// Mermaid because it is the one diagram format a researcher can already paste somewhere useful:
+/// GitHub, Quarto, Obsidian and Typst all render it, and it stays readable as text if none of
+/// them are to hand. The link styles carry the same distinction the drawing does — `-->` is
+/// causal, `-.->` is arrival order — so a diagram pasted into a methods section does not quietly
+/// lose the hedge that makes it honest.
+pub(crate) fn mermaid(graph: &provenance::Graph) -> String {
+    let mut out = String::from("flowchart TD\n");
+    for (at, node) in graph.nodes.iter().enumerate() {
+        let label = match node.visits {
+            1 => node.name.replace('_', " "),
+            visits => format!("{} ×{visits}", node.name.replace('_', " ")),
+        };
+        // Quotes around the label so a name with a bracket or a space in it cannot end the node.
+        out.push_str(&format!("    n{at}[\"{}\"]\n", label.replace('"', "'")));
+    }
+    for edge in &graph.edges {
+        let arrow = match edge.kind {
+            provenance::Edge::Delegated => "-->",
+            _ => "-.->",
+        };
+        let label = match (edge.kind, edge.count) {
+            (provenance::Edge::Delegated, 1) => String::new(),
+            (kind, 1) => format!("|{}|", kind.label()),
+            (kind, count) => format!("|{} ×{count}|", kind.label()),
+        };
+        out.push_str(&format!(
+            "    n{} {arrow}{label} n{}\n",
+            edge.from, edge.to
+        ));
+    }
+    out
+}
+
+
+/// The provenance graph as a standalone SVG.
+///
+/// **SVG rather than the PNG the design asks for.** Rasterising what is on screen would mean a
+/// screenshot API gpui 0.2.2 does not expose, or a PNG encoder — a compressor and a CRC — written
+/// by hand or pulled in as a dependency, on a build that has to succeed on a colleague's Windows
+/// machine with nothing installed. SVG needs none of that: it is text, this function is the
+/// generator, and a vector figure is what a journal asks for anyway. It also survives being
+/// scaled into a poster, which a 760px raster does not.
+///
+/// Colours are baked from the live palette at the moment of export, because the file leaves the
+/// app and cannot ask a theme anything later.
+pub(crate) fn provenance_svg(graph: &provenance::Graph) -> String {
+    const ROW: f32 = 58.;
+    const LEFT: f32 = 16.;
+    const NAME_WIDTH: f32 = 260.;
+    const GUTTER: f32 = 236.;
+
+    let height = ROW * graph.nodes.len() as f32 + 24.;
+    let width = LEFT + NAME_WIDTH + GUTTER;
+    let ink = |colour: u32| format!("#{colour:06x}");
+
+    let mut out = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" \
+         viewBox=\"0 0 {width} {height}\" font-family=\"sans-serif\">\n\
+         <rect width=\"{width}\" height=\"{height}\" fill=\"{}\"/>\n",
+        ink(theme::background())
+    );
+
+    let anchor = LEFT + NAME_WIDTH;
+    for edge in &graph.edges {
+        let from = 12. + (edge.from as f32 + 0.5) * ROW;
+        let to = 12. + (edge.to as f32 + 0.5) * ROW;
+        let span = (edge.to as f32 - edge.from as f32).abs();
+        let bow = (24. + 50. * (span - 1.).max(0.)).min(GUTTER - 30.) * 2.;
+        let weight = match edge.kind {
+            provenance::Edge::Returned => 2.,
+            _ => 1.5,
+        } + (edge.count.saturating_sub(1) as f32 * 0.8).min(3.);
+        let dashes = match edge.kind {
+            provenance::Edge::Delegated => String::new(),
+            _ => " stroke-dasharray=\"4 4\"".to_string(),
+        };
+        out.push_str(&format!(
+            "<path d=\"M {anchor} {from} Q {} {} {anchor} {to}\" fill=\"none\" stroke=\"{}\" \
+             stroke-width=\"{weight}\"{dashes}/>\n",
+            anchor + bow,
+            (from + to) / 2.,
+            ink(edge_ink(edge.kind)),
+        ));
+    }
+
+    for (at, node) in graph.nodes.iter().enumerate() {
+        let y = 12. + (at as f32 + 0.5) * ROW;
+        let x = LEFT + 14. * node.depth.min(3) as f32;
+        out.push_str(&format!(
+            "<circle cx=\"{}\" cy=\"{y}\" r=\"5.5\" fill=\"{}\"/>\n",
+            x + 5.5,
+            ink(theme::accent())
+        ));
+        // `escape` rather than the name straight in: a specialist called `a<b` would otherwise
+        // open a tag and the rest of the file would not parse.
+        out.push_str(&format!(
+            "<text x=\"{}\" y=\"{}\" fill=\"{}\" font-size=\"13\">{}</text>\n",
+            x + 20.,
+            y - 1.,
+            ink(theme::text()),
+            escape_xml(&node.name.replace('_', " "))
+        ));
+        let spans: Vec<String> = node.spans.iter().map(|ms| duration_label(*ms)).collect();
+        let note = match node.visits {
+            1 => spans.join(", "),
+            visits => format!("visited {visits} times · {}", spans.join(", ")),
+        };
+        out.push_str(&format!(
+            "<text x=\"{}\" y=\"{}\" fill=\"{}\" font-size=\"11\">{}</text>\n",
+            x + 20.,
+            y + 14.,
+            ink(theme::text_faint()),
+            escape_xml(&note)
+        ));
+    }
+
+    out.push_str("</svg>\n");
+    out
+}
+
+
+/// The five characters that would otherwise be markup.
+pub(crate) fn escape_xml(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+
+/// The colour that stands for how much an edge can be trusted.
+///
+/// Shared by the arcs and the legend so the two cannot describe different pictures — which they
+/// did while each carried its own `match`.
+pub(crate) fn edge_ink(kind: provenance::Edge) -> u32 {
+    match kind {
+        provenance::Edge::Delegated => theme::text_muted(),
+        provenance::Edge::Then => theme::text_faint(),
+        // The one edge that gets the accent, because these returns are what §73 asked the
+        // feature to make visible.
+        provenance::Edge::Returned => theme::accent(),
+    }
+}
+
+
+/// What kind of work a specialist does, as a colour.
+///
+/// **Two colours, and `None` for anything else.** The design is explicit that a colour per
+/// specialist is a legend nobody memorises; the distinction worth carrying is between work that
+/// goes and reads, and work that touches the data. Matched on the name because that is all the
+/// chip has — a heuristic, and one whose worst outcome is a chip in the ordinary text colour
+/// rather than a wrong claim. A specialist this does not recognise is left uncoloured on purpose:
+/// guessing which of two kinds a new one is would be the mistake.
+pub(crate) fn specialist_ink(name: &str) -> Option<u32> {
+    let name = name.to_ascii_lowercase();
+    if ["search", "research", "literature", "paper", "citation", "theor"]
+        .iter()
+        .any(|mark| name.contains(mark))
+    {
+        return Some(theme::running());
+    }
+    if ["data", "analy", "clean", "profil", "stat"]
+        .iter()
+        .any(|mark| name.contains(mark))
+    {
+        return Some(theme::success());
+    }
+    None
+}
+
+
+/// The specialists a turn consulted, in order, with a run of the same one collapsed.
+///
+/// `a → a → b` is one visit to `a` then one to `b`; `a → b → a` keeps both visits to `a`, because
+/// coming *back* to a specialist after another is the loop the whole provenance feature exists to
+/// show (§73). Only consecutive repeats collapse.
+pub(crate) fn consulted(agents: &[AgentTrace]) -> Vec<String> {
+    let mut path: Vec<String> = Vec::new();
+    for agent in agents {
+        if path.last().map(String::as_str) != Some(agent.name.as_str()) {
+            path.push(agent.name.clone());
+        }
+    }
+    path
+}
+
+/// The `+N` glyph, sized to the tile it sits on.
+pub(crate) fn media_scrim_size(tile: f32) -> f32 {
+    (tile / 4.).max(18.)
+}
+
+
+/// How many characters of a filename fit across a tile at `text_xs`.
+///
+/// Measured rather than truncated by the layout, for the reason [`Workbench::output_grid_tile`]
+/// gives: `Label::ellipsis` collapses to a bare `…` without a flex parent to grow within (§59).
+/// Roughly 6px per character at 12px type, less the tile's own padding.
+pub(crate) fn name_chars(tile: f32) -> usize {
+    (((tile - 16.) / 6.) as usize).max(8)
+}
+
+
+/// How many tiles the grid draws, and how many images the last one stands in for.
+///
+/// **The scrimmed tile counts among the hidden**, because it is covered: eight images in four
+/// tiles reads `+5` — three pictures you can see, five you cannot — which is what the phone
+/// gallery the researcher pointed at shows for the same eight. `total - tiles` gives `+4` and
+/// looks perfectly reasonable in review; it is only wrong beside the thing it is imitating. One
+/// function so the grid and its test cannot hold two versions of the rule.
+pub(crate) fn image_grid_shape(total: usize) -> (usize, usize) {
+    let shown = total.min(IMAGE_GRID_TILES);
+    let hidden = if total > IMAGE_GRID_TILES {
+        total - (IMAGE_GRID_TILES - 1)
+    } else {
+        0
+    };
+    (shown, hidden)
+}
+
+
+pub(crate) fn output_folder_groups(outputs: &[workspace::Output]) -> Vec<OutputFolderGroup<'_>> {
+    let mut groups: Vec<OutputFolderGroup<'_>> = Vec::new();
+    for output in outputs {
+        let folder = std::path::Path::new(&output.name)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new(""))
+            .to_path_buf();
+        if let Some(group) = groups.iter_mut().find(|group| group.folder == folder) {
+            group.outputs.push(output);
+        } else {
+            groups.push(OutputFolderGroup {
+                folder,
+                outputs: vec![output],
+            });
+        }
+    }
+    groups
+}
+
+
+/// Name the folder the agent chose, not the generated background-thread directory above it.
+///
+/// The screenshot in §152 devoted its useful width to a 36-character UUID common to every row.
+/// That component is app bookkeeping; removing only a leading UUID leaves `eda/plots`, the
+/// researcher's information, while the unshortened path remains the grouping identity above.
+///
+/// `worker` is whoever produced the files, when the app knows — from the folder for a background
+/// worker (§199), from the backend's own record for a specialist (§201). It takes the leading
+/// position either way: the UUID's, when there was one, so nothing is lost by removing it; and
+/// otherwise ahead of the folder the agent chose. Either way the heading reads as a path of work
+/// — `background worker / plots`, `exploratory data analysis / plots`. `None` keeps §152's
+/// behaviour, which is what a conversation with no record still gets.
+pub(crate) fn output_folder_label(folder: &std::path::Path, worker: Option<&str>) -> String {
+    let mut components: Vec<String> = folder
+        .components()
+        .filter_map(|component| component.as_os_str().to_str().map(str::to_owned))
+        .collect();
+    let removed_thread = components
+        .first()
+        .is_some_and(|component| workspace::looks_like_thread_id(component));
+    if removed_thread {
+        components.remove(0);
+    }
+    if let Some(name) = worker {
+        components.insert(0, name.to_string());
+    }
+    if components.is_empty() {
+        if removed_thread {
+            "Background task files".to_string()
+        } else {
+            "Conversation files".to_string()
+        }
+    } else {
+        components.join(" / ")
+    }
+}
+
+
+/// The worker thread a file sits under, when it sits under one.
+///
+/// The **only** attribution this client can make without guessing. A background worker runs on
+/// its own thread and writes into a folder named after it, so the folder *is* the record of who
+/// produced the file. Specialists consulted inside the conversation share the conversation's
+/// thread and its one directory, and nothing on the wire says which of them wrote a given file —
+/// so nothing here claims to know. That restraint is `provenance.rs`'s own rule from §73: a
+/// provenance record that quietly guesses is worse than none, because it will be believed.
+pub(crate) fn producing_thread(output: &workspace::Output) -> Option<&str> {
+    let first = std::path::Path::new(&output.name).components().next()?;
+    let name = first.as_os_str().to_str()?;
+    if workspace::looks_like_thread_id(name) {
+        Some(name)
+    } else {
+        None
+    }
+}
+
+
+/// Outputs split by who produced them: the conversation's own first, then one group per
+/// other author, in the order their first file appears.
+///
+/// **Ahead of the image/other split, not after it.** §152 put every image in one grid because
+/// images are what a person opens the panel to look at. That was right within one body of work
+/// and wrong across two: a researcher looking at *"15 images"* was looking at the conversation's
+/// plots and a worker's plots in one tray, with nothing saying where the boundary was (§199). A
+/// background worker is already a separate run with its own job row and its own folder; its
+/// figures are a separate body of work for the same reason.
+///
+/// Two sources of truth, in this order, each exact within its own domain (§201):
+///
+/// 1. **The folder**, for a background worker — its own thread, its own directory, true by
+///    construction and true even for a conversation reopened years later.
+/// 2. **The manifest**, for everything else — what `overlay/minime_local/authorship.py` wrote
+///    down as each file was produced.
+///
+/// The folder wins where both speak, because inside a worker's run the manifest records that
+/// worker's *own* coordinator and would rename `background worker` to `coordinator` — technically
+/// true of the inner graph and useless to the person reading the panel.
+/// A file that records what a search returned, rather than a result of the research.
+///
+/// Kept out of the transcript's file cards only. Both are real outputs a researcher may want —
+/// they are just not things to read mid-conversation.
+pub(crate) fn is_search_record(output: &workspace::Output) -> bool {
+    matches!(
+        output.path.file_name().and_then(|name| name.to_str()),
+        Some("papers.json") | Some("dataverse_search.json")
+    )
+}
+
+
+pub(crate) fn by_producer(
+    outputs: &[workspace::Output],
+    tasks: &[protocol::AsyncTask],
+    wrote: &std::collections::HashMap<String, String>,
+) -> Vec<(Option<String>, Vec<workspace::Output>)> {
+    let mut groups: Vec<(Option<String>, Vec<workspace::Output>)> = Vec::new();
+    for output in outputs {
+        let by = match producing_thread(output) {
+            Some(thread) => produced_by(Some(thread), tasks),
+            None => wrote
+                .get(&workspace::normalise_separators(&output.name))
+                .map(|agent| agent.replace('_', " ")),
+        };
+        match groups.iter_mut().find(|(owner, _)| *owner == by) {
+            Some((_, produced)) => produced.push(output.clone()),
+            None => groups.push((by, vec![output.clone()])),
+        }
+    }
+    // The conversation's own files lead even when someone else wrote first: they are what the
+    // researcher asked for directly, and a delegation is the detour under it.
+    groups.sort_by_key(|(owner, _)| owner.is_some());
+    groups
+}
+
+
+/// Who produced a group of files, in the researcher's words rather than the engine's.
+///
+/// `None` is the conversation's own thread, and stays unlabelled: those files are the unmarked
+/// case, and spending a heading on *"from this conversation"* would name the default everywhere
+/// to say something only where it is not true.
+///
+/// A thread with no matching task is still *some* worker — the folder proves it — so it says so
+/// without naming one. That is the state after a reload whose snapshot carried no `async_tasks`,
+/// and it is the difference between "we don't know which" and "nobody".
+pub(crate) fn produced_by(thread: Option<&str>, tasks: &[protocol::AsyncTask]) -> Option<String> {
+    let thread = thread?;
+    Some(
+        tasks
+            .iter()
+            .find(|task| task.thread_id == thread)
+            // Underscores are the graph's spelling of a name, not a person's — the road strip and
+            // the jobs list both already say `background worker`, and a third spelling of the
+            // same specialist in a third panel is how one worker reads as two.
+            .map(|task| task.agent_name.replace('_', " "))
+            .unwrap_or_else(|| "a background task".to_string()),
+    )
+}
+
+
+/// `15 images`, or `5 images from background worker`.
+pub(crate) fn images_heading(count: usize, by: Option<&str>) -> String {
+    let plural = if count == 1 { "" } else { "s" };
+    match by {
+        Some(who) => format!("{count} image{plural} from {who}"),
+        None => format!("{count} image{plural}"),
+    }
+}
+
+
+/// Keep the distinguishing tail when a filename itself is too long for a thumbnail.
+///
+/// `Label::ellipsis()` correctly protects layout (§59), but its trailing ellipsis preserves the
+/// shared prefix and removes the useful suffix in §152. Shortening the string from the leading
+/// edge before layout means the extension and differentiating part survive even in a 140px tile.
+pub(crate) fn distinguishing_tail(text: &str, max_chars: usize) -> String {
+    let count = text.chars().count();
+    if count <= max_chars || max_chars == 0 {
+        return text.to_string();
+    }
+    let keep = max_chars.saturating_sub(1);
+    format!("…{}", text.chars().skip(count - keep).collect::<String>())
+}
+
+
+/// Shorten an `a / b / c` heading to fit, giving up the middle rather than either end.
+///
+/// **[`distinguishing_tail`] keeps the wrong end for these.** §152 chose tail-keeping because its
+/// labels shared a long *prefix* and differed at the end — the right rule for a filename. §201 then
+/// put the producing worker's name at the *head*, which inverts it: `background worker / outputs /
+/// tables` came out as `…d worker / outputs / tables`, throwing away the one word the attribution
+/// exists to show. Spotted in a screenshot of the feature working (§208).
+///
+/// So both ends survive and the middle gives way. If it still will not fit, the **head** is kept
+/// whole and the tail is trimmed — the producer outranks the leaf folder, because a heading that
+/// cannot say who made these files is the heading §201 replaced.
+pub(crate) fn shorten_path_label(label: &str, max_chars: usize) -> String {
+    if label.chars().count() <= max_chars {
+        return label.to_string();
+    }
+    let segments: Vec<&str> = label.split(" / ").collect();
+    let (Some(head), Some(tail)) = (segments.first(), segments.last()) else {
+        return distinguishing_tail(label, max_chars);
+    };
+    if segments.len() < 2 {
+        // One segment: no middle to drop, so §152's rule is still the best available.
+        return distinguishing_tail(label, max_chars);
+    }
+    let spacer = if segments.len() > 2 { " / … / " } else { " / " };
+    let joined = format!("{head}{spacer}{tail}");
+    if joined.chars().count() <= max_chars {
+        return joined;
+    }
+    let room = max_chars.saturating_sub(head.chars().count() + spacer.chars().count());
+    // Below four characters a trimmed tail is all ellipsis and no information; better to fall back
+    // than to print `… / … / …s`.
+    if room >= 4 {
+        return format!("{head}{spacer}{}", distinguishing_tail(tail, room));
+    }
+    distinguishing_tail(label, max_chars)
+}
+
+
+pub(crate) fn output_filename(output: &workspace::Output) -> String {
+    let name = std::path::Path::new(&output.name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(&output.name);
+    distinguishing_tail(name, 36)
+}
+
+
+/// Whether a file is column-separated, and so worth colouring by column.
+pub(crate) fn is_delimited(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.ends_with(".csv") || name.ends_with(".tsv")
+}
+
+
+/// The colour for one CSV column.
+///
+/// Cycles the theme's own roles rather than inventing a rainbow: colours already checked
+/// against every surface for contrast, so a wide table stays readable in every palette —
+/// including the light one, where a fixed rainbow would wash out.
+pub(crate) fn column_colour(column: usize) -> u32 {
+    const WHEEL: [fn() -> u32; 6] = [
+        theme::text,
+        theme::accent,
+        theme::running,
+        theme::success,
+        theme::warning,
+        theme::text_muted,
+    ];
+    WHEEL[column % WHEEL.len()]()
+}
+
+
+/// Consecutive identical steps folded into one line with a count.
+///
+/// An agent hunting for a file emits `glob` eight times in a row, and eight identical lines
+/// carry exactly as much information as one — while costing eight lines of the answer's
+/// screen space. `glob ×8` says the same thing and reads as one glance.
+///
+/// Only *consecutive* runs are folded. `read_file ×3, ls ×2, read_file ×3` is a different
+/// story from `read_file ×6`, and flattening the order would erase it.
+pub(crate) fn fold_steps(steps: &[String]) -> Vec<String> {
+    let mut folded: Vec<(String, usize)> = Vec::new();
+    for step in steps {
+        match folded.last_mut() {
+            Some((label, count)) if label == step => *count += 1,
+            _ => folded.push((step.clone(), 1)),
+        }
+    }
+    folded
+        .into_iter()
+        .map(|(label, count)| {
+            if count > 1 {
+                format!("{label} ×{count}")
+            } else {
+                label
+            }
+        })
+        .collect()
+}
+
+
+/// The gutter glyph for a list item at a given depth.
+///
+/// Only bullets change. A numbered item keeps the number the author wrote — renumbering it, or
+/// swapping it for a bullet because it happens to be nested, would change what the answer says.
+pub(crate) fn nested_marker(marker: &str, depth: usize) -> String {
+    if marker.ends_with('.') {
+        return marker.to_string();
+    }
+    match depth {
+        0 => "·".to_string(),
+        1 => "‣".to_string(),
+        _ => "–".to_string(),
+    }
+}
+
+
+/// The glyph and colour that stand for a file's kind.
+///
+/// Finer than [`workspace::Kind`], which groups by what a researcher *does* with a file and is
+/// the right grouping for the panel's sections. Here a PDF and a Markdown note want telling
+/// apart at a glance even though both are things you read.
+///
+/// Four colours, from the palette's status roles rather than a new set — the same argument as
+/// the provenance chips: a colour per file type is a legend nobody memorises.
+pub(crate) fn file_mark(path: &std::path::Path) -> (&'static str, u32) {
+    let extension = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "csv" | "tsv" | "xlsx" | "xls" | "parquet" | "feather" => {
+            ("icons/file-table.svg", theme::success())
+        }
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" => {
+            ("icons/file-image.svg", theme::running())
+        }
+        "py" | "r" | "jl" | "sh" | "js" | "ts" | "rs" | "sql" => {
+            ("icons/file-code.svg", theme::accent())
+        }
+        "ipynb" => ("icons/file-notebook.svg", theme::accent()),
+        "json" | "yaml" | "yml" | "toml" | "xml" => ("icons/file-data.svg", theme::warning()),
+        "html" | "htm" => ("icons/file-web.svg", theme::warning()),
+        "md" | "txt" | "rst" => ("icons/file-text.svg", theme::text_muted()),
+        "log" | "out" | "err" => ("icons/file-log.svg", theme::text_faint()),
+        "pdf" | "docx" | "doc" | "typ" => ("icons/file-doc.svg", theme::error()),
+        "zip" | "gz" | "tar" | "tgz" | "7z" => ("icons/file-archive.svg", theme::text_muted()),
+        "db" | "sqlite" | "sqlite3" | "duckdb" => ("icons/file-db.svg", theme::success()),
+        _ => ("icons/file-blank.svg", theme::text_muted()),
+    }
+}
+
+
+/// Images in one group, everything else in another, each keeping its listing order.
+///
+/// **The boundary the researcher asked for**, in their words: *"I want to group images and in
+/// another group other files."* §152's gallery grouped by the folder the agent chose, which was
+/// right about structure and wrong about kind — a folder holding seven plots and a summary CSV
+/// put the CSV in the middle of the strip, and the strip is the thing you flick through looking
+/// for a figure.
+///
+/// `Kind::Figure` is the test rather than the extension, so this cannot disagree with the
+/// thumbnail renderer about what an image is: both ask the same enum.
+pub(crate) fn split_images(
+    outputs: &[workspace::Output],
+) -> (Vec<workspace::Output>, Vec<workspace::Output>) {
+    outputs
+        .iter()
+        .cloned()
+        .partition(|output| output.kind == workspace::Kind::Figure)
+}
+
+
+/// How wide the thumb is for a rail showing `viewport` of `viewport + overflow` content.
+pub(crate) fn horizontal_thumb_width(viewport: f32, overflow: f32) -> f32 {
+    let content = viewport + overflow;
+    (viewport * (viewport / content)).max(28.).min(viewport)
+}
+
+
+/// Convert a dragged thumb position into a negative content offset.
+pub(crate) fn horizontal_drag_offset(
+    pointer_x: f32,
+    track_left: f32,
+    grab_x: f32,
+    travel: f32,
+    overflow: f32,
+) -> f32 {
+    if travel <= 0. {
+        return 0.;
+    }
+    let thumb_left = (pointer_x - track_left - grab_x).clamp(0., travel);
+    -(overflow * (thumb_left / travel))
+}
+
+
+
 // The behavior suite stays immediately after the UI implementation it exercises, while
 // the CLI-only launch helpers remain at the bottom of the executable. Moving this large
 // module past startup code would create merge churn without changing test visibility
@@ -7720,6 +2512,8 @@ fn replay(path: &str) -> anyhow::Result<()> {
 #[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     fn collected(kind: protocol::JobKind, thread: &str) -> (String, protocol::Job) {
         (
             thread.to_string(),
@@ -7732,45 +2526,6 @@ mod tests {
                 size: None,
             },
         )
-    }
-
-    /// §244: one run gets a definite press, because a single action has to mean something.
-    /// A conversation must never become undeletable.
-    ///
-    /// The guard used to *refuse* while any task was unfinished, and a task that never reaches a
-    /// terminal state locks the conversation for good. It happened in front of a colleague: a
-    /// paper search stuck on "running" for over an hour, and no way to remove the thread at all.
-    ///
-    /// Deleting under a live worker is a real risk and the modal says so — but a warning can be
-    /// read and acted on, where a refusal with no way past it cannot (§278).
-    #[test]
-    fn unfinished_work_warns_rather_than_locking_the_conversation() {
-        let source = include_str!("main.rs");
-        let ask = source
-            .split("fn request_delete")
-            .nth(1)
-            .expect("the delete guard")
-            .split("\n    fn ")
-            .next()
-            .expect("its body");
-
-        assert!(
-            ask.contains("self.confirming_delete = Some(target)"),
-            "the confirmation must be reachable"
-        );
-        assert!(
-            !ask.contains("while its background work is running"),
-            "unfinished background work must no longer refuse the delete outright"
-        );
-        assert!(
-            ask.contains("delete_interrupts_work"),
-            "it must still be carried to the modal, so the sentence that asks can warn"
-        );
-        // A turn actually streaming *is* still refused: that one ends on its own, in seconds.
-        assert!(
-            ask.contains("while its turn is running"),
-            "a live foreground turn is a different case and still blocks"
-        );
     }
 
     /// A press must never be silent, and a zero must never be bare.
@@ -8351,40 +3106,6 @@ mod tests {
         // Not by extension, and not by a name that merely contains one of them.
         assert!(!is_search_record(&record("my_papers.json")));
     }
-    use super::*;
-    use crate::ui::{chat::*, common::*, gallery_view::*, provenance_view::*};
-
-    #[gpui::test]
-    fn a_long_transcript_builds_only_rows_near_the_viewport(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        use std::cell::Cell;
-        use std::rc::Rc;
-
-        struct MeasuredList { state: ListState, built: Rc<Cell<usize>> }
-        impl Render for MeasuredList {
-            fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-                let built = self.built.clone();
-                gpui::list(self.state.clone(), move |index, _window, _cx| {
-                    built.set(built.get() + 1);
-                    // Variable by design: `uniform_list` is invalid for transcript rows (§156).
-                    div().h(px(if index % 7 == 0 { 180. } else { 36. })).into_any_element()
-                }).w_full().h_full()
-            }
-        }
-
-        let built = Rc::new(Cell::new(0));
-        let state = ListState::new(500, ListAlignment::Top, px(240.));
-        let cx = cx.add_empty_window();
-        cx.draw(gpui::point(px(0.), px(0.)), size(px(900.), px(600.)), |_, cx| {
-            cx.new(|_| MeasuredList { state, built: built.clone() })
-        });
-        // The removed eager loop constructed all 500. Count the same deterministic unit on both
-        // sides instead of noisy wall time from a headless debug build (docs §156).
-        println!("transcript row construction: eager 500, virtual {}", built.get());
-        assert!(built.get() < 100, "virtualization built {} rows", built.get());
-    }
-
     #[test]
     fn select_all_uses_rendered_words_for_an_unpainted_markdown_message() {
         let message = Message::new(
@@ -8955,32 +3676,32 @@ mod tests {
         // A 200px thumb journey represents 800px of hidden content. The pointer keeps the
         // same 20px grip inside the thumb, and positions beyond either end clamp instead of
         // exposing blank space (docs §158).
-        let offset = |pointer| {
-            horizontal_drag_offset(px(pointer), px(100.), px(20.), px(200.), px(800.))
+        let offset = |pointer: f32| {
+            horizontal_drag_offset(pointer, 100., 20., 200., 800.)
         };
-        assert_eq!(offset(0.), px(0.));
-        assert_eq!(offset(120.), px(0.));
-        assert_eq!(offset(220.), px(-400.));
-        assert_eq!(offset(400.), px(-800.));
+        assert_eq!(offset(0.), 0.);
+        assert_eq!(offset(120.), 0.);
+        assert_eq!(offset(220.), -400.);
+        assert_eq!(offset(400.), -800.);
     }
 
     #[test]
     fn a_gallery_thumb_never_grows_wider_than_the_rail_it_sits_in() {
         // A wide rail: the thumb is proportional, and there is room to drag it.
-        let wide = horizontal_thumb_width(px(400.), px(800.));
-        assert!(wide > px(28.) && wide < px(400.), "{wide:?}");
+        let wide = horizontal_thumb_width(400., 800.);
+        assert!(wide > 28. && wide < 400., "{wide:?}");
 
         // A long rail: proportional would be a few pixels, so the 28px floor applies.
-        assert_eq!(horizontal_thumb_width(px(300.), px(9_000.)), px(28.));
+        assert_eq!(horizontal_thumb_width(300., 9_000.), 28.);
 
         // A rail narrower than that floor is the case the floor alone gets wrong. The thumb has
         // to stop at the track width, because `travel = viewport - thumb` going negative paints
         // it outside the track and leaves it undraggable — a control that reads as broken rather
         // than as absent.
         for narrow in [1., 10., 27.9] {
-            let thumb = horizontal_thumb_width(px(narrow), px(500.));
-            assert_eq!(thumb, px(narrow), "a {narrow}px rail");
-            assert!(px(narrow) - thumb >= px(0.), "travel went negative at {narrow}");
+            let thumb = horizontal_thumb_width(narrow, 500.);
+            assert_eq!(thumb, narrow, "a {narrow}px rail");
+            assert!(narrow - thumb >= 0., "travel went negative at {narrow}");
         }
     }
 
@@ -9060,44 +3781,6 @@ mod tests {
             !project_exists(std::slice::from_ref(&other), "Late blight"),
             "an empty project cannot survive as an active selection"
         );
-    }
-
-    #[test]
-    fn every_ui_icon_is_embedded_rather_than_read_from_beside_the_executable() {
-        // The half a test can actually settle: the bytes are *in* the binary, so a Windows
-        // install with no source-tree-relative assets directory resolves them exactly as
-        // `cargo run` does. `include_bytes!` makes a missing file a build failure, and this
-        // makes a path declared in `ICON_PATHS` but never wired into `load` a test failure.
-        let assets = Assets;
-        assert_eq!(assets.list("icons/").unwrap().len(), ICON_PATHS.len());
-
-        // **Every mark `file_mark` can return is a real, loadable asset.** This is the assertion
-        // worth having: the mapping is a `match` over extensions, and a new arm naming an icon
-        // nobody added would draw nothing at all — the §157 failure again, one layer along. A
-        // count would only have said the number changed.
-        for name in [
-            "a.csv", "b.png", "c.py", "d.ipynb", "e.json", "f.html", "g.md", "h.log", "i.pdf",
-            "j.zip", "k.sqlite", "l.unheard-of", "no-extension",
-        ] {
-            let (icon, _ink) = file_mark(std::path::Path::new(name));
-            assert!(ICON_PATHS.contains(&icon), "{name} draws undeclared {icon}");
-            assert!(assets.load(icon).unwrap().is_some(), "{icon} is not embedded");
-        }
-        for path in ICON_PATHS {
-            let bytes = assets.load(path).unwrap().expect("declared icon is loadable");
-            let source = std::str::from_utf8(&bytes).expect("hand-authored SVG is UTF-8");
-            assert!(source.contains("viewBox=\"0 0 24 24\""), "{path} has no common canvas");
-        }
-        assert!(assets.load("icons/missing.svg").unwrap().is_none());
-
-        // **Not asserted: that they are tintable.** The original test read `currentColor` out of
-        // the file and called that tintable. GPUI never reads it — it rasterises the SVG and
-        // multiplies by `style.text.color`, so whether an icon appears is decided entirely by
-        // the element's own colour and not by anything in these bytes. That assertion passed
-        // just as happily when all four icons rendered nothing at all, which is the state this
-        // PR arrived in. What replaces it is `ui::Icon` taking a colour, defaulted rather than
-        // required now that it lives behind a builder, but still impossible to omit by accident
-        // the way a bare `svg()` call was (docs §157).
     }
 
     #[test]
@@ -9260,34 +3943,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_context_less_binding_outranks_a_scoped_one() {
-        // Why Escape never closed the palette, proven against gpui rather than reasoned about.
-        //
-        // `escape` is bound twice: to `PaletteDismiss` in the `Palette` context, and to `Dismiss`
-        // with no context at all. The comment beside them used to say the scoped one wins because
-        // it is "more specific". It does not: `Keymap::binding_enabled` scores a context-less
-        // binding at `contexts.len()`, which is deeper than any predicate can match, and matched
-        // bindings are sorted deepest-first. `Dismiss` is dispatched, actions stop propagation
-        // during the bubble phase (`window.rs`: "Actions stop propagation by default"), and
-        // `PaletteDismiss` is never reached.
-        //
-        // Pinned here so a gpui bump that changes the rule is caught by a failing test rather
-        // than by a key that quietly stops working.
-        let keymap = gpui::Keymap::new(workbench_key_bindings());
-        let stack = [
-            gpui::KeyContext::try_from("Palette").expect("a valid context"),
-            gpui::KeyContext::try_from("Composer").expect("a valid context"),
-        ];
-        let (matched, _pending) =
-            keymap.bindings_for_input(&[gpui::Keystroke::parse("escape").unwrap()], &stack);
-        let first = matched.first().expect("escape matches something");
-        assert!(
-            first.action().partial_eq(&Dismiss),
-            "the unscoped Dismiss is dispatched first, so the palette must close from `dismiss`"
-        );
-    }
-
     /// A stale index must never make the highlighted row and the Enter key disagree.
     ///
     /// Three call sites used to clamp `palette_selected` three ways, and the activation path
@@ -9338,75 +3993,6 @@ mod tests {
         // Out-of-order letters must not match at all.
         assert!(ranked("tnur").is_empty());
         assert!(ranked("zzz").is_empty());
-    }
-
-    #[test]
-    fn a_spine_without_suggestions_does_not_erase_them() {
-        let with_advice = Project {
-            mission: "M".into(),
-            completed: vec!["a".into()],
-            pending: vec![],
-            suggestions: vec![protocol::Suggestion {
-                title: "Look for the dataset".into(),
-                rationale: "You have the paper".into(),
-                prompt: "find the dataset".into(),
-            }],
-        };
-        // Mid-turn snapshot: newer mission and completed work, no advice.
-        let mid_turn = Project {
-            mission: "M2".into(),
-            completed: vec!["a".into(), "b".into()],
-            pending: vec!["c".into()],
-            suggestions: vec![],
-        };
-        let merged = merge_spine(Some(&with_advice), mid_turn);
-        // State replaces...
-        assert_eq!(merged.mission, "M2");
-        assert_eq!(merged.completed.len(), 2);
-        assert_eq!(merged.pending, vec!["c".to_string()]);
-        // ...but the card the user was about to click survives.
-        assert_eq!(merged.suggestions.len(), 1);
-        assert_eq!(merged.suggestions[0].prompt, "find the dataset");
-
-        // Fresh advice always wins over old advice.
-        let replacement = Project {
-            suggestions: vec![protocol::Suggestion {
-                title: "New".into(),
-                rationale: String::new(),
-                prompt: "new".into(),
-            }],
-            ..Default::default()
-        };
-        assert_eq!(
-            merge_spine(Some(&with_advice), replacement).suggestions[0].prompt,
-            "new"
-        );
-
-        // Nothing to carry over is fine.
-        assert!(merge_spine(None, Project::default()).suggestions.is_empty());
-    }
-
-    #[test]
-    fn secret_fields_are_masked_and_named() {
-        // A field that looks like a secret but is not masked would put an API key on
-        // screen; one that is masked but has nowhere to go would silently discard it.
-        for field in Field::ALL {
-            assert!(!field.label().is_empty());
-            assert!(!field.placeholder().is_empty());
-            match field {
-                Field::ApiKey => {
-                    assert!(field.is_secret());
-                    // The provider key's entry name depends on the provider chosen, so it
-                    // is resolved at save time rather than being fixed here.
-                    assert!(field.secret_name().is_none());
-                }
-                Field::AstaToken | Field::AstaApiKey => {
-                    assert!(field.is_secret());
-                    assert!(field.secret_name().is_some());
-                }
-                _ => assert!(!field.is_secret(), "{}", field.label()),
-            }
-        }
     }
 
     #[test]
@@ -10236,35 +4822,6 @@ mod tests {
     /// of the two places that should consume it. Asserted against the source because that is where
     /// the property lives: a second reader of a snapshot is a second chance to forget a field.
     ///
-    /// The needles are assembled at runtime so this test does not match itself.
-    #[test]
-    fn every_snapshot_is_adopted_through_one_path() {
-        let source = include_str!("main.rs");
-        let jobs = concat!("snapshot", ".jobs");
-        let tasks = concat!("snapshot", ".tasks");
-        let drafts = concat!("snapshot", ".drafts");
-
-        // Nothing walks them itself; the shared method does.
-        assert!(
-            !source.contains(&format!("for job in {jobs}")),
-            "a snapshot's jobs are adopted through `adopt_background_work`, not inline"
-        );
-        assert!(
-            !source.contains(&format!("for task in {tasks}")),
-            "a snapshot's tasks are adopted through `adopt_background_work`, not inline"
-        );
-
-        // And every reader of one reads all three, which is what the two sites disagreed about.
-        let reads = |needle: &str| source.matches(needle).count();
-        assert_eq!(
-            reads(jobs),
-            reads(drafts),
-            "a place that reads a snapshot's jobs must also read its drafts"
-        );
-        assert_eq!(reads(jobs), reads(tasks));
-        assert!(reads(jobs) >= 2, "both the streaming and the opening path");
-    }
-
     /// §260: a failed figure fetch must not be remembered as an experiment that drew nothing.
     #[test]
     fn a_failed_figure_fetch_is_not_an_answer() {
@@ -10280,32 +4837,6 @@ mod tests {
         assert_ne!(
             figure_state(Some(&Vec::new()), false),
             figure_state(none, false)
-        );
-    }
-
-    /// §265: the notification exists for three events, and a helper called from two of them is a
-    /// toast that arrives depending on which kind of work you left running.
-    ///
-    /// A join test, not a component test — which is the whole lesson of §264 and the six defects
-    /// before it. The needle is assembled at runtime so this does not match itself.
-    #[test]
-    fn every_kind_of_finished_background_work_can_reach_somebody_who_left() {
-        let source = include_str!("main.rs");
-        let call = concat!("notify", "_if_away(");
-
-        // Three call sites: a long job ending, a worker ending, a worker asking for a decision.
-        let sites = source.matches(call).count();
-        assert!(
-            sites >= 3,
-            "expected a call for a finished job, a finished worker and a worker at the gate; \
-             found {sites}"
-        );
-
-        // And the decision lives in one place rather than being re-derived per site.
-        assert_eq!(
-            source.matches(concat!("worth", "_interrupting(")).count(),
-            1,
-            "the suppress-when-looking rule belongs in `notify_if_away` alone"
         );
     }
 
@@ -10646,35 +5177,61 @@ fn main() {
         return;
     }
 
-    Application::new().with_assets(Assets).run(move |cx: &mut App| {
-        // Without these the composer receives no editing keys at all — GPUI
-        // dispatches actions, and nothing binds to them by default.
-        cx.bind_keys(composer::key_bindings());
-        cx.bind_keys(workbench_key_bindings());
-
-        let bounds = Bounds::centered(None, size(px(1200.), px(800.)), cx);
-        let window = cx
-            .open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    titlebar: Some(TitlebarOptions {
-                        title: Some("Mini-Me Desktop".into()),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-                |window, cx| cx.new(|cx| Workbench::new(sidecar.clone(), window, cx)),
-            )
-            .expect("failed to open window");
-
-        // Focus the composer so the user can type immediately on launch.
-        window
-            .update(cx, |workbench, window, cx| {
-                let composer = workbench.composer.focus_handle(cx);
-                window.focus(&composer);
-            })
-            .expect("failed to focus the composer");
-
-        cx.activate(true);
-    });
+    tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
+        .setup(|app| {
+            #[cfg(target_os = "macos")]
+            {
+                use tauri::menu::{MenuBuilder, PredefinedMenuItem, SubmenuBuilder};
+                let app_menu = SubmenuBuilder::new(app, "Mini-Me Desktop")
+                    .item(&PredefinedMenuItem::about(app, None, None)?)
+                    .separator()
+                    .item(&PredefinedMenuItem::quit(app, None)?)
+                    .build()?;
+                let edit_menu = SubmenuBuilder::new(app, "Edit")
+                    .item(&PredefinedMenuItem::undo(app, None)?)
+                    .item(&PredefinedMenuItem::redo(app, None)?)
+                    .separator()
+                    .item(&PredefinedMenuItem::cut(app, None)?)
+                    .item(&PredefinedMenuItem::copy(app, None)?)
+                    .item(&PredefinedMenuItem::paste(app, None)?)
+                    .item(&PredefinedMenuItem::select_all(app, None)?)
+                    .build()?;
+                let menu = MenuBuilder::new(app).item(&app_menu).item(&edit_menu).build()?;
+                app.set_menu(menu)?;
+            }
+            Ok(())
+        })
+        .manage(sidecar)
+        .invoke_handler(tauri::generate_handler![
+            commands::get_execution_label,
+            commands::get_base_url,
+            commands::get_settings,
+            commands::save_settings,
+            commands::get_secret,
+            commands::set_secret_value,
+            commands::get_providers,
+            commands::search_themes,
+            commands::install_theme,
+            commands::list_installed_themes,
+            commands::submit_turn,
+            commands::resume_turn,
+            commands::cancel_turn,
+            commands::reset_thread,
+            commands::get_thread_id,
+            commands::set_project,
+            commands::get_project,
+            commands::fetch_project,
+            commands::set_mission,
+            commands::warm_up,
+            commands::warm_graph,
+            commands::restart_backend,
+            commands::list_conversations,
+            commands::open_conversation,
+            commands::delete_conversations,
+            commands::rename_conversation,
+            commands::sweep_finished_jobs,
+        ])
+        .run(tauri::generate_context!())
+        .expect("failed to run the Tauri app");
 }

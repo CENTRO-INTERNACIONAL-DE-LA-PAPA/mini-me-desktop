@@ -1,8 +1,9 @@
 # Mini-Me Desktop
 
 A native desktop **research-acceleration workbench** for
-[Mini-Me](https://github.com/CENTRO-INTERNACIONAL-DE-LA-PAPA/Mini-Me), built in
-Rust on **GPUI** (the GPU UI framework from [Zed](https://github.com/zed-industries/zed)).
+[Mini-Me](https://github.com/CENTRO-INTERNACIONAL-DE-LA-PAPA/Mini-Me), built on
+**Tauri** (a Rust shell hosting the OS's native webview) with a **React + TypeScript**
+frontend built by **Vite**.
 
 This repo is the desktop **client**. The Mini-Me agent stack (coordinator +
 Asta-backed subagents + skills) stays in Python/TypeScript and runs as a **local
@@ -10,18 +11,17 @@ sidecar** the client spawns and supervises — which also means the app inherits
 the local `asta` CLI's auto-refreshing auth, so the web app's token-expiry pain
 goes away.
 
-> **Status: P6.3 done — the core panels work against the real agent stack.** The
-> window renders natively (verified on Windows/DirectX), the app **spawns the local
-> Python sidecar and streams real coordinator turns** over LangGraph SSE, and it now
-> shows the **project spine**, live **outputs**, sandbox provisioning, an **agent
-> activity trace** (what each subagent is doing, while it does it) and a **`ctrl-p`
-> command palette**. One thread spans the conversation, so follow-up questions work.
-> GPUI is pinned at published **`gpui 0.2.2`**.
+> **Status: migrated from GPUI to Tauri.** The Rust side keeps everything that was
+> never about rendering — the backend supervisor, the sidecar/LangGraph HTTP+SSE
+> client, settings and OS-keychain secrets, the preflight checks, the self-updater —
+> exposed to the frontend as Tauri commands and events instead of driven by a GPUI
+> view. The UI itself (chat, sidebar, settings, the approval gate, the command
+> palette, the research/outputs panel, a theme gallery) is a React app in
+> [`crates/app/frontend/`](crates/app/frontend/), styled from the same ten palettes
+> `theme.rs` always shipped.
 >
-> Next: **markdown rendering** — answers currently show their `**asterisks**`, and
-> reports and citations are the deliverable (§16). Read
-> [`docs/desktop-app-plan.md`](docs/desktop-app-plan.md) — the risk register plus the
-> execution logs (§8–§17).
+> Read [`docs/desktop-app-plan.md`](docs/desktop-app-plan.md) for the history behind
+> the app's design decisions — the `§N` markers in code comments point there.
 
 ## Picking this up
 
@@ -39,14 +39,16 @@ in code comments point here, and they are how a decision gets reconstructed late
 ## Layout
 
 ```
-crates/app        the desktop binary (GPUI app + backend supervisor)
-docs/             the design record, the handover, and the open-work checklist
+crates/app            the desktop binary: Tauri shell + backend supervisor + commands
+crates/app/frontend   the React/TypeScript UI, built by Vite
+docs/                 the design record, the handover, and the open-work checklist
 ```
 
 ## Windows (the primary platform)
 
-~98% of our users are on Windows. The app runs **natively** on Windows (GPUI uses
-DirectX), while the Python backend runs **inside WSL2** — the agent stack shells out
+~98% of our users are on Windows. The app runs **natively** on Windows (Tauri wraps
+WebView2, which ships with Windows 10/11), while the Python backend runs **inside
+WSL2** — the agent stack shells out
 with POSIX commands and needs `bash`/`python3`/`asta`, which don't behave under
 `cmd.exe`. Inside WSL it's just Linux, and the app reaches it over localhost.
 
@@ -120,54 +122,32 @@ Worth knowing which repo the failure names: `bundle-backend.sh` itself needs **n
 network, since it clones from a checkout already on the machine. A prompt mentioning
 `mini-me-desktop.git` is the `git pull` in front of it, not the bundle.
 
-## Release builds need `fxc.exe` (Windows)
-
-A **release** build of `gpui 0.2.2` pre-compiles its HLSL shaders; a debug build does not
-(`build.rs:259` gates the step on `#[cfg(not(debug_assertions))]`). So `cargo build` can
-work for months and `cargo build --release` still fail with:
-
-```
-Failed to find fxc.exe
-```
-
-`fxc.exe` is the DirectX shader compiler from the **Windows SDK**. gpui looks for it in
-`GPUI_FXC_PATH`, then on `PATH`, then at one hardcoded SDK version
-(`10.0.26100.0`) — so having a *different* SDK version installed is enough to fail.
-
-Point it at yours (PowerShell):
-
-```powershell
-$env:GPUI_FXC_PATH = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter fxc.exe -ErrorAction SilentlyContinue | Sort-Object { $_.FullName -notmatch '\\x64\\' }, FullName -Descending | Select-Object -First 1).FullName
-```
-
-Check it found something (`echo $env:GPUI_FXC_PATH`), then build. To avoid repeating it
-every session:
-
-```powershell
-setx GPUI_FXC_PATH "$env:GPUI_FXC_PATH"
-```
-
-If the search comes back empty there is no SDK on the machine: install **Windows 11 SDK**
-from the Visual Studio Installer (Individual components), then try again.
-
 ## Build
 
-On Linux (Ubuntu 22.04), install the GPUI system dev headers once:
+On Linux, Tauri needs the system webview dev headers once:
 
 ```bash
-sudo apt-get install -y libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
-                        libasound2-dev libvulkan-dev
+sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev
 ```
 
-Then:
+The frontend has to be built before Cargo, since `tauri-build` embeds
+`crates/app/frontend/dist` into the binary at compile time:
 
 ```bash
-cargo build -p mini-me-desktop-app   # verified green (rustc 1.97.1, gpui 0.2.2)
-cargo run   -p mini-me-desktop-app   # opens the workbench window (needs a display)
+npm --prefix crates/app/frontend ci
+npm --prefix crates/app/frontend run build
+cargo build -p mini-me-desktop-app
 ```
 
-`cargo run` must be launched from a graphical session (Wayland/X11 + Vulkan, or
-DirectX on Windows) — it can't open a window from a headless TTY.
+For day-to-day UI work, run the Tauri dev server instead — it gives the frontend real
+hot reload and rebuilds the Rust side on change:
+
+```bash
+cd crates/app && npm install && npm run dev
+```
+
+`npm run dev` must be launched from a graphical session — it can't open a window from
+a headless TTY.
 
 ### The backend sidecar
 
@@ -240,10 +220,13 @@ the gate — it exists for automation, and is not a recommendation.
 
 ## Direction
 
-Chosen over Tauri (the lower-risk fallback) to get a native, GPU-rendered,
-keyboard-first workbench — "the best of Zed" for scientific discovery. See the
-spike plan for the milestone ladder (P6.1 hello-window → P6.2 real backend →
-P6.3 panels → P6.4 native affordances) and the go/no-go kill-criteria.
+GPUI was the original choice, for a native, GPU-rendered, keyboard-first workbench.
+It was replaced with Tauri because the team could not maintain a GPUI UI without
+heavy AI assistance for every change, it has no hot reload, and time spent on the
+UI framework was time not spent on the backend, which is meant to be this project's
+strongest part. React + TypeScript is a stack every contributor can read and extend
+directly, and the Rust side keeps everything that was never about rendering —
+process supervision, the sidecar client, settings, the keychain, the updater.
 
 Org policy: human-gated (nothing auto-runs). AI-assisted (Claude Code) per CIP
 Acceptable Use policy.

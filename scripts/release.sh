@@ -11,6 +11,8 @@
 #           bash scripts/release.sh --publish    # publish immediately instead of drafting
 #
 # **Run this on Windows**, in Git Bash, after:
+#     npm --prefix crates/app/frontend ci
+#     npm --prefix crates/app/frontend run build
 #     cargo build --release -p mini-me-desktop-app
 #     bash scripts/bundle-backend.sh
 #     bash scripts/package.sh

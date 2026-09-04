@@ -1,6 +1,8 @@
 /target
 **/*.rs.bk
 Cargo.lock.orig
+node_modules/
+/crates/app/frontend/dist/
 
 # Local sidecar / env
 .env

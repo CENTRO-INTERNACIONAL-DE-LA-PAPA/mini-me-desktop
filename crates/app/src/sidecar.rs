@@ -18,6 +18,7 @@ use tokio::sync::Mutex;
 use crate::backend::{BackendConfig, BackendSupervisor, Started};
 use crate::preflight::Cancel;
 use crate::protocol::urlencode;
+use serde::{Deserialize, Serialize};
 use crate::references;
 use crate::workspace;
 use crate::protocol::{
@@ -65,7 +66,7 @@ pub enum FixEvent {
 /// two unrelated click handlers. They still cannot be atomic across HTTP and a disk, so the
 /// server goes first: a rejected request preserves the files; a failed cleanup after success is
 /// returned as an orphan the researcher can recover manually (§155).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize)]
 pub enum DeleteFiles {
     Conversation {
         project: Option<String>,
@@ -81,13 +82,13 @@ pub enum DeleteFiles {
 /// `scanned` is what the caller persists. Reported separately from the list because the two
 /// answer different questions: the list is what to show, `scanned` is whether the migration is
 /// finished and must never run again (docs §166).
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct Adopted {
     pub conversations: Vec<Conversation>,
     pub scanned: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct DeleteOutcome {
     /// `Some` means the server records are gone but Windows could not remove the named folder.
     pub files_error: Option<String>,

@@ -26,18 +26,15 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # GPUI compiles its shaders in release builds and needs `fxc.exe` from the Windows
-      # SDK, which is installed on these runners but not on PATH (docs §26).
-      - name: Locate fxc.exe
-        shell: pwsh
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build the frontend
+        shell: bash
         run: |
-          $fxc = Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin" `
-            -Recurse -Filter fxc.exe -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -like "*x64*" } |
-            Sort-Object FullName -Descending | Select-Object -First 1
-          if (-not $fxc) { throw "fxc.exe not found — GPUI cannot build in release" }
-          echo "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
-          echo "found $($fxc.FullName)"
+          npm --prefix crates/app/frontend ci
+          npm --prefix crates/app/frontend run build
 
       # The tag names the release; `CARGO_PKG_VERSION` is what the built binary reports about
       # itself, and an updater compares the two. If they disagree, an install that fetched

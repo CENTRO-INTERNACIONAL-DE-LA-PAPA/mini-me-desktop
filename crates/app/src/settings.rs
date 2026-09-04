@@ -26,6 +26,7 @@ const KEYCHAIN_SERVICE: &str = "mini-me-desktop";
 /// *"provider id (from the panel)"* — this is that panel. `custom` is an
 /// OpenAI-compatible endpoint, which is how OpenRouter, Groq, Ollama and vLLM are
 /// reached, and it is the only one where `base_url` is mandatory.
+#[derive(Serialize)]
 pub struct Provider {
     pub id: &'static str,
     pub label: &'static str,

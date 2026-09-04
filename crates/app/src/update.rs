@@ -1460,28 +1460,6 @@ mod tests {
     /// What `DETACHED_PROCESS` actually did was leave a console application with no console, and it
     /// died before writing a byte.
     ///
-    /// Two spawns of the same program in one binary should not disagree about how to start it.
-    #[test]
-    fn the_updater_and_the_notifier_start_powershell_the_same_way() {
-        let flags_in = |source: &str| -> String {
-            source
-                .split("creation_flags(")
-                .nth(1)
-                .expect("a spawn")
-                .split(')')
-                .next()
-                .expect("a flag expression")
-                .trim()
-                .to_string()
-        };
-        assert_eq!(
-            flags_in(include_str!("update.rs")),
-            flags_in(include_str!("notify.rs")),
-            "the updater spawns PowerShell differently from the notifier, and only one of the two \
-             has ever been seen to work"
-        );
-    }
-
     /// The helper must never open the log it is already holding.
     ///
     /// `begin_swap` hands the child the log as stdout and stderr, so the child *has* that file
@@ -1576,40 +1554,6 @@ mod tests {
         assert_eq!(
             argv.last().expect("a script"),
             &encoded_script(&swap_script(&a_plan()))
-        );
-    }
-
-    /// The helper's log is the only record of a swap, so the Setup pane must name *that* file.
-    ///
-    /// §250 is the reason this is a test and not a comment: a researcher was handed a `/tmp` path
-    /// for a file the app writes to `%TEMP%`, and the round trip came back empty. This log is
-    /// worse than that one — it is written after the app has exited, so if the pane names the
-    /// wrong file there is nothing else that could have recorded what happened.
-    #[test]
-    fn the_setup_pane_names_the_log_the_helper_writes() {
-        let plan = a_plan();
-        let name = plan
-            .log
-            .file_name()
-            .expect("the helper logs somewhere")
-            .to_string_lossy()
-            .into_owned();
-        // The Setup pane itself lives in ui/settings_view.rs (main.rs holds only
-        // state/logic since the UI split); check both so this test does not depend on
-        // exactly which file the rendering code happens to live in.
-        let pane = concat!(
-            include_str!("main.rs"),
-            include_str!("ui/settings_view.rs"),
-        );
-        assert!(
-            pane.contains(&name),
-            "the Setup pane does not name {name}, so a failed swap leaves nothing findable"
-        );
-        // Not the script: it must *not* name the log, because it must not open a file it already
-        // holds as stdout (§274). The binding that matters is Rust's, so assert on that.
-        assert!(
-            include_str!("update.rs").contains(".open(&plan.log)"),
-            "begin_swap no longer opens {name}, so nothing points the helper's output at it"
         );
     }
 

@@ -30,7 +30,7 @@ use std::collections::HashMap;
 
 use anyhow::{Context as _, Result};
 use futures::StreamExt;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 /// The one internal assistant used to make LangGraph run the graph factory during startup.
@@ -49,7 +49,8 @@ const GRAPH_WARM_UP_ASSISTANT_ID: &str = "709fdf35-66dd-4c0a-bc5f-35d0f33cb91e";
 const GRAPH_WARM_UP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// A decoded, UI-relevant event from a streaming run.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "type", content = "data")]
 pub enum TurnEvent {
     /// Human-readable progress for the status line (not model output).
     Status(String),
@@ -97,7 +98,7 @@ pub enum TurnEvent {
 /// three-pass heuristic the JS SDK carries, which mis-attributes when two subagents
 /// get identical descriptions. We don't need it, because `lc_agent_name` already
 /// names the agent (plan §15b).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct AgentRef {
     pub ns: String,
     pub name: String,
@@ -107,7 +108,7 @@ pub struct AgentRef {
 ///
 /// Measured shape (2026-07-31), carried in a `values` event as `__interrupt__`:
 /// `[{"value": {"action_requests": [...], "review_configs": [...]}, "id": "…"}]`.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ApprovalRequest {
     /// One entry per action awaiting a decision. Order matters: the resume payload
     /// must carry exactly one decision per action, in this order.
@@ -115,7 +116,7 @@ pub struct ApprovalRequest {
 }
 
 /// One tool call held at the gate.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct PendingAction {
     /// Which interrupt raised this, as `Interrupt.id` — an xxh3-128 hex digest.
     ///
@@ -139,7 +140,7 @@ pub struct PendingAction {
 }
 
 /// Research outputs produced so far, as carried by a `values` event.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct Snapshot {
     pub buckets: Vec<Bucket>,
     /// The `values` payload nests the spine under `artifacts.project`, so a turn
@@ -177,7 +178,7 @@ pub struct Snapshot {
 /// Each agent's list is its own. `deepagents`' `_EXCLUDED_STATE_KEYS` keeps `todos` out of what a
 /// subagent inherits, so a worker's plan is the worker's, which is what lets a plan belong to
 /// exactly one row on screen.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct Todo {
     pub content: String,
     /// `pending`, `in_progress` or `completed`, as `langchain`'s `Todo` defines them. Kept as the
@@ -266,7 +267,7 @@ fn decode_todos(values: &Value) -> Vec<Todo> {
 /// The client used to decode `citation` and drop the rest, so every link in the app was scraped
 /// out of the prose by regex while the real one sat one key away — the §91/§115 shape again: a
 /// value the program already had and never read.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct Source {
     /// The citation as the agent wrote it, whole.
     pub citation: String,
@@ -284,7 +285,7 @@ pub struct Source {
 ///
 /// Every field comes from `DataVerseFindings` (`backend/schemas.py:692`) and is optional except
 /// the two the schema requires, so a sparser payload renders less rather than nothing.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct Dataset {
     pub title: String,
     /// `doi:10.21223/P3/0F9T62` — the identifier a researcher pastes into a citation, and the one
@@ -326,7 +327,7 @@ impl Dataset {
 /// Flattened out of `libraries[].papers[]`: the payload carries one library artifact per turn and
 /// the library is cumulative, so what a reader wants is the documents, not the envelopes. Keyed on
 /// `path`, which is what makes two indexings of one paper one row.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct Document {
     pub title: String,
     /// Where the librarian recorded it — relative to the workspace, absolute, or a URL. Turned
@@ -349,7 +350,7 @@ pub struct Document {
 /// So the client used to reduce it to a title for the Outputs panel and drop the body, which is
 /// how the agent could say "the report is in the Outputs panel" and be right, while the
 /// researcher opened the thread's folder and found no report at all (docs §89).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Report {
     pub title: String,
     pub markdown: String,
@@ -364,7 +365,7 @@ pub struct Report {
 /// the poll route and **nowhere else** (`backend/routes/artifacts.py:202,243`), so a
 /// completed run never wrote its results anywhere, while `prompts.py` told the
 /// coordinator they had been saved to the sandbox.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Job {
     pub kind: JobKind,
     pub task_id: String,
@@ -383,7 +384,7 @@ pub struct Job {
     pub size: Option<u64>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum JobKind {
     Theorizer,
     Analysis,
@@ -473,7 +474,7 @@ impl Job {
 /// snapshot. `thread_id` is the load-bearing one: the background worker runs on its **own**
 /// thread, which is why its approval requests were invisible — the client only ever
 /// resumed the conversation's thread.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct AsyncTask {
     pub task_id: String,
     pub thread_id: String,
@@ -605,7 +606,7 @@ fn untagged(thread: &Value) -> Option<&str> {
 pub type StoredConversation = (Vec<(String, String)>, Option<Snapshot>);
 
 /// One past conversation, for the sidebar.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Conversation {
     pub thread_id: String,
     /// Which project it belongs to, or `None` for ungrouped.
@@ -966,7 +967,7 @@ pub(crate) fn urlencode(value: &str) -> String {
 }
 
 /// One named group of outputs (datasets, sources, reports, …).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Bucket {
     pub name: &'static str,
     pub items: Vec<String>,
@@ -998,7 +999,7 @@ const ARTIFACT_BUCKETS: [&str; 8] = [
 /// alone can't express.
 ///
 /// Every field defaults, so a sparse or older backend response still decodes.
-#[derive(Debug, Default, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Project {
     #[serde(default)]
     pub mission: String,
@@ -1013,7 +1014,7 @@ pub struct Project {
 /// An advisory next step. **Advisory only** — org policy is human-gated, so the
 /// app never runs one of these on its own; `prompt` is what gets *offered* to the
 /// user, not executed.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Suggestion {
     #[serde(default)]
     pub title: String,
@@ -2349,7 +2350,7 @@ fn resume_request_body(
 }
 
 /// What the user decided about one held action.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Decision {
     Approve,
     Reject { message: String },
@@ -2361,7 +2362,7 @@ pub enum Decision {
 /// in step — one answer per held action, grouped by the interrupt that held it — and this project
 /// has already paid for the version where two collections that must agree were passed separately:
 /// the providers derived from the specs and the keys sent beside them (§187, §212).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Answer {
     /// `Interrupt.id`, or empty when the backend did not send one.
     pub interrupt: String,
@@ -2942,7 +2943,7 @@ fn decode_reports(artifacts: &Value) -> Vec<Report> {
 /// is a spent credit. It is kept out of [`decode_jobs`] entirely, because a `Job` whose status is
 /// neither running nor terminal would be polled on a timer for as long as the app stayed open —
 /// against a run that has not started and will not start until somebody says so.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Draft {
     /// The AutoDiscovery run id. What the submit route acts on.
     pub run_id: String,

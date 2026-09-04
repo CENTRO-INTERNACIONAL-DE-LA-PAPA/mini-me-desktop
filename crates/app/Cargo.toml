@@ -9,20 +9,12 @@ authors.workspace = true
 name = "mini-me-desktop-app"
 path = "src/main.rs"
 
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
 [dependencies]
-# GPUI *is* published to crates.io — contrary to the P6.0 assumption. `gpui 0.2.2`
-# (an Oct-2025 snapshot) is fully self-contained: its only companions, `gpui_macros`
-# and `gpui_util`, are published too, and it has no `git`/`path` deps. It exposes the
-# exact `Application::new().run()` / `open_window` / `Render` API this app targets
-# (verified 2026-07-29 against gpui 0.2.2's own examples/hello_world.rs). Pinning the
-# published crate instead of a Zed monorepo `git` rev retires risk R1 (unstable
-# git dependency on an API-churning tree).
-#
-# Fallback, only if a newer API becomes necessary: the Zed monorepo at
-#   rev = "00bd72e7838f4b875a913cd112b47a0ebe1ca62b"   # tag v1.13.1 (2026-07-29)
-# — but note revs after ~mid-2025 move the entry point out of `gpui` into a separate
-# `gpui_platform::application()` crate, so main.rs would need reconciling for that.
-gpui = "=0.2.2"
+tauri = { version = "2", features = [] }
+tauri-plugin-notification = "2"
 
 # Local sidecar supervision + streaming.
 tokio = { version = "1", features = ["full"] }
@@ -58,10 +50,6 @@ keyring = { version = "3", features = [
 # `settings.toml` — the non-secret half of the configuration (see settings.rs).
 toml = "0.8"
 
-# Grapheme-aware cursor movement in the composer (matches what gpui's own input
-# example uses, so arrow keys/backspace don't split emoji or accented clusters).
-unicode-segmentation = "1"
-
 # Diagnostics.
 anyhow = "1"
 tracing = "0.1"
@@ -80,12 +68,6 @@ zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
 # this tree transitively; a second major version would compile a second copy.
 sha2 = "0.10"
 
-[dev-dependencies]
-# Enables GPUI's headless window harness only for tests. §156 measures the list at layout time;
-# a helper that merely counts our own iterator would prove the old eager path, not that GPUI
-# actually stops constructing rows outside the viewport.
-gpui = { version = "=0.2.2", features = ["test-support"] }
-
 # Signalling the sidecar's whole process group on shutdown (see backend.rs).
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -103,10 +85,3 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_JobObjects",
     "Win32_System_Threading",
 ] }
-
-# Embeds assets/icon.ico into the .exe (see build.rs) — the taskbar and titlebar icon are a
-# resource on the binary, not something gpui's WindowOptions can set at runtime. Pinned to the
-# version already in this tree: gpui's own build.rs uses the same crate to embed its DPI-
-# awareness manifest, so this adds no new dependency resolution.
-[target.'cfg(windows)'.build-dependencies]
-embed-resource = "3.0.11"

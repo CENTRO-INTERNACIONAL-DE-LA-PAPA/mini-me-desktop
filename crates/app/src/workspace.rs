@@ -590,7 +590,7 @@ pub const ADOPT_LIMIT: u64 = 512 * 1024 * 1024;
 /// `reference` is the exact path currently present in the prompt. Once `source` is copied into the
 /// newly created thread directory, that reference is replaced with a relative one before the model
 /// sees the turn.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
 pub struct PendingAttachment {
     pub source: PathBuf,
     pub reference: String,

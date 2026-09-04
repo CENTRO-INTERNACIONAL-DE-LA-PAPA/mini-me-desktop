@@ -1,0 +1,24 @@
+{
+  "productName": "Mini-Me Desktop",
+  "version": "0.3.30",
+  "identifier": "org.cipotato.mini-me-desktop",
+  "build": {
+    "frontendDist": "frontend/dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm --prefix frontend run dev",
+    "beforeBuildCommand": "npm --prefix frontend run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Mini-Me Desktop",
+        "width": 1200,
+        "height": 800
+      }
+    ]
+  },
+  "bundle": {
+    "active": false,
+    "icon": ["icons/icon.png", "icons/icon.ico"]
+  }
+}

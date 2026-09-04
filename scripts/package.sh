@@ -50,8 +50,12 @@ for candidate in \
   [ -f "$candidate" ] && BIN="$candidate" && break
 done
 if [ -z "$BIN" ]; then
-  bad "no $PROFILE binary. Build it first:"
+  bad "no $PROFILE binary. Build it first, from the repository root:"
+  bad "    npm --prefix crates/app/frontend ci"
+  bad "    npm --prefix crates/app/frontend run build"
   bad "    cargo build --$PROFILE -p mini-me-desktop-app"
+  bad "(the frontend must be built before cargo — tauri-build embeds"
+  bad " crates/app/frontend/dist into the binary at compile time)"
   exit 1
 fi
 

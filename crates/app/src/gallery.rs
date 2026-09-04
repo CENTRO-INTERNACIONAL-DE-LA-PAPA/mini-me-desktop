@@ -20,13 +20,13 @@
 //! by hand, so there is one place themes come from and one loader that reads them.
 
 use anyhow::{bail, Context as _, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Zed's public extension index.
 const REGISTRY: &str = "https://api.zed.dev/extensions";
 
 /// One theme extension, as the registry describes it.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct Listing {
     pub id: String,
     pub name: String,
