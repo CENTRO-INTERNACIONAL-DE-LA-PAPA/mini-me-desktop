@@ -7350,7 +7350,7 @@ impl Render for Workbench {
                         .flex_col()
                         .flex_none()
                         .m_2()
-                        .mr_0()
+                        .mr_1()
                         .gap_1()
                         .justify_between()
                         .child(
@@ -7382,13 +7382,18 @@ impl Render for Workbench {
                                 )
                         )
                          .child(
-                            ui::Button::new("open-settings")
+                            div()
+                            .mb_neg_4()
+                            .child(
+                                ui::Button::new("open-settings")
                                 .icon(ui::Icon::new("icons/gear-six.svg"))
                                 .style(ui::ButtonStyle::SecondaryWhite)
                                 .border(true)
                                 .on_click(cx.listener(|workbench, _event, _window, cx| {
                                     workbench.run_command(Command::OpenSettings, cx);
                                 })),
+                            )
+                            
                         )
                     )
             })

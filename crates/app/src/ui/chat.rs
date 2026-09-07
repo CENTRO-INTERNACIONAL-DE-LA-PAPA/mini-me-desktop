@@ -1301,14 +1301,18 @@ impl Workbench {
                     .child(
                         ui::Icon::new("icons/chat-circle-dots.svg")
                             .size(ui::IconSize::Small)
-                            .colour(theme::text())
+                            .colour(theme::text_muted())
                     )
                     .child(
                         div()
                             .flex()
                             .flex_col()
-                            .text_base()
-                            .child(title)
+                            .child(
+                                div()
+                                    .text_base()
+                                    .line_height(px(20.))
+                                    .child(title),
+                            )
                             // The conversation's own workspace, said once here instead of
                             // repeated inline on every attached turn (§267) — see
                             // `without_attached_blockquote`. Only the thread's own folder name
@@ -1385,7 +1389,8 @@ impl Workbench {
             .flex_grow()
             .min_w_0()
             .h_full()
-            .m_2()
+            .my_2()
+            .mx_1()
             .p_3()
             .gap_5()
             .rounded_lg()
