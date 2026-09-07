@@ -1128,6 +1128,25 @@ pub fn outputs(dir: &Path) -> Vec<(Kind, Vec<Output>)> {
     output_listing(dir).groups
 }
 
+/// One attachment a researcher sent, read back in the same shape [`outputs`] finds a produced
+/// file in — built for a single known name instead of a directory walk, so the message that
+/// sent it can show the same tile a turn's own files get. `None` for a name that no longer
+/// resolves to a file: moved, renamed, or never copied in.
+pub fn attachment_output(root: &Path, name: &str) -> Option<Output> {
+    let path = root.join(name);
+    let metadata = std::fs::metadata(&path).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    Some(Output {
+        kind: Kind::of(&path),
+        modified: metadata.modified().ok()?,
+        bytes: metadata.len(),
+        name: name.to_string(),
+        path,
+    })
+}
+
 /// What the backend writes down about who produced each file, inside the conversation's folder.
 ///
 /// Dot-prefixed, so [`collect_outputs`] already skips it: the record of what made the files never

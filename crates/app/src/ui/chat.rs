@@ -66,6 +66,23 @@ pub(crate) fn fold_steps(steps: &[String]) -> Vec<String> {
 }
 
 
+/// The specialist named in the most recent "delegating to X" step, if any.
+///
+/// The coordinator's own record of who it handed the turn to — `protocol::with_attachments`'s
+/// sibling on the delegating side builds this exact label as `delegating to {subagent}` or
+/// `delegating to {subagent} — {description}` the moment a `task` call is made, before that
+/// namespace has produced a single frame of its own. It is what is left to attribute a message
+/// to when the delegated run never surfaces an [`AgentTrace`] — a backend that does not stream
+/// a subagent's own tokens back to this client still says, in its own words, who it asked.
+pub(crate) fn last_delegated_to(steps: &[String]) -> Option<&str> {
+    const PREFIX: &str = "delegating to ";
+    steps.iter().rev().find_map(|step| {
+        let rest = step.strip_prefix(PREFIX)?;
+        Some(rest.split(" — ").next().unwrap_or(rest).trim())
+    })
+}
+
+
 /// A labelled, bulleted list of spine entries.
 pub(crate) fn spine_list(label: &'static str, items: &[String], bullet: &'static str) -> impl IntoElement {
     let mut list = div().flex().flex_col().gap_1().child(ui::Label::new(label).colour(theme::text_faint()).size(ui::Size::Compact));
@@ -166,7 +183,7 @@ pub(crate) fn markdown_block(
             })
             .collect();
         let text = StyledText::new(inlines.text.clone()).with_highlights(highlights);
-        let element = div().w_full().min_w_0().text_color(rgb(base));
+        let element = div().w_full().min_w_0().text_color(rgb(base)).text_sm();
         match selectable {
             Some(transcript) => element.child(selection::Selectable::new(
                 transcript,
@@ -178,16 +195,10 @@ pub(crate) fn markdown_block(
     };
 
     match block {
-        Block::Heading { level, inlines } => {
-            let element = styled(inlines, theme::text());
-            // Only two sizes: an answer is not a document, and six heading levels of
-            // typography would be noise.
-            if *level <= 2 {
-                element.text_lg().into_any_element()
-            } else {
-                element.into_any_element()
-            }
-        }
+        // Every level reads at the same `text_sm` as the rest of the chat — an answer is not
+        // a document, and heading levels are told apart by the source's own emphasis, not by
+        // a typographic scale.
+        Block::Heading { inlines, .. } => styled(inlines, theme::text()).into_any_element(),
         Block::Paragraph(inlines) => styled(inlines, theme::text()).into_any_element(),
         Block::ListItem {
             marker,
@@ -243,7 +254,7 @@ pub(crate) fn markdown_block(
                     .w_full()
                     .min_w_0()
                     .text_color(rgb(theme::text_muted()))
-                    .text_xs()
+                    .text_sm()
                     // Named, not fetched. See [`markdown::Block::Image`]: the path lives in
                     // the distro and figures the agent really produced are already shown
                     // below, found on the host (§42). Saying which file it meant is the
@@ -509,11 +520,11 @@ impl Workbench {
 
 
 impl Workbench {
-    /// Who was consulted for this answer, how long it took, how many steps.
+    /// Who was consulted for this answer: `academic_researcher → theorizer → data_analysis`.
     ///
-    /// The path reads `academic_researcher → theorizer → data_analysis · 19s · 4 steps`, which is
-    /// the summary people were expanding the trace to reconstruct.
-    pub(crate) fn answer_chips(&self, index: usize, message: &Message) -> impl IntoElement {
+    /// How long it took and how many steps ran now live in [`Workbench::turn_footer`], shown
+    /// under every answer rather than repeated here too.
+    pub(crate) fn answer_chips(&self, message: &Message) -> impl IntoElement {
         /// Past this the row wraps into a paragraph and stops being a glance.
         const MAX_PILLS: usize = 6;
 
@@ -525,7 +536,8 @@ impl Workbench {
             .items_center()
             .gap_1()
             .w_full()
-            .min_w_0();
+            .min_w_0()
+            .text_sm();
 
         for (at, name) in path.iter().take(MAX_PILLS).enumerate() {
             if at > 0 {
@@ -533,7 +545,6 @@ impl Workbench {
                     div()
                         .flex_none()
                         .text_color(rgb(theme::text_muted()))
-                        .text_size(px(11.))
                         .child("→"),
                 );
             }
@@ -547,7 +558,6 @@ impl Workbench {
                     .border_1()
                     .border_color(rgb(theme::border()))
                     .text_color(rgb(specialist_ink(name).unwrap_or(theme::text_muted())))
-                    .text_size(px(11.))
                     .child(name.replace('_', " ")),
             );
         }
@@ -556,41 +566,7 @@ impl Workbench {
                 div()
                     .flex_none()
                     .text_color(rgb(theme::text_faint()))
-                    .text_size(px(11.))
                     .child(format!("+{}", path.len() - MAX_PILLS)),
-            );
-        }
-
-        // Steps across the whole turn: the coordinator's own, plus every specialist's.
-        let steps: usize = message.steps.len()
-            + message
-                .agents
-                .iter()
-                .map(|agent| agent.steps.len())
-                .sum::<usize>();
-        let mut note = String::new();
-        if let Some(turn) = self.turn_for(index) {
-            let span = turn
-                .invocations
-                .iter()
-                .map(|invocation| invocation.last_seen)
-                .max()
-                .unwrap_or(turn.sent_at)
-                .saturating_sub(turn.sent_at);
-            if span >= 1_000 {
-                note.push_str(&format!(" · {}", duration_label(span)));
-            }
-        }
-        if steps > 0 {
-            note.push_str(&format!(" · {steps} steps"));
-        }
-        if !note.is_empty() {
-            row = row.child(
-                div()
-                    .flex_none()
-                    .text_color(rgb(theme::text_faint()))
-                    .text_size(px(11.))
-                    .child(note),
             );
         }
         row
@@ -599,71 +575,105 @@ impl Workbench {
 
 
 impl Workbench {
-    /// What to do with a finished answer.
-    pub(crate) fn export_row(&self, message: &Message, cx: &mut Context<Self>) -> impl IntoElement {
-        let again = self
-            .transcript
-            .iter()
-            .rev()
-            .find(|earlier| earlier.role == "you")
-            .map(|earlier| earlier.body.clone());
-        let bibtex = bibliography(&self.sources, &self.source_origins());
-        let answer = message.body.clone();
+    /// Steps and elapsed time for one answer — shown under every assistant turn, always, not
+    /// only the latest one and not only once the turn has finished. Replaces the old activity
+    /// block's disclosure and the finished-only export row's word count in one line.
+    pub(crate) fn turn_footer(
+        &self,
+        index: usize,
+        message: &Message,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let steps: usize = message.steps.len()
+            + message
+                .agents
+                .iter()
+                .map(|agent| agent.steps.len())
+                .sum::<usize>();
 
-        div()
+        // While this is the turn still streaming, the end of its span is "now" — recomputed on
+        // every token — rather than its last recorded invocation, which would freeze the clock
+        // mid-answer.
+        let live = self.streaming && index + 1 == self.transcript.len();
+        let elapsed = self.turn_for(index).map(|turn| {
+            let end = if live {
+                provenance::now_ms()
+            } else {
+                turn.invocations
+                    .iter()
+                    .map(|invocation| invocation.last_seen)
+                    .max()
+                    .unwrap_or(turn.sent_at)
+            };
+            end.saturating_sub(turn.sent_at)
+        });
+
+        let mut row = div()
             .flex()
             .flex_row()
-            .flex_wrap()
             .items_center()
             .gap_2()
             .w_full()
             .min_w_0()
-            .pt_1()
-            .child(
-                ui::Button::new("export-pdf")
-                    .text("Save as PDF with references")
-                    .style(ui::ButtonStyle::Primary)
-                    // Disabled rather than hidden, so the affordance is discoverable before
-                    // there is a report to use it on.
-                    .disabled(self.reports.is_empty())
-                    .on_click(cx.listener(|workbench, _event, _window, cx| {
-                        workbench.render_report(cx);
-                    })),
-            )
-            .child(
-                ui::Button::new("export-bibtex")
-                    .text("Copy BibTeX")
-                    .disabled(bibtex.is_empty())
-                    .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                        let entries = bibtex.matches("@misc").count();
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(bibtex.clone()));
-                        workbench.say(format!("{entries} references copied as BibTeX"), cx);
-                    })),
-            )
-            .child(
-                ui::Button::new("export-rerun")
-                    .text("Re-run this turn")
-                    .disabled(again.is_none() || self.streaming)
-                    .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                        // Into the composer, not straight to the backend. Re-running is a
-                        // decision, and a question worth asking twice is usually worth editing
-                        // first — the same rule every other suggestion here follows.
-                        if let Some(prompt) = again.clone() {
-                            workbench
-                                .composer
-                                .update(cx, |composer, cx| composer.set_text(prompt, cx));
-                            workbench.restore_focus = true;
-                            cx.notify();
-                        }
-                    })),
-            )
-            .child(
+            .text_xs()
+            .text_color(rgb(theme::text_faint()));
+
+        // Time first, steps right beside it — one phrase, not two separate facts.
+        if let Some(elapsed) = elapsed {
+            row = row.child(
                 div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
                     .flex_none()
-                    .text_color(rgb(theme::text_faint()))
-                    .text_size(px(11.))
-                    .child(format!("{} words", answer.split_whitespace().count())),
-            )
+                    .child(
+                        ui::Icon::new("icons/ladder.svg")
+                            .size(ui::IconSize::ExtraSmall)
+                            .colour(theme::text_faint()),
+                    )
+                    .child(duration_label(elapsed)),
+            );
+        }
+        if steps > 0 {
+            if elapsed.is_some() {
+                row = row.child(div().flex_none().child("·"));
+            }
+            row = row.child(
+                div()
+                    .id(SharedString::from(format!("steps-{index}")))
+                    .flex_none()
+                    .hover(|style| style.text_color(rgb(theme::accent())).cursor_pointer())
+                    .child(format!(
+                        "{} {steps} {}",
+                        if message.steps_expanded { "▾" } else { "▸" },
+                        if steps == 1 { "step" } else { "steps" },
+                    ))
+                    .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                        if let Some(message) = workbench.transcript.get_mut(index) {
+                            message.steps_expanded = !message.steps_expanded;
+                        }
+                        workbench.invalidate_transcript_message(index);
+                        cx.notify();
+                    })),
+            );
+        }
+        row
+    }
+
+    /// The flat step list the `turn_footer` line above discloses: the coordinator's own steps,
+    /// then every specialist's, named rather than grouped into its own collapsible block.
+    pub(crate) fn turn_steps(&self, message: &Message) -> impl IntoElement {
+        let mut list = div().flex().flex_col().w_full().min_w_0().gap_1();
+        for step in fold_steps(&message.steps) {
+            list = list.child(step_line(&step));
+        }
+        for trace in &message.agents {
+            for step in fold_steps(&trace.steps) {
+                list = list.child(step_line(&format!("{}: {step}", trace.name.replace('_', " "))));
+            }
+        }
+        list
     }
 }
 
@@ -936,6 +946,65 @@ impl Workbench {
 
 
 impl Workbench {
+    /// Who answered message `index`, and the colour and tooltip its rail dot should carry.
+    /// `None` for a "you" message, which never carries a dot at all.
+    ///
+    /// The same colour the agent picker already wears for that specialist, so the mapping is
+    /// one a researcher has already seen rather than a second legend to learn. The *last* one
+    /// consulted, since that is whose answer this is; a turn that never delegated is the
+    /// coordinator's own, in a neutral tone rather than no dot at all, so a run of the
+    /// coordinator's own answers still has a colour for the rail to fade toward.
+    ///
+    /// Four tiers, most trustworthy first.
+    ///
+    /// `AgentTrace` is the live, per-namespace record. The provenance turn is next — the *same*
+    /// record `turn_for` already reads for elapsed time, which also carries a **background**
+    /// invocation `message.agents` never will: `observe_background` files it there the moment a
+    /// snapshot names it, precisely because a background worker runs on its own LangGraph thread
+    /// and none of its events reach this conversation's stream to populate `message.agents` at
+    /// all (docs on `Record::observe_background`). Then the coordinator's own "delegating to X"
+    /// step, for a backend that never streams the delegated namespace's own frames back to this
+    /// client either way. Last, a guess — this backend's coordinator turns out to answer
+    /// everything itself while only *narrating* a plan ("I'll use the dataverse_explorer
+    /// subagent to…"), leaving the first three nothing to find. Reading a name back out of that
+    /// prose is not a report of what happened, only of what the answer said, which is why it is
+    /// the last resort and the tooltip says so.
+    fn dot_for(&self, index: usize, message: &Message) -> Option<(u32, SharedString)> {
+        if message.role == "you" {
+            return None;
+        }
+        let real_agent = message
+            .agents
+            .last()
+            .map(|agent| agent.name.as_str())
+            .or_else(|| {
+                self.turn_for(index)
+                    .and_then(|turn| turn.invocations.last())
+                    .map(|invocation| invocation.name.as_str())
+            });
+        let delegated = real_agent.or_else(|| last_delegated_to(&message.steps));
+        let guessed = delegated.or_else(|| subagent::mentioned_in(&message.body));
+        let colour = guessed
+            .map(|name| subagent::display(name).1)
+            .unwrap_or_else(theme::text_faint);
+        // What the dot is actually reading, on hover — so "why is this the wrong colour" has an
+        // answer other than reading the source: the raw name behind the tooltip is exactly what
+        // `subagent::display` keyed off of, unrecognised-and-white included.
+        let hint: SharedString = if delegated.is_some() {
+            let name = delegated.expect("checked");
+            format!("answered by {} ({name})", subagent::display(name).0).into()
+        } else if let Some(name) = guessed {
+            format!(
+                "likely {} ({name}) — named in the answer's own text, not in any recorded step",
+                subagent::display(name).0
+            )
+            .into()
+        } else {
+            "answered directly by the coordinator — no specialist consulted or named".into()
+        };
+        Some((colour, hint))
+    }
+
     /// Build one row only when GPUI's variable-height list asks for it (docs §156).
     pub(crate) fn transcript_message(&self, index: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
         let Some(message) = self.transcript.get(index) else {
@@ -957,20 +1026,17 @@ impl Workbench {
             .flex_col()
             .w_full()
             .min_w_0()
-            .gap_1()
-            .pb_3()
+            .gap_2()
+            .p_2()
             .when(asked, |block| block.items_end());
-        // The summary stays above the trace and answer: it answers who did the work without
-        // requiring the researcher to expand anything.
+        // The summary stays above the answer: it answers who did the work without requiring
+        // the researcher to expand anything. Steps and elapsed time now run below the answer
+        // instead, in `turn_footer`.
         if !asked && !message.agents.is_empty() {
-            block = block.child(self.answer_chips(index, message));
-        }
-        // The trace precedes the answer because that is the order the work happened in.
-        if has_activity {
-            block = block.child(self.activity_block(index, message, cx));
+            block = block.child(self.answer_chips(message));
         }
         if waiting {
-            block = block.child(div().text_color(rgb(theme::text_muted())).child("…"));
+            block = block.child(div().text_color(rgb(theme::text_muted())).text_sm().child("…"));
         }
         if !body.is_empty() {
             // The user's text is shown as typed. Assistant text uses the already-cached Markdown
@@ -987,6 +1053,7 @@ impl Workbench {
                         .border_1()
                         .border_color(rgb(theme::border()))
                         .text_color(rgb(theme::text()))
+                        .text_sm()
                         .child(selection::Selectable::new(
                             &self.text_selection,
                             body.clone(),
@@ -1001,6 +1068,26 @@ impl Workbench {
                 block = block.child(rendered);
             }
         }
+        // What was sent along with the question, in the same tile a turn's own files get —
+        // rather than the raw `> Attached files (already saved in the sandbox working
+        // directory): …` blockquote the backend reads them from, which is what a researcher
+        // used to see verbatim on reopening a conversation (§310).
+        if asked && !message.attached.is_empty() {
+            if let Some(thread_dir) = self.thread_workspace() {
+                let sent: Vec<workspace::Output> = message
+                    .attached
+                    .iter()
+                    .filter_map(|name| workspace::attachment_output(&thread_dir, name))
+                    .collect();
+                if !sent.is_empty() {
+                    block = block.child(
+                        div()
+                            .mt(px(6.))
+                            .child(self.attachment_row(&format!("sent-{index}"), &sent, cx)),
+                    );
+                }
+            }
+        }
         // Marked, not hidden. A truncated answer looks exactly like a finished one, and whether
         // it was cut off decides whether the researcher can rely on it (§63).
         if message.stopped {
@@ -1009,7 +1096,7 @@ impl Workbench {
                     .w_full()
                     .min_w_0()
                     .text_color(rgb(theme::warning()))
-                    .text_xs()
+                    .text_sm()
                     .child("— you stopped this turn; the answer above is incomplete"),
             );
         }
@@ -1025,7 +1112,7 @@ impl Workbench {
                     .w_full()
                     .min_w_0()
                     .text_color(rgb(theme::warning()))
-                    .text_xs()
+                    .text_sm()
                     .child(format!(
                         "— named above but not in this conversation's folder: {named}"
                     )),
@@ -1082,63 +1169,151 @@ impl Workbench {
         // the search away with them (§220) — they are not results to read in the conversation, and
         // the Sources and Datasets panels already say what is in them. Filtered here rather than
         // in `workspace::outputs`, so the Outputs panel and the thread's folder still list them.
+        // One row, whoever produced them. Which subagent wrote which file is bookkeeping the
+        // researcher did not ask for — the files themselves are the point (§310).
         let shown: Vec<workspace::Output> = message
             .outputs
             .iter()
             .filter(|output| !is_search_record(output))
             .cloned()
             .collect();
-        for (band, (worker, produced)) in by_producer(&shown, &self.tasks, &self.authorship)
-            .into_iter()
-            .enumerate()
-        {
-            let (images, others) = split_images(&produced);
-            if !images.is_empty() {
-                block = block.child(self.output_grid(
-                    &format!("transcript-{index}-i{band}"),
-                    images_heading(images.len(), worker.as_deref()),
-                    &images,
-                    false,
-                    cx,
-                ));
-            }
-            for (at, group) in output_folder_groups(&others).iter().enumerate() {
-                if let [output] = group.outputs.as_slice() {
-                    block = block.child(self.output_card(
-                        index * 64 + band * 16 + at,
-                        output,
-                        worker.as_deref(),
-                        cx,
-                    ));
-                } else {
-                    block = block.child(self.output_grid(
-                        &format!("transcript-{index}-{band}-{at}"),
-                        shorten_path_label(
-                            &output_folder_label(&group.folder, worker.as_deref()),
-                            TRANSCRIPT_HEADING_CHARS,
-                        ),
-                        &group
-                            .outputs
-                            .iter()
-                            .map(|output| (*output).clone())
-                            .collect::<Vec<_>>(),
-                        false,
-                        cx,
-                    ));
+        if !shown.is_empty() {
+            // A bit more room than the block's own `gap_2` gives every other pair of sections —
+            // the attachments are a distinct thing the answer produced, not another line of it.
+            block = block.child(
+                div()
+                    .mt(px(6.))
+                    .child(self.attachment_row(&format!("transcript-{index}"), &shown, cx)),
+            );
+        }
+
+        // Steps and elapsed time, on every assistant turn, always — not gated on being the
+        // latest answer or on the turn having finished (§310).
+        if !asked {
+            // A negative margin against the block's own `gap_2`, rather than another spacing
+            // constant to keep in step with it — the footer sits closer to the answer above it
+            // than every other pair of sections does.
+            block = block.child(div().mt(px(-4.)).child(self.turn_footer(index, message, cx)));
+            if message.steps_expanded {
+                let has_steps = !message.steps.is_empty()
+                    || message.agents.iter().any(|agent| !agent.steps.is_empty());
+                if has_steps {
+                    block = block.child(self.turn_steps(message));
                 }
             }
         }
+        // A continuous rail down the whole conversation, not only the messages that carry a
+        // dot: a "you" row draws the same line through itself with nothing on it, so the
+        // segments either side of it still meet edge to edge instead of leaving a gap at every
+        // question. Each row only ever draws its own segment — there is no way to see a
+        // neighbour from here — so the join relies on rows sitting flush with no list-level gap
+        // between them, which `gpui::list` already gives for free.
+        //
+        // Dashed rather than a solid fill: GPUI has no dashed *background*, only a dashed
+        // *border* (the same `border_dashed` the provenance legend already draws a straight
+        // line with) — so the colour comes from a handful of short bordered segments instead of
+        // one continuous gradient fill.
+        //
+        // Absolute and pinned to all four edges, not a flex sibling relying on `align-items:
+        // stretch` to match `block`'s height — that dependency was briefly suspected of being
+        // why the transcript could not scroll to its own end, and it turned out not to be the
+        // cause (`collect_plots` growing a finished message's outputs without telling the list
+        // was), but positioning against `block`'s own wrapper here is still the more direct
+        // reading: this rail has no content of its own to give it a height, so it takes the one
+        // thing in this row that was never ambiguous instead of asking the layout to infer it.
+        const RAIL: f32 = 16.;
+        const DOT: f32 = 12.;
+        const DOT_TOP: f32 = 12.;
+        const DOT_CENTER: f32 = DOT_TOP + DOT / 2.;
+        let x = px(RAIL / 2. - 1.);
+        let dot = self.dot_for(index, message);
+        // The colour this segment fades *from* — the nearest earlier row that had one, so the
+        // line reads as one continuous thread shifting colour at each new answer rather than a
+        // hard cut, and a run of "you" rows in between does not reset it to nothing. `None`
+        // rather than a neutral default: a default here would draw a line above the very first
+        // answer, where nothing has happened yet to connect to.
+        let top = (0..index).rev().find_map(|earlier| {
+            let earlier_message = self.transcript.get(earlier)?;
+            self.dot_for(earlier, earlier_message).map(|(colour, _)| colour)
+        });
+        let bottom = dot.as_ref().map(|(colour, _)| *colour).or(top);
 
-        // Only the latest completed answer gets export actions. Repeating them under every row
-        // would make a long virtual transcript a wall of controls just as it did when eager.
-        if !asked
-            && !message.body.is_empty()
-            && index + 1 == self.transcript.len()
-            && !self.streaming
-        {
-            block = block.child(self.export_row(message, cx));
+        const LINE: f32 = 3.;
+        const PLATE: f32 = DOT + 4.;
+        let mut rail = div()
+            .absolute()
+            .left_0()
+            .top_0()
+            .bottom_0()
+            .w(px(RAIL));
+        // Above the dot: solid in the *previous* colour, stopping dead at the circle rather
+        // than fading into this row's own — one dash segment for the whole run rather than
+        // several short ones, which is what made the pattern look squashed at each seam.
+        if let Some(top) = top {
+            rail = rail.child(
+                div()
+                    .absolute()
+                    .left(x)
+                    .top_0()
+                    .h(px(DOT_CENTER))
+                    .border_l(px(LINE))
+                    .border_dashed()
+                    .border_color(rgb(top)),
+            );
         }
-        block.into_any_element()
+        // Below the dot, in this row's own colour — the next shift in colour belongs to
+        // whichever later row has the next dot. Stops with this row when it is the
+        // transcript's last: the line ends at the last dot instead of trailing into nothing.
+        if let Some(bottom) = bottom {
+            if index + 1 < self.transcript.len() {
+                rail = rail.child(
+                    div()
+                        .absolute()
+                        .left(x)
+                        .top(px(DOT_CENTER))
+                        .bottom_0()
+                        .border_l(px(LINE))
+                        .border_dashed()
+                        .border_color(rgb(bottom)),
+                );
+            }
+        }
+        if let Some((colour, hint)) = dot {
+            rail = rail.child(
+                div()
+                    .id(SharedString::from(format!("who-answered-{index}")))
+                    .absolute()
+                    .left(px(RAIL / 2. - PLATE / 2.))
+                    .top(px(DOT_CENTER - PLATE / 2.))
+                    .size(px(PLATE))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    // The icon itself fades to transparent at its edge, and the dashed line
+                    // sits directly behind it — an opaque plate the same colour as the panel
+                    // masks that out instead of letting the line show through.
+                    .bg(rgb(theme::background()))
+                    .child(
+                        ui::Icon::new("icons/agent-ellipse.svg")
+                            .size(ui::IconSize::ExtraSmall)
+                            .colour(colour),
+                    )
+                    .tooltip(move |_window, cx| cx.new(|_| ui::Hint { text: hint.clone() }).into()),
+            );
+        }
+
+        // `block` is the only normal-flow content here, so this wrapper's height is exactly
+        // `block`'s own. The rail is laid over that in absolute position, reserving its own
+        // room via padding rather than by consuming space as a flex item.
+        div()
+            .relative()
+            .w_full()
+            .min_w_0()
+            .pl(px(RAIL + 8.))
+            .child(rail)
+            .child(block)
+            .into_any_element()
     }
 }
 
@@ -1187,15 +1362,25 @@ impl Workbench {
                 div()
                     .w_full()
                     .min_w_0()
-                    .px(px(TRANSCRIPT_INSET))
+                    // Less on the left than `TRANSCRIPT_INSET`'s own doc comment calls for — it
+                    // exists to line the transcript up with the composer below it, and this
+                    // still comes within a few pixels of that. What sits at this edge is the
+                    // rail's line now, not text, and that inset was reading as a bigger gap to
+                    // the border than either the row's own margin or the panel's own padding
+                    // alone (both tried first — visibly nothing, because this is the one that
+                    // actually reaches the border).
+                    .pl(px(TRANSCRIPT_INSET - 8.))
+                    .pr(px(TRANSCRIPT_INSET))
                     .child(row)
                     .into_any_element()
             })
         })
         .w_full()
         .h_full()
-        // Vertical only, which is all this ever applied.
-        .py_4();
+        // Vertical only, which is all this ever applied. More at the bottom than the top so the
+        // last message sits a little clear of the composer below it, not flush against it.
+        .pt_4()
+        .pb_8();
         let mut col = div()
             .id("transcript")
             .flex()
@@ -1404,123 +1589,139 @@ impl Workbench {
 
 
 impl Workbench {
-    /// The agent activity trace for one turn: coordinator steps as one-liners, then
-    /// a collapsible group per subagent.
+    /// Every attachment a turn produced, in one capped row.
     ///
-    /// This exists because a delegated turn is otherwise *silent*: the coordinator
-    /// emits only a `task` tool call while a subagent does the real work, so the user
-    /// sees a frozen window and then an answer with no account of where it came from
-    /// (plan §15).
-    pub(crate) fn activity_block(
+    /// No per-producer heading and no divider between them: which subagent wrote which file is
+    /// bookkeeping a researcher did not ask for, so images and other files alike sit in one row
+    /// in the order they were produced. Past three, the last tile carries the same `+N` overlay
+    /// the image gallery already uses (§310).
+    pub(crate) fn attachment_row(
         &self,
-        message_index: usize,
-        message: &Message,
+        scope: &str,
+        items: &[workspace::Output],
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let mut block = div().flex().flex_col().w_full().min_w_0().gap_1();
+        /// Past this the row wraps into the existing `+N` overlay instead of growing sideways.
+        const MAX_TILES: usize = 3;
 
-        // The coordinator's own steps, behind the same disclosure the subagent groups have
-        // had all along. Flat and unbounded, they ran to twenty lines of `read_file`, `ls`
-        // and `glob` and pushed the actual answer off the screen (docs §47).
-        let folded = fold_steps(&message.steps);
-        if !folded.is_empty() {
-            let count = message.steps.len();
-            block = block.child(
+        let shown = items.len().min(MAX_TILES);
+        let hidden = if items.len() > MAX_TILES {
+            items.len() - (MAX_TILES - 1)
+        } else {
+            0
+        };
+
+        let mut row = div().flex().flex_row().flex_wrap().gap_2().flex_none();
+        for at in 0..shown {
+            let more = (hidden > 0 && at + 1 == shown).then_some(hidden);
+            row = row.child(self.attachment_tile(
+                format!("attachment-{scope}-{at}"),
+                items,
+                at,
+                more,
+                cx,
+            ));
+        }
+        row
+    }
+
+    /// One attachment: a thumbnail (a picture for a figure, a glyph for anything else) with its
+    /// filename underneath, inside the same bordered box. Clicking it opens the existing
+    /// preview — there is no separate "Open"/"Reveal" control to press first.
+    pub(crate) fn attachment_tile(
+        &self,
+        id: String,
+        set: &[workspace::Output],
+        at: usize,
+        more: Option<usize>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        const TILE: f32 = GRID_TILE_COMPACT;
+        // The tile's own `p_2()` eats into its width on both sides before `media`'s `w_full()`
+        // ever sees it — the same subtraction `name_chars` makes for the same reason — so
+        // squaring the *content* box means matching that width, not the outer tile's own.
+        const MEDIA: f32 = TILE - 16.;
+
+        let output = &set[at];
+        let opening = set.to_vec();
+        let is_image = output.kind == workspace::Kind::Figure;
+        let (glyph, ink) = file_mark(&output.path);
+
+        let scrim = |more: usize| {
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_md()
+                .bg(gpui::rgba(0x000000a6))
+                .text_color(rgb(SCRIM_INK))
+                .text_size(px(media_scrim_size(TILE)))
+                .child(format!("+{more}"))
+        };
+
+        let media = if is_image {
+            div()
+                .relative()
+                .w_full()
+                .h(px(MEDIA))
+                .flex_none()
+                .rounded_md()
+                .overflow_hidden()
+                .child(
+                    img(output.path.clone())
+                        .w_full()
+                        .h_full()
+                        .rounded_md()
+                        .object_fit(gpui::ObjectFit::Contain),
+                )
+                .when_some(more, |media, more| media.child(scrim(more)))
+                .into_any_element()
+        } else {
+            div()
+                .relative()
+                .flex()
+                .items_center()
+                .justify_center()
+                .w_full()
+                .h(px(MEDIA))
+                .flex_none()
+                .child(ui::Icon::new(glyph).size(ui::IconSize::Large).colour(ink))
+                .when_some(more, |media, more| media.child(scrim(more)))
+                .into_any_element()
+        };
+
+        div()
+            .id(SharedString::from(id))
+            .flex()
+            .flex_col()
+            .flex_none()
+            .w(px(TILE))
+            .gap_1()
+            .p_2()
+            .rounded_lg()
+            .bg(rgb(theme::surface()))
+            .border_1()
+            .border_color(rgb(theme::border()))
+            .hover(|style| style.border_color(rgb(theme::accent())).cursor_pointer())
+            .child(media)
+            .child(
                 div()
-                    .id(SharedString::from(format!("steps-{message_index}")))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_center()
                     .w_full()
                     .min_w_0()
                     .text_color(rgb(theme::text_muted()))
                     .text_xs()
-                    .hover(|style| style.cursor_pointer())
-                    .child(format!(
-                        "{} {count} {}",
-                        if message.steps_expanded { "▾" } else { "▸" },
-                        if count == 1 { "step" } else { "steps" },
-                    ))
-                    .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                        if let Some(message) = workbench.transcript.get_mut(message_index) {
-                            message.steps_expanded = !message.steps_expanded;
-                        }
-                        workbench.invalidate_transcript_message(message_index);
-                        cx.notify();
-                    })),
-            );
-            if message.steps_expanded {
-                for step in &folded {
-                    block = block.child(step_line(step));
-                }
-            }
-        }
-
-        for (trace_index, trace) in message.agents.iter().enumerate() {
-            let steps = if trace.steps.len() == 1 {
-                "1 step".to_string()
-            } else {
-                format!("{} steps", trace.steps.len())
-            };
-            let header = format!(
-                "{} {} · {steps} · {} chars",
-                if trace.expanded { "▾" } else { "▸" },
-                trace.name,
-                trace.text.chars().count(),
-            );
-
-            let mut group = div()
-                .flex()
-                .flex_col()
-                .w_full()
-                .min_w_0()
-                .gap_1()
-                .pl_2()
-                .border_l_1()
-                .border_color(rgb(theme::border()))
-                .child(
-                    div()
-                        // Unique per (turn, trace) so GPUI keeps each group's click
-                        // state to itself.
-                        .id(SharedString::from(format!(
-                            "trace-{message_index}-{trace_index}"
-                        )))
-                        .w_full()
-                        .min_w_0()
-                        .text_color(rgb(theme::accent()))
-                        .text_xs()
-                        .hover(|style| style.cursor_pointer())
-                        .child(header)
-                        .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                            if let Some(message) = workbench.transcript.get_mut(message_index) {
-                                if let Some(trace) = message.agents.get_mut(trace_index) {
-                                    trace.expanded = !trace.expanded;
-                                }
-                            }
-                            workbench.invalidate_transcript_message(message_index);
-                            cx.notify();
-                        })),
-                );
-
-            if trace.expanded {
-                for step in &fold_steps(&trace.steps) {
-                    group = group.child(step_line(step));
-                }
-                // Not the raw stream: a subagent's answer often arrives as one JSON
-                // object, which is unreadable as a trace line.
-                let preview = protocol::summarize_agent_result(&trace.text);
-                if !preview.is_empty() {
-                    group = group.child(
-                        div()
-                            .w_full()
-                            .min_w_0()
-                            .text_color(rgb(theme::text_muted()))
-                            .text_xs()
-                            .child(preview),
-                    );
-                }
-            }
-            block = block.child(group);
-        }
-
-        block
+                    .child(distinguishing_tail(&output_filename(output), name_chars(TILE))),
+            )
+            .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                workbench.preview = Preview::opening(opening.clone(), at);
+                cx.notify();
+            }))
     }
 }
 

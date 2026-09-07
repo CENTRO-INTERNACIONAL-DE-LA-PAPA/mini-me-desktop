@@ -73,7 +73,7 @@ const ASTA_CITATION: &str = "AstaBench: Rigorous Benchmarking of AI Agents with 
 /// this is only the researcher-facing name requested in §154, so it cannot become a second
 /// project registry or collide with a real folder of the same name.
 const UNGROUPED_PROJECT_LABEL: &str = "Ungrouped Conversations";
-const ICON_PATHS: [&str; 31] = [
+const ICON_PATHS: [&str; 32] = [
     "icons/settings.svg",
     "icons/conversations.svg",
     "icons/research.svg",
@@ -99,6 +99,7 @@ const ICON_PATHS: [&str; 31] = [
     "icons/broom.svg",
     "icons/chat-circle-dots.svg",
     "icons/gear-six.svg",
+    "icons/ladder.svg",
     "icons/magnifying-glass.svg",
     "icons/paper-plane-right.svg",
     "icons/pencil.svg",
@@ -143,6 +144,7 @@ impl AssetSource for Assets {
             "icons/broom.svg" => Some(include_bytes!("../assets/icons/broom.svg")),
             "icons/chat-circle-dots.svg" => Some(include_bytes!("../assets/icons/chat-circle-dots.svg")),
             "icons/gear-six.svg" => Some(include_bytes!("../assets/icons/gear-six.svg")),
+            "icons/ladder.svg" => Some(include_bytes!("../assets/icons/ladder.svg")),
             "icons/magnifying-glass.svg" => Some(include_bytes!("../assets/icons/magnifying-glass.svg")),
             "icons/paper-plane-right.svg" => Some(include_bytes!("../assets/icons/paper-plane-right.svg")),
             "icons/pencil.svg" => Some(include_bytes!("../assets/icons/pencil.svg")),
@@ -931,10 +933,7 @@ const GRID_GAP: f32 = 8.;
 /// `.ellipsis()` (§193), so this number is the only thing keeping the text inside the box.
 const PANEL_HEADING_CHARS: usize = 32;
 
-/// The same, for a heading under an answer in the transcript, where the box is 408px.
-const TRANSCRIPT_HEADING_CHARS: usize = 40;
-
-const GRID_TILE_COMPACT: f32 = 148.;
+const GRID_TILE_COMPACT: f32 = 120.;
 const GRID_TILE_ROOMY: f32 = 200.;
 
 /// A tile's media area, as a fraction of its width.
@@ -1529,6 +1528,30 @@ fn without_attached_blockquote(prompt: &str) -> &str {
     }
 }
 
+/// The filenames named in a prompt's attached-files blockquote, for showing something more
+/// visual than that line itself — a plain path in a blockquote is what the ugly rendering the
+/// researcher pointed at was (§310). Each reference is `./name` or an absolute path
+/// ([`Attachment::reference`]'s two shapes); only the filename is kept, since that is what the
+/// tile beneath the bubble names.
+fn attached_filenames(prompt: &str) -> Vec<String> {
+    const PREFIX: &str = "> Attached files (already saved in the sandbox working directory): ";
+    let Some(rest) = prompt.strip_prefix(PREFIX) else {
+        return Vec::new();
+    };
+    let Some(listed) = rest.find("\n\n").map(|at| &rest[..at]) else {
+        return Vec::new();
+    };
+    listed
+        .split(',')
+        .filter_map(|reference| {
+            let reference = reference.trim().trim_matches('`');
+            std::path::Path::new(reference)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .collect()
+}
+
 /// The sources of every attachment that is not yet inside the conversation's folder.
 ///
 /// Pure so the rule is testable without a window: a file already copied in must not be copied
@@ -1873,6 +1896,9 @@ struct Message {
     /// it in the side panel to learn whether it had 40 rows or 40,000. The diff never cared what
     /// kind of file it was; only the renderer did.
     outputs: Vec<workspace::Output>,
+    /// Files a `you` message sent along with it, named rather than shown as the raw blockquote
+    /// the backend reads them from (§310) — always empty for an assistant message.
+    attached: Vec<String>,
 }
 
 impl Message {
@@ -1888,6 +1914,7 @@ impl Message {
             stopped: false,
             outputs: Vec::new(),
             unverified: Vec::new(),
+            attached: Vec::new(),
         }
     }
 
@@ -1972,8 +1999,18 @@ impl AgentTrace {
 }
 
 /// Find (or start) the trace group for a subagent invocation.
+///
+/// Self-corrects a placeholder name the same way `provenance::Record::observe` does: a
+/// namespace's first frame can arrive before the metadata that names it, and a trace stuck
+/// forever at `"subagent"` — the fallback `protocol::agent_ref` hands back in that case — used
+/// to draw in the catch-all colour `subagent::display` gives an unrecognised name, which is
+/// what made the dot beside a message never match the specialist that actually answered it.
 fn trace_for<'a>(message: &'a mut Message, agent: &AgentRef) -> &'a mut AgentTrace {
     if let Some(index) = message.agents.iter().position(|trace| trace.ns == agent.ns) {
+        let trace = &mut message.agents[index];
+        if trace.name == provenance::FALLBACK_NAME && agent.name != provenance::FALLBACK_NAME {
+            trace.name = agent.name.clone();
+        }
         return &mut message.agents[index];
     }
     message.agents.push(AgentTrace {
@@ -2358,12 +2395,6 @@ struct Workbench {
     /// from `&mut self` would have to be refreshed by `render` for a panel that may not even be
     /// open. Never borrowed across a call that could re-enter.
     shapes: std::cell::RefCell<HashMap<PathBuf, (std::time::SystemTime, workspace::Shape)>>,
-    /// The first rows of each table, for the cards in the transcript. Same key, same reason as
-    /// [`Self::shapes`]; `None` records "looked, and it is not a table we can split", so a
-    /// Markdown file is not re-opened on every frame to find that out again.
-    #[allow(clippy::type_complexity)]
-    previews:
-        std::cell::RefCell<HashMap<PathBuf, (std::time::SystemTime, Option<Vec<Vec<String>>>)>>,
     /// What the sidebar's search box holds. Empty means "show everything".
     conversation_query: Entity<Composer>,
     /// A file being previewed in the centre, if any — and the set it can be stepped through.
@@ -2567,7 +2598,7 @@ impl Workbench {
 
         // Filtering the conversation list. Never submits — it filters as you type, which
         // is what "fast" means for a list this small.
-        let conversation_query = cx.new(|cx| Composer::new(cx, "Search conversations"));
+        let conversation_query = cx.new(|cx| Composer::new(cx, "Search"));
         cx.observe(&conversation_query, |_workbench, _query, cx| cx.notify())
             .detach();
 
@@ -2728,8 +2759,8 @@ impl Workbench {
             provenance_focus: cx.focus_handle(),
             about_focus: cx.focus_handle(),
             delete_focus: cx.focus_handle(),
-            sidebar_width: 320.,
-            panel_width: 320.,
+            sidebar_width: 300.,
+            panel_width: 300.,
             dragging: None,
             toasts: Vec::new(),
             panel_scroll: gpui::ScrollHandle::new(),
@@ -2740,7 +2771,6 @@ impl Workbench {
             panel_open: stored.panel_open,
             road_open: stored.road_open,
             shapes: std::cell::RefCell::new(HashMap::new()),
-            previews: std::cell::RefCell::new(HashMap::new()),
             conversation_query,
             preview: None,
             conversations: Vec::new(),
@@ -3867,8 +3897,9 @@ impl Workbench {
         // coordinator is what the work responded to.
         self.provenance
             .begin_turn(prompt.clone(), provenance::now_ms());
-        self.transcript
-            .push(Message::new("you", without_attached_blockquote(&prompt).to_string()));
+        let mut asked = Message::new("you", without_attached_blockquote(&prompt).to_string());
+        asked.attached = attached_filenames(&prompt);
+        self.transcript.push(asked);
         // The assistant message — text *and* activity — streams into this entry.
         self.transcript.push(Message::new("mini-me", String::new()));
         if first_turn {
@@ -4079,6 +4110,11 @@ impl Workbench {
                 if let Some(agent) = &agent {
                     self.note_provenance(agent);
                 }
+                // Written to the provenance record too, not only the live message — that is
+                // what lets the step count and its disclosure survive a reload (§310), the
+                // same file `note_provenance` already keeps for timing.
+                self.provenance
+                    .note_step(agent.as_ref().map(|agent| agent.ns.as_str()), label.clone());
                 if let Some(message) = self.transcript.last_mut() {
                     match agent {
                         None => message.steps.push(label),
@@ -4583,7 +4619,18 @@ impl Workbench {
                         // Roles come back as the two the transcript renders; anything
                         // else was filtered out server-side by `decode_stored_message`.
                         let role = if role == "you" { "you" } else { "mini-me" };
-                        workbench.transcript.push(Message::new(role, body));
+                        // A reopened `you` message still carries its blockquote — it was
+                        // never stripped on the way to the server, only on the way into
+                        // this session's own transcript (§310).
+                        let message = if role == "you" {
+                            let mut message =
+                                Message::new(role, without_attached_blockquote(&body).to_string());
+                            message.attached = attached_filenames(&body);
+                            message
+                        } else {
+                            Message::new(role, body)
+                        };
+                        workbench.transcript.push(message);
                     }
                     // Datasets likewise: the search results are a file in this conversation's
                     // folder, so reopening it shows what the searches found rather than nothing
@@ -4601,6 +4648,10 @@ impl Workbench {
                     // on disk because the stream it came from is over (docs §73).
                     if let Some(dir) = workbench.thread_workspace() {
                         workbench.provenance = provenance::load(&dir);
+                        // Steps and their disclosure, read back the same way (§310) — the
+                        // count next to the time was going missing on every reopened
+                        // conversation because only the timing survived, not the labels.
+                        workbench.restore_traces();
                     }
                     // **And pick up any long run still going.** A theorizer or DataVoyager task
                     // lives on Asta's own service, keyed by a task id the thread's artifacts
@@ -5097,13 +5148,33 @@ impl Workbench {
         if produced.is_empty() {
             return;
         }
-        if let Some(message) = self
+        if let Some(index) = self
             .transcript
-            .iter_mut()
-            .rev()
-            .find(|message| message.role == "mini-me")
+            .iter()
+            .rposition(|message| message.role == "mini-me")
         {
-            message.outputs.extend(produced);
+            self.transcript[index].outputs.extend(produced);
+            // A background worker can finish minutes after its own turn ended, with other
+            // turns already complete and `self.streaming` long since false — exactly the case
+            // `sync_transcript_list`'s own "only the in-flight row needs a splice" shortcut
+            // does not cover. Grown outputs change this row's height, and `list`'s own docs are
+            // explicit that a cached row's height changing without a `splice` is what breaks
+            // its layout — which is what made the transcript unable to scroll to its own end
+            // once outputs routinely arrived after the fact (docs on `gpui::list`).
+            self.invalidate_transcript_message(index);
+            // The splice alone is not enough in a long conversation. `gpui::list` only
+            // remeasures an invalidated row once its own forward-walk from the *current*
+            // scroll position reaches it — an unmeasured row counts as zero height in the
+            // sum it clamps wheel-scroll against, so with many rows above never visited this
+            // turn, that clamp settles just short of the truth until something walks as far
+            // as this row. Left alone, a reader already sitting at the tail hits that stale
+            // ceiling on every scroll tick and the newly attached outputs read as cut off.
+            // Only reveal it when they were already reading near here — a background job's
+            // outputs landing minutes later, while the reader has scrolled back to an earlier
+            // answer, has no business yanking their place in the transcript.
+            if self.transcript_list.logical_scroll_top().item_ix + 3 >= index {
+                self.transcript_list.scroll_to_reveal_item(index);
+            }
         }
     }
 
@@ -5545,32 +5616,14 @@ impl Workbench {
 
 
 
-    /// The first rows of a table, measured at most once per version of the file.
-    ///
-    /// Cached beside the shape and for the same reason: this renders on every frame of a
-    /// streaming answer, and a preview that re-read the file each time would be doing disk I/O
-    /// sixty times a second on the thread drawing the window.
-    fn preview_of(&self, output: &workspace::Output, rows: usize) -> Option<Vec<Vec<String>>> {
-        if let Some(entry) = self.previews.borrow().get(&output.path) {
-            if entry.0 == output.modified {
-                return entry.1.clone();
-            }
-        }
-        let found = workspace::table_preview(&output.path, rows);
-        self.previews
-            .borrow_mut()
-            .insert(output.path.clone(), (output.modified, found.clone()));
-        found
-    }
-
-
     /// The provenance turn that produced the assistant message at `index`, if it can be known.
     ///
     /// **Matched from the end, not the start.** Reopening a conversation loads its messages from
-    /// the server and its record from disk, and the two have different lengths on purpose: the
-    /// activity trace does not survive a reload (§46) while the record does. Counting forwards
-    /// would then pair message three with turn three and be wrong by however many turns the
-    /// reload dropped. Both grow at the tail, so aligning the tails is the pairing that holds.
+    /// the server and its record from disk, and the two have different lengths on purpose: a
+    /// subagent's own streamed text does not survive a reload (§46) while the record does.
+    /// Counting forwards would then pair message three with turn three and be wrong by however
+    /// many turns the reload dropped. Both grow at the tail, so aligning the tails is the
+    /// pairing that holds.
     fn turn_for(&self, index: usize) -> Option<&provenance::Turn> {
         let after = self
             .transcript
@@ -5580,6 +5633,45 @@ impl Workbench {
             .count();
         let at = self.provenance.turns.len().checked_sub(after + 1)?;
         self.provenance.turns.get(at)
+    }
+
+    /// Read each answer's step count and disclosure back from the provenance record just
+    /// loaded, now that both it and the transcript are in place.
+    ///
+    /// §46 chose not to persist a subagent's own streamed text — that is the wall of prose this
+    /// module's own docs call not worth writing twice — but a step's *label* is a few words, and
+    /// leaving it out was what made the count beside the time vanish on every reopened
+    /// conversation (§310). `steps_expanded` starts closed, the same state a turn ends in when it
+    /// finishes live.
+    fn restore_traces(&mut self) {
+        for index in 0..self.transcript.len() {
+            if self.transcript[index].role == "you" {
+                continue;
+            }
+            let Some(turn) = self.turn_for(index) else {
+                continue;
+            };
+            let steps = turn.steps.clone();
+            let agents: Vec<AgentTrace> = turn
+                .invocations
+                .iter()
+                .filter(|invocation| !invocation.steps.is_empty())
+                .map(|invocation| AgentTrace {
+                    ns: invocation.ns.clone(),
+                    name: invocation.name.clone(),
+                    steps: invocation.steps.clone(),
+                    text: String::new(),
+                    expanded: false,
+                })
+                .collect();
+            if steps.is_empty() && agents.is_empty() {
+                continue;
+            }
+            let message = &mut self.transcript[index];
+            message.steps = steps;
+            message.agents = agents;
+            message.steps_expanded = false;
+        }
     }
 
 
@@ -8887,16 +8979,16 @@ mod tests {
 
         // A name is shortened to something that actually fits, and never to nothing — §59's bare
         // `…` is what happens when the layout is asked to do this instead.
-        assert!(name_chars(GRID_TILE_COMPACT) >= 20, "{}", name_chars(GRID_TILE_COMPACT));
+        assert!(name_chars(GRID_TILE_COMPACT) >= 15, "{}", name_chars(GRID_TILE_COMPACT));
         assert!(name_chars(GRID_TILE_ROOMY) > name_chars(GRID_TILE_COMPACT));
         assert_eq!(name_chars(0.), 8, "a floor, so a name is never cut to nothing");
         // The tail is what tells two summaries apart, and the result is exactly as long as the
-        // tile allows — 22 characters for a 148px one, ellipsis included.
+        // tile allows — 17 characters for a 120px one, ellipsis included.
         let shortened = distinguishing_tail(
             "kiwi_quality_summary_statistics.csv",
             name_chars(GRID_TILE_COMPACT),
         );
-        assert_eq!(shortened, "…ummary_statistics.csv");
+        assert_eq!(shortened, "…y_statistics.csv");
         assert_eq!(shortened.chars().count(), name_chars(GRID_TILE_COMPACT));
         assert!(shortened.ends_with(".csv"), "the extension has to survive");
     }
@@ -9155,6 +9247,35 @@ mod tests {
         assert!(fold_steps(&[]).is_empty());
     }
 
+    /// The fallback for a backend that never streams a delegated namespace's own frames back:
+    /// `message.agents` stays empty, so the dot beside the message has to read who was asked
+    /// off the coordinator's own "delegating to X" step instead (§310).
+    #[test]
+    fn the_dot_falls_back_to_the_coordinators_own_delegation_step() {
+        assert_eq!(
+            last_delegated_to(&["glob".into(), "delegating to dataverse_explorer".into()]),
+            Some("dataverse_explorer")
+        );
+        // The description that can follow the name is not part of it.
+        assert_eq!(
+            last_delegated_to(&[
+                "delegating to academic_researcher — Find the canonical DESeq2 paper.".into()
+            ]),
+            Some("academic_researcher")
+        );
+        // The most recent delegation wins — that is whose answer this turn actually is.
+        assert_eq!(
+            last_delegated_to(&[
+                "delegating to academic_researcher".into(),
+                "delegating to report_writer — write it up".into(),
+            ]),
+            Some("report_writer")
+        );
+        // Nothing to attribute: a plain answer with no delegation at all.
+        assert_eq!(last_delegated_to(&["glob".into(), "read_file".into()]), None);
+        assert_eq!(last_delegated_to(&[]), None);
+    }
+
     /// A real delegated turn, reduced to fit the repo (see the fixture's header).
     /// Replaying it is what proves the trace works on *measured* wire data rather
     /// than on shapes hand-written from the docs.
@@ -9211,6 +9332,31 @@ mod tests {
             statuses.iter().any(|status| status == "Creating sandbox…"),
             "{statuses:?}"
         );
+    }
+
+    /// A namespace's first frame can arrive before the metadata naming it — `protocol::agent_ref`
+    /// falls back to `"subagent"` for that one frame — and the trace must not stay stuck there
+    /// once the real name turns up. It used to: `provenance::Record::observe` already corrected
+    /// itself the same way, but `trace_for` did not, so `Message::agents` — and every colour or
+    /// label drawn from it, including the dot beside a message — kept naming the placeholder for
+    /// the rest of the conversation.
+    #[test]
+    fn a_trace_stuck_on_the_placeholder_name_is_corrected_once_the_real_one_arrives() {
+        let mut message = Message::new("mini-me", String::new());
+        let placeholder = AgentRef {
+            ns: "tools:a".into(),
+            name: "subagent".into(),
+        };
+        trace_for(&mut message, &placeholder);
+        assert_eq!(message.agents[0].name, "subagent");
+
+        let named = AgentRef {
+            ns: "tools:a".into(),
+            name: "academic_researcher".into(),
+        };
+        trace_for(&mut message, &named);
+        assert_eq!(message.agents.len(), 1, "still the one invocation");
+        assert_eq!(message.agents[0].name, "academic_researcher");
     }
 
     #[test]
@@ -9872,6 +10018,21 @@ mod tests {
         assert_eq!(without_attached_blockquote(&sent), "profile this");
         // Nothing attached: the blockquote was never prepended, so there is nothing to strip.
         assert_eq!(without_attached_blockquote("what is late blight?"), "what is late blight?");
+    }
+
+    /// The names the blockquote's stripped away carry over to the tile shown in its place —
+    /// from `./name` and from an absolute path alike (§310).
+    #[test]
+    fn attached_filenames_reads_the_names_the_blockquote_carried() {
+        let sent = with_attachments(
+            "profile this",
+            &[
+                attached("a.csv", "./a.csv"),
+                attached("huge.tab", "/mnt/d/genomes/huge.tab"),
+            ],
+        );
+        assert_eq!(attached_filenames(&sent), vec!["a.csv", "huge.tab"]);
+        assert!(attached_filenames("what is late blight?").is_empty());
     }
 
     #[test]
