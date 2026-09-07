@@ -171,13 +171,32 @@ Luciano's `feat/wsl2less` already adds a `cwd` field to the command record, whic
 this much cheaper — but that branch is on hold. Either wait for Piero, or derive the
 working directory independently.
 
-### 2. `GET /discovery/{thread_id}/drafts`
+### 2. Two failures reported from real installs — see `docs/plan.md` for the evidence
+
+**A model call that dies mid-stream kills the turn after the expensive part**, and the configured
+`max_retries` provably cannot reach it: the provider injects the error into an already-successful
+200 stream, and the SDK decides retries on status code. The researcher is shown "An internal error
+occurred" and a log path.
+
+**Conversation storage is wired to the background-work switch, and that switch is off by default.**
+`make_config.py` is the only thing that ever sets a `checkpointer` key, and `backend.rs` passes
+`--config <generated>` **only when `async_subagents` is true** — which defaults to `false`. So an
+ordinary install runs upstream's `langgraph.json`, which has no checkpointer, and conversations are
+never written to disk. Setup still reports green, because it checks that the *package directory*
+exists rather than whether anything is wired to it. Confirmed on a researcher's laptop: package
+present, `aiosqlite` present, the exact import succeeding, and no `checkpoints.sqlite`.
+
+The second one is the more serious: it loses a researcher's history, it ran undetected across an
+entire install, and **you can reproduce it on hardware you have.** Both are diagnosed with log
+evidence in `docs/plan.md` — start there rather than re-deriving.
+
+### 3. `GET /discovery/{thread_id}/drafts`
 
 A draft created inside a background worker cannot be approved, because the app can only
 learn about drafts through the conversation snapshot. This does not weaken the spending
 contract — press plus nonce still gate it — but the work is unreachable.
 
-### 3. The tool gate accepts a failed tool
+### 4. The tool gate accepts a failed tool
 
 `tool_gate._returned()` checks `type` and `name` but never `status`, so a **failed** tool
 satisfies its gate and a "completed" artifact can follow a failed analysis. Deliberately
@@ -185,7 +204,7 @@ unpatched so far: `_gate` forces the tool on every model call with no escape, so
 refusing failures would trap the run in a loop. It needs a retry budget plus a sentence
 saying the gate gave up.
 
-### 4. `mcp_tools.py` has no tests of its own
+### 5. `mcp_tools.py` has no tests of its own
 
 Known defects, none acted on: `_truncate_mcp_content_blocks` has an unconditional `break`
 that drops later blocks; `_trim_json_array_text` discards sibling fields (`total`,
@@ -194,12 +213,12 @@ that drops later blocks; `_trim_json_array_text` discards sibling fields (`total
 return; filenames collide at one-second resolution; `_make_mcp_error_handler` turns errors
 into prose. **Step one there is a test file, not a patch.**
 
-### 5. `verify=False` in the MCP disables TLS verification
+### 6. `verify=False` in the MCP disables TLS verification
 
 Flagged and deliberately not changed — it may be load-bearing if CIP's certificate is
 unusual. Piero's call.
 
-### 6. Unconfirmed
+### 7. Unconfirmed
 
 Conversations after a self-relaunch. The blocking-call fix shipped in v0.3.18 and was never
 confirmed working. If the sidebar comes up blank, grab `%TEMP%\mini-me-desktop-app.log`

@@ -285,6 +285,155 @@ toggle, reachable when a run goes wrong.
 
 ---
 
+## Reported from real installs — diagnosed here, not yet fixed
+
+Both found on 2026-09-07 from researcher logs. Evidence is written out so nobody re-derives it.
+
+### A. A model call that dies mid-stream ends the turn, and no retry can reach it
+
+**Seen:** paper finder, LENOVO laptop. `An internal error occurred — sidecar log: …`
+
+```
+16:34:36  tool_gate: academic_researcher has not searched yet — forcing find_papers
+16:34:50  find_papers('diversidad de papas en Paucartambo, Cusco') -> 10 paper(s)   ← worked
+16:34:53  POST openrouter.ai/api/v1/chat/completions "200 OK", stream opens
+          ...132 seconds of silence...
+16:37:05  openai.APIError: Upstream idle timeout exceeded          run_exec_ms=155228
+```
+
+The search succeeded. What died was the subagent's *next* model call — the one deciding what to
+do with those 10 papers. "Upstream idle timeout exceeded" is OpenRouter's own message: it proxies
+to an upstream model and cuts the stream when that upstream stops emitting. **Why the upstream
+went quiet for 132s is not established** — possibly prompt size after 10 papers, possibly their
+routing. Do not guess it in a fix.
+
+**`MODEL_MAX_RETRIES` cannot fire here, and raising it does nothing.** Verified in the installed
+SDK, not assumed:
+
+- the error is raised at `openai/_streaming.py:91`, **inside SSE iteration**, from an error
+  object the provider injected into an already-successful stream;
+- `_should_retry(self, response: httpx.Response)` decides purely on **status code**.
+
+The response was **200**. By the time the error arrives the request has long since returned. A
+correct retry guarding a different failure than the one that happens — `test-the-join` again.
+
+- [ ] **A.1** A retry at the **LangChain/agent** layer, not the SDK layer: catch a mid-stream
+      `APIError` and re-issue the call. Bounded, and it must say in the transcript that it
+      retried — a silent second call to a paid provider is the one thing this app does not do.
+- [ ] **A.2** Recognise the shape and say it. `TurnEvent::Error` currently appends the sidecar
+      path to langgraph's generic text, so a researcher reads 700 lines to learn their provider
+      timed out. *"The model provider timed out — the search completed, try again"* is actionable;
+      *"An internal error occurred"* is not.
+- [ ] **A.3** The turn dies after the expensive part. 10 papers were found and recorded into
+      `sources._seen`, which is an **in-memory dict** — no artifact survives for the researcher.
+      Whether a failed turn should keep what its tools already returned is a real design question,
+      not an obvious yes.
+
+### B. Conversation storage is wired to the background-work switch, and that switch is off by default
+
+**Seen:** VHUALLA laptop, backend at `/root/.local/share/mini-me-desktop/backend`.
+*"we could not reopen conversations. It seems these were deleted or never saved."*
+
+**Two wrong readings were published before this one. Both are recorded because the way they failed
+is the lesson.** First: *"the package is not installed"* — disproved by
+`ls …/site-packages/langgraph/checkpoint/` returning `base memory serde sqlite`. Second:
+*"`aiosqlite` is missing so the `.aio` import fails"* — disproved by running the exact import
+`make_config.py` runs, which **succeeded**, on a machine where `aiosqlite` was already present.
+Two plausible mechanisms, each fitting the symptom, each wrong. What settled it was reading the
+launch path instead of theorising about the environment.
+
+**The cause.** `backend.rs`:
+
+```rust
+let config_flag = if async_subagents {
+    prepare.push_str(&generate_config_command(...));   // runs make_config.py
+    prepare.push_str(" && ");
+    format!(" --config {GENERATED_CONFIG}")
+} else {
+    String::new()                                       // ← upstream langgraph.json, as-is
+};
+```
+
+- `make_config.py:88` is the **only** place `config["checkpointer"]` is ever set.
+- `mini-me/langgraph.json` — what a default install actually runs — has **no `checkpointer` key**:
+  `graphs.agent`, `http`, `auth`, `env`, and nothing else.
+- `settings.rs:221`: `async_subagents: false`.
+
+**So with "Let work run in the background" off — the default — no checkpointer is ever configured,
+however completely the package is installed.** Conversations live in `langgraph dev`'s in-memory
+store for the life of the process. Threads are listed from `.langgraph_ops.pckl`; the messages are
+never written at all.
+
+**Confirmed in both logs, on the one line that distinguishes them.** `make_config.py` also adds a
+`background` graph, unconditionally, in the same pass. The working laptop imports two graphs:
+
+```
+Importing graph profiling … graph_id=agent      … path=./backend/agent.py
+Importing graph profiling … graph_id=background … path=…/minime_local/async_agents.py
+```
+
+The broken one imports `agent` only. Two capabilities behind one flag, and the absence of the
+second is the proof that the first never ran.
+
+Disk state agrees: `.langgraph_api/` holds `.langgraph_ops.pckl` (17 KB, growing) and
+`.langgraph_retry_counter.pckl`, and **no `checkpoints.sqlite`**. No `.minime-rescued-*` copies, so
+`index_guard` never fired and nothing was deleted. Of the researcher's two guesses — *"deleted or
+never saved"* — **never saved** is the true one.
+
+**Every safety net measures the package; none measures the wiring.**
+
+| where | what it checks | verdict on the broken laptop |
+|---|---|---|
+| `setup-wsl.sh:266` | installs `langgraph-checkpoint-sqlite` | done, correctly |
+| `ensure_checkpointer_command()` | installs it again at launch | already there, skipped |
+| `preflight.rs:636` | the package **directory** exists | **green** — "SQLite — conversations load without unpickling" |
+| `backend.rs:1968` | `make_config.py`'s **output** carries the key | passes — the output is correct |
+
+Four correct mechanisms about the package. **Zero about whether it is connected.** The one test in
+the area asserts the generated config is right and never asks whether the launch uses it — the
+join, untested, one more time.
+
+**Immediate relief, with its cost stated.** Turning **on** *Settings → "Let work run in the
+background"* restores persistence today, because it is what causes `--config` to be passed. It
+also enables the preview background-subagent feature, which is off by default for its own reasons
+(`settings.rs`: a preview deepagents API whose docs say "APIs may change"). Coupling those two is
+the bug; a researcher should not have to accept a preview feature to keep their history.
+
+- [ ] **B.1** **Unbind the two.** Generate the config and pass `--config` on **every** launch. The
+      `background` graph can stay declared without being used; the checkpointer cannot be
+      configured without being passed. Nothing about durable storage belongs behind a preview flag.
+- [ ] **B.2** A test on the **join**: build the launch argv with `async_subagents = false` and
+      assert `--config` is still there. Today that assertion fails, which is the point.
+- [ ] **B.3** Make Setup check the wiring, not the directory. "Is the package present" and "are
+      conversations being saved" turned out to be different questions, and only the first is asked.
+- [ ] **B.4** Fix the Setup wording. It reads *"the pickle store — boot slows as history grows,
+      and a failed load can overwrite it"*. On this laptop the truth was **nothing was saved at
+      all** — a different sentence, and a worse one.
+- [ ] **B.5** Decide what to tell someone whose history was never written. It cannot be recovered;
+      it was never on disk. Silence is the wrong answer.
+
+**Settling the state of any install** — the generated config is only meaningful if the launch
+passes it, so read the log rather than the filesystem:
+
+```
+Get-Content "$env:TEMP\mini-me-desktop-backend.log" | Select-String "custom checkpointer"
+```
+
+`Using custom checkpointer: AsyncSqliteSaver` means conversations are being written. **No match
+means they are not.**
+
+### C. Four fake tracebacks at every startup
+
+Starlette parses route docstrings as OpenAPI YAML. `collect_outside_files`, `start_sandbox`,
+`theorizer_status` and `get_project` all contain `: ` sequences YAML reads as mappings, so every
+boot logs four full `ScannerError` tracebacks. Nothing is broken. But the backend log is the
+diagnostic path for A and B above, and it opens with four stack traces that mean nothing.
+
+- [ ] **C.1** Reword the four docstrings so they parse — or stop feeding them to the schema
+      generator. Cheap, and it makes every future diagnosis easier.
+
+---
+
 ## Risks I am flagging rather than deciding
 
 - **Job 1 is the largest behavioural change in this app's history.** Removing WSL touches
