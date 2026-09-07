@@ -104,6 +104,12 @@ async def get_project(request: Request) -> Response:
     ``suggestions`` is always empty here: it is derived from a thread's live
     artifacts during a run, which this stateless route does not have. The
     frontend keeps whatever live suggestions it already holds.
+
+    Everything above is prose. Starlette's schema generator runs `yaml.safe_load` over this
+    docstring and takes only what follows the `---` below (`schemas.py:parse_docstring`), so
+    without the marker a sentence containing a colon is parsed as a YAML mapping and every boot
+    logs a full `ScannerError` traceback for a route that is working perfectly (§303).
+    ---
     """
     if (unauth := _require_auth(request)) is not None:
         return unauth

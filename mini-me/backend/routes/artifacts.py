@@ -162,6 +162,12 @@ async def start_sandbox(request: Request) -> Response:
     Never creates a sandbox: if none exists for the thread (expired or the
     thread never ran), respond 404 so the frontend can tell the user the
     generated files are gone and need to be regenerated.
+
+    Everything above is prose. Starlette's schema generator runs `yaml.safe_load` over this
+    docstring and takes only what follows the `---` below (`schemas.py:parse_docstring`), so
+    without the marker a sentence containing a colon is parsed as a YAML mapping and every boot
+    logs a full `ScannerError` traceback for a route that is working perfectly (§303).
+    ---
     """
     if (unauth := _require_auth(request)) is not None:
         return unauth
@@ -191,6 +197,12 @@ async def theorizer_status(request: Request) -> Response:
     ``{"status": "completed", theories, ...}`` when ready, ``{"status":
     "running", ...}`` while in progress, ``failed``/``canceled`` on error, or
     ``unavailable`` if the thread's sandbox is gone.
+
+    Everything above is prose. Starlette's schema generator runs `yaml.safe_load` over this
+    docstring and takes only what follows the `---` below (`schemas.py:parse_docstring`), so
+    without the marker a sentence containing a colon is parsed as a YAML mapping and every boot
+    logs a full `ScannerError` traceback for a route that is working perfectly (§303).
+    ---
     """
     if (unauth := _require_auth(request)) is not None:
         return unauth
@@ -539,6 +551,12 @@ async def collect_outside_files(request: Request) -> Response:
     anything, which is a different and much worse tool.
 
     Copies, never moves. A script often writes a file and reads it back later in the same run.
+
+    Everything above is prose. Starlette's schema generator runs `yaml.safe_load` over this
+    docstring and takes only what follows the `---` below (`schemas.py:parse_docstring`), so
+    without the marker a sentence containing a colon is parsed as a YAML mapping and every boot
+    logs a full `ScannerError` traceback for a route that is working perfectly (§303).
+    ---
     """
     if (unauth := _require_auth(request)) is not None:
         return unauth

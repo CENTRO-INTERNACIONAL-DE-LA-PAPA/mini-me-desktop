@@ -352,6 +352,42 @@ fn backend_build(config: &BackendConfig) -> Check {
     )
 }
 
+/// Whether the backend's own interpreter can import a module.
+///
+/// **The question Setup has to ask about the checkpointer, and did not.** It checked that
+/// `…/site-packages/langgraph/checkpoint/sqlite` was a directory, which is a proxy for an import
+/// and can disagree with one: `make_config.py` imports `langgraph.checkpoint.sqlite.aio`, and
+/// `aio.py` opens with `import aiosqlite`, so the directory can be present while the module the
+/// backend needs does not load. A researcher chasing lost conversations was shown a green row on
+/// exactly that reasoning (§303).
+///
+/// Windows-native has no `bash` to ask, so it runs the interpreter directly. Both paths run the
+/// **backend's** Python — a module importable in some other interpreter answers a question nobody
+/// asked.
+fn imports(config: &BackendConfig, module: &str) -> bool {
+    let python = if config.wsl.is_some() || !cfg!(windows) {
+        ".venv/bin/python"
+    } else {
+        r".venv\Scripts\python.exe"
+    };
+    match &config.wsl {
+        Some(_) => {
+            let script = format!(
+                "cd {} && {python} -c 'import {module}'",
+                quote_path(&config.backend_dir())
+            );
+            probe(&config.shell_argv(&script)).ok
+        }
+        None => std::process::Command::new(config.project_dir.join(python))
+            .arg("-c")
+            .arg(format!("import {module}"))
+            .current_dir(&config.project_dir)
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false),
+    }
+}
+
 /// Whether a path exists where the backend would look for it.
 ///
 /// Host mode stats the filesystem directly rather than shelling out — that works on
@@ -632,32 +668,37 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
     // whose virtualenv is not ours to change (docs §96). A researcher who cannot code should
     // never have had to notice a warning to avoid losing their history.
     if checkout_ok {
-        let module = if in_wsl || !cfg!(windows) {
-            ".venv/lib/python3.12/site-packages/langgraph/checkpoint/sqlite"
-        } else {
-            ".venv/Lib/site-packages/langgraph/checkpoint/sqlite"
-        };
-        if exists(config, module) {
+        // **The import the backend performs, not a directory that resembles it.** This asked
+        // whether `…/site-packages/langgraph/checkpoint/sqlite` existed. `make_config.py` asks
+        // whether `langgraph.checkpoint.sqlite.aio` imports, and `aio.py` needs `aiosqlite` — so
+        // the two could disagree, and the weaker one was what a researcher was shown (§303).
+        if imports(config, "langgraph.checkpoint.sqlite.aio") {
             checks.push(Check::pass(
                 "checkpointer",
                 "Conversation storage",
-                "SQLite — conversations load without unpickling the whole history",
+                "SQLite — conversations are written to disk as they happen",
             ));
         } else {
+            // **A `Fail`, not a `Warn`, and it says the consequence.** This read "the pickle
+            // store — boot slows as history grows", which described a slower store rather than
+            // the truth: without this the backend has no checkpointer at all, and a
+            // conversation ends when the process does. A researcher lost their history to a
+            // row that looked optional.
             checks.push(Check::failing(
                 "checkpointer",
                 "Conversation storage",
-                State::Warn,
-                "the pickle store — boot slows as history grows, and a failed load can \
-                 overwrite it"
+                State::Fail,
+                "conversations are not being saved — without this the backend keeps them in \
+                 memory and they are gone when it restarts"
                     .to_string(),
                 vec![Fix::Run {
-                    label: "Move conversations to SQLite",
+                    label: "Save conversations to disk",
                     argv: config.shell_argv(&format!(
-                        "cd {} && uv pip install langgraph-checkpoint-sqlite",
+                        "cd {} && uv pip install langgraph-checkpoint-sqlite aiosqlite",
                         quote_path(&config.backend_dir())
                     )),
-                    note: "existing conversations stay in the old store until they are opened",
+                    note: "conversations from before this were never written and cannot be \
+                           recovered",
                 }],
             ));
         }

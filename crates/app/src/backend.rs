@@ -434,10 +434,29 @@ fn launch_command_for(
                 exports.push_str(&format!("{name}={} ", shell_quote(&value)));
             }
         }
-        // Background work needs a second graph, declared in a config we generate from
-        // upstream's just before launch (docs §30). `&&`, so a generator failure stops the
-        // launch instead of silently starting a server whose coordinator holds tools
-        // pointing at a graph nobody serves.
+        // The config we generate from upstream's just before launch (docs §30). `&&`, so a
+        // generator failure stops the launch instead of silently starting a server whose
+        // coordinator holds tools pointing at a graph nobody serves.
+        //
+        // **Generated on every launch, not only when background work is on (§303).** This was
+        // gated on `async_subagents`, and `make_config.py` writes *two* things: the `background`
+        // graph, and — the only place in the product that does — the `checkpointer` key.
+        // Upstream's `langgraph.json` has none. So with background work off, which is the
+        // **default**, `langgraph dev` ran with no checkpointer at all and conversations were
+        // never written to disk. A researcher's laptop listed threads out of
+        // `.langgraph_ops.pckl` and had nothing behind any of them.
+        //
+        // Nothing about durable storage belongs behind a preview feature flag, and the two are
+        // now unbound: `MINIME_ASYNC_SUBAGENTS` still decides whether background work is *on*
+        // (`async_agents.install` returns early without it), so declaring the graph with the flag
+        // off costs one import at startup and enables nothing.
+        //
+        // **The trade this makes, stated.** `&&` now applies to every launch rather than to the
+        // async ones only, so a generator failure stops the backend for everyone. That is
+        // deliberate: `make_config.py` fails when the checkout has no `graphs` object or when
+        // upstream has grown a `background` graph of its own, and a backend that cannot be
+        // configured correctly must not start quietly — starting quietly without persistence is
+        // the whole of §303. The failure lands in the sidecar log, where Setup already points.
         let overlay = execution_env(execution, true, approve_execute)
             .into_iter()
             .find(|(name, _)| name == "PYTHONPATH")
@@ -468,15 +487,20 @@ fn launch_command_for(
             prepare.push_str(&ensure_checkpointer_command());
             prepare.push_str("; ");
         }
-        let config_flag = if async_subagents {
+        // **When there is an overlay, not when background work is on.** The generator lives in
+        // the overlay; a sandbox run has none, and gating this on `async_subagents` hid that —
+        // the first version of §303 generated unconditionally and produced
+        // `"/minime_local/make_config.py"` on the sandbox path, which `the_sandbox_path_is_left_
+        // exactly_as_it_was` caught immediately. The condition was never about the feature.
+        let config_flag = if overlay.is_empty() {
+            String::new()
+        } else {
             prepare.push_str(&generate_config_command(
                 &overlay_expression(&wsl.dir, &overlay),
                 ".venv/bin/python",
             ));
             prepare.push_str(" && ");
             format!(" --config {GENERATED_CONFIG}")
-        } else {
-            String::new()
         };
         argv.push(format!(
             "cd {dir} && {prepare}{exports}exec .venv/bin/langgraph dev --host 0.0.0.0 \
@@ -1809,7 +1833,8 @@ mod tests {
                 overlay_dir: PathBuf::from(r"C:\repo\overlay"),
             },
             true,
-            // Async subagents on, which is what asks for a generated config at all.
+            // Async subagents on. Since §303 the generated config no longer depends on this,
+            // but the original defect was found with it on and the test stays where it was.
             true,
             true,
             None,
@@ -1834,6 +1859,59 @@ mod tests {
         assert!(
             !command.contains("'/mnt/c/repo/overlay/minime_local/make_config.py'"),
             "the generator must not be pinned to the Windows copy: {command}"
+        );
+    }
+
+    /// **Conversations are saved whether or not background work is on (§303).**
+    ///
+    /// The bug this pins was invisible from either side on its own. `make_config.py` writes two
+    /// unrelated things — the `background` graph and the **only** `checkpointer` key in the
+    /// product — and the launch passed `--config` only when `async_subagents` was true.
+    /// `async_subagents` defaults to **false**. So an ordinary install ran upstream's
+    /// `langgraph.json`, which declares no checkpointer, and `langgraph dev` kept every
+    /// conversation in memory. A researcher's laptop listed threads out of `.langgraph_ops.pckl`
+    /// with nothing behind any of them, and the four checks that exist all measure whether the
+    /// *package* is installed — which it was.
+    ///
+    /// Asserted on the **launch argv** and not on `make_config.py`'s output, because the output
+    /// was always correct: `the_generated_config_survives_being_run_as_a_script` passed
+    /// throughout. What nothing asked was whether the launch uses it.
+    #[test]
+    fn conversations_are_saved_with_background_work_off() {
+        let with_background_off = launch_command_for(
+            Path::new("/tmp/mini-me"),
+            2024,
+            Some(&WslTarget {
+                distro: None,
+                dir: "~/Mini-Me".into(),
+            }),
+            &Execution::Local {
+                overlay_dir: PathBuf::from(r"C:\repo\overlay"),
+            },
+            true,
+            // The default, and the whole point: this is the ordinary install.
+            false,
+            true,
+            None,
+        );
+        let command = with_background_off.last().expect("the bash -lc payload");
+
+        assert!(
+            command.contains(&format!("--config {GENERATED_CONFIG}")),
+            "a launch with background work off must still pass the generated config, or nothing \
+             configures a checkpointer and conversations are never written: {command}"
+        );
+        assert!(
+            command.contains("/minime_local/make_config.py\" ."),
+            "and the config has to be generated before it can be passed: {command}"
+        );
+
+        // **The feature stays off.** Unbinding the two must not switch background work on for
+        // everybody: `async_agents.install` returns early unless this is set, so declaring the
+        // graph costs one import and enables nothing (§114 is what a runaway would cost).
+        assert!(
+            !command.contains("MINIME_ASYNC_SUBAGENTS"),
+            "background work must not be enabled by fixing persistence: {command}"
         );
     }
 
@@ -2769,7 +2847,18 @@ mod tests {
         // exactly what the feature exists to avoid. That was the first live result.
         assert!(command.contains("MINIME_ASYNC_SUBAGENTS='1'"), "{command}");
 
-        // And with the feature off, the launch is exactly what it always was.
+        // **With the feature off, only the feature is off.**
+        //
+        // This block used to read *"the launch is exactly what it always was"* and assert that
+        // neither `make_config` nor `--config` appeared. It was faithful to its intent and the
+        // intent was the defect: "what it always was" included **no checkpointer**, because
+        // `make_config.py` is the only thing that writes that key and upstream's `langgraph.json`
+        // does not have one. Every install with background work off — the default — kept its
+        // conversations in memory and lost them on restart (§303).
+        //
+        // The two assertions are inverted rather than deleted, so the file records that this
+        // pairing was once believed correct. What stays untouched is the third: unbinding
+        // persistence from the feature must not switch the feature on.
         let plain = launch_command_for(
             Path::new("/tmp/mini-me"),
             2024,
@@ -2781,8 +2870,14 @@ mod tests {
             None,
         );
         let plain = plain.last().expect("payload");
-        assert!(!plain.contains("make_config"), "{plain}");
-        assert!(!plain.contains("--config"), "{plain}");
+        assert!(
+            plain.contains("make_config"),
+            "the config is generated whether or not background work is on: {plain}"
+        );
+        assert!(
+            plain.contains("--config"),
+            "and passed, or no checkpointer is ever configured: {plain}"
+        );
         assert!(!plain.contains("MINIME_ASYNC_SUBAGENTS"), "{plain}");
     }
 

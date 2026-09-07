@@ -329,7 +329,7 @@ correct retry guarding a different failure than the one that happens — `test-t
       Whether a failed turn should keep what its tools already returned is a real design question,
       not an obvious yes.
 
-### B. Conversation storage is wired to the background-work switch, and that switch is off by default
+### B. Conversation storage is wired to the background-work switch — ✅ FIXED
 
 **Seen:** VHUALLA laptop, backend at `/root/.local/share/mini-me-desktop/backend`.
 *"we could not reopen conversations. It seems these were deleted or never saved."*
@@ -399,18 +399,57 @@ also enables the preview background-subagent feature, which is off by default fo
 (`settings.rs`: a preview deepagents API whose docs say "APIs may change"). Coupling those two is
 the bug; a researcher should not have to accept a preview feature to keep their history.
 
-- [ ] **B.1** **Unbind the two.** Generate the config and pass `--config` on **every** launch. The
+- [x] **B.1** **Unbind the two.** Generate the config and pass `--config` on **every** launch. The
       `background` graph can stay declared without being used; the checkpointer cannot be
       configured without being passed. Nothing about durable storage belongs behind a preview flag.
-- [ ] **B.2** A test on the **join**: build the launch argv with `async_subagents = false` and
+- [x] **B.2** A test on the **join**: build the launch argv with `async_subagents = false` and
       assert `--config` is still there. Today that assertion fails, which is the point.
-- [ ] **B.3** Make Setup check the wiring, not the directory. "Is the package present" and "are
+- [x] **B.3** Make Setup check the wiring, not the directory. "Is the package present" and "are
       conversations being saved" turned out to be different questions, and only the first is asked.
-- [ ] **B.4** Fix the Setup wording. It reads *"the pickle store — boot slows as history grows,
+- [x] **B.4** Fix the Setup wording. It reads *"the pickle store — boot slows as history grows,
       and a failed load can overwrite it"*. On this laptop the truth was **nothing was saved at
       all** — a different sentence, and a worse one.
 - [ ] **B.5** Decide what to tell someone whose history was never written. It cannot be recovered;
       it was never on disk. Silence is the wrong answer.
+
+
+**What landed (§303).**
+
+- `backend.rs` generates and passes `--config` whenever there **is an overlay**, instead of
+  whenever background work is on. The condition was never about the feature; the generator lives
+  in the overlay, and a sandbox run has none. The first attempt generated unconditionally and
+  produced `"/minime_local/make_config.py"` on the sandbox path — caught immediately by
+  `the_sandbox_path_is_left_exactly_as_it_was`, which is what that test is for.
+- `conversations_are_saved_with_background_work_off` asserts the launch argv carries `--config`
+  with `async_subagents = false`, and that `MINIME_ASYNC_SUBAGENTS` is still absent — persistence
+  must not switch a preview feature on. Mutation-checked: restoring the flag fails it by name.
+- **A test that asserted the defect** had to be inverted. `background_work_registers_its_graph…`
+  ended with *"with the feature off, the launch is exactly what it always was"* and asserted no
+  `make_config` and no `--config`. Faithful to its intent, and the intent was the bug. The two
+  assertions are inverted rather than deleted so the file records that this was once believed
+  correct; the third — that the feature stays off — is untouched.
+- Setup now runs the **import the backend performs** (`langgraph.checkpoint.sqlite.aio`) through
+  the backend's own interpreter, rather than checking that a directory exists. The row is a
+  `Fail`, not a `Warn`, and says *"conversations are not being saved"* instead of describing a
+  slower store. Its fix installs `aiosqlite` alongside the checkpointer, and its note says
+  plainly that anything from before was never written.
+- The four docstrings end with starlette's documented `---` separator
+  (`schemas.py:parse_docstring` takes `split("---")[-1]`), so prose is never fed to
+  `yaml.safe_load`. `mini-me/tests/test_route_docstrings_parse.py` applies that exact rule to
+  every **registered** endpoint — read from the `Route(..., endpoint=…)` table, after a first
+  version flagged three private helpers starlette never sees. Mutation-checked by removing one
+  separator.
+
+495 Rust tests, 568 Python.
+
+**Left open deliberately:** B.5 — what to tell a researcher whose history was never written. It
+cannot be recovered; it was never on disk. Nothing in the app says so today, and inventing that
+sentence without knowing how many installs are affected would be guessing.
+
+**Noticed in passing, not touched:** `ui/settings_view.rs:528` computes `current =
+self.sidecar.project()` and never uses it. It arrived with the merged UI work. Prefixing it with
+an underscore would silence a warning that may be a missing feature — the picker marking which
+project you are already in — so it is reported rather than quieted.
 
 **Settling the state of any install** — the generated config is only meaningful if the launch
 passes it, so read the log rather than the filesystem:
@@ -422,14 +461,14 @@ Get-Content "$env:TEMP\mini-me-desktop-backend.log" | Select-String "custom chec
 `Using custom checkpointer: AsyncSqliteSaver` means conversations are being written. **No match
 means they are not.**
 
-### C. Four fake tracebacks at every startup
+### C. Four fake tracebacks at every startup — ✅ FIXED
 
 Starlette parses route docstrings as OpenAPI YAML. `collect_outside_files`, `start_sandbox`,
 `theorizer_status` and `get_project` all contain `: ` sequences YAML reads as mappings, so every
 boot logs four full `ScannerError` tracebacks. Nothing is broken. But the backend log is the
 diagnostic path for A and B above, and it opens with four stack traces that mean nothing.
 
-- [ ] **C.1** Reword the four docstrings so they parse — or stop feeding them to the schema
+- [x] **C.1** Reword the four docstrings so they parse — or stop feeding them to the schema
       generator. Cheap, and it makes every future diagnosis easier.
 
 ---
