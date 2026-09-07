@@ -585,6 +585,17 @@ pub struct Output {
 /// unbounded one is a frozen app as much as a full disk.
 pub const ADOPT_LIMIT: u64 = 512 * 1024 * 1024;
 
+/// One attachment selected before the backend assigned the conversation a thread id.
+///
+/// `reference` is the exact path currently present in the prompt. Once `source` is copied into the
+/// newly created thread directory, that reference is replaced with a relative one before the model
+/// sees the turn.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingAttachment {
+    pub source: PathBuf,
+    pub reference: String,
+}
+
 /// Copy an attached file into the conversation's own folder, and say where it landed.
 ///
 /// # Why attachments are copied at all
@@ -641,6 +652,46 @@ pub fn adopt(folder: &Path, source: &Path) -> Result<PathBuf> {
         }
     }
     anyhow::bail!("{name} already exists a hundred times over in this conversation")
+}
+
+/// Copy first-turn attachments into the conversation and rewrite the prompt to name the copies.
+///
+/// The backend creates a thread only when the first turn starts. Previously the app sent that turn
+/// with the original attachment path and copied the input in only after the answer finished. A
+/// cleaning script reasonably used `input.parent` for its outputs, putting cleaned data and
+/// profiling reports beside the researcher's original file. This runs after thread creation but
+/// before the model request, closing that race.
+///
+/// A failed or oversized adoption leaves its reference untouched: the model can still read the
+/// original, and losing persistence is better than refusing the researcher's question. The
+/// execute-tool rule still requires relative output paths, and the command ledger remains the
+/// recovery net if the model ignores it.
+pub fn adopt_before_turn(
+    folder: &Path,
+    prompt: &str,
+    attachments: &[PendingAttachment],
+) -> String {
+    let mut prepared = prompt.to_string();
+    for attachment in attachments {
+        let size = std::fs::metadata(&attachment.source)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        if size > ADOPT_LIMIT {
+            continue;
+        }
+        match adopt(folder, &attachment.source) {
+            Ok(copy) => {
+                let Some(name) = copy.file_name().map(|name| name.to_string_lossy()) else {
+                    continue;
+                };
+                prepared = prepared.replace(&attachment.reference, &format!("./{name}"));
+            }
+            Err(error) => {
+                tracing::warn!(%error, path = %attachment.source.display(), "could not copy an attachment in before the turn");
+            }
+        }
+    }
+    prepared
 }
 
 /// The path this app can open, for a path the *agent* wrote down.
@@ -728,24 +779,26 @@ pub struct Command {
     pub exit: Option<i64>,
     /// How long it took, in seconds.
     pub seconds: Option<f64>,
+    /// The command's real working directory, which may be a background worker's folder.
+    pub cwd: String,
     /// **Absolute paths the command named that lie outside this conversation.**
     ///
-    /// Named, not written — the producer is explicit about this and so is the UI that shows it. A
-    /// command can write somewhere it never names, and nothing here can see that.
+    /// Named, not written — the producer is explicit about this and so is the UI that shows it.
     pub outside: Vec<String>,
-    /// The subset of [`Self::outside`] the command is **known** to have written.
+    /// Files the producer observed changing while the command ran, outside the conversation.
     ///
-    /// Decided by the producer from the file's own mtime against the window the command ran in, so
-    /// it is a fact about the file rather than a guess about the string. This is the only list
-    /// anything may act on: `pd.read_csv('/tmp/input.csv')` names a file the researcher owns, and
-    /// treating a named path as output is how a tidy-up steals somebody's data.
+    /// Independent of [`Self::outside`]: a relative output may be here without being named, while a
+    /// named input may be in `outside` without being here. This is the only list anything may act
+    /// on; keeping the two distinct is what prevents recovery from copying a researcher's input.
     pub wrote: Vec<String>,
+    /// Whether the bounded cwd scan stopped before examining everything.
+    pub scan_truncated: bool,
 }
 
 impl Command {
     /// Whether this one named something outside the conversation, written or merely mentioned.
     pub fn escaped(&self) -> bool {
-        !self.outside.is_empty()
+        !self.outside.is_empty() || !self.wrote.is_empty()
     }
 
     /// Whether this one is **known** to have written outside the conversation.
@@ -797,8 +850,10 @@ pub fn decode_commands(text: &str) -> Vec<Command> {
             clipped: value["clipped"].as_bool().unwrap_or(false),
             exit: value["exit"].as_i64(),
             seconds: value["seconds"].as_f64(),
+            cwd: value["cwd"].as_str().unwrap_or_default().to_string(),
             outside: strings(&value["outside"]),
             wrote: strings(&value["wrote"]),
+            scan_truncated: value["scan_truncated"].as_bool().unwrap_or(false),
         })
         .collect()
 }
@@ -2758,6 +2813,41 @@ mod tests {
         assert!(source.exists());
     }
 
+    /// §302: on a new conversation the thread id arrives only after Send. The copy and prompt
+    /// rewrite must both happen before the model receives that first turn, or a cleaning script
+    /// derives its output directory from the original attachment in Downloads.
+    #[test]
+    fn a_first_turn_reads_the_conversation_copy_not_the_originals_parent() {
+        let home = scratch("before-turn");
+        let source_dir = home.join("workshop mini-me").join("datasets");
+        std::fs::create_dir_all(&source_dir).expect("source folder");
+        let source = source_dir.join("native_potato_biodiversity_dirty.csv");
+        std::fs::write(&source, b"variety,yield\nA,4\n").expect("dataset");
+        let original = "/mnt/c/Users/LENOVO/Documents/workshop mini-me/datasets/native_potato_biodiversity_dirty.csv";
+        let prompt = format!(
+            "> Attached files (already saved in the sandbox working directory): `{original}`\n\nclean it"
+        );
+        let thread = home.join("Mini-Me").join("thread-1");
+
+        let prepared = adopt_before_turn(
+            &thread,
+            &prompt,
+            &[PendingAttachment {
+                source: source.clone(),
+                reference: original.into(),
+            }],
+        );
+
+        assert!(prepared.contains("`./native_potato_biodiversity_dirty.csv`"), "{prepared}");
+        assert!(!prepared.contains(original), "the model was still sent outside the thread");
+        assert_eq!(
+            std::fs::read(thread.join("native_potato_biodiversity_dirty.csv"))
+                .expect("conversation copy"),
+            b"variety,yield\nA,4\n"
+        );
+        assert!(source.exists(), "adoption preserves the researcher's original");
+    }
+
     /// Attaching the same paper twice should not litter the folder.
     #[test]
     fn the_same_file_attached_twice_is_the_same_copy() {
@@ -2852,7 +2942,10 @@ mod tests {
         let keys: Vec<&str> = first.as_object().expect("an object").keys().map(String::as_str).collect();
 
         // What the decoder demonstrably reads: change a field in the fixture and the value changes.
-        let read = ["at", "command", "clipped", "exit", "seconds", "outside", "wrote"];
+        let read = [
+            "at", "command", "clipped", "exit", "seconds", "cwd", "outside", "wrote",
+            "scan_truncated",
+        ];
         for key in &keys {
             assert!(
                 read.contains(key) || UNREAD.iter().any(|(name, _)| name == key),
@@ -2879,14 +2972,16 @@ mod tests {
     fn every_field_the_overlay_records_is_read_back() {
         let fixture = include_str!("../tests/fixtures/command-record.jsonl");
         let commands = decode_commands(fixture);
-        assert_eq!(commands.len(), 4, "one line per command");
+        assert_eq!(commands.len(), 5, "one line per command");
 
         let first = &commands[0];
         assert_eq!(first.at, "2026-08-25T09:14:03Z");
         assert!(first.text.starts_with("python3 -c"), "{}", first.text);
         assert_eq!(first.exit, Some(0));
         assert_eq!(first.seconds, Some(1.4));
+        assert_eq!(first.cwd, "/mnt/c/Users/piero/Documents/Mini-Me/019ff651-0cd7-71c1");
         assert!(!first.clipped);
+        assert!(!first.scan_truncated);
         assert!(!first.escaped(), "it stayed inside the conversation");
         assert!(!first.failed());
 
@@ -2902,13 +2997,20 @@ mod tests {
         assert!(!broken.escaped(), "and failing is not the same as landing outside");
 
         // **The distinction everything downstream rests on.** The second command named a path it
-        // did not write — that is the read case, and nothing may act on it. The fourth is
-        // confirmed written, and is the only kind a copy button may ever touch.
+        // did not write — that is the read case, and nothing may act on it. The fourth named no
+        // absolute path but its cwd scan observed the relative output, which is the live defect.
         assert!(escaped.escaped() && !escaped.left_files(), "named without writing");
-        let created = &commands[3];
+        let relative = &commands[3];
+        assert!(relative.outside.is_empty(), "nothing absolute appeared in the command text");
+        assert_eq!(relative.cwd, "/tmp/background-worker");
+        assert_eq!(relative.wrote, vec!["/tmp/background-worker/missingness.png".to_string()]);
+        assert!(relative.left_files() && relative.escaped());
+
+        // The fifth is both named and observed. Both shapes are actionable, for different reasons.
+        let created = &commands[4];
         assert_eq!(created.wrote, vec!["/tmp/late-blight.csv".to_string()]);
         assert!(created.left_files());
-        assert_eq!(created.outside, created.wrote, "wrote is always a subset of named");
+        assert_eq!(created.outside, created.wrote);
     }
 
     /// A record written by a process that may have been killed mid-write.
@@ -3232,4 +3334,3 @@ mod tests {
         assert_eq!(windows_path_for("/mnt/c"), None);
     }
 }
-

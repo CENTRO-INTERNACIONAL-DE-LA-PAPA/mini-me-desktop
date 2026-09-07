@@ -1755,7 +1755,7 @@ mod tests {
             ("settings.rs", include_str!("settings.rs")),
             ("sidecar.rs", include_str!("sidecar.rs")),
             ("theme.rs", include_str!("theme.rs")),
-            ("ui.rs", include_str!("ui.rs")),
+            ("ui/components/button.rs", include_str!("ui/components/button.rs")),
             ("main.rs", include_str!("main.rs")),
         ];
         let mut unguarded = Vec::new();

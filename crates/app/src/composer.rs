@@ -246,6 +246,14 @@ impl Composer {
         cx.notify();
     }
 
+    /// Changes what the field says when empty — for one entity reused by more than one prompt,
+    /// where "type to search" and "type to name a new one" are different questions asked of the
+    /// same box.
+    pub fn set_placeholder(&mut self, placeholder: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.placeholder = placeholder.into();
+        cx.notify();
+    }
+
     fn submit(&mut self, _: &Submit, _window: &mut Window, cx: &mut Context<Self>) {
         self.submit_now(cx);
     }

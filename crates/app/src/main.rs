@@ -11,7 +11,6 @@
 
 mod backend;
 mod catalogue;
-mod components;
 mod composer;
 mod dataverse;
 mod discovery;
@@ -40,15 +39,11 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use futures::StreamExt;
 use gpui::{
-    actions, div, prelude::*, px, rgb, size, App, Application, AssetSource, Bounds, ClipboardItem, Context, Entity, Focusable,
-    KeyBinding, ListAlignment, ListState, SharedString,
-    Window, WindowBounds,
-    WindowOptions,
+    App, Application, AssetSource, Bounds, ClipboardItem, Context, Entity, Focusable, KeyBinding, ListAlignment, ListState, SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div, prelude::*, px, rgb, size,
 };
 
-use components::common::horizontal_drag_offset;
-use components::common::app_icon;
-use components::provenance_view::{link_for, provenance_svg};
+use ui::common::horizontal_drag_offset;
+use ui::provenance_view::{link_for, provenance_svg};
 use composer::{Composer, ComposerEvent};
 use protocol::{AgentRef, ApprovalRequest, Bucket, Project, TurnEvent};
 use sidecar::Sidecar;
@@ -322,6 +317,7 @@ const SCROLL_GROUP: &str = "scroll-region";
 /// researcher types and the answer they read start on the same x. 16px was the list's padding
 /// before §174 found that half of it never applied.
 const TRANSCRIPT_INSET: f32 = 16.;
+
 
 /// How many references the side panel lists before offering the rest in one press.
 ///
@@ -1092,17 +1088,6 @@ fn summary_for(tasks: &[protocol::AsyncTask], plan: &[protocol::Todo]) -> Option
 
 
 
-/// A one-line tooltip.
-///
-/// GPUI wants a whole view for a tooltip, so this is the smallest one that renders text —
-/// and having it means a control can be an icon without becoming a guess.
-struct Hint {
-    text: SharedString,
-}
-
-
-
-
 
 
 actions!(
@@ -1529,6 +1514,21 @@ fn attached_blockquote(attachments: &[Attachment]) -> Option<String> {
     ))
 }
 
+/// What `with_attachments` sent the coordinator, minus the blockquote it may have prepended.
+///
+/// The coordinator and three subagent prompts still need that blockquote — it is how they learn
+/// where an attached file landed — so it stays in what `start_turn_as` submits. It no longer
+/// belongs in the *transcript*, though: the path it names is the conversation's workspace, which
+/// is the same on every turn, and repeating it mid-conversation was noise where the researcher
+/// was reading what they actually typed. The chat header now says it once, instead (§267).
+fn without_attached_blockquote(prompt: &str) -> &str {
+    const PREFIX: &str = "> Attached files (already saved in the sandbox working directory): ";
+    match prompt.strip_prefix(PREFIX).and_then(|rest| rest.find("\n\n").map(|at| &rest[at + 2..])) {
+        Some(typed) => typed,
+        None => prompt,
+    }
+}
+
 /// The sources of every attachment that is not yet inside the conversation's folder.
 ///
 /// Pure so the rule is testable without a window: a file already copied in must not be copied
@@ -1538,6 +1538,19 @@ fn awaiting_adoption(attachments: &[Attachment]) -> Vec<std::path::PathBuf> {
         .iter()
         .filter(|attachment| !attachment.adopted)
         .map(|attachment| attachment.source.clone())
+        .collect()
+}
+
+/// The same first-turn attachments, with the prompt reference the sidecar must replace after the
+/// backend assigns the thread id and before it starts the model run.
+fn attachments_for_turn(attachments: &[Attachment]) -> Vec<workspace::PendingAttachment> {
+    attachments
+        .iter()
+        .filter(|attachment| !attachment.adopted)
+        .map(|attachment| workspace::PendingAttachment {
+            source: attachment.source.clone(),
+            reference: attachment.reference.clone(),
+        })
         .collect()
 }
 
@@ -2270,8 +2283,19 @@ struct Workbench {
     sidebar_menu: Option<(SidebarMenu, gpui::Point<gpui::Pixels>)>,
     /// Which of the two sidebar lists — Conversations or Projects — is showing.
     sidebar_view: SidebarView,
-    /// Which row of the `/name` picker is chosen. Reset on every keystroke.
-    subagent_selected: usize,
+    /// Whether the pointer is over the agent indicator, and separately whether it is over the
+    /// menu that indicator opens — tracked apart, and the menu shown while either is true, so
+    /// moving from one into the other never crosses a gap that would count as having left
+    /// either one (§263).
+    agent_pill_hovered: bool,
+    agent_menu_hovered: bool,
+    /// Where the menu's own list scrolls to, tracked the same way every other picker's list is
+    /// (`theme_scroll`, `model_scroll`).
+    agent_menu_scroll: gpui::ScrollHandle,
+    /// Which specialist the next turn is addressed to, chosen from the agent indicator rather
+    /// than typed — kept apart from the composer's own text so picking one, unlike the old
+    /// `/name` prefix, leaves nothing in the box to read or delete (§263).
+    current_subagent: Option<String>,
     /// An open choice popup: which choice, and where its trigger was clicked.
     open_picker: Option<(Picker, gpui::Point<gpui::Pixels>)>,
     /// Pane widths, in pixels, and which edge is being dragged.
@@ -2492,10 +2516,9 @@ impl Workbench {
             ComposerEvent::Submit(text) => workbench.submitted(text.clone(), cx),
         })
         .detach();
-        // Observed as well as subscribed: the `/name` picker filters on every keystroke, and
-        // without this the list would only refresh on the next unrelated render.
-        cx.observe(&composer, |workbench, _composer, cx| {
-            workbench.subagent_selected = 0;
+        // Observed as well as subscribed: the agent indicator reads off the composer's text on
+        // every keystroke, and without this it would only refresh on the next unrelated render.
+        cx.observe(&composer, |_workbench, _composer, cx| {
             cx.notify();
         })
         .detach();
@@ -2696,13 +2719,16 @@ impl Workbench {
             warming: false,
             sidebar_menu: None,
             sidebar_view: SidebarView::default(),
-            subagent_selected: 0,
+            agent_pill_hovered: false,
+            agent_menu_hovered: false,
+            agent_menu_scroll: gpui::ScrollHandle::new(),
+            current_subagent: None,
             open_picker: None,
             settings_focus: cx.focus_handle(),
             provenance_focus: cx.focus_handle(),
             about_focus: cx.focus_handle(),
             delete_focus: cx.focus_handle(),
-            sidebar_width: 240.,
+            sidebar_width: 320.,
             panel_width: 320.,
             dragging: None,
             toasts: Vec::new(),
@@ -3420,63 +3446,6 @@ impl Workbench {
 
 
 
-    /// What each row does. **Nothing new lives here** — every arm calls a method the sidebar
-    /// already had, which is the rule `menu.rs` states for the right-click menu and the reason
-    /// this change is a rearrangement rather than a feature with its own behaviour.
-    fn run_sidebar_menu(
-        &mut self,
-        open: &SidebarMenu,
-        id: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match (open, id) {
-            (SidebarMenu::New, "menu-new-conversation") => self.new_thread_in(None, cx),
-            (SidebarMenu::New, "menu-new-project") => {
-                // The project picker already knows how to name one that does not exist yet —
-                // typing offers `New project “…”` as its first row. `NewProject` only changes
-                // what choosing does: start a conversation there, rather than move the open one.
-                self.open_picker = Some((Picker::NewProject, gpui::point(px(24.), px(120.))));
-                self.project_query.update(cx, |query, cx| query.set_text("", cx));
-                cx.notify();
-            }
-            (SidebarMenu::Conversation(conversation), "menu-rename") => {
-                self.start_rename(conversation.thread_id.clone(), window, cx)
-            }
-            (SidebarMenu::Conversation(conversation), "menu-delete") => {
-                self.request_delete(DeleteTarget::Conversation(conversation.clone()), window, cx)
-            }
-            (SidebarMenu::Project { name, .. }, "menu-new-here") => {
-                self.new_thread_in(Some(name.clone()), cx)
-            }
-            (SidebarMenu::Project { name, .. }, "menu-open-folder") => {
-                if let Some(dir) =
-                    workspace::project_folder(name).map(|folder| workspace::root().join(folder))
-                {
-                    if let Err(error) = workspace::open(&dir) {
-                        tracing::warn!(%error, "could not open a project");
-                    }
-                }
-            }
-            (
-                SidebarMenu::Project {
-                    name,
-                    conversations,
-                },
-                "menu-delete-project",
-            ) => self.request_delete(
-                DeleteTarget::Project {
-                    name: name.clone(),
-                    conversations: conversations.clone(),
-                },
-                window,
-                cx,
-            ),
-            _ => {}
-        }
-    }
-
-
     /// Copy the selected transcript text.
     ///
     /// Reached from `ctrl-c` when the composer declines it, so the ordinary shortcut works on
@@ -3844,6 +3813,15 @@ impl Workbench {
             cx.notify();
             return;
         }
+        // The agent indicator's own choice, folded into the same `/name` prefix `subagent::parse`
+        // already reads below — one path rather than two, so resolving, refusing an unknown
+        // name, and background dispatch all still happen exactly once. Skipped if the composer
+        // text is already its own `/name` command: someone who typed one by hand meant that one,
+        // not whatever the indicator happens to be showing.
+        let prompt = match &self.current_subagent {
+            Some(name) if subagent::parse(&prompt).is_none() => format!("/{name} {prompt}"),
+            _ => prompt,
+        };
         // `/name …` names a specialist. Resolved *before* anything is sent, because the failure
         // this guards against is silent: sent as prose, `/eda-subagent do the thing` is a
         // ten-minute wait for a turn that was never delegated (§55, §76).
@@ -3864,11 +3842,14 @@ impl Workbench {
         // taking the list before them would drop a researcher's attachments on a turn that never
         // ran. They are cleared here, where the turn is certain to go.
         let prompt = with_attachments(&prompt, &self.attachments);
-        // **A file attached before the conversation existed is copied in afterwards.**
-        // `thread_workspace()` is `None` until the backend assigns a thread id on the first turn,
-        // so "new conversation, attach, ask" — the ordinary flow, and the one §228 was written for
-        // — silently skipped the copy. The turn that follows carries the absolute path, which the
-        // agent reads perfectly well; what was missing is the file being *kept* (docs §236).
+        // The first turn is the only time attachments can exist before their thread folder. Keep
+        // both addresses: the source to copy after the backend creates the thread, and the exact
+        // prompt reference to replace with `./name` before the model sees it (§302).
+        let attachments_for_turn = attachments_for_turn(&self.attachments);
+        // Keep a UI-side fallback too. The sidecar now copies these after thread creation and
+        // before streaming (§302); this later pass is idempotent when that worked and preserves the
+        // old recovery path if preparing the turn was interrupted after the model had already read
+        // the original.
         self.pending_adoption
             .extend(awaiting_adoption(&self.attachments));
         self.attachments.clear();
@@ -3886,14 +3867,15 @@ impl Workbench {
         // coordinator is what the work responded to.
         self.provenance
             .begin_turn(prompt.clone(), provenance::now_ms());
-        self.transcript.push(Message::new("you", prompt.clone()));
+        self.transcript
+            .push(Message::new("you", without_attached_blockquote(&prompt).to_string()));
         // The assistant message — text *and* activity — streams into this entry.
         self.transcript.push(Message::new("mini-me", String::new()));
         if first_turn {
             self.pending_title = Some(protocol::title_from_prompt(&prompt));
         }
 
-        let mut events = self.sidecar.submit(prompt);
+        let mut events = self.sidecar.submit(prompt, attachments_for_turn);
         cx.spawn(async move |this, cx| {
             while let Some(event) = events.next().await {
                 // `Err` here means the view is gone (window closed) — stop pumping.
@@ -3986,46 +3968,32 @@ impl Workbench {
         self.say(outcome, cx);
     }
 
-    /// Enter, in the composer.
-    ///
-    /// While a name is still being typed, Enter **completes** rather than sends — the way
-    /// completion works in a shell, and the reason two Enters is the natural rhythm here: one to
-    /// settle the specialist, one to send the request. It cannot send by accident, because a
-    /// half-typed name is never a real one.
+    /// Enter, in the composer. Always sends — picking a specialist is the agent indicator's
+    /// job now (§263), not something typing `/name` and pressing Enter twice does.
     fn submitted(&mut self, text: String, cx: &mut Context<Self>) {
-        if subagent::completing(&text) {
-            let agents = workspace::subagents();
-            let query = subagent::parse(&text).map(|c| c.name).unwrap_or_default();
-            let matched = subagent::ranked(&query, &agents);
-            if let Some(chosen) =
-                matched.get(self.subagent_selected.min(matched.len().saturating_sub(1)))
-            {
-                self.choose_subagent(&chosen.name, cx);
-                return;
-            }
-            // Nothing matched. Fall through, so `start_turn` refuses by name and suggests —
-            // silence here would look like a key that does nothing.
-        }
         self.start_turn(text, cx);
     }
 
-    /// Put a chosen name in the composer, ready for the request.
+    /// Address the next turn to a specialist, or (`None`) back to the coordinator, and close
+    /// the menu that offered the choice — picking is the thing hovering the indicator was for.
     ///
-    /// The trailing space is the point: it closes the picker and puts the caret where the
-    /// sentence continues.
-    fn choose_subagent(&mut self, name: &str, cx: &mut Context<Self>) {
-        let filled = format!("/{name} ");
-        self.composer
-            .update(cx, |composer, cx| composer.set_text(filled, cx));
-        self.subagent_selected = 0;
+    /// Nothing is written into the composer. The old `/name` prefix left a name in the box
+    /// nobody typed, sitting there to be read twice (once in the indicator, once in the text)
+    /// or accidentally deleted; kept apart, the composer holds only what was actually typed
+    /// (§263).
+    fn choose_subagent(&mut self, name: Option<String>, cx: &mut Context<Self>) {
+        self.current_subagent = name;
+        self.agent_pill_hovered = false;
+        self.agent_menu_hovered = false;
         cx.notify();
     }
 
-    /// Copy in the files that were attached before this conversation had a folder.
+    /// Confirm first-turn attachments are in the folder once control returns to the UI.
     ///
-    /// Runs once the turn has finished, which is the first moment `thread_workspace()` can answer.
-    /// Failures are logged and dropped: the turn already ran and the agent already read the file
-    /// from where it was, so nothing here is worth interrupting a researcher over.
+    /// The sidecar now performs the important copy before streaming (§302). This second idempotent
+    /// pass keeps the UI resilient to an interrupted preparation task and refreshes the folder once
+    /// the turn is back on the main thread. Failures are logged and dropped: the turn already ran
+    /// and the agent already read the file, so nothing here is worth interrupting a researcher over.
     fn adopt_pending(&mut self, cx: &mut Context<Self>) {
         if self.pending_adoption.is_empty() {
             return;
@@ -4567,6 +4535,9 @@ impl Workbench {
         // thread-independent, so it stays — same rule as `New thread`.
         self.transcript.clear();
         self.reset_transcript_list();
+        // Addressed to a specialist belongs to the conversation being left, same as the tasks
+        // and jobs below — the one being opened gets a coordinator turn until asked otherwise.
+        self.current_subagent = None;
         // Read back from the thread being opened, below. Cleared first so a failure to load
         // shows the new conversation as having no record rather than the previous one's.
         self.provenance = provenance::Record::default();
@@ -5299,8 +5270,7 @@ impl Workbench {
         {
             self.sidecar.rename_conversation(thread_id, title);
         }
-        // And the same reason attachments wait: the folder they belong in did not exist when they
-        // were chosen. Now it does.
+        // Idempotent confirmation on the UI side; the model-facing copy happened before streaming.
         self.adopt_pending(cx);
         self.refresh_conversations(cx);
         self.pending_approval = None;
@@ -5526,6 +5496,9 @@ impl Workbench {
         self.project = None;
         self.refresh_project(cx);
         self.transcript.clear();
+        // Addressed to a specialist is a property of *this* enquiry, not a standing default —
+        // the one just left keeps nothing that would carry it forward either.
+        self.current_subagent = None;
         // A conversation fetch started before this can still land after it — see the guard
         // in `open_conversation`'s completion — but the screen itself must not keep showing
         // "opening…" for a conversation that was just left (§262).
@@ -6371,6 +6344,10 @@ impl Workbench {
                 }
                 // Anchored under the sidebar, where the projects it is about are listed.
                 self.open_picker = Some((Picker::Project, gpui::point(px(24.), px(120.))));
+                // Reverts whatever "New project…" last left it as — the same entity is reused
+                // for both prompts (see `Picker::NewProject`'s open handler).
+                self.project_query
+                    .update(cx, |query, cx| query.set_placeholder("Find or name a project", cx));
                 cx.notify();
             }
             Command::OpenAbout => {
@@ -7361,6 +7338,7 @@ impl Render for Workbench {
             // separate bugs (§40, §48, §51).
             .min_h_0()
             .w_full()
+            .mb_4()
             .when(self.sidebar_open, |body| {
                 body.child(self.rail(cx))
                     .child(self.divider(Divider::Sidebar, cx))
@@ -7368,33 +7346,50 @@ impl Render for Workbench {
             .when(!self.sidebar_open, |body| {
                 body.child(
                     div()
-                        .id("toggle-left-sidebar")
-                        .child(
-                            app_icon(
-                                "icons/sidebar-simple-left.svg",
-                                theme::text(),
-                                Some(ui::IconSize::Small.px())
-                            )
-                        )
-                        .w(px(30.))
-                        .h(px(30.))
-                        .bg(rgb(theme::surface()))
-                        .m_2()
-                        .mt_3()
-                        .border_1()
-                        .border_color(rgb(theme::border()))
-                        .flex_none()
-                        .p_4()
                         .flex()
-                        .rounded_lg()
-                        .items_center()
-                        .justify_center()
-                        .hover(|style| style.cursor_pointer())
-                        .on_click(cx.listener(|workbench, _event, _window, cx| {
-                            workbench.sidebar_open = !workbench.sidebar_open;
-                            workbench.remember_panels();
-                            cx.notify();
-                        })),
+                        .flex_col()
+                        .flex_none()
+                        .m_2()
+                        .mr_0()
+                        .gap_1()
+                        .justify_between()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .flex_none()
+                                .gap_1()
+                                .child(
+                                    ui::Button::new("toggle-left-sidebar")
+                                        .icon(ui::Icon::new("icons/sidebar-simple-left.svg"))
+                                        .style(ui::ButtonStyle::SecondaryWhite)
+                                        .border(true)
+                                        .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                            workbench.sidebar_open = !workbench.sidebar_open;
+                                            workbench.remember_panels();
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    ui::Button::new("new-conversation")
+                                        .icon(ui::Icon::new("icons/plus.svg"))
+                                        .style(ui::ButtonStyle::SecondaryWhite)
+                                        .border(true)
+                                        .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                            let project = workbench.sidecar.project();
+                                            workbench.new_thread_in(project, cx);
+                                        })),
+                                )
+                        )
+                         .child(
+                            ui::Button::new("open-settings")
+                                .icon(ui::Icon::new("icons/gear-six.svg"))
+                                .style(ui::ButtonStyle::SecondaryWhite)
+                                .border(true)
+                                .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                    workbench.run_command(Command::OpenSettings, cx);
+                                })),
+                        )
                     )
             })
             // **Its own card, not a strip inside the conversation's.** It lived inside the chat
@@ -7404,9 +7399,9 @@ impl Render for Workbench {
             //
             // Not before the first question: an empty road beside an empty transcript is a frame
             // around nothing, and the empty state has its own things to say.
-            .when(!self.transcript.is_empty(), |body| {
-                body.child(self.road_strip(cx))
-            })
+            // .when(!self.transcript.is_empty(), |body| {
+            //     body.child(self.road_strip(cx))
+            // })
             .child(self.chat_pane(cx));
 
         // The right-hand slot belongs to the research panel alone. Setup used to take it,
@@ -7418,11 +7413,11 @@ impl Render for Workbench {
             body.child(
                 div()
                     .id("toggle-right-panel")
-                    .child(app_icon(
-                        "icons/sidebar-simple-right.svg",
-                        theme::text(),
-                        Some(ui::IconSize::Small.px()),
-                    ))
+                    .child(
+                        ui::Icon::new("icons/sidebar-simple-right.svg")
+                            .size(ui::IconSize::Small)
+                            .colour(theme::text())
+                    )
                     .w(px(30.))
                     .h(px(30.))
                     .bg(rgb(theme::surface()))
@@ -7827,11 +7822,16 @@ mod tests {
         let commands = workspace::decode_commands(
             "{\"command\":\"a\",\"outside\":[\"/tmp/x.png\",\"/tmp/y.png\"],\"wrote\":[\"/tmp/x.png\",\"/tmp/y.png\"]}\n\
              {\"command\":\"b\",\"outside\":[\"/tmp/x.png\"],\"wrote\":[\"/tmp/x.png\"]}\n\
-             {\"command\":\"c\",\"outside\":[\"/tmp/read.csv\"],\"wrote\":[]}",
+             {\"command\":\"c\",\"outside\":[\"/tmp/read.csv\"],\"wrote\":[]}\n\
+             {\"command\":\"python analysis.py\",\"outside\":[],\"wrote\":[\"/tmp/z.png\"]}",
         );
         let files = files_left_outside(&commands);
-        // Two commands, three `wrote` entries, two distinct files — and the read is not among them.
-        assert_eq!(files, vec!["/tmp/x.png".to_string(), "/tmp/y.png".to_string()]);
+        // A duplicate, two named writes, and one relative write found only from cwd observation.
+        assert_eq!(files, vec![
+            "/tmp/x.png".to_string(),
+            "/tmp/y.png".to_string(),
+            "/tmp/z.png".to_string(),
+        ]);
         assert!(!files.contains(&"/tmp/read.csv".to_string()), "a path only named is never copied");
     }
 
@@ -8132,19 +8132,19 @@ mod tests {
     /// What the Outputs panel says about a conversation's commands.
     ///
     /// A free function so the *wording* is testable, because the wording is the feature: the phrase
-    /// that matters names files the panel below it cannot show, and it has to say **named** rather
-    /// than **wrote** — the producer sees paths in a command's text and nothing more.
+    /// that matters names files the panel below it cannot show. It says **wrote** only for a path
+    /// the filesystem observation confirmed and **named** for the weaker command-text evidence.
     #[test]
-    fn the_summary_says_named_and_never_says_wrote() {
+    fn the_summary_uses_the_strongest_evidence_it_has() {
         let fixture = include_str!("../tests/fixtures/command-record.jsonl");
         let commands = workspace::decode_commands(fixture);
         let (summary, loud) = commands_summary(&commands);
 
-        assert!(summary.starts_with("4 commands"), "{summary}");
+        assert!(summary.starts_with("5 commands"), "{summary}");
         assert!(summary.contains("1 failed"), "{summary}");
         // One command is *confirmed* to have written outside, so the line says so — that is a fact
         // about a file, established from its mtime, not a reading of the command's text.
-        assert!(summary.contains("1 wrote a file outside this conversation"), "{summary}");
+        assert!(summary.contains("2 wrote a file outside this conversation"), "{summary}");
         assert!(loud, "something landed outside, so the line is drawn in the accent colour");
     }
 
@@ -8290,6 +8290,28 @@ mod tests {
     }
 
     #[test]
+    fn a_first_turn_hands_the_source_and_its_prompt_reference_to_the_sidecar() {
+        let source = std::path::PathBuf::from(
+            r"C:\Users\LENOVO\Documents\workshop mini-me\dataset.csv",
+        );
+        let reference = "/mnt/c/Users/LENOVO/Documents/workshop mini-me/dataset.csv";
+        let attachment = Attachment {
+            label: "dataset.csv".into(),
+            source: source.clone(),
+            adopted: false,
+            reference: reference.into(),
+        };
+
+        assert_eq!(
+            attachments_for_turn(&[attachment]),
+            vec![workspace::PendingAttachment {
+                source,
+                reference: reference.into(),
+            }]
+        );
+    }
+
+    #[test]
     fn a_file_already_inside_the_conversation_is_not_copied_twice() {
         assert!(awaiting_adoption(&[attached("yield.csv", "./yield.csv")]).is_empty());
     }
@@ -8330,7 +8352,7 @@ mod tests {
         assert!(!is_search_record(&record("my_papers.json")));
     }
     use super::*;
-    use crate::components::{chat::*, common::*, gallery_view::*, provenance_view::*};
+    use crate::ui::{chat::*, common::*, gallery_view::*, provenance_view::*};
 
     #[gpui::test]
     fn a_long_transcript_builds_only_rows_near_the_viewport(
@@ -9073,8 +9095,9 @@ mod tests {
         // multiplies by `style.text.color`, so whether an icon appears is decided entirely by
         // the element's own colour and not by anything in these bytes. That assertion passed
         // just as happily when all four icons rendered nothing at all, which is the state this
-        // PR arrived in. What replaces it is `app_icon` taking `ink` as an argument, so the
-        // compiler refuses a call site that forgets (docs §157).
+        // PR arrived in. What replaces it is `ui::Icon` taking a colour, defaulted rather than
+        // required now that it lives behind a builder, but still impossible to omit by accident
+        // the way a bare `svg()` call was (docs §157).
     }
 
     #[test]
@@ -9833,6 +9856,17 @@ mod tests {
             subagent::parse(&quoted).is_none(),
             "which is why `start_turn_as` resolves the specialist first: {quoted}"
         );
+    }
+
+    /// What lands in the transcript is what the researcher typed — the blockquote naming where
+    /// the file went is for the coordinator, and the chat header says that once instead of §267
+    /// repeating it inline on every attached turn.
+    #[test]
+    fn the_transcript_shows_what_was_typed_not_the_blockquote_sent_alongside_it() {
+        let sent = with_attachments("profile this", &[attached("a.csv", "./a.csv")]);
+        assert_eq!(without_attached_blockquote(&sent), "profile this");
+        // Nothing attached: the blockquote was never prepended, so there is nothing to strip.
+        assert_eq!(without_attached_blockquote("what is late blight?"), "what is late blight?");
     }
 
     #[test]
@@ -10623,6 +10657,10 @@ fn main() {
             .open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("Mini-Me Desktop".into()),
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 },
                 |window, cx| cx.new(|cx| Workbench::new(sidecar.clone(), window, cx)),

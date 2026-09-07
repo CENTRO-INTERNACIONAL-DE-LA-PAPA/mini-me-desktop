@@ -19,6 +19,7 @@ use crate::backend::{BackendConfig, BackendSupervisor, Started};
 use crate::preflight::Cancel;
 use crate::protocol::urlencode;
 use crate::references;
+use crate::workspace;
 use crate::protocol::{
     AgentRef, Answer, AsyncTask, Conversation, Decision, Job, LangGraphClient, ModelChoice,
     Project,
@@ -208,7 +209,11 @@ impl Sidecar {
 
     /// Start one coordinator turn. Returns the receiving end of its event
     /// stream; the caller drives it from the UI thread.
-    pub fn submit(&self, prompt: String) -> mpsc::UnboundedReceiver<TurnEvent> {
+    pub fn submit(
+        &self,
+        prompt: String,
+        attachments: Vec<workspace::PendingAttachment>,
+    ) -> mpsc::UnboundedReceiver<TurnEvent> {
         let (tx, rx) = mpsc::unbounded();
         let supervisor = self.supervisor.clone();
         let thread = self.thread.clone();
@@ -221,7 +226,7 @@ impl Sidecar {
         let task = self.runtime.spawn(async move {
             let client = LangGraphClient::new(base_url)
                 .with_model(model)
-                .with_project(project);
+                .with_project(project.clone());
             // Send failures just mean the UI dropped the receiver (window closed).
             let mut emit = |event: TurnEvent| {
                 // Noted on the way past rather than asked for separately: this is the only
@@ -236,7 +241,17 @@ impl Sidecar {
                 let _ = tx.unbounded_send(event);
             };
 
-            match run_turn(&client, &supervisor, &thread, &prompt, &mut emit).await {
+            match run_turn(
+                &client,
+                &supervisor,
+                &thread,
+                project.as_deref(),
+                &prompt,
+                &attachments,
+                &mut emit,
+            )
+            .await
+            {
                 // A paused run is *not* done: the UI keeps the turn open, shows the
                 // command, and calls `resume` with the person's decision. Emitting
                 // `Done` here would close the turn and strand the run forever.
@@ -1710,7 +1725,16 @@ impl Sidecar {
                 };
 
                 let mut outcome =
-                    run_turn(&client, &supervisor, &thread, prompt, &mut handle).await?;
+                    run_turn(
+                        &client,
+                        &supervisor,
+                        &thread,
+                        None,
+                        prompt,
+                        &[],
+                        &mut handle,
+                    )
+                    .await?;
                 while outcome == TurnOutcome::AwaitingApproval {
                     let answers: Vec<Answer> = pending.borrow_mut().drain(..).collect();
                     anyhow::ensure!(
@@ -1758,7 +1782,9 @@ async fn run_turn(
     client: &LangGraphClient,
     supervisor: &Arc<Mutex<BackendSupervisor>>,
     thread: &ThreadId,
+    project: Option<&str>,
     prompt: &str,
+    attachments: &[workspace::PendingAttachment],
     emit: &mut impl FnMut(TurnEvent),
 ) -> Result<TurnOutcome> {
     emit(TurnEvent::Status("checking backend…".into()));
@@ -1782,8 +1808,32 @@ async fn run_turn(
     };
     tracing::info!(%thread_id, "streaming coordinator turn");
 
+    // **Before the model sees the first turn.** The server has assigned the only missing part of
+    // the workspace address, so attachments chosen on a blank conversation can finally be copied
+    // in. Offloaded because the per-file limit is 512 MB and copying that on Tokio's reactor would
+    // stall every backend request sharing it.
+    let prompt = if attachments.is_empty() {
+        prompt.to_string()
+    } else {
+        let folder = workspace::thread_dir_in(project, &thread_id);
+        let attachments = attachments.to_vec();
+        let original = prompt.to_string();
+        let candidate = original.clone();
+        match tokio::task::spawn_blocking(move || {
+            workspace::adopt_before_turn(&folder, &candidate, &attachments)
+        })
+        .await
+        {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                tracing::warn!(%error, "could not prepare first-turn attachments");
+                original
+            }
+        }
+    };
+
     emit(TurnEvent::Status("streaming…".into()));
-    client.stream_turn(&thread_id, prompt, emit).await
+    client.stream_turn(&thread_id, &prompt, emit).await
 }
 
 /// Ask Crossref about one DOI.
