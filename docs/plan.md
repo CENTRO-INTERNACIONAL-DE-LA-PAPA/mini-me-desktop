@@ -329,104 +329,98 @@ correct retry guarding a different failure than the one that happens — `test-t
       Whether a failed turn should keep what its tools already returned is a real design question,
       not an obvious yes.
 
-### B. A second laptop was silently running without the SQLite checkpointer
+### B. Conversation storage is wired to the background-work switch, and that switch is off by default
 
-**Seen:** VHUALLA laptop, backend at `/root/.local/share/mini-me-desktop/backend` (root user in
-WSL). *"we could not reopen conversations. It seems these were deleted or never saved."*
+**Seen:** VHUALLA laptop, backend at `/root/.local/share/mini-me-desktop/backend`.
+*"we could not reopen conversations. It seems these were deleted or never saved."*
 
-**Proven by comparing two logs.** The working laptop has four lines this one does not:
+**Two wrong readings were published before this one. Both are recorded because the way they failed
+is the lesson.** First: *"the package is not installed"* — disproved by
+`ls …/site-packages/langgraph/checkpoint/` returning `base memory serde sqlite`. Second:
+*"`aiosqlite` is missing so the `.aio` import fails"* — disproved by running the exact import
+`make_config.py` runs, which **succeeded**, on a machine where `aiosqlite` was already present.
+Two plausible mechanisms, each fitting the symptom, each wrong. What settled it was reading the
+launch path instead of theorising about the environment.
+
+**The cause.** `backend.rs`:
+
+```rust
+let config_flag = if async_subagents {
+    prepare.push_str(&generate_config_command(...));   // runs make_config.py
+    prepare.push_str(" && ");
+    format!(" --config {GENERATED_CONFIG}")
+} else {
+    String::new()                                       // ← upstream langgraph.json, as-is
+};
+```
+
+- `make_config.py:88` is the **only** place `config["checkpointer"]` is ever set.
+- `mini-me/langgraph.json` — what a default install actually runs — has **no `checkpointer` key**:
+  `graphs.agent`, `http`, `auth`, `env`, and nothing else.
+- `settings.rs:221`: `async_subagents: false`.
+
+**So with "Let work run in the background" off — the default — no checkpointer is ever configured,
+however completely the package is installed.** Conversations live in `langgraph dev`'s in-memory
+store for the life of the process. Threads are listed from `.langgraph_ops.pckl`; the messages are
+never written at all.
+
+**Confirmed in both logs, on the one line that distinguishes them.** `make_config.py` also adds a
+`background` graph, unconditionally, in the same pass. The working laptop imports two graphs:
 
 ```
-Configuring custom checkpointer at …/.desktop-overlay/minime_local/checkpointer.py:checkpointer
-Loading checkpointer …
-minime_local: conversations are stored in …/.langgraph_api/checkpoints.sqlite
-Using custom checkpointer: AsyncSqliteSaver
+Importing graph profiling … graph_id=agent      … path=./backend/agent.py
+Importing graph profiling … graph_id=background … path=…/minime_local/async_agents.py
 ```
 
-On the second laptop the log goes straight from `Starting In-Memory runtime` to
-`OTel metrics reporter initialized`. **No checkpointer was configured at all.**
+The broken one imports `agent` only. Two capabilities behind one flag, and the absence of the
+second is the proof that the first never ran.
 
-**Why — corrected on evidence.** The first reading here was *"the package is not installed"*. It
-**is**: `ls …/site-packages/langgraph/checkpoint/` on that laptop returns
-`base memory serde sqlite`. The real cause is worse, because it is ours and not the environment's.
+Disk state agrees: `.langgraph_api/` holds `.langgraph_ops.pckl` (17 KB, growing) and
+`.langgraph_retry_counter.pckl`, and **no `checkpoints.sqlite`**. No `.minime-rescued-*` copies, so
+`index_guard` never fired and nothing was deleted. Of the researcher's two guesses — *"deleted or
+never saved"* — **never saved** is the true one.
 
-**Three checks ask "is SQLite available", at three strictnesses, and the weakest is the one the
-researcher is shown.**
+**Every safety net measures the package; none measures the wiring.**
 
-| where | what it tests | what it decides |
+| where | what it checks | verdict on the broken laptop |
 |---|---|---|
-| `make_config.py:52` | `import langgraph.checkpoint.sqlite.aio` | whether the checkpointer is configured **at all** |
-| `backend.rs:547` | `import langgraph.checkpoint.sqlite` | whether to install anything |
-| `preflight.rs:636` | the **directory** exists | the Setup row a researcher reads |
+| `setup-wsl.sh:266` | installs `langgraph-checkpoint-sqlite` | done, correctly |
+| `ensure_checkpointer_command()` | installs it again at launch | already there, skipped |
+| `preflight.rs:636` | the package **directory** exists | **green** — "SQLite — conversations load without unpickling" |
+| `backend.rs:1968` | `make_config.py`'s **output** carries the key | passes — the output is correct |
 
-Only the first imports `.aio`, and `aio.py:11` is `import aiosqlite`. Plain
-`langgraph.checkpoint.sqlite` needs nothing beyond `sqlite3` from the stdlib — verified by reading
-both modules in `langgraph-checkpoint-sqlite` 3.1.1, not inferred.
+Four correct mechanisms about the package. **Zero about whether it is connected.** The one test in
+the area asserts the generated config is right and never asks whether the launch uses it — the
+join, untested, one more time.
 
-So when `aiosqlite` is absent while the package directory is present:
+**Immediate relief, with its cost stated.** Turning **on** *Settings → "Let work run in the
+background"* restores persistence today, because it is what causes `--config` to be passed. It
+also enables the preview background-subagent feature, which is off by default for its own reasons
+(`settings.rs`: a preview deepagents API whose docs say "APIs may change"). Coupling those two is
+the bug; a researcher should not have to accept a preview feature to keep their history.
 
-- **Setup shows green** — *"SQLite — conversations load without unpickling the whole history"*
-- the launch's install is **skipped**, because its weaker import succeeds
-- `make_config` **omits the checkpointer**
-- conversations are never written to disk
+- [ ] **B.1** **Unbind the two.** Generate the config and pass `--config` on **every** launch. The
+      `background` graph can stay declared without being used; the checkpointer cannot be
+      configured without being passed. Nothing about durable storage belongs behind a preview flag.
+- [ ] **B.2** A test on the **join**: build the launch argv with `async_subagents = false` and
+      assert `--config` is still there. Today that assertion fails, which is the point.
+- [ ] **B.3** Make Setup check the wiring, not the directory. "Is the package present" and "are
+      conversations being saved" turned out to be different questions, and only the first is asked.
+- [ ] **B.4** Fix the Setup wording. It reads *"the pickle store — boot slows as history grows,
+      and a failed load can overwrite it"*. On this laptop the truth was **nothing was saved at
+      all** — a different sentence, and a worse one.
+- [ ] **B.5** Decide what to tell someone whose history was never written. It cannot be recovered;
+      it was never on disk. Silence is the wrong answer.
 
-The disk state matches exactly. `.langgraph_api/` holds `.langgraph_ops.pckl` (17 KB, growing)
-and `.langgraph_retry_counter.pckl`, and **no `checkpoints.sqlite`**. The ops index is the list of
-threads; the checkpoints are the messages. A sidebar can therefore list conversations with nothing
-behind them — *"we could not reopen conversations"*, precisely.
-
-And **no `.minime-rescued-*` copies**, so `index_guard` never fired and the index was never
-deleted. Nothing was destroyed. The messages were **never written in the first place** — which is
-the other half of what the researcher said, and the half that is true.
-
-**What it costs.** §95 moved conversations into SQLite so that a failed index load could not take
-thirty threads with it. Without the checkpointer that protection is simply absent, and the pickle
-path §218 documents — upstream's `start_pool` deleting the whole thread index on any load
-exception, with *"pulled updates that modified class definitions"* as its own named trigger, which
-on this product **is the update path** — is the one this install is exposed to.
-
-**Still to establish:** why `aiosqlite` is missing from a venv whose installer declares it
-(`Requires-Dist: aiosqlite>=0.20`). A partial or interrupted `uv pip install`, or a root-owned WSL
-environment behaving differently, are candidates — none of them verified. One command settles it,
-because it is the exact import `make_config.py` runs:
+**Settling the state of any install** — the generated config is only meaningful if the launch
+passes it, so read the log rather than the filesystem:
 
 ```
-wsl /root/.local/share/mini-me-desktop/backend/.venv/bin/python -c "import langgraph.checkpoint.sqlite.aio"
+Get-Content "$env:TEMP\mini-me-desktop-backend.log" | Select-String "custom checkpointer"
 ```
 
-The traceback names the missing module.
-
-- [ ] **B.1** **One check, not three.** All three sites must ask the same question, and the honest
-      question is the strict one — `import langgraph.checkpoint.sqlite.aio`, since that is what
-      decides whether conversations are saved. A directory listing is not evidence that a module
-      imports. This is the defect: not a failed install, but three correct-looking checks with no
-      way to disagree out loud.
-- [ ] **B.2** A test that fails when they drift. Remove `aiosqlite` from a venv and the Setup row
-      must go red; today it stays green, which is exactly how this ran undetected.
-- [ ] **B.3** Make the launch install observable. `>/dev/null 2>&1 || true` is right that a boot
-      beats no boot and wrong that it may say nothing — a launch that could not provision the
-      checkpointer should leave something the app can read.
-- [ ] **B.4** Say it where a researcher is. "Your history is not being written" is not an amber
-      optional-looking row in a pane nobody opens.
-- [ ] **B.5** Fix the Setup wording. It reads *"the pickle store — boot slows as history grows,
-      and a failed load can overwrite it"*. On this laptop the truth was **nothing was being
-      saved at all**, which is a different sentence.
-- [ ] **B.6** Then find why `aiosqlite` is missing here and not on the other laptop. Same
-      installer, two outcomes — and reproducible on hardware Codex has.
-
-**One command settles the state of any install** (literal paths, no variables):
-
-```
-wsl ls /root/.local/share/mini-me-desktop/backend/.venv/lib/python3.12/site-packages/langgraph/checkpoint/
-```
-
-`sqlite` present means persistence is on. And to see whether an index was ever rescued:
-
-```
-wsl ls -la /root/.local/share/mini-me-desktop/backend/.langgraph_api/
-```
-
-Files ending `.minime-rescued-<stamp>` are copies taken before upstream deleted the index.
+`Using custom checkpointer: AsyncSqliteSaver` means conversations are being written. **No match
+means they are not.**
 
 ### C. Four fake tracebacks at every startup
 

@@ -178,14 +178,13 @@ working directory independently.
 200 stream, and the SDK decides retries on status code. The researcher is shown "An internal error
 occurred" and a log path.
 
-**A second laptop ran without the SQLite checkpointer and nobody knew** — and the cause is ours.
-Three places ask "is SQLite available" at three strictnesses: `make_config.py` imports
-`langgraph.checkpoint.sqlite.aio` (needs `aiosqlite`) and decides whether conversations are saved
-at all; `backend.rs` imports `langgraph.checkpoint.sqlite` (needs only stdlib `sqlite3`) and
-decides whether to install; `preflight.rs` checks that a **directory exists** and decides what the
-researcher is told. When `aiosqlite` alone is missing, Setup goes **green** while nothing is
-written to disk. Confirmed on the machine: the `sqlite` package directory is present and there is
-no `checkpoints.sqlite`.
+**Conversation storage is wired to the background-work switch, and that switch is off by default.**
+`make_config.py` is the only thing that ever sets a `checkpointer` key, and `backend.rs` passes
+`--config <generated>` **only when `async_subagents` is true** — which defaults to `false`. So an
+ordinary install runs upstream's `langgraph.json`, which has no checkpointer, and conversations are
+never written to disk. Setup still reports green, because it checks that the *package directory*
+exists rather than whether anything is wired to it. Confirmed on a researcher's laptop: package
+present, `aiosqlite` present, the exact import succeeding, and no `checkpoints.sqlite`.
 
 The second one is the more serious: it loses a researcher's history, it ran undetected across an
 entire install, and **you can reproduce it on hardware you have.** Both are diagnosed with log
