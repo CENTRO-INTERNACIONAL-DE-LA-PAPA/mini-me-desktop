@@ -88,12 +88,24 @@ else
   die "no executable in the bundle"
 fi
 
-# Without this the installer asks for a GitHub token for a *private* repo, which is
+# Without a backend the installer asks for a GitHub token for a *private* repo, which is
 # exactly the wall this bundle exists to remove (docs §25).
-[ -f "$BUNDLE/vendor/Mini-Me/langgraph.json" ] \
-  || die "vendor/Mini-Me is missing — the bundle cannot install itself.
+#
+# **Either layout, because the app accepts either.** This demanded `vendor/Mini-Me` — the
+# pre-monorepo path — and went on demanding it after §283 moved the backend to `mini-me/` and
+# `package.sh` began shipping `vendor/` as an empty compatibility directory. So a correct bundle
+# failed its own release check with "the bundle cannot install itself", and the suggested fix
+# rebuilt exactly the same thing. Kept in step with `BUNDLE_BACKENDS` in `update.rs`, which is
+# the list the installed app actually tests (§304).
+if [ -f "$BUNDLE/mini-me/langgraph.json" ]; then
+  ok "mini-me/ (the backend, so no GitHub account is needed)"
+elif [ -f "$BUNDLE/vendor/Mini-Me/langgraph.json" ]; then
+  ok "vendor/Mini-Me (the pre-monorepo layout, still accepted)"
+else
+  die "no backend in the bundle — it cannot install itself.
+       Looked for mini-me/langgraph.json and vendor/Mini-Me/langgraph.json.
        Fix: bash scripts/bundle-backend.sh && bash scripts/package.sh"
-ok "vendor/Mini-Me (the backend, so no GitHub account is needed)"
+fi
 
 [ -f "$BUNDLE/overlay/minime_local/workspace.py" ] \
   || die "overlay/ is missing — host execution would not work"

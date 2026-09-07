@@ -56,7 +56,11 @@ const BUNDLE_MARKERS: [&str; 2] = ["overlay", "scripts"];
 ///
 /// Any of these, because a bundle carries exactly one. `package.sh` still writes a `vendor/`
 /// beside it for as long as installs older than v0.3.15 might update — see the note it puts there.
-const BUNDLE_BACKENDS: [&str; 2] = ["mini-me", "vendor"];
+///
+/// `pub(crate)` so `backend.rs` can assert `release.sh` mentions every name the app accepts.
+/// The list living in one module and the gate that must match it living in another is exactly
+/// how §283 and §304 both happened.
+pub(crate) const BUNDLE_BACKENDS: [&str; 2] = ["mini-me", "vendor"];
 
 /// What the executable is called inside a downloaded bundle, per `scripts/package.sh`.
 ///

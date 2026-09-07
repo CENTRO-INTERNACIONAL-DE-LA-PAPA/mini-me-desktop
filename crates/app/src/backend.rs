@@ -2320,6 +2320,55 @@ mod tests {
         assert!(!owned_wsl_dir().starts_with("/mnt/"), "{}", owned_wsl_dir());
     }
 
+    /// **The release check accepts what the packager ships.**
+    ///
+    /// `release.sh` refused a correct bundle: it required `vendor/Mini-Me/langgraph.json`, the
+    /// pre-monorepo path, and kept requiring it after §283 moved the backend to `mini-me/` and
+    /// left `vendor/` as an empty compatibility directory. So the gate said *"the bundle cannot
+    /// install itself"* about a bundle that installs fine, and the fix it printed rebuilt exactly
+    /// the same thing.
+    ///
+    /// It stayed hidden because **CI never runs `release.sh`** — `release.yml` calls `package.sh`
+    /// and uploads the result — so every tagged release worked while the documented local path
+    /// was broken. Only someone releasing by hand ever met it, and that is the person least able
+    /// to tell a stale check from a real one.
+    ///
+    /// The same shape as §283 twice over: two scripts each correct about its own job, nothing
+    /// comparing them. So this compares them.
+    #[test]
+    fn the_release_check_accepts_the_layout_the_packager_writes() {
+        let scripts = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts");
+        let packager = std::fs::read_to_string(scripts.join("package.sh")).expect("package.sh");
+        let releaser = std::fs::read_to_string(scripts.join("release.sh")).expect("release.sh");
+
+        // What the packager writes, read from the assignment rather than restated.
+        assert!(
+            packager.contains("BACKEND_DEST=\"$OUT/mini-me\""),
+            "package.sh no longer writes mini-me/ — this test is checking the wrong thing"
+        );
+        assert!(
+            releaser.contains("$BUNDLE/mini-me/langgraph.json"),
+            "release.sh must accept the layout package.sh ships, or a correct bundle is refused"
+        );
+
+        // **And `vendor/` alone must not satisfy it.** `package.sh` creates an empty `vendor/`
+        // with only a README so that a pre-§283 installer still accepts the download. A check
+        // that treated the directory's existence as "the backend is here" would pass on a bundle
+        // carrying no backend at all — which is the failure §283 shipped for a fortnight.
+        assert!(
+            !releaser.contains("[ -d \"$BUNDLE/vendor\" ]"),
+            "an empty vendor/ is a compatibility shim, never evidence of a backend"
+        );
+
+        // Both names the installed app accepts, kept in step with `update::BUNDLE_BACKENDS`.
+        for backend in crate::update::BUNDLE_BACKENDS {
+            assert!(
+                releaser.contains(backend),
+                "release.sh never mentions {backend}, which the app accepts"
+            );
+        }
+    }
+
     /// **The directory the app looks for is the directory the packager writes.**
     ///
     /// `bundled_backend_dir` has preferred `mini-me/` since the monorepo move, and
