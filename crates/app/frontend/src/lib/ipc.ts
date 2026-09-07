@@ -3,16 +3,22 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Adopted,
   Answer,
+  AttachmentInput,
   DeleteFiles,
   DeleteOutcome,
+  FixEvent,
   GalleryListing,
   Job,
+  LogPaths,
   PendingAttachment,
+  PreflightReport,
+  PreparedTurn,
   Project,
   Provider,
   Settings,
   Snapshot,
   Started,
+  Subagent,
   TurnEvent,
 } from "./protocol";
 import type { RawTheme } from "../theme/theme";
@@ -21,6 +27,7 @@ export const ipc = {
   getExecutionLabel: () => invoke<string>("get_execution_label"),
   getBaseUrl: () => invoke<string>("get_base_url"),
   getSettings: () => invoke<Settings>("get_settings"),
+  getSettingsPath: () => invoke<string>("get_settings_path"),
   saveSettings: (settings: Settings) => invoke<void>("save_settings", { settings }),
   getSecret: (name: string) => invoke<string | null>("get_secret", { name }),
   setSecretValue: (name: string, value: string) => invoke<void>("set_secret_value", { name, value }),
@@ -28,6 +35,9 @@ export const ipc = {
   searchThemes: (query: string) => invoke<GalleryListing[]>("search_themes", { query }),
   installTheme: (id: string) => invoke<string[]>("install_theme", { id }),
   listInstalledThemes: () => invoke<[string, RawTheme][]>("list_installed_themes"),
+  listSubagents: () => invoke<Subagent[]>("list_subagents"),
+  prepareTurn: (prompt: string, attachments: AttachmentInput[], subagent: string | null) =>
+    invoke<PreparedTurn>("prepare_turn", { prompt, attachments, subagent }),
   submitTurn: (prompt: string, attachments: PendingAttachment[]) =>
     invoke<void>("submit_turn", { prompt, attachments }),
   resumeTurn: (answers: Answer[]) => invoke<void>("resume_turn", { answers }),
@@ -50,6 +60,16 @@ export const ipc = {
     invoke<void>("rename_conversation", { threadId, title }),
   sweepFinishedJobs: () => invoke<[string, Job][] | null>("sweep_finished_jobs"),
 
+  runPreflight: () => invoke<PreflightReport>("run_preflight"),
+  startFix: (argv: string[]) => invoke<void>("start_fix", { argv }),
+  cancelFix: () => invoke<boolean>("cancel_fix"),
+  adoptCheckout: (dir: string) => invoke<Settings>("adopt_checkout", { dir }),
+  openUrl: (url: string) => invoke<void>("open_url", { url }),
+  openPath: (path: string) => invoke<void>("open_path", { path }),
+  getLogPaths: () => invoke<LogPaths>("get_log_paths"),
+
   onTurnEvent: (callback: (event: TurnEvent) => void): Promise<UnlistenFn> =>
     listen<TurnEvent>("turn-event", (event) => callback(event.payload)),
+  onFixEvent: (callback: (event: FixEvent) => void): Promise<UnlistenFn> =>
+    listen<FixEvent>("fix-event", (event) => callback(event.payload)),
 };

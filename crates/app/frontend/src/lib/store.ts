@@ -1,7 +1,23 @@
 import { create } from "zustand";
 import { ipc } from "./ipc";
 import { notifyTurnFinished } from "./notify";
-import type { Answer, ApprovalRequest, AsyncTask, Conversation, Job, Project, Snapshot, TurnEvent } from "./protocol";
+import type {
+  Answer,
+  ApprovalRequest,
+  AsyncTask,
+  AttachmentInput,
+  Conversation,
+  Decision,
+  Job,
+  Project,
+  Snapshot,
+  Started,
+  TurnEvent,
+} from "./protocol";
+
+function answersFor(request: ApprovalRequest, decision: Decision): Answer[] {
+  return request.actions.map((action) => ({ interrupt: action.interrupt, decision }));
+}
 
 export interface TraceStep {
   agent: string | null;
@@ -24,6 +40,8 @@ interface AppState {
   executionLabel: string;
   baseUrl: string;
   approveConversation: boolean;
+  approveRestOfTurn: boolean;
+  currentSubagent: string | null;
   transcript: Message[];
   snapshot: Snapshot | null;
   pendingApproval: ApprovalRequest | null;
@@ -35,12 +53,16 @@ interface AppState {
   currentThreadId: string | null;
   sidebarView: SidebarView;
   sidebarOpen: boolean;
+  backendStart: Started | null;
 
   setExecutionInfo: (executionLabel: string, baseUrl: string) => void;
+  setBackendStart: (started: Started | null) => void;
   setApproveConversation: (value: boolean) => void;
+  setApproveRestOfTurn: (value: boolean) => void;
+  setCurrentSubagent: (name: string | null) => void;
   setSnapshotProject: (project: Project) => void;
   beginTurn: (prompt: string) => void;
-  submitTurn: (prompt: string, attachments?: { source: string; reference: string }[]) => void;
+  submitTurn: (prompt: string, attachments?: AttachmentInput[]) => Promise<void>;
   applyTurnEvent: (event: TurnEvent) => void;
   answerApproval: (answers: Answer[]) => void;
   cancelTurn: () => void;
@@ -61,6 +83,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   executionLabel: "",
   baseUrl: "",
   approveConversation: false,
+  approveRestOfTurn: false,
+  currentSubagent: null,
   transcript: [],
   snapshot: null,
   pendingApproval: null,
@@ -72,9 +96,13 @@ export const useAppStore = create<AppState>((set, get) => ({
   currentThreadId: null,
   sidebarView: "conversations",
   sidebarOpen: true,
+  backendStart: null,
 
   setExecutionInfo: (executionLabel, baseUrl) => set({ executionLabel, baseUrl }),
+  setBackendStart: (started) => set({ backendStart: started }),
   setApproveConversation: (value) => set({ approveConversation: value }),
+  setApproveRestOfTurn: (value) => set({ approveRestOfTurn: value }),
+  setCurrentSubagent: (name) => set({ currentSubagent: name }),
   setSnapshotProject: (project) =>
     set((state) => ({
       snapshot: state.snapshot
@@ -146,11 +174,20 @@ export const useAppStore = create<AppState>((set, get) => ({
       streaming: true,
       error: null,
       status: "thinking",
+      approveRestOfTurn: false,
     })),
 
-  submitTurn: (prompt, attachments = []) => {
-    get().beginTurn(prompt);
-    ipc.submitTurn(prompt, attachments);
+  submitTurn: async (prompt, attachments = []) => {
+    if (!prompt.trim() || get().streaming) return;
+    let prepared;
+    try {
+      prepared = await ipc.prepareTurn(prompt, attachments, get().currentSubagent);
+    } catch (error) {
+      set({ error: String(error) });
+      return;
+    }
+    get().beginTurn(prepared.transcript_text);
+    ipc.submitTurn(prepared.submit_text, prepared.attachments);
   },
 
   cancelTurn: () => {
@@ -164,6 +201,17 @@ export const useAppStore = create<AppState>((set, get) => ({
       notifyTurnFinished(last?.text ? last.text.slice(0, 200) : "Your turn finished.");
     } else if (event.type === "Error") {
       notifyTurnFinished(`Something went wrong: ${event.data}`);
+    } else if (event.type === "Approval") {
+      const { approveRestOfTurn, approveConversation } = get();
+      if (approveRestOfTurn || approveConversation) {
+        ipc.resumeTurn(answersFor(event.data, "Approve"));
+        set({
+          status: approveConversation
+            ? "approved (rest of conversation) — running…"
+            : "approved (rest of turn) — running…",
+        });
+        return;
+      }
     }
     set((state) => {
       switch (event.type) {

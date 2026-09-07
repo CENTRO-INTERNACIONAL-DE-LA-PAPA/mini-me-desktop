@@ -5179,6 +5179,7 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             #[cfg(target_os = "macos")]
             {
@@ -5203,10 +5204,12 @@ fn main() {
             Ok(())
         })
         .manage(sidecar)
+        .manage(std::sync::Mutex::<Option<preflight::Cancel>>::new(None))
         .invoke_handler(tauri::generate_handler![
             commands::get_execution_label,
             commands::get_base_url,
             commands::get_settings,
+            commands::get_settings_path,
             commands::save_settings,
             commands::get_secret,
             commands::set_secret_value,
@@ -5214,6 +5217,8 @@ fn main() {
             commands::search_themes,
             commands::install_theme,
             commands::list_installed_themes,
+            commands::list_subagents,
+            commands::prepare_turn,
             commands::submit_turn,
             commands::resume_turn,
             commands::cancel_turn,
@@ -5231,6 +5236,13 @@ fn main() {
             commands::delete_conversations,
             commands::rename_conversation,
             commands::sweep_finished_jobs,
+            commands::run_preflight,
+            commands::start_fix,
+            commands::cancel_fix,
+            commands::adopt_checkout,
+            commands::open_url,
+            commands::open_path,
+            commands::get_log_paths,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run the Tauri app");

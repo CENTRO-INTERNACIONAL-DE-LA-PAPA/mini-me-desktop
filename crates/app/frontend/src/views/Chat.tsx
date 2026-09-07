@@ -1,5 +1,6 @@
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { useShallow } from "zustand/react/shallow";
 import { ApprovalCard } from "./ApprovalCard";
 import { Composer } from "./Composer";
 import { useAppStore, type TraceStep } from "../lib/store";
@@ -22,10 +23,12 @@ function foldSteps(steps: TraceStep[]): { label: string; count: number }[] {
 
 export function Chat() {
   const { theme } = useTheme();
-  const { transcript, pendingApproval } = useAppStore((state) => ({
-    transcript: state.transcript,
-    pendingApproval: state.pendingApproval,
-  }));
+  const { transcript, pendingApproval } = useAppStore(
+    useShallow((state) => ({
+      transcript: state.transcript,
+      pendingApproval: state.pendingApproval,
+    })),
+  );
 
   return (
     <div

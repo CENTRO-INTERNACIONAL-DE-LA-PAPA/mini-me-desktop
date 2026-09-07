@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { Actions, Button, Icon, Label, Menu, MenuItem, Modal, SearchBar } from "../components";
 import { useAppStore } from "../lib/store";
 import type { Conversation } from "../lib/protocol";
@@ -28,19 +29,21 @@ export function Sidebar({ onOpenSettings }: { onOpenSettings: () => void }) {
     renameConversation,
     deleteConversation,
     toggleSidebar,
-  } = useAppStore((state) => ({
-    conversations: state.conversations,
-    conversationsLoaded: state.conversationsLoaded,
-    currentThreadId: state.currentThreadId,
-    sidebarView: state.sidebarView,
-    setSidebarView: state.setSidebarView,
-    loadConversations: state.loadConversations,
-    openConversation: state.openConversation,
-    startNewConversation: state.startNewConversation,
-    renameConversation: state.renameConversation,
-    deleteConversation: state.deleteConversation,
-    toggleSidebar: state.toggleSidebar,
-  }));
+  } = useAppStore(
+    useShallow((state) => ({
+      conversations: state.conversations,
+      conversationsLoaded: state.conversationsLoaded,
+      currentThreadId: state.currentThreadId,
+      sidebarView: state.sidebarView,
+      setSidebarView: state.setSidebarView,
+      loadConversations: state.loadConversations,
+      openConversation: state.openConversation,
+      startNewConversation: state.startNewConversation,
+      renameConversation: state.renameConversation,
+      deleteConversation: state.deleteConversation,
+      toggleSidebar: state.toggleSidebar,
+    })),
+  );
 
   const [query, setQuery] = useState("");
   const [menu, setMenu] = useState<{ at: { x: number; y: number }; target: RowMenu } | null>(null);

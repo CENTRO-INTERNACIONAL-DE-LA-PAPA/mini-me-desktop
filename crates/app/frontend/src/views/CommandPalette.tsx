@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { ipc } from "../lib/ipc";
 import { useAppStore } from "../lib/store";
 import { hex } from "../theme/theme";
@@ -13,29 +14,34 @@ interface PaletteCommand {
 
 export function CommandPalette({
   onOpenSettings,
+  onOpenSetup,
   onOpenAbout,
 }: {
   onOpenSettings: () => void;
+  onOpenSetup: () => void;
   onOpenAbout: () => void;
 }) {
   const { theme } = useTheme();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(0);
-  const { startNewConversation, toggleSidebar } = useAppStore((state) => ({
-    startNewConversation: state.startNewConversation,
-    toggleSidebar: state.toggleSidebar,
-  }));
+  const { startNewConversation, toggleSidebar } = useAppStore(
+    useShallow((state) => ({
+      startNewConversation: state.startNewConversation,
+      toggleSidebar: state.toggleSidebar,
+    })),
+  );
 
   const commands: PaletteCommand[] = useMemo(
     () => [
       { id: "new-thread", label: "New conversation", hint: "⌘N", run: () => startNewConversation(null) },
       { id: "restart-backend", label: "Restart backend", hint: "", run: () => ipc.restartBackend() },
       { id: "open-settings", label: "Open settings", hint: "", run: onOpenSettings },
+      { id: "open-setup", label: "Open setup", hint: "", run: onOpenSetup },
       { id: "toggle-sidebar", label: "Toggle sidebar", hint: "", run: toggleSidebar },
       { id: "open-about", label: "About Mini-Me", hint: "", run: onOpenAbout },
     ],
-    [startNewConversation, toggleSidebar, onOpenSettings, onOpenAbout],
+    [startNewConversation, toggleSidebar, onOpenSettings, onOpenSetup, onOpenAbout],
   );
 
   const matched = useMemo(

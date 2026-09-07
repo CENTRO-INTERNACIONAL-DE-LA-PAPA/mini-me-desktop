@@ -51,7 +51,7 @@ const ASTA_INSTALL_URL: &str = "git+https://github.com/allenai/asta-plugins.git@
 /// generation. Being signed in says nothing about it.
 const THEORY_PERMISSION: &str = "enroll:theory_generation";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum State {
     /// Verified present.
     Pass,
@@ -75,7 +75,7 @@ impl State {
 }
 
 /// What would resolve a check.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum Fix {
     /// A command, already routed for the machine it has to run on. `note` carries the
     /// part a person needs to know before clicking (elevation, a restart, how long).
@@ -92,7 +92,7 @@ pub enum Fix {
     Adopt { label: &'static str, dir: String },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Check {
     /// Stable identifier, so tests and the UI can name a row without matching prose.
     pub id: &'static str,
@@ -147,7 +147,7 @@ impl Check {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct Report {
     pub checks: Vec<Check>,
     /// Where the checks ran — the pane's subtitle, because "no checkout" means

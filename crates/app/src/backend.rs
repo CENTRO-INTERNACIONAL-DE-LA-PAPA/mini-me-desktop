@@ -1327,10 +1327,15 @@ impl BackendSupervisor {
             // survives the app closing, so this is the usual case rather than an edge one.
             // Said plainly, with what to do about it, because the researcher just ran `git pull`
             // and has every reason to believe the new code is running (docs §130).
+            let kill_command = if self.config.wsl.is_some() {
+                "wsl bash -lc \"pkill -f 'langgraph dev'\""
+            } else {
+                "pkill -f 'langgraph dev'"
+            };
             tracing::warn!(
                 "attached to a backend that was already running — it is on the code it started \
                  with, not what this app now ships. To pick up a backend change, close this app \
-                 and run: wsl bash -lc \"pkill -f 'langgraph dev'\""
+                 and run: {kill_command}"
             );
             return Ok(Started::Attached);
         }

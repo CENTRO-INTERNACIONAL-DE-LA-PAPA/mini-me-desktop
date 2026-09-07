@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { Button, Icon, Label } from "../components";
 import { ipc } from "../lib/ipc";
 import { useAppStore } from "../lib/store";
@@ -19,10 +20,12 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 
 function MissionBlock() {
   const { theme } = useTheme();
-  const { snapshot, setSnapshotProject } = useAppStore((state) => ({
-    snapshot: state.snapshot,
-    setSnapshotProject: state.setSnapshotProject,
-  }));
+  const { snapshot, setSnapshotProject } = useAppStore(
+    useShallow((state) => ({
+      snapshot: state.snapshot,
+      setSnapshotProject: state.setSnapshotProject,
+    })),
+  );
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState(snapshot?.project?.mission ?? "");
   const mission = snapshot?.project?.mission ?? "";

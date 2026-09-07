@@ -54,7 +54,7 @@ const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
 const TASK_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(4);
 
 /// Progress from a setup fix the app is running on the user's behalf.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum FixEvent {
     Line(String),
     Finished { ok: bool, note: String },

@@ -3,6 +3,22 @@ export interface AgentRef {
   name: string;
 }
 
+export interface Subagent {
+  name: string;
+  description: string;
+}
+
+export interface AttachmentInput {
+  label: string;
+  path: string;
+}
+
+export interface PreparedTurn {
+  transcript_text: string;
+  submit_text: string;
+  attachments: PendingAttachment[];
+}
+
 export interface PendingAction {
   interrupt: string;
   tool: string;
@@ -173,6 +189,36 @@ export interface Provider {
   needs_base_url: boolean;
   suggested_model: string;
   models: string[];
+}
+
+export type PreflightState = "Pass" | "Warn" | "Fail" | "Skip";
+
+export type PreflightFix =
+  | { Run: { label: string; argv: string[]; note: string } }
+  | { Manual: string }
+  | { Adopt: { label: string; dir: string } };
+
+export interface PreflightCheck {
+  id: string;
+  label: string;
+  state: PreflightState;
+  detail: string;
+  fixes: PreflightFix[];
+}
+
+export interface PreflightReport {
+  checks: PreflightCheck[];
+  location: string;
+  execution: string;
+  owned: boolean;
+}
+
+export type FixEvent = { Line: string } | { Finished: { ok: boolean; note: string } };
+
+export interface LogPaths {
+  sidecar: string;
+  app: string;
+  update: string;
 }
 
 export interface Settings {

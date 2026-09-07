@@ -1,3 +1,4 @@
+import { useShallow } from "zustand/react/shallow";
 import { Button, Label, Spinner } from "../components";
 import { useAppStore } from "../lib/store";
 import { hex } from "../theme/theme";
@@ -6,15 +7,17 @@ import { useTheme } from "../theme/ThemeProvider";
 export function StatusBar() {
   const { theme } = useTheme();
   const { status, error, streaming, executionLabel, baseUrl, approveConversation, setApproveConversation } =
-    useAppStore((state) => ({
-      status: state.status,
-      error: state.error,
-      streaming: state.streaming,
-      executionLabel: state.executionLabel,
-      baseUrl: state.baseUrl,
-      approveConversation: state.approveConversation,
-      setApproveConversation: state.setApproveConversation,
-    }));
+    useAppStore(
+      useShallow((state) => ({
+        status: state.status,
+        error: state.error,
+        streaming: state.streaming,
+        executionLabel: state.executionLabel,
+        baseUrl: state.baseUrl,
+        approveConversation: state.approveConversation,
+        setApproveConversation: state.setApproveConversation,
+      })),
+    );
 
   const statusText = error ?? status;
   const statusColour = error ? theme.error : theme.textMuted;

@@ -1,3 +1,4 @@
+import { useShallow } from "zustand/react/shallow";
 import { Button } from "../components";
 import { useAppStore } from "../lib/store";
 import type { Answer, ApprovalRequest, Decision } from "../lib/protocol";
@@ -10,13 +11,20 @@ function answersFor(request: ApprovalRequest, decision: Decision): Answer[] {
 
 export function ApprovalCard({ request }: { request: ApprovalRequest }) {
   const { theme } = useTheme();
-  const { answerApproval, setApproveConversation } = useAppStore((state) => ({
-    answerApproval: state.answerApproval,
-    setApproveConversation: state.setApproveConversation,
-  }));
+  const { answerApproval, setApproveConversation, setApproveRestOfTurn } = useAppStore(
+    useShallow((state) => ({
+      answerApproval: state.answerApproval,
+      setApproveConversation: state.setApproveConversation,
+      setApproveRestOfTurn: state.setApproveRestOfTurn,
+    })),
+  );
 
   const approve = () => answerApproval(answersFor(request, "Approve"));
   const reject = () => answerApproval(answersFor(request, { Reject: { message: "rejected by the user" } }));
+  const approveRestOfTurn = () => {
+    setApproveRestOfTurn(true);
+    approve();
+  };
   const approveConversation = () => {
     setApproveConversation(true);
     approve();
@@ -75,7 +83,7 @@ export function ApprovalCard({ request }: { request: ApprovalRequest }) {
         </Button>
         <Button onClick={reject}>Reject</Button>
         <div style={{ flexGrow: 1 }} />
-        <Button onClick={approve}>Approve the rest of this turn</Button>
+        <Button onClick={approveRestOfTurn}>Approve the rest of this turn</Button>
         <Button onClick={approveConversation}>Approve everything in this conversation</Button>
       </div>
     </div>

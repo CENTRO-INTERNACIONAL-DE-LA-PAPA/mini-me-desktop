@@ -166,7 +166,7 @@ pub fn root() -> PathBuf {
 }
 
 /// A specialist the coordinator can be told to use by name.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Subagent {
     pub name: String,
     pub description: String,
@@ -590,7 +590,7 @@ pub const ADOPT_LIMIT: u64 = 512 * 1024 * 1024;
 /// `reference` is the exact path currently present in the prompt. Once `source` is copied into the
 /// newly created thread directory, that reference is replaced with a relative one before the model
 /// sees the turn.
-#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct PendingAttachment {
     pub source: PathBuf,
     pub reference: String,
