@@ -100,6 +100,15 @@ pub struct Turn {
     /// Every subagent invocation beneath it, in first-seen order.
     #[serde(default)]
     pub invocations: Vec<Invocation>,
+    /// The coordinator's own steps — tool calls and delegations — in the order they happened.
+    ///
+    /// Kept here, not only on the live `Message`, so the count and disclosure beside a finished
+    /// answer survive a reload (§310): `Message::steps` lives only as long as the stream that
+    /// filled it, the same way `AgentTrace::text` still does — but a step's *label* is a few
+    /// words the researcher asked to keep seeing, where the raw token stream a subagent produced
+    /// is the wall of prose §46 already decided was not worth writing twice.
+    #[serde(default)]
+    pub steps: Vec<String>,
 }
 
 /// One invocation of one specialist.
@@ -122,6 +131,10 @@ pub struct Invocation {
     /// Last token seen. Equal to `first_seen` for an invocation that produced one chunk.
     #[serde(default)]
     pub last_seen: u64,
+    /// This invocation's own steps, in the order they happened — the specialist's half of
+    /// [`Turn::steps`].
+    #[serde(default)]
+    pub steps: Vec<String>,
 }
 
 impl Invocation {
@@ -142,7 +155,31 @@ impl Record {
             prompt: prompt.into(),
             sent_at,
             invocations: Vec::new(),
+            steps: Vec::new(),
         });
+    }
+
+    /// Record one step this turn took — a tool call or a delegation — beside the timing
+    /// [`Self::observe`] already tracks.
+    ///
+    /// `ns` is `None` for the coordinator's own step and `Some` for one taken inside a named
+    /// invocation, which must already have been `observe`d — a step arriving for an invocation
+    /// this record has not seen yet is dropped rather than filed under a namespace with no
+    /// timing of its own.
+    pub fn note_step(&mut self, ns: Option<&str>, label: String) {
+        let Some(turn) = self.turns.last_mut() else {
+            return;
+        };
+        match ns {
+            None => turn.steps.push(label),
+            Some(ns) => {
+                if let Some(invocation) =
+                    turn.invocations.iter_mut().find(|invocation| invocation.ns == ns)
+                {
+                    invocation.steps.push(label);
+                }
+            }
+        }
     }
 
     /// Note that `ns` produced something at `at`.
@@ -176,6 +213,7 @@ impl Record {
             ns: ns.to_string(),
             first_seen: at,
             last_seen: at,
+            steps: Vec::new(),
         });
     }
 
@@ -382,9 +420,10 @@ impl Record {
 
 /// What the decoder calls a subagent it could not name.
 ///
-/// Mirrors `protocol::agent_ref`'s fallback. Kept as a constant here so the two cannot drift into
-/// disagreeing about which invocations are still waiting for a name.
-const FALLBACK_NAME: &str = "subagent";
+/// Mirrors `protocol::agent_ref`'s fallback. Kept as a constant here — and `pub(crate)` so
+/// `trace_for` in `main.rs` can apply the exact same self-correction to `Message::agents`, and
+/// the two cannot drift into disagreeing about which invocations are still waiting for a name.
+pub(crate) const FALLBACK_NAME: &str = "subagent";
 
 /// Group a turn's invocations by who delegated them, parents before children.
 ///
@@ -619,6 +658,33 @@ mod tests {
         assert_eq!(newest.name, "academic_researcher");
 
         assert!(Record::default().road().is_empty());
+    }
+
+    /// Both halves of a turn's steps — the coordinator's own and a specialist's — round-trip
+    /// through the file the same as everything else here (§310): the count and disclosure
+    /// beside a finished answer must survive a reload the same way the timing already does.
+    #[test]
+    fn a_steps_note_files_under_the_coordinator_or_the_invocation_it_names() {
+        let mut record = Record::default();
+        // Dropped: no turn has begun yet.
+        record.note_step(None, "too early".into());
+        assert!(record.turns.is_empty());
+
+        record.begin_turn("clean this dataset", 0);
+        record.note_step(None, "glob".into());
+        record.observe("tools:a", "data_cleaning", 100);
+        record.note_step(Some("tools:a"), "read_file".into());
+        // Dropped: no invocation at this namespace has been observed.
+        record.note_step(Some("tools:z"), "orphaned".into());
+
+        assert_eq!(record.turns[0].steps, vec!["glob"]);
+        assert_eq!(record.turns[0].invocations[0].steps, vec!["read_file"]);
+
+        let directory =
+            std::env::temp_dir().join(format!("mini-me-provenance-steps-{}", std::process::id()));
+        save(&directory, &record).expect("writing the record");
+        assert_eq!(load(&directory), record);
+        std::fs::remove_dir_all(&directory).ok();
     }
 
     #[test]

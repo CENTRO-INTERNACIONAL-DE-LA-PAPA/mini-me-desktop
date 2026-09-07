@@ -343,6 +343,7 @@ impl Workbench {
             .flex_none()
             .m_2()
             .mb_4()
+            .mr_1()
             .p_3()
             .gap_5()
             .rounded_lg()

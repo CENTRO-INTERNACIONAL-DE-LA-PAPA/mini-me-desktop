@@ -228,7 +228,9 @@ impl RenderOnce for Button {
             button = button.border_1().border_color(rgb(border_colour));
         }
         if let Some(icon) = self.icon {
-            button = button.p_2();
+            if self.text.is_none() {
+                button = button.p_2();
+            }
             // Size and colour are the button's to decide, not the caller's — an icon that
             // came in some other size or shade would make one button read as a different
             // family from the rest. `Button` always renders it at `IconSize::Small`, tinted

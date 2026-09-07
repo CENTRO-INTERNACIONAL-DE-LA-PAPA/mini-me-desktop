@@ -81,6 +81,43 @@ pub fn display(name: &str) -> (String, u32) {
     (display_name, colour)
 }
 
+/// Every name [`display`] gives its own colour to — kept beside it, and in the same order, so
+/// the two cannot drift apart the way a name matched here and not there would.
+const NAMED: [&str; 12] = [
+    "academic_researcher",
+    "dataverse_explorer",
+    "data_cleaning",
+    "exploratory_data_analysis",
+    "diagnostic_analytics",
+    "predictive_analytics",
+    "report_writer",
+    "hypothesis_generator",
+    "pdf_librarian",
+    "data_voyager",
+    "autodiscovery",
+    "research_planner",
+];
+
+/// The last known specialist named in `text`, if any — for attributing a message that narrates
+/// what it did ("I'll use the dataverse_explorer subagent to…") rather than reporting it through
+/// any structured event.
+///
+/// **A guess, not a fact, and the last resort.** Nothing here claims the coordinator actually
+/// delegated — only that it wrote the specialist's name in its own words. A backend that never
+/// streams a `task` call's arguments back to this client (or never makes one at all, answering
+/// everything itself while narrating a plan it did not act on) leaves both the real
+/// [`crate::provenance::Invocation`] record and the coordinator's own "delegating to X" step
+/// empty, and this is what is left once those two have already come back with nothing. The
+/// *last* mention wins, on the same reasoning the other two attribution paths use: it is closest
+/// to whatever the answer actually settled on.
+pub fn mentioned_in(text: &str) -> Option<&'static str> {
+    NAMED
+        .iter()
+        .filter_map(|&name| text.rfind(name).map(|at| (at, name)))
+        .max_by_key(|&(at, _)| at)
+        .map(|(_, name)| name)
+}
+
 /// A `/name …` typed into the composer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Command {
@@ -209,6 +246,25 @@ pub enum Dispatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mentioned_in_finds_the_last_specialist_the_answer_named() {
+        assert_eq!(
+            mentioned_in(
+                "I'll use the dataverse_explorer subagent to search for datasets related to \
+                 potato yield and soil properties in Peru."
+            ),
+            Some("dataverse_explorer")
+        );
+        // Two named, in order — the later one is the one the answer actually settled on.
+        assert_eq!(
+            mentioned_in(
+                "I'll use academic_researcher first, then hand off to report_writer to write it up."
+            ),
+            Some("report_writer")
+        );
+        assert_eq!(mentioned_in("Late blight is caused by Phytophthora infestans."), None);
+    }
 
     fn registry() -> Vec<Subagent> {
         // The real ten, from the fixture the overlay wrote.
