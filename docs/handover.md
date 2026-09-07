@@ -178,9 +178,14 @@ working directory independently.
 200 stream, and the SDK decides retries on status code. The researcher is shown "An internal error
 occurred" and a log path.
 
-**A second laptop ran without the SQLite checkpointer and nobody knew.** The launch-time install is
-`>/dev/null 2>&1 || true`, so its failure is unobservable; conversations fall back to a pickle
-index that upstream deletes on any load error, with the update path as the named trigger.
+**A second laptop ran without the SQLite checkpointer and nobody knew** — and the cause is ours.
+Three places ask "is SQLite available" at three strictnesses: `make_config.py` imports
+`langgraph.checkpoint.sqlite.aio` (needs `aiosqlite`) and decides whether conversations are saved
+at all; `backend.rs` imports `langgraph.checkpoint.sqlite` (needs only stdlib `sqlite3`) and
+decides whether to install; `preflight.rs` checks that a **directory exists** and decides what the
+researcher is told. When `aiosqlite` alone is missing, Setup goes **green** while nothing is
+written to disk. Confirmed on the machine: the `sqlite` package directory is present and there is
+no `checkpoints.sqlite`.
 
 The second one is the more serious: it loses a researcher's history, it ran undetected across an
 entire install, and **you can reproduce it on hardware you have.** Both are diagnosed with log

@@ -347,46 +347,73 @@ Using custom checkpointer: AsyncSqliteSaver
 On the second laptop the log goes straight from `Starting In-Memory runtime` to
 `OTel metrics reporter initialized`. **No checkpointer was configured at all.**
 
-**Why.** `make_config.py:sqlite_available()` omits the `checkpointer` key when
-`import langgraph.checkpoint.sqlite.aio` fails — deliberately, so a missing optional dependency
-cannot stop the server booting. So `langgraph-checkpoint-sqlite` is not in that venv.
+**Why — corrected on evidence.** The first reading here was *"the package is not installed"*. It
+**is**: `ls …/site-packages/langgraph/checkpoint/` on that laptop returns
+`base memory serde sqlite`. The real cause is worse, because it is ours and not the environment's.
 
-**Why nobody was told.** `ensure_checkpointer_command()` runs at every launch and is:
+**Three checks ask "is SQLite available", at three strictnesses, and the weakest is the one the
+researcher is shown.**
+
+| where | what it tests | what it decides |
+|---|---|---|
+| `make_config.py:52` | `import langgraph.checkpoint.sqlite.aio` | whether the checkpointer is configured **at all** |
+| `backend.rs:547` | `import langgraph.checkpoint.sqlite` | whether to install anything |
+| `preflight.rs:636` | the **directory** exists | the Setup row a researcher reads |
+
+Only the first imports `.aio`, and `aio.py:11` is `import aiosqlite`. Plain
+`langgraph.checkpoint.sqlite` needs nothing beyond `sqlite3` from the stdlib — verified by reading
+both modules in `langgraph-checkpoint-sqlite` 3.1.1, not inferred.
+
+So when `aiosqlite` is absent while the package directory is present:
+
+- **Setup shows green** — *"SQLite — conversations load without unpickling the whole history"*
+- the launch's install is **skipped**, because its weaker import succeeds
+- `make_config` **omits the checkpointer**
+- conversations are never written to disk
+
+The disk state matches exactly. `.langgraph_api/` holds `.langgraph_ops.pckl` (17 KB, growing)
+and `.langgraph_retry_counter.pckl`, and **no `checkpoints.sqlite`**. The ops index is the list of
+threads; the checkpoints are the messages. A sidebar can therefore list conversations with nothing
+behind them — *"we could not reopen conversations"*, precisely.
+
+And **no `.minime-rescued-*` copies**, so `index_guard` never fired and the index was never
+deleted. Nothing was destroyed. The messages were **never written in the first place** — which is
+the other half of what the researcher said, and the half that is true.
+
+**What it costs.** §95 moved conversations into SQLite so that a failed index load could not take
+thirty threads with it. Without the checkpointer that protection is simply absent, and the pickle
+path §218 documents — upstream's `start_pool` deleting the whole thread index on any load
+exception, with *"pulled updates that modified class definitions"* as its own named trigger, which
+on this product **is the update path** — is the one this install is exposed to.
+
+**Still to establish:** why `aiosqlite` is missing from a venv whose installer declares it
+(`Requires-Dist: aiosqlite>=0.20`). A partial or interrupted `uv pip install`, or a root-owned WSL
+environment behaving differently, are candidates — none of them verified. One command settles it,
+because it is the exact import `make_config.py` runs:
 
 ```
-{ .venv/bin/python -c 'import langgraph.checkpoint.sqlite' 2>/dev/null \
-  || uv pip install langgraph-checkpoint-sqlite ; } >/dev/null 2>&1 || true
+wsl /root/.local/share/mini-me-desktop/backend/.venv/bin/python -c "import langgraph.checkpoint.sqlite.aio"
 ```
 
-`>/dev/null 2>&1 || true`. If that install fails — no network, a root-owned WSL install, `uv` not
-on PATH — **the failure is unobservable**. The backend starts, persistence is downgraded, and the
-only trace is a `Warn` row in Setup that its own comment says a researcher should never need to
-notice.
+The traceback names the missing module.
 
-**What it costs.** §95 moved conversations to SQLite precisely so a failed index load could not
-take thirty threads with it. Without it they are back in `langgraph_runtime_inmem`'s pickle
-store — and upstream's `start_pool` **deletes the whole thread index on any load exception**, its
-own message naming the trigger as *"pulled updates that modified class definitions"*, which on
-this product **is the update path** (§218). "Deleted or never saved" is a literal description.
-
-`index_guard` *is* installed on that machine (the log confirms it), so a deleted index left a
-stamped copy beside it. That is recoverable evidence, not a fix.
-
-- [ ] **B.1** Make the failure observable. The `|| true` is right — a backend that starts beats
-      one that does not — but it must **record** what happened. A launch that could not install
-      the checkpointer should say so where the app can read it.
-- [ ] **B.2** Say it where a researcher is, not only in Setup. Running without SQLite means the
-      next backend update can lose their history; that deserves better than an optional-looking
-      amber row.
-- [ ] **B.3** Fix the Setup wording. It reads *"the pickle store — boot slows as history grows,
-      and a failed load can overwrite it"*. True but far too mild for **"an app update can delete
-      your conversation index"**, which is what §218 documents.
-- [ ] **B.4** Find out why the install failed on a root-owned WSL install specifically. Two
-      laptops, same installer, different outcome — that difference is the bug, and it is
-      reproducible on hardware Codex has.
-- [ ] **B.5** Check the join, not the part. Provisioning installs it, the launch re-checks, Setup
-      reports it — three correct mechanisms, and a machine still ran for weeks without
-      persistence because none of them could report failing.
+- [ ] **B.1** **One check, not three.** All three sites must ask the same question, and the honest
+      question is the strict one — `import langgraph.checkpoint.sqlite.aio`, since that is what
+      decides whether conversations are saved. A directory listing is not evidence that a module
+      imports. This is the defect: not a failed install, but three correct-looking checks with no
+      way to disagree out loud.
+- [ ] **B.2** A test that fails when they drift. Remove `aiosqlite` from a venv and the Setup row
+      must go red; today it stays green, which is exactly how this ran undetected.
+- [ ] **B.3** Make the launch install observable. `>/dev/null 2>&1 || true` is right that a boot
+      beats no boot and wrong that it may say nothing — a launch that could not provision the
+      checkpointer should leave something the app can read.
+- [ ] **B.4** Say it where a researcher is. "Your history is not being written" is not an amber
+      optional-looking row in a pane nobody opens.
+- [ ] **B.5** Fix the Setup wording. It reads *"the pickle store — boot slows as history grows,
+      and a failed load can overwrite it"*. On this laptop the truth was **nothing was being
+      saved at all**, which is a different sentence.
+- [ ] **B.6** Then find why `aiosqlite` is missing here and not on the other laptop. Same
+      installer, two outcomes — and reproducible on hardware Codex has.
 
 **One command settles the state of any install** (literal paths, no variables):
 
