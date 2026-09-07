@@ -286,6 +286,134 @@ toggle, reachable when a run goes wrong.
 
 ---
 
+## Reported from real installs — diagnosed here, not yet fixed
+
+Both found on 2026-09-07 from researcher logs. Evidence is written out so nobody re-derives it.
+
+### A. A model call that dies mid-stream ends the turn, and no retry can reach it
+
+**Seen:** paper finder, LENOVO laptop. `An internal error occurred — sidecar log: …`
+
+```
+16:34:36  tool_gate: academic_researcher has not searched yet — forcing find_papers
+16:34:50  find_papers('diversidad de papas en Paucartambo, Cusco') -> 10 paper(s)   ← worked
+16:34:53  POST openrouter.ai/api/v1/chat/completions "200 OK", stream opens
+          ...132 seconds of silence...
+16:37:05  openai.APIError: Upstream idle timeout exceeded          run_exec_ms=155228
+```
+
+The search succeeded. What died was the subagent's *next* model call — the one deciding what to
+do with those 10 papers. "Upstream idle timeout exceeded" is OpenRouter's own message: it proxies
+to an upstream model and cuts the stream when that upstream stops emitting. **Why the upstream
+went quiet for 132s is not established** — possibly prompt size after 10 papers, possibly their
+routing. Do not guess it in a fix.
+
+**`MODEL_MAX_RETRIES` cannot fire here, and raising it does nothing.** Verified in the installed
+SDK, not assumed:
+
+- the error is raised at `openai/_streaming.py:91`, **inside SSE iteration**, from an error
+  object the provider injected into an already-successful stream;
+- `_should_retry(self, response: httpx.Response)` decides purely on **status code**.
+
+The response was **200**. By the time the error arrives the request has long since returned. A
+correct retry guarding a different failure than the one that happens — `test-the-join` again.
+
+- [ ] **A.1** A retry at the **LangChain/agent** layer, not the SDK layer: catch a mid-stream
+      `APIError` and re-issue the call. Bounded, and it must say in the transcript that it
+      retried — a silent second call to a paid provider is the one thing this app does not do.
+- [ ] **A.2** Recognise the shape and say it. `TurnEvent::Error` currently appends the sidecar
+      path to langgraph's generic text, so a researcher reads 700 lines to learn their provider
+      timed out. *"The model provider timed out — the search completed, try again"* is actionable;
+      *"An internal error occurred"* is not.
+- [ ] **A.3** The turn dies after the expensive part. 10 papers were found and recorded into
+      `sources._seen`, which is an **in-memory dict** — no artifact survives for the researcher.
+      Whether a failed turn should keep what its tools already returned is a real design question,
+      not an obvious yes.
+
+### B. A second laptop was silently running without the SQLite checkpointer
+
+**Seen:** VHUALLA laptop, backend at `/root/.local/share/mini-me-desktop/backend` (root user in
+WSL). *"we could not reopen conversations. It seems these were deleted or never saved."*
+
+**Proven by comparing two logs.** The working laptop has four lines this one does not:
+
+```
+Configuring custom checkpointer at …/.desktop-overlay/minime_local/checkpointer.py:checkpointer
+Loading checkpointer …
+minime_local: conversations are stored in …/.langgraph_api/checkpoints.sqlite
+Using custom checkpointer: AsyncSqliteSaver
+```
+
+On the second laptop the log goes straight from `Starting In-Memory runtime` to
+`OTel metrics reporter initialized`. **No checkpointer was configured at all.**
+
+**Why.** `make_config.py:sqlite_available()` omits the `checkpointer` key when
+`import langgraph.checkpoint.sqlite.aio` fails — deliberately, so a missing optional dependency
+cannot stop the server booting. So `langgraph-checkpoint-sqlite` is not in that venv.
+
+**Why nobody was told.** `ensure_checkpointer_command()` runs at every launch and is:
+
+```
+{ .venv/bin/python -c 'import langgraph.checkpoint.sqlite' 2>/dev/null \
+  || uv pip install langgraph-checkpoint-sqlite ; } >/dev/null 2>&1 || true
+```
+
+`>/dev/null 2>&1 || true`. If that install fails — no network, a root-owned WSL install, `uv` not
+on PATH — **the failure is unobservable**. The backend starts, persistence is downgraded, and the
+only trace is a `Warn` row in Setup that its own comment says a researcher should never need to
+notice.
+
+**What it costs.** §95 moved conversations to SQLite precisely so a failed index load could not
+take thirty threads with it. Without it they are back in `langgraph_runtime_inmem`'s pickle
+store — and upstream's `start_pool` **deletes the whole thread index on any load exception**, its
+own message naming the trigger as *"pulled updates that modified class definitions"*, which on
+this product **is the update path** (§218). "Deleted or never saved" is a literal description.
+
+`index_guard` *is* installed on that machine (the log confirms it), so a deleted index left a
+stamped copy beside it. That is recoverable evidence, not a fix.
+
+- [ ] **B.1** Make the failure observable. The `|| true` is right — a backend that starts beats
+      one that does not — but it must **record** what happened. A launch that could not install
+      the checkpointer should say so where the app can read it.
+- [ ] **B.2** Say it where a researcher is, not only in Setup. Running without SQLite means the
+      next backend update can lose their history; that deserves better than an optional-looking
+      amber row.
+- [ ] **B.3** Fix the Setup wording. It reads *"the pickle store — boot slows as history grows,
+      and a failed load can overwrite it"*. True but far too mild for **"an app update can delete
+      your conversation index"**, which is what §218 documents.
+- [ ] **B.4** Find out why the install failed on a root-owned WSL install specifically. Two
+      laptops, same installer, different outcome — that difference is the bug, and it is
+      reproducible on hardware Codex has.
+- [ ] **B.5** Check the join, not the part. Provisioning installs it, the launch re-checks, Setup
+      reports it — three correct mechanisms, and a machine still ran for weeks without
+      persistence because none of them could report failing.
+
+**One command settles the state of any install** (literal paths, no variables):
+
+```
+wsl ls /root/.local/share/mini-me-desktop/backend/.venv/lib/python3.12/site-packages/langgraph/checkpoint/
+```
+
+`sqlite` present means persistence is on. And to see whether an index was ever rescued:
+
+```
+wsl ls -la /root/.local/share/mini-me-desktop/backend/.langgraph_api/
+```
+
+Files ending `.minime-rescued-<stamp>` are copies taken before upstream deleted the index.
+
+### C. Four fake tracebacks at every startup
+
+Starlette parses route docstrings as OpenAPI YAML. `collect_outside_files`, `start_sandbox`,
+`theorizer_status` and `get_project` all contain `: ` sequences YAML reads as mappings, so every
+boot logs four full `ScannerError` tracebacks. Nothing is broken. But the backend log is the
+diagnostic path for A and B above, and it opens with four stack traces that mean nothing.
+
+- [ ] **C.1** Reword the four docstrings so they parse — or stop feeding them to the schema
+      generator. Cheap, and it makes every future diagnosis easier.
+
+---
+
 ## Risks I am flagging rather than deciding
 
 - **Job 1 is the largest behavioural change in this app's history.** Removing WSL touches
