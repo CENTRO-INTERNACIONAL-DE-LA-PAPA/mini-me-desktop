@@ -473,6 +473,52 @@ diagnostic path for A and B above, and it opens with four stack traces that mean
 
 ---
 
+## D. `backend exited during startup with exit code: 15` — OPEN, and the logs could not say why
+
+**Seen:** VHUALLA laptop on v0.3.32, immediately after §303 made `make_config.py` run on machines
+where it never had. Setup all green, including *"SQLite — conversations are written to disk as they
+happen"*. Status bar: `backend exited during startup with exit code: 15`.
+
+**What the evidence rules out.** Running the app's own config by hand on that machine starts
+cleanly in 4.6 seconds — checkpointer loaded, `AsyncSqliteSaver` in use, both graphs imported,
+`Application started up in 4.636s`:
+
+```
+wsl bash -lc "cd /root/.local/share/mini-me-desktop/backend && .venv/bin/langgraph dev \
+  --host 127.0.0.1 --port 2025 --config .mini-me-desktop.langgraph.json --no-reload --no-browser"
+```
+
+So **the generated config is not the cause**, and neither is the checkpointer or the `background`
+graph — both were tested by importing them directly and both are fine. Three hypotheses about that
+machine were published before this and all three were wrong: the package was installed, `aiosqlite`
+was installed, the `.aio` import succeeds.
+
+**What is known.** Exit 15 is SIGTERM, and nothing in `langgraph dev` exits 15 on its own — the app
+terminated it. `stop()` is the only path that sends SIGTERM, and it is called from `Drop` and from
+restart. The app's health budget is 120 attempts at 500 ms, so a 60-second startup is not it.
+
+**Why it could not be diagnosed — fixed in §305, still the reason D is open.** Both logs were
+opened with `File::create`. Every spawn truncated the sidecar log, so the failing run's output was
+erased by the next attempt and the researcher's log held a single line. And two app instances each
+truncating the app log overwrote the other's regions, producing timestamps out of order — 16:22:20
+printed above 16:22:09 — which reads as impossible if taken for one process, and was.
+
+- [ ] **D.1** Re-collect both logs on that laptop now that they append and carry a spawn banner.
+      The question is what happens between `spawning backend sidecar` and the SIGTERM.
+- [ ] **D.2** Establish whether two app instances were running. The duplicate
+      `reusing the valid Asta token` lines and the impossible ordering both point that way, and a
+      second instance stopping the first one's backend would produce exactly this.
+- [ ] **D.3** If two instances is the cause, decide what the second one should do. Attaching to a
+      healthy backend is already the behaviour (`ensure_running`); terminating one that another
+      app is waiting on is not.
+
+**Not to be done before D.1:** reverting §303. The config is proven good on the affected machine,
+so a revert would remove the persistence fix without addressing this, and would put that laptop
+back to losing conversations silently. Turning **on** *"Let work run in the background"* is the
+workaround while this is open — it is what the working laptop does.
+
+---
+
 ## Risks I am flagging rather than deciding
 
 - **Job 1 is the largest behavioural change in this app's history.** Removing WSL touches

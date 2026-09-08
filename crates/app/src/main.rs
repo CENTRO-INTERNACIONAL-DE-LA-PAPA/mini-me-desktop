@@ -10663,7 +10663,12 @@ fn main() {
     // **Truncated, not appended.** The whole point is that a researcher told to read this file is
     // reading *this* launch. An appended log would have answered the question we actually asked
     // with lines from a run three days earlier, which is the failure one step removed.
-    let log = std::fs::File::create(app_log_path()).ok();
+    // **Appended, not truncated.** `File::create` here meant every launch erased the launch
+    // before it — and worse, two app instances truncating the same file overwrote each other's
+    // regions, producing a log with timestamps out of order (16:22:20 above 16:22:09) that reads
+    // as impossible if taken for one process. A researcher's failing run was unreadable for
+    // exactly this reason while its cause was being guessed at (§305).
+    let log = backend::open_log_appending(&app_log_path()).ok();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
