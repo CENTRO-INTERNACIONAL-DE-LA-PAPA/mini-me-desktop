@@ -551,6 +551,44 @@ fn launch_command_for(
     argv
 }
 
+/// Open a log for appending, keeping one previous file when it grows past the cap.
+///
+/// **Because `File::create` truncates, and that is how the evidence keeps disappearing.** Both
+/// logs this app writes were opened that way, and both destroyed the run before them:
+///
+/// - a researcher's backend log held a single line — a later spawn had wiped the failing one, and
+///   the answer to "why did it exit" was gone before anyone could read it;
+/// - an app log arrived with timestamps out of order (16:22:20 above 16:22:09), because two app
+///   instances had each truncated the same file and overwritten the other's region. Read as one
+///   process it says something impossible.
+///
+/// Appending fixes both: concurrent writers interleave instead of clobbering, and a spawn cannot
+/// erase the one before it. The cap is what makes that safe to leave on — past `LOG_MAX_BYTES` the
+/// file is rolled to `<name>.old`, so there is always at least one full previous run to read and
+/// never unbounded growth on a machine nobody administers (§305).
+pub fn open_log_appending(path: &std::path::Path) -> std::io::Result<File> {
+    if std::fs::metadata(path).is_ok_and(|meta| meta.len() > LOG_MAX_BYTES) {
+        // Best-effort: a failed roll must not cost the log itself, which is the whole point.
+        let _ = std::fs::rename(path, path.with_extension("old"));
+    }
+    std::fs::OpenOptions::new().create(true).append(true).open(path)
+}
+
+/// How large a log may grow before the previous one is rolled aside.
+///
+/// Eight megabytes holds many runs of an ordinarily quiet backend and is small enough that two of
+/// them are unremarkable in `%TEMP%`.
+const LOG_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Epoch milliseconds for the spawn banner.
+///
+/// Not a formatted date: this app carries no date library, and the banner's job is to separate one
+/// spawn from the next and line up against `provenance::now_ms`, which is the same clock. A reader
+/// comparing it to the tracing timestamps around it needs an ordering, not a calendar.
+fn now_stamp() -> String {
+    crate::provenance::now_ms().to_string()
+}
+
 /// Install the SQLite checkpointer if it is not already there.
 ///
 /// **Only ever on a checkout the app provisioned and owns.** Installing a package into someone
@@ -1217,12 +1255,26 @@ impl BackendSupervisor {
             "spawning backend sidecar"
         );
 
-        let log = File::create(&self.config.log_path).with_context(|| {
+        let log = open_log_appending(&self.config.log_path).with_context(|| {
             format!(
                 "could not open the sidecar log at {}",
                 self.config.log_path.display()
             )
         })?;
+        // **A banner, so two spawns in one file can be told apart.** Without it an appended log
+        // reads as one confusing run; with it the reader can find the last `spawning` line and
+        // know everything below it belongs to that attempt (§305).
+        {
+            use std::io::Write as _;
+            let mut banner = log.try_clone().context("could not dup the sidecar log")?;
+            let _ = writeln!(
+                banner,
+                "\n===== {} spawning {} on port {} =====",
+                now_stamp(),
+                self.config.location(),
+                self.config.port
+            );
+        }
         let log_err = log.try_clone().context("could not dup the sidecar log")?;
 
         let mut command = Command::new(program);
@@ -2318,6 +2370,60 @@ mod tests {
         // On the distro's own filesystem: a venv over /mnt/c is the placement that makes
         // everything feel broken.
         assert!(!owned_wsl_dir().starts_with("/mnt/"), "{}", owned_wsl_dir());
+    }
+
+    /// **A second launch does not erase the first one's log.**
+    ///
+    /// Both logs were opened with `File::create`, which truncates. Two failures came from that and
+    /// neither looked like a logging problem:
+    ///
+    /// - a researcher's backend log held one line, so "why did it exit with 15" had no evidence
+    ///   left to read — a later spawn had wiped it;
+    /// - an app log arrived with timestamps out of order, 16:22:20 printed above 16:22:09, because
+    ///   two app instances had each truncated the same file and overwritten the other's region.
+    ///   Read as one process it describes something that cannot happen, and it was read that way.
+    ///
+    /// The cap is what makes appending safe to leave on: past `LOG_MAX_BYTES` the file rolls to
+    /// `.old`, so a previous run always survives and nothing grows without bound (§305).
+    #[test]
+    fn a_second_launch_keeps_what_the_first_one_wrote() {
+        use std::io::Write as _;
+        let dir = std::env::temp_dir().join(format!("minime-log-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch");
+        let path = dir.join("sidecar.log");
+
+        {
+            let mut first = open_log_appending(&path).expect("first open");
+            writeln!(first, "the failing run said this").expect("write");
+        }
+        {
+            let mut second = open_log_appending(&path).expect("second open");
+            writeln!(second, "and then it was spawned again").expect("write");
+        }
+
+        let kept = std::fs::read_to_string(&path).expect("read");
+        assert!(
+            kept.contains("the failing run said this"),
+            "the second open erased the evidence: {kept:?}"
+        );
+        assert!(kept.contains("and then it was spawned again"), "{kept:?}");
+
+        // **Past the cap, one previous file survives — the run is not simply dropped.** A rotation
+        // that deleted instead of renaming would be the same defect wearing a limit.
+        std::fs::write(&path, vec![b'x'; (LOG_MAX_BYTES + 1) as usize]).expect("grow");
+        {
+            let mut after = open_log_appending(&path).expect("open after the cap");
+            writeln!(after, "fresh").expect("write");
+        }
+        let rolled = path.with_extension("old");
+        assert!(rolled.is_file(), "the oversized log must roll aside, not vanish");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read").trim(),
+            "fresh",
+            "the live log starts clean once it has rolled"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// **The release check accepts what the packager ships.**
