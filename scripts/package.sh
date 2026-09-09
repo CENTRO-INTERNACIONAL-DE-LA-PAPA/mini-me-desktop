@@ -9,9 +9,9 @@
 #
 #   dist/mini-me-desktop/
 #     mini-me-desktop-app(.exe)   the app
-#     overlay/                    host execution (docs §18)
 #     scripts/                    setup-wsl.sh, run from the Setup pane
-#     mini-me/                    the backend, so no GitHub account is needed
+#     mini-me/                    the backend, so no GitHub account is needed —
+#                                 host execution lives in mini-me/backend/local/ (docs §303)
 #
 # `resource()` in backend.rs looks beside the executable first, which is what makes this
 # layout work without any configuration.
@@ -61,7 +61,7 @@ mkdir -p "$OUT"
 cp "$BIN" "$OUT/"
 ok "$(basename "$BIN") ($(du -h "$BIN" | cut -f1))"
 
-for dir in overlay scripts; do
+for dir in scripts; do
   cp -r "$ROOT/$dir" "$OUT/$dir"
   ok "$dir/"
 done

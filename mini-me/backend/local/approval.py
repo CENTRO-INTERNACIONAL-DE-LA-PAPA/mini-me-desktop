@@ -7,7 +7,7 @@ explicit that nothing constrains it. CIP policy is human-gated, and deepagents
 recommends HITL for exactly this backend.
 
 So every `execute` call stops and waits for the person. This is what makes host
-execution safe enough to be the default (desktop plan §19).
+execution safe enough to be the only mode.
 
 Mini-Me already uses this mechanism — `diagnostic_analytics` interrupts on
 `request_diagnostic_context` — so the shape is upstream's, not something invented here:
@@ -23,11 +23,10 @@ import os
 #: The tool that runs shell commands on this machine.
 EXECUTE_TOOL = "execute"
 
-#: Set to `0` to run host execution unattended. Off-label: the whole reason host
-#: execution is allowed to be the default is that this is on.
+#: Set to `0` to run host execution unattended.
 APPROVAL_ENV = "MINIME_APPROVE_EXECUTE"
 
-log = logging.getLogger("minime_local")
+log = logging.getLogger("backend.local")
 
 
 def approval_requested() -> bool:
@@ -84,14 +83,14 @@ def install(deepagents_module) -> None:
     One patch point covers both levels, because the coordinator's own gate and the
     subagents' gates are both arguments to that single call.
 
-    Wrapped on the ``deepagents`` package rather than on ``backend.agent``: LangGraph
-    loads the graph module from a file path, so that module never passes through the
-    import hook. ``backend/agent.py`` does ``from deepagents import create_deep_agent``,
-    so patching the package attribute before that import is what takes effect.
+    Wrapped on the ``deepagents`` package rather than on ``backend.agent``, and called
+    explicitly from ``backend.local.install()`` before ``backend/agent.py``'s own
+    ``from deepagents import create_deep_agent`` import — patching the package
+    attribute first is what that import picks up.
     """
     if not approval_requested():
         log.warning(
-            "minime_local: execute approval is OFF (%s) — commands run unreviewed",
+            "backend.local: execute approval is OFF (%s) — commands run unreviewed",
             APPROVAL_ENV,
         )
         return
@@ -99,9 +98,8 @@ def install(deepagents_module) -> None:
     original = getattr(deepagents_module, "create_deep_agent", None)
     if original is None:
         raise RuntimeError(
-            "minime_local: deepagents has no create_deep_agent to wrap — the pinned "
-            "deepagents version has moved and overlay/minime_local needs updating "
-            "(desktop plan §19)."
+            "backend.local: deepagents has no create_deep_agent to wrap — the pinned "
+            "deepagents version has moved and backend/local needs updating."
         )
 
     def create_deep_agent_with_approval(*args, **kwargs):
@@ -111,4 +109,4 @@ def install(deepagents_module) -> None:
         return original(*args, **kwargs)
 
     deepagents_module.create_deep_agent = create_deep_agent_with_approval
-    log.warning("minime_local: every `execute` call will wait for your approval")
+    log.warning("backend.local: every `execute` call will wait for your approval")

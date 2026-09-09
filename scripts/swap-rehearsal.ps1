@@ -20,8 +20,7 @@ Write-Host "=== a throwaway install under $base ===" -ForegroundColor Cyan
 Remove-Item -Recurse -Force $base -ErrorAction SilentlyContinue
 Remove-Item -Force $out, $err -ErrorAction SilentlyContinue
 foreach ($d in @(
-    'mini-me-desktop\overlay', 'mini-me-desktop\scripts', 'mini-me-desktop\vendor',
-    '.mini-me-update-9.9.9\mini-me-desktop\overlay',
+    'mini-me-desktop\scripts', 'mini-me-desktop\vendor',
     '.mini-me-update-9.9.9\mini-me-desktop\scripts',
     '.mini-me-update-9.9.9\mini-me-desktop\vendor')) {
   New-Item -ItemType Directory -Force -Path (Join-Path $base $d) | Out-Null

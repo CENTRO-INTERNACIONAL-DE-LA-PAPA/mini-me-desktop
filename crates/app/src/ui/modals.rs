@@ -352,27 +352,17 @@ impl Workbench {
         }
 
         // **Where code runs, as this install is actually configured.** The web app's About says
-        // every conversation runs in an isolated LangSmith sandbox. On this app that is usually
-        // false: host execution is the default, because a local-first workbench shipping the
-        // researcher's own files to a rented VM to be read was the wrong shape (docs §11). Saying
-        // the reassuring thing regardless is the defect this repo has already reported upstream
-        // in `guardrails.py`, and it would be worse to repeat it here, in the document that
-        // explains the product.
-        let execution = if self.sidecar.runs_locally() {
-            (
-                "Runs on this machine",
-                "Python and shell code the agent writes execute here, with your permissions, in \
-                 this conversation's folder under Documents\\Mini-Me. Commands that touch your \
-                 system stop for your approval first.",
-            )
-        } else {
-            (
-                "Runs in an isolated sandbox",
-                "Python and shell code the agent writes execute in a LangSmith sandbox rather \
-                 than on this machine. Files it produces are copied back into this \
-                 conversation's folder.",
-            )
-        };
+        // every conversation runs in an isolated LangSmith sandbox; this app always runs code on
+        // the host instead, because a local-first workbench shipping the researcher's own files
+        // to a rented VM to be read was the wrong shape (docs §11). Saying the reassuring thing
+        // regardless is the defect this repo has already reported upstream in `guardrails.py`,
+        // and it would be worse to repeat it here, in the document that explains the product.
+        let execution = (
+            "Runs on this machine",
+            "Python and shell code the agent writes execute here, with your permissions, in \
+             this conversation's folder under Documents\\Mini-Me. Commands that touch your \
+             system stop for your approval first.",
+        );
 
         let body = div()
             .flex()

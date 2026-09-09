@@ -11,7 +11,7 @@ from pathlib import PurePosixPath
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
-from backend.sandbox import LazyLangsmithSandbox
+from backend.local.workspace import LocalWorkspaceBackend
 from backend.schemas import _is_supported_artifact_file
 from backend.autodiscovery_tools import (
     MetadataNotSaved,
@@ -125,7 +125,7 @@ async def upload_artifact_file(request: Request) -> Response:
             {"error": f"file exceeds {MAX_UPLOAD_BYTES} bytes"}, status_code=413
         )
 
-    adapter = LazyLangsmithSandbox(thread_id)
+    adapter = LocalWorkspaceBackend(thread_id)
     await adapter.aresolve()  # create-if-missing is intended for uploads
     work_dir = PurePosixPath(await adapter.aget_work_dir())
     abs_path = work_dir / safe_name
@@ -175,7 +175,7 @@ async def start_sandbox(request: Request) -> Response:
     if not thread_id:
         return JSONResponse({"error": "missing thread_id"}, status_code=400)
 
-    adapter = LazyLangsmithSandbox(thread_id)
+    adapter = LocalWorkspaceBackend(thread_id)
     try:
         resumed = await adapter.aresume()
     except Exception as exc:  # noqa: BLE001
@@ -564,16 +564,9 @@ async def collect_outside_files(request: Request) -> Response:
     if not thread_id:
         return JSONResponse({"error": "missing thread_id"}, status_code=400)
 
-    try:
-        from minime_local import ledger
-    except ImportError:
-        # The overlay is desktop-only. A sandboxed deployment has no local files to collect, and
-        # saying so beats a 500 that reads like a bug.
-        return JSONResponse(
-            {"error": "collecting local files needs the desktop overlay"}, status_code=501
-        )
+    from backend.local import ledger
 
-    adapter = LazyLangsmithSandbox(thread_id)
+    adapter = LocalWorkspaceBackend(thread_id)
     try:
         work_dir = await adapter.aget_work_dir()
     except Exception as exc:  # noqa: BLE001
@@ -620,7 +613,7 @@ async def delete_sandbox(request: Request) -> Response:
     if not thread_id:
         return JSONResponse({"error": "missing thread_id"}, status_code=400)
 
-    adapter = LazyLangsmithSandbox(thread_id)
+    adapter = LocalWorkspaceBackend(thread_id)
     try:
         existed = await adapter.adelete()
     except Exception as exc:  # noqa: BLE001

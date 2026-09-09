@@ -6,9 +6,8 @@ With this, the coordinator can hand a whole piece of work to a *background Mini-
 so, and hand control straight back. You keep asking questions while it runs.
 
 **Why it needs no fork.** `deepagents.AsyncSubAgentMiddleware` wants each async subagent to
-be a **graph on the Agent Protocol server**, and Mini-Me declares one graph — which looked
-like a structural upstream change (docs §14). Three measured facts made it an *extension*
-instead:
+be a **graph on the Agent Protocol server**, and Mini-Me declares one graph. Three measured
+facts make it an *extension* instead:
 
 1. `AsyncSubAgent` is a **reference** — `{name, description, graph_id, url}` — and
    `url=None` selects the in-process ASGI transport, so no network hop, no second server
@@ -26,10 +25,8 @@ that becomes merge debt the first time upstream changes. Delegating to a backgro
 *coordinator* reuses upstream's own assembly verbatim, and is strictly more capable: the
 worker can chain subagents, run its own analysis and write a report.
 
-This works in our deployment specifically because execution is **local** (docs §19): the
-background worker shares the researcher's filesystem, so files it writes are simply there.
-Under the remote sandbox each thread gets its own, and results would land somewhere the
-user's thread cannot see.
+This works because execution is **local**: the background worker shares the researcher's
+filesystem, so files it writes are simply there.
 """
 
 from __future__ import annotations
@@ -40,7 +37,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 # The graph id our generated config registers for background work. Must match the id the
-# desktop app writes into `langgraph.json` (`backend.rs: async_graph_config`).
+# desktop app writes into `langgraph.json` (`crates/app/src/backend.rs`).
 BACKGROUND_GRAPH_ID = "background"
 
 # Set while a *background* coordinator is being constructed.
@@ -49,7 +46,7 @@ BACKGROUND_GRAPH_ID = "background"
 # spawn another background worker, and so on. One level of delegation is the feature; a
 # tree of them is a runaway that bills the user's model key.
 _BUILDING_BACKGROUND: contextvars.ContextVar[bool] = contextvars.ContextVar(
-    "minime_local_building_background", default=False
+    "backend_local_building_background", default=False
 )
 
 
@@ -58,9 +55,9 @@ _BUILDING_BACKGROUND: contextvars.ContextVar[bool] = contextvars.ContextVar(
 #: The `ContextVar` above is set around the factory call and is the primary guard. This is a
 #: second, independent one, and it exists because the first is silent when it works: a worker that
 #: was handed `start_async_task` anyway looks exactly like one that was not, right up until it
-#: spawns another worker (docs §114). This signal travels *in the run's config*, which is the same
-#: place the model and the workspace come from, so it cannot be lost to a context that did not
-#: propagate across an `await`.
+#: spawns another worker. This signal travels *in the run's config*, which is the same place the
+#: model and the workspace come from, so it cannot be lost to a context that did not propagate
+#: across an `await`.
 BACKGROUND_RUN_KEY = "__is_background__"
 
 
@@ -114,11 +111,9 @@ async def background_graph(config):
     **`config` is not optional and must be passed on.** `backend/agent.py` declares
     `async def agent(config: RunnableConfig)`, and that argument is the whole reason this
     app works: `_build_model_resolver(config)` reads the model and key out of it. Calling
-    it with no argument — which this did, for three rounds — raises `TypeError` while the
-    graph is being *constructed*, so the run dies before any checkpoint exists. That is
-    why the failure had no error to read anywhere: there was no state to record it in, and
-    the middleware's "The async subagent encountered an error" was all that survived
-    (docs §39).
+    it with no argument raises `TypeError` while the graph is being *constructed*, so the
+    run dies before any checkpoint exists — which is why such a failure has no error to
+    read anywhere: there is no state to record it in.
 
     The parameter is deliberately unannotated. The dev server classifies a factory by its
     signature and hands a lone un-annotated parameter the `RunnableConfig`
@@ -135,7 +130,7 @@ async def background_graph(config):
     wants_config = bool(inspect.signature(upstream_agent).parameters)
     if not wants_config:
         logger.warning(
-            "minime_local: backend.agent.agent takes no config — background work cannot "
+            "backend.local: backend.agent.agent takes no config — background work cannot "
             "be handed the researcher's model and key"
         )
 
@@ -149,10 +144,10 @@ async def background_graph(config):
 def install(deepagents_module) -> None:
     """Give every coordinator the background-work tools.
 
-    Wrapped on the ``deepagents`` package, for the same reason the approval gate is:
+    Wrapped on the ``deepagents`` package, called explicitly from `backend.local.install()`:
     LangGraph loads the graph module from a file path, so `backend/agent.py` never passes
-    through the import hook — but its ``from deepagents import create_deep_agent`` does
-    read the package attribute we set here (docs §18).
+    through an import hook — but its ``from deepagents import create_deep_agent`` does
+    read the package attribute we set here.
 
     Chains cleanly with the approval wrapper: whichever installs second wraps the first,
     and both effects apply.
@@ -161,7 +156,7 @@ def install(deepagents_module) -> None:
         return
     original = getattr(deepagents_module, "create_deep_agent", None)
     if original is None:
-        logger.warning("minime_local: no create_deep_agent to wrap for async subagents")
+        logger.warning("backend.local: no create_deep_agent to wrap for async subagents")
         return
 
     def create_deep_agent_with_background(*args, **kwargs):
@@ -171,7 +166,7 @@ def install(deepagents_module) -> None:
         return original(*args, **kwargs)
 
     deepagents_module.create_deep_agent = create_deep_agent_with_background
-    logger.warning("minime_local: background work is available to the coordinator")
+    logger.warning("backend.local: background work is available to the coordinator")
 
 
 def enabled() -> bool:
@@ -197,15 +192,15 @@ def middleware_for(deepagents_module):
         # **Said out loud.** One level of delegation is the feature; a worker that can spawn
         # workers is a runaway on the researcher's own model key, and the difference between the
         # guard working and the guard being bypassed was previously invisible — both produce a
-        # coordinator that starts, and only one of them produces a tree (docs §114).
+        # coordinator that starts, and only one of them produces a tree.
         logger.warning(
-            "minime_local: background worker built WITHOUT start_async_task, as intended"
+            "backend.local: background worker built WITHOUT start_async_task, as intended"
         )
         return None
     factory = getattr(deepagents_module, "AsyncSubAgentMiddleware", None)
     if factory is None:
         logger.warning(
-            "minime_local: this deepagents has no AsyncSubAgentMiddleware; "
+            "backend.local: this deepagents has no AsyncSubAgentMiddleware; "
             "background work is unavailable"
         )
         return None
@@ -214,7 +209,7 @@ def middleware_for(deepagents_module):
         return _forwarding_config(factory(async_subagents=specs), specs)
     except Exception as exc:  # noqa: BLE001
         # A preview API that changed shape must not take the whole agent down with it.
-        logger.warning("minime_local: could not build AsyncSubAgentMiddleware: %s", exc)
+        logger.warning("backend.local: could not build AsyncSubAgentMiddleware: %s", exc)
         return None
 
 
@@ -225,10 +220,9 @@ def middleware_for(deepagents_module):
 # thread and corrupt it.
 #
 # `__workspace_project__` is here for the same reason the thread pin below is: it decides which
-# directory the worker writes into. Left out — as it was when projects shipped (docs §105) — a
-# background worker pinned to the conversation's thread still wrote to the *root*, so its report
-# landed outside the project whose conversation asked for it, and the app looked for it inside
-# (docs §111).
+# directory the worker writes into. Left out, a background worker pinned to the conversation's
+# thread still wrote to the *root*, so its report landed outside the project whose conversation
+# asked for it.
 FORWARDED_CONFIG_KEYS = (
     "model_config",
     "__llm_keys",
@@ -240,7 +234,7 @@ FORWARDED_CONFIG_KEYS = (
 #
 # LangGraph's default is 25 supersteps and a Mini-Me coordinator spends ~22 on middleware
 # alone before it delegates anything, so a background worker started at the default fails
-# almost immediately. Same value the desktop app and the web frontend send (docs §37).
+# almost immediately. Same value the desktop app and the web frontend send.
 BACKGROUND_RECURSION_LIMIT = 10_000
 
 
@@ -268,9 +262,9 @@ def _conversation_thread(config: dict, configurable: dict) -> tuple[str, str]:
     Returns ``("", "nothing")`` when no source has it, which the caller reports rather than
     swallowing.
     """
-    # Imported here, as the caller does: `minime_local.workspace` pulls in deepagents, and this
+    # Imported here, as the caller does: `backend.local.workspace` pulls in deepagents, and this
     # module is imported during graph construction where that is not yet guaranteed.
-    from minime_local.workspace import WORKSPACE_THREAD_KEY
+    from backend.local.workspace import WORKSPACE_THREAD_KEY
 
     pin = str(configurable.get(WORKSPACE_THREAD_KEY) or "").strip()
     if pin:
@@ -296,10 +290,10 @@ def _report_what_the_worker_will_bill(forwarded: dict) -> None:
     library falls back to its default host. On OpenRouter that means every background request goes
     to `api.openai.com` and comes back as *"You have no credits remaining"* pointing at an OpenAI
     billing page the researcher has never used — while the same conversation chats happily,
-    because the coordinator's own turns carry the config directly (§211).
+    because the coordinator's own turns carry the config directly.
 
-    That is §187 again, one layer down: a specialist billed to an account nobody chose, and the
-    only symptom arriving minutes later inside a worker.
+    A specialist billed to an account nobody chose, one layer down: the only symptom arrives
+    minutes later inside a worker.
 
     **Never the key itself.** Provider names, the model spec, and whether a `base_url` came with
     each — which is exactly enough to tell "went to the wrong host" from "had no key at all", and
@@ -309,9 +303,9 @@ def _report_what_the_worker_will_bill(forwarded: dict) -> None:
     spec = (forwarded.get("model_config") or {}).get("default")
     if not keys:
         logger.warning(
-            "minime_local: background work is starting with NO provider keys (model %s) — its "
+            "backend.local: background work is starting with NO provider keys (model %s) — its "
             "requests will go wherever the client library defaults to, which is not where the "
-            "conversation goes (docs §211)",
+            "conversation goes",
             spec or "<none>",
         )
         return
@@ -320,15 +314,14 @@ def _report_what_the_worker_will_bill(forwarded: dict) -> None:
         for provider, entry in sorted(keys.items())
     )
     logger.warning(
-        "minime_local: background work will bill %s, model %s", described, spec or "<none>"
+        "backend.local: background work will bill %s, model %s", described, spec or "<none>"
     )
 
     # **A provider a spec names and no key covers is a guaranteed failure, minutes early.**
-    # `§186` refuses a *turn* whose coordinator has no key; a specialist pointed at a second
-    # provider with none still saves, and the first anyone hears of it is a 429 from a billing
-    # account they never chose, raised inside a worker. The set is knowable right here, before the
-    # run starts, and it is the difference between a diagnosable failure and "the subagent
-    # encountered an error" (docs §211).
+    # A specialist pointed at a second provider with none still saves, and the first anyone hears
+    # of it is a 429 from a billing account they never chose, raised inside a worker. The set is
+    # knowable right here, before the run starts, and it is the difference between a diagnosable
+    # failure and "the subagent encountered an error".
     model_config = forwarded.get("model_config") or {}
     referenced = {_provider_of(model_config.get("default"))}
     referenced.update(
@@ -337,9 +330,9 @@ def _report_what_the_worker_will_bill(forwarded: dict) -> None:
     missing = sorted(name for name in referenced if name and name not in keys)
     if missing:
         logger.warning(
-            "minime_local: background work names %s and carries no key for %s — those requests "
+            "backend.local: background work names %s and carries no key for %s — those requests "
             "will fail inside the worker, on whatever host the client library defaults to, which "
-            "is how a 429 arrives from a billing account nobody chose (docs §211)",
+            "is how a 429 arrives from a billing account nobody chose",
             ", ".join(missing),
             "it" if len(missing) == 1 else "them",
         )
@@ -364,8 +357,8 @@ def _forwarded_config(runtime_config: dict | None = None) -> dict:
     input=…)` and passes **no config at all**. For a hosted deployment that is fine — the
     server holds the keys and the defaults suit it. Here it is fatal twice over:
 
-    * the model and its key travel *in the request* (docs §20), so a config-less run has
-      neither and cannot construct a model;
+    * the model and its key travel *in the request*, so a config-less run has neither and
+      cannot construct a model;
     * `recursion_limit` falls back to 25, and this background worker is a whole
       coordinator — it burns most of that on middleware before doing any work.
 
@@ -373,7 +366,7 @@ def _forwarded_config(runtime_config: dict | None = None) -> dict:
     researcher picked, with exactly the budget their own turns get. `ToolRuntime.config` is the
     first source because it crosses the tool boundary explicitly. `get_config()` is only the
     compatibility fallback; it has already been empty in a real launch while the runtime still
-    carried the thread id (§301).
+    carried the thread id.
     """
     config = runtime_config or {}
     if not config:
@@ -383,7 +376,7 @@ def _forwarded_config(runtime_config: dict | None = None) -> dict:
             config = get_config() or {}
         except Exception as exc:  # noqa: BLE001  # no runnable context, or an SDK change
             logger.warning(
-                "minime_local: no live run config to forward to background work: %s", exc
+                "backend.local: no live run config to forward to background work: %s", exc
             )
             config = {}
 
@@ -393,10 +386,9 @@ def _forwarded_config(runtime_config: dict | None = None) -> dict:
     # Share the conversation's workspace. Note this is *not* forwarding `thread_id` — that
     # would point the run itself at the wrong thread and corrupt it. It is a separate key
     # read only when choosing a directory, so the worker's files land where the researcher
-    # and the coordinator already look (docs §43). An existing pin wins, so a worker
-    # started by a worker still writes to the conversation's folder rather than its
-    # parent's.
-    from minime_local.workspace import WORKSPACE_THREAD_KEY
+    # and the coordinator already look. An existing pin wins, so a worker started by a worker
+    # still writes to the conversation's folder rather than its parent's.
+    from backend.local.workspace import WORKSPACE_THREAD_KEY
 
     pinned, source = _conversation_thread(config, configurable)
     if pinned:
@@ -404,9 +396,9 @@ def _forwarded_config(runtime_config: dict | None = None) -> dict:
     # Said either way, because the two outcomes were indistinguishable and the failing one is
     # silent by construction: an unpinned worker writes to a directory that exists, fills it
     # correctly, and reports paths under the conversation instead. The researcher is told their
-    # plots were saved, opens the folder, and finds nothing (docs §150).
+    # plots were saved, opens the folder, and finds nothing.
     logger.warning(
-        "minime_local: background work pinned to %s (from %s)",
+        "backend.local: background work pinned to %s (from %s)",
         pinned or "<the worker's own thread — its files will not join the conversation>",
         source,
     )
@@ -415,7 +407,7 @@ def _forwarded_config(runtime_config: dict | None = None) -> dict:
         # model it could not build. This line is the difference between a diagnosable
         # failure and "The async subagent encountered an error".
         logger.warning(
-            "minime_local: starting background work with no model config — "
+            "backend.local: starting background work with no model config — "
             "the worker will fall back to the server default and may not have a key"
         )
     _report_what_the_worker_will_bill(forwarded)
@@ -442,7 +434,7 @@ def _forwarding_config(middleware, specs: list[dict]):
     )
     if index is None:
         logger.warning(
-            "minime_local: no start_async_task tool to wrap; background work will run "
+            "backend.local: no start_async_task tool to wrap; background work will run "
             "on the server's default model and recursion limit"
         )
         return middleware
@@ -466,15 +458,14 @@ def _forwarding_config(middleware, specs: list[dict]):
         # request, including read-only ones with no model in them.
         forwarded = _forwarded_config(getattr(runtime, "config", None))
         # Mark the run as a background worker, so the graph it builds knows what it is without
-        # depending on a ContextVar surviving the trip (docs §114).
+        # depending on a ContextVar surviving the trip.
         forwarded.setdefault("configurable", {})[BACKGROUND_RUN_KEY] = True
         configurable = forwarded.get("configurable") or {}
         # **Named on the way out.** A background run that starts without a model reports
         # `success` with an empty result, which is indistinguishable from one that ran and found
-        # nothing — and that ambiguity is exactly what cost §81 four rounds. Keys only; a value
-        # here would be an API key in a log file.
+        # nothing. Keys only; a value here would be an API key in a log file.
         logger.warning(
-            "minime_local: launching %s with config keys %s, recursion_limit=%s",
+            "backend.local: launching %s with config keys %s, recursion_limit=%s",
             subagent_type,
             sorted(configurable) or "NONE — the worker will have no model",
             forwarded.get("recursion_limit"),
@@ -490,7 +481,7 @@ def _forwarding_config(middleware, specs: list[dict]):
                 config=forwarded,
             )
         except Exception as exc:  # noqa: BLE001  # the LangGraph SDK raises untyped errors
-            logger.warning("minime_local: failed to launch background work: %s", exc)
+            logger.warning("backend.local: failed to launch background work: %s", exc)
             return f"Failed to launch async subagent '{subagent_type}': {exc}"
 
         # The middleware keys tasks by thread id, and `check_async_task` looks them up
@@ -536,14 +527,14 @@ def _forwarding_config(middleware, specs: list[dict]):
             args_schema=original.args_schema,
         )
     except Exception as exc:  # noqa: BLE001
-        logger.warning("minime_local: could not wrap start_async_task: %s", exc)
+        logger.warning("backend.local: could not wrap start_async_task: %s", exc)
         return middleware
 
     middleware.tools = tools
     # `info`, and worded as what it is. This runs on **every graph build** — including the
     # read-only ones behind `GET /threads/{id}/state`, which the client polls while watching a
-    # task — so at warning level it filled the log with a sentence that reads like an event and
-    # was only ever a wiring step. The line that matters is in the tool itself, where a launch
-    # actually happens (docs §112).
-    logger.info("minime_local: start_async_task will forward the conversation's config")
+    # task — so at warning level it would fill the log with a sentence that reads like an event
+    # and is only ever a wiring step. The line that matters is in the tool itself, where a launch
+    # actually happens.
+    logger.info("backend.local: start_async_task will forward the conversation's config")
     return middleware

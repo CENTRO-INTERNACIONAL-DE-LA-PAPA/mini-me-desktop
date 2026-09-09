@@ -47,7 +47,7 @@ from backend.theory_tools import generate_theories
 if TYPE_CHECKING:
     from backend.middleware import FileSyncMiddleware
     from backend.models import _ModelResolver
-    from backend.sandbox import LazyLangsmithSandbox
+    from backend.local.workspace import LocalWorkspaceBackend
 
 
 academic_subagent = {
@@ -687,7 +687,7 @@ def _build_runtime_subagents(
     datavoyager_tools: list[Any],
     discovery_tools: list[Any],
     file_sync: "FileSyncMiddleware",
-    sandbox_backend: "LazyLangsmithSandbox",
+    sandbox_backend: "LocalWorkspaceBackend",
     model_resolver: "_ModelResolver",
     subagent_overrides: dict[str, str],
 ) -> list[dict[str, Any]]:

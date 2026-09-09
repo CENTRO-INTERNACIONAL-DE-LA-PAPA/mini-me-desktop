@@ -1,16 +1,16 @@
 """Record which subagents the coordinator was actually built with.
 
-**Why the desktop app needs this.** `/subagent` commands (docs §55) let a researcher name the
-specialist they want instead of hoping the coordinator delegates to it. Naming one requires a
-list of what can be named, and §55 was explicit that the list must come from the backend rather
-than be hardcoded in the client — a copy would drift the first time upstream renames a subagent,
-and the failure would be a command that silently does nothing.
+**Why the desktop app needs this.** `/subagent` commands let a researcher name the specialist
+they want instead of hoping the coordinator delegates to it. Naming one requires a list of what
+can be named, and the list must come from the backend rather than be hardcoded in the client — a
+copy would drift the first time a subagent is renamed, and the failure would be a command that
+silently does nothing.
 
 **Why it is captured here rather than served over HTTP.** The obvious move is a `GET /subagents`
 route. It does not work: `langgraph.json` mounts `http.app` from a *file path*
-(`./backend/routes/__init__.py:app`), and file-path loading bypasses `sys.meta_path` entirely —
-the same trap documented in `minime_local/__init__.py`, which is why the approval patch had to
-move to the `deepagents` package. A route added by an import hook would never be mounted.
+(`./backend/routes/__init__.py:app`), and file-path loading bypasses `sys.meta_path` entirely — a
+route added by an import hook would never be mounted. Wrapped on `deepagents.create_deep_agent`
+instead, called explicitly from `backend.local.install()`.
 
 **Why capturing the call is better than reading the file.** `backend/subagents.py` has a module
 level list, and parsing it would be one more thing to keep in sync. But the coordinator is
@@ -19,8 +19,8 @@ actually be delegated to. Reading the kwarg the factory was called with reports 
 including anything upstream adds or assembles conditionally.
 
 The file lands beside the researcher's own work, in the workspace root the desktop app already
-shares with this process (`MINIME_LOCAL_WORKSPACE`) — the same directory figures appear in
-(docs §42), so no new path has to be agreed between the two sides.
+shares with this process (`MINIME_LOCAL_WORKSPACE`) — the same directory figures appear in, so no
+new path has to be agreed between the two sides.
 """
 
 from __future__ import annotations
@@ -74,23 +74,16 @@ def describe(subagents: Any) -> list[dict[str, str]]:
 
 
 def install(deepagents_module) -> None:
-    """Record the registry on every coordinator build, whatever else is switched on.
+    """Record the registry on every coordinator build.
 
-    **Its own wrapper on purpose.** This started out folded into the background-work wrapper in
-    `async_agents.install`, which returns early unless `MINIME_ASYNC_SUBAGENTS` is set — the
-    "Let work run in the background" setting, off by default. So the list was never written, and
-    the `/name` picker said "no specialist list yet" after any number of ordinary questions
-    (docs §78). Naming what can be delegated to has nothing to do with whether work may run in
-    the background, and it must not inherit that switch.
-
-    Wrapped on the `deepagents` package for the same reason the other two are: LangGraph loads
-    the graph module by file path, so `backend/agent.py` never passes through the import hook,
-    but its `from deepagents import create_deep_agent` does read the attribute set here
-    (docs §18). Chains cleanly — every wrapper calls whatever was current when it installed.
+    Wrapped on the `deepagents` package, called explicitly from `backend.local.install()`:
+    LangGraph loads the graph module by file path, so `backend/agent.py` never passes through an
+    import hook, but its `from deepagents import create_deep_agent` does read the attribute set
+    here. Chains cleanly — every wrapper calls whatever was current when it installed.
     """
     original = getattr(deepagents_module, "create_deep_agent", None)
     if original is None:
-        logger.warning("minime_local: no create_deep_agent to wrap for the subagent registry")
+        logger.warning("backend.local: no create_deep_agent to wrap for the subagent registry")
         return
 
     def create_deep_agent_recording_subagents(*args, **kwargs):
@@ -98,12 +91,8 @@ def install(deepagents_module) -> None:
         return original(*args, **kwargs)
 
     deepagents_module.create_deep_agent = create_deep_agent_recording_subagents
-    # Logged on *success*, like every other installer in this overlay. Without it a wrapper
-    # that installed and one that never ran look identical in the log — which is precisely
-    # what happened: three `minime_local` lines, none of them this one, and no way to tell
-    # whether the code was absent, skipped, or working and writing somewhere else (docs §81).
     logger.warning(
-        "minime_local: the subagent registry will be written to %s",
+        "backend.local: the subagent registry will be written to %s",
         os.path.join(os.getenv("MINIME_LOCAL_WORKSPACE", "<unset>"), FILENAME),
     )
 
@@ -116,7 +105,7 @@ def _write(path: str, payload: dict) -> None:
     with open(temporary, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2)
     os.replace(temporary, path)
-    logger.warning("minime_local: recorded %d subagents in %s", len(payload["subagents"]), path)
+    logger.warning("backend.local: recorded %d subagents in %s", len(payload["subagents"]), path)
 
 
 def record(subagents: Any) -> None:
@@ -124,10 +113,10 @@ def record(subagents: Any) -> None:
 
     **Never on the event loop.** `create_deep_agent` is called from inside
     `async def agent(config)`, and the LangGraph dev server installs a guard that raises on
-    blocking I/O there — *"Blocking call to os.mkdir"*, which is precisely what this did on its
-    first real turn (docs §81). The guard is right: a synchronous write on the loop stalls health
-    checks and every other run in the process. So the file is written in a worker thread when
-    there is a loop, and inline when there is not, which is what a plain `python -c` import does.
+    blocking I/O there — *"Blocking call to os.mkdir"*. The guard is right: a synchronous write on
+    the loop stalls health checks and every other run in the process. So the file is written in a
+    worker thread when there is a loop, and inline when there is not, which is what a plain
+    `python -c` import does.
 
     Never raises. This is on the path that answers a researcher's question, and a picker that
     cannot be populated is worth strictly less than the turn it would have broken.
@@ -135,7 +124,7 @@ def record(subagents: Any) -> None:
     try:
         described = describe(subagents)
         if not described:
-            logger.warning("minime_local: no nameable subagents to record")
+            logger.warning("backend.local: no nameable subagents to record")
             return
         root = os.getenv("MINIME_LOCAL_WORKSPACE", "").strip()
         if not root:
@@ -156,11 +145,11 @@ def record(subagents: Any) -> None:
         future = loop.run_in_executor(None, _write, path, payload)
         future.add_done_callback(_report)
     except Exception as error:  # noqa: BLE001 — see the docstring
-        logger.warning("minime_local: could not record the subagent registry: %s", error)
+        logger.warning("backend.local: could not record the subagent registry: %s", error)
 
 
 def _report(future) -> None:
     """Surface a failure that happened in the worker thread rather than dropping it."""
     error = future.exception()
     if error is not None:
-        logger.warning("minime_local: could not record the subagent registry: %s", error)
+        logger.warning("backend.local: could not record the subagent registry: %s", error)

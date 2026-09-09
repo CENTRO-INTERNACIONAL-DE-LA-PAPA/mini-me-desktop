@@ -1,36 +1,34 @@
 """Write down which specialist produced which file.
 
-**The client cannot work this out, and it stopped trying.** §199 gave the desktop app the one
-attribution it can make without guessing: a background worker runs on its own LangGraph thread
-and writes into a folder named after it, so the folder *is* the record. Everything else — the
+**The client cannot work this out, and it stopped trying.** The desktop app gave itself the one
+attribution it can make without guessing: a background worker runs on its own LangGraph thread and
+writes into a folder named after it, so the folder *is* the record. Everything else — the
 specialists a conversation consults, `exploratory_data_analysis`, `academic_researcher`, the
 coordinator itself — shares one thread and one directory, and nothing on the wire says who wrote
-what. Matching file timestamps against the road strip's arrival windows would produce an
-attribution for every file and would be a guess, which `provenance.rs` refuses on the grounds that
-a provenance record that quietly guesses is worse than none, because it will be believed.
+what. Matching file timestamps against arrival windows would produce an attribution for every file
+and would be a guess, which a provenance record must refuse, because a provenance record that
+quietly guesses is worse than none — it will be believed.
 
 Here it is not a guess. This process *is* the writer. It knows which delegation it is inside,
 because the `task` tool was handed the name; and it knows which files a command produced, because
-it started the command and can look at the directory afterwards. Asked for plainly: *"we need to
-record the write."*
+it started the command and can look at the directory afterwards.
 
 **Two write paths, both covered.**
 
 * `write` / `upload_files` — deepagents' file tools. The path is the argument; nothing to infer.
-* `aexecute` — a shell command, usually a Python script that draws plots. The app's own comment
-  says these are *most* of the files, and none of them registers an artifact. So the directory is
-  read after the command and anything newer than its start belongs to whoever issued it. That is
-  a measurement bracketing one command, not an inference from a timeline: the process that took
-  the "before" timestamp is the process that ran the command.
+* `aexecute` — a shell command, usually a Python script that draws plots. These are most of the
+  files a run produces, and none of them registers an artifact. So the directory is read after the
+  command and anything newer than its start belongs to whoever issued it. That is a measurement
+  bracketing one command, not an inference from a timeline: the process that took the "before"
+  timestamp is the process that ran the command.
 
 **What it deliberately does not do.** It never runs the walk on a workspace it does not own, and
 it never descends into a nested thread folder — a background worker writing while the coordinator
 runs a command is the one case where two authors are genuinely active in one tree, and the
-worker's own folder is already the answer for its files (§199).
+worker's own folder is already the answer for its files.
 
-Failures are logged and swallowed. Losing a line of provenance is a worse panel; raising here
-would be a turn that died while writing a file successfully, which is §18's rule about what an
-overlay may risk.
+Failures are logged and swallowed. Losing a line of provenance is a worse panel than raising here,
+which would be a turn that died while writing a file successfully.
 """
 
 from __future__ import annotations
@@ -54,7 +52,7 @@ MANIFEST = ".authorship.jsonl"
 #: What a write outside any delegation is attributed to.
 #:
 #: Not `""` and not "unknown". The coordinator writing a file itself is a fact, and one worth
-#: telling apart from a specialist doing it — which is exactly what the researcher could not see.
+#: telling apart from a specialist doing it.
 COORDINATOR = "coordinator"
 
 #: Ceiling on one post-command scan, matching the client's own bounded walk.
@@ -70,9 +68,9 @@ MAX_ENTRIES = 4096
 #: once: LangGraph schedules concurrent tool calls as asyncio tasks, and a task copies the context
 #: at creation, so each delegation's name is visible only to its own subtree. A global would have
 #: the second specialist overwrite the first and both files come out wearing one name. Same shape,
-#: and the same reason, as `spine.py`'s `_http_project`.
+#: and the same reason, as `backend.runtime`'s HTTP scope ContextVars.
 _current: contextvars.ContextVar[str] = contextvars.ContextVar(
-    "minime_local_current_agent", default=""
+    "backend_local_current_agent", default=""
 )
 
 
@@ -129,7 +127,7 @@ def record(work_dir, paths, agent: str | None = None) -> None:
         with _manifest(work_dir).open("a", encoding="utf-8") as manifest:
             manifest.write("\n".join(lines) + "\n")
     except OSError as error:
-        logger.warning("minime_local: could not record authorship (%s)", error)
+        logger.warning("backend.local: could not record authorship (%s)", error)
 
 
 def record_written_since(work_dir, since: float, agent: str | None = None) -> int:
@@ -158,7 +156,7 @@ def _walk(work_dir: Path):
     for root, directories, files in os.walk(work_dir):
         # Pruned in place, which `os.walk` documents as the way to stop it descending: a nested
         # thread folder is a background worker's own workspace and its files are already
-        # attributed by the folder they are in (§199).
+        # attributed by the folder they are in.
         directories[:] = [
             directory
             for directory in directories
@@ -172,7 +170,7 @@ def _walk(work_dir: Path):
             seen += 1
             if seen > MAX_ENTRIES:
                 logger.warning(
-                    "minime_local: stopped attributing after %d files in %s — the rest of this "
+                    "backend.local: stopped attributing after %d files in %s — the rest of this "
                     "command's output is unattributed rather than wrongly attributed",
                     MAX_ENTRIES,
                     work_dir,
@@ -200,16 +198,16 @@ def install(module) -> None:
     """Make the `task` tool announce which specialist it is about to run.
 
     `_build_task_tool` is module-level in `deepagents.middleware.subagents` and is called once,
-    from `SubAgentMiddleware.__init__` — which happens when `backend/agent.py` builds the agent,
-    after the `deepagents` import this is hooked from has finished. Same ordering argument as
-    `_rewrite_execute_description`, and the same reason it is done through the package rather than
-    by watching the submodule for an import that has already happened.
+    from `SubAgentMiddleware.__init__` — which happens when `backend/agent.py` builds the agent.
+    Called explicitly from `backend.local.install()`, before `backend/agent.py`'s own
+    `from deepagents import create_deep_agent` import, so the wrapped `_build_task_tool` is what
+    `SubAgentMiddleware` sees.
     """
     original = getattr(module, "_build_task_tool", None)
     if original is None:
         logger.warning(
-            "minime_local: no _build_task_tool to wrap — files will be attributed to the "
-            "coordinator even when a specialist wrote them (docs §201)"
+            "backend.local: no _build_task_tool to wrap — files will be attributed to the "
+            "coordinator even when a specialist wrote them"
         )
         return
 
@@ -219,11 +217,11 @@ def install(module) -> None:
         try:
             _announce(tool)
         except Exception as error:  # noqa: BLE001
-            logger.warning("minime_local: could not wrap the task tool (%s)", error)
+            logger.warning("backend.local: could not wrap the task tool (%s)", error)
         return tool
 
     module._build_task_tool = build
-    logger.warning("minime_local: file writes are attributed to the specialist that made them")
+    logger.warning("backend.local: file writes are attributed to the specialist that made them")
 
 
 def _name_of(args, kwargs) -> str:
@@ -269,7 +267,7 @@ def _announce(tool) -> None:
         # **`async def`, and the `await` inside the block.** A sync wrapper would set the variable,
         # build the coroutine, reset, and hand back something unawaited — so the name would be
         # gone by the time the subagent actually ran, and every file would come out attributed to
-        # the coordinator while the wrapper looked installed. `spine.py` paid for this lesson.
+        # the coordinator while the wrapper looked installed.
         @functools.wraps(async_fn)
         async def coroutine(*args, **kwargs):
             token = _current.set(_name_of(args, kwargs))

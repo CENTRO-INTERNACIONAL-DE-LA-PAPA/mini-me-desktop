@@ -997,16 +997,10 @@ impl Workbench {
         for (label, description, value, toggle) in if section == Section::Backend {
             vec![
                 (
-                    "Run code on this machine",
-                    "Commands run in your own WSL distro rather than a remote sandbox.",
-                    self.draft.local_execution,
-                    0usize,
-                ),
-                (
                     "Ask before every command",
                     "Pause and show each command, so nothing runs without you seeing it.",
                     self.draft.approve_execute,
-                    1,
+                    0usize,
                 ),
                 // Preview API, and it needs the generated graph config — so opt-in, and
                 // labelled by what it does rather than by what it is called upstream.
@@ -1014,7 +1008,7 @@ impl Workbench {
                     "Let work run in the background",
                     "Long jobs keep going while you carry on asking questions.",
                     self.draft.async_subagents,
-                    2,
+                    1,
                 ),
                 // Named for what it puts on screen, not for the reader it is aimed at: "developer
                 // mode" would be a claim about who deserves it, and the researcher checking a
@@ -1024,7 +1018,7 @@ impl Workbench {
                     "Adds two lines to Outputs comparing what the agent said it did against \
                      what is in this conversation's folder.",
                     self.draft.run_record,
-                    3,
+                    2,
                 ),
             ]
         } else {
@@ -1036,9 +1030,8 @@ impl Workbench {
                 ui::Toggle::new(SharedString::from(format!("toggle-{toggle}")), value).on_click(
                     cx.listener(move |workbench, _event, _window, cx| {
                         match toggle {
-                            0 => workbench.draft.local_execution = !workbench.draft.local_execution,
-                            1 => workbench.draft.approve_execute = !workbench.draft.approve_execute,
-                            2 => workbench.draft.async_subagents = !workbench.draft.async_subagents,
+                            0 => workbench.draft.approve_execute = !workbench.draft.approve_execute,
+                            1 => workbench.draft.async_subagents = !workbench.draft.async_subagents,
                             _ => workbench.draft.run_record = !workbench.draft.run_record,
                         }
                         cx.notify();

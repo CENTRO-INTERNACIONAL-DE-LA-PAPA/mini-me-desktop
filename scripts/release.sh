@@ -107,9 +107,9 @@ else
        Fix: bash scripts/bundle-backend.sh && bash scripts/package.sh"
 fi
 
-[ -f "$BUNDLE/overlay/minime_local/workspace.py" ] \
-  || die "overlay/ is missing — host execution would not work"
-ok "overlay/ (host execution)"
+[ -f "$BUNDLE/mini-me/backend/local/workspace.py" ] \
+  || die "mini-me/backend/local/ is missing — host execution would not work"
+ok "mini-me/backend/local/ (host execution)"
 
 [ -f "$BUNDLE/scripts/setup-wsl.sh" ] || die "scripts/setup-wsl.sh is missing"
 ok "scripts/ (first-run provisioning)"

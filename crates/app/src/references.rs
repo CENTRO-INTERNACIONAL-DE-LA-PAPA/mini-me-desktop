@@ -68,7 +68,7 @@ pub enum Verdict {
     ///
     /// **Not a weaker answer than [`Self::Confirmed`] — a stronger one.** A DOI has to be
     /// verified because the model wrote it. This link was built from the `corpusId` in the search
-    /// result the paper came from (`overlay/minime_local/sources.py`), so it does not name the
+    /// result the paper came from (`backend/citations.py::link`), so it does not name the
     /// wrong paper for the same reason a file path does not: nothing composed it.
     FromSearch,
     /// Nothing to check: no DOI in the citation and none in the structured field.
@@ -393,10 +393,10 @@ mod tests {
     ///
     /// `PYTHONIOENCODING` is the load-bearing part. Python picks its stdout encoding from the
     /// console code page, which on a Windows runner is cp1252 — so an en-dash written by the
-    /// overlay arrives as the single byte `0x96`, and reading it back as UTF-8 gives `�`. The test
-    /// then compares `603�627` against `603–627` and fails on a citation the overlay had formatted
+    /// backend arrives as the single byte `0x96`, and reading it back as UTF-8 gives `�`. The test
+    /// then compares `603�627` against `603–627` and fails on a citation the backend had formatted
     /// perfectly. Nothing about the product: in a real run this text crosses HTTP as JSON, which is
-    /// UTF-8 by definition, and the overlay only ever runs inside WSL.
+    /// UTF-8 by definition, and this backend only ever runs inside WSL.
     fn interpreter(program: &str) -> std::process::Command {
         let mut command = std::process::Command::new(program);
         command.env("PYTHONIOENCODING", "utf-8");
@@ -670,111 +670,22 @@ mod tests {
         assert!(candidates_of(&serde_json::json!({})).is_empty());
     }
 
-    /// The Rust and Python title matchers must reach the same verdict.
+    /// `backend/citations.py` builds APA references in code. This checks it against the real
+    /// records the model got wrong.
     ///
-    /// **The same shape as `workspace::project_tests`, and for the same reason.** This rule is now
-    /// written twice: `overlay/minime_local/sources.py` uses it to decide which corpus id belongs
-    /// to a citation, and this module uses it to decide which registry record does. Both carry the
-    /// same noise words, the same 0.6 threshold and the same 0.15 margin, and if they drift the
-    /// backend and the client will disagree about which paper a citation names — silently, and in
-    /// the one feature built to stop exactly that.
-    ///
-    /// It cannot be written once, so it is checked instead.
+    /// Driven from Rust because this repo has no Python harness, and a rule that only runs in
+    /// production is a rule nobody checks.
     #[test]
-    fn the_rust_and_python_matchers_agree() {
+    fn the_backend_builds_a_citation_the_model_could_not() {
         let Some(python) = python() else {
             eprintln!("skipping: no Python on PATH");
             return;
         };
-        let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
-
-        // (citation, candidate titles) — the real cases from §119 and §120, plus the ties.
-        let cases: [(&str, &[&str]); 5] = [
-            (
-                "Plaisted, R. L., & Hoopes, R. W. (1989). The past record and future prospects \
-                 for the use of wild species for the improvement of potato (Solanum tuberosum) \
-                 varieties. American Potato Journal, 66, 603-627.",
-                &[
-                    "The past record and future prospects for the use of exotic potato germplasm",
-                    "Solanum amayanum: A new wild Peruvian potato species",
-                ],
-            ),
-            (
-                "Hijmans, R.J., & Spooner, D.M. (2001). Geographic distribution of wild potato \
-                 species. American Journal of Botany, 88(11), 2101-2112.",
-                &["Algal switching among lichen symbioses"],
-            ),
-            (
-                "Hijmans, R.J., & Spooner, D.M. (2001). Geographic distribution of wild potato \
-                 species. American Journal of Botany, 88(11), 2101-2112.",
-                &["Geographic distribution of wild potato species"],
-            ),
-            // A tie: both plausible, so both sides must decline.
-            (
-                "Smith (2020). The potato crop handbook.",
-                &["The potato crop handbook", "The potato crop handbook II"],
-            ),
-            ("Nothing recognisable here.", &["Some unrelated title"]),
-        ];
-
-        let source = std::fs::read_to_string(overlay.join("minime_local/sources.py"))
-            .expect("the overlay is beside the crate");
-        // Only the pure functions, so importing does not pull in contextvars-backed state.
-        let start = source.find("_NOISE = {").expect("the noise set");
-        let end = source.find("def _papers()").expect("the next function");
-        let script = format!(
-            "import json,re,sys\n{}\n\
-             cit, titles = sys.argv[1], json.loads(sys.argv[2])\n\
-             have = set(_significant(cit))\n\
-             ranked = []\n\
-             for t in titles:\n\
-             \x20   want = _significant(t)\n\
-             \x20   if want: ranked.append((sum(w in have for w in want)/len(want), t))\n\
-             ranked.sort(reverse=True)\n\
-             ok = bool(ranked) and ranked[0][0] >= 0.6 and (len(ranked) < 2 or ranked[0][0]-ranked[1][0] >= 0.15)\n\
-             print(json.dumps(ranked[0][1] if ok else None))",
-            &source[start..end]
-        );
-
-        for (citation, titles) in cases {
-            let candidates: Vec<(String, String)> = titles
-                .iter()
-                .enumerate()
-                .map(|(at, title)| (format!("10.1/{at}"), title.to_string()))
-                .collect();
-            let ours = best_match(citation, &candidates).map(|repair| repair.title);
-
-            let out = interpreter(python)
-                .arg("-c")
-                .arg(&script)
-                .arg(citation)
-                .arg(serde_json::to_string(titles).expect("json"))
-                .output()
-                .expect("python3 runs");
-            assert!(
-                out.status.success(),
-                "python failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-            let theirs: Option<String> =
-                serde_json::from_slice(&out.stdout).expect("python printed json");
-
-            assert_eq!(ours, theirs, "disagreed on {citation:?} against {titles:?}");
-        }
-    }
-
-    /// The overlay builds APA references in code. This checks it against the real records the
-    /// model got wrong.
-    ///
-    /// Driven from Rust for the same reason `the_rust_and_python_matchers_agree` is: this repo has
-    /// no Python harness, and a rule that only runs in production is a rule nobody checks.
-    #[test]
-    fn the_overlay_builds_a_citation_the_model_could_not() {
-        let Some(python) = python() else {
-            eprintln!("skipping: no Python on PATH");
-            return;
-        };
-        let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
+        // `backend/citations.py` has no imports beyond the standard library, so its whole source
+        // runs standalone — importing it as `backend.citations` would first run
+        // `backend/__init__.py`, which needs dotenv/langchain/langgraph installed.
+        let citations = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../mini-me/backend/citations.py");
 
         // Real Semantic Scholar records, verbatim. The first two are the papers whose DOIs the
         // model invented in a live run (§119, §120): it wrote BF02853934 for Plaisted, whose real
@@ -834,10 +745,11 @@ mod tests {
 
         for (record, expected) in cases {
             let script = format!(
-                "import json,sys\nsys.path.insert(0,{overlay:?})\n\
-                 from minime_local import citations\n\
-                 print(citations.apa(json.loads(sys.argv[1])))",
-                overlay = overlay.to_string_lossy()
+                "import json,sys,pathlib\n\
+                 ns = {{}}\n\
+                 exec(pathlib.Path({citations:?}).read_text(encoding=\"utf-8\"), ns)\n\
+                 print(ns['apa'](json.loads(sys.argv[1])))",
+                citations = citations.to_string_lossy()
             );
             let out = interpreter(python)
                 .arg("-c")
@@ -857,147 +769,6 @@ mod tests {
         }
     }
 
-    /// The overlay's tool wrapper must actually *run*, not merely parse.
-    ///
-    /// **This test exists because of a shipped crash.** `install_mcp` built its wrapper with
-    /// `_tool=name`, where `name` belonged to upstream's loop and not to ours. Python evaluates a
-    /// default argument when the `def` executes, so it raised `NameError: name 'name' is not
-    /// defined` the moment the tool list was wrapped — and every turn in the app failed with
-    /// "An internal error occurred". It went out because it was checked with `ast.parse`, which
-    /// proves a file is syntactically valid and never that a line of it runs (docs §128).
-    ///
-    /// Driven from Rust because this repository has no Python harness, and an overlay that only
-    /// executes in production is one nobody tests.
-    #[test]
-    fn the_overlays_tool_wrapper_runs() {
-        let Some(python) = python() else {
-            eprintln!("skipping: no Python on PATH");
-            return;
-        };
-        let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
-        // Upstream's wrapper around ours, with the tool call in a child task — the arrangement
-        // the backend actually uses, and the one where a ContextVar store silently failed (§123).
-        let script = format!(
-            r#"
-import sys, types, asyncio, json
-sys.path.insert(0, {overlay:?})
-from minime_local import sources
-
-mod = types.ModuleType("backend.mcp_tools")
-def _make_mcp_tools_resilient(tools):
-    for t in tools:
-        inner = t.coroutine
-        async def capped(*a, _i=inner, **k):
-            await _i(*a, **k)
-            return "TRUNCATED"
-        t.coroutine = capped
-    return tools
-mod._make_mcp_tools_resilient = _make_mcp_tools_resilient
-
-payload = [{{"type": "text", "text": json.dumps(
-    {{"data": [{{"paper": {{"corpusId": "237744014", "title": "A recorded paper title"}}}}]}})}}]
-
-class Tool:
-    name = "snippet_search"
-    def __init__(self):
-        async def coro(**kw):
-            return payload
-        self.coroutine = coro
-
-sources.install_mcp(mod)
-tools = mod._make_mcp_tools_resilient([Tool()])
-async def main():
-    await asyncio.create_task(tools[0].coroutine())
-    print(len(sources._papers()))
-asyncio.run(main())
-"#,
-            overlay = overlay.to_string_lossy()
-        );
-        let out = interpreter(python)
-            .arg("-c")
-            .arg(&script)
-            .output()
-            .expect("python3 runs");
-        assert!(
-            out.status.success(),
-            "the overlay's wrapper raised:
-{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        assert_eq!(
-            String::from_utf8_lossy(&out.stdout).trim(),
-            "1",
-            "the recorder saw the raw result before upstream truncated it"
-        );
-    }
-
-    /// `find_papers` is recorded too, and keeps the link the record gave it.
-    ///
-    /// **This one exists because of four days spent reading the wrong half of the system.** The
-    /// only evidence in the backend log was `0 of N sources carry the corpus id`, which was taken
-    /// as "the subagent invented its citations again". It says exactly the same thing when the
-    /// subagent did everything right: `find_papers` is not part of the MCP bundle, so it never
-    /// passed through the wrapper that records papers, and a perfect run recorded nothing and
-    /// printed zero.
-    ///
-    /// Asserts the link is passed through rather than rebuilt: `backend/citations.py` prefers the
-    /// DOI from the publisher's record, and a corpus id reconstructed here would be worse.
-    #[test]
-    fn the_overlay_records_the_cli_search_as_well_as_the_mcp_one() {
-        let Some(python) = python() else {
-            eprintln!("skipping: no Python on PATH");
-            return;
-        };
-        let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
-        let script = format!(
-            r#"
-import sys, types, asyncio, json
-sys.path.insert(0, {overlay:?})
-from minime_local import sources
-
-mod = types.ModuleType("backend.paper_tools")
-found = json.dumps({{"query": "q", "count": 1, "papers": [{{
-    "citation": "Sorensen, T. (1948). A method of establishing groups of equal amplitude.",
-    "link": "https://api.semanticscholar.org/DOI:10.1234/abcd",
-    "title": "A method of establishing groups of equal amplitude in plant sociology"}}]}})
-
-class Tool:
-    name = "find_papers"
-    def __init__(self):
-        async def coro(query, limit=10):
-            return found
-        self.coroutine = coro
-
-mod.find_papers = Tool()
-sources.install_papers(mod)
-async def main():
-    # In a child task, like every other tool call the backend makes (§123).
-    await asyncio.create_task(mod.find_papers.coroutine("beta diversity"))
-    print(sources.link_for(
-        "Sorensen, T. (1948). A method of establishing groups of equal "
-        "amplitude in plant sociology. Biologiske Skrifter."))
-asyncio.run(main())
-"#,
-            overlay = overlay.to_string_lossy()
-        );
-        let out = interpreter(python)
-            .arg("-c")
-            .arg(&script)
-            .output()
-            .expect("python3 runs");
-        assert!(
-            out.status.success(),
-            "the overlay's find_papers wrapper raised:
-{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        assert_eq!(
-            String::from_utf8_lossy(&out.stdout).trim(),
-            "https://api.semanticscholar.org/DOI:10.1234/abcd",
-            "the recorded link is the one the record supplied, not a rebuilt corpus id"
-        );
-    }
-
     /// A failed command tells the model which directory it ran in.
     ///
     /// **Two blind attempts, on a real run.** A background worker wrote `potato_late_blight.csv`
@@ -1015,13 +786,15 @@ asyncio.run(main())
             eprintln!("skipping: no Python on PATH");
             return;
         };
-        let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
+        let backend_local =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../mini-me/backend/local");
         // The helpers are lifted out of the module verbatim rather than imported, because
-        // importing `minime_local.workspace` drags in deepagents and langgraph.
+        // importing `backend.local.workspace` drags in deepagents and langgraph (and, through
+        // `backend/__init__.py`, dotenv/langchain too).
         let script = format!(
             r#"
 import logging, pathlib
-src = pathlib.Path({overlay:?} + "/minime_local/workspace.py").read_text()
+src = pathlib.Path({backend_local:?} + "/workspace.py").read_text(encoding="utf-8")
 ns = {{"Any": object, "logger": logging.getLogger("t")}}
 exec(src[src.index("_CWD_NOTE ="):src.index("def _log_failure")], ns)
 say = ns["_say_where_it_ran"]
@@ -1055,7 +828,7 @@ say(None, "/work/thread-1")
 say(object(), "/work/thread-1")
 print("ok")
 "#,
-            overlay = overlay.to_string_lossy()
+            backend_local = backend_local.to_string_lossy()
         );
         let out = interpreter(python)
             .arg("-c")
@@ -1064,7 +837,7 @@ print("ok")
             .expect("python3 runs");
         assert!(
             out.status.success(),
-            "the overlay's cwd hint is wrong:
+            "the local backend's cwd hint is wrong:
 {}",
             String::from_utf8_lossy(&out.stderr)
         );
@@ -1087,15 +860,17 @@ print("ok")
             eprintln!("skipping: no Python on PATH");
             return;
         };
-        let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
+        let backend_local =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../mini-me/backend/local");
         let script = format!(
             r#"
 import pathlib, sys, types
-src = pathlib.Path({overlay:?} + "/minime_local/async_agents.py").read_text()
-stub = types.ModuleType("minime_local.workspace")
+src = pathlib.Path({backend_local:?} + "/async_agents.py").read_text(encoding="utf-8")
+stub = types.ModuleType("backend.local.workspace")
 stub.WORKSPACE_THREAD_KEY = "__workspace_thread__"
-sys.modules["minime_local"] = types.ModuleType("minime_local")
-sys.modules["minime_local.workspace"] = stub
+sys.modules["backend"] = types.ModuleType("backend")
+sys.modules["backend.local"] = types.ModuleType("backend.local")
+sys.modules["backend.local.workspace"] = stub
 ns = {{}}
 exec(src[src.index("def _conversation_thread"):src.index("def _forwarded_config")], ns)
 thread = ns["_conversation_thread"]
@@ -1120,7 +895,7 @@ assert thread({{"metadata": {{"thread_id": "conv"}}}}, {{"thread_id": "   "}})[0
 assert thread({{}}, {{}}) == ("", "nothing")
 print("ok")
 "#,
-            overlay = overlay.to_string_lossy()
+            backend_local = backend_local.to_string_lossy()
         );
         let out = interpreter(python)
             .arg("-c")
@@ -1151,13 +926,14 @@ print("ok")
             eprintln!("skipping: no Python on PATH");
             return;
         };
-        let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
-        // The layout is lifted out of `LocalSandbox.__init__` verbatim — importing the module
-        // drags in deepagents and langgraph.
+        let backend_local =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../mini-me/backend/local");
+        // The layout is lifted out of `LocalWorkspaceBackend.__init__` verbatim — importing the
+        // module drags in deepagents and langgraph.
         let script = format!(
             r#"
 import pathlib
-src = pathlib.Path({overlay:?} + "/minime_local/workspace.py").read_text()
+src = pathlib.Path({backend_local:?} + "/workspace.py").read_text(encoding="utf-8")
 
 # Tied to the real code: if the nesting line is edited away, this fails rather than passing
 # against a copy that no longer matches.
@@ -1167,7 +943,7 @@ assert "root.joinpath(" in src, "the work dir is no longer composed from parts"
 def layout(root, project, pinned, own):
     parts = [pinned] + ([own] if own and own != pinned else [])
     # `as_posix`, not `str`: the rule under test is which folder nests inside which, and `str`
-    # of a WindowsPath spells the same layout with backslashes. The overlay itself only ever
+    # of a WindowsPath spells the same layout with backslashes. This backend itself only ever
     # runs inside WSL, so its own separator is never in question (§214).
     return pathlib.Path(root).joinpath(*([project] if project else []), *parts).as_posix()
 
@@ -1205,7 +981,7 @@ cfg["value"] = {{}}
 assert thread("D") == "C" and thread("A") == "A", "one task belongs to one conversation"
 print("ok")
 "#,
-            overlay = overlay.to_string_lossy()
+            backend_local = backend_local.to_string_lossy()
         );
         let out = interpreter(python)
             .arg("-c")
@@ -1238,15 +1014,20 @@ print("ok")
             eprintln!("skipping: no Python on PATH");
             return;
         };
-        let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
+        // `backend/local/execute_rule.py` imports only `logging`, so its source runs standalone —
+        // importing it as `backend.local.execute_rule` would first run `backend/__init__.py`,
+        // which needs dotenv/langchain/langgraph installed.
+        let execute_rule_py = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../mini-me/backend/local/execute_rule.py");
         let script = format!(
             r#"
-import logging, sys, types
-sys.path.insert(0, {overlay:?})
-from minime_local import execute_rule
+import pathlib, types
+
+execute_rule = {{}}
+exec(pathlib.Path({execute_rule_py:?}).read_text(encoding="utf-8"), execute_rule)
 
 logs = []
-execute_rule.log = type("L", (), {{"warning": lambda self, m, *a: logs.append(m % a if a else m)}})()
+execute_rule["log"] = type("L", (), {{"warning": lambda self, m, *a: logs.append(m % a if a else m)}})()
 
 # Upstream's text, with the sentence this exists to remove.
 upstream = types.SimpleNamespace(EXECUTE_TOOL_DESCRIPTION=(
@@ -1254,7 +1035,7 @@ upstream = types.SimpleNamespace(EXECUTE_TOOL_DESCRIPTION=(
     "  - When issuing multiple commands, use the ';' or '&&' operator\n"
     "  - Try to maintain your current working directory throughout the session by using "
     "absolute paths and avoiding usage of cd\n"))
-execute_rule.install(upstream)
+execute_rule["install"](upstream)
 out = upstream.EXECUTE_TOOL_DESCRIPTION
 
 assert "using absolute paths and avoiding" not in out, "the advice that caused the escape survived"
@@ -1271,18 +1052,18 @@ assert not any("no longer contains" in line for line in logs), logs
 # Upstream reworded: the rule still ships, and the log says the contradiction may be back.
 logs.clear()
 moved = types.SimpleNamespace(EXECUTE_TOOL_DESCRIPTION="Prefer fully-qualified paths at all times.")
-execute_rule.install(moved)
+execute_rule["install"](moved)
 assert "Where your output goes" in moved.EXECUTE_TOOL_DESCRIPTION
 assert any("no longer contains" in line for line in logs), logs
 
 # The constant is gone entirely: say so, change nothing, and never raise — an exception here
 # would cost the whole agent to prevent files landing in the wrong folder.
 logs.clear()
-execute_rule.install(types.SimpleNamespace())
+execute_rule["install"](types.SimpleNamespace())
 assert any("no EXECUTE_TOOL_DESCRIPTION" in line for line in logs), logs
 print("ok")
 "#,
-            overlay = overlay.to_string_lossy()
+            execute_rule_py = execute_rule_py.to_string_lossy()
         );
         let out = interpreter(python)
             .arg("-c")
@@ -1299,7 +1080,7 @@ print("ok")
 
     #[test]
     fn a_corpus_link_is_recognised_and_never_treated_as_a_doi() {
-        // The form `overlay/minime_local/sources.py` writes, and the one `_paper_ref` established
+        // The form `backend/citations.py::link` writes, and the one `_paper_ref` established
         // resolves correctly.
         for link in [
             "https://api.semanticscholar.org/CorpusID:45447591",

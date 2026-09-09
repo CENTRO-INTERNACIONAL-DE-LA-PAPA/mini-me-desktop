@@ -9,8 +9,9 @@ index and a document. §219's claims recorder checked it against the workspace:
 
 `.asta/documents` is not a subtle thing to be wrong about. Measured against the real CLI:
 `asta documents add` writes `.asta/documents/index.yaml` **relative to the working directory**, and
-the overlay already runs every command with the conversation's workspace as that directory
-(`minime_local/workspace.py`). So the index would be there if the command had run. It had not.
+`LocalWorkspaceBackend` already runs every command with the conversation's workspace as that
+directory (`backend/local/workspace.py`). So the index would be there if the command had run. It
+had not.
 
 # Why it could happen
 

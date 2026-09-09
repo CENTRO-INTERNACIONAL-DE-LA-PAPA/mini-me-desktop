@@ -1,7 +1,7 @@
 //! Where the researcher's outputs land, and how the app reaches them.
 //!
 //! The backend writes every file a turn produces into one directory per thread
-//! (`minime_local/workspace.py:workspace_root`), and until now that was
+//! (`backend/local/workspace.py:workspace_root`), and until now that was
 //! `~/.mini-me/workspaces` **inside the WSL distro** — a place a Windows researcher cannot
 //! reach without knowing what `\\wsl.localhost` means. Since ~98% of users are on Windows
 //! and none of them are expected to code, files they cannot find are files that do not
@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 
-/// The variable the backend reads for this (`minime_local/workspace.py:44`).
+/// The variable the backend reads for this (`backend/local/workspace.py:44`).
 pub const WORKSPACE_ENV: &str = "MINIME_LOCAL_WORKSPACE";
 
 /// Image kinds worth putting in the transcript.
@@ -190,17 +190,17 @@ impl Subagent {
     }
 }
 
-/// The file the backend overlay writes its subagent list into.
+/// The file the backend writes its subagent list into.
 const REGISTRY: &str = "subagents.json";
 
 /// What can be named in a `/subagent` command.
 ///
-/// Read from a file the backend overlay writes when it assembles the coordinator, rather than
+/// Read from a file the backend writes when it assembles the coordinator, rather than
 /// hardcoded here. §55 asked for that specifically: a copy in the client would drift the first
 /// time upstream renamed a subagent, and the failure mode is a command that silently does
-/// nothing. See `overlay/minime_local/registry.py` for why it is a file and not an endpoint —
-/// `langgraph.json` mounts its HTTP app by file path, which bypasses the import hook the
-/// overlay patches through.
+/// nothing. See `backend/local/registry.py` for why it is a file and not an endpoint —
+/// `langgraph.json` mounts its HTTP app by file path, which can never see a route added by
+/// wrapping `deepagents.create_deep_agent`.
 ///
 /// Empty until the backend has assembled a coordinator at least once. That is a real gap and
 /// the caller has to say so rather than showing an empty picker as though there were no
@@ -250,7 +250,7 @@ pub(crate) fn parse_registry(text: &str) -> Vec<Subagent> {
 
 /// One path segment for a project name, or `None` for "no project".
 ///
-/// **This must agree exactly with `workspace_project` in `overlay/minime_local/workspace.py`.**
+/// **This must agree exactly with `workspace_project` in `backend/local/workspace.py`.**
 /// The backend writes a turn's outputs into the folder *it* computes; the app looks in the folder
 /// *this* computes. Disagree by one character and the researcher's figures are written somewhere
 /// the app will never show them — the §89 failure with a longer fuse. There is a test that runs
@@ -343,8 +343,8 @@ pub fn thread_dir_in(project: Option<&str>, thread_id: &str) -> PathBuf {
 /// Where one background worker's files landed, inside the conversation that started it.
 ///
 /// **A worker runs on its own LangGraph thread but writes inside its parent's folder** — the
-/// overlay composes `[conversation_thread, worker_thread]` when the two differ
-/// (`LazyLangsmithSandbox.__init__`), which is what §151 verified on a live run: plots appeared
+/// backend composes `[conversation_thread, worker_thread]` when the two differ
+/// (`LocalWorkspaceBackend.__init__`), which is what §151 verified on a live run: plots appeared
 /// at `<task>/guinea_pig_eda_output/plots/…` rather than in a sibling directory nobody would
 /// think to open.
 ///
@@ -761,15 +761,14 @@ fn windows_path_for(recorded: &str) -> Option<PathBuf> {
 /// it in Python (`ledger.RECORD_DIR`). Three copies of a folder name is how §278 started.
 const RECORD_DIR: &str = ".mini-me";
 
-/// One command a conversation ran, as the overlay recorded it.
+/// One command a conversation ran, as the backend recorded it.
 ///
-/// The producer is `overlay/minime_local/ledger.py`, and the shape is pinned by a fixture it
+/// The producer is `backend/local/ledger.py`, and the shape is pinned by a fixture it
 /// generates from its own code (`crates/app/tests/fixtures/command-record.jsonl`) — §264's
-/// discipline, applied to the one record written by a Python file that ships beside this binary
-/// rather than by the backend.
+/// discipline, applied to the one record written in a different language from the reader.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Command {
-    /// When it ran, as the overlay wrote it. Kept as text: it is shown, never compared.
+    /// When it ran, as the backend wrote it. Kept as text: it is shown, never compared.
     pub at: String,
     /// The command, already clipped by the producer if it was enormous.
     pub text: String,
@@ -1158,7 +1157,7 @@ pub const AUTHORSHIP: &str = ".authorship.jsonl";
 /// **Read rather than inferred.** §199 could name a background worker, because a worker runs on
 /// its own thread and writes into a folder named after it. The specialists a conversation
 /// consults share one thread and one directory, so the client had nothing to go on and correctly
-/// said nothing. `overlay/minime_local/authorship.py` now writes the fact down as it happens —
+/// said nothing. `backend/local/authorship.py` now writes the fact down as it happens —
 /// the delegation's own name, and the interval of the command that produced the file — and this
 /// reads it back (§201).
 ///
@@ -1812,7 +1811,8 @@ mod project_tests {
             eprintln!("skipping: python3 is not on PATH");
             return;
         }
-        let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
+        let backend_local =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../mini-me/backend/local");
 
         let names = [
             "Late blight",
@@ -1831,8 +1831,8 @@ mod project_tests {
         ];
 
         // The sanitiser lifted out of the module, so importing it does not pull in deepagents.
-        let source = std::fs::read_to_string(overlay.join("minime_local/workspace.py"))
-            .expect("the overlay is beside the crate");
+        let source = std::fs::read_to_string(backend_local.join("workspace.py"))
+            .expect("mini-me/backend/local is beside the crate");
         let start = source
             .find("def workspace_project()")
             .expect("the function");
@@ -2096,7 +2096,7 @@ mod report_tests {
 mod authorship_tests {
     use super::*;
 
-    /// The contract with `overlay/minime_local/authorship.py`, checked against the bytes it
+    /// The contract with `backend/local/authorship.py`, checked against the bytes it
     /// actually writes rather than against a struct both sides agree on in prose.
     #[test]
     fn the_last_writer_of_a_file_owns_it() {
@@ -2133,7 +2133,7 @@ mod authorship_tests {
         assert_eq!(who.len(), 2, "the torn line is skipped, not fatal");
 
         // No record at all is not an error — it is every conversation that ran before this
-        // existed, and every one on a backend without the overlay armed.
+        // existed, and every one on a backend that never called `backend.local.install()`.
         std::fs::remove_file(dir.join(AUTHORSHIP)).ok();
         assert!(authorship(&dir).is_empty());
         std::fs::remove_dir_all(&dir).ok();
@@ -2707,11 +2707,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The exact bytes `overlay/minime_local/registry.py` writes, with the real names from
+    /// The exact bytes `backend/local/registry.py` writes, with the real names from
     /// `backend/subagents.py` — so a rename upstream shows up here as a failing test rather
     /// than as a command that quietly does nothing.
     #[test]
-    fn the_subagent_registry_is_read_as_the_overlay_writes_it() {
+    fn the_subagent_registry_is_read_as_the_backend_writes_it() {
         let written = r#"{
           "format": 1,
           "subagents": [
@@ -2728,12 +2728,12 @@ mod tests {
 
     /// The cross-language contract, tested against a file the Python side really wrote.
     ///
-    /// Generated by running `minime_local.registry.record` over the reference checkout's own
+    /// Generated by running `backend.local.registry.record` over the reference checkout's own
     /// `backend.subagents.subagents` — so this asserts the *seam*, not my idea of it. Every bug
     /// this week lived in a seam (§71), and this one has a parser on one side of it and a
     /// different language on the other.
     #[test]
-    fn the_fixture_the_overlay_actually_wrote_parses() {
+    fn the_fixture_the_backend_actually_wrote_parses() {
         let written = include_str!("../tests/fixtures/subagent-registry.json");
         let found = parse_registry(written);
         assert_eq!(found.len(), 10, "{found:#?}");
@@ -2988,7 +2988,7 @@ mod tests {
     /// identically for as long as the feature existed. Regenerate with
     /// `MINIME_WRITE_CONTRACT=1 pytest mini-me/tests/test_ledger.py`.
     #[test]
-    fn every_field_the_overlay_records_is_read_back() {
+    fn every_field_the_backend_records_is_read_back() {
         let fixture = include_str!("../tests/fixtures/command-record.jsonl");
         let commands = decode_commands(fixture);
         assert_eq!(commands.len(), 5, "one line per command");
@@ -3255,7 +3255,7 @@ mod tests {
     /// look; and until this test nothing compared the two.
     ///
     /// That gap is §280 exactly — two notions of where a conversation is, each correct in its own
-    /// file, both sides green. So this drives the overlay's own `append` through its own constants
+    /// file, both sides green. So this drives the backend's own `append` through its own constants
     /// and then reads the result back with the app's own reader.
     #[test]
     fn the_record_python_writes_is_the_one_the_app_reads() {
@@ -3268,7 +3268,8 @@ mod tests {
             return;
         }
         let base = scratch("claims-join");
-        let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
+        let backend_local =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../mini-me/backend/local");
         // The librarian's answer out of the producer's own fixture, rather than a shape retyped
         // here — a hand-written line would agree with itself and prove nothing about the producer.
         let line = include_str!("../tests/fixtures/claim-record.jsonl")
@@ -3276,26 +3277,30 @@ mod tests {
             .nth(1)
             .expect("the librarian's answer");
 
+        // `sys.path` points at the directory and the module is imported by its bare name — not
+        // `backend.local.ledger` — because that dotted form would first run `backend/__init__.py`,
+        // which needs dotenv/langchain/langgraph installed; `ledger.py` itself needs nothing but
+        // the standard library.
         let script = "import json,sys\n\
                       sys.path.insert(0, sys.argv[1])\n\
-                      from minime_local import ledger\n\
+                      import ledger\n\
                       ledger.append(sys.argv[2], json.loads(sys.argv[3]), name=ledger.CLAIMS_NAME)\n";
         let out = std::process::Command::new("python3")
             .env("PYTHONIOENCODING", "utf-8")
             .args(["-c", script])
-            .arg(&overlay)
+            .arg(&backend_local)
             .arg(&base)
             .arg(line)
             .output()
             .expect("python3 runs");
         assert!(
             out.status.success(),
-            "the overlay could not write the record: {}",
+            "the backend could not write the record: {}",
             String::from_utf8_lossy(&out.stderr)
         );
 
         let found = claims(&base);
-        assert_eq!(found.len(), 1, "the app looked where the overlay wrote");
+        assert_eq!(found.len(), 1, "the app looked where the backend wrote");
         assert_eq!(found[0].source, "pdf_librarian");
         assert_eq!(found[0].missing, vec![".asta/documents".to_string()]);
         // And the two records in that folder stay separate files. If the command reader picked

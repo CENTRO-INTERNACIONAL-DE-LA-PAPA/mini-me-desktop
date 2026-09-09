@@ -13,14 +13,14 @@ except Exception as e:
 
 The `ModuleNotFoundError` branch above it names the trigger in its own message: *"Pulled updates
 that modified class definitions in a way that's incompatible with the cache."* On this product that
-is not an edge case — it is the **update path**. The desktop app mirrors the backend source into the
-checkout on every launch, so `git pull` on the app *is* the backend update (docs §135/§139), and a
-pickle written by last week's classes is exactly what the next launch reads.
+is not an edge case — it is the **update path**: every backend upgrade risks exactly the shape of
+change that trips this branch, and a pickle written by last week's classes is exactly what the next
+launch reads.
 
-§95 already removed the worse twin of this: conversations themselves live in SQLite now, so a failed
-load cannot take thirty threads with it. That fix replaced the *checkpointer*. This is the **ops
-index**, a different store, still `PersistentDict`, and still flushed over its own file every ten
-seconds by `_persistence.py:57` — so even preventing the delete would not be enough on its own.
+Conversations themselves live in SQLite (see `checkpointer.py`), so a failed load there cannot take
+thirty threads with it. This is the **ops index**, a different store, still `PersistentDict`, and
+still flushed over its own file every ten seconds — so even preventing the delete would not be
+enough on its own.
 
 **What this does, and what it deliberately does not.** It copies the file aside before `start_pool`
 runs and removes the copy when the load succeeded. It does *not* stop the server deleting or
@@ -28,8 +28,8 @@ rewriting anything: refusing would leave a server that cannot start, and a resea
 unreadable index needs a working app more than they need that file in place. What they must not have
 is the file silently gone — so the copy survives, and the log says where.
 
-The plan's own statement of the principle is `a persistence layer that cannot read its file must
-refuse to write it`. Upstream is not ours to change; keeping the evidence is the part that is.
+A persistence layer that cannot read its file must refuse to write it. Upstream is not ours to
+change; keeping the evidence is the part that is.
 """
 
 from __future__ import annotations
@@ -58,8 +58,8 @@ def install(module) -> None:
     filename = getattr(module, "OPS_FILENAME", None)
     if original is None or not filename:
         logger.warning(
-            "minime_local: no start_pool/OPS_FILENAME to guard — an unreadable conversation "
-            "index would be deleted with no copy kept (docs §218)"
+            "backend.local: no start_pool/OPS_FILENAME to guard — an unreadable conversation "
+            "index would be deleted with no copy kept"
         )
         return
 
@@ -78,14 +78,14 @@ def install(module) -> None:
                     _forget(rescued)
                 else:
                     logger.warning(
-                        "minime_local: the conversation index could not be read and the server "
+                        "backend.local: the conversation index could not be read and the server "
                         "deleted it. A copy is at %s — the app's conversation list will look "
-                        "empty until it is restored (docs §218)",
+                        "empty until it is restored",
                         os.path.abspath(rescued),
                     )
 
     module.start_pool = guarded
-    logger.warning("minime_local: the conversation index is copied aside before every load")
+    logger.warning("backend.local: the conversation index is copied aside before every load")
 
 
 def _copy_aside(filename: str) -> str | None:
@@ -99,7 +99,7 @@ def _copy_aside(filename: str) -> str | None:
         # And made unique, because the stamp alone does not do it. A test that failed twice inside
         # one second produced one file, silently — the claim above was false for exactly the case it
         # was written for. Launches are minutes apart in practice, which is why it would never have
-        # been noticed and why it is worth closing anyway (§218).
+        # been noticed and why it is worth closing anyway.
         stamp = f"{filename}{MARK}{time.strftime('%Y%m%d-%H%M%S')}"
         rescued, attempt = stamp, 1
         while os.path.exists(rescued):
@@ -110,8 +110,8 @@ def _copy_aside(filename: str) -> str | None:
         return rescued
     except OSError as error:
         # Never the reason a backend fails to start. A missing copy is a worse day later; a crash
-        # here is no app at all (§18).
-        logger.warning("minime_local: could not copy the conversation index aside (%s)", error)
+        # here is no app at all.
+        logger.warning("backend.local: could not copy the conversation index aside (%s)", error)
         return None
 
 
@@ -127,8 +127,7 @@ def _sweep(filename: str) -> None:
 
     **By modification time, not by name.** Sorting the stamped names looked equivalent and is not:
     the collision suffix makes `…-101533` sort before `…-101533-1`, and once the numbers reach two
-    digits it stops matching age at all. Measured while checking this file: the cap held at five, and
-    they were the five *oldest*. mtime is the thing actually meant.
+    digits it stops matching age at all. mtime is the thing actually meant.
     """
     directory = os.path.dirname(filename) or "."
     prefix = os.path.basename(filename) + MARK

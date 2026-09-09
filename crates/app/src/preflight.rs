@@ -24,7 +24,7 @@ use std::io::Read as _;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::backend::{bundled_backend_dir, quote_path, shell_quote, BackendConfig, Execution};
+use crate::backend::{bundled_backend_dir, quote_path, shell_quote, BackendConfig};
 
 /// Ceiling for one probe. Generous because a **cold** WSL distro genuinely takes
 /// several seconds to boot on the first `wsl.exe` call of a session, and reporting
@@ -710,72 +710,42 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
         ));
     }
 
-    // ---------------------------------------------------------------- 4. the overlay
+    // ---------------------------------------------------------------- 4. local execution
     //
-    // The check that exists because this failure is *silent*. Host execution works by
-    // putting `overlay/` on the backend's PYTHONPATH so `sitecustomize` swaps the
-    // sandbox class at interpreter startup (docs §18). If that path is not reachable
-    // from the backend — the repo on a drive the distro has not mounted, a UNC path
-    // `wsl_path` cannot translate — Python simply imports nothing, no error is raised,
-    // and the backend quietly tries the *remote* sandbox instead. The user sees an
-    // authentication failure about a service they thought they had stopped using.
-    let candidates = config.overlay_candidates();
-    if let Some(overlay) = candidates.last().cloned() {
-        if can_probe {
-            // In the launch command's own preference order, so the pane names the copy the
-            // backend will actually import. Reporting a different path from the one in use
-            // is worse than reporting nothing — it sends anyone debugging to the wrong file.
-            let found = candidates.iter().find(|candidate| {
-                let marker = format!("{}/sitecustomize.py", candidate.trim_end_matches('/'));
-                if in_wsl {
-                    probe(&config.shell_argv(&format!("test -f {}", quote_path(&marker)))).ok
-                } else {
-                    std::path::Path::new(&marker).is_file()
-                }
-            });
-            if let Some(found) = found {
-                let installed = found != &overlay;
-                checks.push(Check::pass(
-                    "overlay",
-                    "Host execution overlay",
-                    if installed {
-                        format!("installed with the backend: {found}")
-                    } else {
-                        format!("reachable at {found}")
-                    },
-                ));
-            } else {
-                checks.push(Check::failing(
-                    "overlay",
-                    "Host execution overlay",
-                    State::Fail,
-                    format!("the backend cannot see {overlay}"),
-                    vec![Fix::Manual(format!(
-                        "Host execution would not take effect and the backend would try \
-                         the remote sandbox instead. Put this repo on a local drive, or \
-                         set MINIME_OVERLAY_DIR to a path reachable from {}.",
-                        if in_wsl { "the distro" } else { "the backend" }
-                    ))],
-                ));
-            }
+    // Host execution is the only mode: the module that makes it work ships inside
+    // `backend/local/` as part of the checkout itself. If it's missing — an incomplete
+    // sync, or a checkout old enough to predate the merge — `execute` would fail
+    // immediately, so this is a hard failure rather than a fallback warning: there is no
+    // other backend left to fall back to.
+    let local_execution = config.local_execution_module();
+    if can_probe {
+        let found = if in_wsl {
+            probe(&config.shell_argv(&format!("test -f {}", quote_path(&local_execution)))).ok
         } else {
-            checks.push(Check::skip(
-                "overlay",
-                "Host execution overlay",
-                RUNTIME_FIRST,
+            std::path::Path::new(&local_execution).is_file()
+        };
+        if found {
+            checks.push(Check::pass(
+                "local-execution",
+                "Local execution",
+                format!("found at {local_execution}"),
+            ));
+        } else {
+            checks.push(Check::failing(
+                "local-execution",
+                "Local execution",
+                State::Fail,
+                format!("missing at {local_execution}"),
+                vec![Fix::Manual(
+                    "Run Setup to (re)install the backend checkout.".into(),
+                )],
             ));
         }
-    } else if matches!(config.execution, Execution::Sandbox) {
-        checks.push(Check::failing(
-            "overlay",
-            "Host execution overlay",
-            State::Warn,
-            "off — the agent's commands go to the remote sandbox",
-            vec![Fix::Manual(
-                "That needs LANGSMITH_API_KEY. Turn on \"Run code on this machine\" in \
-                 Settings to use the local path instead."
-                    .into(),
-            )],
+    } else {
+        checks.push(Check::skip(
+            "local-execution",
+            "Local execution",
+            RUNTIME_FIRST,
         ));
     }
 
@@ -1464,7 +1434,6 @@ mod tests {
             launch_command: vec!["true".into()],
             attach_only: false,
             log_path: PathBuf::from("/dev/null"),
-            execution: Execution::Sandbox,
             secrets: Vec::new(),
             approve_execute: true,
             async_subagents: false,
@@ -1569,21 +1538,6 @@ mod tests {
         };
         assert_eq!(state(&with), Some(State::Pass));
         assert_eq!(state(&without), Some(State::Fail));
-    }
-
-    #[test]
-    fn the_remote_sandbox_is_a_warning_and_never_blocks_a_turn() {
-        let _env = crate::backend::env_lock::hold();
-        // Sandbox execution is still supported (`--sandbox`), so it must not show up as
-        // a failure — only as a note that commands leave this machine.
-        let report = inspect(&config(), true);
-        let overlay = report
-            .checks
-            .iter()
-            .find(|check| check.id == "overlay")
-            .expect("an overlay row");
-        assert_eq!(overlay.state, State::Warn);
-        assert!(overlay.detail.contains("remote sandbox"), "{overlay:?}");
     }
 
     #[test]

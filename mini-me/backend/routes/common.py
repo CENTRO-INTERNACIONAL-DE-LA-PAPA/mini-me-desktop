@@ -7,7 +7,7 @@ from pathlib import PurePosixPath
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
-from backend.sandbox import LazyLangsmithSandbox
+from backend.local.workspace import LocalWorkspaceBackend
 
 
 def _require_auth(request: Request) -> Response | None:
@@ -36,9 +36,9 @@ def _require_auth(request: Request) -> Response | None:
 
 async def _existing_sandbox_for_thread(
     thread_id: str,
-) -> LazyLangsmithSandbox | None:
-    """Return a resolved adapter for a thread, or None if no sandbox exists."""
-    adapter = LazyLangsmithSandbox(thread_id)
+) -> LocalWorkspaceBackend | None:
+    """Return a resolved adapter for a thread, or None if no workspace exists."""
+    adapter = LocalWorkspaceBackend(thread_id)
     sb = await adapter.try_resolve()
     return adapter if sb is not None else None
 

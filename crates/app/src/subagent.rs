@@ -18,8 +18,8 @@
 //!   path;
 //! - it works against the pinned backend with no upstream change at all.
 //!
-//! What the app *does* own is the name: it is checked against the registry the backend overlay
-//! writes (`overlay/minime_local/registry.py`, read by [`crate::workspace::subagents`]) before
+//! What the app *does* own is the name: it is checked against the registry the backend
+//! writes (`backend/local/registry.py`, read by [`crate::workspace::subagents`]) before
 //! anything is sent. §55 left this as the open question and answered it — "failing loudly at
 //! send is right; silently sending `/eda-subagent …` as prose is how someone waits ten minutes
 //! for a turn that was never delegated."
@@ -40,7 +40,7 @@ use crate::workspace::Subagent;
 /// Colours are placeholders — nothing here claims meaning beyond letting the same specialist
 /// read as the same dot everywhere it appears (the indicator above the composer, its own row in
 /// the menu). Named explicitly rather than assigned in registry order, because that order is the
-/// backend's and can be rebuilt any time the overlay reassembles the coordinator (§55) — a
+/// backend's and can be rebuilt any time it reassembles the coordinator (§55) — a
 /// colour tied to position would then reshuffle across every specialist for no reason visible to
 /// whoever is looking at it. A specialist this table doesn't yet name — one the backend has added
 /// since this was last written — still gets its name formatted and falls back to grey, which is
@@ -267,7 +267,7 @@ mod tests {
     }
 
     fn registry() -> Vec<Subagent> {
-        // The real ten, from the fixture the overlay wrote.
+        // The real ten, from the fixture the backend wrote.
         crate::workspace::parse_registry(include_str!("../tests/fixtures/subagent-registry.json"))
     }
 

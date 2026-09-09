@@ -214,29 +214,22 @@ cargo run -p mini-me-desktop-app -- --set-secret llm:anthropic "sk-…"
 The model and key apply to the next turn. The port and execution locality are baked into
 the sidecar's launch command, so those need a restart.
 
-### Host execution (the default)
+### Host execution (the only mode)
 
 The agent's code runs **on this machine** — no LangSmith key, no cold start, no upload
 dance. Files land in `~/.mini-me/workspaces/<thread>/`, where you can open them yourself.
+There is no remote-sandbox alternative to opt into; local execution is unconditional.
 
 **Every `execute` call stops and asks first.** The run pauses, the app shows you the
 command verbatim, and nothing runs until you approve it. That is what makes running on
-your own machine reasonable rather than reckless.
+your own machine reasonable rather than reckless. `MINIME_APPROVE_EXECUTE=0` disables the
+gate — it exists for automation, and is not a recommendation.
 
-The remote LangSmith sandbox is still there if you want it:
-
-```bash
-cargo run -p mini-me-desktop-app -- --sandbox
-```
-
-`--local` / `--sandbox` override `MINIME_EXECUTION_BACKEND`, and are the better habit on
-Windows: PowerShell has no `VAR=value cmd` prefix form, and a `$env:` assignment
-outlives the command that needed it.
-
-This works by putting [`overlay/`](overlay/) on the backend's `PYTHONPATH`; **the
-Mini-Me checkout is not modified**. See [`overlay/README.md`](overlay/README.md) for the
-mechanism and the plan's §18/§19 for the trade-offs. `MINIME_APPROVE_EXECUTE=0` disables
-the gate — it exists for automation, and is not a recommendation.
+This is implemented directly in `mini-me/backend/local/` — part of the backend package
+itself, not an external checkout patched at import time (see plan §18/§19 for the
+history: this used to be a `PYTHONPATH` overlay kept separate so it never conflicted with
+an upstream Mini-Me checkout; now that the backend is vendored in this repo, that
+separation no longer serves a purpose).
 
 ## Direction
 

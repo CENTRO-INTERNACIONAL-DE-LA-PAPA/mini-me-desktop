@@ -6,7 +6,7 @@ A synchronous EDA produced sixteen real files — a 46 KB dataset, seven summary
 figures — and the researcher's Outputs panel was empty. The files were in WSL's global `/tmp`,
 where `workspace::outputs` cannot see them, artifact capture correctly does not scan, a project
 move does not carry them, deleting the conversation does not remove them, and the operating system
-eventually deletes them anyway (docs §160).
+eventually deletes them anyway.
 
 The coordinator had asked for relative paths. It lost, and to a better-placed instruction:
 
@@ -16,17 +16,16 @@ The coordinator had asked for relative paths. It lost, and to a better-placed in
 
 That is sound advice for an agent in a container it owns. Here it is the opposite of what is
 needed: `LocalWorkspaceBackend` runs with ``virtual_mode=False`` so that shell commands and file
-tools share one real path namespace (§18), which means an absolute path in a command is an
-absolute path on the researcher's machine. `/tmp` is a plausible guess for a scratch directory,
-and nothing corrected it.
+tools share one real path namespace, which means an absolute path in a command is an absolute
+path on the researcher's machine. `/tmp` is a plausible guess for a scratch directory, and
+nothing corrected it.
 
 # Why the description and not a guard
 
 `_reroute_write` re-roots absolute paths for `write` and `upload_files`. `aexecute` has no
 equivalent and should not get one made of string matching: a command is an arbitrary shell
 program, and pattern-matching it for writes would produce a containment claim that is false in
-every case nobody thought of. §160 says this and then proposes exactly that as a fallback; it
-cannot be both.
+every case nobody thought of.
 
 So this changes what the model is *told*, which is honest about being advice rather than a
 boundary. Real containment means the workspace is the only writable persistent mount, and that is
@@ -35,10 +34,10 @@ a larger change than a docstring — one worth making, and not one to pretend ha
 # Why it is patched by name
 
 `create_deep_agent` takes no `custom_tool_descriptions`, and `FilesystemMiddleware` reads the
-module global when it builds the tool (`filesystem.py:1481`), so replacing the global before any
-middleware is constructed is the reachable point. Patching a third party by name is a shape this
-project has been bitten by, so: the replacement is attempted on an exact sentence and the result
-is **logged either way**. If upstream rewords that line, the log says the contradiction may have
+module global when it builds the tool, so replacing the global before any middleware is
+constructed is the reachable point. Patching a third party by name is a shape this project has
+been bitten by, so: the replacement is attempted on an exact sentence and the result is
+**logged either way**. If upstream rewords that line, the log says the contradiction may have
 returned rather than reporting success over a no-op.
 """
 
@@ -83,9 +82,8 @@ def install(module) -> None:
     original = getattr(module, "EXECUTE_TOOL_DESCRIPTION", None)
     if not isinstance(original, str) or not original:
         log.warning(
-            "minime_local: deepagents has no EXECUTE_TOOL_DESCRIPTION to rewrite — commands "
-            "will be told to prefer absolute paths and their outputs may leave the workspace "
-            "(docs §160)"
+            "backend.local: deepagents has no EXECUTE_TOOL_DESCRIPTION to rewrite — commands "
+            "will be told to prefer absolute paths and their outputs may leave the workspace"
         )
         return
 
@@ -95,11 +93,11 @@ def install(module) -> None:
         # of the sentence arguing against it, and a reader deserves to know which of the two
         # they got.
         log.warning(
-            "minime_local: deepagents' execute description no longer contains the "
+            "backend.local: deepagents' execute description no longer contains the "
             "absolute-path sentence — the workspace rule is appended, but the advice it "
-            "contradicts may have returned in a new wording (docs §160)"
+            "contradicts may have returned in a new wording"
         )
     module.EXECUTE_TOOL_DESCRIPTION = replaced + _WORKSPACE_RULE
     log.warning(
-        "minime_local: execute is told to keep persistent output in the conversation's workspace"
+        "backend.local: execute is told to keep persistent output in the conversation's workspace"
     )

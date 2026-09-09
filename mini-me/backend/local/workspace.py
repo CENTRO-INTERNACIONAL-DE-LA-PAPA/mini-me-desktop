@@ -1,10 +1,11 @@
 """Host execution for Mini-Me: a local workspace in place of the LangSmith sandbox.
 
-Mini-Me runs the agent's files and shell commands inside a remote LangSmith sandbox.
-For a **local-first desktop app** that is infrastructure we neither need nor want: it
-costs a per-user API key, a cold start, a 10-minute idle TTL, a one-concurrent-sandbox
-free tier, and it ships the user's files to someone else's VM. See the desktop plan,
-§10/§11 — the sandbox is the *only* thing standing between us and dropping LangSmith.
+Mini-Me's own sandbox abstraction (`backend/sandbox.py`) can run the agent's files and shell
+commands inside a remote LangSmith sandbox. For a **local-first desktop app** that is
+infrastructure this app neither needs nor wants: it costs a per-user API key, a cold start, a
+10-minute idle TTL, a one-concurrent-sandbox free tier, and it ships the user's files to someone
+else's VM. This app only ever runs `LocalWorkspaceBackend` — see the construction sites in
+`backend/agent.py` and `backend/routes/`.
 
 The replacement is deliberately thin, because deepagents already does the work:
 
@@ -35,12 +36,12 @@ from typing import Any
 from deepagents.backends.local_shell import LocalShellBackend
 from deepagents.backends.protocol import ExecuteResponse
 
-# Imported from upstream rather than reimplemented, so the local path truncates
-# execute output exactly as the sandbox path does — the cap protects the model's
-# context window and is not sandbox-specific.
+# Imported from the sandbox module rather than reimplemented, so the local path truncates
+# execute output exactly as the remote-sandbox path does — the cap protects the model's context
+# window and is not sandbox-specific.
 from backend.sandbox import _emit_sandbox_status, _truncate_execute_response
 
-from minime_local import authorship, ledger
+from backend.local import authorship, ledger
 
 #: Where per-thread workspaces live. The desktop app sets this; the fallback keeps
 #: a bare ``langgraph dev`` working.
@@ -60,18 +61,17 @@ _DEFAULT_TIMEOUT = 300
 #: A background worker runs on its **own** LangGraph thread, so by default it would get its
 #: own workspace directory — and everything it produced would be invisible: the app looks in
 #: the conversation's directory, and the coordinator, asked for the report afterwards, could
-#: only hunt for it with `ls` and `glob` (docs §43). This pins the worker to the
-#: conversation's workspace so a file it writes is simply *there*, at the same relative
-#: path, for everyone who goes looking.
+#: only hunt for it with `ls` and `glob`. This pins the worker to the conversation's workspace
+#: so a file it writes is simply *there*, at the same relative path, for everyone who goes
+#: looking.
 WORKSPACE_THREAD_KEY = "__workspace_thread__"
 
 #: Config key naming the project folder this run's workspace sits inside.
 #:
-#: **Why a project is a real directory and not only a label.** Docs §42 moved outputs out of the
-#: distro into ``Documents\Mini-Me`` on one argument: files a researcher cannot find are files
-#: that do not exist. A project is the unit a scientist actually works in, so the same argument
-#: applies again one level up — a grouping that exists only inside the app is not a grouping they
-#: can zip, back up, or drop on a shared drive (docs §105).
+#: **Why a project is a real directory and not only a label.** Files a researcher cannot find
+#: are files that do not exist. A project is the unit a scientist actually works in, so the
+#: same argument applies one level up — a grouping that exists only inside the app is not a
+#: grouping they can zip, back up, or drop on a shared drive.
 #:
 #: Empty or absent means the conversation is not in a project, and its directory sits directly
 #: under the root exactly as before. Every conversation that predates this stays where it is.
@@ -89,9 +89,9 @@ def workspace_root() -> Path:
 def _configurable() -> dict:
     """The live run's ``configurable``, or an empty dict outside a run.
 
-    Read from the running config rather than passed in, because upstream constructs the backend
-    as ``LazyLangsmithSandbox(thread_id)`` at two call sites this overlay deliberately does not
-    touch.
+    Read from the running config rather than passed in: ``backend/agent.py`` constructs the
+    backend as ``LocalWorkspaceBackend(thread_id)``, so extra per-run context has to travel
+    through the config rather than through the constructor.
     """
     try:
         from langgraph.config import get_config
@@ -111,8 +111,7 @@ def _configurable() -> dict:
 # with a bare `NameError` far from here. **Add new module-level code below the logger.**
 #
 # The markers are named in the tests, not repeated here: this comment first quoted them and the
-# tests then matched *it* instead of the code — a warning that became the thing it warned about
-# (§280).
+# tests then matched *it* instead of the code — a warning that became the thing it warned about.
 # ---------------------------------------------------------------------------------------------
 def workspace_project() -> str:
     """The project folder for this run, or ``""`` for none.
@@ -138,12 +137,12 @@ def workspace_project() -> str:
 #: **The config is not visible at every construction site.** A single background run built its
 #: sandbox twice — once where `get_config()` carried the pin, and once where it did not — so two
 #: directories appeared for one task: the nested one, empty, and a sibling holding every file. From
-#: the outside they are indistinguishable from "the nesting did not work" (docs §151).
+#: the outside they are indistinguishable from "the nesting did not work".
 #:
-#: This is the same shape as §123, where a `ContextVar` store did not survive a task boundary. The
-#: answer there was the same as here: keep the fact somewhere the process shares, keyed by
-#: something that cannot collide. A task id is unique to one background run, so the map is small,
-#: correct, and cannot mis-file one conversation's work under another's.
+#: The answer here is the same as for a `ContextVar` store that does not survive a task boundary:
+#: keep the fact somewhere the process shares, keyed by something that cannot collide. A task id is
+#: unique to one background run, so the map is small, correct, and cannot mis-file one
+#: conversation's work under another's.
 _PINNED_BY_THREAD: dict[str, str] = {}
 
 
@@ -151,9 +150,8 @@ def workspace_thread(default: str) -> str:
     """Which thread's workspace this run should use.
 
     ``default`` (the run's own thread) unless something pinned it — see
-    :data:`WORKSPACE_THREAD_KEY`. Read from the live run config rather than passed in,
-    because upstream constructs the backend as ``LazyLangsmithSandbox(thread_id)`` at two
-    call sites this overlay deliberately does not touch.
+    :data:`WORKSPACE_THREAD_KEY`. Read from the live run config rather than passed in, for the
+    same reason as :func:`_configurable`.
 
     Remembered per thread, because that config is visible at some of those sites and not others.
     """
@@ -165,14 +163,13 @@ def workspace_thread(default: str) -> str:
         remembered = _PINNED_BY_THREAD.setdefault(default, pinned)
         if remembered != pinned:
             logger.warning(
-                "minime_local: thread %s was pinned to %s and is now %s — keeping the first",
+                "backend.local: thread %s was pinned to %s and is now %s — keeping the first",
                 default,
                 remembered,
                 pinned,
             )
         return remembered
     return _PINNED_BY_THREAD.get(default, "") or default
-
 
 
 logger = logging.getLogger(__name__)
@@ -289,7 +286,7 @@ def current_asta_token() -> str | None:
 
     **Never called on the event loop** — see the call site in ``aexecute``, which is
     already inside ``asyncio.to_thread``. ``langgraph dev``'s blocking-call guard rejects
-    subprocesses on the loop, and that guard has aborted a run in this project before.
+    subprocesses on the loop, and that guard has aborted a run on this project before.
     """
     global _token_cache
 
@@ -306,15 +303,15 @@ def current_asta_token() -> str | None:
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        logger.debug("minime_local: could not run the asta CLI: %s", exc)
+        logger.debug("backend.local: could not run the asta CLI: %s", exc)
         return token
     minted = result.stdout.strip()
     if result.returncode != 0 or not _looks_like_a_jwt(minted):
-        logger.debug("minime_local: asta did not return a token")
+        logger.debug("backend.local: asta did not return a token")
         return token or _supplied_token()
 
     _token_cache = (minted, time.monotonic())
-    logger.info("minime_local: refreshed the Asta access token from the CLI")
+    logger.info("backend.local: refreshed the Asta access token from the CLI")
     return minted
 
 
@@ -336,7 +333,7 @@ def _supplied_token() -> str | None:
     supplied = (os.getenv("ASTA_TOKEN") or "").strip()
     if supplied and _looks_like_a_jwt(supplied):
         logger.warning(
-            "minime_local: using ASTA_TOKEN from the environment — the asta CLI could "
+            "backend.local: using ASTA_TOKEN from the environment — the asta CLI could "
             "not mint one. If Asta calls fail, this stored token is likely stale; "
             "clear it in Settings and sign in instead."
         )
@@ -366,8 +363,8 @@ def _record(
     """Add this command to the conversation's own record. **Never raises.**
 
     Every command, not only the failures `_log_failure` keeps: the ones that matter most are the
-    ones that worked and wrote somewhere nobody looked (§160), and under the conversation-wide
-    approval grant (§41) nobody sees them go past at all.
+    ones that worked and wrote somewhere nobody looked, and under the conversation-wide approval
+    grant nobody sees them go past at all.
 
     Placed here because this is the one function every `execute` already passes through — the same
     reason `_say_where_it_ran` is here, and the difference between a record and a record with a
@@ -408,7 +405,7 @@ def _record(
         record["scan_truncated"] = tree_truncated or truncated
         ledger.append(owner, record)
     except Exception:  # noqa: BLE001 — a diagnostic must never be what takes `execute` down
-        logger.debug("minime_local: could not record a command", exc_info=True)
+        logger.debug("backend.local: could not record a command", exc_info=True)
 
 
 def _say_where_it_ran(result: Any, work_dir: Any) -> None:
@@ -437,8 +434,7 @@ def _say_where_it_ran(result: Any, work_dir: Any) -> None:
     # Only on failure
 
     A working command must stay quiet. This text enters the model's context, and a line appended to
-    every `execute` is a line the model learns to skip — which is how the corpus-id diagnostic
-    stopped being read (§116/§132).
+    every `execute` is a line the model learns to skip.
 
     Never raises. A response shape we cannot append to is a lost hint; an exception here would take
     `execute` down entirely, which is the trade this file already records making wrongly once.
@@ -455,7 +451,7 @@ def _say_where_it_ran(result: Any, work_dir: Any) -> None:
         else:
             object.__setattr__(result, "output", output + note)
     except Exception:  # noqa: BLE001
-        logger.debug("minime_local: could not append the working directory to a failure")
+        logger.debug("backend.local: could not append the working directory to a failure")
 
 
 def _log_failure(command: str, result: Any) -> None:
@@ -463,8 +459,7 @@ def _log_failure(command: str, result: Any) -> None:
 
     Tools discard what a command actually printed and report their own summary instead —
     the theorizer's *"no task id was returned, which usually means the access token is
-    missing or expired"* is a **guess**, offered with no way to see the real error. That
-    guess has now sent this project down three wrong paths.
+    missing or expired"* is a **guess**, offered with no way to see the real error.
 
     Whatever the command truly said lands here, in the file the Setup pane already points
     at. Only failures, so a working session stays quiet.
@@ -479,7 +474,7 @@ def _log_failure(command: str, result: Any) -> None:
     if exit_code in (None, 0):
         return
     logger.warning(
-        "minime_local: command failed (exit %s): %s\n%s",
+        "backend.local: command failed (exit %s): %s\n%s",
         exit_code,
         command[:400],
         output[-2000:],
@@ -518,32 +513,14 @@ def _command_env() -> dict[str, str]:
     asta_token = os.getenv("ASTA_TOKEN")
     if asta_token:
         env["ASTA_TOKEN"] = asta_token
-
-    # Keep the overlay out of the child's PYTHONPATH. Otherwise every command the
-    # model runs re-imports our `sitecustomize`, whose startup line lands in the
-    # command's stderr — and `execute` merges stderr into the output the model reads,
-    # so every result would arrive wearing a banner about the overlay.
-    # String comparison, not `Path.resolve()`: this runs on the event loop, where
-    # `langgraph dev`'s blocking-call guard rejects filesystem syscalls.
-    overlay_dir = os.path.normpath(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    remaining = [
-        entry
-        for entry in env.get("PYTHONPATH", "").split(os.pathsep)
-        if entry and os.path.normpath(entry) != overlay_dir
-    ]
-    if remaining:
-        env["PYTHONPATH"] = os.pathsep.join(remaining)
-    else:
-        env.pop("PYTHONPATH", None)
     return env
 
 
 class LocalWorkspaceBackend(LocalShellBackend):
     """A per-thread directory on the host, standing in for a sandbox VM.
 
-    Constructed with the same one-argument signature as
-    ``backend.sandbox.LazyLangsmithSandbox`` so it can be dropped in at both of
-    upstream's construction sites without touching them.
+    Constructed with a one-argument signature — ``LocalWorkspaceBackend(thread_id)`` — matching
+    every construction site in ``backend/agent.py`` and ``backend/routes/``.
 
     **``virtual_mode=False`` is load-bearing.** Upstream's tools build absolute paths
     from ``aget_work_dir()`` — ``f"{work_dir}/theories/{task_id}"`` — hand them to the
@@ -562,19 +539,16 @@ class LocalWorkspaceBackend(LocalShellBackend):
         root = workspace_root()
         # The run's own config first — it is authoritative and it is what creates the folder in the
         # first place. Outside a run it is empty, and then the folder that already exists is the
-        # only thing that knows (§280).
+        # only thing that knows.
         project = workspace_project() or existing_project(root, self._thread_id)
         # **A background worker gets a folder *inside* the conversation's, named after itself.**
         #
-        # Three earlier attempts moved these files between sibling directories and none of them
-        # answered the actual requirement, which the researcher put plainly: *"the idea is to
-        # somehow view it in the app, not as a different folder outside the conversation folder."*
-        #
-        # Nesting answers it without the app changing at all. `workspace::outputs` already descends
-        # through named subfolders and shows the relative path (§143), so `019fe.../plot_yield.png`
-        # appears in the conversation's Outputs panel by itself — and *which run produced it* stays
-        # legible, which writing straight into the conversation's folder would have destroyed by
-        # mixing every worker's files together.
+        # Nesting answers the requirement — *"the idea is to somehow view it in the app, not as a
+        # different folder outside the conversation folder"* — without the app changing at all.
+        # `workspace::outputs` already descends through named subfolders and shows the relative
+        # path, so `019fe.../plot_yield.png` appears in the conversation's Outputs panel by
+        # itself — and *which run produced it* stays legible, which writing straight into the
+        # conversation's folder would have destroyed by mixing every worker's files together.
         #
         # The coordinator's own runs are unaffected: `workspace_thread` returns their own id, the
         # two are equal, and there is nothing to nest.
@@ -591,20 +565,16 @@ class LocalWorkspaceBackend(LocalShellBackend):
         # explanations — it is looking in the wrong directory, or the file is not where the
         # conversation thinks it is — and from the outside they are the same sentence: *"could not
         # find ./potato_yield.csv"*. The directory is computed right here from three inputs and was
-        # never reported, so neither could be ruled out (docs §115).
-        #
-        # This is the fifth time in a week that the thing needed to end an argument was a value
-        # the program already had: §99's laid-out width, §91's count of adoptable threads, §110's
-        # overlay path, §114's config keys.
+        # never reported, so neither could be ruled out.
         #
         # `warning` for a real run, `debug` for a read-only graph load. `GET /threads/{id}/state`
         # builds a backend too — the client polls it while watching a task — and those have no run
         # config, so they resolve to the run's own thread at the root and touch nothing. At
         # warning level they outnumbered the lines that matter six to one, which is how a log
-        # stops being read (docs §116).
+        # stops being read.
         speak = logger.warning if _configurable() else logger.debug
         speak(
-            "minime_local: workspace %s (own thread %s, pinned to %s, project %r)",
+            "backend.local: workspace %s (own thread %s, pinned to %s, project %r)",
             self._work_dir,
             thread_id,
             self._thread_id,
@@ -633,8 +603,7 @@ class LocalWorkspaceBackend(LocalShellBackend):
 
         Every filesystem call here is offloaded with ``asyncio.to_thread``. That is not
         politeness: ``langgraph dev`` runs a blocking-call detector, and a bare
-        ``mkdir`` on the event loop aborts the run with ``BlockingError`` — which is
-        exactly how the first live turn on this backend failed.
+        ``mkdir`` on the event loop aborts the run with ``BlockingError``.
         """
         await asyncio.to_thread(self._work_dir.mkdir, parents=True, exist_ok=True)
         if not self._announced:
@@ -674,12 +643,12 @@ class LocalWorkspaceBackend(LocalShellBackend):
         """Send a write outside the workspace to ``<workspace>/<basename>``.
 
         Mirrors upstream's ``_resolve_for_write``. The deepagents virtual filesystem
-        hands the model's "project root" writes through as ``/report.md``; in the
-        sandbox that was the POSIX root, where the unprivileged user could not write,
-        so upstream re-rooted them. Here the same rule does double duty as the one
+        hands the model's "project root" writes through as ``/report.md``; in a remote
+        sandbox that was the POSIX root, where the unprivileged user could not write, so
+        upstream re-rooted them. Here the same rule does double duty as the one
         guardrail the file tools have: without it ``write("/etc/hosts", …)`` would be a
         real attempt on the host, and with it the file lands harmlessly in the
-        workspace. `execute` is a different matter — see §18 on human-gating it.
+        workspace. `execute` is a different matter — see `approval.py` on human-gating it.
         """
         if not isinstance(path, str) or not path:
             return path
@@ -708,19 +677,14 @@ class LocalWorkspaceBackend(LocalShellBackend):
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
         """Run a command, and record that it ran.
 
-        **Overridden for the record, and here rather than in `aexecute`, which is where the first
-        version put it.** deepagents registers *two* execute tools — a synchronous one calling
-        `execute` and an async one calling `aexecute` (`middleware/filesystem.py:1538` and `:1627`)
-        — and which is used depends on how the graph was built. Recording in `aexecute` covered one
-        of them.
+        **Overridden for the record, here rather than in `aexecute`.** deepagents registers
+        *two* execute tools — a synchronous one calling `execute` and an async one calling
+        `aexecute` — and which is used depends on how the graph was built. Recording in
+        `aexecute` alone would cover only one of them.
 
-        This is the point both reach: the protocol's `aexecute` delegates to `execute`, and so does
-        ours. One override, no double entry, and no way for a command to run without appearing.
-
-        That is the sixth time in this project a correct component has been wired to one of two
-        paths (§254, §257, §258, §259, §261, §262). The lesson each time is the same and it is
-        cheap to apply: find the function *everything* passes through, not the one you happened to
-        be editing.
+        This is the point both reach: the protocol's `aexecute` delegates to `execute`, and so
+        does ours. One override, no double entry, and no way for a command to run without
+        appearing.
         """
         # **The workspace has to exist first.** `aresolve` creates it, and only `aexecute` awaits
         # that — so a command arriving through the *synchronous* tool ran with a `cwd` that was not
@@ -732,7 +696,7 @@ class LocalWorkspaceBackend(LocalShellBackend):
         try:
             self._work_dir.mkdir(parents=True, exist_ok=True)
         except OSError:
-            logger.debug("minime_local: could not make the workspace before a command", exc_info=True)
+            logger.debug("backend.local: could not make the workspace before a command", exc_info=True)
 
         started = time.monotonic()
         try:
@@ -755,12 +719,12 @@ class LocalWorkspaceBackend(LocalShellBackend):
         return str(self._work_dir)
 
     async def aexecute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
-        """Run a command, truncating output as upstream does.
+        """Run a command, truncating output as the remote-sandbox path does.
 
         Overridden rather than inherited for two reasons: the protocol's default
         ``aexecute`` is ``asyncio.to_thread(self.execute, command)``, which **silently
         drops the per-call timeout**; and this output can flow into the agent's
-        context, so it gets upstream's cap.
+        context, so it gets the same cap `backend.sandbox` applies.
         """
         return _truncate_execute_response(
             await self.aexecute_untruncated(command, timeout=timeout)
@@ -777,12 +741,12 @@ class LocalWorkspaceBackend(LocalShellBackend):
         await self.aresolve()
         # **Both `aexecute` paths run through here**, which is why the bracket is here rather than
         # on the caller: a plot written by a script inside `execute` registers no artifact, and the
-        # desktop app's own comment says those are most of the files it shows.
+        # desktop app shows most of the files it displays this way.
         #
         # Taken *before* the command, from the same clock the filesystem stamps with, and compared
         # afterwards against the tree this workspace owns. One process reading two of its own
         # readings around one command it started — an interval it can prove, not one inferred from
-        # a timeline (docs §201). `authorship` names whoever issued it.
+        # a timeline. `authorship` names whoever issued it.
         started = time.time()
         author = authorship.current_agent()
         try:
@@ -816,7 +780,7 @@ class LocalWorkspaceBackend(LocalShellBackend):
             env["ASTA_TOKEN"] = token
         elif token:
             logger.debug(
-                "minime_local: no _env on the backend; the Asta token cannot be refreshed"
+                "backend.local: no _env on the backend; the Asta token cannot be refreshed"
             )
         result = self.execute(command, timeout=timeout)
         _log_failure(command, result)

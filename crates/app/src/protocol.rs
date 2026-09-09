@@ -560,14 +560,14 @@ const CONVERSATION_TAG: &str = "minime_conversation";
 /// Metadata key naming the project a conversation belongs to.
 ///
 /// Paired with the folder the backend writes into (`__workspace_project__`, see
-/// `overlay/minime_local/workspace.py`). The folder is where the files are; this is how the app
+/// `backend/local/workspace.py`). The folder is where the files are; this is how the app
 /// knows which folder to look in — see docs §105 for why it is both and not either.
 const PROJECT_KEY: &str = "minime_project";
 
 /// Config key naming the conversation whose folder owns a run's files.
 ///
 /// This must agree exactly with `WORKSPACE_THREAD_KEY` in
-/// `overlay/minime_local/workspace.py`. The client already knows the conversation id; making the
+/// `backend/local/workspace.py`. The client already knows the conversation id; making the
 /// backend rediscover it from LangGraph metadata was intermittent because that metadata is not
 /// present in every tool-call context (docs §159).
 const WORKSPACE_THREAD_KEY: &str = "__workspace_thread__";
@@ -1171,17 +1171,17 @@ impl LangGraphClient {
     ///
     /// The project this spine belongs to. Upstream keys it `(user_id, "project")` — one per
     /// person, accumulating forever — which mixes every line of work a researcher has ever had
-    /// and never forgets a deleted conversation. The overlay reads this parameter and scopes the
+    /// and never forgets a deleted conversation. The backend reads this parameter and scopes the
     /// namespace to match what a turn writes; without it the two sides would disagree and the
-    /// panel would go blank rather than become correct (`overlay/minime_local/spine.py`, §109).
+    /// panel would go blank rather than become correct (`backend/routes/project.py`, §109).
     ///
-    /// Shared by the read and the write, which is not tidiness: the overlay wraps `get_project`
-    /// and `patch_project` alike, so a PATCH that spelled its scope differently from the GET
-    /// would save the mission into a namespace the panel never reads and look like a save that
-    /// silently did nothing.
+    /// Shared by the read and the write, which is not tidiness: `_set_request_scope` arms
+    /// `get_project` and `patch_project` alike, so a PATCH that spelled its scope differently from
+    /// the GET would save the mission into a namespace the panel never reads and look like a save
+    /// that silently did nothing.
     ///
     /// **A conversation in no project names itself instead**, because otherwise it names nothing
-    /// and the overlay falls back to a record every ungrouped conversation shares — which is how a
+    /// and the backend falls back to a record every ungrouped conversation shares — which is how a
     /// new conversation about late blight opened under a mission of "Testting functionalities",
     /// with six visualizations it had not produced (§282). Only one of the two is ever sent: a
     /// filed conversation's spine belongs to its project.
@@ -2422,7 +2422,7 @@ fn config_for(
         "__is_for_execution__": true,
     });
 
-    // Which folder under the workspace root this turn's outputs belong in. The overlay reads
+    // Which folder under the workspace root this turn's outputs belong in. The backend reads
     // this key and sanitises it again on its own side — a project name is a path segment and a
     // thing a person types (docs §105).
     if let Some(project) = project.map(str::trim).filter(|name| !name.is_empty()) {
@@ -4765,7 +4765,7 @@ mod tests {
         assert_eq!(
             filed.project_url(),
             "http://127.0.0.1:2024/project?project=Potato%20Late%20Blight",
-            "the overlay reads `?project` on GET and PATCH alike",
+            "the backend reads `?project` on GET and PATCH alike",
         );
 
         // Whitespace is not a project. `with_project(Some("  "))` used to be indistinguishable
@@ -4777,7 +4777,7 @@ mod tests {
 
     /// **A conversation in no project names itself, or it reads everybody's.**
     ///
-    /// Naming neither is what the client used to do, and the overlay answered from a record every
+    /// Naming neither is what the client used to do, and the backend answered from a record every
     /// unfiled conversation shared — so a new conversation about late blight opened under a
     /// mission of "Testting functionalities" with six visualizations it had not produced. Worse
     /// than the panel: that spine is injected into the coordinator's system prompt every turn
@@ -4792,7 +4792,7 @@ mod tests {
         );
 
         // **One or the other, never both.** Filing a conversation into a project says its work
-        // belongs with that project's, and the overlay resolves the same way — but sending both
+        // belongs with that project's, and the backend resolves the same way — but sending both
         // would leave which one wins to be agreed twice, in two languages.
         let filed = LangGraphClient::new("http://127.0.0.1:2024")
             .with_project(Some("TEST3".into()))
@@ -4806,21 +4806,21 @@ mod tests {
         assert_eq!(fresh.project_url(), "http://127.0.0.1:2024/project");
     }
 
-    /// The names this client sends and the names the overlay reads are the same two names.
+    /// The names this client sends and the names the backend reads are the same two names.
     ///
-    /// Read out of the overlay's own source rather than restated here. A rename on either side is
+    /// Read out of the backend's own source rather than restated here. A rename on either side is
     /// a spine that silently falls back to the shared record — which is a defect that looks like
     /// nothing at all, because the panel still fills in.
     #[test]
-    fn the_query_parameters_are_the_ones_the_overlay_reads() {
-        let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../overlay/minime_local/spine.py");
-        let source = std::fs::read_to_string(&overlay).expect("the overlay is beside the crate");
+    fn the_query_parameters_are_the_ones_the_backend_reads() {
+        let route = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../mini-me/backend/routes/project.py");
+        let source = std::fs::read_to_string(&route).expect("mini-me is beside the crate");
 
         let constant = |name: &str| {
             let start = source
                 .find(&format!("{name} = \""))
-                .unwrap_or_else(|| panic!("{name} is gone from spine.py"))
+                .unwrap_or_else(|| panic!("{name} is gone from routes/project.py"))
                 + name.len()
                 + 4;
             source[start..]
@@ -4834,18 +4834,18 @@ mod tests {
             .with_thread(Some("t".into()))
             .project_url();
         assert!(
-            url.contains(&format!("?{}=", constant("THREAD_PARAM"))),
-            "the app sends {url}, and the overlay reads ?{}",
-            constant("THREAD_PARAM")
+            url.contains(&format!("?{}=", constant("_SCOPE_THREAD_PARAM"))),
+            "the app sends {url}, and the backend reads ?{}",
+            constant("_SCOPE_THREAD_PARAM")
         );
 
         let filed = LangGraphClient::new("http://x")
             .with_project(Some("p".into()))
             .project_url();
         assert!(
-            filed.contains(&format!("?{}=", constant("QUERY_PARAM"))),
-            "the app sends {filed}, and the overlay reads ?{}",
-            constant("QUERY_PARAM")
+            filed.contains(&format!("?{}=", constant("_SCOPE_PROJECT_PARAM"))),
+            "the app sends {filed}, and the backend reads ?{}",
+            constant("_SCOPE_PROJECT_PARAM")
         );
     }
 

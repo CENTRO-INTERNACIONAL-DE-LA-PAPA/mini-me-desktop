@@ -542,7 +542,7 @@ def test_a_dataverse_run_that_recommended_nothing_is_not_a_run_that_was_never_as
 
 def test_the_record_lands_beside_the_command_record(tmp_path):
     """One folder, two files, and the app finds both by the same address."""
-    from minime_local import ledger
+    from backend.local import ledger
 
     _write(tmp_path, entry("pdf_librarian", "LibraryArtifact", at=AT, checked=True, claimed=2))
     written = ledger.read(tmp_path, name=ledger.CLAIMS_NAME)
@@ -573,7 +573,7 @@ def test_every_structured_answer_is_recorded_even_the_clean_ones(tmp_path):
     dataverse run after three seconds and one model call, having never called the subagent. The
     missing line is only visible if the present ones are there.
     """
-    from minime_local import ledger
+    from backend.local import ledger
 
     clean = DataAnalysisResults(
         question="does yield track rainfall",
@@ -594,7 +594,7 @@ def test_every_structured_answer_is_recorded_even_the_clean_ones(tmp_path):
 
 
 def test_a_fabricated_dataset_reaches_the_record_not_only_the_log(tmp_path):
-    from minime_local import ledger
+    from backend.local import ledger
 
     sandbox = FakeSandbox(
         entries=[DATAVERSE_SEARCH], search='[{"global_id": "doi:1/real"}]', work_dir=tmp_path
@@ -609,7 +609,7 @@ def test_a_fabricated_dataset_reaches_the_record_not_only_the_log(tmp_path):
 
 def test_a_check_that_could_not_run_says_so_in_the_record(tmp_path):
     """Distinct from finding nothing wrong, which is the distinction §224 cost two days."""
-    from minime_local import ledger
+    from backend.local import ledger
 
     sandbox = FakeSandbox(entries=[], search=None, work_dir=tmp_path)  # the read fails
     record("dataverse_explorer", _recommendation("doi:1/x"), sandbox)
@@ -621,7 +621,7 @@ def test_a_check_that_could_not_run_says_so_in_the_record(tmp_path):
 
 def test_a_broken_record_never_costs_the_turn(tmp_path, recorded):
     """The folder is a file, so every write into it fails. The turn must not notice."""
-    from minime_local import ledger
+    from backend.local import ledger
 
     (tmp_path / ledger.RECORD_DIR).write_text("not a folder", encoding="utf-8")
     sandbox = FakeSandbox(entries=["data/trials.csv"], work_dir=tmp_path)
@@ -733,7 +733,7 @@ def test_the_recorder_writes_the_shape_the_fixture_declares(tmp_path):
     Both halves matter. `test_ledger.py`'s first version asserted only the hand-built one, and a
     field could be added to the fixture, regenerated, and never written by the code that runs.
     """
-    from minime_local import ledger
+    from backend.local import ledger
 
     sandbox = FakeSandbox(entries=["data/trials.csv"], work_dir=tmp_path)
     analysis = DataAnalysisResults(
@@ -763,7 +763,7 @@ def test_a_written_record_says_so(tmp_path, recorded):
 
 def test_a_record_that_could_not_be_written_is_a_warning(tmp_path, recorded):
     """The folder is a file, so every write into it fails — and it must not fail quietly."""
-    from minime_local import ledger
+    from backend.local import ledger
 
     (tmp_path / ledger.RECORD_DIR).write_text("not a folder", encoding="utf-8")
     _write(tmp_path, entry("data_voyager", "DataAnalysisResults", at=AT, checked=True))
@@ -771,22 +771,6 @@ def test_a_record_that_could_not_be_written_is_a_warning(tmp_path, recorded):
     assert "could not be written" in line
     assert "data_voyager" in line
     assert "Outputs panel" in line, "and says what the researcher will notice"
-
-
-def test_a_missing_overlay_is_said_at_a_level_this_channel_prints(monkeypatch, tmp_path, recorded):
-    """**INFO, not DEBUG.** The channel is set to INFO, so the debug line went nowhere.
-
-    A sandboxed deployment legitimately has no `minime_local`, and "the overlay is missing" is the
-    single most useful sentence for anyone looking for a panel row that never appeared.
-    """
-    import sys
-
-    monkeypatch.setitem(sys.modules, "minime_local", None)
-    _write(tmp_path, entry("academic_researcher", "AcademicResearchResults", at=AT, checked=True))
-    line = "\n".join(recorded)
-    assert "no minime_local on the path" in line
-    assert "academic_researcher" in line
-    assert not (tmp_path / ".mini-me").exists(), "and nothing was left behind"
 
 
 def test_the_record_is_written_off_the_event_loop(tmp_path, monkeypatch):

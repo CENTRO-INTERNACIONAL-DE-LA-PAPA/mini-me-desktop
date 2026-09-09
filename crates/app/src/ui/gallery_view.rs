@@ -137,7 +137,7 @@ pub(crate) fn producing_thread(output: &workspace::Output) -> Option<&str> {
 ///
 /// 1. **The folder**, for a background worker — its own thread, its own directory, true by
 ///    construction and true even for a conversation reopened years later.
-/// 2. **The manifest**, for everything else — what `overlay/minime_local/authorship.py` wrote
+/// 2. **The manifest**, for everything else — what `backend/local/authorship.py` wrote
 ///    down as each file was produced.
 ///
 /// The folder wins where both speak, because inside a worker's run the manifest records that
