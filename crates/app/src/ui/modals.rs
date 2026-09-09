@@ -13,7 +13,76 @@ use gpui::{
 };
 
 impl Workbench {
-    pub(crate) fn context_menu(&self, open: menu::ContextMenu, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Hosted research integrations are capabilities, not a condition for opening Mini-Me.
+    /// This appears once after warm-up, names only what was actually attempted, and leaves a
+    /// single honest action: continue with the services that did connect.
+    pub(crate) fn mcp_unavailable_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let many = self.unavailable_mcps.len() != 1;
+        let title = if many {
+            "Research services unavailable"
+        } else {
+            "Research service unavailable"
+        };
+        let mut services = div().flex().flex_col().w_full().min_w_0().gap_3();
+        for service in &self.unavailable_mcps {
+            services = services.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .min_w_0()
+                    .gap_1()
+                    .child(ui::Label::new(service.name.clone()).colour(theme::warning()))
+                    .child(
+                        ui::Label::new("This MCP is not reachable at this time.")
+                            .muted()
+                            .size(ui::Size::Compact),
+                    ),
+            );
+        }
+
+        let body = div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w_0()
+            .gap_4()
+            .child(services)
+            .child(ui::Label::new(
+                "Mini-Me will continue with the research services that are available. For help, \
+                 contact pierp.palacios@cgiar.org.",
+            ));
+
+        ui::Modal::new("mcp-unavailable", title)
+            .width(540.)
+            .focus(&self.mcp_notice_focus)
+            .body(body)
+            .actions(
+                ui::actions().child(div().flex_grow()).child(
+                    ui::Button::new("mcp-unavailable-continue")
+                        .text("Continue")
+                        .style(ui::ButtonStyle::Primary)
+                        .on_click(cx.listener(|workbench, _event, _window, cx| {
+                            workbench.mcp_notice_open = false;
+                            workbench.restore_focus = true;
+                            cx.notify();
+                        })),
+                ),
+            )
+            .footer(
+                ui::Label::new("No conversation or saved work was removed.")
+                    .muted()
+                    .size(ui::Size::Compact),
+            )
+    }
+}
+
+impl Workbench {
+    pub(crate) fn context_menu(
+        &self,
+        open: menu::ContextMenu,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let target = open.target;
         let mut popup = ui::Menu::new(open.at)
             // A right-click elsewhere re-opens this menu at the new spot, and that handler is
@@ -487,6 +556,202 @@ impl Workbench {
 
 
 impl Workbench {
+    /// A modern MCP input-required round: human-readable prompts, typed primitive fields, and
+    /// explicit accept/decline/cancel actions. The service's JSON schema stays visible as ordinary
+    /// fields rather than being handed to the model to answer on the researcher's behalf.
+    pub(crate) fn mcp_elicitation_card(
+        &self,
+        pending: &PendingMcpElicitation,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let tools: HashSet<&str> = pending
+            .request
+            .questions
+            .iter()
+            .map(|question| question.tool.as_str())
+            .collect();
+        let tool_label = if tools.len() == 1 {
+            tools.into_iter().next().unwrap_or("MCP tool").to_string()
+        } else {
+            format!("{} MCP tools", tools.len())
+        };
+        let has_form = pending
+            .request
+            .questions
+            .iter()
+            .any(|question| question.mode == "form");
+        let mut questions = div()
+            .id("mcp-elicitation-questions")
+            .flex()
+            .flex_col()
+            .gap_3()
+            .w_full()
+            .min_w_0()
+            .max_h(px(360.))
+            .overflow_y_scroll();
+
+        for (question_index, question) in pending.request.questions.iter().enumerate() {
+            let mut section = div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .w_full()
+                .min_w_0()
+                .child(
+                    div()
+                        .text_color(rgb(theme::text()))
+                        .text_sm()
+                        .child(question.message.clone()),
+                );
+            if let Some(url) = &question.url {
+                section = section
+                    .child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .p_2()
+                            .rounded_md()
+                            .bg(rgb(theme::background()))
+                            .text_color(rgb(theme::text_muted()))
+                            .text_xs()
+                            .child(url.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_2()
+                            .child(
+                                ui::Button::new(SharedString::from(format!(
+                                    "mcp-open-url-{question_index}"
+                                )))
+                                .text("Open page")
+                                .style(ui::ButtonStyle::Primary)
+                                .on_click(cx.listener({
+                                    let url = url.clone();
+                                    move |workbench, _event, _window, cx| {
+                                        workbench.status = match open_in_browser(&url) {
+                                            Ok(()) => "opened the MCP page in your browser".into(),
+                                            Err(error) => {
+                                                format!("could not open a browser: {error}")
+                                            }
+                                        };
+                                        cx.notify();
+                                    }
+                                })),
+                            )
+                            .child(
+                                ui::Button::new(SharedString::from(format!(
+                                    "mcp-copy-url-{question_index}"
+                                )))
+                                .text("Copy link")
+                                .on_click(cx.listener({
+                                    let url = url.clone();
+                                    move |workbench, _event, _window, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(url.clone()));
+                                        workbench.say("MCP link copied", cx);
+                                    }
+                                })),
+                            ),
+                    );
+            }
+            for field in pending.fields.iter().filter(|field| {
+                field.interrupt == question.interrupt && field.request_key == question.key
+            }) {
+                let qualifier = if field.required { "required" } else { "optional" };
+                section = section.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .w_full()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .text_color(rgb(theme::text_muted()))
+                                .text_xs()
+                                .child(format!("{} · {} · {qualifier}", field.label, field.kind)),
+                        )
+                        .child(self.filter_field(field.editor.clone(), cx)),
+                );
+            }
+            questions = questions.child(section);
+        }
+
+        let mut card = div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .w_full()
+            .min_w_0()
+            .gap_3()
+            .m_2()
+            .p_3()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(theme::accent()))
+            .bg(rgb(theme::surface()))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_color(rgb(theme::accent()))
+                            .text_size(px(11.))
+                            .child("MCP SERVICE NEEDS INPUT"),
+                    )
+                    .child(
+                        div()
+                            .text_color(rgb(theme::text_faint()))
+                            .text_size(px(11.))
+                            .child(tool_label),
+                    ),
+            )
+            .child(questions);
+        if let Some(error) = &pending.error {
+            card = card.child(
+                div()
+                    .text_color(rgb(theme::error()))
+                    .text_xs()
+                    .child(error.clone()),
+            );
+        }
+        card.child(
+            div()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .gap_2()
+                .child(
+                    ui::Button::new("mcp-elicitation-accept")
+                        .text(if has_form { "Send response" } else { "Continue" })
+                        .style(ui::ButtonStyle::Primary)
+                        .on_click(cx.listener(|workbench, _event, _window, cx| {
+                            workbench.answer_mcp_elicitation("accept", cx)
+                        })),
+                )
+                .child(
+                    ui::Button::new("mcp-elicitation-decline")
+                        .text("Decline")
+                        .on_click(cx.listener(|workbench, _event, _window, cx| {
+                            workbench.answer_mcp_elicitation("decline", cx)
+                        })),
+                )
+                .child(
+                    ui::Button::new("mcp-elicitation-cancel")
+                        .text("Cancel tool")
+                        .on_click(cx.listener(|workbench, _event, _window, cx| {
+                            workbench.answer_mcp_elicitation("cancel", cx)
+                        })),
+                ),
+        )
+    }
+
     /// The approval card: the command, verbatim, and the two decisions.
     ///
     /// Deliberately shows the command rather than a summary. Host execution means this
@@ -1804,17 +2069,16 @@ impl Workbench {
     }
 }
 
-
 impl Workbench {
     /// One indexed document: what it is, what it is about, and where it lives.
     pub(crate) fn document_row(&self, document: &protocol::Document) -> impl IntoElement {
         // The whole row opens the file, because unlike a dataset there is no second action to
         // confuse it with (§225a) — and only when there is a file to open, so a URL-only entry
         // does not light up and then do nothing.
-        let openable = workspace::local_path(
-            &document.path,
-            self.thread_workspace().as_deref(),
-        );
+        let openable = workspace::local_path(&document.path, self.thread_workspace().as_deref())
+            // `workspace::open` creates a missing *directory* for folder buttons. A stale library
+            // path must never reach it and create a directory whose name ends in `.pdf`.
+            .filter(|path| path.is_file());
         let mut row = div()
             .id(SharedString::from(format!("doc-{}", document.path)))
             .flex()

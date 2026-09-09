@@ -34,6 +34,7 @@ from backend.routes.config import (
     test_key,
 )
 from backend.routes.project import get_project, patch_project
+from backend.routes.mcp import get_mcp_status
 from backend.routes.projects import (
     assign_thread_project_route,
     create_project_route,
@@ -94,6 +95,7 @@ app = Starlette(
         Route("/config/asta", endpoint=get_asta_status, methods=["GET"]),
         Route("/config/asta", endpoint=save_asta_token, methods=["POST"]),
         Route("/config/asta", endpoint=delete_asta_token, methods=["DELETE"]),
+        Route("/mcp-status", endpoint=get_mcp_status, methods=["GET"]),
         Route("/project", endpoint=get_project, methods=["GET"]),
         Route("/project", endpoint=patch_project, methods=["PATCH"]),
         Route("/projects", endpoint=list_projects_route, methods=["GET"]),
