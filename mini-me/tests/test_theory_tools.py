@@ -223,6 +223,21 @@ def test_run_prefers_untruncated_execute() -> None:
     assert res["status"] == "completed"
 
 
+def test_run_reads_a_dict_shaped_response_too() -> None:
+    """`LocalWorkspaceBackend.aexecute_untruncated` can answer with a dict, and `_run` read only
+    attributes — so a dict-shaped response became "", indistinguishable from a command that
+    printed nothing, and the poll reported "running" forever. §224, one module over
+    (`datavoyager_tools.py`/`autodiscovery_tools.py` already carry this fix)."""
+    task = {"status": {"state": "completed"}, "artifacts": []}
+
+    class _DictSandbox:
+        async def aexecute_untruncated(self, command: str, *, timeout: int | None = None):
+            return {"exit_code": 0, "output": json.dumps(task)}
+
+    res = asyncio.run(poll_theory_status(_DictSandbox(), "6580ec74-121a-4757-b5e2-2e1ed9fc210e"))
+    assert res["status"] == "completed"
+
+
 # ---------------------------------------------------------------------------
 # The truncation regression: a real completed task record is ~500 KB (it embeds
 # the paper store + per-paper extraction markdown). Piped raw through the

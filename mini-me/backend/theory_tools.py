@@ -253,6 +253,11 @@ async def _run(sandbox: Any, command: str, timeout: int) -> str:
     # to `aexecute` for stubs/sandboxes that lack the untruncated method.
     runner = getattr(sandbox, "aexecute_untruncated", None) or sandbox.aexecute
     resp = await runner(command, timeout=timeout)
+    # Either shape, for the reason §224 taught the hard way: the sandbox protocol
+    # returns both, and reading only attributes turns a dict-shaped response into
+    # an empty string — indistinguishable from a command that printed nothing.
+    if isinstance(resp, dict):
+        return resp.get("output") or ""
     return getattr(resp, "output", "") or ""
 
 
