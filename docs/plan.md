@@ -519,6 +519,68 @@ workaround while this is open — it is what the working laptop does.
 
 ---
 
+## E. One MCP server returning 401 takes the whole agent down — NEW, and two separate problems
+
+**Seen:** VHUALLA laptop, 2026-09-08, on v0.3.32 with background work switched on. Saying "hi"
+failed. **Not seen before:** on 2026-09-07 the same server answered `200 OK` and the backend
+logged `wrapped 23 of 23 tool(s)`. It now answers:
+
+```
+HTTP Request: POST https://dataverse-cip.fastmcp.app/mcp "HTTP/1.1 401 Unauthorized"
+```
+
+**The good news in the same log, worth recording because three readings of this laptop were
+wrong:** the backend started cleanly — `Application started up in 9.952s`,
+`Using custom checkpointer: AsyncSqliteSaver`, `conversations are stored in …checkpoints.sqlite`.
+So §303's persistence fix works there, and **D did not recur** with background work on.
+
+### E1 — the deployment stopped being public (theirs, not ours)
+
+`MCP_SERVER_CONFIGS["dataverse"]` carries **no `headers_env`**, unlike `asta`, which sends
+`x-api-key` from `ASTA_API_KEY`. The backend has never sent credentials to that server; it worked
+because the FastMCP Cloud deployment was open. A 401 means it is not any more.
+
+Piero's to settle, since it is his deployment: either make it public again, or give it a token and
+add a `headers_env` entry beside Asta's.
+
+### E2 — and one server failing should not cost the agent (ours)
+
+This is the part worth fixing regardless of E1. In `get_mcp_tools`:
+
+```python
+loaded = await client.get_tools()
+_mcp_tools_cache[bundle] = _make_mcp_tools_resilient(loaded)
+```
+
+`_make_mcp_tools_resilient` wraps tools **after** they load — it guards tool *calls*. Tool
+*loading* is unguarded, so a 401 propagates out through `agent.py:133` while the **graph is being
+constructed**, which means:
+
+- `GET /assistants/{id}/schemas` → **500**
+- the run → `Background run failed`
+- and every conversation dies, not only the ones that would have touched Dataverse
+
+Asta answered 200 and wrapped 8 tools in that same log. Agrovoc and CropOntology were never
+reached. One unauthorised server out of four and the researcher gets nothing — for a question that
+needed none of them.
+
+- [ ] **E.1** `get_mcp_tools` survives a server it cannot load: keep the tools it got, log which
+      server failed and why, and let the agent build. A specialist whose tools are missing already
+      has a story for that (`get_dataverse_search_mcp_tools` computes `missing` and reports it);
+      an agent that will not construct has none.
+- [ ] **E.2** Say it where the researcher is. "An internal error occurred" for *"hi"* is the §303
+      complaint again — *"the Dataverse catalogue is not reachable (401); everything else works"*
+      is actionable and true.
+- [ ] **E.3** A test on the join: one server in the bundle raising during `get_tools` must still
+      yield a usable agent. Nothing covers this today, which is why one 401 was enough.
+
+**Careful about caching.** `_mcp_tools_cache` is keyed by bundle and populated only on success.
+Degrading must not cache the degraded set for the process's life — a server that recovers should
+be picked up, and a fix that pins "dataverse is down" until the next restart trades one bad day
+for a longer one.
+
+---
+
 ## Risks I am flagging rather than deciding
 
 - **Job 1 is the largest behavioural change in this app's history.** Removing WSL touches
