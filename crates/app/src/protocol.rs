@@ -48,6 +48,31 @@ const GRAPH_WARM_UP_ASSISTANT_ID: &str = "709fdf35-66dd-4c0a-bc5f-35d0f33cb91e";
 /// host, the researcher gets the app back and the ordinary request can report the real error.
 const GRAPH_WARM_UP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// One hosted MCP integration as last observed by the backend graph factory.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct McpService {
+    pub id: String,
+    pub name: String,
+    pub status: String,
+}
+
+/// Availability is a capability report, not backend health: a graph can be ready with none of
+/// these optional services connected.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct McpStatusReport {
+    #[serde(default)]
+    pub services: Vec<McpService>,
+}
+
+impl McpStatusReport {
+    pub fn unavailable(self) -> Vec<McpService> {
+        self.services
+            .into_iter()
+            .filter(|service| service.status == "unavailable")
+            .collect()
+    }
+}
+
 /// A decoded, UI-relevant event from a streaming run.
 #[derive(Clone, Debug, PartialEq)]
 pub enum TurnEvent {
@@ -67,6 +92,9 @@ pub enum TurnEvent {
     /// The run has paused: a tool call needs a human decision before it proceeds.
     /// The turn is **not** over — it continues when the client resumes.
     Approval(ApprovalRequest),
+    /// A stateless MCP tool needs information from the researcher before it can finish.
+    /// Unlike an approval, accepting this carries typed form content (or confirms a URL visit).
+    Elicitation(McpElicitationRequest),
     /// A full snapshot of the run's artifacts (and the spine, which rides along).
     /// Emitted by the `values` stream mode; **replaces** prior state rather than
     /// accumulating, since each event carries the whole picture.
@@ -136,6 +164,41 @@ pub struct PendingAction {
     pub description: String,
     /// Decisions the agent will accept (`approve`, `reject`, …).
     pub allowed: Vec<String>,
+}
+
+/// Questions returned by a modern MCP tool as an input-required round.
+#[derive(Clone, Debug, PartialEq)]
+pub struct McpElicitationRequest {
+    pub questions: Vec<McpElicitationQuestion>,
+}
+
+/// One form or URL request within an MCP elicitation interrupt.
+#[derive(Clone, Debug, PartialEq)]
+pub struct McpElicitationQuestion {
+    /// LangGraph interrupt id. Several concurrently paused subagents can each own questions.
+    pub interrupt: String,
+    pub tool: String,
+    /// MCP request key; the resume response must be filed under this exact value.
+    pub key: String,
+    pub message: String,
+    pub mode: String,
+    pub requested_schema: Value,
+    pub url: Option<String>,
+}
+
+/// One response to an MCP elicitation request.
+#[derive(Clone, Debug, PartialEq)]
+pub struct McpElicitationAnswer {
+    pub interrupt: String,
+    pub key: String,
+    pub action: McpElicitationAction,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum McpElicitationAction {
+    Accept { content: Option<Value> },
+    Decline,
+    Cancel,
 }
 
 /// Research outputs produced so far, as carried by a `values` event.
@@ -484,6 +547,8 @@ pub struct AsyncTask {
     /// Set when the background run has stopped at the approval gate. Until this existed,
     /// such a task simply hung — nothing in the UI could answer it (docs §31).
     pub pending: Option<ApprovalRequest>,
+    /// Set when a background MCP tool returned a modern input-required round.
+    pub elicitation: Option<McpElicitationRequest>,
     /// What actually went wrong, read off the worker's own thread.
     ///
     /// Not the same thing as the middleware's report. `check_async_task` looks for an
@@ -534,6 +599,15 @@ impl AsyncTask {
     /// Whether it is stopped, waiting on a decision.
     pub fn needs_approval(&self) -> bool {
         self.pending.is_some()
+    }
+
+    pub fn needs_input(&self) -> bool {
+        self.elicitation.is_some()
+    }
+
+    /// Whether the worker is paused until the researcher answers any kind of question.
+    pub fn needs_attention(&self) -> bool {
+        self.needs_approval() || self.needs_input()
     }
 
     /// The conversation whose folder this worker's files belong in, or `None` when unknown.
@@ -813,6 +887,7 @@ pub struct ThreadState {
     /// Derived, not reported: `error` beats a pending approval beats an empty `next`.
     pub status: String,
     pub pending: Option<ApprovalRequest>,
+    pub elicitation: Option<McpElicitationRequest>,
     pub error: Option<String>,
     /// What the worker is doing right now — the subagent it delegated to, or the tool it
     /// is running. `None` when nothing has been called yet.
@@ -928,6 +1003,7 @@ fn decode_async_tasks(artifacts: &Value, root: &Value) -> Vec<AsyncTask> {
                     .unwrap_or_default()
                     .to_string(),
                 pending: None,
+                elicitation: None,
                 error: None,
                 activity: None,
                 // Empty for the same reason `activity` is: this map is what the coordinator
@@ -1123,7 +1199,7 @@ impl LangGraphClient {
     /// access that did trigger the factory in a live probe. The assistant is deliberately retained:
     /// one stable internal row is safer than create/delete races between two app windows, and it is
     /// not a conversation or a second source of conversation metadata (docs §154, §176).
-    pub async fn warm_graph(&self) -> Result<()> {
+    pub async fn warm_graph(&self) -> Result<McpStatusReport> {
         self.http
             .post(format!("{}/assistants", self.base_url))
             .json(&graph_warm_up_assistant())
@@ -1144,7 +1220,21 @@ impl LangGraphClient {
             .context("warming the agent graph failed")?
             .error_for_status()
             .context("warming the agent graph returned an error status")?;
-        Ok(())
+
+        // Added after the warm-up route existed, so treat its absence as an older compatible
+        // backend rather than turning an observability feature into a new startup dependency.
+        let report = match self
+            .http
+            .get(format!("{}/mcp-status", self.base_url))
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => {
+                response.json::<McpStatusReport>().await.unwrap_or_default()
+            }
+            _ => McpStatusReport::default(),
+        };
+        Ok(report)
     }
 
     /// `GET /project` → the research project spine.
@@ -1657,9 +1747,8 @@ impl LangGraphClient {
     /// approval and a foreground one are the same shape — which is what lets the pane
     /// render one card for both.
     ///
-    /// Returns `(status, pending_approval)`. `status` is derived rather than reported: an
-    /// interrupted thread is *waiting*, an empty `next` with no interrupt is *done*, and
-    /// anything else is still working.
+    /// `status` is derived rather than reported: an approval or MCP elicitation interrupt is
+    /// *waiting*, an empty `next` with no interrupt is *done*, and anything else is still working.
     pub async fn thread_state(&self, thread_id: &str) -> Result<ThreadState> {
         let resp = self
             .http
@@ -1694,8 +1783,11 @@ impl LangGraphClient {
                     .collect()
             })
             .unwrap_or_default();
-        let pending = decode_interrupt(&json!({"__interrupt__": from_tasks}))
+        let task_interrupts = json!({"__interrupt__": from_tasks});
+        let pending = decode_interrupt(&task_interrupts)
             .or_else(|| state.get("values").and_then(decode_interrupt));
+        let elicitation = decode_mcp_elicitation(&task_interrupts)
+            .or_else(|| state.get("values").and_then(decode_mcp_elicitation));
 
         // The same tasks carry the failure, when there is one. This is the only place the
         // real text is available: the run record has no `error` field on the dev server,
@@ -1758,7 +1850,7 @@ impl LangGraphClient {
         // ever learned of a failure when the researcher happened to ask.
         let status = if error.is_some() {
             "error"
-        } else if pending.is_some() {
+        } else if pending.is_some() || elicitation.is_some() {
             "interrupted"
         } else if next_is_empty {
             "success"
@@ -1768,6 +1860,7 @@ impl LangGraphClient {
         Ok(ThreadState {
             status: status.to_string(),
             pending,
+            elicitation,
             error,
             activity: last_activity(&state),
             next: next_nodes,
@@ -1806,6 +1899,34 @@ impl LangGraphClient {
             .context("resuming a background task failed")?
             .error_for_status()
             .context("resuming a background task returned an error status")?;
+        Ok(())
+    }
+
+    /// Answer a background worker's MCP input-required round on that worker's thread.
+    pub async fn resume_background_elicitation(
+        &self,
+        thread_id: &str,
+        workspace_thread: Option<&str>,
+        answers: &[McpElicitationAnswer],
+    ) -> Result<()> {
+        let payload = elicitation_resume_request_body(
+            answers,
+            self.model.as_ref(),
+            self.project.as_deref(),
+            workspace_thread,
+        );
+        self.http
+            .post(format!(
+                "{}/threads/{}/runs",
+                self.base_url,
+                urlencode(thread_id)
+            ))
+            .json(&payload)
+            .send()
+            .await
+            .context("answering a background MCP request failed")?
+            .error_for_status()
+            .context("answering a background MCP request returned an error status")?;
         Ok(())
     }
 
@@ -2186,6 +2307,26 @@ impl LangGraphClient {
         .await
     }
 
+    /// Resume a modern MCP input-required round with answers keyed by request and interrupt id.
+    pub async fn resume_elicitation_turn(
+        &self,
+        thread_id: &str,
+        answers: &[McpElicitationAnswer],
+        on_event: impl FnMut(TurnEvent),
+    ) -> Result<TurnOutcome> {
+        self.stream(
+            thread_id,
+            elicitation_resume_request_body(
+                answers,
+                self.model.as_ref(),
+                self.project.as_deref(),
+                Some(thread_id),
+            ),
+            on_event,
+        )
+        .await
+    }
+
     /// Stop a run the server is still working on.
     ///
     /// Dropping our end of the SSE stream is *not* enough: `on_disconnect` defaults to
@@ -2256,7 +2397,7 @@ impl LangGraphClient {
                     // A paused run looks exactly like a finished one at the transport
                     // layer — the stream just ends. Remembering the interrupt is what
                     // lets the caller tell "done" from "waiting on you".
-                    if matches!(decoded, TurnEvent::Approval(_)) {
+                    if matches!(decoded, TurnEvent::Approval(_) | TurnEvent::Elicitation(_)) {
                         outcome = TurnOutcome::AwaitingApproval;
                     }
                     on_event(decoded);
@@ -2345,6 +2486,48 @@ fn resume_request_body(
 
     let decisions: Vec<Value> = answers.iter().map(|a| wire(&a.decision)).collect();
     body["command"] = json!({ "resume": { "decisions": decisions } });
+    body
+}
+
+/// Body for resuming `langchain.mcp`'s `mcp_elicitation` interrupt.
+///
+/// Each MCP request is answered under its server-provided key. The outer interrupt-id map is the
+/// same LangGraph concurrency boundary used by human-in-the-loop approvals: without it, two
+/// specialists eliciting at once cannot be resumed deterministically.
+fn elicitation_resume_request_body(
+    answers: &[McpElicitationAnswer],
+    model: Option<&ModelChoice>,
+    project: Option<&str>,
+    workspace_thread: Option<&str>,
+) -> Value {
+    let wire = |action: &McpElicitationAction| match action {
+        McpElicitationAction::Accept { content: Some(content) } => {
+            json!({"action": "accept", "content": content})
+        }
+        McpElicitationAction::Accept { content: None } => json!({"action": "accept"}),
+        McpElicitationAction::Decline => json!({"action": "decline"}),
+        McpElicitationAction::Cancel => json!({"action": "cancel"}),
+    };
+    let mut body = stream_request_body(model, project, workspace_thread);
+    let keyed = !answers.is_empty() && answers.iter().all(|answer| !answer.interrupt.is_empty());
+
+    if keyed {
+        let mut grouped: serde_json::Map<String, Value> = serde_json::Map::new();
+        for answer in answers {
+            let slot = grouped
+                .entry(answer.interrupt.clone())
+                .or_insert_with(|| json!({"responses": {}}));
+            slot["responses"][&answer.key] = wire(&answer.action);
+        }
+        body["command"] = json!({"resume": Value::Object(grouped)});
+        return body;
+    }
+
+    let responses: serde_json::Map<String, Value> = answers
+        .iter()
+        .map(|answer| (answer.key.clone(), wire(&answer.action)))
+        .collect();
+    body["command"] = json!({"resume": {"responses": Value::Object(responses)}});
     body
 }
 
@@ -2627,6 +2810,75 @@ fn decode_interrupt(value: &Value) -> Option<ApprovalRequest> {
         "an approval request arrived"
     );
     Some(ApprovalRequest { actions })
+}
+
+/// Decode the interrupt shape introduced by `langchain.mcp>=1.4`.
+///
+/// The payload is intentionally separate from human-in-the-loop approvals: an elicitation answer
+/// is `{action, content}` keyed by the MCP request key, while an approval is an ordered
+/// `{decisions: [...]}` list. Treating them as the same UI event would produce a valid HTTP request
+/// with the wrong resume value and leave the tool paused forever.
+fn decode_mcp_elicitation(value: &Value) -> Option<McpElicitationRequest> {
+    let interrupts = value.get("__interrupt__")?.as_array()?;
+    let mut questions = Vec::new();
+    for interrupt in interrupts {
+        let id = interrupt
+            .get("id")
+            .or_else(|| interrupt.get("interrupt_id"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let Some(payload) = interrupt.get("value") else {
+            continue;
+        };
+        if payload.get("type").and_then(Value::as_str) != Some("mcp_elicitation") {
+            continue;
+        }
+        let tool = payload
+            .get("tool_name")
+            .and_then(Value::as_str)
+            .unwrap_or("MCP tool")
+            .to_string();
+        let Some(requests) = payload.get("requests").and_then(Value::as_array) else {
+            continue;
+        };
+        for request in requests {
+            let Some(key) = request.get("key").and_then(Value::as_str) else {
+                continue;
+            };
+            questions.push(McpElicitationQuestion {
+                interrupt: id.clone(),
+                tool: tool.clone(),
+                key: key.to_string(),
+                message: request
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("This service needs more information.")
+                    .to_string(),
+                mode: request
+                    .get("mode")
+                    .and_then(Value::as_str)
+                    .unwrap_or("form")
+                    .to_string(),
+                requested_schema: request
+                    .get("requested_schema")
+                    .cloned()
+                    .unwrap_or_else(|| json!({"type": "object", "properties": {}})),
+                // URL elicitation is opened by the desktop shell. Keep that boundary narrower
+                // than MCP's general URI type: browser-based consent needs HTTP(S), while custom
+                // schemes would hand control to an arbitrary local protocol handler.
+                url: request
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .filter(|url| {
+                        (url.starts_with("https://") || url.starts_with("http://"))
+                            && !url.chars().any(char::is_whitespace)
+                    })
+                    .map(str::to_string),
+            });
+        }
+    }
+    (!questions.is_empty()).then_some(McpElicitationRequest { questions })
 }
 
 fn decode_values(data: &str) -> Option<Snapshot> {
@@ -3273,6 +3525,9 @@ impl TurnDecoder {
                     if let Some(request) = decode_interrupt(&value) {
                         events.push(TurnEvent::Approval(request));
                     }
+                    if let Some(request) = decode_mcp_elicitation(&value) {
+                        events.push(TurnEvent::Elicitation(request));
+                    }
                 }
                 if let Some(snapshot) = decode_values(&event.data) {
                     events.push(TurnEvent::Snapshot(snapshot));
@@ -3539,6 +3794,23 @@ fn summarize_error(data: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_capability_report_keeps_only_unavailable_services() {
+        let report: McpStatusReport = serde_json::from_value(json!({
+            "services": [
+                {"id": "asta", "name": "Asta", "status": "available"},
+                {"id": "dataverse", "name": "CIP Dataverse", "status": "unavailable"},
+                {"id": "agrovoc", "name": "AGROVOC", "status": "checking"}
+            ]
+        }))
+        .expect("the backend status shape");
+
+        let unavailable = report.unavailable();
+        assert_eq!(unavailable.len(), 1);
+        assert_eq!(unavailable[0].id, "dataverse");
+        assert_eq!(unavailable[0].name, "CIP Dataverse");
+    }
 
     /// One approval for one interrupt. `""` is the older backend that sends no id.
     fn approve_of(interrupt: &str) -> Answer {
@@ -4352,12 +4624,19 @@ mod tests {
             status: "interrupted".into(),
             description: String::new(),
             pending: None,
+            elicitation: None,
             error: None,
             activity: None,
             todos: Vec::new(),
             owner: String::new(),
         };
         assert!(!waiting.is_finished(), "interrupted is not terminal");
+        assert!(!waiting.needs_attention());
+        let asking = AsyncTask {
+            elicitation: Some(McpElicitationRequest { questions: Vec::new() }),
+            ..waiting.clone()
+        };
+        assert!(asking.needs_attention(), "MCP input is a human-attention state");
         for status in ["success", "error", "timeout", "cancelled"] {
             let done = AsyncTask {
                 status: status.to_string(),
@@ -4389,6 +4668,7 @@ mod tests {
             status: "interrupted".into(),
             description: String::new(),
             pending: None,
+            elicitation: None,
             error: None,
             activity: None,
             todos: Vec::new(),
@@ -4751,6 +5031,77 @@ mod tests {
         assert_eq!(both.actions.len(), 2);
         assert_eq!(both.actions[0].interrupt, id);
         assert_eq!(both.actions[1].interrupt, second);
+    }
+
+    #[test]
+    fn an_mcp_elicitation_keeps_its_form_schema_and_url() {
+        let id = "0f1e2d3c4b5a69788796a5b4c3d2e1f0";
+        let request = decode_mcp_elicitation(&json!({
+            "__interrupt__": [{
+                "id": id,
+                "value": {
+                    "type": "mcp_elicitation",
+                    "tool_name": "reserve_table",
+                    "requests": [
+                        {
+                            "key": "details",
+                            "message": "Which date should I use?",
+                            "mode": "form",
+                            "requested_schema": {
+                                "type": "object",
+                                "properties": {"date": {"type": "string"}},
+                                "required": ["date"]
+                            }
+                        },
+                        {
+                            "key": "signin",
+                            "message": "Finish sign-in",
+                            "mode": "url",
+                            "url": "https://example.org/authorize"
+                        },
+                        {
+                            "key": "local-handler",
+                            "message": "Unsafe schemes stay inside the app",
+                            "mode": "url",
+                            "url": "file:///C:/Windows/System32/calc.exe"
+                        }
+                    ]
+                }
+            }]
+        }))
+        .expect("the MCP elicitation interrupt");
+
+        assert_eq!(request.questions.len(), 3);
+        assert_eq!(request.questions[0].interrupt, id);
+        assert_eq!(request.questions[0].requested_schema["required"][0], "date");
+        assert_eq!(request.questions[1].url.as_deref(), Some("https://example.org/authorize"));
+        assert_eq!(request.questions[2].url, None);
+    }
+
+    #[test]
+    fn mcp_elicitation_resumes_by_interrupt_and_request_key() {
+        let id = "0f1e2d3c4b5a69788796a5b4c3d2e1f0";
+        let answers = vec![
+            McpElicitationAnswer {
+                interrupt: id.into(),
+                key: "details".into(),
+                action: McpElicitationAction::Accept {
+                    content: Some(json!({"date": "2026-09-14"})),
+                },
+            },
+            McpElicitationAnswer {
+                interrupt: id.into(),
+                key: "optional".into(),
+                action: McpElicitationAction::Decline,
+            },
+        ];
+        let body = elicitation_resume_request_body(&answers, None, None, None);
+        let resume = &body["command"]["resume"][id]["responses"];
+
+        assert_eq!(resume["details"]["action"], "accept");
+        assert_eq!(resume["details"]["content"]["date"], "2026-09-14");
+        assert_eq!(resume["optional"]["action"], "decline");
+        assert!(resume["optional"].get("content").is_none());
     }
 
     /// Reading and writing the spine must name the same project, or a saved mission lands in a

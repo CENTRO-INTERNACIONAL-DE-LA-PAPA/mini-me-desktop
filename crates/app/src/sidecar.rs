@@ -21,9 +21,8 @@ use crate::protocol::urlencode;
 use crate::references;
 use crate::workspace;
 use crate::protocol::{
-    AgentRef, Answer, AsyncTask, Conversation, Decision, Job, LangGraphClient, ModelChoice,
-    Project,
-    TurnEvent, TurnOutcome,
+    AgentRef, Answer, AsyncTask, Conversation, Decision, Job, LangGraphClient,
+    McpElicitationAnswer, McpStatusReport, ModelChoice, Project, TurnEvent, TurnOutcome,
 };
 
 /// Find (or start) the tally row for one subagent invocation, keyed by namespace so
@@ -390,6 +389,55 @@ impl Sidecar {
         rx
     }
 
+    /// Answer a stateless MCP input-required round and stream its continuation.
+    pub fn resume_elicitation(
+        &self,
+        answers: Vec<McpElicitationAnswer>,
+    ) -> mpsc::UnboundedReceiver<TurnEvent> {
+        let (tx, rx) = mpsc::unbounded();
+        let thread = self.thread.clone();
+        let base_url = self.base_url.clone();
+        let model = self.model.lock().expect("model mutex").clone();
+        let project = self.project();
+        let running = self.running.clone();
+        let record = running.clone();
+        let task = self.runtime.spawn(async move {
+            let client = LangGraphClient::new(base_url)
+                .with_model(model)
+                .with_project(project);
+            let mut emit = |event: TurnEvent| {
+                if let TurnEvent::Started { run_id } = &event {
+                    if let Ok(mut slot) = record.lock() {
+                        if let Some(turn) = slot.as_mut() {
+                            turn.run_id = Some(run_id.clone());
+                        }
+                    }
+                }
+                let _ = tx.unbounded_send(event);
+            };
+            let Some(thread_id) = thread.lock().expect("thread id mutex").clone() else {
+                emit(TurnEvent::Error(
+                    "there is no thread to resume — the MCP request was already lost".into(),
+                ));
+                return;
+            };
+            match client
+                .resume_elicitation_turn(&thread_id, &answers, &mut emit)
+                .await
+            {
+                Ok(TurnOutcome::AwaitingApproval) => {}
+                Ok(TurnOutcome::Finished) => emit(TurnEvent::Done),
+                Err(error) => emit(TurnEvent::Error(format!("{error:#}"))),
+            }
+            if let Ok(mut slot) = running.lock() {
+                *slot = None;
+            }
+        });
+        self.register(task);
+
+        rx
+    }
+
     /// The thread this conversation is on, once a turn has created one.
     ///
     /// `None` before the first turn. The workspace directory is named after it, so this is
@@ -640,7 +688,7 @@ impl Sidecar {
     /// the HTTP server is ready, then keep the honest "loading research tools" status until the
     /// expensive factory finishes. Folding this into backend readiness would turn the measured
     /// 15-second graph load into a new 15-second sidebar delay (docs §176).
-    pub fn warm_graph(&self) -> mpsc::UnboundedReceiver<Result<()>> {
+    pub fn warm_graph(&self) -> mpsc::UnboundedReceiver<Result<McpStatusReport>> {
         let (tx, rx) = mpsc::unbounded();
         let base_url = self.base_url.clone();
         self.runtime.spawn(async move {
@@ -1439,6 +1487,7 @@ impl Sidecar {
                         }
                         let changed = state.status != task.status
                             || state.pending != task.pending
+                            || state.elicitation != task.elicitation
                             || state.error != task.error
                             || state.activity != task.activity
                             // A plan that advanced is news even when nothing else moved — it is
@@ -1446,6 +1495,7 @@ impl Sidecar {
                             || state.todos != task.todos;
                         task.status = state.status;
                         task.pending = state.pending;
+                        task.elicitation = state.elicitation;
                         task.error = state.error;
                         task.activity = state.activity;
                         task.todos = state.todos;
@@ -1515,6 +1565,33 @@ impl Sidecar {
                 .await
             {
                 tracing::error!(%thread_id, %error, "could not answer a background task");
+            }
+        });
+    }
+
+    /// Answer an MCP elicitation on a background worker without confusing it with the open thread.
+    pub fn answer_task_elicitation(
+        &self,
+        thread_id: String,
+        owner: Option<String>,
+        answers: Vec<McpElicitationAnswer>,
+    ) {
+        let base_url = self.base_url.clone();
+        let model = self.model.lock().expect("model mutex").clone();
+        let project = self.project();
+        self.runtime.spawn(async move {
+            let client = LangGraphClient::new(base_url)
+                .with_model(model)
+                .with_project(project);
+            if let Err(error) = client
+                .resume_background_elicitation(
+                    &thread_id,
+                    owner.as_deref(),
+                    &answers,
+                )
+                .await
+            {
+                tracing::error!(%thread_id, %error, "could not answer a background MCP request");
             }
         });
     }
@@ -1667,6 +1744,7 @@ impl Sidecar {
                 // A `RefCell` because the event handler and the resume loop both need
                 // it, and the handler holds its borrow for as long as it lives.
                 let pending: std::cell::RefCell<Vec<Answer>> = Default::default();
+                let elicited: std::cell::RefCell<Vec<McpElicitationAnswer>> = Default::default();
                 let mut handle = |event: TurnEvent| match event {
                     TurnEvent::Token(token) => {
                         chunks += 1;
@@ -1720,6 +1798,19 @@ impl Sidecar {
                             });
                         }
                     }
+                    // There is no person in a headless check, so decline instead of inventing form
+                    // data. This still exercises the stateless resume shape and lets a server that
+                    // can proceed without the optional answer do so.
+                    TurnEvent::Elicitation(request) => {
+                        for question in request.questions {
+                            println!("elicit   : {} — {}", question.tool, question.message);
+                            elicited.borrow_mut().push(McpElicitationAnswer {
+                                interrupt: question.interrupt,
+                                key: question.key,
+                                action: crate::protocol::McpElicitationAction::Decline,
+                            });
+                        }
+                    }
                     TurnEvent::Error(error) => println!("error    : {error}"),
                     TurnEvent::Done => {}
                 };
@@ -1737,9 +1828,11 @@ impl Sidecar {
                     .await?;
                 while outcome == TurnOutcome::AwaitingApproval {
                     let answers: Vec<Answer> = pending.borrow_mut().drain(..).collect();
+                    let elicitation_answers: Vec<McpElicitationAnswer> =
+                        elicited.borrow_mut().drain(..).collect();
                     anyhow::ensure!(
-                        !answers.is_empty(),
-                        "the run paused but no approval request was decoded"
+                        !answers.is_empty() || !elicitation_answers.is_empty(),
+                        "the run paused but no approval or MCP elicitation request was decoded"
                     );
                     // The thread was created (or reused) by `run_turn` above.
                     let thread_id = thread
@@ -1747,9 +1840,17 @@ impl Sidecar {
                         .expect("thread id mutex")
                         .clone()
                         .context("the run paused but no thread was recorded")?;
-                    outcome = client
-                        .resume_turn(&thread_id, &answers, &mut handle)
-                        .await?;
+                    outcome = if !answers.is_empty() {
+                        client.resume_turn(&thread_id, &answers, &mut handle).await?
+                    } else {
+                        client
+                            .resume_elicitation_turn(
+                                &thread_id,
+                                &elicitation_answers,
+                                &mut handle,
+                            )
+                            .await?
+                    };
                 }
 
                 println!("stream   : {chunks} chunk(s), {} chars", text.len());

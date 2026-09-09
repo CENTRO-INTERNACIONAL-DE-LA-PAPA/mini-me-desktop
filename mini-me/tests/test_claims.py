@@ -298,9 +298,9 @@ def test_a_search_file_that_is_not_json_accuses_nobody():
 def test_a_search_that_recommended_nothing_is_written_down(recorded):
     """What the researcher saw twice, and what nothing recorded.
 
-    `mcp_tools._make_mcp_error_handler` turns a failed tool call into an ordinary message, so a
-    Dataverse turn whose read never succeeded completes quietly with an empty shortlist. An empty
-    search is a legitimate outcome; an unrecorded one is how a wrong argument name survived weeks.
+    `langchain.mcp` turns an MCP `isError` result into a failed ToolMessage, so a Dataverse turn
+    whose read never succeeded completes quietly with an empty shortlist. An empty search is a
+    legitimate outcome; an unrecorded one is how a wrong argument name survived weeks.
     """
     record("dataverse_explorer", _recommendation(), FakeSandbox())
     assert "recommended no datasets at all" in "\n".join(recorded)
