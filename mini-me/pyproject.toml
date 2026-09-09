@@ -19,6 +19,13 @@ dependencies = [
     "flask-wtf>=1.3.0",
     "ipykernel>=7.2.0",
     "langchain[mcp]>=1.4.0",
+    # **Declared, not side-loaded.** This is the SQLite checkpointer `make_config.py` points
+    # `langgraph dev` at, and it decides whether conversations reach disk at all (§303). It was
+    # installed only by `setup-wsl.sh` and by the launch's `ensure_checkpointer_command`, so it
+    # was absent from the lock — which means every `uv sync` pruned it and one silent `|| true`
+    # step was all that put it back. Declaring it makes `uv sync` install it and leaves that step
+    # as belt-and-braces rather than the thing persistence hangs on.
+    "langgraph-checkpoint-sqlite>=2.0.0",
     "langchain-openai>=1.1.14",
     "langchain-anthropic>=0.3.0",
     "langchain-google-genai>=2.0.0",

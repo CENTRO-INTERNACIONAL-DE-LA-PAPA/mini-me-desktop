@@ -633,6 +633,32 @@ The upgrade path exists and is the right shape: the launch runs
 sticking. What changed is the **blast radius**: before #230 a failed sync meant slightly stale
 libraries; after it, a backend that cannot start.
 
+**✅ Dependencies brought fully current** on Piero's instruction *"update all the dependencies so
+we can work with fastmcp 4"*. `uv lock --upgrade` moved **126 packages** (16 added, 15 removed) and
+the lock is now stable — a second `--upgrade` changes nothing. Notably
+**`langgraph-api` 0.12.6 → 0.13.3**, which clears the *"0.12.6 is in Critical support"* banner every
+one of these logs has been opening with.
+
+**And `langgraph-checkpoint-sqlite` is now a declared dependency.** It was in neither
+`pyproject.toml` nor the lock — installed only by `setup-wsl.sh` and by the launch's
+`ensure_checkpointer_command`. Which means **every `uv sync` pruned it**, and one
+`>/dev/null 2>&1 || true` step was all that put it back before `make_config.py` decided whether
+conversations reach disk. The launch order saves it today (sync → install → generate, verified),
+but that is a silent step standing between a lock change and §303 recurring. Declared now, so
+`uv sync` installs it and the side channel is belt-and-braces. It brings `aiosqlite` with it —
+which was the second wrong hypothesis about the VHUALLA laptop, and can no longer be absent.
+
+**Verified against the real runtime, not just unit tests.** 126 packages and a `langgraph-api`
+minor bump are not something a mocked suite covers, so the server was started for real:
+
+```
+Application started up in 2.054s          langgraph_api_version=0.13.3
+Using custom checkpointer: AsyncSqliteSaver
+conversations are stored in …/.langgraph_api/checkpoints.sqlite
+```
+
+Both graphs imported, zero tracebacks. **512 Rust tests, 577 Python.**
+
 - [ ] **F.1** Make a failed `uv sync` observable. The whole prepare block is `>/dev/null || true`,
       so the one step that now decides whether the backend can import at all cannot say it failed.
       §305 means the resulting `ModuleNotFoundError` will at least survive in the sidecar log — the
