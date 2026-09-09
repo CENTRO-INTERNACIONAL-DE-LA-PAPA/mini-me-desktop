@@ -60,7 +60,7 @@ pub struct WslTarget {
 ///
 /// 1. **An environment override**, for anything unusual.
 /// 2. **Next to the executable** — how a *packaged* build is laid out
-///    (`mini-me-desktop.exe` beside `overlay/`, `scripts/`, `vendor/`). Checked before
+///    (`mini-me-desktop.exe` beside `mini-me/`, `scripts/`, `vendor/`). Checked before
 ///    the compiled-in path so a shipped copy never reaches back to a source tree that
 ///    exists only on the machine it was built on.
 /// 3. **The repo**, resolved at compile time, which is the development case and was the
@@ -126,8 +126,10 @@ fn scripts_dir() -> PathBuf {
 /// every log line looked healthy (§134). Shipping the source here replaces a network call needing
 /// credentials with a file copy needing nothing — `git pull` on this repo *is* the backend update.
 ///
-/// `vendor/Mini-Me` is still honoured behind it, for a packaged build laid out by
-/// `scripts/bundle-backend.sh`, and `MINIME_BUNDLED_BACKEND` overrides both.
+/// `MINIME_BUNDLED_BACKEND` overrides it. The old `vendor/Mini-Me` fallback (a clone of the
+/// separate private repo, populated by a since-removed `scripts/bundle-backend.sh`) is gone —
+/// `mini-me/` has been the only layout since the monorepo move, confirmed dead weight rather
+/// than a real fallback (nothing in this repository still produces or reads `vendor/Mini-Me`).
 pub(crate) fn bundled_backend_dir() -> Option<PathBuf> {
     // The variable names the checkout itself, not the directory holding it — someone overriding
     // it is pointing at a specific copy.
@@ -135,12 +137,8 @@ pub(crate) fn bundled_backend_dir() -> Option<PathBuf> {
         let dir = PathBuf::from(dir);
         return dir.join("langgraph.json").is_file().then_some(dir);
     }
-    [
-        resource("MINIME_SOURCE_DIR", "mini-me"),
-        resource("MINIME_VENDOR_DIR", "vendor").join("Mini-Me"),
-    ]
-    .into_iter()
-    .find(|dir| dir.join("langgraph.json").is_file())
+    let dir = resource("MINIME_SOURCE_DIR", "mini-me");
+    dir.join("langgraph.json").is_file().then_some(dir)
 }
 
 /// Render a path the way WSL sees it: `C:\\Users\\x` becomes `/mnt/c/Users/x`.
@@ -943,7 +941,8 @@ impl BackendConfig {
     /// When a backend copy ships with the app, its path is passed in so the script
     /// provisions from it instead of cloning. That is the difference between an install
     /// a scientist can complete and one that stops at a GitHub token prompt, because
-    /// Mini-Me is a private repository (see `scripts/bundle-backend.sh`).
+    /// Mini-Me is a private repository — the reason the backend is bundled as `mini-me/`
+    /// in this repository rather than fetched at provision time.
     pub fn setup_script(&self) -> String {
         let for_wsl = self.wsl.is_some();
         let spell = |path: &Path| {
@@ -1975,7 +1974,6 @@ mod tests {
         let _env = env_lock::hold();
         std::env::remove_var("MINIME_BUNDLED_BACKEND");
         std::env::remove_var("MINIME_SOURCE_DIR");
-        std::env::remove_var("MINIME_VENDOR_DIR");
         let found = bundled_backend_dir().expect("mini-me/ is part of this repo");
         assert!(
             found.ends_with("mini-me"),

@@ -12,7 +12,6 @@
 #
 # **Run this on Windows**, in Git Bash, after:
 #     cargo build --release -p mini-me-desktop-app
-#     bash scripts/bundle-backend.sh
 #     bash scripts/package.sh
 #
 # It is a *draft* by default. Nobody has ever installed this from a zip, and a draft can be
@@ -91,20 +90,24 @@ fi
 # Without a backend the installer asks for a GitHub token for a *private* repo, which is
 # exactly the wall this bundle exists to remove (docs §25).
 #
-# **Either layout, because the app accepts either.** This demanded `vendor/Mini-Me` — the
-# pre-monorepo path — and went on demanding it after §283 moved the backend to `mini-me/` and
-# `package.sh` began shipping `vendor/` as an empty compatibility directory. So a correct bundle
-# failed its own release check with "the bundle cannot install itself", and the suggested fix
-# rebuilt exactly the same thing. Kept in step with `BUNDLE_BACKENDS` in `update.rs`, which is
-# the list the installed app actually tests (§304).
+# **`mini-me/` is the only layout now.** The old `vendor/Mini-Me` path (a clone of the
+# separate private repo, from before the monorepo move) demanded a fallback here even after
+# §283 moved the backend to `mini-me/` — so a correct bundle failed its own release check
+# with "the bundle cannot install itself", and the suggested fix rebuilt exactly the same
+# thing. That fallback is gone; nothing in this repository still produces `vendor/Mini-Me`.
+#
+# The empty `vendor/` directory `package.sh` still creates is a different thing — a
+# compatibility marker for installs older than v0.3.15, not a backend location — and is
+# deliberately not checked here (an empty `vendor/` is never evidence of a backend). Kept in
+# step with `BUNDLE_BACKENDS` in `update.rs`, which is the list the installed app actually
+# tests (§304): it accepts `mini-me` (a real backend) or `vendor` (that empty marker, for an
+# old installer that refuses any download without a folder by that name).
 if [ -f "$BUNDLE/mini-me/langgraph.json" ]; then
   ok "mini-me/ (the backend, so no GitHub account is needed)"
-elif [ -f "$BUNDLE/vendor/Mini-Me/langgraph.json" ]; then
-  ok "vendor/Mini-Me (the pre-monorepo layout, still accepted)"
 else
   die "no backend in the bundle — it cannot install itself.
-       Looked for mini-me/langgraph.json and vendor/Mini-Me/langgraph.json.
-       Fix: bash scripts/bundle-backend.sh && bash scripts/package.sh"
+       Looked for mini-me/langgraph.json.
+       Fix: bash scripts/package.sh"
 fi
 
 [ -f "$BUNDLE/mini-me/backend/local/workspace.py" ] \
@@ -153,10 +156,6 @@ else
 fi
 ok "sha256 ${SHA:0:16}…"
 
-PINNED="unknown"
-[ -f "$BUNDLE/vendor/BUNDLED.txt" ] \
-  && PINNED="$(grep -m1 'commit:' "$BUNDLE/vendor/BUNDLED.txt" | awk '{print $2}')"
-
 # -------------------------------------------------------------------------- the release
 #
 # Written for the person downloading it, not for us. They do not know what a sidecar is,
@@ -184,7 +183,6 @@ needs administrator rights and may ask for a restart — the app says so before 
 - Your API keys go in Windows Credential Manager, never in a file.
 - Files the agent creates land in **Documents\\Mini-Me**, one folder per conversation.
 - Commands the agent wants to run on your machine wait for your approval first.
-- Backend pinned at \`$PINNED\`.
 - sha256: \`$SHA\`
 
 ## Known limits in $TAG

@@ -80,8 +80,9 @@ ok "uv $(uv --version | awk '{print $2}')"
 #   1. A copy bundled with the app. THIS IS THE ONE THAT MATTERS for a real
 #      install: Mini-Me is a *private* repository, so `git clone` demands
 #      credentials that GitHub only issues as a personal access token — something
-#      no scientist should have to create in order to open an app. Whoever builds
-#      the installer runs scripts/bundle-backend.sh once, and this path is free.
+#      no scientist should have to create in order to open an app. The backend is
+#      `mini-me/`, tracked directly in this repository, so `scripts/package.sh`
+#      bundles it with no separate step, and this path is free.
 #   2. A checkout already on this machine — copied, not downloaded again.
 #   3. A checkout on the Windows side, same.
 #   4. git clone. The developer path, and the only one that can ask for a

@@ -134,24 +134,31 @@ one generic route, not a stream-based collapse — this is the "how you check ba
 
 ## 4. Remove the `vendor/Mini-Me` packaging fallback
 
-**Status:** open
+**Status:** done (2026-09-09)
 
 Same shape as the `overlay/` cleanup already done this session, but in the build/release pipeline
-instead of runtime: this repo moved to a `mini-me/` monorepo layout, but packaging still accepts
+instead of runtime: this repo moved to a `mini-me/` monorepo layout, but packaging still accepted
 the older `vendor/Mini-Me` layout (a clone of a separate private repo). Since `mini-me/` is now
-always the layout in practice, this fallback is very likely dead.
+always the layout in practice, this fallback was dead.
 
-- `scripts/bundle-backend.sh` (whole file — clones the private repo)
-- `scripts/package.sh` (~lines 74-114 — checks for `vendor/Mini-Me/langgraph.json`)
-- `scripts/release.sh` (~lines 94-107 — accepts either layout)
-- `crates/app/src/backend.rs` (`bundled_backend_dir()`, ~lines 129-130, 946, 2116, 2166 — doc
-  comments still say "Mini-Me is a private repository")
-- Confirmed dead, not just likely: `git ls-files mini-me/` returns 220 tracked files — the backend
-  is committed straight into this repo. `vendor/` is gitignored with zero tracked files.
-- Not just quietly unused — actively wrong: `README.md` lines 63-74 ("For whoever prepares the
-  build") still instructs a new contributor to get a personal access token for the private repo and
-  run `bundle-backend.sh` to populate `vendor/`, describing a two-repo world that no longer exists.
-  Fixing this also means updating that README section.
+Deleted `scripts/bundle-backend.sh` entirely; removed the `vendor/Mini-Me` branches from
+`package.sh` and `release.sh` (including the `vendor/BUNDLED.txt` pin-reading, which nothing
+populates anymore, and the now-redundant "Backend pinned at" release-notes line — the backend is
+the same commit as everything else in this monorepo); removed the fallback from
+`bundled_backend_dir()` in `backend.rs`; updated the stale doc comments in `backend.rs` and
+`setup-wsl.sh`; rewrote `README.md`'s "For whoever prepares the build" section, which was actively
+instructing a new contributor to do the obsolete two-repo step.
+
+**Explicitly NOT touched, a different thing entirely**: the empty `vendor/` marker folder
+`package.sh` still creates in the packaged output, and `"vendor"` in `update::BUNDLE_BACKENDS`.
+That's a compatibility shim so installs older than v0.3.15 (which require a folder literally named
+`vendor` beside the executable) still accept new downloads — unrelated to the dead source-checkout
+fallback, and still load-bearing for anyone on an old install. Left alone; a separate judgment call
+about how many users might still be that old, not part of this item.
+
+Verified: `cargo test -p mini-me-desktop-app` — 492 passed, 0 failed, including the release-check
+self-tests that read `package.sh`/`release.sh` content directly. `bash -n` clean on all three
+edited scripts.
 
 ## 5. AutoDiscovery's approval pipeline
 

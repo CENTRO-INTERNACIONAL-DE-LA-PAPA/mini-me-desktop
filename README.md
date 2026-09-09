@@ -62,16 +62,17 @@ restart), the pane says so before you press it, and offers the command to copy.
 
 ### For whoever prepares the build
 
-Run this **once**, on a machine that has GitHub access:
+Nothing to run first — the backend is `mini-me/`, tracked directly in this repository (no
+separate private repo, no personal access token, no bundling step). Build the app and package
+it:
 
 ```bash
-bash scripts/bundle-backend.sh
+cargo build --release -p mini-me-desktop-app
+bash scripts/package.sh
 ```
 
-Mini-Me is a **private** repository, so `git clone` wants a personal access token —
-a wall for the people this app is for. That script puts a pinned, unmodified copy in
-`vendor/` (gitignored), and every install after that provisions from it without ever
-contacting GitHub.
+`package.sh` copies `mini-me/` into the bundle, so every install after that provisions from it
+without ever contacting GitHub.
 
 ### For development
 
@@ -115,10 +116,6 @@ git config --global credential.helper "/mnt/c/Program Files/Git/mingw64/libexec/
 ```
 
 (If that path is wrong, `ls /mnt/c/Program\ Files/Git/mingw64/libexec/git-core/ | grep credential`.)
-
-Worth knowing which repo the failure names: `bundle-backend.sh` itself needs **no**
-network, since it clones from a checkout already on the machine. A prompt mentioning
-`mini-me-desktop.git` is the `git pull` in front of it, not the bundle.
 
 ## Release builds need `fxc.exe` (Windows)
 
