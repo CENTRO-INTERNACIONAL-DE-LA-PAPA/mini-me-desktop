@@ -135,6 +135,23 @@ def test_state_of_handles_none() -> None:
     assert _state_of({"status": {"state": "completed"}}) == "completed"
 
 
+def test_extract_json_tolerates_stderr_suffix() -> None:
+    """A record parses even when `aexecute` appended stderr after it.
+
+    Regression guard: consolidating this parser into `backend.asta_jobs` (shared with
+    `theory_tools.py` and `autodiscovery_tools.py`) first took `autodiscovery_tools.py`'s
+    version verbatim on the wrong assumption the two were byte-identical, silently dropping
+    this `[stderr]`-splitting — a real regression no other test here caught, because none of
+    them exercised a stderr-suffixed record."""
+    merged = (
+        '{"id": "' + _TID + '", "status": {"state": "running"}}\n'
+        "[stderr]\nsome warning that happens to mention a dict {not json}"
+    )
+    task = _extract_json(merged)
+    assert task is not None, "the record before [stderr] must still parse"
+    assert _state_of(task) == "running"
+
+
 def test_status_message_text_reads_string_and_parts() -> None:
     assert _status_message_text({"status": {"message": "boom"}}) == "boom"
     task = {"status": {"message": {"parts": [{"text": "PaperFinder timed out"}]}}}

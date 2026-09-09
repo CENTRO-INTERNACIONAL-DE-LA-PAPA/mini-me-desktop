@@ -17,20 +17,19 @@ authenticated via ``ASTA_TOKEN``), parses the task artifacts into the frontend
 
 import json
 import logging
-import re
 import shlex
 from datetime import datetime, timezone
 from typing import Any
 
 from langchain_core.tools import tool
 
+from backend.asta_jobs import _UUID_RE, _run, _state_of, is_valid_task_id
 from backend.runtime import _active_sandbox
 
 logger = logging.getLogger(__name__)
 
 _SUBMIT_TIMEOUT_S = 120
 _POLL_TIMEOUT_S = 90
-_UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
 def _extract_json(output: str) -> dict[str, Any] | None:
@@ -141,10 +140,6 @@ def _parse_theories(task: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _state_of(task: dict[str, Any] | None) -> str | None:
-    return ((task or {}).get("status") or {}).get("state")
-
-
 def _progress_of(task: dict[str, Any] | None) -> str:
     if not task:
         return ""
@@ -247,20 +242,6 @@ def _poll_command(task_id: str) -> str:
     return f"{fetch} | python3 -c {shlex.quote(_REDUCE_TASK_PY)}"
 
 
-async def _run(sandbox: Any, command: str, timeout: int) -> str:
-    # Prefer the untruncated path: poll output is parsed server-side (never fed
-    # to the model), and a truncated task record is unparseable JSON. Fall back
-    # to `aexecute` for stubs/sandboxes that lack the untruncated method.
-    runner = getattr(sandbox, "aexecute_untruncated", None) or sandbox.aexecute
-    resp = await runner(command, timeout=timeout)
-    # Either shape, for the reason §224 taught the hard way: the sandbox protocol
-    # returns both, and reading only attributes turns a dict-shaped response into
-    # an empty string — indistinguishable from a command that printed nothing.
-    if isinstance(resp, dict):
-        return resp.get("output") or ""
-    return getattr(resp, "output", "") or ""
-
-
 def _build_submit_command(question: str, max_papers: int, do_novelty: bool) -> list[str]:
     """Build the argv for submitting a theorizer run (asta CLI v0.101.0).
 
@@ -292,11 +273,6 @@ async def _submit(sandbox: Any, question: str, max_papers: int, do_novelty: bool
     out = await _run(sandbox, cmd, _SUBMIT_TIMEOUT_S)
     match = _UUID_RE.search(out)
     return match.group(0) if match else None
-
-
-def is_valid_task_id(task_id: str) -> bool:
-    """True if `task_id` is a well-formed A2A task UUID (guards the poll route)."""
-    return bool(task_id) and bool(_UUID_RE.fullmatch(task_id))
 
 
 def _failure_reason(task: dict[str, Any] | None, state: str) -> str:

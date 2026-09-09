@@ -83,25 +83,52 @@ mirroring `test_datavoyager_tools.py::test_a_dict_shaped_response_is_read_too`.
 
 ## 2. Consolidate the three Asta job-lifecycle files
 
-**Status:** open — first concrete step toward item 0
+**Status:** done (2026-09-09)
 
 `theory_tools.py`, `datavoyager_tools.py`, and `autodiscovery_tools.py` each independently
-reimplement the same shape: `_extract_json` (parse merged stdout/stderr into a JSON record),
-`_run` (prefer `aexecute_untruncated`, handle both dict- and object-shaped sandbox responses),
-`_state_of`/`_progress_of`/`_failure_reason`, id validation, a markdown renderer, and a
-`persist_*_outputs` function. `_extract_json` is byte-for-byte identical between at least two of
-them. Merge the shared shape into one base module; keep only what's genuinely
-job-type-specific (the Asta CLI invocation itself, the markdown template, the persisted output
-shape) in each file.
+reimplemented the same shape. Created `mini-me/backend/asta_jobs.py` holding what turned out to
+be genuinely shared: `_run` (the §224 dict-response fix, identical in all three), `_UUID_RE` +
+`is_valid_task_id` (identical in theorizer/DataVoyager), `_state_of` (identical in
+theorizer/DataVoyager), and `_extract_json`. Each of the three files now imports these instead of
+keeping its own copy.
 
-This is also the natural place to introduce the Asta-side adapter into `JobState` (item 0) — the
-three files' `_state_of`/`_progress_of` functions are exactly the code that would translate Asta's
-own vocabulary (`"completed"/"failed"/"canceled"/"running"`, inconsistently also `"error"`) into
-the shared enum.
+**Deliberately left separate** (forcing these together would have been dishonest to what each
+actually does): each file's own CLI command-building, markdown rendering, and
+`persist_*_outputs`; `autodiscovery_tools.py`'s `is_valid_run_id` (different validation strictness
+than `is_valid_task_id`, not the same check); `autodiscovery_tools.py`'s `normalise_status` (maps
+a completely different, uppercase REST-job vocabulary, not an A2A task's `status.state`);
+`theory_tools.py`'s own `_extract_json` (a genuinely simpler, different algorithm — a theorizer
+record is reduced in-sandbox before it reaches this parser).
 
-- `mini-me/backend/theory_tools.py`, `mini-me/backend/datavoyager_tools.py`,
-  `mini-me/backend/autodiscovery_tools.py`
-- Do item 1 first (or as part of this), so the merge doesn't propagate the bug into the shared code.
+**A real regression was caught and fixed during review, not by the test suite.** The first pass
+took `autodiscovery_tools.py`'s `_extract_json` verbatim as "the shared one" on the assumption
+(from earlier research this session) that it was byte-identical to `datavoyager_tools.py`'s. It
+wasn't: `datavoyager_tools.py`'s version additionally split off a `[stderr]` suffix before
+parsing, and losing that meant a record could fail to parse whenever the command also wrote to
+stderr. No existing test exercised that combination, so `572 passed` looked clean while shipping a
+real behavior loss — caught by manually diffing old-vs-new output on a constructed stderr-suffixed
+input, not by CI. Fixed by writing `_extract_json` as the union of what both originals actually
+tried (tries a `[stderr]`-split head before the full text, each as whole-string JSON before
+falling back to `{...}`/`[...]` bracket-matching), so it cannot parse less than either original
+did. Added a regression test for this exact case, plus a new `mini-me/tests/test_asta_jobs.py`
+giving the shared module its own direct test coverage instead of relying only on indirect exercise
+through whichever of the three callers happens to hit a given path.
+
+- `mini-me/backend/asta_jobs.py` (new), `mini-me/backend/theory_tools.py`,
+  `mini-me/backend/datavoyager_tools.py`, `mini-me/backend/autodiscovery_tools.py`
+- `mini-me/tests/test_asta_jobs.py` (new), `mini-me/tests/test_datavoyager_tools.py` (added the
+  stderr-suffix regression test)
+- Public/imported names preserved exactly via re-export (e.g. `theory_tools.py` does
+  `from backend.asta_jobs import _UUID_RE, _run, _state_of, is_valid_task_id`), so no other
+  module's imports or existing tests needed to change.
+- Verified: 572 passed, 1 skipped, 6 failed — the exact same pre-existing failure set as items 1
+  and 4 (confirmed identical, not just similar-looking). Checked the Rust side for any source-
+  slicing tests reading these three files' exact structure — found none, only doc-comment
+  mentions, unaffected.
+- This is also the natural place to eventually introduce the Asta-side adapter into `JobState`
+  (item 0) — `_state_of`/each file's own `_progress_of` are exactly the code that would translate
+  Asta's own vocabulary (`"completed"/"failed"/"canceled"/"running"`, inconsistently also
+  `"error"`) into the shared enum, when that work happens.
 
 ## 3. Consolidate the three Asta poll-status HTTP routes
 

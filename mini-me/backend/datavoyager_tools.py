@@ -37,6 +37,7 @@ from typing import Any
 
 from langchain_core.tools import tool
 
+from backend.asta_jobs import _UUID_RE, _extract_json, _run, _state_of, is_valid_task_id
 from backend.runtime import _active_sandbox
 
 #: Reaches the log at INFO — see `backend/diagnostics.py` for why that needs saying.
@@ -45,7 +46,6 @@ logger = diagnostics.arriving(__name__)
 _SUBMIT_TIMEOUT_S = 180
 _STATUS_TIMEOUT_S = 90
 _EXPORT_TIMEOUT_S = 120
-_UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 # Sandbox path the submit response JSON (task id + context id) is written to.
 # Fixed name, and therefore cleared before every submit: a failed run used to leave the previous
@@ -278,34 +278,6 @@ def _export_shell(task_id: str, base_dir: str) -> str:
 # Parsing helpers (pure; fed synthetic A2A records in tests)
 # ---------------------------------------------------------------------------
 
-def _extract_json(output: str) -> dict[str, Any] | None:
-    """Pull the JSON task record out of merged stdout/stderr output."""
-    if not output:
-        return None
-    head = output.split("[stderr]", 1)[0].strip()
-    for candidate in (head, output):
-        try:
-            return json.loads(candidate)
-        except Exception:
-            pass
-        start, end = candidate.find("{"), candidate.rfind("}")
-        if start != -1 and end > start:
-            try:
-                return json.loads(candidate[start : end + 1])
-            except Exception:
-                continue
-    return None
-
-
-def _state_of(task: dict[str, Any] | None) -> str | None:
-    return ((task or {}).get("status") or {}).get("state")
-
-
-def is_valid_task_id(task_id: str) -> bool:
-    """True if `task_id` is a well-formed A2A task UUID (guards the poll route)."""
-    return bool(task_id) and bool(_UUID_RE.fullmatch(task_id))
-
-
 def _status_message_text(task: dict[str, Any] | None) -> str:
     """Human-readable text from ``status.message`` (string, or a2a parts)."""
     message = ((task or {}).get("status") or {}).get("message")
@@ -382,21 +354,6 @@ def _failure_reason(task: dict[str, Any] | None, state: str) -> str:
 # ---------------------------------------------------------------------------
 # Sandbox IO
 # ---------------------------------------------------------------------------
-
-async def _run(sandbox: Any, command: str, timeout: int) -> str:
-    # Prefer the untruncated path: the reduced task record is parsed server-side
-    # (never fed to the model) and a truncated record is unparseable JSON. Fall
-    # back to `aexecute` for stubs/sandboxes lacking the untruncated method.
-    runner = getattr(sandbox, "aexecute_untruncated", None) or sandbox.aexecute
-    resp = await runner(command, timeout=timeout)
-    # Either shape, for the reason `_exit_and_output` two functions down already says: the sandbox
-    # protocol returns both, and this one read only attributes — so a dict-shaped response became an
-    # empty string, indistinguishable from a command that printed nothing. §224 was this exact
-    # mistake one module over, where `ReadResult.file_data` is a TypedDict.
-    if isinstance(resp, dict):
-        return resp.get("output") or ""
-    return getattr(resp, "output", "") or ""
-
 
 async def _submit(
     sandbox: Any, question: str, dataset_paths: list[str], context_id: str | None
