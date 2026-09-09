@@ -4,19 +4,22 @@
 // nothing but render methods, and one nobody calls is a feature that stopped being drawn.
 #![allow(unused_imports)]
 
+use crate::ui::{
+    chat::*, common::*, modals::*, palette_view::*, provenance_view::*, settings_view::*,
+    sidebar::*, status_bar::*,
+};
 use crate::*;
-use crate::ui::{common::*, sidebar::*, chat::*, provenance_view::*, settings_view::*, palette_view::*, modals::*, status_bar::*};
 use gpui::{
     actions, div, img, prelude::*, px, relative, rgb, size, svg, App, Application, AssetSource,
     Bounds, ClipboardItem, Context, Div, Entity, Focusable, FontStyle, FontWeight, HighlightStyle,
-    KeyBinding, ListAlignment, ListState, SharedString, StyledText, Window, WindowBounds, WindowOptions,
+    KeyBinding, ListAlignment, ListState, SharedString, StyledText, Window, WindowBounds,
+    WindowOptions,
 };
 
 /// The `+N` glyph, sized to the tile it sits on.
 pub(crate) fn media_scrim_size(tile: f32) -> f32 {
     (tile / 4.).max(18.)
 }
-
 
 /// How many characters of a filename fit across a tile at `text_xs`.
 ///
@@ -26,7 +29,6 @@ pub(crate) fn media_scrim_size(tile: f32) -> f32 {
 pub(crate) fn name_chars(tile: f32) -> usize {
     (((tile - 16.) / 6.) as usize).max(8)
 }
-
 
 /// How many tiles the grid draws, and how many images the last one stands in for.
 ///
@@ -44,7 +46,6 @@ pub(crate) fn image_grid_shape(total: usize) -> (usize, usize) {
     };
     (shown, hidden)
 }
-
 
 pub(crate) fn output_folder_groups(outputs: &[workspace::Output]) -> Vec<OutputFolderGroup<'_>> {
     let mut groups: Vec<OutputFolderGroup<'_>> = Vec::new();
@@ -64,7 +65,6 @@ pub(crate) fn output_folder_groups(outputs: &[workspace::Output]) -> Vec<OutputF
     }
     groups
 }
-
 
 /// Name the folder the agent chose, not the generated background-thread directory above it.
 ///
@@ -103,7 +103,6 @@ pub(crate) fn output_folder_label(folder: &std::path::Path, worker: Option<&str>
     }
 }
 
-
 /// The worker thread a file sits under, when it sits under one.
 ///
 /// The **only** attribution this client can make without guessing. A background worker runs on
@@ -121,7 +120,6 @@ pub(crate) fn producing_thread(output: &workspace::Output) -> Option<&str> {
         None
     }
 }
-
 
 /// Outputs split by who produced them: the conversation's own first, then one group per
 /// other author, in the order their first file appears.
@@ -154,7 +152,6 @@ pub(crate) fn is_search_record(output: &workspace::Output) -> bool {
     )
 }
 
-
 pub(crate) fn by_producer(
     outputs: &[workspace::Output],
     tasks: &[protocol::AsyncTask],
@@ -179,7 +176,6 @@ pub(crate) fn by_producer(
     groups
 }
 
-
 /// Who produced a group of files, in the researcher's words rather than the engine's.
 ///
 /// `None` is the conversation's own thread, and stays unlabelled: those files are the unmarked
@@ -203,7 +199,6 @@ pub(crate) fn produced_by(thread: Option<&str>, tasks: &[protocol::AsyncTask]) -
     )
 }
 
-
 /// `15 images`, or `5 images from background worker`.
 pub(crate) fn images_heading(count: usize, by: Option<&str>) -> String {
     let plural = if count == 1 { "" } else { "s" };
@@ -212,7 +207,6 @@ pub(crate) fn images_heading(count: usize, by: Option<&str>) -> String {
         None => format!("{count} image{plural}"),
     }
 }
-
 
 /// Keep the distinguishing tail when a filename itself is too long for a thumbnail.
 ///
@@ -227,7 +221,6 @@ pub(crate) fn distinguishing_tail(text: &str, max_chars: usize) -> String {
     let keep = max_chars.saturating_sub(1);
     format!("…{}", text.chars().skip(count - keep).collect::<String>())
 }
-
 
 /// Shorten an `a / b / c` heading to fit, giving up the middle rather than either end.
 ///
@@ -252,7 +245,11 @@ pub(crate) fn shorten_path_label(label: &str, max_chars: usize) -> String {
         // One segment: no middle to drop, so §152's rule is still the best available.
         return distinguishing_tail(label, max_chars);
     }
-    let spacer = if segments.len() > 2 { " / … / " } else { " / " };
+    let spacer = if segments.len() > 2 {
+        " / … / "
+    } else {
+        " / "
+    };
     let joined = format!("{head}{spacer}{tail}");
     if joined.chars().count() <= max_chars {
         return joined;
@@ -266,7 +263,6 @@ pub(crate) fn shorten_path_label(label: &str, max_chars: usize) -> String {
     distinguishing_tail(label, max_chars)
 }
 
-
 pub(crate) fn output_filename(output: &workspace::Output) -> String {
     let name = std::path::Path::new(&output.name)
         .file_name()
@@ -274,7 +270,6 @@ pub(crate) fn output_filename(output: &workspace::Output) -> String {
         .unwrap_or(&output.name);
     distinguishing_tail(name, 36)
 }
-
 
 impl Workbench {
     /// The file open in the centre, with the set it belongs to along the bottom.
@@ -508,7 +503,6 @@ impl Workbench {
     }
 }
 
-
 impl Workbench {
     /// One step-through arrow beside the previewed file.
     pub(crate) fn preview_arrow(
@@ -548,7 +542,6 @@ impl Workbench {
             }))
     }
 }
-
 
 impl Workbench {
     /// The set along the bottom of the modal: a counter, then a sideways strip to choose from.
@@ -606,7 +599,11 @@ impl Workbench {
                         theme::border()
                     }))
                     .bg(rgb(theme::surface()))
-                    .hover(|style| style.border_color(rgb(theme::accent_hover())).cursor_pointer())
+                    .hover(|style| {
+                        style
+                            .border_color(rgb(theme::accent_hover()))
+                            .cursor_pointer()
+                    })
                     .when(is_image, |tile| {
                         tile.child(
                             img(output.path.clone())
@@ -663,7 +660,6 @@ impl Workbench {
     }
 }
 
-
 impl Workbench {
     /// A file a turn produced, in the transcript, under the answer that produced it.
     ///
@@ -709,9 +705,7 @@ impl Workbench {
             .py_2()
             .border_b_1()
             .border_color(rgb(theme::border()))
-            .child(
-                ui::Icon::new(glyph).size(ui::IconSize::Small).colour(ink),
-            )
+            .child(ui::Icon::new(glyph).size(ui::IconSize::Small).colour(ink))
             .child(
                 ui::Label::new(output.name.clone())
                     .size(ui::Size::Compact)
@@ -770,7 +764,11 @@ impl Workbench {
             } else {
                 theme::surface()
             }))
-            .hover(|style| style.border_color(rgb(theme::border_strong())).cursor_pointer())
+            .hover(|style| {
+                style
+                    .border_color(rgb(theme::border_strong()))
+                    .cursor_pointer()
+            })
             .child(header);
 
         match output.kind {
@@ -865,7 +863,6 @@ impl Workbench {
     }
 }
 
-
 impl Workbench {
     pub(crate) fn output_gallery_scroll(&self, key: &str) -> gpui::ScrollHandle {
         self.output_gallery_scrolls
@@ -875,7 +872,6 @@ impl Workbench {
             .clone()
     }
 }
-
 
 impl Workbench {
     /// A visible, clickable and draggable horizontal scrollbar for one gallery rail.
@@ -916,40 +912,40 @@ impl Workbench {
                 )
                 .on_mouse_down(
                     gpui::MouseButton::Left,
-                    cx.listener(move |workbench, event: &gpui::MouseDownEvent, _window, cx| {
-                        let local_x =
-                            (event.position.x - track_left).clamp(px(0.), metrics.viewport);
-                        let grab_x = if local_x >= thumb_left
-                            && local_x <= thumb_left + metrics.thumb
-                        {
-                            local_x - thumb_left
-                        } else {
-                            metrics.thumb / 2.
-                        };
-                        let offset_x = horizontal_drag_offset(
-                            event.position.x,
-                            track_left,
-                            grab_x,
-                            metrics.travel,
-                            metrics.overflow,
-                        );
-                        let offset_y = dragged.offset().y;
-                        dragged.set_offset(gpui::point(offset_x, offset_y));
-                        workbench.gallery_scroll_drag = Some(GalleryScrollDrag {
-                            handle: dragged.clone(),
-                            track_left,
-                            grab_x,
-                            travel: metrics.travel,
-                            overflow: metrics.overflow,
-                        });
-                        cx.stop_propagation();
-                        cx.notify();
-                    }),
+                    cx.listener(
+                        move |workbench, event: &gpui::MouseDownEvent, _window, cx| {
+                            let local_x =
+                                (event.position.x - track_left).clamp(px(0.), metrics.viewport);
+                            let grab_x =
+                                if local_x >= thumb_left && local_x <= thumb_left + metrics.thumb {
+                                    local_x - thumb_left
+                                } else {
+                                    metrics.thumb / 2.
+                                };
+                            let offset_x = horizontal_drag_offset(
+                                event.position.x,
+                                track_left,
+                                grab_x,
+                                metrics.travel,
+                                metrics.overflow,
+                            );
+                            let offset_y = dragged.offset().y;
+                            dragged.set_offset(gpui::point(offset_x, offset_y));
+                            workbench.gallery_scroll_drag = Some(GalleryScrollDrag {
+                                handle: dragged.clone(),
+                                track_left,
+                                grab_x,
+                                travel: metrics.travel,
+                                overflow: metrics.overflow,
+                            });
+                            cx.stop_propagation();
+                            cx.notify();
+                        },
+                    ),
                 ),
         )
     }
 }
-
 
 impl Workbench {
     /// A capped grid of outputs, with the last visible tile counting the rest.
@@ -1030,7 +1026,6 @@ impl Workbench {
     }
 }
 
-
 impl Workbench {
     /// One tile: a picture for a figure, a glyph and a name for anything else.
     ///
@@ -1059,82 +1054,75 @@ impl Workbench {
         let shape = self.shape_of(output);
         let is_image = output.kind == workspace::Kind::Figure;
 
-        let inside = if is_image {
-            div()
-                .relative()
-                .w_full()
-                .h(px(media))
-                .flex_none()
-                .child(
-                    img(output.path.clone())
-                        .w_full()
-                        .h_full()
-                        // `Contain`, not `Cover`: a photo crops acceptably and a chart does not.
-                        // Cropping the axes off a plot makes the thumbnail useless for choosing
-                        // between seven of them, which is the only job it has.
-                        .object_fit(gpui::ObjectFit::Contain),
-                )
-                .when_some(more, |media, more| {
-                    media.child(
-                        div()
-                            .absolute()
-                            .inset_0()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .bg(gpui::rgba(0x000000a6))
-                            .text_color(rgb(SCRIM_INK))
-                            .text_size(px(media_scrim_size(tile)))
-                            .child(format!("+{more}")),
+        let inside =
+            if is_image {
+                div()
+                    .relative()
+                    .w_full()
+                    .h(px(media))
+                    .flex_none()
+                    .child(
+                        img(output.path.clone())
+                            .w_full()
+                            .h_full()
+                            // `Contain`, not `Cover`: a photo crops acceptably and a chart does not.
+                            // Cropping the axes off a plot makes the thumbnail useless for choosing
+                            // between seven of them, which is the only job it has.
+                            .object_fit(gpui::ObjectFit::Contain),
                     )
-                })
-                .into_any_element()
-        } else {
-            div()
-                .relative()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap_1()
-                .w_full()
-                .h(px(media))
-                .flex_none()
-                .px_2()
-                .child(
-                    ui::Icon::new(glyph).size(ui::IconSize::Large).colour(ink),
-                )
-                .child(
-                    div()
-                        .text_color(rgb(theme::text()))
-                        .text_xs()
-                        .child(distinguishing_tail(
-                            &output_filename(output),
-                            name_chars(tile),
-                        )),
-                )
-                .child(
-                    div()
-                        .text_color(rgb(theme::text_faint()))
-                        .text_size(px(11.))
-                        .child(shape.describe(output.bytes)),
-                )
-                .when_some(more, |media, more| {
-                    media.child(
+                    .when_some(more, |media, more| {
+                        media.child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .bg(gpui::rgba(0x000000a6))
+                                .text_color(rgb(SCRIM_INK))
+                                .text_size(px(media_scrim_size(tile)))
+                                .child(format!("+{more}")),
+                        )
+                    })
+                    .into_any_element()
+            } else {
+                div()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_1()
+                    .w_full()
+                    .h(px(media))
+                    .flex_none()
+                    .px_2()
+                    .child(ui::Icon::new(glyph).size(ui::IconSize::Large).colour(ink))
+                    .child(div().text_color(rgb(theme::text())).text_xs().child(
+                        distinguishing_tail(&output_filename(output), name_chars(tile)),
+                    ))
+                    .child(
                         div()
-                            .absolute()
-                            .inset_0()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .bg(gpui::rgba(0x000000a6))
-                            .text_color(rgb(SCRIM_INK))
-                            .text_size(px(media_scrim_size(tile)))
-                            .child(format!("+{more}")),
+                            .text_color(rgb(theme::text_faint()))
+                            .text_size(px(11.))
+                            .child(shape.describe(output.bytes)),
                     )
-                })
-                .into_any_element()
-        };
+                    .when_some(more, |media, more| {
+                        media.child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .bg(gpui::rgba(0x000000a6))
+                                .text_color(rgb(SCRIM_INK))
+                                .text_size(px(media_scrim_size(tile)))
+                                .child(format!("+{more}")),
+                        )
+                    })
+                    .into_any_element()
+            };
 
         div()
             .id(SharedString::from(id))
@@ -1159,7 +1147,6 @@ impl Workbench {
             }))
     }
 }
-
 
 impl Workbench {
     /// One file on its own row. `by` names the worker that produced it, when one did.
@@ -1193,9 +1180,7 @@ impl Workbench {
             .rounded_lg()
             .bg(rgb(theme::elevated()))
             .hover(|style| style.bg(rgb(theme::accent_soft())).cursor_pointer())
-            .child(
-                ui::Icon::new(glyph).size(ui::IconSize::Small).colour(ink),
-            )
+            .child(ui::Icon::new(glyph).size(ui::IconSize::Small).colour(ink))
             .child(
                 div()
                     .flex()
@@ -1222,7 +1207,6 @@ impl Workbench {
             }))
     }
 }
-
 
 impl Workbench {
     /// The project spine: mission, what's done, what's queued, what's suggested.
@@ -1271,7 +1255,6 @@ impl Workbench {
     }
 }
 
-
 impl Workbench {
     /// The mission, and the way to change it.
     ///
@@ -1310,9 +1293,7 @@ impl Workbench {
                         // What it costs to be wrong, said before the press rather than after:
                         // this sentence is read by the coordinator on every turn, so it is not a
                         // label on the work — it is an instruction to it.
-                        .child(
-                            "Enter to save · Esc to cancel. Mini-Me reads this on every turn.",
-                        ),
+                        .child("Enter to save · Esc to cancel. Mini-Me reads this on every turn."),
                 );
         }
 
@@ -1344,7 +1325,6 @@ impl Workbench {
         )
     }
 }
-
 
 impl Workbench {
     pub(crate) fn artifacts_contents(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1381,7 +1361,9 @@ impl Workbench {
                     // stretch to fill the row and push Edit out of the split the row wants.
                     .child(
                         div().flex_none().child(
-                            ui::Label::new("MISSION").colour(theme::text_faint()).size(ui::Size::Compact),
+                            ui::Label::new("MISSION")
+                                .colour(theme::text_faint())
+                                .size(ui::Size::Compact),
                         ),
                     )
                     .when(!self.editing_mission, |heading| {
@@ -1436,11 +1418,11 @@ impl Workbench {
         // Advisory only: shown so the user can choose to ask for one. Nothing here
         // auto-runs — org policy is human-gated.
         if !project.suggestions.is_empty() {
-            let mut suggestions = div()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(ui::Label::new("SUGGESTED NEXT").colour(theme::text_faint()).size(ui::Size::Compact));
+            let mut suggestions = div().flex().flex_col().gap_2().child(
+                ui::Label::new("SUGGESTED NEXT")
+                    .colour(theme::text_faint())
+                    .size(ui::Size::Compact),
+            );
             for (index, suggestion) in project.suggestions.iter().enumerate() {
                 let prompt = suggestion.prompt.clone();
                 suggestions = suggestions.child(
@@ -1510,7 +1492,6 @@ impl Workbench {
             .child(self.sources_section(Some(SOURCES_IN_PANEL), cx))
     }
 }
-
 
 impl Workbench {
     /// Long jobs still running, and the ones that finished this session.
@@ -1594,7 +1575,6 @@ impl Workbench {
     }
 }
 
-
 impl Workbench {
     /// The coordinator's plan for this conversation, when it wrote one.
     ///
@@ -1624,7 +1604,9 @@ impl Workbench {
                     // content-width, and `Label` is always `w_full()` on its own.
                     .child(
                         div().flex_none().child(
-                            ui::Label::new("PLAN").colour(theme::text_faint()).size(ui::Size::Compact),
+                            ui::Label::new("PLAN")
+                                .colour(theme::text_faint())
+                                .size(ui::Size::Compact),
                         ),
                     )
                     .child(
@@ -1641,7 +1623,6 @@ impl Workbench {
         section
     }
 }
-
 
 impl Workbench {
     pub(crate) fn jobs_section(&self, cx: &mut Context<Self>) -> Div {
@@ -1707,7 +1688,7 @@ impl Workbench {
         // and until this existed that task simply hung, since the gate it hit runs on its
         // own thread and nothing in the UI could answer it (docs §31).
         let (waiting, working): (Vec<_>, Vec<_>) =
-            self.tasks.iter().partition(|task| task.needs_approval());
+            self.tasks.iter().partition(|task| task.needs_attention());
         for task in waiting {
             section = section.child(self.task_row(task, cx));
         }
@@ -1760,7 +1741,6 @@ impl Workbench {
     }
 }
 
-
 impl Workbench {
     /// One background worker: what it is, what it is doing, its plan, its gate, its files.
     ///
@@ -1769,7 +1749,7 @@ impl Workbench {
     /// than inside it — and two copies of this would be two places for the Approve button to
     /// drift apart.
     pub(crate) fn task_row(&self, task: &protocol::AsyncTask, cx: &mut Context<Self>) -> Div {
-        let (mark, colour) = if task.needs_approval() {
+        let (mark, colour) = if task.needs_attention() {
             ("⏸", theme::accent())
         } else if !task.is_finished() {
             ("◐", theme::running())
@@ -1826,19 +1806,20 @@ impl Workbench {
                     // guessing what had actually happened (docs §38).
                     .text_color(rgb(if task.error.is_some() {
                         theme::error()
-                    } else if task.needs_approval() {
+                    } else if task.needs_attention() {
                         theme::warning()
                     } else {
                         theme::text_muted()
                     }))
                     .text_xs()
-                    .child(match (&task.error, task.needs_approval()) {
-                        (Some(error), _) => error.clone(),
-                        (None, true) => "waiting for your approval".to_string(),
+                    .child(match (&task.error, task.needs_approval(), task.needs_input()) {
+                        (Some(error), _, _) => error.clone(),
+                        (None, _, true) => "waiting for your input".to_string(),
+                        (None, true, false) => "waiting for your approval".to_string(),
                         // What it is *doing*, not just that it is doing something —
                         // "running" for ten minutes tells a researcher nothing about
                         // whether to wait (docs §42).
-                        (None, false) => match (&task.activity, task.is_finished()) {
+                        (None, false, false) => match (&task.activity, task.is_finished()) {
                             (Some(activity), false) => format!("{} · {activity}", task.status),
                             _ => task.status.clone(),
                         },
@@ -1900,24 +1881,24 @@ impl Workbench {
                     .gap_2()
                     .child(
                         ui::Button::new(SharedString::from(format!("bg-approve-{task_id}")))
-                        .text("Approve")
-                        .style(ui::ButtonStyle::Primary)
-                        .on_click(cx.listener({
-                            let task_id = task_id.clone();
-                            move |workbench, _event, _window, cx| {
-                                workbench.decide_task(task_id.clone(), true, cx);
-                            }
-                        })),
+                            .text("Approve")
+                            .style(ui::ButtonStyle::Primary)
+                            .on_click(cx.listener({
+                                let task_id = task_id.clone();
+                                move |workbench, _event, _window, cx| {
+                                    workbench.decide_task(task_id.clone(), true, cx);
+                                }
+                            })),
                     )
                     .child(
                         ui::Button::new(SharedString::from(format!("bg-reject-{task_id}")))
-                        .text("Reject")
-                        .on_click(cx.listener({
-                            let task_id = task_id.clone();
-                            move |workbench, _event, _window, cx| {
-                                workbench.decide_task(task_id.clone(), false, cx);
-                            }
-                        })),
+                            .text("Reject")
+                            .on_click(cx.listener({
+                                let task_id = task_id.clone();
+                                move |workbench, _event, _window, cx| {
+                                    workbench.decide_task(task_id.clone(), false, cx);
+                                }
+                            })),
                     ),
             );
             // A background worker asks once per command over several minutes. Without
@@ -1935,18 +1916,18 @@ impl Workbench {
             ] {
                 row = row.child(
                     ui::Button::new(SharedString::from(format!("bg-approve-{suffix}-{task_id}")))
-                    .text(label)
-                    .on_click(cx.listener({
-                        let task_id = task_id.clone();
-                        move |workbench, _event, _window, cx| {
-                            if conversation_wide {
-                                workbench.approve_conversation = true;
-                            } else {
-                                workbench.approve_tasks.insert(task_id.clone());
+                        .text(label)
+                        .on_click(cx.listener({
+                            let task_id = task_id.clone();
+                            move |workbench, _event, _window, cx| {
+                                if conversation_wide {
+                                    workbench.approve_conversation = true;
+                                } else {
+                                    workbench.approve_tasks.insert(task_id.clone());
+                                }
+                                workbench.decide_task(task_id.clone(), true, cx);
                             }
-                            workbench.decide_task(task_id.clone(), true, cx);
-                        }
-                    })),
+                        })),
                 );
             }
         }
@@ -1986,13 +1967,16 @@ impl Workbench {
     }
 }
 
-
 impl Workbench {
     /// One long-running job: the theorizer, or a DataVoyager analysis.
     ///
     /// No `cx` and no controls — a job is something this client polls, not a gate it can answer.
     /// What the row owes a reader is whether it is still going and roughly how long that takes.
-    pub(crate) fn job_row(&self, job: &protocol::Job, cx: &mut Context<Self>) -> gpui::Stateful<Div> {
+    pub(crate) fn job_row(
+        &self,
+        job: &protocol::Job,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<Div> {
         let (mark, colour) = if !job.is_finished() {
             ("◐", theme::running())
         } else if job.succeeded() {
@@ -2079,7 +2063,6 @@ impl Workbench {
     }
 }
 
-
 impl Workbench {
     /// One line for what this conversation *ran*, beside what it produced.
     ///
@@ -2134,12 +2117,12 @@ impl Workbench {
                     workbench.commands_open = true;
                     cx.notify();
                 }))
-                .child(ui::Label::new("WHAT RAN").colour(theme::text_faint()).size(ui::Size::Compact))
                 .child(
-                    ui::Label::new(summary)
-                        .colour(tone)
+                    ui::Label::new("WHAT RAN")
+                        .colour(theme::text_faint())
                         .size(ui::Size::Compact),
                 )
+                .child(ui::Label::new(summary).colour(tone).size(ui::Size::Compact))
                 .into_any_element(),
         )
     }
@@ -2196,17 +2179,16 @@ impl Workbench {
                     workbench.claims_open = true;
                     cx.notify();
                 }))
-                .child(ui::Label::new("WHAT WAS CLAIMED").colour(theme::text_faint()).size(ui::Size::Compact))
                 .child(
-                    ui::Label::new(summary)
-                        .colour(tone)
+                    ui::Label::new("WHAT WAS CLAIMED")
+                        .colour(theme::text_faint())
                         .size(ui::Size::Compact),
                 )
+                .child(ui::Label::new(summary).colour(tone).size(ui::Size::Compact))
                 .into_any_element(),
         )
     }
 }
-
 
 impl Workbench {
     pub(crate) fn outputs_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2293,9 +2275,10 @@ impl Workbench {
         //
         // "Together" is now bounded by who produced them (§199): one tray per body of work, not
         // one tray for the window.
-        for (band, (worker, produced)) in by_producer(&ordered_outputs, &self.tasks, &self.authorship)
-            .into_iter()
-            .enumerate()
+        for (band, (worker, produced)) in
+            by_producer(&ordered_outputs, &self.tasks, &self.authorship)
+                .into_iter()
+                .enumerate()
         {
             let (images, others) = split_images(&produced);
             if !images.is_empty() {
@@ -2320,16 +2303,22 @@ impl Workbench {
                 } else {
                     // Still folder-grouped, because two runs' `results/` directories are still two
                     // things — the image grid above is the only surface where kind outranks folder.
-                    section = section.child(self.output_grid(
-                        &format!("panel-{band}-{at}"),
-                        shorten_path_label(
-                            &output_folder_label(&group.folder, worker.as_deref()),
-                            PANEL_HEADING_CHARS,
+                    section = section.child(
+                        self.output_grid(
+                            &format!("panel-{band}-{at}"),
+                            shorten_path_label(
+                                &output_folder_label(&group.folder, worker.as_deref()),
+                                PANEL_HEADING_CHARS,
+                            ),
+                            &group
+                                .outputs
+                                .iter()
+                                .map(|o| (*o).clone())
+                                .collect::<Vec<_>>(),
+                            true,
+                            cx,
                         ),
-                        &group.outputs.iter().map(|o| (*o).clone()).collect::<Vec<_>>(),
-                        true,
-                        cx,
-                    ));
+                    );
                 }
             }
         }
@@ -2387,8 +2376,11 @@ impl Workbench {
             // (docs §223). Only when the structured list actually arrived, so a bucket from an
             // older backend still renders as plain text rather than as a heading that does
             // nothing.
-            let openable = matches!(bucket.name, "datasets" | "libraries")
-                && !bucket.items.is_empty();
+            let openable = match bucket.name {
+                "libraries" => !self.documents.is_empty(),
+                "datasets" => !bucket.items.is_empty(),
+                _ => false,
+            };
             // **What the researcher is counting, not what the payload wrapped.** `libraries` holds
             // one artifact per turn and `datasets` one entry per recommendation, so the bucket's
             // own length answered *how many envelopes* for the first and *how many datasets* for
@@ -2459,11 +2451,7 @@ impl Workbench {
                 heading = heading
                     // Said as well as coloured. A hover-only affordance is one a researcher finds
                     // by accident, and this is the panel's only way into the dataset list.
-                    .child(
-                        ui::Label::new("open all")
-                            .inherit()
-                            .size(ui::Size::Compact),
-                    )
+                    .child(ui::Label::new("open all").inherit().size(ui::Size::Compact))
                     .hover(|style| {
                         let fill = theme::hover_over(theme::surface());
                         style
@@ -2475,6 +2463,10 @@ impl Workbench {
                         let which = bucket.name;
                         cx.listener(move |workbench, _event, _window, cx| match which {
                             "libraries" => {
+                                // The modal is an inventory, so refresh from Asta's durable index
+                                // at the moment the researcher asks to see it. This also repairs
+                                // conversations whose checkpoint predates the cumulative reducer.
+                                workbench.reload_documents();
                                 workbench.documents_open = true;
                                 cx.notify();
                             }
@@ -2507,4 +2499,3 @@ impl Workbench {
         section
     }
 }
-

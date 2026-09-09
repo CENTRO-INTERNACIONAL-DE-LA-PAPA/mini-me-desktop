@@ -1432,6 +1432,9 @@ impl Workbench {
         if let Some(request) = &self.pending_approval {
             column = column.child(self.approval_card(request, cx));
         }
+        if let Some(pending) = &self.pending_mcp_elicitation {
+            column = column.child(self.mcp_elicitation_card(pending, cx));
+        }
         let column = column
             .children(self.collected_banner(cx))
             .children(self.attachment_chips(cx))
@@ -1674,4 +1677,3 @@ impl Workbench {
             )
     }
 }
-

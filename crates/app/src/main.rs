@@ -811,7 +811,7 @@ impl JobTally {
         for task in tasks {
             // Approval first: a task at the gate is `interrupted`, which is *not* terminal and
             // not running either — it is stopped, waiting for a person.
-            if task.needs_approval() {
+            if task.needs_attention() {
                 tally.waiting += 1;
             } else if !task.is_finished() {
                 tally.running += 1;
@@ -1054,6 +1054,73 @@ fn decision_for(approve: bool) -> protocol::Decision {
             message: "The researcher declined to run this command.".to_string(),
         }
     }
+}
+
+fn mcp_schema_kind(schema: &serde_json::Value) -> String {
+    match schema.get("type") {
+        Some(serde_json::Value::String(kind)) => kind.clone(),
+        Some(serde_json::Value::Array(kinds)) => kinds
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .find(|kind| *kind != "null")
+            .unwrap_or("string")
+            .to_string(),
+        _ => "string".to_string(),
+    }
+}
+
+fn mcp_default_text(value: &serde_json::Value) -> String {
+    value
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| value.to_string())
+}
+
+fn parse_mcp_form_value(
+    field: &McpElicitationField,
+    raw: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return if field.required {
+            Err(format!("{} is required", field.label))
+        } else {
+            Ok(None)
+        };
+    }
+    let value = match field.kind.as_str() {
+        "string" => serde_json::Value::String(raw.to_string()),
+        "integer" => serde_json::json!(raw
+            .parse::<i64>()
+            .map_err(|_| format!("{} must be a whole number", field.label))?),
+        "number" => serde_json::json!(raw
+            .parse::<f64>()
+            .map_err(|_| format!("{} must be a number", field.label))?),
+        "boolean" => serde_json::Value::Bool(match raw.to_ascii_lowercase().as_str() {
+            "true" | "yes" | "1" => true,
+            "false" | "no" | "0" => false,
+            _ => return Err(format!("{} must be true or false", field.label)),
+        }),
+        "array" => serde_json::Value::Array(
+            raw.split(',')
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(|item| serde_json::Value::String(item.to_string()))
+                .collect(),
+        ),
+        _ => serde_json::from_str(raw)
+            .map_err(|_| format!("{} must be valid JSON", field.label))?,
+    };
+    if !field.options.is_empty() && !field.options.contains(&value) {
+        let allowed = field
+            .options
+            .iter()
+            .map(mcp_default_text)
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!("{} must be one of: {allowed}", field.label));
+    }
+    Ok(Some(value))
 }
 
 /// The status bar's one-line answer to "what is happening, and how far through".
@@ -1538,6 +1605,87 @@ fn attachments_for_turn(attachments: &[Attachment]) -> Vec<workspace::PendingAtt
         .collect()
 }
 
+/// Reconcile the latest librarian response with Asta's durable inventory.
+///
+/// A `LibraryArtifact.papers` list is only the documents relevant to that turn — a search for GNN
+/// expressivity can correctly return one match from a two-paper library. The modal answers a
+/// different question, "what is indexed?", so its membership and ordering come from `index.yaml`.
+/// Rich fields which Asta's metadata index does not carry (currently DOI and page count) survive
+/// from the structured response when both locations resolve to the same file.
+fn reconciled_documents(
+    thread: &std::path::Path,
+    reported: &[protocol::Document],
+    indexed: Vec<workspace::IndexedDocument>,
+) -> Vec<protocol::Document> {
+    indexed
+        .into_iter()
+        .map(|document| {
+            let enriched = reported.iter().find(|candidate| {
+                candidate.path == document.path
+                    || match (
+                        workspace::local_path(&candidate.path, Some(thread)),
+                        workspace::local_path(&document.path, Some(thread)),
+                    ) {
+                        (Some(left), Some(right)) => left == right,
+                        _ => false,
+                    }
+            });
+            protocol::Document {
+                title: document.title,
+                path: document.path,
+                doi: enriched.and_then(|candidate| candidate.doi.clone()),
+                summary: if document.summary.is_empty() {
+                    enriched
+                        .map(|candidate| candidate.summary.clone())
+                        .unwrap_or_default()
+                } else {
+                    document.summary
+                },
+                tags: if document.tags.is_empty() {
+                    enriched
+                        .map(|candidate| candidate.tags.clone())
+                        .unwrap_or_default()
+                } else {
+                    document.tags
+                },
+                page_count: enriched.and_then(|candidate| candidate.page_count),
+            }
+        })
+        .collect()
+}
+
+/// Make the Outputs card describe the same durable library as the modal.
+///
+/// Old checkpoints can omit the `libraries` artifact altogether, not just carry a short `papers`
+/// list. In that case the complete disk inventory must create the way into the modal as well as
+/// populate it. Conversely, a valid empty index removes a stale card.
+fn sync_library_bucket(buckets: &mut Vec<protocol::Bucket>, documents: &[protocol::Document]) {
+    let titles = documents
+        .iter()
+        .map(|document| document.title.clone())
+        .collect::<Vec<_>>();
+    if let Some(bucket) = buckets.iter_mut().find(|bucket| bucket.name == "libraries") {
+        if titles.is_empty() {
+            buckets.retain(|bucket| bucket.name != "libraries");
+        } else {
+            bucket.items = titles;
+        }
+    } else if !titles.is_empty() {
+        // Keep the protocol's usual display order: libraries precede analyses/recommendations.
+        let position = buckets
+            .iter()
+            .position(|bucket| matches!(bucket.name, "analyses" | "recommendations"))
+            .unwrap_or(buckets.len());
+        buckets.insert(
+            position,
+            protocol::Bucket {
+                name: "libraries",
+                items: titles,
+            },
+        );
+    }
+}
+
 /// The turn to send: the blockquote, then what they typed.
 fn with_attachments(typed: &str, attachments: &[Attachment]) -> String {
     match attached_blockquote(attachments) {
@@ -1667,10 +1815,10 @@ fn device_code(url: &str) -> Option<String> {
 fn open_in_browser(url: &str) -> std::io::Result<()> {
     #[cfg(windows)]
     {
-        // The empty argument is `start`'s title parameter. Without it, a quoted URL is
-        // taken *as* the title and nothing opens.
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", url])
+        // Direct argv, not `cmd /C start`: an MCP-provided OAuth URL legitimately contains `&`,
+        // which `cmd` would parse as shell syntax rather than as part of the URL.
+        std::process::Command::new("rundll32.exe")
+            .args(["url.dll,FileProtocolHandler", url])
             .spawn()
             .map(|_| ())
     }
@@ -2036,6 +2184,36 @@ struct RunningFix {
 /// How much of a fix's output the pane keeps.
 const FIX_LOG_LINES: usize = 200;
 
+/// One editable primitive from an MCP elicitation form.
+struct McpElicitationField {
+    interrupt: String,
+    request_key: String,
+    name: String,
+    label: String,
+    kind: String,
+    required: bool,
+    options: Vec<serde_json::Value>,
+    editor: Entity<Composer>,
+}
+
+#[derive(Clone)]
+enum McpElicitationTarget {
+    Foreground,
+    Background {
+        task_id: String,
+        thread_id: String,
+        owner: Option<String>,
+    },
+}
+
+/// The input-required round currently shown above the composer.
+struct PendingMcpElicitation {
+    request: protocol::McpElicitationRequest,
+    fields: Vec<McpElicitationField>,
+    target: McpElicitationTarget,
+    error: Option<String>,
+}
+
 struct Workbench {
     /// The project spine from `GET /project`. `None` until the first fetch lands
     /// (or if the backend isn't up yet) — the panel says so rather than lying.
@@ -2154,6 +2332,8 @@ struct Workbench {
     /// A run paused at the approval gate: the command it wants to run, awaiting a
     /// decision. While this is set the turn is *open*, not finished.
     pending_approval: Option<ApprovalRequest>,
+    /// A modern stateless MCP tool paused for form data or confirmation that a URL was visited.
+    pending_mcp_elicitation: Option<PendingMcpElicitation>,
     /// The user approved everything remaining in *this* turn. Never persisted, and reset
     /// by [`Workbench::finish_turn`] — see the button's comment for why it is bounded.
     approve_rest_of_turn: bool,
@@ -2263,6 +2443,10 @@ struct Workbench {
     /// The agent graph has not finished building. §176 measured that wait at fifteen seconds on
     /// a real machine, which is far too long to leave a window looking idle.
     warming: bool,
+    /// Hosted MCPs the graph skipped at startup, and whether their one-per-launch notice is open.
+    /// Kept separately: dismissing information must not rewrite the backend's capability state.
+    unavailable_mcps: Vec<protocol::McpService>,
+    mcp_notice_open: bool,
     /// An open sidebar `⋮` or `New` menu, and where its corner goes.
     sidebar_menu: Option<(SidebarMenu, gpui::Point<gpui::Pixels>)>,
     /// Which of the two sidebar lists — Conversations or Projects — is showing.
@@ -2289,6 +2473,8 @@ struct Workbench {
     /// The delete warning's focus. It has buttons but no text field, so leaving focus on the
     /// sidebar row it covers would make Escape depend on an element hidden behind the modal.
     delete_focus: gpui::FocusHandle,
+    /// The hosted-service notice has no field of its own, so Escape needs a stable focus target.
+    mcp_notice_focus: gpui::FocusHandle,
     /// Recent outcomes, newest last, each fading on its own timer.
     ///
     /// The status bar holds exactly one line, so an outcome worth reading — "copied 12 lines",
@@ -2675,6 +2861,7 @@ impl Workbench {
             judge_after_recheck: false,
             running_fix: None,
             pending_approval: None,
+            pending_mcp_elicitation: None,
             approve_rest_of_turn: false,
             approve_conversation: false,
             theme_filter,
@@ -2691,6 +2878,8 @@ impl Workbench {
             folder_projects: Vec::new(),
             opening: false,
             warming: false,
+            unavailable_mcps: Vec::new(),
+            mcp_notice_open: false,
             sidebar_menu: None,
             sidebar_view: SidebarView::default(),
             subagent_selected: 0,
@@ -2699,6 +2888,7 @@ impl Workbench {
             provenance_focus: cx.focus_handle(),
             about_focus: cx.focus_handle(),
             delete_focus: cx.focus_handle(),
+            mcp_notice_focus: cx.focus_handle(),
             sidebar_width: 320.,
             panel_width: 320.,
             dragging: None,
@@ -2897,7 +3087,10 @@ impl Workbench {
             // The snapshot knows the status the coordinator last recorded; the *watcher*
             // knows whether it is stopped at the gate right now. Never let a stale
             // snapshot erase a pending approval the user is looking at.
-            if existing.pending.is_none() && !existing.is_finished() {
+            if existing.pending.is_none()
+                && existing.elicitation.is_none()
+                && !existing.is_finished()
+            {
                 existing.status = task.status;
             }
             // A task already being watched keeps the owner it was first seen with: re-stamping
@@ -2920,8 +3113,12 @@ impl Workbench {
                 let carry_on = this.update(cx, |workbench, cx| {
                     let finished = update.is_finished();
                     let waiting = update.needs_approval();
+                    let waiting_for_input = update.needs_input();
                     let succeeded = update.succeeded();
                     let task_id = update.task_id.clone();
+                    let elicitation = update.elicitation.clone();
+                    let elicitation_thread = update.thread_id.clone();
+                    let elicitation_owner = update.owning_conversation().map(str::to_string);
                     // Read before `update` is moved into the tracked slot below.
                     let worker = update.agent_name.replace('_', " ");
                     if let Some(tracked) = workbench
@@ -2943,7 +3140,26 @@ impl Workbench {
                         cx.notify();
                         return;
                     }
-                    if waiting {
+                    if waiting_for_input {
+                        workbench.status =
+                            "a background MCP service is waiting for your input".into();
+                        workbench.notify_if_away(
+                            "A background service needs your input",
+                            &worker,
+                        );
+                        workbench.jobs_expanded = true;
+                        if let Some(request) = elicitation {
+                            workbench.open_mcp_elicitation_for(
+                                request,
+                                McpElicitationTarget::Background {
+                                    task_id,
+                                    thread_id: elicitation_thread,
+                                    owner: elicitation_owner,
+                                },
+                                cx,
+                            );
+                        }
+                    } else if waiting {
                         workbench.status = "a background task is waiting for your approval".into();
                         // **More deserving of a toast than a finished run.** This one is stopped
                         // and cannot continue: §31 is the record of such a task hanging with
@@ -3905,6 +4121,7 @@ impl Workbench {
         let told_backend = self.sidecar.cancel_turn();
         self.streaming = false;
         self.pending_approval = None;
+        self.clear_foreground_mcp_elicitation(cx);
         self.composer
             .update(cx, |composer, cx| composer.set_disabled(false, cx));
         if let Some(message) = self.transcript.last_mut() {
@@ -4086,6 +4303,7 @@ impl Workbench {
                 // The composer stays disabled: this turn is still running, it is just
                 // paused on a question for the user.
             }
+            TurnEvent::Elicitation(request) => self.open_mcp_elicitation(request, cx),
             TurnEvent::SubagentToken { agent, text } => {
                 self.note_provenance(&agent);
                 if let Some(message) = self.transcript.last_mut() {
@@ -4126,6 +4344,9 @@ impl Workbench {
                 if !snapshot.buckets.is_empty() {
                     self.buckets = snapshot.buckets;
                 }
+                // The response is a turn slice; the index is the library. Do this after replacing
+                // the snapshot's buckets so an old checkpoint cannot erase the repaired card.
+                self.reload_documents();
                 // **Replaced, not merged.** A plan is a whole statement about the current
                 // intention: the model rewrites the list to reorder or drop a step, so keeping
                 // the old items when a shorter list arrives would show work the agent has
@@ -4370,7 +4591,23 @@ impl Workbench {
             let _ = this.update(cx, |workbench, cx| {
                 workbench.warming = false;
                 match outcome {
-                    Some(Ok(())) => workbench.status = status.label().into(),
+                    Some(Ok(report)) => {
+                        workbench.unavailable_mcps = report.unavailable();
+                        workbench.mcp_notice_open = !workbench.unavailable_mcps.is_empty();
+                        workbench.status = if workbench.unavailable_mcps.is_empty() {
+                            status.label().into()
+                        } else {
+                            format!(
+                                "backend started; {} research service{} unavailable",
+                                workbench.unavailable_mcps.len(),
+                                if workbench.unavailable_mcps.len() == 1 {
+                                    ""
+                                } else {
+                                    "s"
+                                }
+                            )
+                        };
+                    }
                     Some(Err(error)) => {
                         // Startup remains usable: a dependency may be temporarily unreachable,
                         // and the first real turn will surface its contextual error. What must not
@@ -4519,6 +4756,7 @@ impl Workbench {
         self.tasks.clear();
         self.jobs.clear();
         self.plan.clear();
+        self.documents.clear();
         // The record of who wrote what belongs to the conversation being left. Cleared with the
         // stamp, or the next frame would see an unchanged `None` and keep the old map.
         self.authorship.clear();
@@ -4616,6 +4854,7 @@ impl Workbench {
                         if !snapshot.documents.is_empty() {
                             workbench.documents = snapshot.documents;
                         }
+                        workbench.reload_documents();
                         if !snapshot.reports.is_empty() {
                             workbench.reports = snapshot.reports;
                         }
@@ -5229,6 +5468,9 @@ impl Workbench {
 
     fn finish_turn(&mut self, cx: &mut Context<Self>) {
         self.collect_plots();
+        // The librarian may have updated `index.yaml` in its final command after the last values
+        // event. One last disk read makes the completed turn and its panel agree immediately.
+        self.reload_documents();
         self.check_file_claims();
         self.settle_outputs(cx);
         // Written here, and only here, for the same reason the title is: the thread id does not
@@ -5247,6 +5489,7 @@ impl Workbench {
         self.adopt_pending(cx);
         self.refresh_conversations(cx);
         self.pending_approval = None;
+        self.clear_foreground_mcp_elicitation(cx);
         // Blanket approval expires with the turn it was given for. Carrying it into the
         // next question would turn a bounded decision into a permanent one, which is
         // exactly what the button is worded to avoid.
@@ -5481,6 +5724,7 @@ impl Workbench {
         self.tasks.clear();
         self.jobs.clear();
         self.plan.clear();
+        self.documents.clear();
         // The record of who wrote what belongs to the conversation being left. Cleared with the
         // stamp, or the next frame would see an unchanged `None` and keep the old map.
         self.authorship.clear();
@@ -5767,6 +6011,244 @@ impl Workbench {
     }
 
 
+    /// Materialize the flat primitive form schema carried by a modern MCP elicitation request.
+    fn open_mcp_elicitation(
+        &mut self,
+        request: protocol::McpElicitationRequest,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_mcp_elicitation_for(request, McpElicitationTarget::Foreground, cx);
+    }
+
+    fn open_mcp_elicitation_for(
+        &mut self,
+        request: protocol::McpElicitationRequest,
+        target: McpElicitationTarget,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(pending) = self.pending_mcp_elicitation.as_ref() {
+            match (&pending.target, &target) {
+                // A watcher repeats an interrupted state until it is resumed. Do not rebuild the
+                // editor on every poll and erase text the researcher has already entered.
+                (McpElicitationTarget::Foreground, McpElicitationTarget::Foreground)
+                    if pending.request == request =>
+                {
+                    return;
+                }
+                // Keep one background request visible at a time. The task retains every queued
+                // request and `open_next_background_mcp_elicitation` advances the queue.
+                (_, McpElicitationTarget::Background { .. }) => return,
+                // A foreground tool belongs to the conversation being read now, so it takes the
+                // card. The background request remains on its task and returns afterward.
+                _ => {}
+            }
+        }
+        let mut fields = Vec::new();
+        for question in &request.questions {
+            if question.mode != "form" {
+                continue;
+            }
+            let required: HashSet<&str> = question
+                .requested_schema
+                .get("required")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .collect();
+            let Some(properties) = question
+                .requested_schema
+                .get("properties")
+                .and_then(serde_json::Value::as_object)
+            else {
+                continue;
+            };
+            for (name, schema) in properties {
+                let kind = mcp_schema_kind(schema);
+                let label = schema
+                    .get("title")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(name)
+                    .to_string();
+                let options = schema
+                    .get("enum")
+                    .and_then(serde_json::Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                let placeholder = if options.is_empty() {
+                    match kind.as_str() {
+                        "boolean" => "true or false".to_string(),
+                        "array" => "comma-separated values".to_string(),
+                        _ => format!("Enter {label}"),
+                    }
+                } else {
+                    options
+                        .iter()
+                        .map(mcp_default_text)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                let default = schema.get("default").map(mcp_default_text);
+                let editor = cx.new(|cx| {
+                    let mut editor = Composer::new(cx, placeholder);
+                    if let Some(default) = default {
+                        editor.set_text(&default, cx);
+                    }
+                    editor
+                });
+                fields.push(McpElicitationField {
+                    interrupt: question.interrupt.clone(),
+                    request_key: question.key.clone(),
+                    name: name.clone(),
+                    label,
+                    kind,
+                    required: required.contains(name.as_str()),
+                    options,
+                    editor,
+                });
+            }
+        }
+        let count = request.questions.len();
+        self.pending_mcp_elicitation = Some(PendingMcpElicitation {
+            request,
+            fields,
+            target,
+            error: None,
+        });
+        self.status = if count == 1 {
+            "an MCP service needs your input".into()
+        } else {
+            format!("an MCP service needs {count} answers")
+        };
+    }
+
+    /// Answer every question in the current MCP input-required round.
+    fn answer_mcp_elicitation(&mut self, choice: &str, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_mcp_elicitation.as_ref() else {
+            return;
+        };
+        let target = pending.target.clone();
+        let built: Result<Vec<protocol::McpElicitationAnswer>, String> = pending
+            .request
+            .questions
+            .iter()
+            .map(|question| {
+                let action = match choice {
+                    "decline" => protocol::McpElicitationAction::Decline,
+                    "cancel" => protocol::McpElicitationAction::Cancel,
+                    _ if question.mode == "url" => {
+                        protocol::McpElicitationAction::Accept { content: None }
+                    }
+                    _ => {
+                        let mut content = serde_json::Map::new();
+                        for field in pending.fields.iter().filter(|field| {
+                            field.interrupt == question.interrupt
+                                && field.request_key == question.key
+                        }) {
+                            let raw = field.editor.read(cx).text().to_string();
+                            if let Some(value) = parse_mcp_form_value(field, &raw)? {
+                                content.insert(field.name.clone(), value);
+                            }
+                        }
+                        protocol::McpElicitationAction::Accept {
+                            content: Some(serde_json::Value::Object(content)),
+                        }
+                    }
+                };
+                Ok(protocol::McpElicitationAnswer {
+                    interrupt: question.interrupt.clone(),
+                    key: question.key.clone(),
+                    action,
+                })
+            })
+            .collect();
+        let answers = match built {
+            Ok(answers) => answers,
+            Err(error) => {
+                if let Some(pending) = self.pending_mcp_elicitation.as_mut() {
+                    pending.error = Some(error);
+                }
+                cx.notify();
+                return;
+            }
+        };
+        self.pending_mcp_elicitation = None;
+        self.status = match choice {
+            "decline" => "MCP request declined — continuing…",
+            "cancel" => "MCP tool cancelled — continuing…",
+            _ => "MCP response sent — continuing…",
+        }
+        .into();
+
+        match target {
+            McpElicitationTarget::Foreground => {
+                let mut events = self.sidecar.resume_elicitation(answers);
+                cx.spawn(async move |this, cx| {
+                    while let Some(event) = events.next().await {
+                        if this
+                            .update(cx, |workbench, cx| {
+                                workbench.apply(event, cx);
+                                cx.notify();
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                })
+                .detach();
+            }
+            McpElicitationTarget::Background {
+                task_id,
+                thread_id,
+                owner,
+            } => {
+                if let Some(task) = self.tasks.iter_mut().find(|task| task.task_id == task_id) {
+                    task.elicitation = None;
+                    task.status = "running".into();
+                }
+                self.sidecar
+                    .answer_task_elicitation(thread_id, owner, answers);
+            }
+        }
+        self.open_next_background_mcp_elicitation(cx);
+        cx.notify();
+    }
+
+    fn open_next_background_mcp_elicitation(&mut self, cx: &mut Context<Self>) {
+        if self.pending_mcp_elicitation.is_some() {
+            return;
+        }
+        let next = self.tasks.iter().find_map(|task| {
+            task.elicitation.clone().map(|request| {
+                (
+                    request,
+                    McpElicitationTarget::Background {
+                        task_id: task.task_id.clone(),
+                        thread_id: task.thread_id.clone(),
+                        owner: task.owning_conversation().map(str::to_string),
+                    },
+                )
+            })
+        });
+        if let Some((request, target)) = next {
+            self.open_mcp_elicitation_for(request, target, cx);
+        }
+    }
+
+    /// End only the open conversation's request; a background task may still need an answer.
+    fn clear_foreground_mcp_elicitation(&mut self, cx: &mut Context<Self>) {
+        if self
+            .pending_mcp_elicitation
+            .as_ref()
+            .is_some_and(|pending| matches!(pending.target, McpElicitationTarget::Foreground))
+        {
+            self.pending_mcp_elicitation = None;
+        }
+        self.open_next_background_mcp_elicitation(cx);
+    }
+
+
     /// Answer the pending approval and pump the continuation into the same turn.
     fn decide(&mut self, approve: bool, cx: &mut Context<Self>) {
         let Some(request) = self.pending_approval.take() else {
@@ -5912,6 +6394,12 @@ impl Workbench {
         // promised "esc close" the whole time (docs §84).
         if self.palette_open {
             self.close_palette(window, cx);
+            return;
+        }
+        if self.mcp_notice_open {
+            self.mcp_notice_open = false;
+            self.restore_focus = true;
+            cx.notify();
             return;
         }
         if self.confirming_delete.take().is_some() {
@@ -7243,6 +7731,27 @@ impl Workbench {
             .unwrap_or_default()
     }
 
+    /// Re-read the complete per-conversation PDF library from Asta's own index.
+    ///
+    /// The state payload remains useful for richer fields, but it is a slice of one turn and is
+    /// not authoritative for membership. A missing or temporarily malformed index preserves that
+    /// payload; a valid empty index clears the panel because a removal must be visible too.
+    pub(crate) fn reload_documents(&mut self) {
+        let Some(thread) = self.thread_workspace() else {
+            return;
+        };
+        match workspace::indexed_documents(&thread) {
+            Ok(Some(indexed)) => {
+                self.documents = reconciled_documents(&thread, &self.documents, indexed);
+                sync_library_bucket(&mut self.buckets, &self.documents);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(%error, "could not refresh the document library index");
+            }
+        }
+    }
+
     /// Re-read the datasets this conversation's searches returned.
     ///
     /// **The file wins whenever there is one.** The model's answer is kept only for a run that
@@ -7575,6 +8084,12 @@ impl Render for Workbench {
             None => root,
         };
 
+        let root = if self.mcp_notice_open {
+            root.child(self.mcp_unavailable_modal(cx))
+        } else {
+            root
+        };
+
         let root = if self.palette_open {
             root.child(self.palette(cx))
         } else {
@@ -7633,6 +8148,13 @@ fn decode_capture(raw: &[u8], mut on_status: impl FnMut(&str)) -> (Message, Vec<
                             .push(format!("awaiting approval: {}", action.tool));
                     }
                 }
+                TurnEvent::Elicitation(request) => {
+                    for question in &request.questions {
+                        message
+                            .steps
+                            .push(format!("awaiting input: {}", question.tool));
+                    }
+                }
                 TurnEvent::Status(status) => on_status(&status),
                 TurnEvent::Error(error) => on_status(&format!("error: {error}")),
                 TurnEvent::Done => {}
@@ -7689,6 +8211,15 @@ fn replay(path: &str) -> anyhow::Result<()> {
 #[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_mcp_outage_notice_is_non_fatal_and_names_the_support_contact() {
+        let source = include_str!("ui/modals.rs");
+        assert!(source.contains("This MCP is not reachable at this time."));
+        assert!(source.contains("Mini-Me will continue"));
+        assert!(source.contains("pierp.palacios@cgiar.org"));
+        assert!(source.contains("No conversation or saved work was removed."));
+    }
+
     fn collected(kind: protocol::JobKind, thread: &str) -> (String, protocol::Job) {
         (
             thread.to_string(),
@@ -8252,17 +8783,101 @@ mod tests {
     #[test]
     fn a_file_attached_before_the_conversation_existed_is_copied_in_later() {
         let waiting = awaiting_adoption(&[
-            attached("SOC_Covariables_TrainValV5.csv", "/mnt/c/Users/x/Downloads/SOC_Covariables_TrainValV5.csv"),
-            attached("SOC_Covariables_TESTV5.csv", "/mnt/c/Users/x/Downloads/SOC_Covariables_TESTV5.csv"),
+            attached(
+                "SOC_Covariables_TrainValV5.csv",
+                "/mnt/c/Users/x/Downloads/SOC_Covariables_TrainValV5.csv",
+            ),
+            attached(
+                "SOC_Covariables_TESTV5.csv",
+                "/mnt/c/Users/x/Downloads/SOC_Covariables_TESTV5.csv",
+            ),
         ]);
         assert_eq!(waiting.len(), 2, "both were sent from outside the folder");
     }
 
+    /// §303: the live checkpoint said `paper_count: 2` but carried only the one GNN search match.
+    /// The index supplies membership; the turn still enriches the matching row with its DOI.
+    #[test]
+    fn the_library_panel_shows_the_index_not_only_the_latest_search_matches() {
+        let gnn = "file:///mnt/c/Users/LENOVO/Documents/Mini-Me/thread/Graph-neural-networks.pdf";
+        let reported = vec![protocol::Document {
+            title: "Graph neural networks".into(),
+            path: gnn.into(),
+            doi: Some("10.1038/s43586-024-00294-7".into()),
+            summary: "one search match".into(),
+            tags: vec!["gnn".into()],
+            page_count: Some(27),
+        }];
+        let indexed = vec![
+            workspace::IndexedDocument {
+                title: "Ploidy-specific symbiotic interactions".into(),
+                path: "file:///mnt/c/Users/LENOVO/Documents/Mini-Me/thread/phytologist.pdf".into(),
+                summary: "orchid mycorrhiza".into(),
+                tags: vec!["orchidaceae".into()],
+            },
+            workspace::IndexedDocument {
+                title: "Graph neural networks".into(),
+                path: gnn.into(),
+                summary: "the complete indexed summary".into(),
+                tags: vec!["graph neural networks".into()],
+            },
+        ];
+
+        let documents = reconciled_documents(std::path::Path::new("/thread"), &reported, indexed);
+        assert_eq!(documents.len(), 2);
+        assert_eq!(documents[0].title, "Ploidy-specific symbiotic interactions");
+        assert_eq!(documents[1].title, "Graph neural networks");
+        assert_eq!(
+            documents[1].doi.as_deref(),
+            Some("10.1038/s43586-024-00294-7")
+        );
+        assert_eq!(documents[1].page_count, Some(27));
+        assert_eq!(documents[1].summary, "the complete indexed summary");
+    }
+
+    #[test]
+    fn removing_a_paper_from_the_index_removes_it_from_the_panel() {
+        let reported = vec![protocol::Document {
+            title: "Old state".into(),
+            path: "old.pdf".into(),
+            ..Default::default()
+        }];
+        let indexed = vec![workspace::IndexedDocument {
+            title: "Still indexed".into(),
+            path: "current.pdf".into(),
+            summary: String::new(),
+            tags: Vec::new(),
+        }];
+        let documents = reconciled_documents(std::path::Path::new("/thread"), &reported, indexed);
+        assert_eq!(documents.len(), 1);
+        assert_eq!(documents[0].title, "Still indexed");
+    }
+
+    #[test]
+    fn the_disk_inventory_restores_a_missing_library_card() {
+        let documents = vec![protocol::Document {
+            title: "Indexed on disk".into(),
+            path: "paper.pdf".into(),
+            ..Default::default()
+        }];
+        let mut buckets = vec![protocol::Bucket {
+            name: "analyses",
+            items: vec!["Existing analysis".into()],
+        }];
+
+        sync_library_bucket(&mut buckets, &documents);
+        assert_eq!(buckets[0].name, "libraries");
+        assert_eq!(buckets[0].items, ["Indexed on disk"]);
+
+        sync_library_bucket(&mut buckets, &[]);
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0].name, "analyses");
+    }
+
     #[test]
     fn a_first_turn_hands_the_source_and_its_prompt_reference_to_the_sidecar() {
-        let source = std::path::PathBuf::from(
-            r"C:\Users\LENOVO\Documents\workshop mini-me\dataset.csv",
-        );
+        let source =
+            std::path::PathBuf::from(r"C:\Users\LENOVO\Documents\workshop mini-me\dataset.csv");
         let reference = "/mnt/c/Users/LENOVO/Documents/workshop mini-me/dataset.csv";
         let attachment = Attachment {
             label: "dataset.csv".into(),
@@ -8413,6 +9028,7 @@ mod tests {
             status: status.into(),
             description: String::new(),
             pending: None,
+            elicitation: None,
             error: None,
             activity: activity.map(str::to_owned),
             todos: todos
@@ -8569,6 +9185,7 @@ mod tests {
             status: "success".into(),
             description: String::new(),
             pending: None,
+            elicitation: None,
             error: None,
             activity: None,
             todos: Vec::new(),
@@ -8627,6 +9244,7 @@ mod tests {
             status: "success".into(),
             description: String::new(),
             pending: None,
+            elicitation: None,
             error: None,
             activity: None,
             todos: Vec::new(),

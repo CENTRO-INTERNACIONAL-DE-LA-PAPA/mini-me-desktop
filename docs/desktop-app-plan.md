@@ -17267,3 +17267,117 @@ parent.
 
 *Hundred-and-fifty-second: an attachment is not adopted when a later copy happens; it is adopted
 when every consumer, including the first one, receives the conversation's copy.*
+
+## 303. A search result is not the library (2026-09-04)
+
+The same conversation that exposed §232 and §233 was opened again in 0.3.30. Its Library modal
+still showed one paper. This time every durable layer was inspected rather than inferred:
+
+- `<thread>/.asta/documents/index.yaml` held both the Phytologist and GNN records;
+- `<thread>/.asta/documents/.cache/search.db` held two `documents`, two FTS rows and two embeddings;
+- the live `GET /threads/<id>/state` response said `paper_count: 2` but its `papers` list contained
+  only *Graph neural networks*.
+
+That payload was not corrupt. The last librarian action was a semantic search about GNN data
+symmetries, and `LibraryArtifact.papers` is explicitly the documents relevant to the current turn:
+the documents just indexed **or the search matches**. The UI was asking that turn slice to answer
+the inventory question. §233's cumulative reducer prevents new turns from losing earlier slices,
+but it cannot reconstruct a row already absent from an old persisted checkpoint.
+
+### The index owns membership
+
+The desktop now reads Asta's per-conversation `index.yaml`. A valid index supplies the modal's
+complete membership, order, titles, summaries and tags, and restores the Library card if an old
+checkpoint omitted it altogether. The structured state remains useful for fields the index does
+not currently carry, so DOI and page count are retained when both locations resolve to the same
+file. Missing or temporarily malformed indexes preserve the last good state; a valid empty index
+clears the list and its stale card, because removing a paper must be visible too.
+
+The read happens on every values snapshot, after a completed turn, when a conversation is reopened,
+and immediately before the modal opens. The last one is the legacy repair: opening this old thread
+now shows the two records already on disk without spending a model call or rewriting its checkpoint.
+
+### A local URL is still a local file
+
+`asta documents add` stores an absolute file as `file:///mnt/c/...`. `local_path` previously rejected
+every string containing `://`, so a real indexed PDF could be rendered but never pressed. File URLs
+are now parsed and percent-decoded, remote hosts are refused, WSL-mounted Windows drives cross back
+through the existing `/mnt/<drive>` bridge, and native `file:///C:/...` URLs are accepted. The row is
+interactive only when the resolved target is an existing file, preventing the folder-opening helper
+from creating a directory named `paper.pdf` for a stale index entry.
+
+Regression tests reproduce the two-paper disk index plus one-paper search slice, distinguish a
+missing index from a deliberately emptied one, preserve DOI/page count while taking membership from
+disk, remove stale rows, decode a `%20` WSL file URL, and refuse a network-host file URL.
+
+*Hundred-and-fifty-third: a search tells you what matched; an index tells you what exists. A panel
+named Library must ask the second question even when the most recent turn answered the first.*
+
+## 304. A research service is a capability, not the backend (2026-09-08)
+
+The Dataverse MCP deployment began requiring bearer authentication. The desktop still reached
+`/ok`, then graph warm-up and every conversation-state read returned 500 because `agent()` treated
+all four hosted MCP handshakes as prerequisites for constructing any graph. A researcher could see
+their conversation names but could neither open them nor run a turn because one optional catalogue
+changed its deployment contract.
+
+Hosted MCP discovery now fails closed at the capability boundary and open at the application
+boundary. Each handshake records `available` or `unavailable`; a failed handshake contributes no
+tools, is cached for the process so read-only requests do not hammer the deployment, and never
+prevents the graph from being built. AGROVOC and Crop Ontology are loaded independently, so one
+cannot erase the other merely because `MultiServerMCPClient` gathers both. An incompatible
+Dataverse tool manifest is the same kind of capability failure as an unreachable host: it cannot
+safely serve the specialist, but it cannot take down unrelated work.
+
+Dataverse has no local fallback, so its specialist is omitted when its tools are unavailable.
+Academic research keeps `find_papers` when the Asta MCP enrichment is absent, and data cleaning
+keeps its ordinary execution tools when either vocabulary MCP is absent. The coordinator receives
+an availability note so it cannot claim a skipped service was consulted or fabricate its result.
+
+After graph warm-up, the desktop reads `GET /mcp-status`. Unavailable services open one dismissible
+modal saying that the MCP is not reachable at this time, that Mini-Me will continue with available
+services, and to contact `pierp.palacios@cgiar.org`. The endpoint exposes stable service ids and
+display names but never the upstream exception; deployment detail stays in the backend log. An old
+backend without the status route remains compatible and simply produces no notice.
+
+The stable service id and separate status route are also the seam for optional accounts. A future
+WorkOS OAuth flow can add an `authentication_required` state and invalidate the failed-tool cache
+after sign-in without making an account a condition for opening Mini-Me. Services chosen to require
+identity can gain it; researchers who do not want an account keep the rest of the workbench.
+
+*Hundred-and-fifty-fourth: losing one source should narrow what the agent can do, never erase the
+work it already did.*
+
+## 305. An MCP round is a request, not a session (2026-09-09)
+
+LangChain 1.4 moved its MCP client into `langchain.mcp` and rebuilt it on FastMCP 4 for the
+2026-07-28 protocol. The old `langchain-mcp-adapters` client always approached a hosted service as
+a sessionful connection. It also left Mini-Me owning a permanent successful tool-list cache, so a
+server could publish a catalogue TTL or change its manifest and the desktop would never ask again
+until restart.
+
+Mini-Me now creates one `MCPAdapter` per deployment around a FastMCP `Client(mode="auto",
+cache=True)`. Auto mode negotiates the modern stateless era and falls back to the legacy handshake
+for a server that has not migrated. Keeping deployments separate preserves §304's failure
+boundary. Successful catalogues flow through FastMCP's `cache_mode="use"`, which honors the
+server's TTL and cache scope; only failed discovery remains process-cached to prevent an outage
+from being hammered by every graph reconstruction. The client is currently process-wide because a
+desktop process has one local user. When WorkOS introduces identities, this cache must be keyed by
+principal so authenticated catalogues never cross accounts.
+
+The new protocol replaces a live server callback with an input-required round. `langchain.mcp`
+surfaces that round as a LangGraph interrupt whose payload is discriminated by
+`type: "mcp_elicitation"`. The desktop now decodes form and URL requests separately from command
+approvals, renders the server's primitive JSON-schema fields, and resumes with responses keyed by
+both LangGraph interrupt id and MCP request key. Accept, decline and cancel remain distinct. URL
+requests can open on the Windows host, while form values are parsed to their declared string,
+integer, number, boolean or string-array types rather than being sent as model-authored prose.
+
+FastMCP owns transport inference, protocol negotiation and the future authentication object. That
+is the WorkOS seam: a signed-in principal can supply a bearer/OAuth credential when its service
+client is constructed, while an unsigned user still receives the non-fatal unavailable capability
+from §304. The app account and an MCP connection are related policy decisions, not a new global
+startup prerequisite.
+
+*Hundred-and-fifty-fifth: a stateless tool may stop for a human, but it must not stop the
+application from being human-usable.*
