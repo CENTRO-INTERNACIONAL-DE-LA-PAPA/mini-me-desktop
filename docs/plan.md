@@ -581,6 +581,68 @@ for a longer one.
 
 ---
 
+## E — ✅ FIXED by Codex, adopted with three conflicts resolved by hand
+
+`#230` (`codex/conversation-errors`) found the same defect independently and fixed it better than
+E.1–E.3 proposed:
+
+- **One adapter per server.** `_get_or_create_mcp_client` now *refuses* a multi-server bundle:
+  *"Mini-Me opens one MCP deployment per adapter so one outage cannot affect another."*
+- **Only failures are cached.** Successes ride FastMCP's TTL-aware response cache, so a server can
+  change its catalogue without an app restart — which is the half of the trap E flagged.
+- **`_minime_mcp_capped`** stops a second truncation wrapper being stacked when the graph is
+  rebuilt and FastMCP returns the same tool object. Not something E anticipated.
+- `get_dataverse_search_mcp_tools` marks the server unavailable and returns `[]` instead of raising.
+- A `/mcp` status route with per-server labels, so the UI can name which service is down.
+- Migrated `langchain-mcp-adapters` → first-party `langchain.mcp` (`MCPAdapter`) + `fastmcp.Client`.
+
+**The trap E named is still there, deliberately.** Failure memoization is process-lifetime, so
+**fixing the Dataverse deployment does not clear it until the backend restarts.** Codex documented
+why — otherwise every read-only thread-state request hammers a dead deployment — and the `/mcp`
+route at least makes the state visible. Worth knowing before someone reports "I fixed it and the
+app still says unavailable".
+
+### What the adoption cost, recorded because taking the branch wholesale would have broken things
+
+`#230` was based on `#220` and **21 commits behind**. Three conflicts, and two of them would have
+silently reverted shipped work:
+
+| file | resolution |
+|---|---|
+| `main.rs` | Kept main's `sidebar_width: 300.` — the base had **320**, so Codex never changed it; **Luciano did**, in #225. Took his new `mcp_notice_focus`. |
+| `ui/chat.rs` | Dropped his `composer_row`. Main **moved** it to `ui/chat_input.rs`, and his copy still carries the `.m_2()` that #225 removed on purpose ("fix composer margin"). Keeping it would have been a duplicate definition *and* a reverted fix. |
+| `ui/gallery_view.rs` | Dropped his `output_card` (202 lines). Main removed it in #225 along with its only caller, replaced by `attachment_row`/`attachment_tile` — both called. His copy would have been dead code with no call site. |
+
+Verified rather than assumed: **1,380 → 1,414 functions and 529 → 539 test fns with nothing from
+main lost**, all twelve v0.3.31–v0.3.33 symbols present, and warnings identical to main's eleven
+(an earlier reading of "six" predated #225). **512 Rust tests, 577 Python.**
+
+### F. The dependency bump is the real risk in #230, and it is invisible in the title
+
+`fastmcp>=3.2.4` → **`>=4.0.0`** and `langchain-mcp-adapters>=0.2.2` → **`langchain[mcp]>=1.4.0`**.
+Resolved and verified in a clean venv: `fastmcp 4.0.3`, `langchain 1.4.0`, `mcp 2.2.0`, 577 tests
+passing.
+
+**But against the currently installed venv the suite does not even collect** — 9 collection errors,
+`cannot import name 'InputRequiredResult' from 'mcp.types'`, because `fastmcp 4` needs `mcp >= 2`.
+So an install that does not get the new packages has a backend that cannot import `mcp_tools`.
+
+The upgrade path exists and is the right shape: the launch runs
+`cmp -s uv.lock .mini-me-lock || { uv sync --extra dev && cp uv.lock .mini-me-lock; }`, and
+`.mini-me-lock` is only stamped on success, so a failed sync retries next launch rather than
+sticking. What changed is the **blast radius**: before #230 a failed sync meant slightly stale
+libraries; after it, a backend that cannot start.
+
+- [ ] **F.1** Make a failed `uv sync` observable. The whole prepare block is `>/dev/null || true`,
+      so the one step that now decides whether the backend can import at all cannot say it failed.
+      §305 means the resulting `ModuleNotFoundError` will at least survive in the sidecar log — the
+      instrument works — but preventable is better than diagnosable.
+- [ ] **F.2** Tell the researcher what a first launch after this update is doing. `uv sync` pulling
+      a new `mcp` major over a slow connection looks exactly like a hang, and the health budget is
+      60 seconds.
+
+---
+
 ## Risks I am flagging rather than deciding
 
 - **Job 1 is the largest behavioural change in this app's history.** Removing WSL touches
