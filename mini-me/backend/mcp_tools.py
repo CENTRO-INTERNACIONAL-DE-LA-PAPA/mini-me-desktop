@@ -2,52 +2,101 @@
 
 Mini-Me reaches external knowledge through hosted MCP servers (AGROVOC, Crop
 Ontology, Asta, the CIP Dataverse). This module owns their connection configs,
-a per-bundle client/tool cache (the dicts live in backend.runtime so every
-module shares one copy), the truncation + save-to-sandbox logic that keeps
-large MCP payloads from poisoning agent state, and the ``get_*_mcp_tools``
-loaders the subagents consume. Large results are written through whatever
-sandbox is active in the ``_active_sandbox`` ContextVar, so this module has no
-hard dependency on the sandbox class.
+process-wide adapters whose FastMCP caches honor each server's discovery TTL,
+the truncation + save-to-sandbox logic that keeps large MCP payloads from
+poisoning agent state, and the ``get_*_mcp_tools`` loaders the subagents
+consume. Failed discovery is memoized for this process so an unavailable
+deployment remains non-fatal without delaying every graph factory. Large
+results are written through whatever sandbox is active in the
+``_active_sandbox`` ContextVar, so this module has no hard dependency on the
+sandbox class.
 """
 
 import asyncio
 import contextvars
 import json
+import logging
 import os
 from datetime import datetime
 from typing import Any, Sequence
 
-from langchain_mcp_adapters.client import MultiServerMCPClient
+from fastmcp import Client
+from fastmcp.client.transports import StreamableHttpTransport
+from langchain_core._api import suppress_langchain_beta_warning
+
+with suppress_langchain_beta_warning():
+    # First-party as of LangChain 1.4. Kept scoped because the namespace is explicitly beta and
+    # otherwise emits a process warning on every backend boot even though this version is pinned.
+    from langchain.mcp import MCPAdapter
 
 from backend.runtime import (
     _active_sandbox,
     _mcp_clients,
+    _mcp_statuses,
     _mcp_tools_cache,
     _mcp_tools_locks,
 )
 
 
+log = logging.getLogger(__name__)
+
+
 MCP_SERVER_CONFIGS: dict[str, dict[str, Any]] = {
     "agrovoc": {
-        "transport": "http",
         "url": "https://agrovoc.fastmcp.app/mcp",
     },
     "crop_ontology": {
-        "transport": "http",
         "url": "https://CropOntology.fastmcp.app/mcp",
     },
     "asta": {
-        "transport": "http",
         "url": "https://asta-tools.allen.ai/mcp/v1",
         "headers_env": {
             "x-api-key": "ASTA_API_KEY",
         },
     },
     "dataverse": {
-        "transport": "http",
         "url": "https://dataverse-cip.fastmcp.app/mcp",
     },
 }
+
+MCP_SERVER_LABELS = {
+    "agrovoc": "AGROVOC",
+    "crop_ontology": "Crop Ontology",
+    "asta": "Asta",
+    "dataverse": "CIP Dataverse",
+}
+
+
+def mcp_status_report() -> dict[str, list[dict[str, str]]]:
+    """Return public availability state for the desktop client.
+
+    Error details stay in the backend log: upstream exception strings can contain URLs or
+    deployment details which do not belong in a user-facing response. ``checking`` is distinct
+    from unavailable so asking this route before graph warm-up cannot invent an outage.
+    """
+    services = []
+    for server_id in MCP_SERVER_CONFIGS:
+        available = _mcp_statuses.get(server_id)
+        status = (
+            "checking"
+            if available is None
+            else "available" if available else "unavailable"
+        )
+        services.append(
+            {
+                "id": server_id,
+                "name": MCP_SERVER_LABELS.get(server_id, server_id),
+                "status": status,
+            }
+        )
+    return {"services": services}
+
+
+def _mark_mcp_unavailable(server_names: Sequence[str], error: BaseException) -> None:
+    for server_name in server_names:
+        _mcp_statuses[server_name] = False
+    labels = ", ".join(MCP_SERVER_LABELS.get(name, name) for name in server_names)
+    log.warning("MCP unavailable; continuing without %s: %s", labels, error)
 
 
 def _normalize_mcp_server_names(server_names: Sequence[str]) -> tuple[str, ...]:
@@ -87,12 +136,30 @@ def _resolve_mcp_server_config(server_name: str) -> dict[str, Any]:
     return config
 
 
-def _get_or_create_mcp_client(server_names: Sequence[str]) -> MultiServerMCPClient:
+def _get_or_create_mcp_client(server_names: Sequence[str]) -> MCPAdapter:
     bundle = _normalize_mcp_server_names(server_names)
-    if bundle not in _mcp_clients:
-        _mcp_clients[bundle] = MultiServerMCPClient(
-            {name: _resolve_mcp_server_config(name) for name in bundle}
+    if len(bundle) != 1:
+        raise ValueError(
+            "Mini-Me opens one MCP deployment per adapter so one outage cannot affect another"
         )
+    if bundle not in _mcp_clients:
+        server_name = bundle[0]
+        config = _resolve_mcp_server_config(server_name)
+        transport = StreamableHttpTransport(
+            config["url"],
+            headers=config.get("headers"),
+        )
+        # `mode="auto"` negotiates the modern stateless protocol and falls back for a legacy
+        # deployment. The response cache honors the server's discovery TTL; keeping the adapter
+        # process-wide means repeated graph factories share that cache without crossing users in
+        # today's one-user desktop process. Key this cache by account when WorkOS lands.
+        client = Client(
+            transport,
+            name=MCP_SERVER_LABELS.get(server_name, server_name),
+            mode="auto",
+            cache=True,
+        )
+        _mcp_clients[bundle] = MCPAdapter(client)
     return _mcp_clients[bundle]
 
 
@@ -368,7 +435,7 @@ async def _save_mcp_to_sandbox(
 def _ensure_tuple(result: Any) -> Any:
     """Coerce a value into ``(content, artifact)`` shape if it isn't already.
 
-    MCP tools wrapped by ``langchain_mcp_adapters`` declare
+    MCP tools wrapped by ``langchain.mcp`` declare
     ``response_format="content_and_artifact"``; their coroutines must return a
     2-tuple. When our truncation helpers return a bare string, wrap it so the
     contract is preserved (warning suppressed in LangChain's tool layer).
@@ -393,12 +460,18 @@ def _make_mcp_tools_resilient(tools: list[Any]) -> list[Any]:
     """
     for tool in tools:
         name = getattr(tool, "name", "<unknown>")
-        try:
-            tool.handle_tool_error = _make_mcp_error_handler(name)
-        except Exception:  # noqa: BLE001
-            pass
+        # `langchain.mcp` already preserves an MCP `isError` result as a failed ToolMessage with
+        # the server's content blocks. Keep that richer handler; the fallback only applies to a
+        # non-standard tool that arrived without one.
+        if not getattr(tool, "handle_tool_error", None):
+            try:
+                tool.handle_tool_error = _make_mcp_error_handler(name)
+            except Exception:  # noqa: BLE001
+                pass
         original_coro = getattr(tool, "coroutine", None)
-        if asyncio.iscoroutinefunction(original_coro):
+        if asyncio.iscoroutinefunction(original_coro) and not getattr(
+            original_coro, "_minime_mcp_capped", False
+        ):
             async def _capped(
                 *args: Any,
                 _orig: Any = original_coro,
@@ -426,6 +499,9 @@ def _make_mcp_tools_resilient(tools: list[Any]) -> list[Any]:
                 # (content, artifact) 2-tuple shape expected by the MCP wrapper.
                 return _ensure_tuple(_truncate_tool_result_any(result, _name))
             try:
+                # FastMCP may return the same LangChain tool object while its discovery response is
+                # cached. Mark the wrapper itself so graph reconstruction cannot stack another copy.
+                setattr(_capped, "_minime_mcp_capped", True)
                 tool.coroutine = _capped
             except Exception:  # noqa: BLE001
                 pass
@@ -434,24 +510,45 @@ def _make_mcp_tools_resilient(tools: list[Any]) -> list[Any]:
 
 async def get_mcp_tools(server_names: Sequence[str]) -> list[Any]:
     bundle = _normalize_mcp_server_names(server_names)
-    if bundle in _mcp_tools_cache:
+    # Only failures are held here. Successful discovery goes through FastMCP's TTL-aware response
+    # cache so a server can change its catalog without requiring an app restart.
+    if _mcp_tools_cache.get(bundle) == []:
         return _mcp_tools_cache[bundle]
 
     if bundle not in _mcp_tools_locks:
         _mcp_tools_locks[bundle] = asyncio.Lock()
 
     async with _mcp_tools_locks[bundle]:
-        if bundle in _mcp_tools_cache:
+        if _mcp_tools_cache.get(bundle) == []:
             return _mcp_tools_cache[bundle]
 
-        client = _get_or_create_mcp_client(bundle)
-        loaded = await client.get_tools()
-        _mcp_tools_cache[bundle] = _make_mcp_tools_resilient(loaded)
-        return _mcp_tools_cache[bundle]
+        try:
+            adapter = _get_or_create_mcp_client(bundle)
+            loaded = await adapter.list_tools(cache_mode="use")
+            if not loaded:
+                raise ValueError("MCP server returned no tools")
+            resilient = _make_mcp_tools_resilient(loaded)
+        except Exception as error:  # noqa: BLE001 — a hosted service is optional
+            # Cache the empty result for this process. Without it every read-only thread-state
+            # request would immediately hammer the same unavailable deployment again. A restart
+            # performs a fresh handshake; the future account flow can invalidate this cache after
+            # a successful sign-in.
+            _mark_mcp_unavailable(bundle, error)
+            _mcp_tools_cache[bundle] = []
+            return _mcp_tools_cache[bundle]
+        _mcp_tools_cache.pop(bundle, None)
+        for server_name in bundle:
+            _mcp_statuses[server_name] = True
+        return resilient
 
 
 async def get_data_cleaning_mcp_tools() -> list[Any]:
-    return await get_mcp_tools(("agrovoc", "crop_ontology"))
+    # One deployment must not take its healthy neighbour down with it. Separate adapters also let
+    # FastMCP negotiate the best protocol era and credentials independently for each service.
+    catalogs = await asyncio.gather(
+        *(get_mcp_tools((server_name,)) for server_name in ("agrovoc", "crop_ontology"))
+    )
+    return [tool for catalog in catalogs for tool in catalog]
 
 
 async def get_academic_research_mcp_tools() -> list[Any]:
@@ -465,12 +562,17 @@ async def get_dataverse_search_mcp_tools() -> list[Any]:
         "list_dataset_files",
     }
     tools = await get_mcp_tools(("dataverse",))
+    if not tools and _mcp_statuses.get("dataverse") is False:
+        return []
     selected = [tool for tool in tools if getattr(tool, "name", None) in allowed_names]
     missing = sorted(allowed_names - {getattr(tool, "name", None) for tool in selected})
     if missing:
-        raise ValueError(
-            "Missing required Dataverse MCP tools: " + ", ".join(missing)
+        error = ValueError(
+            "Dataverse MCP is missing required tools: " + ", ".join(missing)
         )
+        _mark_mcp_unavailable(("dataverse",), error)
+        _mcp_tools_cache[("dataverse",)] = []
+        return []
     return selected
 
 

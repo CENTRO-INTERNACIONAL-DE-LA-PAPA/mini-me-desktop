@@ -486,8 +486,8 @@ class ClaimsRecorder(AgentMiddleware[ArtifactState, Any, Any]):
         if not ids:
             # Recorded rather than passed over. A `DataVerseSearchResults` with no datasets is what
             # the researcher saw twice (§220), and it reaches them as a polite paragraph: the MCP
-            # error handler turns a failed tool call into an ordinary message
-            # (`mcp_tools._make_mcp_error_handler`), so the turn completes and nothing is raised.
+            # first-party `langchain.mcp` adapter turns an MCP `isError` result into a failed
+            # ToolMessage, so the turn completes and nothing is raised.
             # An empty search is a legitimate outcome; an empty search that nobody wrote down is
             # how a broken tool argument survived for weeks.
             logger.warning(

@@ -39,12 +39,17 @@ load_dotenv()
 # them — so sandbox resolution and MCP caching see a single shared instance.
 # ---------------------------------------------------------------------------
 
-# MCP client + tool caches, keyed by the tuple of server names. The value type
-# of ``_mcp_clients`` is ``MultiServerMCPClient``; it is typed ``Any`` here to
-# keep this leaf module free of the langchain-mcp-adapters import.
+# MCP adapter + failed-discovery caches, keyed by the tuple of server names. The value type
+# of ``_mcp_clients`` is ``langchain.mcp.MCPAdapter``; it is typed ``Any`` here to keep this leaf
+# module free of the beta MCP import (and its one-time warning). Successful discovery is cached by
+# the adapter's FastMCP client according to the server-provided TTL, not in ``_mcp_tools_cache``.
 _mcp_clients: dict[tuple[str, ...], Any] = {}
 _mcp_tools_cache: dict[tuple[str, ...], list[Any]] = {}
 _mcp_tools_locks: dict[tuple[str, ...], asyncio.Lock] = {}
+# Whether each hosted MCP completed its tool handshake in this process. Kept beside the
+# corresponding caches so the graph factory and the custom status route always see the same
+# object, even when LangGraph loads the graph module through a second import path.
+_mcp_statuses: dict[str, bool] = {}
 
 # Holds the per-request sandbox so MCP tool wrappers can write large results
 # to disk instead of truncating. Set in agent() before the graph runs.

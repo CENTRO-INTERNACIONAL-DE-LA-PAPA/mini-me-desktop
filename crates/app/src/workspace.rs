@@ -112,7 +112,10 @@ pub fn discovery_figures(
     if unsafe_id(run_id) || unsafe_id(experiment_id) {
         return Vec::new();
     }
-    let dir = conversation.join("discovery").join(run_id).join(experiment_id);
+    let dir = conversation
+        .join("discovery")
+        .join(run_id)
+        .join(experiment_id);
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Vec::new();
     };
@@ -148,7 +151,9 @@ pub fn discovery_record(conversation: &std::path::Path, run_id: &str) -> Option<
     if run_id.is_empty() || run_id.contains(['/', '\\', '.']) {
         return None;
     }
-    let path = conversation.join("discovery").join(format!("{run_id}.json"));
+    let path = conversation
+        .join("discovery")
+        .join(format!("{run_id}.json"));
     let text = std::fs::read_to_string(&path).ok()?;
     serde_json::from_str(&text).ok()
 }
@@ -621,8 +626,7 @@ pub fn adopt(folder: &Path, source: &Path) -> Result<PathBuf> {
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| "attachment".to_string());
-    std::fs::create_dir_all(folder)
-        .with_context(|| format!("creating {}", folder.display()))?;
+    std::fs::create_dir_all(folder).with_context(|| format!("creating {}", folder.display()))?;
 
     let (stem, extension) = match name.rsplit_once('.') {
         Some((stem, extension)) if !stem.is_empty() => (stem.to_string(), format!(".{extension}")),
@@ -666,11 +670,7 @@ pub fn adopt(folder: &Path, source: &Path) -> Result<PathBuf> {
 /// original, and losing persistence is better than refusing the researcher's question. The
 /// execute-tool rule still requires relative output paths, and the command ledger remains the
 /// recovery net if the model ignores it.
-pub fn adopt_before_turn(
-    folder: &Path,
-    prompt: &str,
-    attachments: &[PendingAttachment],
-) -> String {
+pub fn adopt_before_turn(folder: &Path, prompt: &str, attachments: &[PendingAttachment]) -> String {
     let mut prepared = prompt.to_string();
     for attachment in attachments {
         let size = std::fs::metadata(&attachment.source)
@@ -694,6 +694,83 @@ pub fn adopt_before_turn(
     prepared
 }
 
+/// One durable row from Asta's per-conversation document index.
+///
+/// This is deliberately separate from `protocol::Document`. The protocol object is what one
+/// librarian turn chose to report; this object is what the library on disk actually contains.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IndexedDocument {
+    pub title: String,
+    pub path: String,
+    pub summary: String,
+    pub tags: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct AstaDocumentIndex {
+    #[serde(default)]
+    documents: Option<Vec<AstaDocumentRecord>>,
+}
+
+#[derive(serde::Deserialize)]
+struct AstaDocumentRecord {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+}
+
+/// Read the complete document inventory Asta keeps inside one conversation.
+///
+/// `None` means this conversation has never had a library. `Some([])` means it has a library and
+/// that library is now empty; keeping those distinct lets a removal clear the UI without making a
+/// conversation from before Asta lose the structured artifact it can still show. A malformed
+/// index is an error and likewise leaves the last good UI state in place.
+pub fn indexed_documents(conversation: &Path) -> Result<Option<Vec<IndexedDocument>>> {
+    let path = conversation
+        .join(".asta")
+        .join("documents")
+        .join("index.yaml");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("could not read {}", path.display()));
+        }
+    };
+    let index: AstaDocumentIndex = serde_yaml_ng::from_str(&text)
+        .with_context(|| format!("could not parse {}", path.display()))?;
+
+    let mut seen = std::collections::HashSet::new();
+    let documents = index
+        .documents
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|record| {
+            let path = record.url.unwrap_or_default().trim().to_string();
+            if path.is_empty() || !seen.insert(path.clone()) {
+                return None;
+            }
+            let title = record.name.unwrap_or_default().trim().to_string();
+            Some(IndexedDocument {
+                title: if title.is_empty() {
+                    path.clone()
+                } else {
+                    title
+                },
+                path,
+                summary: record.summary.unwrap_or_default().trim().to_string(),
+                tags: record.tags.unwrap_or_default(),
+            })
+        })
+        .collect();
+    Ok(Some(documents))
+}
+
 /// The path this app can open, for a path the *agent* wrote down.
 ///
 /// The two live on opposite sides of WSL, and `backend::wsl_path` only goes one way. A document
@@ -704,7 +781,20 @@ pub fn adopt_before_turn(
 /// its schema explicitly allows) does not become a launch of a file that is not there.
 pub fn local_path(recorded: &str, thread: Option<&Path>) -> Option<PathBuf> {
     let recorded = recorded.trim();
-    if recorded.is_empty() || recorded.contains("://") || recorded.starts_with("doi:") {
+    if recorded.is_empty() || recorded.starts_with("doi:") {
+        return None;
+    }
+    // `asta documents add` stores an absolute local path as a file URL. It is not a web link: it
+    // is the exact PDF the researcher indexed, and refusing the scheme made every real library row
+    // inert. Parse it rather than trimming a prefix so percent escapes are decoded and a network
+    // host cannot become an Explorer UNC launch.
+    if recorded
+        .get(..5)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("file:"))
+    {
+        return file_url_path(recorded);
+    }
+    if recorded.contains("://") {
         return None;
     }
     let path = PathBuf::from(recorded);
@@ -725,6 +815,41 @@ pub fn local_path(recorded: &str, thread: Option<&Path>) -> Option<PathBuf> {
     // Relative, which is what the skills ask for and what an adopted attachment produces: it is
     // relative to the conversation's own folder.
     thread.map(|dir| dir.join(recorded))
+}
+
+/// Turn a validated local file URL into the platform path it denotes.
+fn file_url_path(recorded: &str) -> Option<PathBuf> {
+    let url = url::Url::parse(recorded).ok()?;
+    if url.scheme() != "file"
+        || url
+            .host_str()
+            .is_some_and(|host| !host.is_empty() && host != "localhost")
+    {
+        return None;
+    }
+    let decoded = percent_encoding::percent_decode_str(url.path())
+        .decode_utf8()
+        .ok()?;
+    if cfg!(windows) {
+        // Asta runs under WSL in released builds, so its local file URL names the mounted Windows
+        // drive. A normal file-URL converter rejects `/mnt/c` because it is not Windows syntax,
+        // so decode the URL path first and apply the bridge we already use for agent paths.
+        if decoded.starts_with("/mnt/") {
+            return windows_path_for(&decoded);
+        }
+        // Native Windows file URLs spell `C:\x` as `/C:/x`.
+        let bytes = decoded.as_bytes();
+        if bytes.len() > 3
+            && bytes[0] == b'/'
+            && bytes[1].is_ascii_alphabetic()
+            && bytes[2] == b':'
+            && bytes[3] == b'/'
+        {
+            return Some(PathBuf::from(decoded[1..].replace('/', "\\")));
+        }
+    }
+    let path = PathBuf::from(decoded.as_ref());
+    path.is_absolute().then_some(path)
 }
 
 /// The Windows path for a rooted POSIX path the agent wrote down, or `None` when there is not one.
@@ -991,7 +1116,10 @@ pub fn decode_datasets(text: &str) -> Vec<crate::protocol::Dataset> {
     rows.iter()
         .map(|row| crate::protocol::Dataset {
             title: row["title"].as_str().unwrap_or_default().to_string(),
-            persistent_id: row["persistent_id"].as_str().unwrap_or_default().to_string(),
+            persistent_id: row["persistent_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
             // `None` rather than an empty string, because the row's own `link()` falls back to
             // building one from the identifier and an empty string is not a URL.
             link: row["link"]
@@ -1387,9 +1515,9 @@ pub fn shape(path: &Path, bytes: u64) -> Shape {
     match extension.as_str() {
         "csv" => table(path, b','),
         "tsv" => table(path, b'\t'),
-        extension if IMAGE_EXTENSIONS.contains(&extension) => {
-            std::fs::read(path).map(|data| image_shape(&data)).unwrap_or(Shape::Plain)
-        }
+        extension if IMAGE_EXTENSIONS.contains(&extension) => std::fs::read(path)
+            .map(|data| image_shape(&data))
+            .unwrap_or(Shape::Plain),
         _ => Shape::Plain,
     }
 }
@@ -1622,8 +1750,7 @@ pub(crate) fn image_shape(data: &[u8]) -> Shape {
                 None => break,
             };
             // Every SOFn *except* the four that are not frame headers: DHT, JPG, DAC, DNL.
-            let is_frame = (0xc0..=0xcf).contains(&marker)
-                && !matches!(marker, 0xc4 | 0xc8 | 0xcc);
+            let is_frame = (0xc0..=0xcf).contains(&marker) && !matches!(marker, 0xc4 | 0xc8 | 0xcc);
             if is_frame {
                 if let Some(bytes) = data.get(at + 5..at + 9) {
                     return Shape::Image {
@@ -1848,7 +1975,7 @@ mod project_tests {
 
         for name in names {
             let out = std::process::Command::new("python3")
-            .env("PYTHONIOENCODING", "utf-8")
+                .env("PYTHONIOENCODING", "utf-8")
                 .arg("-c")
                 .arg(&script)
                 .arg(name)
@@ -1903,9 +2030,18 @@ mod project_tests {
         // A name a researcher would type, however UUID-ish it looks.
         assert!(!looks_like_thread_id("Late blight"));
         assert!(!looks_like_thread_id("2026-08-12-trial"));
-        assert!(!looks_like_thread_id("019ff651-0cd7-71c1-9f17-5fc9250b10d"), "35 characters");
-        assert!(!looks_like_thread_id("019ff651_0cd7_71c1_9f17_5fc9250b10d1"), "wrong separator");
-        assert!(!looks_like_thread_id("019ff651-0cd7-71c1-9f17-5fc9250b10dZ"), "not hex");
+        assert!(
+            !looks_like_thread_id("019ff651-0cd7-71c1-9f17-5fc9250b10d"),
+            "35 characters"
+        );
+        assert!(
+            !looks_like_thread_id("019ff651_0cd7_71c1_9f17_5fc9250b10d1"),
+            "wrong separator"
+        );
+        assert!(
+            !looks_like_thread_id("019ff651-0cd7-71c1-9f17-5fc9250b10dZ"),
+            "not hex"
+        );
     }
 
     #[test]
@@ -2128,7 +2264,10 @@ mod authorship_tests {
             who.get("plots/yield.png").map(String::as_str),
             Some("exploratory_data_analysis")
         );
-        assert_eq!(who.get("notes.md").map(String::as_str), Some("report_writer"));
+        assert_eq!(
+            who.get("notes.md").map(String::as_str),
+            Some("report_writer")
+        );
         assert!(!who.contains_key("orphan.csv"));
         assert_eq!(who.len(), 2, "the torn line is skipped, not fatal");
 
@@ -2161,7 +2300,12 @@ mod tests {
         let inside = dir.join("discovery").join(run).join("node_2_0");
         std::fs::create_dir_all(&inside).expect("a temp dir");
         // Written out of order on purpose: the directory yields whatever it likes.
-        for name in ["figure-02.png", "figure-01.png", "figure-03.jpg", "notes.txt"] {
+        for name in [
+            "figure-02.png",
+            "figure-01.png",
+            "figure-03.jpg",
+            "notes.txt",
+        ] {
             std::fs::write(inside.join(name), b"x").expect("write");
         }
 
@@ -2178,8 +2322,14 @@ mod tests {
 
         // Both ids come from a payload, so neither is trusted into a path.
         for hostile in ["../../..", "..", "a/b", "x.y", ""] {
-            assert!(discovery_figures(&dir, run, hostile).is_empty(), "{hostile}");
-            assert!(discovery_figures(&dir, hostile, "node_2_0").is_empty(), "{hostile}");
+            assert!(
+                discovery_figures(&dir, run, hostile).is_empty(),
+                "{hostile}"
+            );
+            assert!(
+                discovery_figures(&dir, hostile, "node_2_0").is_empty(),
+                "{hostile}"
+            );
         }
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -2296,7 +2446,11 @@ mod tests {
             .collect();
         assert_eq!(
             asta,
-            ["academic_researcher", "hypothesis_generator", "data_voyager"]
+            [
+                "academic_researcher",
+                "hypothesis_generator",
+                "data_voyager"
+            ]
         );
         // The report writer produces the document the attribution goes *in*. Crediting Asta
         // because that ran would restore the bug in a new place.
@@ -2827,7 +2981,10 @@ mod tests {
         let landed = adopt(&thread, &source).expect("adopted");
 
         assert_eq!(landed, thread.join("Graph-neural-networks.pdf"));
-        assert_eq!(std::fs::read(&landed).expect("readable"), b"%PDF-1.7 a paper");
+        assert_eq!(
+            std::fs::read(&landed).expect("readable"),
+            b"%PDF-1.7 a paper"
+        );
         // The original is untouched — this copies, it does not move somebody's file.
         assert!(source.exists());
     }
@@ -2857,14 +3014,23 @@ mod tests {
             }],
         );
 
-        assert!(prepared.contains("`./native_potato_biodiversity_dirty.csv`"), "{prepared}");
-        assert!(!prepared.contains(original), "the model was still sent outside the thread");
+        assert!(
+            prepared.contains("`./native_potato_biodiversity_dirty.csv`"),
+            "{prepared}"
+        );
+        assert!(
+            !prepared.contains(original),
+            "the model was still sent outside the thread"
+        );
         assert_eq!(
             std::fs::read(thread.join("native_potato_biodiversity_dirty.csv"))
                 .expect("conversation copy"),
             b"variety,yield\nA,4\n"
         );
-        assert!(source.exists(), "adoption preserves the researcher's original");
+        assert!(
+            source.exists(),
+            "adoption preserves the researcher's original"
+        );
     }
 
     /// Attaching the same paper twice should not litter the folder.
@@ -2910,7 +3076,10 @@ mod tests {
         std::fs::write(thread.join("README"), b"one").expect("existing");
         let source = home.join("README");
         std::fs::write(&source, b"a longer, different thing").expect("source");
-        assert_eq!(adopt(&thread, &source).expect("adopted"), thread.join("README-2"));
+        assert_eq!(
+            adopt(&thread, &source).expect("adopted"),
+            thread.join("README-2")
+        );
     }
 
     /// A path the agent wrote has to come back across WSL before this app can open it.
@@ -2921,18 +3090,118 @@ mod tests {
             local_path("Graph-neural-networks.pdf", Some(thread)),
             Some(thread.join("Graph-neural-networks.pdf"))
         );
-        assert_eq!(local_path("papers/blight.pdf", Some(thread)),
-            Some(thread.join("papers/blight.pdf")));
+        assert_eq!(
+            local_path("papers/blight.pdf", Some(thread)),
+            Some(thread.join("papers/blight.pdf"))
+        );
         // With no conversation there is nothing to resolve against, and guessing would open
         // whatever happens to sit beside the executable.
         assert_eq!(local_path("a.pdf", None), None);
+    }
+
+    /// The panel is an inventory, not the latest search result. This is the shape of the live
+    /// two-paper index that showed one row in the UI (§303).
+    #[test]
+    fn the_asta_index_is_the_complete_library_inventory() {
+        let thread = scratch("library-index");
+        let folder = thread.join(".asta").join("documents");
+        std::fs::create_dir_all(&folder).expect("index folder");
+        std::fs::write(
+            folder.join("index.yaml"),
+            r#"version: '1.0'
+documents:
+- uuid: first
+  name: Ploidy-specific symbiotic interactions
+  mime_type: application/pdf
+  url: file:///mnt/c/Users/LENOVO/Documents/Mini-Me/thread/New
+    Phytologist.pdf
+  summary: Orchid mycorrhizal associations across cytotypes.
+  tags:
+  - orchidaceae
+  - polyploidy
+- uuid: second
+  name: Graph neural networks
+  mime_type: application/pdf
+  url: file:///mnt/c/Users/LENOVO/Documents/Mini-Me/thread/Graph-neural-networks.pdf
+  summary: Message passing, expressivity and data symmetries.
+  tags:
+  - graph neural networks
+  - machine learning
+"#,
+        )
+        .expect("index");
+
+        let documents = indexed_documents(&thread)
+            .expect("readable index")
+            .expect("library exists");
+        assert_eq!(documents.len(), 2);
+        assert_eq!(documents[0].title, "Ploidy-specific symbiotic interactions");
+        assert_eq!(
+            documents[0].path,
+            "file:///mnt/c/Users/LENOVO/Documents/Mini-Me/thread/New Phytologist.pdf"
+        );
+        assert_eq!(documents[1].title, "Graph neural networks");
+        assert_eq!(
+            documents[1].tags,
+            ["graph neural networks", "machine learning"]
+        );
+
+        std::fs::remove_dir_all(thread).ok();
+    }
+
+    #[test]
+    fn a_missing_library_and_an_empty_library_are_different_answers() {
+        let thread = scratch("empty-library");
+        assert_eq!(
+            indexed_documents(&thread).expect("missing is readable"),
+            None
+        );
+        let folder = thread.join(".asta").join("documents");
+        std::fs::create_dir_all(&folder).expect("index folder");
+        std::fs::write(folder.join("index.yaml"), "version: '1.0'\ndocuments: []\n")
+            .expect("empty index");
+        assert_eq!(
+            indexed_documents(&thread).expect("empty is readable"),
+            Some(Vec::new())
+        );
+
+        std::fs::remove_dir_all(thread).ok();
+    }
+
+    /// Asta stores local paths as file URLs. `%20` proves this goes through a URL decoder rather
+    /// than merely having its prefix cut off, and `/mnt/c` proves it crosses WSL on Windows.
+    #[test]
+    fn an_asta_file_url_is_a_local_pdf_path() {
+        let resolved = local_path(
+            "file:///mnt/c/Users/LENOVO/Documents/Mini-Me/thread/Graph%20neural.pdf",
+            None,
+        );
+        if cfg!(windows) {
+            assert_eq!(
+                resolved,
+                Some(std::path::PathBuf::from(
+                    "C:\\Users\\LENOVO\\Documents\\Mini-Me\\thread\\Graph neural.pdf"
+                ))
+            );
+        } else {
+            assert_eq!(
+                resolved,
+                Some(std::path::PathBuf::from(
+                    "/mnt/c/Users/LENOVO/Documents/Mini-Me/thread/Graph neural.pdf"
+                ))
+            );
+        }
+        assert_eq!(local_path("file://server/share/paper.pdf", None), None);
     }
 
     /// `IndexedPaper.path` is documented as "sandbox path **or URL**".
     #[test]
     fn a_url_is_not_a_file_to_open() {
         let thread = std::path::Path::new("/w/thread");
-        assert_eq!(local_path("https://example.org/paper.pdf", Some(thread)), None);
+        assert_eq!(
+            local_path("https://example.org/paper.pdf", Some(thread)),
+            None
+        );
         assert_eq!(local_path("asta://doc/1", Some(thread)), None);
         assert_eq!(local_path("doi:10.1000/x", Some(thread)), None);
         assert_eq!(local_path("   ", Some(thread)), None);
@@ -2958,11 +3227,23 @@ mod tests {
         let fixture = include_str!("../tests/fixtures/command-record.jsonl");
         let first: serde_json::Value =
             serde_json::from_str(fixture.lines().next().expect("a line")).expect("json");
-        let keys: Vec<&str> = first.as_object().expect("an object").keys().map(String::as_str).collect();
+        let keys: Vec<&str> = first
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
 
         // What the decoder demonstrably reads: change a field in the fixture and the value changes.
         let read = [
-            "at", "command", "clipped", "exit", "seconds", "cwd", "outside", "wrote",
+            "at",
+            "command",
+            "clipped",
+            "exit",
+            "seconds",
+            "cwd",
+            "outside",
+            "wrote",
             "scan_truncated",
         ];
         for key in &keys {
@@ -2973,11 +3254,17 @@ mod tests {
             );
         }
         for (_, reason) in UNREAD {
-            assert!(reason.len() > 10, "a declared-unread field needs a real reason");
+            assert!(
+                reason.len() > 10,
+                "a declared-unread field needs a real reason"
+            );
         }
         // And every field this claims to read is really in the record, so the list cannot rot.
         for field in read {
-            assert!(keys.contains(&field), "`{field}` is claimed as read but is not in the record");
+            assert!(
+                keys.contains(&field),
+                "`{field}` is claimed as read but is not in the record"
+            );
         }
     }
 
@@ -2998,7 +3285,10 @@ mod tests {
         assert!(first.text.starts_with("python3 -c"), "{}", first.text);
         assert_eq!(first.exit, Some(0));
         assert_eq!(first.seconds, Some(1.4));
-        assert_eq!(first.cwd, "/mnt/c/Users/piero/Documents/Mini-Me/019ff651-0cd7-71c1");
+        assert_eq!(
+            first.cwd,
+            "/mnt/c/Users/piero/Documents/Mini-Me/019ff651-0cd7-71c1"
+        );
         assert!(!first.clipped);
         assert!(!first.scan_truncated);
         assert!(!first.escaped(), "it stayed inside the conversation");
@@ -3008,21 +3298,36 @@ mod tests {
         let escaped = &commands[1];
         assert_eq!(escaped.outside, vec!["/tmp/hist.png".to_string()]);
         assert!(escaped.escaped());
-        assert!(!escaped.failed(), "landing outside is not the same as failing");
+        assert!(
+            !escaped.failed(),
+            "landing outside is not the same as failing"
+        );
 
         let broken = &commands[2];
         assert_eq!(broken.exit, Some(127));
         assert!(broken.failed());
-        assert!(!broken.escaped(), "and failing is not the same as landing outside");
+        assert!(
+            !broken.escaped(),
+            "and failing is not the same as landing outside"
+        );
 
         // **The distinction everything downstream rests on.** The second command named a path it
         // did not write — that is the read case, and nothing may act on it. The fourth named no
         // absolute path but its cwd scan observed the relative output, which is the live defect.
-        assert!(escaped.escaped() && !escaped.left_files(), "named without writing");
+        assert!(
+            escaped.escaped() && !escaped.left_files(),
+            "named without writing"
+        );
         let relative = &commands[3];
-        assert!(relative.outside.is_empty(), "nothing absolute appeared in the command text");
+        assert!(
+            relative.outside.is_empty(),
+            "nothing absolute appeared in the command text"
+        );
         assert_eq!(relative.cwd, "/tmp/background-worker");
-        assert_eq!(relative.wrote, vec!["/tmp/background-worker/missingness.png".to_string()]);
+        assert_eq!(
+            relative.wrote,
+            vec!["/tmp/background-worker/missingness.png".to_string()]
+        );
         assert!(relative.left_files() && relative.escaped());
 
         // The fifth is both named and observed. Both shapes are actionable, for different reasons.
@@ -3049,7 +3354,10 @@ mod tests {
     fn a_command_with_no_exit_code_is_not_called_failed() {
         let commands = decode_commands("{\"command\":\"echo\",\"exit\":null}");
         assert_eq!(commands[0].exit, None);
-        assert!(!commands[0].failed(), "absence of a code is not a non-zero code");
+        assert!(
+            !commands[0].failed(),
+            "absence of a code is not a non-zero code"
+        );
     }
 
     /// No record at all is the ordinary case, not an error.
@@ -3082,8 +3390,16 @@ mod tests {
             .collect();
 
         let read = [
-            "at", "source", "schema", "checked", "claimed", "missing", "outside", "datasets",
-            "unsearched", "note",
+            "at",
+            "source",
+            "schema",
+            "checked",
+            "claimed",
+            "missing",
+            "outside",
+            "datasets",
+            "unsearched",
+            "note",
         ];
         for key in &keys {
             assert!(
@@ -3093,10 +3409,16 @@ mod tests {
             );
         }
         for (_, reason) in UNREAD {
-            assert!(reason.len() > 10, "a declared-unread field needs a real reason");
+            assert!(
+                reason.len() > 10,
+                "a declared-unread field needs a real reason"
+            );
         }
         for field in read {
-            assert!(keys.contains(&field), "`{field}` is claimed as read but is not in the record");
+            assert!(
+                keys.contains(&field),
+                "`{field}` is claimed as read but is not in the record"
+            );
         }
     }
 
@@ -3128,24 +3450,42 @@ mod tests {
             vec!["/mnt/c/Users/LENOVO/Downloads/Graph-neural-networks.pdf".to_string()]
         );
         assert!(librarian.contradicted(), "a named file that is not there");
-        assert!(librarian.used_outside(), "and a real one that will not travel");
+        assert!(
+            librarian.used_outside(),
+            "and a real one that will not travel"
+        );
 
         let unexamined = &claims[2];
         assert!(unexamined.unexamined());
-        assert!(!unexamined.contradicted(), "nothing looked, so nothing is contradicted");
+        assert!(
+            !unexamined.contradicted(),
+            "nothing looked, so nothing is contradicted"
+        );
         assert_eq!(unexamined.claimed, 0);
 
         let invented = &claims[3];
         assert_eq!(invented.datasets, Some(3));
-        assert_eq!(invented.unsearched, vec!["doi:10.21223/INVENTED".to_string()]);
+        assert_eq!(
+            invented.unsearched,
+            vec!["doi:10.21223/INVENTED".to_string()]
+        );
         assert!(invented.contradicted(), "a citation composed from memory");
-        assert_eq!(invented.note, None, "the check ran; there is nothing to explain");
+        assert_eq!(
+            invented.note, None,
+            "the check ran; there is nothing to explain"
+        );
 
         // And the one that is neither clean nor an accusation: the check could not be made.
         let blind = &claims[4];
         assert_eq!(blind.datasets, Some(2));
-        assert!(blind.unsearched.is_empty(), "no accusation from a check that never happened");
-        assert_eq!(blind.note.as_deref(), Some("dataverse_search.json could not be read"));
+        assert!(
+            blind.unsearched.is_empty(),
+            "no accusation from a check that never happened"
+        );
+        assert_eq!(
+            blind.note.as_deref(),
+            Some("dataverse_search.json could not be read")
+        );
         assert!(!blind.contradicted());
     }
 
@@ -3176,11 +3516,19 @@ mod tests {
 
         let fixture = include_str!("../tests/fixtures/dataverse-search.json");
         let rows: serde_json::Value = serde_json::from_str(fixture).expect("json");
-        let first = rows.as_array().expect("an array")[0].as_object().expect("an object");
+        let first = rows.as_array().expect("an array")[0]
+            .as_object()
+            .expect("an object");
         let keys: Vec<&str> = first.keys().map(String::as_str).collect();
 
         let read = [
-            "title", "persistent_id", "link", "description", "authors", "file_count", "repository",
+            "title",
+            "persistent_id",
+            "link",
+            "description",
+            "authors",
+            "file_count",
+            "repository",
         ];
         for key in &keys {
             assert!(
@@ -3190,10 +3538,16 @@ mod tests {
             );
         }
         for (_, reason) in UNREAD {
-            assert!(reason.len() > 10, "a declared-unread field needs a real reason");
+            assert!(
+                reason.len() > 10,
+                "a declared-unread field needs a real reason"
+            );
         }
         for field in read {
-            assert!(keys.contains(&field), "`{field}` is claimed as read but is not in a row");
+            assert!(
+                keys.contains(&field),
+                "`{field}` is claimed as read but is not in a row"
+            );
         }
     }
 
@@ -3206,15 +3560,29 @@ mod tests {
     fn a_search_result_is_read_back_as_the_row_a_researcher_sees() {
         let fixture = include_str!("../tests/fixtures/dataverse-search.json");
         let rows = decode_datasets(fixture);
-        assert_eq!(rows.len(), 4, "one row per search result, including the ones we cannot map");
+        assert_eq!(
+            rows.len(),
+            4,
+            "one row per search result, including the ones we cannot map"
+        );
 
         let full = &rows[0];
         assert_eq!(full.persistent_id, "doi:10.21223/P3/HJLUJZ");
-        assert!(full.title.starts_with("Three new healthy"), "{}", full.title);
-        assert_eq!(full.authors, vec!["Perez, Willmer".to_string(), "Gastelo, Manuel".to_string()]);
+        assert!(
+            full.title.starts_with("Three new healthy"),
+            "{}",
+            full.title
+        );
+        assert_eq!(
+            full.authors,
+            vec!["Perez, Willmer".to_string(), "Gastelo, Manuel".to_string()]
+        );
         assert_eq!(full.file_count, Some(3));
         assert_eq!(full.repository.as_deref(), Some("CIP Potato Breeding"));
-        assert!(full.link.as_deref().is_some_and(|link| link.ends_with("HJLUJZ")));
+        assert!(full
+            .link
+            .as_deref()
+            .is_some_and(|link| link.ends_with("HJLUJZ")));
 
         // Everything optional missing. The row still renders and still opens.
         let sparse = &rows[1];
@@ -3236,7 +3604,10 @@ mod tests {
     #[test]
     fn an_unreadable_search_file_is_no_datasets_rather_than_a_panic() {
         assert!(decode_datasets("not json").is_empty());
-        assert!(decode_datasets("{\"content\": []}").is_empty(), "an object is not the array");
+        assert!(
+            decode_datasets("{\"content\": []}").is_empty(),
+            "an object is not the array"
+        );
         assert!(decode_datasets("[]").is_empty());
         let base = scratch("no-datasets");
         assert!(datasets(&base).is_empty());
@@ -3318,9 +3689,15 @@ mod tests {
     fn an_absolute_path_is_taken_as_it_stands() {
         let resolved = local_path("/home/piero/papers/a.pdf", None);
         if cfg!(windows) {
-            assert_eq!(resolved, None, "WSL's own filesystem does not open in Explorer");
+            assert_eq!(
+                resolved, None,
+                "WSL's own filesystem does not open in Explorer"
+            );
         } else {
-            assert_eq!(resolved, Some(std::path::PathBuf::from("/home/piero/papers/a.pdf")));
+            assert_eq!(
+                resolved,
+                Some(std::path::PathBuf::from("/home/piero/papers/a.pdf"))
+            );
         }
     }
 
@@ -3331,10 +3708,17 @@ mod tests {
     #[test]
     fn a_rooted_path_never_lands_inside_the_conversation() {
         let thread = std::path::Path::new("/w/Mini-Me/thread-1");
-        for recorded in ["/root/work/report.pdf", "/home/piero/a.pdf", "/mnt/c/Users/x/a.pdf"] {
+        for recorded in [
+            "/root/work/report.pdf",
+            "/home/piero/a.pdf",
+            "/mnt/c/Users/x/a.pdf",
+        ] {
             let resolved = local_path(recorded, Some(thread));
             let inside = matches!(&resolved, Some(path) if path.starts_with(thread));
-            assert!(!inside, "{recorded} resolved to {resolved:?}, inside the conversation");
+            assert!(
+                !inside,
+                "{recorded} resolved to {resolved:?}, inside the conversation"
+            );
         }
     }
 
@@ -3348,7 +3732,10 @@ mod tests {
             Some(std::path::PathBuf::from("C:\\Users\\x\\Downloads\\a.pdf"))
         );
         // Uppercased: `D:` is how a drive is written, and Explorer accepts either.
-        assert_eq!(windows_path_for("/mnt/d/data"), Some(std::path::PathBuf::from("D:\\data")));
+        assert_eq!(
+            windows_path_for("/mnt/d/data"),
+            Some(std::path::PathBuf::from("D:\\data"))
+        );
         // Not a drive. WSL's own root, the sandbox's work dir, and `/mnt/wsl`, which is a real
         // mount point and not one letter. None of the three open from Windows.
         assert_eq!(windows_path_for("/home/piero/a.pdf"), None);

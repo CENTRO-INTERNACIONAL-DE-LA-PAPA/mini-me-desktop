@@ -1,64 +1,140 @@
-# Mini-Me Desktop
+# Mini-Me Desktop (Ask the Data)
 
-A native desktop **research-acceleration workbench** for
-[Mini-Me](https://github.com/CENTRO-INTERNACIONAL-DE-LA-PAPA/Mini-Me), built in
-Rust on **GPUI** (the GPU UI framework from [Zed](https://github.com/zed-industries/zed)).
+<p align="center">
+  <img src="mini-me/images/mini_me.png" alt="Mini-Me" width="420" />
+</p>
 
-This repo is the desktop **client**. The Mini-Me agent stack (coordinator +
-Asta-backed subagents + skills) stays in Python/TypeScript and runs as a **local
-sidecar** the client spawns and supervises — which also means the app inherits
-the local `asta` CLI's auto-refreshing auth, so the web app's token-expiry pain
-goes away.
+**Mini-Me is an AI research workbench that coordinates specialist agents to find evidence and datasets, analyze your files, test hypotheses, and produce traceable reports.**
 
-> **Status: P6.3 done — the core panels work against the real agent stack.** The
-> window renders natively (verified on Windows/DirectX), the app **spawns the local
-> Python sidecar and streams real coordinator turns** over LangGraph SSE, and it now
-> shows the **project spine**, live **outputs**, sandbox provisioning, an **agent
-> activity trace** (what each subagent is doing, while it does it) and a **`ctrl-p`
-> command palette**. One thread spans the conversation, so follow-up questions work.
-> GPUI is pinned at published **`gpui 0.2.2`**.
->
-> Next: **markdown rendering** — answers currently show their `**asterisks**`, and
-> reports and citations are the deliverable (§16). Read
-> [`docs/desktop-app-plan.md`](docs/desktop-app-plan.md) — the risk register plus the
-> execution logs (§8–§17).
+Mini-Me and **Ask the Data** are the same system. `AsktheData-Agent` is the name of the
+coordinator graph in the backend; Mini-Me is the product name used by the desktop application.
 
-## Picking this up
+Mini-Me Desktop is the native Windows client for the
+[Mini-Me](https://github.com/CENTRO-INTERNACIONAL-DE-LA-PAPA/Mini-Me) research-agent
+stack. The interface is written in Rust with [GPUI](https://crates.io/crates/gpui), while
+the Python/LangGraph backend runs as a local sidecar. The application is designed for
+researchers who want one workspace for literature review, data discovery, data analysis,
+scientific reasoning, and reporting without having to operate the individual tools by hand.
 
-New to the repo, or taking over development? Read these two first, in order:
+> **Current status:** active development, workspace version **0.3.30**. Windows is the primary
+> platform. The current mainline backend runs through WSL2; the separate `feat/wsl2less`
+> development branch has deliberately not been merged.
 
-1. [`docs/handover.md`](docs/handover.md) — what the project is, the rules that are not
-   negotiable, the failures that cost weeks and how to avoid repeating them, and how to
-   build, test and release.
-2. [`docs/plan.md`](docs/plan.md) — the open work as a checklist, newest state first.
+## What Mini-Me does
 
-[`docs/desktop-app-plan.md`](docs/desktop-app-plan.md) is the long-form record behind
-both: one numbered section (§N) per problem and what was done about it. The `§` markers
-in code comments point here, and they are how a decision gets reconstructed later.
+A coordinator receives the researcher's request, delegates bounded pieces of work to the
+appropriate specialists, and combines their results in one persistent conversation. A request
+can move through the complete research workflow:
 
-## Layout
+1. Define a mission and prepare a research plan.
+2. Search peer-reviewed literature and the researcher's own PDF collection.
+3. Find and inspect datasets in CIP Dataverse.
+4. Validate, clean, and standardize tabular data.
+5. Explore patterns, missingness, distributions, outliers, and correlations.
+6. Investigate associations, mechanisms, confounding, and causal questions.
+7. Train and evaluate predictive, statistical, time-series, or Bayesian models.
+8. Generate and test literature-grounded hypotheses.
+9. Produce a referenced Markdown report and a styled PDF.
 
+The researcher can let the coordinator choose the team or invoke a specialist directly. The UI
+streams each specialist's activity, keeps its outputs beside the conversation, and records where
+the resulting evidence and files came from.
+
+## The specialist team
+
+The live backend currently defines twelve specialists. The desktop reads their names and
+descriptions from the backend registry instead of maintaining a separate hardcoded UI list.
+
+| Specialist | Responsibility |
+|---|---|
+| `research_planner` | Writes a concise, ordered investigation plan for the researcher to review. Planning does not execute the work. |
+| `academic_researcher` | Searches scientific literature with Asta, synthesizes evidence, and returns citations and stable links. |
+| `dataverse_explorer` | Searches CIP Dataverse, reads complete result metadata, and recommends datasets with persistent identifiers. |
+| `pdf_librarian` | Extracts and indexes the researcher's PDFs into a conversation-specific semantic library and searches it by meaning. |
+| `data_cleaning` | Validates schemas, identifies data-quality problems, harmonizes terminology, and writes cleaned versions without replacing raw files. |
+| `exploratory_data_analysis` | Profiles and summarizes data, examines missingness and outliers, and creates explanatory visualizations. |
+| `diagnostic_analytics` | Investigates why an outcome occurred using comparisons, regression, inference, confounder checks, and causal framing. |
+| `predictive_analytics` | Selects, trains, validates, and compares machine-learning, forecasting, deep-learning, and Bayesian models. |
+| `data_voyager` | Uses Asta DataVoyager to test a specific analytical question against local tabular data and return findings and charts. |
+| `hypothesis_generator` | Uses the Asta Theorizer pipeline to generate literature-grounded mechanisms, theories, and open questions. |
+| `autodiscovery` | Drafts an open-ended Asta exploration that generates and tests hypotheses over a dataset. The researcher approves its experiment budget before it runs. |
+| `report_writer` | Synthesizes findings, methods, limitations, recommendations, and references into a complete report. |
+
+## Desktop experience
+
+### Conversations and projects
+
+- Persistent, multi-turn conversations backed by LangGraph threads.
+- Follow-up questions retain the context of the conversation.
+- Searchable conversation history.
+- Projects for grouping related conversations and their files.
+- A project mission plus completed, active, and proposed work in the Road panel.
+- Creation, filing, moving, opening, and deletion of conversations and projects.
+- A `Ctrl-P` command palette for common actions.
+
+### Chat and agent activity
+
+- Streaming answers with Markdown, tables, lists, links, code blocks, and images.
+- Local file attachments copied into the conversation before the agent receives them.
+- Expandable activity traces that show which specialist did what.
+- Text selection and clipboard commands across the transcript.
+- Optional background specialists for work that should continue while the chat remains usable.
+- Visible states for running, waiting for approval, completed, failed, and input-required work.
+
+### Research outputs
+
+The Outputs panel presents structured artifacts separately from conversational prose:
+
+- Files and figures, including previews and image lightboxes.
+- Literature sources and stable citation links.
+- Dataverse results with identifiers, metadata, access information, and download actions.
+- Reports that can be read as Markdown or rendered as PDF.
+- Complete per-conversation PDF libraries.
+- Hypotheses, theories, analyses, and experiment results.
+- Long-running Asta jobs and background tasks.
+- A provenance view showing which specialists and inputs produced an output.
+
+Diagnostic summaries of commands and recorded claims are available but hidden by default. They
+can be enabled under **Settings → Backend → Show what ran and what was claimed**.
+
+## Files and conversation workspaces
+
+The researcher's work belongs in Documents, not in an application cache. Every conversation has
+its own folder beneath:
+
+```text
+C:\Users\<user>\Documents\Mini-Me\
 ```
-crates/app        the desktop binary (GPUI app + backend supervisor)
-docs/             the design record, the handover, and the open-work checklist
+
+An ungrouped conversation is stored as `<thread-id>`. A conversation filed into a project is
+stored inside that project's folder. The folder can contain:
+
+- Uploaded copies of input data and PDFs.
+- Cleaned datasets and validation results.
+- Charts, figures, notebooks, and analysis files.
+- Markdown and PDF reports.
+- Literature and Dataverse search records.
+- PDF-library indexes and extracted text.
+- Provenance, command, and claim records.
+- Results collected from background workers.
+
+The desktop passes the conversation folder as the working directory for the agent. It also
+observes command output and can offer to bring files back when a tool writes into another known
+working directory. Existing user files are never silently overwritten during adoption.
+
+### PDF libraries
+
+The PDF Librarian keeps a separate collection for each conversation:
+
+```text
+<conversation>\.asta\documents\index.yaml
+<conversation>\.asta\documents\.cache\search.db
 ```
 
-## Windows (the primary platform)
-
-~98% of our users are on Windows. The app runs **natively** on Windows (GPUI uses
-DirectX), while the Python backend runs **inside WSL2** — the agent stack shells out
-with POSIX commands and needs `bash`/`python3`/`asta`, which don't behave under
-`cmd.exe`. Inside WSL it's just Linux, and the app reaches it over localhost.
-
-### For someone who is just using the app
-
-Launch it. The **Setup** pane opens by itself and says what is missing, with a button
-for each thing it can do for you — install WSL, install Mini-Me, install the Python
-packages — showing the output as it runs. Then paste a model key in **Settings**.
-Nothing needs to be typed in a terminal, and nothing needs to be edited in a file.
-
-If a step can't be automated (installing WSL needs administrator rights and a
-restart), the pane says so before you press it, and offers the command to copy.
+`index.yaml` is the durable inventory and metadata source. `search.db` contains the full-text and
+semantic-search cache. The Library modal reads the inventory rather than treating the most recent
+search matches as the whole collection. Existing local PDF rows can be clicked to open the source
+document, including files whose Asta location is recorded as `file:///mnt/c/...`.
 
 ### For whoever prepares the build
 
@@ -74,23 +150,214 @@ bash scripts/package.sh
 `package.sh` copies `mini-me/` into the bundle, so every install after that provisions from it
 without ever contacting GitHub.
 
-### For development
+## MCP integrations
+
+Ask the Data loads four hosted Model Context Protocol servers over HTTP. LangChain's first-party
+MCP adapter and FastMCP 4 negotiate the stateless 2026 protocol with a legacy fallback per server;
+tool discovery follows each server's cache TTL. An unavailable deployment removes only its own
+capability, and oversized results are saved into the active conversation workspace rather than
+filling the model context. Modern MCP form and URL elicitation pauses are shown to the researcher
+and may be accepted, declined, or cancelled before the tool continues.
+
+| MCP server | Endpoint | Used by | Purpose and exposed scope |
+|---|---|---|---|
+| **Asta** | `https://asta-tools.allen.ai/mcp/v1` | `academic_researcher` | Scientific literature search and passage retrieval. Authenticated with an Asta API key. |
+| **CIP Dataverse** | `https://dataverse-cip.fastmcp.app/mcp` | `dataverse_explorer` | Dataset search, complete search-result reading, and dataset-file listing. The agent is restricted to `SearchCIPDataverse`, `read_search_results`, and `list_dataset_files`; it does not receive curation tools. |
+| **AGROVOC** | `https://agrovoc.fastmcp.app/mcp` | `data_cleaning` | Agricultural vocabulary lookup and terminology normalization. |
+| **Crop Ontology** | `https://CropOntology.fastmcp.app/mcp` | `data_cleaning` | Crop trait, genotype, and phenotype terminology and mappings. |
+
+The Asta-powered specialists also use the authenticated `asta` CLI for capabilities that are not
+exposed through those MCP tools:
+
+- `asta papers` for structured Semantic Scholar paper records.
+- `asta pdf-extraction remote` for PDF text and OCR.
+- `asta documents` for the local semantic PDF library.
+- `asta generate-theories` for the Theorizer pipeline.
+- `asta analyze-data` for DataVoyager.
+- `asta autodiscovery` for credit-metered open-ended experiments.
+
+## External services
+
+| Service | Why it is used | When data leaves the machine |
+|---|---|---|
+| **LLM providers** | Reasoning and language generation. OpenAI, Anthropic, Google, Mistral, and custom OpenAI-compatible gateways are supported. | When a conversation or specialist run is submitted. The user supplies the provider credentials. |
+| **Asta / Allen Institute for AI** | Literature tools, Semantic Scholar records, PDF OCR, document embeddings, theory generation, DataVoyager, and AutoDiscovery. | Only when an Asta-backed specialist or command is used. Some operations consume Asta credits and require approval. |
+| **CIP Dataverse MCP** | Searches CIP's dataset catalogue and retrieves dataset/file metadata. | When the Dataverse Explorer runs. |
+| **AGROVOC and Crop Ontology MCPs** | Resolve and normalize agricultural and crop terminology. | When the Data Cleaner requests ontology assistance. |
+| **Semantic Scholar and arXiv** | Stable paper records and open-access PDF locations. These are normally reached through Asta; the PDF Librarian can download an identified open-access PDF URL. | When literature is resolved or an open-access paper is explicitly fetched. Paywalled material is not bypassed. |
+| **Crossref** | Checks whether a DOI resolves to the paper named by a citation and can search for a likely registered DOI. | The desktop sends a DOI, or citation text when repairing a missing/mismatched identifier. It does not send the research question or uploaded files. |
+| **LangGraph / LangSmith** | Agent graph execution, threads, state, streaming, and the optional remote sandbox/production deployment. | Local desktop development uses a local LangGraph server. Data reaches LangSmith when remote sandbox, hosted deployment, or tracing is enabled. |
+| **WorkOS** | Authentication and encrypted per-user credential storage for the hosted web deployment. | Used in production web/Vault mode. The desktop instead stores model keys in the OS keychain. |
+| **Amazon S3 and CloudFront** | Optional deployment target for the React web client. | Only for the separately deployed web frontend; not required by the desktop client. |
+| **GitHub Releases** | Publishes and checks digest-verified desktop release bundles. | The desktop checks the repository's latest-release endpoint; research data is not sent. |
+
+Researcher-provided PDFs and tabular files are another primary data source, but they are inputs
+rather than an external service. In local mode they remain in the conversation workspace except
+for the selected model request and any explicitly invoked external analysis or search service.
+
+Literature search is powered by Asta from the Allen Institute for AI. Work that uses Asta output
+should cite:
+
+> *AstaBench: Rigorous Benchmarking of AI Agents with a Scientific Research Suite.*
+> arXiv:2510.21652.
+
+## Safety, privacy, and spending
+
+Mini-Me is designed around explicit researcher control:
+
+- Model API keys are stored in the operating-system keychain, not in the repository, `.env`, or
+  application logs.
+- Keys travel with the individual run request and are not installed into the backend environment.
+- Local Python and shell commands can pause and display the exact command before execution.
+- Approval can cover one command, the rest of the current turn, or the current conversation.
+  Approval grants are temporary and are not persisted.
+- Asta operations that spend credits require a separate human approval. AutoDiscovery exposes the
+  proposed experiment count and cost before submission.
+- Local execution is the desktop default; a remote LangSmith sandbox remains available when
+  explicitly selected.
+- Files and structured claims are recorded for traceability, but Mini-Me cannot prove every claim
+  written in free-form model prose.
+
+Generative AI produces analysis and prose in this application. Researchers must validate results
+with appropriate subject-matter experts, avoid entering confidential or restricted information,
+disclose AI use where required, and review citations before publication.
+
+## Architecture
+
+```text
+Native GPUI desktop
+        │
+        ├── conversations, projects, settings, approvals, outputs
+        │
+        ▼
+Rust sidecar supervisor ── LangGraph HTTP/SSE ── Python coordinator
+                                                    │
+                                                    ├── specialist agents
+                                                    ├── Asta and MCP tools
+                                                    ├── local/remote execution
+                                                    └── structured artifacts
+        │
+        ▼
+Per-conversation folders under Documents\Mini-Me
+```
+
+The desktop application:
+
+- Starts the backend or attaches to a healthy instance already listening on the configured port.
+- Provisions an owned backend inside WSL when necessary.
+- Streams coordinator and subagent events over Server-Sent Events.
+- Converts backend artifacts into native GPUI panels and modals.
+- Injects the desktop-only Python package in [`overlay/`](overlay/) through `PYTHONPATH`.
+- Keeps model credentials in the OS keychain and sends configuration with each run.
+
+The overlay provides local workspaces, command approval, artifact and provenance recording,
+background-agent support, and desktop-specific behavior without requiring those adaptations to be
+maintained as edits to an external Mini-Me checkout.
+
+### Integration surface
+
+The LangGraph graph is registered as assistant `agent` and implemented by
+`backend/agent.py:agent`; the constructed coordinator is named `AsktheData-Agent`. An integrating
+client supplies a LangGraph thread id, user messages, optional attachments, project context, model
+routing, and credentials. Runs stream messages, tool activity, interrupts, and whole state
+snapshots over LangGraph's HTTP/SSE protocol.
+
+Specialists return typed artifacts rather than requiring another system to scrape prose:
+
+- `AcademicResearchResults` for literature and citations.
+- `DataVerseSearchResults` for dataset recommendations.
+- `LibraryArtifact` for PDF extraction, indexing, and semantic search.
+- `HypothesisOutput` for theories and evidence.
+- `DataAnalysisResults` for DataVoyager findings and figures.
+- `DiscoveryRunResults` for AutoDiscovery lifecycle and experiments.
+- `ReportWriterOutput` for complete report content.
+- `ResearchPlan` for ordered, reviewable investigation steps.
+
+Custom backend routes cover file upload/download, PDF report rendering, project management,
+provider configuration, Asta authentication, sandbox lifecycle, stray-output collection, and
+status/approval flows for Theorizer, DataVoyager, and AutoDiscovery. This makes it possible for an
+AI-CoScientist interface to reuse the agent backend without reproducing the desktop UI, provided
+it preserves thread identity, structured artifacts, interrupts, credential isolation, and the
+human credit-approval gate.
+
+## Technology stack
+
+| Layer | Languages and principal components |
+|---|---|
+| **Desktop client** | Rust 2021, GPUI 0.2.2, Tokio, Reqwest, Serde, and the native Windows credential manager through `keyring`. |
+| **Agent backend** | Python 3.12+, LangGraph API/SDK, LangChain, Deep Agents, Starlette, and Pydantic structured responses. |
+| **Optional web client** | TypeScript 5.9, React 19, Vite 7, LangChain React, and WorkOS AuthKit. |
+| **Data science** | pandas, NumPy, SciPy, scikit-learn, statsmodels, PyMC, PreliZ, DABEST, XGBoost, UMAP, pointblank, missingno, Matplotlib, and Seaborn. |
+| **Documents and reports** | Markdown, `pypandoc-binary`, Typst, PDF extraction/OCR, and BibTeX/reference rendering. |
+| **Protocols** | HTTP/JSON, Server-Sent Events for live agent output, MCP over HTTP for external tools, and local CLI/subprocess execution. |
+| **Persistence formats** | LangGraph thread/checkpoint state, JSON artifacts, YAML indexes, Markdown reports, SQLite search/index caches, and ordinary files in the conversation workspace. |
+| **Build and operations** | Cargo/Rust tooling, `uv` for Python environments, npm for the optional web client, Bash/Git Bash, PowerShell, GitHub Actions, and Windows SDK shader compilation. |
+
+## Settings
+
+`Ctrl-,` opens Settings. Available configuration includes:
+
+- Provider and coordinator model.
+- Per-specialist model overrides.
+- Provider API keys.
+- Custom OpenAI-compatible base URLs, including gateways such as OpenRouter.
+- Local-machine versus remote-sandbox execution.
+- Per-command approval.
+- Background specialist execution.
+- Optional command/claim diagnostics.
+- Application theme.
+
+Supported provider families are Anthropic, OpenAI, Google, Mistral, and custom
+OpenAI-compatible endpoints. Keys are managed separately per provider so selecting a model also
+makes its billing authority visible.
+
+## Installing and running on Windows
+
+Windows is the supported user platform. The released application guides the user through missing
+requirements in its **Setup & diagnostics** page. The current mainline requires:
+
+- Windows 10 or 11.
+- WSL2 with a Linux distribution.
+- A configured model-provider API key.
+- Asta sign-in for Asta-backed capabilities.
+
+The Setup page can provision the Mini-Me backend and Python dependencies. Installing WSL itself
+requires administrator rights and can require a restart.
+
+The backend is provisioned inside WSL at:
+
+```text
+~/.local/share/mini-me-desktop/backend
+```
+
+This is separate from the researcher's conversation folders. Updating the desktop executable does
+not automatically replace an already provisioned backend; the Setup page reports a content-stamp
+mismatch and provides the backend update action.
+
+## Development
+
+### Requirements
+
+- Rust stable, selected by [`rust-toolchain.toml`](rust-toolchain.toml).
+- WSL2 for the current Windows backend path.
+- A Mini-Me backend checkout or the copy under [`mini-me/`](mini-me/).
+- Windows SDK with `fxc.exe` for optimized GPUI builds.
+- Git Bash for the packaging scripts.
+
+### Run a development build
+
+From PowerShell:
 
 ```powershell
-$env:MINIME_BACKEND_WSL=1; cargo run -p mini-me-desktop-app
+$env:MINIME_BACKEND_WSL=1
+cargo run -p mini-me-desktop-app
 ```
 
-The app launches the backend inside WSL itself. It provisions into
-`~/.local/share/mini-me-desktop/backend` — on the distro's **own** filesystem, because
-a Python venv reached over `/mnt/c` is slow enough to feel broken. Point it at your
-own checkout with `MINIME_BACKEND_WSL_DIR` (or `MINIME_BACKEND_DIR` outside WSL); the
-app will run that one but **never modify it**, since it may hold your work.
+To use a specific Mini-Me checkout inside WSL, set `MINIME_BACKEND_WSL_DIR`. To use a native
+checkout where supported, set `MINIME_BACKEND_DIR`. A checkout supplied by the developer is treated
+as borrowed: the desktop runs it but does not provision or rewrite it.
 
-To see what the pane would say, with no window:
-
-```bash
-cargo run -p mini-me-desktop-app -- --preflight
-```
+### Run an optimized build
 
 ## Backend prerequisite
 
@@ -137,79 +404,67 @@ Point it at yours (PowerShell):
 $env:GPUI_FXC_PATH = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter fxc.exe -ErrorAction SilentlyContinue | Sort-Object { $_.FullName -notmatch '\\x64\\' }, FullName -Descending | Select-Object -First 1).FullName
 ```
 
-Check it found something (`echo $env:GPUI_FXC_PATH`), then build. To avoid repeating it
-every session:
+Confirm that the command found a file, then run:
 
 ```powershell
-setx GPUI_FXC_PATH "$env:GPUI_FXC_PATH"
+cargo run --release -p mini-me-desktop-app
 ```
 
-If the search comes back empty there is no SDK on the machine: install **Windows 11 SDK**
-from the Visual Studio Installer (Individual components), then try again.
+If the search returns nothing, install the Windows 11 SDK from Visual Studio Installer.
 
-## Build
+### Test
 
-On Linux (Ubuntu 22.04), install the GPUI system dev headers once:
-
-```bash
-sudo apt-get install -y libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev \
-                        libasound2-dev libvulkan-dev
+```powershell
+cargo check --workspace
+cargo test --workspace
 ```
 
-Then:
+The repository also contains Python tests for the vendored backend. Some integration tests require
+the Python/Asta environment and external credentials; unit tests must not spend model or Asta
+credits.
 
-```bash
-cargo build -p mini-me-desktop-app   # verified green (rustc 1.97.1, gpui 0.2.2)
-cargo run   -p mini-me-desktop-app   # opens the workbench window (needs a display)
+### Headless diagnostics
+
+Run the same checks shown by the Setup page without opening a window:
+
+```powershell
+cargo run -p mini-me-desktop-app -- --preflight
 ```
 
-`cargo run` must be launched from a graphical session (Wayland/X11 + Vulkan, or
-DirectX on Windows) — it can't open a window from a headless TTY.
+Exercise backend startup and health checks:
 
-### The backend sidecar
+```powershell
+cargo run -p mini-me-desktop-app -- --check-backend
+```
 
-The app spawns and supervises the Mini-Me Python backend itself; it attaches to
-one that's already running rather than double-spawning. It needs the Mini-Me
-checkout (with its `.env`) — found via `MINIME_BACKEND_DIR`, else conventional
-locations. Sidecar logs go to `/tmp/mini-me-desktop-backend.log`.
+Exercise a complete streamed turn, which can spend model tokens:
 
-To exercise the whole backend path **without a display** (spawn → health →
-thread → stream), which is also the fastest way to debug a bad turn:
-
-```bash
+```powershell
 cargo run -p mini-me-desktop-app -- --check-backend --stream
 ```
 
-Drop `--stream` to stop before the model call, or swap it for
-`--prompt "find the deseq2 paper"` to run your own — which is how a *delegating*
-turn gets checked: the output then lists each step and a per-subagent tally.
-Repeat `--prompt` to run several turns **on one thread**, which is how conversation
-continuity gets verified without a window.
+Or provide an explicit prompt:
 
-To decode a **saved** SSE capture instead, with no backend and no tokens spent:
+```powershell
+cargo run -p mini-me-desktop-app -- --check-backend --prompt "find recent late-blight datasets"
+```
 
-```bash
+Decode a recorded SSE stream without starting the backend or spending tokens:
+
+```powershell
 cargo run -p mini-me-desktop-app -- --replay crates/app/tests/fixtures/delegated-turn.sse
 ```
 
-Env overrides: `MINIME_BACKEND_DIR`, `MINIME_BACKEND_PORT`, `MINIME_BACKEND_URL`,
-`MINIME_BACKEND_ATTACH_ONLY`.
+Store a credential in the OS keychain without displaying it in the UI:
 
-### Settings
-
-`ctrl-,` opens Settings: provider (Anthropic / OpenAI / Google / Mistral / any
-OpenAI-compatible endpoint such as OpenRouter), model, API keys, and whether code runs on
-this machine. **Keys go into your OS keychain, never into a file** — so you do not need to
-edit the backend's `.env` at all. On a fresh install the pane opens by itself.
-
-Headless equivalent, which never echoes the value:
-
-```bash
-cargo run -p mini-me-desktop-app -- --set-secret llm:anthropic "sk-…"
+```powershell
+cargo run -p mini-me-desktop-app -- --set-secret llm:anthropic "sk-..."
 ```
 
-The model and key apply to the next turn. The port and execution locality are baked into
-the sidecar's launch command, so those need a restart.
+Useful overrides include `MINIME_BACKEND_WSL`, `MINIME_BACKEND_WSL_DIR`,
+`MINIME_BACKEND_DIR`, `MINIME_BACKEND_PORT`, `MINIME_BACKEND_URL`,
+`MINIME_BACKEND_ATTACH_ONLY`, and `MINIME_EXECUTION_BACKEND`. The `--local` and `--sandbox`
+flags override execution locality for one launch.
 
 ### Host execution (the only mode)
 
@@ -228,12 +483,74 @@ history: this used to be a `PYTHONPATH` overlay kept separate so it never confli
 an upstream Mini-Me checkout; now that the backend is vendored in this repo, that
 separation no longer serves a purpose).
 
-## Direction
+### Logs
 
-Chosen over Tauri (the lower-risk fallback) to get a native, GPU-rendered,
-keyboard-first workbench — "the best of Zed" for scientific discovery. See the
-spike plan for the milestone ladder (P6.1 hello-window → P6.2 real backend →
-P6.3 panels → P6.4 native affordances) and the go/no-go kill-criteria.
+On Windows, the three primary logs are:
 
-Org policy: human-gated (nothing auto-runs). AI-assisted (Claude Code) per CIP
-Acceptable Use policy.
+```text
+%TEMP%\mini-me-desktop-app.log
+%TEMP%\mini-me-desktop-backend.log
+%TEMP%\mini-me-desktop-update.log
+```
+
+Include the build stamp shown in **About Mini-Me** and the relevant logs when reporting a defect.
+
+## Packaging and release
+
+Before packaging on a machine that can access the Mini-Me repository, prepare the backend bundle:
+
+```bash
+bash scripts/bundle-backend.sh
+```
+
+The manual Windows release sequence is run from Git Bash:
+
+```bash
+cargo build --release -p mini-me-desktop-app
+cargo test --release
+bash scripts/bundle-backend.sh
+bash scripts/package.sh
+bash scripts/release.sh
+```
+
+The GitHub Actions [`release` workflow](.github/workflows/release.yml) performs the corresponding
+Windows build, tests, packaging, and draft-release creation. Releases are drafted first. Before
+publishing, inspect the produced archive and confirm that `overlay/`, `scripts/`, `vendor/`, and
+`mini-me/` contain the files expected by the installed application.
+
+## Repository layout
+
+```text
+crates/app/       Native Rust/GPUI application and sidecar supervisor
+mini-me/          Mini-Me Python/LangGraph backend snapshot and specialist skills
+overlay/          Desktop-only Python behavior injected into the backend
+scripts/          Setup, backend bundling, packaging, release, and rehearsal tools
+docs/             Handover, working plan, design record, and upstream issue notes
+dist/             Locally produced release artifacts
+vendor/           Bundled-backend compatibility location used by packaging
+```
+
+## Documentation
+
+Start here when maintaining the application:
+
+1. [`docs/handover.md`](docs/handover.md) — safety rules, architecture, failure history, and release
+   guidance. Its release/PR snapshot can lag behind the repository.
+2. [`docs/plan.md`](docs/plan.md) — the current work checklist and intentionally deferred work.
+3. [`docs/desktop-app-plan.md`](docs/desktop-app-plan.md) — the long-form source of truth. Each
+   numbered section records a problem, evidence, decision, and implementation; `§N` code comments
+   refer back to it.
+4. [`overlay/README.md`](overlay/README.md) — how desktop-local execution is injected.
+5. [`mini-me/README.md`](mini-me/README.md) and [`mini-me/skills/`](mini-me/skills/) — the backend
+   architecture and detailed specialist procedures. Some summary counts in the backend README
+   predate the newer specialists; the live registry and `backend/subagents.py` are authoritative.
+
+When behavior contradicts the source tree, inspect the installed or released artifact and the
+provisioned backend before assuming the running application contains the latest code. The desktop
+binary, backend installation, and copied overlay are three distinct pieces that can be at different
+revisions.
+
+## Acknowledgements
+
+Mini-Me Desktop is developed for the International Potato Center (CIP). It uses GPUI from Zed and
+Asta from the Allen Institute for AI. See [`NOTICE`](NOTICE) for third-party attribution.

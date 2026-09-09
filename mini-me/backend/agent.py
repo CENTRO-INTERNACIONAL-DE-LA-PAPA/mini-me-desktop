@@ -16,6 +16,8 @@ from backend.local import install as _install_local_patches
 
 _install_local_patches()
 
+import asyncio
+
 from langchain_core.runnables import RunnableConfig
 
 from deepagents import create_deep_agent
@@ -39,6 +41,7 @@ from backend.mcp_tools import (
     get_academic_research_mcp_tools,
     get_data_cleaning_mcp_tools,
     get_dataverse_search_mcp_tools,
+    mcp_status_report,
     _tool_names,
 )
 from backend.middleware import (
@@ -134,12 +137,14 @@ async def agent(config: RunnableConfig):
     # each paper with its reference already built from the record (`backend/citations.py`), which
     # is what stops the model composing one from memory; `snippet_search` stays available for the
     # separate job of quoting a passage out of a paper's body.
-    academic_research_tools = [
-        find_papers,
-        *await get_academic_research_mcp_tools(),
-    ]
-    dataverse_tools = await get_dataverse_search_mcp_tools()
-    data_cleaning_tools = await get_data_cleaning_mcp_tools()
+    # Stateless discovery calls are independent. A cold graph should wait for the slowest hosted
+    # deployment, not the sum of all of them; each loader owns its own non-fatal failure boundary.
+    academic_mcp_tools, dataverse_tools, data_cleaning_tools = await asyncio.gather(
+        get_academic_research_mcp_tools(),
+        get_dataverse_search_mcp_tools(),
+        get_data_cleaning_mcp_tools(),
+    )
+    academic_research_tools = [find_papers, *academic_mcp_tools]
     external_tool_names = _tool_names(
         [
             *academic_research_tools,
@@ -161,6 +166,30 @@ async def agent(config: RunnableConfig):
         model_resolver=model_resolver,
         subagent_overrides=subagent_overrides,
     )
+    # Dataverse has no local fallback. Leaving its specialist registered with zero tools would let
+    # the coordinator delegate into a middleware gate that can only demand a tool which is not
+    # present. Other specialists keep useful local capabilities when their enrichment MCPs are
+    # absent (academic research still has find_papers; data cleaning still has execution).
+    if not dataverse_tools:
+        runtime_subagents = [
+            subagent
+            for subagent in runtime_subagents
+            if subagent.get("name") != "dataverse_explorer"
+        ]
+
+    unavailable = [
+        service["name"]
+        for service in mcp_status_report()["services"]
+        if service["status"] == "unavailable"
+    ]
+    coordinator_prompt = COORDINATOR_SYSTEM_PROMPT
+    if unavailable:
+        coordinator_prompt += (
+            "\n\nHosted MCP availability for this run:\n"
+            f"Unavailable: {', '.join(unavailable)}. Continue with available tools. "
+            "Do not claim an unavailable integration was consulted and never fabricate its "
+            "results. CIP Dataverse being unavailable means dataverse_explorer is unavailable."
+        )
 
     backend = make_backend(sandbox_backend=sandbox_backend)
     permissions = _build_filesystem_permissions()
@@ -176,7 +205,7 @@ async def agent(config: RunnableConfig):
 
     return create_deep_agent(
         model=coordinator_model,
-        system_prompt=COORDINATOR_SYSTEM_PROMPT,
+        system_prompt=coordinator_prompt,
         subagents=runtime_subagents,
         skills=["/skills/"],
         memory=["/memories/instructions.txt"],
