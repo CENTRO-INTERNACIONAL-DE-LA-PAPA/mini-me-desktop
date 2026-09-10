@@ -40,6 +40,7 @@ interactive flow.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -55,16 +56,28 @@ DATAVERSE_MCP_URL = "https://dataverse-cip.fastmcp.app/mcp"
 CALLBACK_PORT = 41999
 
 
+_STATE_DIR: Path | None = None
+
+
 def state_dir() -> Path:
     """Where the tokens live: beside the conversation database, not in the checkout.
 
     ``MINIME_STATE_DIR`` lets the desktop app say; otherwise this follows the same
     ``.langgraph_api`` directory the checkpointer writes to, so a researcher who deletes their
     backend state deletes their sign-in with it rather than leaving a token behind.
+
+    **Blocking, and memoised because of it.** ``Path.cwd()`` is ``os.getcwd()``, which langgraph
+    runs the server under `blockbuster` to forbid on the event loop — and forbidding it means
+    raising. Every call on the async path must therefore reach this through
+    [`auth_for_runtime`], which moves it to a thread. Memoising is not an optimisation: it means
+    the *first* resolution is the only one that can be caught in the wrong place.
     """
-    override = os.getenv("MINIME_STATE_DIR")
-    base = Path(override) if override else Path.cwd() / ".langgraph_api"
-    return base / "auth"
+    global _STATE_DIR
+    if _STATE_DIR is None:
+        override = os.getenv("MINIME_STATE_DIR")
+        base = Path(override) if override else Path.cwd() / ".langgraph_api"
+        _STATE_DIR = base / "auth"
+    return _STATE_DIR
 
 
 class FileTokenStore:
@@ -76,8 +89,14 @@ class FileTokenStore:
     ``PydanticAdapter`` ever calls.
     """
 
-    def __init__(self, directory: Path) -> None:
-        self._path = directory / "dataverse-tokens.json"
+    def __init__(self, directory: Path | None = None) -> None:
+        # Resolved on use, not here: `state_dir()` blocks, and a store constructed on the event
+        # loop would raise before it had read anything.
+        self._directory = directory
+
+    @property
+    def _path(self) -> Path:
+        return (self._directory or state_dir()) / "dataverse-tokens.json"
 
     def _read(self) -> dict[str, Any]:
         try:
@@ -106,7 +125,7 @@ class FileTokenStore:
     async def get(
         self, key: str, *, collection: str | None = None
     ) -> dict[str, Any] | None:
-        entry = self._read().get(self._slot(key, collection))
+        entry = (await asyncio.to_thread(self._read)).get(self._slot(key, collection))
         if not isinstance(entry, dict):
             return None
         expires = entry.get("expires_at")
@@ -123,18 +142,18 @@ class FileTokenStore:
         collection: str | None = None,
         ttl: Any | None = None,
     ) -> None:
-        data = self._read()
+        data = await asyncio.to_thread(self._read)
         entry: dict[str, Any] = {"value": dict(value)}
         if ttl is not None:
             entry["expires_at"] = time.time() + float(ttl)
         data[self._slot(key, collection)] = entry
-        self._write(data)
+        await asyncio.to_thread(self._write, data)
 
     async def delete(self, key: str, *, collection: str | None = None) -> bool:
-        data = self._read()
+        data = await asyncio.to_thread(self._read)
         if data.pop(self._slot(key, collection), None) is None:
             return False
-        self._write(data)
+        await asyncio.to_thread(self._write, data)
         return True
 
 
@@ -244,9 +263,70 @@ def for_login():
 
 
 def signed_in() -> bool:
-    """Whether a token is on disk. Says nothing about whether it still works."""
-    store = FileTokenStore(state_dir())
-    return bool(store._read())
+    """Whether a token is on disk. Says nothing about whether it still works.
+
+    **Blocking.** Never call this from the event loop — use [`auth_for_runtime`].
+    """
+    return bool(FileTokenStore()._read())
+
+
+def sign_in_fingerprint() -> str:
+    """Cheap evidence of *which* sign-in is stored, for invalidating a cached failure.
+
+    Blocking, like everything that touches the store — reached from the async path through
+    [`sign_in_changed`].
+    """
+    try:
+        stat = FileTokenStore()._path.stat()
+    except OSError:
+        return "none"
+    return f"{stat.st_mtime_ns}:{stat.st_size}"
+
+
+async def sign_in_changed(previous: str | None) -> tuple[bool, str]:
+    """Whether the stored sign-in differs from when a caller last looked.
+
+    # Why a cached failure has to expire on this and not on time
+
+    Discovery caches an empty tool list when a deployment cannot be reached, so a read-only
+    request cannot hammer it. That cache is process-wide and has no notion of a researcher
+    signing in halfway through its life — and the sign-in happens in a *different process*, so
+    nothing can reach in and clear it. The result was the state Codex measured: a correct
+    sign-in, a healthy deployment, and an app that kept reporting the service as unavailable
+    until the whole backend was restarted.
+
+    A stat is enough to tell the two apart, and it costs nothing on the path where the answer is
+    "no change" — which is every path except the one immediately after a sign-in.
+    """
+    current = await asyncio.to_thread(sign_in_fingerprint)
+    return current != previous, current
+
+
+async def auth_for_runtime():
+    """The provider a graph build should use, or `None` when signed out.
+
+    # Why this exists rather than callers deciding for themselves
+
+    The first version had `mcp_tools` call `signed_in()` directly while constructing the MCP
+    client. That construction happens on the event loop during a graph build, and langgraph runs
+    the server under `blockbuster`, which does not merely warn about blocking I/O — it raises.
+    So every launch produced:
+
+        MCP unavailable; continuing without CIP Dataverse: Blocking call to os.getcwd
+
+    from `signed_in()` → `state_dir()` → `Path.cwd()`, **before authentication was ever
+    attempted**. Discovery caught it, marked the service unavailable and cached the empty
+    result, so a correctly signed-in researcher saw exactly the same modal as a signed-out one,
+    and `agent.py` then dropped the `dataverse_explorer` specialist. The sign-in worked
+    throughout; nothing could use it.
+
+    Fixing `Path.cwd()` alone would only have moved the error — `_read` opens and reads a file,
+    which is blocked as well. So the whole decision moves to a thread, once, here, and the async
+    callers have nothing left to get wrong.
+    """
+    if not await asyncio.to_thread(signed_in):
+        return None
+    return await asyncio.to_thread(for_runtime)
 
 
 def _drop_stale_registration(provider) -> None:
@@ -292,9 +372,14 @@ async def _login() -> int:
     """Perform the interactive flow, then prove it worked.
 
     Driven through a real call rather than by poking the provider: the OAuth machinery is an
-    httpx auth flow, so it runs when a request needs it and not before. `ping` is the cheapest
-    request that exercises the whole path — registration, browser, callback, token exchange —
-    and a login that "succeeded" without one would be a token nobody has spent.
+    httpx auth flow, so it runs when a request needs it and not before, and a login that
+    "succeeded" without one would be a token nobody has spent.
+
+    **`list_tools`, not `ping`.** `ping` was the cheaper request and this deployment answers it
+    with *"Method not found"* — MCP servers are not obliged to implement it. That turned a
+    successful sign-in into a reported failure while the tokens sat correctly on disk. Listing
+    tools is the thing the backend will actually do with this credential, so it verifies what
+    matters rather than what was convenient.
     """
     from fastmcp import Client
     from fastmcp.client.transports import StreamableHttpTransport
@@ -303,7 +388,7 @@ async def _login() -> int:
     _drop_stale_registration(provider)
     transport = StreamableHttpTransport(DATAVERSE_MCP_URL, auth=provider)
     async with Client(transport) as client:
-        await client.ping()
+        await client.list_tools()
     print("MINIME_SIGNED_IN")
     return 0
 
@@ -322,9 +407,9 @@ async def _status() -> int:
     from fastmcp.client.transports import StreamableHttpTransport
 
     try:
-        transport = StreamableHttpTransport(DATAVERSE_MCP_URL, auth=for_runtime())
+        transport = StreamableHttpTransport(DATAVERSE_MCP_URL, auth=await auth_for_runtime())
         async with Client(transport) as client:
-            await client.ping()
+            await client.list_tools()
     except Exception as error:  # noqa: BLE001 — every failure means the same thing to the caller
         print(f"MINIME_SIGN_IN_EXPIRED {type(error).__name__}")
         return 1

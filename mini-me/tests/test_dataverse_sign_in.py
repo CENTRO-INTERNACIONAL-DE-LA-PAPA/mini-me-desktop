@@ -20,13 +20,22 @@ from backend import dataverse_auth
 
 @pytest.fixture()
 def state(tmp_path, monkeypatch):
+    """A private token store for one test.
+
+    `_STATE_DIR` is reset too: `state_dir()` memoises deliberately — it calls `os.getcwd()`,
+    which is forbidden on the event loop — so setting the environment variable alone does not
+    move an already-resolved directory. In the server that memo is correct (the environment is
+    fixed for the life of the process); across tests in one interpreter it is a leak, and it
+    silently pointed one test's store at another's directory.
+    """
     monkeypatch.setenv("MINIME_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(dataverse_auth, "_STATE_DIR", None)
     return tmp_path
 
 
 def test_tokens_survive_a_restart_and_a_truncated_file_reads_as_signed_out(state):
     """The store is the whole reason a sign-in is worth doing once."""
-    store = dataverse_auth.FileTokenStore(dataverse_auth.state_dir())
+    store = dataverse_auth.FileTokenStore()
 
     import asyncio
 
@@ -72,24 +81,35 @@ def test_being_signed_out_does_not_register_an_oauth_client_on_every_launch(stat
             seen["url"] = url
             seen["auth"] = auth
 
+    class _Adapter:
+        def __init__(self, _client):
+            pass
+
+        async def list_tools(self, cache_mode=None):
+            return [object()]
+
     monkeypatch.setattr(mcp_tools, "StreamableHttpTransport", _Transport)
     monkeypatch.setattr(mcp_tools, "Client", lambda *a, **k: object())
-    monkeypatch.setattr(mcp_tools, "MCPAdapter", lambda client: client)
-    monkeypatch.setattr(mcp_tools, "_mcp_clients", {})
+    monkeypatch.setattr(mcp_tools, "MCPAdapter", _Adapter)
 
-    mcp_tools._get_or_create_mcp_client(("dataverse",))
+    def _fresh():
+        monkeypatch.setattr(mcp_tools, "_mcp_clients", {})
+        monkeypatch.setattr(mcp_tools, "_mcp_tools_cache", {})
+        monkeypatch.setattr(mcp_tools, "_mcp_tools_locks", {})
+
+    import asyncio
+
+    # **Driven through `get_mcp_tools`, not by constructing the client directly.** Deciding the
+    # provider moved out of `_get_or_create_mcp_client` precisely because that runs on the event
+    # loop; a test that calls the factory itself would pass with the decision anywhere at all.
+    _fresh()
+    asyncio.run(mcp_tools.get_mcp_tools(("dataverse",)))
     assert seen["auth"] is None, "a signed-out launch must send no OAuth provider at all"
 
     # And once there is a token, it is attached — or signing in would achieve nothing.
-    import asyncio
-
-    asyncio.run(
-        dataverse_auth.FileTokenStore(dataverse_auth.state_dir()).put(
-            "token", {"access_token": "t"}
-        )
-    )
-    monkeypatch.setattr(mcp_tools, "_mcp_clients", {})
-    mcp_tools._get_or_create_mcp_client(("dataverse",))
+    asyncio.run(dataverse_auth.FileTokenStore().put("token", {"access_token": "t"}))
+    _fresh()
+    asyncio.run(mcp_tools.get_mcp_tools(("dataverse",)))
     assert seen["auth"] is not None, "a signed-in launch must carry the provider"
 
 
@@ -168,7 +188,7 @@ def test_a_registration_from_the_broken_build_is_not_reused(state):
     """
     import asyncio
 
-    store = dataverse_auth.FileTokenStore(dataverse_auth.state_dir())
+    store = dataverse_auth.FileTokenStore()
     asyncio.run(
         store.put(
             "client",
@@ -220,3 +240,119 @@ def _run_login_without_a_network(_state) -> None:
             asyncio.run(module._login())
     finally:
         fastmcp.Client = real
+
+
+def test_the_token_store_is_never_touched_on_the_event_loop(tmp_path, monkeypatch):
+    """**The bug that made a working sign-in look identical to no sign-in at all.**
+
+    langgraph runs the server under `blockbuster`, which does not warn about blocking I/O on the
+    event loop — it raises. The first build decided whether to attach the OAuth provider by
+    calling `signed_in()` while constructing the MCP client, which happens on the loop during a
+    graph build, so every launch produced:
+
+        MCP unavailable; continuing without CIP Dataverse: Blocking call to os.getcwd
+
+    *before authentication was ever attempted*. Discovery caught it, cached the empty result, and
+    `agent.py` dropped the `dataverse_explorer` specialist. Signing in changed nothing, and
+    restarting changed nothing, because the failure had nothing to do with credentials.
+
+    Run under the real guard rather than by reading the code: the blocking call was three frames
+    down (`signed_in` → `state_dir` → `Path.cwd`), and a second one (`_read` opening the file)
+    was waiting behind it — so anything short of executing the path would have found one and
+    missed the other.
+    """
+    import asyncio
+
+    from blockbuster import blockbuster_ctx
+
+    # The real resolution path: no override, so `state_dir()` must reach `os.getcwd()`, and a
+    # token file that exists, so `_read` genuinely opens and reads it.
+    monkeypatch.delenv("MINIME_STATE_DIR", raising=False)
+    monkeypatch.setattr(dataverse_auth, "_STATE_DIR", None)
+    monkeypatch.chdir(tmp_path)
+    auth_dir = tmp_path / ".langgraph_api" / "auth"
+    auth_dir.mkdir(parents=True)
+    (auth_dir / "dataverse-tokens.json").write_text(
+        json.dumps({"token::t": {"value": {"access_token": "t"}}}), encoding="utf-8"
+    )
+
+    async def resolve():
+        with blockbuster_ctx():
+            return await dataverse_auth.auth_for_runtime()
+
+    provider = asyncio.run(resolve())
+    assert provider is not None, "a stored sign-in must produce a provider"
+
+    # And the store's own async methods are safe on the loop too — `auth_for_runtime` is not the
+    # only thing that reaches the file. `OAuth` reads and writes tokens through it mid-request.
+    async def read_through_the_store():
+        with blockbuster_ctx():
+            return await dataverse_auth.FileTokenStore().get("t", collection="token")
+
+    assert asyncio.run(read_through_the_store()) == {"access_token": "t"}
+
+
+def test_signing_in_after_a_failure_does_not_need_a_backend_restart(state, monkeypatch):
+    """**The state Codex measured: correct sign-in, healthy server, still reported unavailable.**
+
+    Discovery caches an empty tool list when a deployment cannot be reached, so read-only
+    requests cannot hammer it. That cache is process-wide, and the sign-in happens in a
+    *different* process — so nothing can reach in and clear it. A researcher who signed in
+    correctly kept seeing the same modal until the whole backend was restarted, and Codex
+    confirmed the restart itself was not enough while the blocking bug remained.
+
+    A `stat` of the token file tells the two situations apart, and costs nothing on the path
+    where the answer is "no change" — which is every path except the one after a sign-in.
+    """
+    import asyncio
+
+    from backend import mcp_tools
+
+    attempts: list[object] = []
+
+    class _Adapter:
+        def __init__(self, _client):
+            pass
+
+        async def list_tools(self, cache_mode=None):
+            attempts.append(object())
+            # Unreachable while signed out, and answering once a credential exists.
+            if not dataverse_auth.signed_in():
+                raise RuntimeError("401 Unauthorized")
+            return [object()]
+
+    auths: list[object] = []
+
+    def _transport(_url, headers=None, auth=None):
+        auths.append(auth)
+        return object()
+
+    monkeypatch.setattr(mcp_tools, "StreamableHttpTransport", _transport)
+    monkeypatch.setattr(mcp_tools, "Client", lambda *a, **k: object())
+    monkeypatch.setattr(mcp_tools, "MCPAdapter", _Adapter)
+    monkeypatch.setattr(mcp_tools, "_mcp_clients", {})
+    monkeypatch.setattr(mcp_tools, "_mcp_tools_cache", {})
+    monkeypatch.setattr(mcp_tools, "_mcp_tools_locks", {})
+    monkeypatch.setattr(mcp_tools, "_sign_in_marks", {})
+
+    assert asyncio.run(mcp_tools.get_mcp_tools(("dataverse",))) == []
+    assert len(attempts) == 1
+
+    # The cache does its job while nothing has changed: no second call to an unreachable server.
+    assert asyncio.run(mcp_tools.get_mcp_tools(("dataverse",))) == []
+    assert len(attempts) == 1, "a cached failure must not be retried on every request"
+
+    # Now sign in, exactly as the separate login process would.
+    asyncio.run(dataverse_auth.FileTokenStore().put("token", {"access_token": "t"}))
+
+    assert asyncio.run(mcp_tools.get_mcp_tools(("dataverse",))) != [], (
+        "signing in must take effect without restarting the backend"
+    )
+    assert len(attempts) == 2
+
+    # **And the client was rebuilt, not reused.** One constructed while signed out carries
+    # `auth=None` for the life of the process, so discarding the failure without discarding the
+    # adapter would retry with no credential and fail identically — a fix that changes the
+    # symptom's timing and nothing else.
+    assert auths[0] is None, "signed out: no provider"
+    assert auths[-1] is not None, "signed in: the retry must carry the provider"
