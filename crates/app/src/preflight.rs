@@ -1462,6 +1462,7 @@ mod tests {
             project_dir: PathBuf::from("/nonexistent-checkout"),
             wsl: None,
             launch_command: vec!["true".into()],
+            prepare_command: None,
             attach_only: false,
             log_path: PathBuf::from("/dev/null"),
             execution: Execution::Sandbox,
