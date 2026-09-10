@@ -187,6 +187,25 @@ def _oauth(interactive: bool):
     from fastmcp.client.auth import OAuth
 
     class _Provider(OAuth):  # type: ignore[misc]
+        def _bind(self, mcp_url: str) -> None:
+            """Advertise a loopback address, then listen on every interface.
+
+            ``OAuth`` uses one ``callback_host`` for two different jobs: the address written into
+            ``redirect_uri`` — which a **browser** has to navigate to — and the address the
+            callback server binds. Those are not the same requirement here, and setting the field
+            to ``0.0.0.0`` to satisfy the second broke the first:
+
+                http://0.0.0.0:41999/callback  ->  ERR_ADDRESS_INVALID
+
+            ``0.0.0.0`` means "every interface" to a listener and nothing at all to Chrome. So
+            bind is chosen after the URI is built: the browser is sent to ``127.0.0.1`` on
+            Windows, and WSL2 forwards that to a listener bound on every interface inside the
+            distro — which is the same reason the backend itself binds ``0.0.0.0`` rather than
+            loopback (a loopback-only bind "is not always visible from Windows").
+            """
+            super()._bind(mcp_url)
+            self._callback_host = "0.0.0.0"
+
         async def redirect_handler(self, authorization_url: str) -> None:
             if not interactive:
                 # The whole point of the split: a turn discovers it is signed out here, and this
@@ -208,10 +227,9 @@ def _oauth(interactive: bool):
         client_name="Mini-Me Desktop",
         token_storage=FileTokenStore(state_dir()),
         callback_port=CALLBACK_PORT,
-        # The listener runs in WSL and the browser is on Windows. WSL2 forwards Windows loopback
-        # to a listener bound on all interfaces; a 127.0.0.1-only bind is "not always visible
-        # from Windows", which is why the backend itself binds 0.0.0.0 (docs §the launch).
-        callback_host="0.0.0.0",
+        # What the **browser** is told to come back to. `_Provider._bind` widens the listener
+        # afterwards; the two are separate requirements and one field.
+        callback_host="127.0.0.1",
     )
 
 
@@ -231,6 +249,45 @@ def signed_in() -> bool:
     return bool(store._read())
 
 
+def _drop_stale_registration(provider) -> None:
+    """Forget a client registration that names a redirect URI we no longer use.
+
+    A registration is cached so repeated sign-ins do not create a new OAuth client every time.
+    That cache outlives a change to the callback address, and a stale one is not merely useless —
+    it is invisible: the sign-in reuses it, the browser is sent to the old address, and the only
+    symptom is the callback never arriving. The first build of this shipped
+    ``http://0.0.0.0:41999/callback``, so the first machines to try it have exactly that cached.
+
+    Matching on the URI rather than clearing unconditionally, because re-registering on every
+    sign-in would leave a trail of client records on the researcher's Horizon account.
+    """
+    try:
+        wanted = {str(uri) for uri in provider.context.client_metadata.redirect_uris}
+    except AttributeError:
+        return
+
+    store = FileTokenStore(state_dir())
+    data = store._read()
+    kept = {
+        slot: entry
+        for slot, entry in data.items()
+        if not _names_another_callback(entry, wanted)
+    }
+    if len(kept) != len(data):
+        store._write(kept)
+
+
+def _names_another_callback(entry: Any, wanted: set[str]) -> bool:
+    value = entry.get("value") if isinstance(entry, dict) else None
+    if not isinstance(value, dict):
+        return False
+    uris = value.get("redirect_uris")
+    if not isinstance(uris, list) or not uris:
+        # Not a client registration — a token, which no callback address invalidates.
+        return False
+    return not any(str(uri) in wanted for uri in uris)
+
+
 async def _login() -> int:
     """Perform the interactive flow, then prove it worked.
 
@@ -242,7 +299,9 @@ async def _login() -> int:
     from fastmcp import Client
     from fastmcp.client.transports import StreamableHttpTransport
 
-    transport = StreamableHttpTransport(DATAVERSE_MCP_URL, auth=for_login())
+    provider = for_login()
+    _drop_stale_registration(provider)
+    transport = StreamableHttpTransport(DATAVERSE_MCP_URL, auth=provider)
     async with Client(transport) as client:
         await client.ping()
     print("MINIME_SIGNED_IN")

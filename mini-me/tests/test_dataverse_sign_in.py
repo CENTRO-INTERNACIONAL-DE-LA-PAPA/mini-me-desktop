@@ -129,17 +129,94 @@ def test_the_url_is_printed_before_any_attempt_to_open_it(state, capsys, monkeyp
     assert order == [f"open {url}"], "the browser is opened, and only after the URL is printed"
 
 
-def test_the_callback_is_reachable_from_the_windows_browser(state):
-    """Bound on every interface, advertised on a fixed port.
+def test_the_browser_is_sent_somewhere_a_browser_can_actually_go(state):
+    """**The bug this test was written after failing to catch.**
 
-    The listener runs in WSL and the browser is on Windows. This repository already learned that
-    WSL2's loopback forwarding "is not always visible from Windows" for a 127.0.0.1-only bind —
-    it is why the backend binds 0.0.0.0 — and a callback the browser cannot reach fails after a
-    five-minute timeout with nothing to read.
+    Its first version asserted `_callback_host == "0.0.0.0"` and passed while the sign-in was
+    broken, because that field does two jobs: it is the bind address *and* the host written into
+    `redirect_uri`. Chrome was handed `http://0.0.0.0:41999/callback` and answered
+    `ERR_ADDRESS_INVALID` — a valid thing to listen on is not a valid thing to navigate to.
 
-    The port is fixed because the redirect URI registered at sign-in has to be the one the
-    listener later answers on.
+    So the assertion is now on the URI the browser is given, which was observable the whole time.
+    Both halves matter and they differ:
+
+    - the browser goes to loopback, on Windows;
+    - the listener binds every interface, because WSL2's forwarding "is not always visible from
+      Windows" for a loopback-only bind — the same finding that makes the backend bind 0.0.0.0.
     """
     provider = dataverse_auth.for_login()
+
+    redirect = str(provider.context.client_metadata.redirect_uris[0])
+    assert redirect == f"http://127.0.0.1:{dataverse_auth.CALLBACK_PORT}/callback", redirect
+    # Said plainly, because this is the exact value that shipped broken.
+    assert "0.0.0.0" not in redirect, "a browser cannot navigate to 0.0.0.0"
+
+    # And the listener is still widened, or the browser reaches loopback and finds nothing.
     assert provider._callback_host == "0.0.0.0"
+    # Fixed, because the redirect URI registered at sign-in must be the one it later answers on.
     assert provider._callback_port == dataverse_auth.CALLBACK_PORT
+
+
+def test_a_registration_from_the_broken_build_is_not_reused(state):
+    """The first build advertised `http://0.0.0.0:41999/callback` and cached that registration.
+
+    A machine that tried the sign-in then has it on disk. Reusing it sends the browser back to
+    the address that produced `ERR_ADDRESS_INVALID`, and the only symptom is a callback that
+    never arrives — so the second attempt fails exactly like the first, for a reason nothing
+    reports. The tokens beside it are untouched: a callback address says nothing about whether a
+    sign-in is still good.
+    """
+    import asyncio
+
+    store = dataverse_auth.FileTokenStore(dataverse_auth.state_dir())
+    asyncio.run(
+        store.put(
+            "client",
+            {"client_id": "old", "redirect_uris": ["http://0.0.0.0:41999/callback"]},
+            collection="client",
+        )
+    )
+    asyncio.run(store.put("token", {"access_token": "keep-me"}, collection="token"))
+
+    # **Driven through `_login`, not by calling the helper.** A test that invokes the cleanup
+    # itself proves the cleanup works and says nothing about whether the sign-in performs it —
+    # and deleting the call is exactly the regression that would strand these machines.
+    _run_login_without_a_network(state)
+
+    assert asyncio.run(store.get("client", collection="client")) is None
+    assert asyncio.run(store.get("token", collection="token")) == {"access_token": "keep-me"}
+
+    # A registration that already names the current address is left alone, or every sign-in
+    # would register a new client and litter the researcher's Horizon account.
+    current = str(dataverse_auth.for_login().context.client_metadata.redirect_uris[0])
+    asyncio.run(
+        store.put("client", {"client_id": "new", "redirect_uris": [current]}, collection="client")
+    )
+    _run_login_without_a_network(state)
+    assert asyncio.run(store.get("client", collection="client")) is not None
+
+
+def _run_login_without_a_network(_state) -> None:
+    """Run `_login` far enough to reach the cleanup, then stop before it talks to anything."""
+    import asyncio
+    import contextlib
+
+    import backend.dataverse_auth as module
+
+    class _Stop(Exception):
+        pass
+
+    @contextlib.asynccontextmanager
+    async def _client(*_args, **_kwargs):
+        raise _Stop
+        yield  # pragma: no cover - unreachable, keeps this an async generator
+
+    import fastmcp
+
+    real = fastmcp.Client
+    fastmcp.Client = _client
+    try:
+        with contextlib.suppress(_Stop):
+            asyncio.run(module._login())
+    finally:
+        fastmcp.Client = real
