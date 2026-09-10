@@ -56,6 +56,11 @@ MCP_SERVER_CONFIGS: dict[str, dict[str, Any]] = {
     },
     "dataverse": {
         "url": "https://dataverse-cip.fastmcp.app/mcp",
+        # Horizon Authentication is on for this deployment, and it must stay on: the server
+        # exposes six writing tools, and MCP calls do not pass through the `execute` approval
+        # gate. `headers_env` cannot serve here — the deployment offers no `client_credentials`
+        # grant, so no static key exists to put in one. See `backend/dataverse_auth.py`.
+        "oauth": True,
     },
 }
 
@@ -145,9 +150,25 @@ def _get_or_create_mcp_client(server_names: Sequence[str]) -> MCPAdapter:
     if bundle not in _mcp_clients:
         server_name = bundle[0]
         config = _resolve_mcp_server_config(server_name)
+        # **Never interactive.** This runs while a graph is being built, so a deployment the
+        # researcher has not signed in to must fail in milliseconds and be reported as an
+        # unavailable service — the path `_mark_mcp_unavailable` already handles — rather than
+        # block the turn behind a browser prompt nobody can see. Setup's Sign in button is the
+        # only caller allowed to start a login.
+        auth = None
+        if config.pop("oauth", False):
+            from backend.dataverse_auth import for_runtime, signed_in
+
+            # **Gated on a stored token, not on the provider's own refusal.** `OAuth` performs
+            # dynamic client registration *before* it asks the redirect handler for a browser, so
+            # attaching it while signed out registers a fresh OAuth client on the researcher's
+            # Horizon account on every launch. Without a token there is nothing to send, so send
+            # nothing: the 401 arrives immediately and `_mark_mcp_unavailable` reports it.
+            auth = for_runtime() if signed_in() else None
         transport = StreamableHttpTransport(
             config["url"],
             headers=config.get("headers"),
+            auth=auth,
         )
         # `mode="auto"` negotiates the modern stateless protocol and falls back for a legacy
         # deployment. The response cache honors the server's discovery TTL; keeping the adapter
