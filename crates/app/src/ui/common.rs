@@ -111,26 +111,6 @@ pub(crate) fn horizontal_drag_offset(
 }
 
 
-/// Images in one group, everything else in another, each keeping its listing order.
-///
-/// **The boundary the researcher asked for**, in their words: *"I want to group images and in
-/// another group other files."* §152's gallery grouped by the folder the agent chose, which was
-/// right about structure and wrong about kind — a folder holding seven plots and a summary CSV
-/// put the CSV in the middle of the strip, and the strip is the thing you flick through looking
-/// for a figure.
-///
-/// `Kind::Figure` is the test rather than the extension, so this cannot disagree with the
-/// thumbnail renderer about what an image is: both ask the same enum.
-pub(crate) fn split_images(
-    outputs: &[workspace::Output],
-) -> (Vec<workspace::Output>, Vec<workspace::Output>) {
-    outputs
-        .iter()
-        .cloned()
-        .partition(|output| output.kind == workspace::Kind::Figure)
-}
-
-
 impl Workbench {
     /// The bordered box a filter composer sits in.
     ///
@@ -162,4 +142,96 @@ impl Workbench {
             .in_focus(|style| style.border_color(rgb(theme::accent())))
             .child(field)
     }
+}
+
+/// How many lines of a text file's own content a thumbnail reads.
+const TEXT_PREVIEW_LINES: usize = 12;
+
+/// Extensions read as plain text for a thumbnail, rather than shown as a bare glyph.
+///
+/// An allowlist rather than "try to read it and see what comes back": `workspace::head` reads
+/// line by line and a binary file's first few bytes are not reliably invalid UTF-8 — a PDF's
+/// own header and cross-reference table are plain ASCII — so sniffing content risks a tile full
+/// of PDF syntax rather than the icon PDFs still get. Real PDF rendering is a separate feature;
+/// this one is scoped to files a person would call "text".
+const TEXT_PREVIEW_EXTENSIONS: &[&str] = &[
+    "md", "txt", "py", "js", "jsx", "ts", "tsx", "json", "yaml", "yml", "toml", "rs", "go",
+    "java", "kt", "c", "cc", "cpp", "h", "hpp", "cs", "rb", "php", "swift", "css", "scss",
+    "html", "htm", "xml", "sh", "bash", "zsh", "ps1", "r", "sql", "log", "ini", "cfg", "conf",
+    "csv", "tsv", "env", "md", "rst", "tex", "bib", "makefile", "dockerfile", "gradle", "pom", "vbs", "lua", "pl"
+];
+
+/// The first few lines of a file's own content, for a thumbnail — `None` for anything not on
+/// [`TEXT_PREVIEW_EXTENSIONS`] or that fails to read as text (a spreadsheet saved with the wrong
+/// extension, say).
+///
+/// Lives here, not in `gallery_view.rs` or `chat.rs`, because both the Pinboard's tiles and the
+/// chat's attachment tiles use it — one shared function neither file owns, the same shape the
+/// sources-rendering split settled on.
+pub(crate) fn text_preview_lines(output: &workspace::Output) -> Option<Vec<String>> {
+    let extension = output
+        .path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if !TEXT_PREVIEW_EXTENSIONS.contains(&extension.as_str()) {
+        return None;
+    }
+    let text = workspace::head(&output.path, TEXT_PREVIEW_LINES).ok()?;
+    let lines: Vec<String> = text.lines().map(str::to_string).collect();
+    if lines.is_empty() {
+        return None;
+    }
+    Some(lines)
+}
+
+/// Truncate one preview line from the front — the opposite end from [`distinguishing_tail`],
+/// because a line of code or prose reads left to right and its start is what identifies it,
+/// unlike a filename sharing a long prefix with its siblings.
+fn truncate_line_head(line: &str, max_chars: usize) -> String {
+    if line.chars().count() <= max_chars || max_chars == 0 {
+        return line.to_string();
+    }
+    let keep = max_chars.saturating_sub(1);
+    format!("{}…", line.chars().take(keep).collect::<String>())
+}
+
+/// The preview's own font size. Named so [`preview_chars`] can stay in step with it — the
+/// column count this whole tile is about got left behind once already when this shrank from 9px
+/// to 6px and the width estimate below did not follow, so lines cut off with the tile's right
+/// half still empty.
+const PREVIEW_FONT_PX: f32 = 6.;
+
+/// How many monospace characters fit one preview line at a tile's width.
+///
+/// `0.6` is the rough advance-width-to-em-size ratio for the monospace stack `code_font()`
+/// picks per platform (Consolas, Menlo, DejaVu Sans Mono) — a fixed pixel divisor tuned for one
+/// font size silently stops matching reality the moment the size changes, which is exactly what
+/// left this tile filling only its left half.
+fn preview_chars(tile: f32) -> usize {
+    (((tile - 8.) / (PREVIEW_FONT_PX * 0.6)) as usize).max(6)
+}
+
+/// A small monospace snippet of a text file's own content, sized to fill a tile's media box —
+/// the same slot an image thumbnail fills, so a `.py` or `.md` reads as "here is the file" the
+/// way a plot already does, rather than a bare glyph standing in for it.
+pub(crate) fn text_preview_tile(lines: &[String], tile: f32) -> gpui::AnyElement {
+    let chars_per_line = preview_chars(tile);
+    let mut block = div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .h_full()
+        .min_w_0()
+        .overflow_hidden()
+        .p_1()
+        .gap(px(1.))
+        .font(ui::code_font())
+        .text_color(rgb(theme::text_muted()))
+        .text_size(px(PREVIEW_FONT_PX));
+    for line in lines {
+        block = block.child(div().min_w_0().child(truncate_line_head(line, chars_per_line)));
+    }
+    block.into_any_element()
 }

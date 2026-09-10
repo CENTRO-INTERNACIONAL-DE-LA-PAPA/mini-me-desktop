@@ -187,19 +187,12 @@ pub struct Settings {
     /// The mechanism changed with §139 — it used to be `git fetch && git checkout <pin>` — and
     /// the reason did not, so this comment is the one place the old sentence survived.
     pub backend_dir_owned: bool,
-    /// Whether the Outputs panel shows `WHAT RAN` and `WHAT WAS CLAIMED`.
+    /// Whether the Outputs panel shows `WHAT RAN`.
     ///
     /// **Off by default, and kept rather than deleted.** *"I dont like to see in the ui the What
     /// was claimed and the what ran because that noise to users."* — true for a researcher, who
-    /// opens this app to read an answer and not to audit a run. But these two are the only things
-    /// that compare what was *said* against what is on disk: the claims recorder found two
-    /// fabricated-DOI cases (§288, §298), and the first time it did I read its verdict as a false
-    /// positive and shipped on that reading. A diagnostic with that record is not one to remove
-    /// because it is usually quiet.
-    ///
-    /// So: hidden, not gone. The cost of being wrong in each direction decides the default — a
-    /// panel nobody wanted is noise every day, and a panel nobody can reach is a fabricated
-    /// citation in a paper.
+    /// opens this app to read an answer and not to audit a run. Hidden, not gone: a researcher
+    /// debugging a command that wrote somewhere unexpected can still turn it back on.
     ///
     /// **Nothing here gates the recovery of files.** The offer to fetch what a run wrote outside
     /// the conversation used to live inside the `WHAT RAN` modal; it now sits on the answer that
@@ -826,8 +819,8 @@ mod tests {
         // open with all three panels shut.
         assert!(settings.sidebar_open && settings.panel_open && settings.road_open);
         // **And this one stays off.** Every settings.toml in existence predates the field, and
-        // the point of adding it was to stop showing `WHAT RAN` and `WHAT WAS CLAIMED` to people
-        // who never asked for them — so a bare `#[serde(default)]`, and no `yes()` (§301).
+        // the point of adding it was to stop showing `WHAT RAN` to people who never asked for it
+        // — so a bare `#[serde(default)]`, and no `yes()` (§301).
         assert!(
             !settings.run_record,
             "an existing install must upgrade into the quiet panel, not out of it"
