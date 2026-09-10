@@ -4148,6 +4148,37 @@ impl Workbench {
     /// speed and wrong after an update: the Python overlay lives in that process's memory, so a
     /// newly-pulled app kept talking to a server holding the previous one — with no symptom
     /// except a feature that did nothing (docs §79).
+    /// Rebuild the agent graph and refresh which research services answered.
+    ///
+    /// Separate from [`Self::warm_up`], which also waits for the backend to exist and checks for
+    /// an app update — neither of which applies to a backend that has just been restarted on
+    /// purpose.
+    fn refresh_research_services(&mut self, cx: &mut Context<Self>) {
+        self.warming = true;
+        let mut graph = self.sidecar.warm_graph();
+        cx.spawn(async move |this, cx| {
+            let outcome = graph.next().await;
+            let _ = this.update(cx, |workbench, cx| {
+                workbench.warming = false;
+                if let Some(Ok(report)) = outcome {
+                    let now = report.unavailable();
+                    let changed = workbench.unavailable_mcps != now;
+                    workbench.unavailable_mcps = now;
+                    // Opened only on news. Everything answering closes it — the direction that
+                    // matters after a sign-in — and an unchanged outage does not reopen a notice
+                    // the researcher has already read and dismissed.
+                    if workbench.unavailable_mcps.is_empty() {
+                        workbench.mcp_notice_open = false;
+                    } else if changed {
+                        workbench.mcp_notice_open = true;
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn restart_backend(&mut self, cx: &mut Context<Self>) {
         if self.streaming {
             self.say("can't restart the backend mid-turn", cx);
@@ -4185,6 +4216,12 @@ impl Workbench {
                 workbench.conversations_loaded = false;
                 workbench.refresh_conversations(cx);
                 workbench.run_preflight(cx);
+                // **And ask again which research services answered.** `unavailable_mcps` was
+                // written only by `warm_up`, which runs once at startup, so a restart left the
+                // notice reporting whatever had been true when the app opened. A researcher who
+                // signed in to CIP Dataverse and restarted saw the same "unavailable" modal
+                // describing a state that no longer existed — and had no way to make it recheck.
+                workbench.refresh_research_services(cx);
                 cx.notify();
             });
         })

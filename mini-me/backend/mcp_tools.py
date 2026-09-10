@@ -141,7 +141,17 @@ def _resolve_mcp_server_config(server_name: str) -> dict[str, Any]:
     return config
 
 
-def _get_or_create_mcp_client(server_names: Sequence[str]) -> MCPAdapter:
+def _get_or_create_mcp_client(
+    server_names: Sequence[str], auth: Any | None = None
+) -> MCPAdapter:
+    """Build (or reuse) the one adapter for this deployment.
+
+    `auth` is **passed in rather than decided here**. Choosing it means reading the token store,
+    and this runs on the event loop during a graph build, where langgraph's `blockbuster` guard
+    turns filesystem access into a raised `BlockingError`. Deciding it here is what reported
+    Dataverse as unavailable on every launch whether or not the researcher had signed in — the
+    reasoning is in `dataverse_auth.auth_for_runtime`.
+    """
     bundle = _normalize_mcp_server_names(server_names)
     if len(bundle) != 1:
         raise ValueError(
@@ -150,21 +160,7 @@ def _get_or_create_mcp_client(server_names: Sequence[str]) -> MCPAdapter:
     if bundle not in _mcp_clients:
         server_name = bundle[0]
         config = _resolve_mcp_server_config(server_name)
-        # **Never interactive.** This runs while a graph is being built, so a deployment the
-        # researcher has not signed in to must fail in milliseconds and be reported as an
-        # unavailable service — the path `_mark_mcp_unavailable` already handles — rather than
-        # block the turn behind a browser prompt nobody can see. Setup's Sign in button is the
-        # only caller allowed to start a login.
-        auth = None
-        if config.pop("oauth", False):
-            from backend.dataverse_auth import for_runtime, signed_in
-
-            # **Gated on a stored token, not on the provider's own refusal.** `OAuth` performs
-            # dynamic client registration *before* it asks the redirect handler for a browser, so
-            # attaching it while signed out registers a fresh OAuth client on the researcher's
-            # Horizon account on every launch. Without a token there is nothing to send, so send
-            # nothing: the 401 arrives immediately and `_mark_mcp_unavailable` reports it.
-            auth = for_runtime() if signed_in() else None
+        config.pop("oauth", None)
         transport = StreamableHttpTransport(
             config["url"],
             headers=config.get("headers"),
@@ -529,12 +525,49 @@ def _make_mcp_tools_resilient(tools: list[Any]) -> list[Any]:
     return tools
 
 
+_sign_in_marks: dict[tuple[str, ...], str] = {}
+
+
+async def _sign_in_moved(bundle: tuple[str, ...]) -> bool:
+    """Whether the stored sign-in changed since this bundle's failure was cached.
+
+    Only asked of deployments that have a sign-in at all: for a public server the answer is
+    always no, and asking would put a `stat` on every discovery for nothing.
+
+    **Compares only.** The mark is taken where the failure is recorded, not here — taking it on
+    the read path meant the first comparison had nothing to compare against, read as a change,
+    and retried an unreachable deployment on every single request. That is the behaviour the
+    cache exists to prevent, and it passed the "signing in works" assertion while doing it.
+    """
+    if not MCP_SERVER_CONFIGS[bundle[0]].get("oauth"):
+        return False
+    from backend.dataverse_auth import sign_in_changed
+
+    changed, _current = await sign_in_changed(_sign_in_marks.get(bundle))
+    return changed
+
+
+async def _remember_sign_in(bundle: tuple[str, ...]) -> None:
+    """Record which sign-in was in force when a failure was cached."""
+    if not MCP_SERVER_CONFIGS[bundle[0]].get("oauth"):
+        return
+    from backend.dataverse_auth import sign_in_changed
+
+    _, current = await sign_in_changed(None)
+    _sign_in_marks[bundle] = current
+
+
 async def get_mcp_tools(server_names: Sequence[str]) -> list[Any]:
     bundle = _normalize_mcp_server_names(server_names)
     # Only failures are held here. Successful discovery goes through FastMCP's TTL-aware response
     # cache so a server can change its catalog without requiring an app restart.
     if _mcp_tools_cache.get(bundle) == []:
-        return _mcp_tools_cache[bundle]
+        # **Unless the researcher has signed in since.** The sign-in happens in another process,
+        # so it cannot clear this cache; without the check, a correct sign-in kept reporting the
+        # service as unavailable until the whole backend was restarted.
+        if not await _sign_in_moved(bundle):
+            return _mcp_tools_cache[bundle]
+        _mcp_tools_cache.pop(bundle, None)
 
     if bundle not in _mcp_tools_locks:
         _mcp_tools_locks[bundle] = asyncio.Lock()
@@ -544,7 +577,16 @@ async def get_mcp_tools(server_names: Sequence[str]) -> list[Any]:
             return _mcp_tools_cache[bundle]
 
         try:
-            adapter = _get_or_create_mcp_client(bundle)
+            # **Never interactive.** Resolved before the client is built, on a thread, so a
+            # researcher who has not signed in fails in milliseconds and is reported as an
+            # unavailable service rather than blocked behind a browser prompt nobody can see.
+            # Setup's Sign in button is the only caller allowed to start a login.
+            auth = None
+            if MCP_SERVER_CONFIGS[bundle[0]].get("oauth"):
+                from backend.dataverse_auth import auth_for_runtime
+
+                auth = await auth_for_runtime()
+            adapter = _get_or_create_mcp_client(bundle, auth)
             loaded = await adapter.list_tools(cache_mode="use")
             if not loaded:
                 raise ValueError("MCP server returned no tools")
@@ -556,6 +598,11 @@ async def get_mcp_tools(server_names: Sequence[str]) -> list[Any]:
             # a successful sign-in.
             _mark_mcp_unavailable(bundle, error)
             _mcp_tools_cache[bundle] = []
+            await _remember_sign_in(bundle)
+            # The adapter goes with it. One built while signed out holds `auth=None` for the
+            # life of the process, so keeping it would make the retry above discover nothing
+            # even once the sign-in is valid.
+            _mcp_clients.pop(bundle, None)
             return _mcp_tools_cache[bundle]
         _mcp_tools_cache.pop(bundle, None)
         for server_name in bundle:
