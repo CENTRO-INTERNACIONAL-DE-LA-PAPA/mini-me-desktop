@@ -120,9 +120,10 @@ def test_adapter_uses_stateless_negotiation_and_server_ttl_cache(monkeypatch) ->
     captured = {}
 
     class Transport:
-        def __init__(self, url, *, headers=None):
+        def __init__(self, url, *, headers=None, auth=None):
             captured["url"] = url
             captured["headers"] = headers
+            captured["auth"] = auth
 
     class Client:
         def __init__(self, transport, **kwargs):
@@ -143,6 +144,10 @@ def test_adapter_uses_stateless_negotiation_and_server_ttl_cache(monkeypatch) ->
     assert isinstance(adapter, Adapter)
     assert captured["url"] == "https://agrovoc.fastmcp.app/mcp"
     assert captured["headers"] is None
+    # A public deployment carries no credentials of any kind. AGROVOC needs no sign-in, and
+    # attaching an OAuth provider to it would register a client against a server that never
+    # asked for one — see `test_dataverse_sign_in.py`.
+    assert captured["auth"] is None
     assert captured["client"]["mode"] == "auto"
     assert captured["client"]["cache"] is True
 

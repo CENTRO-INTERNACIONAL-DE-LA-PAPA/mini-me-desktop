@@ -46,7 +46,7 @@ use ui::common::horizontal_drag_offset;
 use ui::provenance_view::{link_for, provenance_svg};
 use composer::{Composer, ComposerEvent};
 use protocol::{AgentRef, ApprovalRequest, Bucket, Project, TurnEvent};
-use sidecar::Sidecar;
+use sidecar::{Restarting, Sidecar};
 
 // ---- Palette (placeholder; align with the web app's tokens in P6.3) --------
 
@@ -4156,7 +4156,21 @@ impl Workbench {
         self.status = "restarting the backend…".into();
         let mut done = self.sidecar.restart_backend();
         cx.spawn(async move |this, cx| {
-            let outcome = done.next().await;
+            // **Drained rather than awaited once.** A restart during a dependency change waits
+            // for an install that can run for minutes; the status line carries what it is doing,
+            // so the wait explains itself instead of looking like the hang it replaced.
+            let outcome = loop {
+                match done.next().await {
+                    Some(Restarting::Working(line)) => {
+                        let _ = this.update(cx, |workbench, cx| {
+                            workbench.status = line;
+                            cx.notify();
+                        });
+                    }
+                    Some(Restarting::Done(outcome)) => break Some(outcome),
+                    None => break None,
+                }
+            };
             let _ = this.update(cx, |workbench, cx| {
                 match outcome {
                     Some(Ok(status)) => {
