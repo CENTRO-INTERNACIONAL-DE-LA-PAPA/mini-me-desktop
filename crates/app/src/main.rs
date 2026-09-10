@@ -7451,8 +7451,8 @@ impl Render for Workbench {
             .w_full()
             .mb_4()
             .when(self.sidebar_open, |body| {
-                body.child(self.rail(cx))
-                    .child(self.divider(Divider::Sidebar, cx))
+                body.child(self.sidebar_panel(cx))
+                    .child(self.pane_divider(Divider::Sidebar, cx))
             })
             .when(!self.sidebar_open, |body| {
                 body.child(
@@ -7523,7 +7523,7 @@ impl Render for Workbench {
         // The right-hand slot belongs to the research panel alone. Setup used to take it,
         // which meant diagnosing a problem hid the outputs you were diagnosing it about.
         body = if self.panel_open {
-            body.child(self.divider(Divider::Panel, cx))
+            body.child(self.pane_divider(Divider::Panel, cx))
                 .child(self.artifacts_panel(cx))
         } else {
             body.child(
