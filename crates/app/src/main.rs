@@ -4361,7 +4361,29 @@ impl Workbench {
         Some(subagent::turn(&command.name, &command.prompt, dispatch))
     }
 
+    /// Name the conversation and let the sidebar know it exists, the moment the backend has
+    /// actually assigned it a thread id — which happens before the first token streams back,
+    /// not after the whole answer does. Checked on every event rather than one specific one:
+    /// `sidecar.thread_id()` reads a mutex `run_turn` sets before it emits anything past
+    /// "creating thread…", so whichever event arrives first after that is when this fires.
+    ///
+    /// Safe to call repeatedly — `pending_title.take()` only succeeds once, so a conversation
+    /// already named this turn is left alone.
+    fn ensure_conversation_created(&mut self, cx: &mut Context<Self>) {
+        if self.pending_title.is_none() {
+            return;
+        }
+        let Some(thread_id) = self.sidecar.thread_id() else {
+            return;
+        };
+        if let Some(title) = self.pending_title.take() {
+            self.sidecar.rename_conversation(thread_id, title);
+            self.refresh_conversations(cx);
+        }
+    }
+
     fn apply(&mut self, event: TurnEvent, cx: &mut Context<Self>) {
+        self.ensure_conversation_created(cx);
         match event {
             TurnEvent::Status(status) => self.status = status,
             // Recorded by the sidecar as it passes; nothing here needs it, and putting a
@@ -5627,13 +5649,10 @@ impl Workbench {
         // A turn stopped or failed still gets recorded — what was consulted before it stopped is
         // part of the enquiry, and §63 already settled that a cut-off turn is worth keeping.
         self.save_provenance();
-        // The thread id does not exist until the turn has run, which is why the title
-        // waits until here rather than being set when the prompt was typed.
-        if let (Some(title), Some(thread_id)) =
-            (self.pending_title.take(), self.sidecar.thread_id())
-        {
-            self.sidecar.rename_conversation(thread_id, title);
-        }
+        // Ordinarily already done by `ensure_conversation_created`, the moment the thread id
+        // came back — this is only the backstop for a turn that errored before its first event
+        // reached `apply` at all, the one path that would otherwise leave `pending_title` unset.
+        self.ensure_conversation_created(cx);
         // Idempotent confirmation on the UI side; the model-facing copy happened before streaming.
         self.adopt_pending(cx);
         self.refresh_conversations(cx);
@@ -7992,8 +8011,8 @@ impl Render for Workbench {
             .w_full()
             .mb_4()
             .when(self.sidebar_open, |body| {
-                body.child(self.rail(cx))
-                    .child(self.divider(Divider::Sidebar, cx))
+                body.child(self.sidebar_panel(cx))
+                    .child(self.pane_divider(Divider::Sidebar, cx))
             })
             .when(!self.sidebar_open, |body| {
                 body.child(
@@ -8064,7 +8083,7 @@ impl Render for Workbench {
         // The right-hand slot belongs to the research panel alone. Setup used to take it,
         // which meant diagnosing a problem hid the outputs you were diagnosing it about.
         body = if self.panel_open {
-            body.child(self.divider(Divider::Panel, cx))
+            body.child(self.pane_divider(Divider::Panel, cx))
                 .child(self.artifacts_panel(cx))
         } else {
             body.child(

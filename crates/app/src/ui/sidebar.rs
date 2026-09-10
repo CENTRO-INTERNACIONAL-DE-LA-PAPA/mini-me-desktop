@@ -51,7 +51,7 @@ impl Workbench {
     /// *which* edge is being dragged, and the root's mouse-move does the arithmetic. Tracking
     /// the drag on the root rather than on this strip is what keeps it working when the pointer
     /// outruns four pixels, which it does immediately.
-    pub(crate) fn divider(&self, edge: Divider, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn pane_divider(&self, edge: Divider, cx: &mut Context<Self>) -> impl IntoElement {
         let id = match edge {
             Divider::Sidebar => "divider-sidebar",
             Divider::Panel => "divider-panel",
@@ -274,7 +274,7 @@ impl Workbench {
     /// asked, so a 64px rail with a decorative glyph was all there was and every session
     /// looked like the first one. Past work was not lost — it was unreachable, which for
     /// the researcher is the same thing (docs §48).
-    pub(crate) fn rail(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn sidebar_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let current = self.sidecar.thread_id();
         // Which project (if any) an in-flight draft belongs to — set by `new_thread_in`
         // before a thread exists, so it is what tells the draft row where to sit: under the

@@ -520,61 +520,6 @@ impl Workbench {
 
 
 impl Workbench {
-    /// Who was consulted for this answer: `academic_researcher → theorizer → data_analysis`.
-    ///
-    /// How long it took and how many steps ran now live in [`Workbench::turn_footer`], shown
-    /// under every answer rather than repeated here too.
-    pub(crate) fn answer_chips(&self, message: &Message) -> impl IntoElement {
-        /// Past this the row wraps into a paragraph and stops being a glance.
-        const MAX_PILLS: usize = 6;
-
-        let path = consulted(&message.agents);
-        let mut row = div()
-            .flex()
-            .flex_row()
-            .flex_wrap()
-            .items_center()
-            .gap_1()
-            .w_full()
-            .min_w_0()
-            .text_sm();
-
-        for (at, name) in path.iter().take(MAX_PILLS).enumerate() {
-            if at > 0 {
-                row = row.child(
-                    div()
-                        .flex_none()
-                        .text_color(rgb(theme::text_muted()))
-                        .child("→"),
-                );
-            }
-            row = row.child(
-                div()
-                    .flex_none()
-                    .px_2()
-                    .py_1()
-                    .rounded_full()
-                    .bg(rgb(theme::elevated()))
-                    .border_1()
-                    .border_color(rgb(theme::border()))
-                    .text_color(rgb(specialist_ink(name).unwrap_or(theme::text_muted())))
-                    .child(name.replace('_', " ")),
-            );
-        }
-        if path.len() > MAX_PILLS {
-            row = row.child(
-                div()
-                    .flex_none()
-                    .text_color(rgb(theme::text_faint()))
-                    .child(format!("+{}", path.len() - MAX_PILLS)),
-            );
-        }
-        row
-    }
-}
-
-
-impl Workbench {
     /// Steps and elapsed time for one answer — shown under every assistant turn, always, not
     /// only the latest one and not only once the turn has finished. Replaces the old activity
     /// block's disclosure and the finished-only export row's word count in one line.
@@ -643,7 +588,9 @@ impl Workbench {
                 div()
                     .id(SharedString::from(format!("steps-{index}")))
                     .flex_none()
-                    .hover(|style| style.text_color(rgb(theme::accent())).cursor_pointer())
+                    .text_color(rgb(theme::accent()))
+                    .underline()
+                    .hover(|style| style.cursor_pointer())
                     .child(format!(
                         "{} {steps} {}",
                         if message.steps_expanded { "▾" } else { "▸" },
@@ -1029,12 +976,6 @@ impl Workbench {
             .gap_2()
             .p_2()
             .when(asked, |block| block.items_end());
-        // The summary stays above the answer: it answers who did the work without requiring
-        // the researcher to expand anything. Steps and elapsed time now run below the answer
-        // instead, in `turn_footer`.
-        if !asked && !message.agents.is_empty() {
-            block = block.child(self.answer_chips(message));
-        }
         if waiting {
             block = block.child(div().text_color(rgb(theme::text_muted())).text_sm().child("…"));
         }

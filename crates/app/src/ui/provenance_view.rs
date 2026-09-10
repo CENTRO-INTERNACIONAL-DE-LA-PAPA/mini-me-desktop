@@ -435,48 +435,6 @@ pub(crate) fn graph_legend() -> impl IntoElement {
 }
 
 
-/// What kind of work a specialist does, as a colour.
-///
-/// **Two colours, and `None` for anything else.** The design is explicit that a colour per
-/// specialist is a legend nobody memorises; the distinction worth carrying is between work that
-/// goes and reads, and work that touches the data. Matched on the name because that is all the
-/// chip has — a heuristic, and one whose worst outcome is a chip in the ordinary text colour
-/// rather than a wrong claim. A specialist this does not recognise is left uncoloured on purpose:
-/// guessing which of two kinds a new one is would be the mistake.
-pub(crate) fn specialist_ink(name: &str) -> Option<u32> {
-    let name = name.to_ascii_lowercase();
-    if ["search", "research", "literature", "paper", "citation", "theor"]
-        .iter()
-        .any(|mark| name.contains(mark))
-    {
-        return Some(theme::running());
-    }
-    if ["data", "analy", "clean", "profil", "stat"]
-        .iter()
-        .any(|mark| name.contains(mark))
-    {
-        return Some(theme::success());
-    }
-    None
-}
-
-
-/// The specialists a turn consulted, in order, with a run of the same one collapsed.
-///
-/// `a → a → b` is one visit to `a` then one to `b`; `a → b → a` keeps both visits to `a`, because
-/// coming *back* to a specialist after another is the loop the whole provenance feature exists to
-/// show (§73). Only consecutive repeats collapse.
-pub(crate) fn consulted(agents: &[AgentTrace]) -> Vec<String> {
-    let mut path: Vec<String> = Vec::new();
-    for agent in agents {
-        if path.last().map(String::as_str) != Some(agent.name.as_str()) {
-            path.push(agent.name.clone());
-        }
-    }
-    path
-}
-
-
 impl Workbench {
     /// The record of this enquiry: what was consulted, in what order, and where it doubled back.
     ///
