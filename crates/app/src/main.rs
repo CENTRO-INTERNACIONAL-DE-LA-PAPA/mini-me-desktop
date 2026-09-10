@@ -1951,12 +1951,17 @@ impl Message {
 
     /// Nothing happened here worth keeping. A turn that produced only tool calls
     /// still has activity, so "empty body" alone is not enough to drop a message —
-    /// that would throw away the only record of a purely delegated turn.
+    /// that would throw away the only record of a purely delegated turn. Likewise a turn
+    /// that produced only a file and no prose: dropping it would throw the file away with it.
     fn is_silent(&self) -> bool {
         // A stopped turn counts as content even with nothing in it: "you stopped this" is
         // the whole record of what happened, and pruning it would leave a question that
         // appears never to have been answered for no stated reason (docs §63).
-        self.body.is_empty() && self.steps.is_empty() && self.agents.is_empty() && !self.stopped
+        self.body.is_empty()
+            && self.steps.is_empty()
+            && self.agents.is_empty()
+            && self.outputs.is_empty()
+            && !self.stopped
     }
 
     /// The rendered words Select All should copy when this row is off screen (docs §156).
@@ -4837,9 +4842,6 @@ impl Workbench {
                     // dataset the researcher chose while reading a different search.
                     workbench.dataset_picks.clear();
                     workbench.reload_datasets();
-                    // Figures this conversation produced are still on disk, so they can
-                    // be shown again — history the transcript alone cannot carry.
-                    workbench.collect_plots();
                     // Same argument, for the same reason: the record of what was consulted is
                     // on disk because the stream it came from is over (docs §73).
                     if let Some(dir) = workbench.thread_workspace() {
@@ -4848,7 +4850,29 @@ impl Workbench {
                         // count next to the time was going missing on every reopened
                         // conversation because only the timing survived, not the labels.
                         workbench.restore_traces();
+                        // Which turn actually produced which file, read back from the same
+                        // provenance record `restore_traces` just used — and *before*
+                        // `collect_plots` below, which must run second: reported as *"all the
+                        // attachments in chat are appending to the final message instead of
+                        // their own message"*, and that is exactly what `collect_plots` alone
+                        // does here, because on a reload nothing has attributed anything yet, so
+                        // its "give it to the most recent answer" rule (correct for a straggling
+                        // background job landing minutes late, live) swept every figure the whole
+                        // conversation ever produced onto its last message instead.
+                        workbench.restore_outputs();
                     }
+                    // Figures this conversation produced are still on disk, so they can be shown
+                    // again — history the transcript alone cannot carry. Runs after
+                    // `restore_outputs`, so its own "attribute to the most recent answer" rule
+                    // only ever catches genuine stragglers, the same as it does live.
+                    workbench.collect_plots();
+                    // A turn kept for `restore_outputs`'s sake — see `decode_stored_message` —
+                    // is only worth showing once outputs and steps have had their chance to land
+                    // on it. Pruned now, the same rule `finish_turn` applies live, so it does not
+                    // linger as an empty bubble in the transcript.
+                    workbench
+                        .transcript
+                        .retain(|message| message.role != "mini-me" || !message.is_silent());
                     // **And pick up any long run still going.** A theorizer or DataVoyager task
                     // lives on Asta's own service, keyed by a task id the thread's artifacts
                     // carry — so closing the window never stopped the work, only our watching of
@@ -5884,6 +5908,62 @@ impl Workbench {
             message.steps = steps;
             message.agents = agents;
             message.steps_expanded = false;
+        }
+    }
+
+    /// Read back which turn actually produced which file, using the provenance record's own
+    /// timestamps — the same tail-aligned turn-to-message pairing [`Self::turn_for`] already
+    /// gives `restore_traces`, applied to outputs instead of steps.
+    ///
+    /// **Why this has to run before `collect_plots`.** That function's whole job is "attribute a
+    /// file nobody has claimed yet to the most recent answer" — correct for the live case it was
+    /// built for, a background job finishing minutes after its own turn ended while every other
+    /// turn already has its own outputs recorded. On a reload nothing has recorded anything yet
+    /// (`restore_traces` reads back steps, never outputs), so `collect_plots`'s same rule swept
+    /// every file the whole conversation ever produced onto its *last* message — reported as
+    /// *"all the attachments in chat are appending to the final message instead of their own
+    /// message"*, and only on a reopened conversation, which is exactly this ordering gap.
+    ///
+    /// A file's mtime is a real filesystem timestamp meant for ordering — already used to sort
+    /// `produced` below — unlike a command's own display-only `at` string, which is documented
+    /// elsewhere as unfit for comparison. Bucketing by "the last turn whose `sent_at` is at or
+    /// before this file's mtime" is safe for exactly that reason.
+    fn restore_outputs(&mut self) {
+        let Some(dir) = self.thread_workspace() else {
+            return;
+        };
+        let mut produced: Vec<workspace::Output> = workspace::outputs(&dir)
+            .into_iter()
+            .flat_map(|(_, items)| items)
+            .collect();
+        produced.sort_by_key(|output| output.modified);
+
+        let assistant_indices: Vec<usize> = self
+            .transcript
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| message.role != "you")
+            .map(|(index, _)| index)
+            .collect();
+        if assistant_indices.is_empty() {
+            return;
+        }
+
+        for output in produced {
+            let modified_ms = output
+                .modified
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_millis() as u64)
+                .unwrap_or(0);
+            let mut target = assistant_indices[0];
+            for &index in &assistant_indices {
+                match self.turn_for(index) {
+                    Some(turn) if turn.sent_at <= modified_ms => target = index,
+                    Some(_) => break,
+                    None => continue,
+                }
+            }
+            self.transcript[target].outputs.push(output);
         }
     }
 

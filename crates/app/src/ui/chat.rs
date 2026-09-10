@@ -1665,6 +1665,7 @@ impl Workbench {
         let opening = set.to_vec();
         let is_image = output.kind == workspace::Kind::Figure;
         let (glyph, ink) = file_mark(&output.path);
+        let text_lines = (!is_image).then(|| text_preview_lines(output)).flatten();
 
         let scrim = |more: usize| {
             div()
@@ -1695,6 +1696,20 @@ impl Workbench {
                         .rounded_md()
                         .object_fit(gpui::ObjectFit::Contain),
                 )
+                .when_some(more, |media, more| media.child(scrim(more)))
+                .into_any_element()
+        } else if let Some(lines) = &text_lines {
+            // A file's own text fills the same slot an image would — "here is the file",
+            // not a glyph standing in for it.
+            div()
+                .relative()
+                .w_full()
+                .h(px(MEDIA))
+                .flex_none()
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(theme::border()))
+                .child(text_preview_tile(lines, TILE))
                 .when_some(more, |media, more| media.child(scrim(more)))
                 .into_any_element()
         } else {

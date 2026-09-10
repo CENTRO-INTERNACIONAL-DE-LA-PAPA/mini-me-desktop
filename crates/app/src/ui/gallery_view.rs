@@ -641,183 +641,6 @@ impl Workbench {
     }
 }
 
-impl Workbench {
-    /// A capped grid of outputs, with the last visible tile counting the rest.
-    ///
-    /// **One renderer for images and for files**, because the researcher asked for the same
-    /// treatment on both and the difference is only what a tile draws inside itself. §153's
-    /// sideways strip is gone: it spanned the whole transcript, one folder of seven files claimed
-    /// a band of the conversation wider than the answer above it, and the phone gallery it was
-    /// being compared against is a compact block you flick past. Their words: *"the grouping
-    /// occupies too much space in the conversation (too wide) … less invasive and functions the
-    /// same."*
-    ///
-    /// Fixed-width tiles rather than a fraction of the container, which is what makes it narrow:
-    /// two per row means the block is exactly `2 × tile + gap` and stops there, whatever the panel
-    /// or the window is doing.
-    /// Just the tiles. The heading used to live here too, in its own compact label above the
-    /// grid, beside a "click to open" hint; both are gone now — the heading is a
-    /// `pinboard_section` title built by the caller, and every title is just the title, nothing
-    /// beside it.
-    pub(crate) fn output_grid(
-        &self,
-        scope: &str,
-        items: &[workspace::Output],
-        compact: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let tile = if compact {
-            GRID_TILE_COMPACT
-        } else {
-            GRID_TILE_ROOMY
-        };
-        let (shown, hidden) = image_grid_shape(items.len());
-
-        let mut grid = div().flex().flex_col().gap_2().flex_none();
-        for row_start in (0..shown).step_by(GRID_COLUMNS) {
-            let mut row = div().flex().flex_row().gap_2().flex_none();
-            for at in row_start..(row_start + GRID_COLUMNS).min(shown) {
-                // The count rides on the *last visible* tile, and only when something is behind
-                // it. Clicking it opens that file; the rest are then one arrow away, which is
-                // what makes a capped grid honest rather than lossy.
-                let more = (hidden > 0 && at + 1 == shown).then_some(hidden);
-                row = row.child(self.output_grid_tile(
-                    format!("output-tile-{scope}-{at}"),
-                    items,
-                    at,
-                    tile,
-                    more,
-                    cx,
-                ));
-            }
-            grid = grid.child(row);
-        }
-        grid
-    }
-
-}
-
-impl Workbench {
-    /// One tile: a picture for a figure, a glyph and a name for anything else.
-    ///
-    /// **No filename on an image tile.** The picture identifies itself, the modal's header names
-    /// it, and a caption under every thumbnail was half of what made the old strip feel like
-    /// furniture. A data file is the opposite case — one CSV looks exactly like another — so those
-    /// tiles carry the name and the shape, which is the only thing that tells them apart.
-    ///
-    /// The name is shortened **here**, in Rust, rather than by asking the layout to truncate it.
-    /// `Label::ellipsis` needs a flex parent to grow within (§59), and a tile is a column of
-    /// fixed width — get that wrong and every name renders as a bare `…`, which is exactly what
-    /// §153's tiles did in the panel.
-    pub(crate) fn output_grid_tile(
-        &self,
-        id: String,
-        set: &[workspace::Output],
-        at: usize,
-        tile: f32,
-        more: Option<usize>,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let output = &set[at];
-        let opening = set.to_vec();
-        let media = tile * GRID_TILE_ASPECT;
-        let (glyph, ink) = file_mark(&output.path);
-        let shape = self.shape_of(output);
-        let is_image = output.kind == workspace::Kind::Figure;
-
-        let inside =
-            if is_image {
-                div()
-                    .relative()
-                    .w_full()
-                    .h(px(media))
-                    .flex_none()
-                    .child(
-                        img(output.path.clone())
-                            .w_full()
-                            .h_full()
-                            // `Contain`, not `Cover`: a photo crops acceptably and a chart does not.
-                            // Cropping the axes off a plot makes the thumbnail useless for choosing
-                            // between seven of them, which is the only job it has.
-                            .object_fit(gpui::ObjectFit::Contain),
-                    )
-                    .when_some(more, |media, more| {
-                        media.child(
-                            div()
-                                .absolute()
-                                .inset_0()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .bg(gpui::rgba(0x000000a6))
-                                .text_color(rgb(SCRIM_INK))
-                                .text_size(px(media_scrim_size(tile)))
-                                .child(format!("+{more}")),
-                        )
-                    })
-                    .into_any_element()
-            } else {
-                div()
-                    .relative()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap_1()
-                    .w_full()
-                    .h(px(media))
-                    .flex_none()
-                    .px_2()
-                    .child(ui::Icon::new(glyph).size(ui::IconSize::Large).colour(ink))
-                    .child(div().text_color(rgb(theme::text())).text_xs().child(
-                        distinguishing_tail(&output_filename(output), name_chars(tile)),
-                    ))
-                    .child(
-                        div()
-                            .text_color(rgb(theme::text_faint()))
-                            .text_size(px(11.))
-                            .child(shape.describe(output.bytes)),
-                    )
-                    .when_some(more, |media, more| {
-                        media.child(
-                            div()
-                                .absolute()
-                                .inset_0()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .bg(gpui::rgba(0x000000a6))
-                                .text_color(rgb(SCRIM_INK))
-                                .text_size(px(media_scrim_size(tile)))
-                                .child(format!("+{more}")),
-                        )
-                    })
-                    .into_any_element()
-            };
-
-        div()
-            .id(SharedString::from(id))
-            .flex()
-            .flex_col()
-            .flex_none()
-            .w(px(tile))
-            .overflow_hidden()
-            .rounded_lg()
-            .border_1()
-            .border_color(rgb(theme::border()))
-            .bg(rgb(if theme::is_light(&theme::current()) {
-                theme::elevated()
-            } else {
-                theme::surface()
-            }))
-            .hover(|style| style.border_color(rgb(theme::accent())).cursor_pointer())
-            .child(inside)
-            .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                workbench.preview = Preview::opening(opening.clone(), at);
-                cx.notify();
-            }))
-    }
-}
 
 /// One section of the Pinboard: a title, the same rule `outputs_section` used to draw above
 /// itself, and whatever this section's kind of artifact wants to show below that.
@@ -1608,6 +1431,182 @@ impl Workbench {
 }
 
 impl Workbench {
+    /// A capped grid of outputs, with the last visible tile counting the rest.
+    ///
+    /// One renderer for images, text previews, and everything else — the difference is only
+    /// what a tile draws inside itself. Fixed-width tiles rather than a fraction of the
+    /// container: two per row means the block is exactly `2 × tile + gap` and stops there,
+    /// whatever the panel or the window is doing.
+    pub(crate) fn output_grid(
+        &self,
+        scope: &str,
+        items: &[workspace::Output],
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let tile = if compact {
+            GRID_TILE_COMPACT
+        } else {
+            GRID_TILE_ROOMY
+        };
+        let (shown, hidden) = image_grid_shape(items.len());
+
+        // `w_full`, not `flex_none`: a flex-none column sizes to its widest child and then sits
+        // wherever the parent's own alignment leaves it, which is the left edge in a plain flex
+        // column. Left at the default `align-items: stretch` here (not `items_center`) so the
+        // "View More" button below — which sets no width of its own — still stretches to fill
+        // the section; each *row* of tiles centers itself individually instead, wrapped in its
+        // own full-width, `justify_center` strip.
+        let mut grid = div().flex().flex_col().gap_2().w_full();
+        for row_start in (0..shown).step_by(GRID_COLUMNS) {
+            let mut row = div().flex().flex_row().gap_2().flex_none();
+            for at in row_start..(row_start + GRID_COLUMNS).min(shown) {
+                // The count rides on the *last visible* tile, and only when something is behind
+                // it. Clicking it opens that file; the rest are then one arrow away, which is
+                // what makes a capped grid honest rather than lossy.
+                let more = (hidden > 0 && at + 1 == shown).then_some(hidden);
+                row = row.child(self.output_grid_tile(
+                    format!("output-tile-{scope}-{at}"),
+                    items,
+                    at,
+                    tile,
+                    more,
+                    cx,
+                ));
+            }
+            grid = grid.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .justify_center()
+                    .w_full()
+                    .child(row),
+            );
+        }
+
+        // Same "+N more" the last tile's scrim already offers, said in words too — a corner
+        // overlay on a capped grid is easy to miss, and this is the explicit way in, the same
+        // shape `open-all-sources` gives the Sources section.
+        if hidden > 0 {
+            let opening = items.to_vec();
+            grid = grid.child(
+                ui::Button::new(SharedString::from(format!("open-all-{scope}")))
+                    .icon(ui::Icon::new("icons/plus.svg"))
+                    .text("View More")
+                    .style(ui::ButtonStyle::Secondary)
+                    .alignment(Alignment::Center)
+                    .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                        workbench.preview = Preview::opening(opening.clone(), 0);
+                        cx.notify();
+                    })),
+            );
+        }
+
+        grid
+    }
+}
+
+impl Workbench {
+    /// One tile: a picture for a figure, a live text snippet for a text file, a bare glyph for
+    /// anything else. Square, same as the chat's own attachment tiles — no filename, no shape
+    /// or size caption underneath; the tile's content is the whole story, and the rest is one
+    /// click away in the Preview gallery.
+    pub(crate) fn output_grid_tile(
+        &self,
+        id: String,
+        set: &[workspace::Output],
+        at: usize,
+        tile: f32,
+        more: Option<usize>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let output = &set[at];
+        let opening = set.to_vec();
+        let is_image = output.kind == workspace::Kind::Figure;
+        let text_lines = (!is_image).then(|| text_preview_lines(output)).flatten();
+        let (glyph, ink) = file_mark(&output.path);
+
+        let scrim = |more: usize| {
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                // The tile's own corners are rounded, but its `overflow_hidden` clips to a
+                // rectangular bounds rather than the rounded shape — so an inset overlay needs
+                // its own matching radius, or it paints square corners over the tile's rounded
+                // ones.
+                .rounded_lg()
+                .bg(gpui::rgba(0x000000a6))
+                .text_color(rgb(SCRIM_INK))
+                .text_size(px(media_scrim_size(tile)))
+                .child(format!("+{more}"))
+        };
+
+        let inside = if is_image {
+            div()
+                .relative()
+                .w_full()
+                .h(px(tile))
+                .flex_none()
+                .child(
+                    img(output.path.clone())
+                        .w_full()
+                        .h_full()
+                        // `Contain`, not `Cover`: a photo crops acceptably and a chart does not.
+                        .object_fit(gpui::ObjectFit::Contain),
+                )
+                .when_some(more, |media, more| media.child(scrim(more)))
+                .into_any_element()
+        } else if let Some(lines) = &text_lines {
+            div()
+                .relative()
+                .w_full()
+                .h(px(tile))
+                .flex_none()
+                .child(text_preview_tile(lines, tile))
+                .when_some(more, |media, more| media.child(scrim(more)))
+                .into_any_element()
+        } else {
+            div()
+                .relative()
+                .flex()
+                .items_center()
+                .justify_center()
+                .w_full()
+                .h(px(tile))
+                .flex_none()
+                .child(ui::Icon::new(glyph).size(ui::IconSize::Large).colour(ink))
+                .when_some(more, |media, more| media.child(scrim(more)))
+                .into_any_element()
+        };
+
+        div()
+            .id(SharedString::from(id))
+            .flex()
+            .flex_col()
+            .flex_none()
+            .w(px(tile))
+            .overflow_hidden()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(theme::border()))
+            .bg(rgb(if theme::is_light(&theme::current()) {
+                theme::elevated()
+            } else {
+                theme::surface()
+            }))
+            .hover(|style| style.border_color(rgb(theme::accent())).cursor_pointer())
+            .child(inside)
+            .on_click(cx.listener(move |workbench, _event, _window, cx| {
+                workbench.preview = Preview::opening(opening.clone(), at);
+                cx.notify();
+            }))
+    }
+}
+
+impl Workbench {
     /// Everything a conversation produced, top to bottom: `What ran`, then `Files` — one flat
     /// grid holding every output together, images and everything else, whatever folder each came
     /// from. No longer split by folder or by kind: joined into one list for now, on the way to a
@@ -1652,13 +1651,13 @@ impl Workbench {
         if count > 0 {
             items.push(
                 pinboard_section(
-                    format!("Files · {count}"),
+                    format!("Files ({count})"),
                     self.output_grid("panel-files", &ordered_outputs, true, cx),
                 )
                 .into_any_element(),
             );
         }
-
+        
         if listing.as_ref().is_some_and(|listing| listing.truncated) {
             // The scan is intentionally bounded: an agent can create a virtualenv or unpack a
             // dataset under its workspace. Say when that protection bites, because a silent cap
@@ -1672,56 +1671,7 @@ impl Workbench {
             );
         }
 
-        if let Some(button) = self.open_workspace_button() {
-            items.push(button);
-        }
-
         items
-    }
-
-    /// Everything this conversation wrote, in one folder the researcher already owns.
-    /// This *is* "download all the documents": the files are in their own Documents
-    /// directory (`workspace.rs`), so there is nothing to package — the ask was only
-    /// ever for a way to get at them.
-    ///
-    /// Not a section of its own — it is a way *out* of the list rather than another output in
-    /// it, and it reaches anything beyond §143's deliberate scan bounds.
-    fn open_workspace_button(&self) -> Option<gpui::AnyElement> {
-        let dir = self.thread_workspace()?;
-        Some(
-            div()
-                .id("open-workspace")
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_center()
-                .w_full()
-                .min_w_0()
-                .p_2()
-                .rounded_lg()
-                .border_1()
-                .border_dashed()
-                .border_color(rgb(theme::border_strong()))
-                .text_color(rgb(theme::text_muted()))
-                .text_xs()
-                .hover(|style| {
-                    style
-                        .text_color(rgb(theme::accent()))
-                        .border_color(rgb(theme::accent()))
-                        .cursor_pointer()
-                })
-                .child(if cfg!(windows) {
-                    "Open the folder in Explorer"
-                } else {
-                    "Open the folder"
-                })
-                .on_click(move |_event, _window, _cx| {
-                    if let Err(error) = workspace::open(&dir) {
-                        tracing::warn!(%error, "could not open the workspace folder");
-                    }
-                })
-                .into_any_element(),
-        )
     }
 }
 
@@ -1747,7 +1697,7 @@ impl Workbench {
     /// today because nobody has asked for a difference yet — free to diverge whenever the panel
     /// wants something the modal doesn't, with no dependency running either way.
     fn pinboard_sources_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut section = div().flex().flex_col().gap_1();
+        let mut section = div().flex().flex_col().gap_2();
 
         let showing = SOURCES_IN_PANEL.min(self.sources.len());
         for (at, source) in self.sources.iter().enumerate().take(showing) {
@@ -1766,9 +1716,8 @@ impl Workbench {
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap_2()
+                .gap_3()
                 .w_full()
-                .mb_2()
                 .min_w_0()
                 .p_2()
                 .rounded_lg()
@@ -1791,7 +1740,6 @@ impl Workbench {
                         .flex_none()
                         .text_color(rgb(theme::accent()))
                         .text_sm()
-                        .mr_1()
                         .child(format!("[{}]", at + 1)),
                 );
 

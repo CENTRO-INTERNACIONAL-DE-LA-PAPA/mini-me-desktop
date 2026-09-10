@@ -806,8 +806,17 @@ fn decode_conversation(thread: &Value) -> Option<Conversation> {
 
 /// One stored message as `(role, text)`, or `None` if it is not worth showing.
 ///
-/// Tool messages and empty assistant turns are dropped: reopening a conversation should
-/// look like the conversation, not like its plumbing.
+/// Tool messages are dropped: reopening a conversation should look like the conversation,
+/// not like its plumbing. **An empty assistant entry is kept**, as an empty string, rather
+/// than dropped alongside them: one question can take the coordinator several LLM calls to
+/// answer — a call that only invokes a tool, with no text of its own, then one that writes
+/// the final prose — and the stored history keeps one entry per call, most of them textless.
+/// [`group_turns`] is what turns those back into one entry per turn; it needs every call's
+/// entry to fold in, including the empty ones, or a turn whose *every* call was textless
+/// (one that produced a file and said nothing about it) would leave no entry for it to
+/// produce, which is exactly as bad as dropping it here directly. See `group_turns` for the
+/// rest of the reasoning and `main.rs`'s `turn_for`, which is what actually depends on the
+/// result being one entry per turn.
 fn decode_stored_message(message: &Value) -> Option<(String, String)> {
     let kind = message
         .get("type")
@@ -830,10 +839,44 @@ fn decode_stored_message(message: &Value) -> Option<(String, String)> {
         _ => return None,
     };
     let text = text.trim();
-    if text.is_empty() {
+    if role == "you" && text.is_empty() {
         return None;
     }
     Some((role.to_string(), text.to_string()))
+}
+
+/// Collapse the stored history's one-entry-per-LLM-call shape into one entry per turn.
+///
+/// Live, a turn is one `Message` from the moment `begin_turn` opens it: every chunk the
+/// coordinator streams — across however many internal tool-call round trips it takes — lands
+/// in that same entry via `push_body`. The stored history has no such accumulator; the server
+/// keeps the raw sequence, one entry per LLM call, and most of those calls in a tool-using
+/// turn carry no text at all. Left ungrouped, a three-call turn became three transcript
+/// bubbles instead of one, and `main.rs`'s `turn_for` — which pairs reloaded messages with
+/// provenance turns by counting from the tail, one message expected per turn — miscounted for
+/// every turn after the first one shaped that way. Reported as *"all the attachments in chat
+/// are appending to their own message when sent... only happens when loading a previous
+/// chat"*: the files were being read back correctly, onto a transcript that no longer lined up
+/// with the turns they were read back against.
+///
+/// A "you" message always starts a new turn, so grouping is simply: fold every assistant entry
+/// into the previous one *unless* the previous one was "you". `decode_stored_message` keeps
+/// even a textless assistant entry for exactly this fold to see — a turn whose every call was
+/// textless still needs to produce the one (empty) entry a provenance turn expects, not zero.
+fn group_turns(messages: Vec<(String, String)>) -> Vec<(String, String)> {
+    let mut grouped: Vec<(String, String)> = Vec::with_capacity(messages.len());
+    for (role, text) in messages {
+        if role != "you" {
+            if let Some(previous) = grouped.last_mut() {
+                if previous.0 != "you" {
+                    previous.1.push_str(&text);
+                    continue;
+                }
+            }
+        }
+        grouped.push((role, text));
+    }
+    grouped
 }
 
 /// A conversation's name, from the first thing the researcher asked.
@@ -2246,10 +2289,7 @@ impl LangGraphClient {
             .get("messages")
             .and_then(Value::as_array)
             .map(|messages| {
-                messages
-                    .iter()
-                    .filter_map(decode_stored_message)
-                    .collect::<Vec<_>>()
+                group_turns(messages.iter().filter_map(decode_stored_message).collect())
             })
             .unwrap_or_default();
         // The same response already carries `artifacts` — the outputs, the spine, and the
@@ -4208,8 +4248,8 @@ mod tests {
         // No id, nothing to open.
         assert_eq!(decode_conversation(&json!({"metadata": {}})), None);
 
-        // Reopening shows the conversation, not its plumbing: tool traffic and empty
-        // assistant turns are dropped, and both content shapes are understood.
+        // Reopening shows the conversation, not its plumbing: tool traffic is dropped, and
+        // both content shapes are understood.
         assert_eq!(
             decode_stored_message(&json!({"type": "human", "content": "hola"})),
             Some(("you".to_string(), "hola".to_string()))
@@ -4224,9 +4264,47 @@ mod tests {
             decode_stored_message(&json!({"type": "tool", "content": "{}"})),
             None
         );
+        // An empty assistant turn is kept, not dropped — see the doc comment on
+        // `decode_stored_message` for why this one used to read `None`.
         assert_eq!(
             decode_stored_message(&json!({"type": "ai", "content": "  "})),
+            Some(("mini-me".to_string(), String::new()))
+        );
+        // A human message never arrives empty in practice, but the same "not worth
+        // showing" rule still applies to it if it somehow did.
+        assert_eq!(
+            decode_stored_message(&json!({"type": "human", "content": "   "})),
             None
+        );
+    }
+
+    /// A turn that took several internal LLM calls to answer still reads back as one turn.
+    ///
+    /// The exact shape of the reported bug: a turn whose first call only invoked a tool (no
+    /// text) and whose second call wrote the answer must fold into one entry, or `turn_for`
+    /// miscounts every turn after it and starts handing files to the wrong message.
+    #[test]
+    fn several_llm_calls_for_one_turn_read_back_as_one_message() {
+        let stored = vec![
+            ("you".to_string(), "write a converter".to_string()),
+            ("mini-me".to_string(), String::new()),
+            ("mini-me".to_string(), "done, see convert.py".to_string()),
+            ("you".to_string(), "now two more".to_string()),
+            ("mini-me".to_string(), "working on it".to_string()),
+            ("mini-me".to_string(), String::new()),
+            ("you".to_string(), "and a small dataset".to_string()),
+            ("mini-me".to_string(), String::new()),
+        ];
+        assert_eq!(
+            group_turns(stored),
+            vec![
+                ("you".to_string(), "write a converter".to_string()),
+                ("mini-me".to_string(), "done, see convert.py".to_string()),
+                ("you".to_string(), "now two more".to_string()),
+                ("mini-me".to_string(), "working on it".to_string()),
+                ("you".to_string(), "and a small dataset".to_string()),
+                ("mini-me".to_string(), String::new()),
+            ]
         );
     }
 
