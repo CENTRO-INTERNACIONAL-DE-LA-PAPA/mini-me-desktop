@@ -61,6 +61,7 @@ impl Workbench {
             .flex_none()
             .w(px(4.))
             .h_full()
+            .mt_2()
             .when(self.dragging == Some(edge), |bar| {
                 bar.bg(rgb(theme::accent()))
             })

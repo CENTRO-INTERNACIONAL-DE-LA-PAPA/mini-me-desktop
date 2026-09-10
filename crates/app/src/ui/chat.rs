@@ -83,9 +83,12 @@ pub(crate) fn last_delegated_to(steps: &[String]) -> Option<&str> {
 }
 
 
-/// A labelled, bulleted list of spine entries.
-pub(crate) fn spine_list(label: &'static str, items: &[String], bullet: &'static str) -> impl IntoElement {
-    let mut list = div().flex().flex_col().gap_1().child(ui::Label::new(label).colour(theme::text_faint()).size(ui::Size::Compact));
+/// A bulleted list of spine entries, with no label of its own.
+///
+/// The label used to be built in here; it now comes from whatever `pinboard_section` wraps this
+/// in (`gallery_view.rs`), so every Pinboard heading — this one included — reads the same way.
+pub(crate) fn spine_list(items: &[String], bullet: &'static str) -> impl IntoElement {
+    let mut list = div().flex().flex_col().gap_1();
     for item in items {
         list = list.child(
             div()
@@ -153,7 +156,7 @@ pub(crate) fn markdown_block(
             .map(|(range, emphasis)| {
                 let style = match emphasis {
                     Emphasis::Strong => HighlightStyle {
-                        font_weight: Some(FontWeight::BOLD),
+                        font_weight: Some(FontWeight::MEDIUM),
                         ..Default::default()
                     },
                     Emphasis::Italic => HighlightStyle {
@@ -557,31 +560,43 @@ impl Workbench {
             .flex()
             .flex_row()
             .items_center()
-            .gap_2()
+            .gap_1()
             .w_full()
             .min_w_0()
             .text_xs()
             .text_color(rgb(theme::text_faint()));
 
-        // Time first, steps right beside it — one phrase, not two separate facts.
+        let mut has_leading = false;
+        // Time first, steps right beside it — one phrase, not two separate facts. The live
+        // status line used to be its own row below the transcript; folded in here, between the
+        // ladder icon and the duration it times, since the elapsed time it also carried is
+        // already this row's job.
         if let Some(elapsed) = elapsed {
-            row = row.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap_1()
-                    .flex_none()
-                    .child(
-                        ui::Icon::new("icons/ladder.svg")
-                            .size(ui::IconSize::ExtraSmall)
-                            .colour(theme::text_faint()),
-                    )
-                    .child(duration_label(elapsed)),
-            );
+            let mut timer = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .flex_none()
+                .child(
+                    ui::Icon::new("icons/ladder.svg")
+                        .size(ui::IconSize::ExtraSmall)
+                        .colour(theme::text_faint()),
+                );
+            if live && !self.status.trim().is_empty() {
+                timer = timer.child(
+                    div()
+                        .flex_none()
+                        .min_w_0()
+                        .truncate()
+                        .child(self.status.clone()),
+                );
+            }
+            row = row.child(timer.child(duration_label(elapsed)));
+            has_leading = true;
         }
         if steps > 0 {
-            if elapsed.is_some() {
+            if has_leading {
                 row = row.child(div().flex_none().child("·"));
             }
             row = row.child(
@@ -592,8 +607,7 @@ impl Workbench {
                     .underline()
                     .hover(|style| style.cursor_pointer())
                     .child(format!(
-                        "{} {steps} {}",
-                        if message.steps_expanded { "▾" } else { "▸" },
+                        "{steps} {}",
                         if steps == 1 { "step" } else { "steps" },
                     ))
                     .on_click(cx.listener(move |workbench, _event, _window, cx| {
@@ -1225,7 +1239,7 @@ impl Workbench {
                     .id(SharedString::from(format!("who-answered-{index}")))
                     .absolute()
                     .left(px(RAIL / 2. - PLATE / 2.))
-                    .top(px(DOT_CENTER - PLATE / 2.))
+                    .top(px(DOT_CENTER - PLATE / 2. + 2.))
                     .size(px(PLATE))
                     .flex()
                     .items_center()
@@ -1256,20 +1270,81 @@ impl Workbench {
             .child(block)
             .into_any_element()
     }
-}
 
-
-impl Workbench {
-    pub(crate) fn live_turn_row(&self) -> gpui::AnyElement {
-        let elapsed = self.provenance.turns.last()
-            .map(|turn| provenance::now_ms().saturating_sub(turn.sent_at))
-            .filter(|elapsed| *elapsed >= 1_000)
-            .map(|elapsed| format!(" · {}", duration_label(elapsed))).unwrap_or_default();
-        div().flex().flex_row().items_center().w_full().min_w_0().gap_2().pb_3()
-            .text_color(rgb(theme::text_muted())).text_xs()
-            .child(format!("{}{elapsed}", self.status)).into_any_element()
+    /// A project's advisory next-step, rendered as if the researcher had already sent it —
+    /// same bubble shape and alignment as an asked message — so accepting one is just deciding
+    /// to hit send on what is already sitting there, not hunting a side panel for it.
+    ///
+    /// Pressing it only *loads* the prompt into the composer; it never sends. Suggestions are
+    /// advisory and org policy is human-gated, so the researcher still presses Enter, and the
+    /// bubble itself stays put until a turn actually goes out (`start_turn_as` marks it
+    /// dismissed then, not here — see `Workbench::active_suggestions`) — clicking is a draft,
+    /// not a commitment.
+    pub(crate) fn suggestion_row(&self, index: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Some(suggestion) = self.active_suggestions().get(index).copied() else {
+            return div().into_any_element();
+        };
+        let prompt = suggestion.prompt.clone();
+        div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w_0()
+            .items_end()
+            .p_2()
+            .child(
+                div()
+                    .text_color(rgb(theme::text_muted()))
+                    .text_xs()
+                    .text_right()
+                    .mb_1()
+                    .child("Suggested next..."),
+            )
+            .child(
+                div()
+                    .id(("suggestion", index))
+                    .max_w(relative(0.78))
+                    .min_w_0()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .px_3()
+                    .py_2()
+                    .rounded_lg()
+                    .items_center()
+                    .bg(rgb(theme::accent_soft()))
+                    .border_1()
+                    .border_dashed()
+                    .border_color(rgb(theme::accent()))
+                    .hover(|style| style.cursor_pointer())
+                    .child(
+                        ui::Icon::new("icons/lightbulb.svg")
+                            .size(ui::IconSize::Small)
+                            .colour(theme::accent()),
+                    )
+                    .child(
+                        div()
+                            .text_color(rgb(theme::accent()))
+                            .text_sm()
+                            .child(suggestion.title.clone()),
+                    )
+                    .on_click(cx.listener(move |workbench, _event, window, cx| {
+                        if workbench.streaming || prompt.is_empty() {
+                            return;
+                        }
+                        workbench.composer.update(cx, |composer, cx| {
+                            composer.set_text(prompt.clone(), cx);
+                        });
+                        let focus = workbench.composer.focus_handle(cx);
+                        window.focus(&focus);
+                        workbench.status = "suggestion loaded — press Enter to run it".into();
+                        cx.notify();
+                    })),
+            )
+            .into_any_element()
     }
 }
+
 
 
 impl Workbench {
@@ -1292,7 +1367,7 @@ impl Workbench {
                 let row = if index < workbench.transcript.len() {
                     workbench.transcript_message(index, cx)
                 } else {
-                    workbench.live_turn_row()
+                    workbench.suggestion_row(index - workbench.transcript.len(), cx)
                 };
                 // **The inset has to be on the row, not on the list.** GPUI's `list` applies only
                 // the *vertical* half of its padding: `prepaint_items` places each item at
@@ -1436,7 +1511,7 @@ impl Workbench {
                             .child(
                                 div()
                                     .text_base()
-                                    .line_height(px(20.))
+                                    .line_height(px(24.))
                                     .child(title),
                             )
                             // The conversation's own workspace, said once here instead of

@@ -5,8 +5,7 @@
 #![allow(unused_imports)]
 
 use crate::ui::{
-    chat::*, common::*, modals::*, palette_view::*, provenance_view::*, settings_view::*,
-    sidebar::*, status_bar::*,
+    Alignment, chat::*, common::*, modals::*, palette_view::*, provenance_view::*, settings_view::*, sidebar::*, status_bar::*,
 };
 use crate::*;
 use gpui::{
@@ -69,16 +68,9 @@ pub(crate) fn output_folder_groups(outputs: &[workspace::Output]) -> Vec<OutputF
 /// Name the folder the agent chose, not the generated background-thread directory above it.
 ///
 /// The screenshot in §152 devoted its useful width to a 36-character UUID common to every row.
-/// That component is app bookkeeping; removing only a leading UUID leaves `eda/plots`, the
-/// researcher's information, while the unshortened path remains the grouping identity above.
-///
-/// `worker` is whoever produced the files, when the app knows — from the folder for a background
-/// worker (§199), from the backend's own record for a specialist (§201). It takes the leading
-/// position either way: the UUID's, when there was one, so nothing is lost by removing it; and
-/// otherwise ahead of the folder the agent chose. Either way the heading reads as a path of work
-/// — `background worker / plots`, `exploratory data analysis / plots`. `None` keeps §152's
-/// behaviour, which is what a conversation with no record still gets.
-pub(crate) fn output_folder_label(folder: &std::path::Path, worker: Option<&str>) -> String {
+/// That component is app bookkeeping; removing it leaves `eda/plots`, the researcher's
+/// information, while the unshortened path remains the grouping identity above.
+pub(crate) fn output_folder_label(folder: &std::path::Path) -> String {
     let mut components: Vec<String> = folder
         .components()
         .filter_map(|component| component.as_os_str().to_str().map(str::to_owned))
@@ -88,9 +80,6 @@ pub(crate) fn output_folder_label(folder: &std::path::Path, worker: Option<&str>
         .is_some_and(|component| workspace::looks_like_thread_id(component));
     if removed_thread {
         components.remove(0);
-    }
-    if let Some(name) = worker {
-        components.insert(0, name.to_string());
     }
     if components.is_empty() {
         if removed_thread {
@@ -103,44 +92,6 @@ pub(crate) fn output_folder_label(folder: &std::path::Path, worker: Option<&str>
     }
 }
 
-/// The worker thread a file sits under, when it sits under one.
-///
-/// The **only** attribution this client can make without guessing. A background worker runs on
-/// its own thread and writes into a folder named after it, so the folder *is* the record of who
-/// produced the file. Specialists consulted inside the conversation share the conversation's
-/// thread and its one directory, and nothing on the wire says which of them wrote a given file —
-/// so nothing here claims to know. That restraint is `provenance.rs`'s own rule from §73: a
-/// provenance record that quietly guesses is worse than none, because it will be believed.
-pub(crate) fn producing_thread(output: &workspace::Output) -> Option<&str> {
-    let first = std::path::Path::new(&output.name).components().next()?;
-    let name = first.as_os_str().to_str()?;
-    if workspace::looks_like_thread_id(name) {
-        Some(name)
-    } else {
-        None
-    }
-}
-
-/// Outputs split by who produced them: the conversation's own first, then one group per
-/// other author, in the order their first file appears.
-///
-/// **Ahead of the image/other split, not after it.** §152 put every image in one grid because
-/// images are what a person opens the panel to look at. That was right within one body of work
-/// and wrong across two: a researcher looking at *"15 images"* was looking at the conversation's
-/// plots and a worker's plots in one tray, with nothing saying where the boundary was (§199). A
-/// background worker is already a separate run with its own job row and its own folder; its
-/// figures are a separate body of work for the same reason.
-///
-/// Two sources of truth, in this order, each exact within its own domain (§201):
-///
-/// 1. **The folder**, for a background worker — its own thread, its own directory, true by
-///    construction and true even for a conversation reopened years later.
-/// 2. **The manifest**, for everything else — what `overlay/minime_local/authorship.py` wrote
-///    down as each file was produced.
-///
-/// The folder wins where both speak, because inside a worker's run the manifest records that
-/// worker's *own* coordinator and would rename `background worker` to `coordinator` — technically
-/// true of the inner graph and useless to the person reading the panel.
 /// A file that records what a search returned, rather than a result of the research.
 ///
 /// Kept out of the transcript's file cards only. Both are real outputs a researcher may want —
@@ -150,62 +101,6 @@ pub(crate) fn is_search_record(output: &workspace::Output) -> bool {
         output.path.file_name().and_then(|name| name.to_str()),
         Some("papers.json") | Some("dataverse_search.json")
     )
-}
-
-pub(crate) fn by_producer(
-    outputs: &[workspace::Output],
-    tasks: &[protocol::AsyncTask],
-    wrote: &std::collections::HashMap<String, String>,
-) -> Vec<(Option<String>, Vec<workspace::Output>)> {
-    let mut groups: Vec<(Option<String>, Vec<workspace::Output>)> = Vec::new();
-    for output in outputs {
-        let by = match producing_thread(output) {
-            Some(thread) => produced_by(Some(thread), tasks),
-            None => wrote
-                .get(&workspace::normalise_separators(&output.name))
-                .map(|agent| agent.replace('_', " ")),
-        };
-        match groups.iter_mut().find(|(owner, _)| *owner == by) {
-            Some((_, produced)) => produced.push(output.clone()),
-            None => groups.push((by, vec![output.clone()])),
-        }
-    }
-    // The conversation's own files lead even when someone else wrote first: they are what the
-    // researcher asked for directly, and a delegation is the detour under it.
-    groups.sort_by_key(|(owner, _)| owner.is_some());
-    groups
-}
-
-/// Who produced a group of files, in the researcher's words rather than the engine's.
-///
-/// `None` is the conversation's own thread, and stays unlabelled: those files are the unmarked
-/// case, and spending a heading on *"from this conversation"* would name the default everywhere
-/// to say something only where it is not true.
-///
-/// A thread with no matching task is still *some* worker — the folder proves it — so it says so
-/// without naming one. That is the state after a reload whose snapshot carried no `async_tasks`,
-/// and it is the difference between "we don't know which" and "nobody".
-pub(crate) fn produced_by(thread: Option<&str>, tasks: &[protocol::AsyncTask]) -> Option<String> {
-    let thread = thread?;
-    Some(
-        tasks
-            .iter()
-            .find(|task| task.thread_id == thread)
-            // Underscores are the graph's spelling of a name, not a person's — the road strip and
-            // the jobs list both already say `background worker`, and a third spelling of the
-            // same specialist in a third panel is how one worker reads as two.
-            .map(|task| task.agent_name.replace('_', " "))
-            .unwrap_or_else(|| "a background task".to_string()),
-    )
-}
-
-/// `15 images`, or `5 images from background worker`.
-pub(crate) fn images_heading(count: usize, by: Option<&str>) -> String {
-    let plural = if count == 1 { "" } else { "s" };
-    match by {
-        Some(who) => format!("{count} image{plural} from {who}"),
-        None => format!("{count} image{plural}"),
-    }
 }
 
 /// Keep the distinguishing tail when a filename itself is too long for a thumbnail.
@@ -760,10 +655,13 @@ impl Workbench {
     /// Fixed-width tiles rather than a fraction of the container, which is what makes it narrow:
     /// two per row means the block is exactly `2 × tile + gap` and stops there, whatever the panel
     /// or the window is doing.
+    /// Just the tiles. The heading used to live here too, in its own compact label above the
+    /// grid, beside a "click to open" hint; both are gone now — the heading is a
+    /// `pinboard_section` title built by the caller, and every title is just the title, nothing
+    /// beside it.
     pub(crate) fn output_grid(
         &self,
         scope: &str,
-        heading: String,
         items: &[workspace::Output],
         compact: bool,
         cx: &mut Context<Self>,
@@ -794,35 +692,9 @@ impl Workbench {
             }
             grid = grid.child(row);
         }
-
-        div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .flex_none()
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .w(px(tile * GRID_COLUMNS as f32 + GRID_GAP))
-                    .child(ui::Label::new(heading).size(ui::Size::Compact))
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_color(rgb(theme::text_faint()))
-                            .text_xs()
-                            .child(if hidden > 0 {
-                                "click to open all".to_string()
-                            } else {
-                                "click to open".to_string()
-                            }),
-                    ),
-            )
-            .child(grid)
+        grid
     }
+
 }
 
 impl Workbench {
@@ -947,64 +819,40 @@ impl Workbench {
     }
 }
 
-impl Workbench {
-    /// One file on its own row. `by` names the worker that produced it, when one did.
-    ///
-    /// A lone file gets no gallery heading to carry its attribution, so it carries it on the line
-    /// that already describes the file — otherwise a worker that wrote exactly one report would
-    /// be the one case §199 still left anonymous.
-    pub(crate) fn output_panel_row(
-        &self,
-        id: String,
-        output: &workspace::Output,
-        by: Option<&str>,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let shown = output.clone();
-        let shape = self.shape_of(output).describe(output.bytes);
-        let shape = match by {
-            Some(who) => format!("from {who} · {shape}"),
-            None => shape,
-        };
-        let (glyph, ink) = file_mark(&output.path);
-        div()
-            .id(SharedString::from(id))
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_2()
-            .w_full()
-            .min_w_0()
-            .p_2()
-            .rounded_lg()
-            .bg(rgb(theme::elevated()))
-            .hover(|style| style.bg(rgb(theme::accent_soft())).cursor_pointer())
-            .child(ui::Icon::new(glyph).size(ui::IconSize::Small).colour(ink))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_grow()
-                    .min_w_0()
-                    // The filename is the distinguishing tail. The parent folder has its own
-                    // gallery heading, so repeating its UUID here recreates §152 exactly.
-                    .child(
-                        ui::Label::new(output_filename(output))
-                            .size(ui::Size::Compact)
-                            .ellipsis(),
-                    )
-                    .child(
-                        div()
-                            .text_color(rgb(theme::text_faint()))
-                            .text_size(px(11.))
-                            .child(shape),
-                    ),
-            )
-            .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                workbench.preview = Preview::single(shown.clone());
-                cx.notify();
-            }))
-    }
+/// One section of the Pinboard: a title, the same rule `outputs_section` used to draw above
+/// itself, and whatever this section's kind of artifact wants to show below that.
+///
+/// Private to this file. Every heading in the panel — Mission, Completed, Pending, Plan,
+/// Background jobs, Outputs, Sources — used to build its own version of "muted label, maybe a
+/// line, maybe not, in whatever case the author typed" by hand, which is how a heading drifting
+/// from the others started reading as a different panel rather than a mis-styled one. `title` is
+/// `impl IntoElement` rather than a bare string so a heading that carries its own action (Mission's
+/// Edit link, the jobs disclosure's count and hover) still goes through the one component; a caller
+/// with nothing but a name passes a `&str` or `String` and gets the same muted, sentence-case
+/// styling as anything else.
+fn pinboard_section(title: impl IntoElement, content: impl IntoElement) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .min_w_0()
+        .gap_2()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .w_full()
+                .min_w_0()
+                .text_sm()
+                .text_color(rgb(theme::text_muted()))
+                .child(title)
+                .child(div().w_full().h(px(1.)).bg(rgb(theme::border())))
+        )
+        // `border_t_1` alone on an otherwise-empty div painted nothing: with no content and no
+        // explicit height this collapses to a zero-size flex item, and a border on a zero-size
+        // box is a border with nothing to draw around. An explicit height fixes the box a border
+        // could rely on elsewhere; a filled div needs no such help.
+        .child(content)
 }
 
 impl Workbench {
@@ -1015,13 +863,16 @@ impl Workbench {
     /// element — inside, it would scroll along with what it measures.
     pub(crate) fn artifacts_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
-            .relative()
             .flex()
             .flex_col()
             .w(px(self.panel_width))
             .flex_none()
             .h_full()
             .m_2()
+            .mb_4()
+            .ml_1()
+            .p_3()
+            .gap_5()
             .rounded_lg()
             .overflow_hidden()
             .bg(rgb(theme::surface()))
@@ -1035,8 +886,7 @@ impl Workbench {
                     .items_center()
                     .justify_start()
                     .flex_none()
-                    .px_3()
-                    .py_2()
+                    .gap_2()
                     .child(
                         ui::Button::new("toggle-right-panel")
                             .icon(ui::Icon::new("icons/sidebar-simple-right.svg"))
@@ -1047,7 +897,12 @@ impl Workbench {
                                 workbench.remember_panels();
                                 cx.notify();
                             })),
-                    ),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .child("Pinboard"),
+                    )
             )
             .child(self.artifacts_contents(cx))
             .children(ui::scrollbar(&self.panel_scroll))
@@ -1070,7 +925,7 @@ impl Workbench {
     /// field replaces the text it is about, so the researcher is looking at what they are
     /// changing rather than at a copy of it in a dialog.
     pub(crate) fn mission_block(&self, mission: &str, cx: &mut Context<Self>) -> Div {
-        let block = div().flex().flex_col().w_full().min_w_0().gap_1();
+        let block: Div = div().flex().flex_col().w_full().min_w_0().gap_1();
 
         if self.editing_mission {
             return block
@@ -1078,8 +933,9 @@ impl Workbench {
                     div()
                         .w_full()
                         .min_w_0()
-                        .px_2()
+                        .text_sm()
                         .py_1()
+                        .px_2()
                         .rounded_md()
                         .border_1()
                         .border_color(rgb(theme::accent()))
@@ -1101,17 +957,8 @@ impl Workbench {
                 .id("mission")
                 .w_full()
                 .min_w_0()
-                .px_2()
-                .py_1()
+                .text_base()
                 .rounded_md()
-                .hover(|style| {
-                    style
-                        .bg(rgb(theme::hover_over(theme::surface())))
-                        .cursor_pointer()
-                })
-                .on_click(cx.listener(|workbench, _event, window, cx| {
-                    workbench.start_mission_edit(window, cx)
-                }))
                 .when(mission.is_empty(), |empty| {
                     empty
                         .text_color(rgb(theme::text_muted()))
@@ -1119,7 +966,7 @@ impl Workbench {
                         .child("No mission yet — press to write one, or it comes from your first question.")
                 })
                 .when(!mission.is_empty(), |set| {
-                    set.text_color(rgb(theme::text())).child(mission.to_string())
+                    set.text_color(rgb(theme::text())).child(format!("\"{mission}\""))
                 }),
         )
     }
@@ -1136,56 +983,17 @@ impl Workbench {
             .flex_grow()
             .overflow_y_scroll()
             .track_scroll(&self.panel_scroll)
-            .p_4()
-            .gap_4()
-            // `MISSION`, not `RESEARCH PROJECT`. The panel *is* the research project — saying so
-            // at the top of it spends the widest heading in the column on a word that names the
-            // container rather than its first section.
-            //
-            // The heading carries the edit control rather than the mission carrying a hover-only
-            // one. Our researchers are not developers, and *"I cannot modify the project mission"*
-            // was said about a panel where the text was in fact the button — an affordance that
-            // only exists once the pointer is already on it cannot be the answer to someone who
-            // has concluded there isn't one (§199).
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .w_full()
-                    .min_w_0()
-                    // `flex_none`-wrapped: this heading sits in a `justify_between` row beside
-                    // the Edit action, and `Label` is always `w_full()` — unwrapped it would
-                    // stretch to fill the row and push Edit out of the split the row wants.
-                    .child(
-                        div().flex_none().child(
-                            ui::Label::new("MISSION")
-                                .colour(theme::text_faint())
-                                .size(ui::Size::Compact),
-                        ),
-                    )
-                    .when(!self.editing_mission, |heading| {
-                        heading.child(
-                            div()
-                                .id("edit-mission")
-                                .px_1()
-                                .rounded_sm()
-                                .text_xs()
-                                .text_color(rgb(theme::accent()))
-                                .hover(|style| {
-                                    style
-                                        .bg(rgb(theme::hover_over(theme::surface())))
-                                        .cursor_pointer()
-                                })
-                                .child("Edit")
-                                .on_click(cx.listener(|workbench, _event, window, cx| {
-                                    workbench.start_mission_edit(window, cx)
-                                })),
-                        )
-                    }),
-            );
+            .p_2()
+            .pt_0()
+            .gap_4();
 
+        // `Mission`, not `Research project`. The panel *is* the research project — saying so
+        // at the top of it spends the widest heading in the column on a word that names the
+        // container rather than its first section.
+        //
+        // No Edit link beside it any more — every `pinboard_section` title is just the title
+        // now. The mission text itself already opens the editor on click/hover (see
+        // `mission_block`), so nothing is lost.
         let mission = self
             .project
             .as_ref()
@@ -1195,100 +1003,57 @@ impl Workbench {
         // *read*, but there is still something to *write*, and a researcher who knows what this
         // project is for should be able to say so before the first question rather than having
         // one derived from it (§199).
-        panel = panel.child(self.mission_block(&mission, cx));
+        let mission_header = div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(theme::text_muted()))
+                    .child("Mission"),
+            )
+            .when(!self.editing_mission, |row| {
+                row.child(
+                    ui::Button::new("edit-mission")
+                        .icon(ui::Icon::new("icons/pencil.svg"))
+                        .style(ui::ButtonStyle::SecondaryWhite)
+                        .border(false)
+                        .on_click(cx.listener(|workbench, _event, window, cx| {
+                            workbench.start_mission_edit(window, cx)
+                        })),
+                )
+            });
+        panel = panel.child(pinboard_section(mission_header, self.mission_block(&mission, cx)));
 
         let Some(project) = &self.project else {
             // No spine yet, but a run may already be producing outputs — still show
             // them rather than an empty panel.
             return panel
-                .child(self.plan_section(cx))
-                .child(self.jobs_section(cx))
-                .child(self.outputs_section(cx))
-                .child(self.sources_section(Some(SOURCES_IN_PANEL), cx));
+                .children(self.plan_section(cx))
+                .children(self.jobs_section(cx))
+                .children(self.outputs_section(cx))
+                .children(self.sources_pinboard_section(cx));
         };
 
         if !project.completed.is_empty() {
-            panel = panel.child(spine_list("COMPLETED", &project.completed, "✓"));
+            panel = panel.child(pinboard_section("Completed", spine_list(&project.completed, "✓")));
         }
         if !project.pending.is_empty() {
-            panel = panel.child(spine_list("PENDING", &project.pending, "○"));
+            panel = panel.child(pinboard_section("Pending", spine_list(&project.pending, "○")));
         }
 
-        // Advisory only: shown so the user can choose to ask for one. Nothing here
-        // auto-runs — org policy is human-gated.
-        if !project.suggestions.is_empty() {
-            let mut suggestions = div().flex().flex_col().gap_2().child(
-                ui::Label::new("SUGGESTED NEXT")
-                    .colour(theme::text_faint())
-                    .size(ui::Size::Compact),
-            );
-            for (index, suggestion) in project.suggestions.iter().enumerate() {
-                let prompt = suggestion.prompt.clone();
-                suggestions = suggestions.child(
-                    div()
-                        .id(("suggestion", index))
-                        .flex()
-                        .flex_col()
-                        .w_full()
-                        .min_w_0()
-                        .gap_1()
-                        .p_2()
-                        .border_1()
-                        .border_color(rgb(theme::border()))
-                        .hover(|style| style.border_color(rgb(theme::accent())).cursor_pointer())
-                        .child(
-                            div()
-                                .w_full()
-                                .text_color(rgb(theme::text()))
-                                .text_sm()
-                                .child(suggestion.title.clone()),
-                        )
-                        .child(
-                            div()
-                                .w_full()
-                                .text_color(rgb(theme::text_muted()))
-                                .text_xs()
-                                .child(suggestion.rationale.clone()),
-                        )
-                        // Clicking *loads* the prompt into the composer; it never
-                        // runs it. Suggestions are advisory and org policy is
-                        // human-gated, so the user still presses Enter.
-                        .on_click(cx.listener(move |workbench, _event, window, cx| {
-                            if workbench.streaming || prompt.is_empty() {
-                                return;
-                            }
-                            workbench.composer.update(cx, |composer, cx| {
-                                composer.set_text(prompt.clone(), cx);
-                            });
-                            // Drop it from the list: it is in the composer now, and
-                            // leaving a duplicate to click is just confusing.
-                            if let Some(project) = workbench.project.as_mut() {
-                                project.suggestions.retain(|s| s.prompt != prompt);
-                            }
-                            let focus = workbench.composer.focus_handle(cx);
-                            window.focus(&focus);
-                            workbench.status = "suggestion loaded — press Enter to run it".into();
-                            cx.notify();
-                        })),
-                );
-            }
-            panel = panel.child(suggestions);
-        }
-
-        if project.completed.is_empty() && project.pending.is_empty() {
-            panel = panel.child(
-                div()
-                    .text_color(rgb(theme::text_muted()))
-                    .text_xs()
-                    .child("Completed and pending work will appear here as the project grows."),
-            );
-        }
+        // Suggestions render as bubbles at the end of the chat transcript now
+        // (`Workbench::suggestion_row`), not here — a next step reads as a message
+        // away from being sent, not a card in a side panel.
 
         panel
-            .child(self.plan_section(cx))
-            .child(self.jobs_section(cx))
-            .child(self.outputs_section(cx))
-            .child(self.sources_section(Some(SOURCES_IN_PANEL), cx))
+            .children(self.plan_section(cx))
+            .children(self.jobs_section(cx))
+            .children(self.outputs_section(cx))
+            .children(self.sources_pinboard_section(cx))
     }
 }
 
@@ -1384,105 +1149,25 @@ impl Workbench {
     /// Kept after the turn ends on purpose: a finished plan is the account of what the answer
     /// involved, and clearing it the moment the last token arrives would delete the explanation
     /// exactly when someone starts reading it.
-    pub(crate) fn plan_section(&self, _cx: &mut Context<Self>) -> Div {
-        let mut section = div().flex().flex_col().gap_2().w_full().min_w_0();
-        let Some((done, total)) = protocol::plan_progress(&self.plan) else {
-            return section;
-        };
-        section = section
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .w_full()
-                    .min_w_0()
-                    .gap_2()
-                    // `flex_none`-wrapped: `justify_between` needs this heading to stay
-                    // content-width, and `Label` is always `w_full()` on its own.
-                    .child(
-                        div().flex_none().child(
-                            ui::Label::new("PLAN")
-                                .colour(theme::text_faint())
-                                .size(ui::Size::Compact),
-                        ),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_color(rgb(theme::text_faint()))
-                            .text_xs()
-                            .child(format!("{done} of {total}")),
-                    ),
-            )
-            // The coordinator's plan gets no activity string: `activity` is read off a *worker's*
-            // thread, and this conversation's current tool is already the road strip's job.
-            .child(self.plan_list(&self.plan, None));
-        section
+    pub(crate) fn plan_section(&self, _cx: &mut Context<Self>) -> Option<Div> {
+        protocol::plan_progress(&self.plan)?;
+        // The coordinator's plan gets no activity string: `activity` is read off a *worker's*
+        // thread, and this conversation's current tool is already the road strip's job.
+        Some(pinboard_section("Plan", self.plan_list(&self.plan, None)))
     }
 }
 
 impl Workbench {
-    pub(crate) fn jobs_section(&self, cx: &mut Context<Self>) -> Div {
-        let mut section = div().flex().flex_col().gap_2().pt_2();
+    pub(crate) fn jobs_section(&self, cx: &mut Context<Self>) -> Option<Div> {
         if self.jobs.is_empty() && self.tasks.is_empty() {
-            return section;
+            return None;
         }
 
-        let tally = JobTally::of(&self.tasks, &self.jobs);
-        section = section.child(
-            div()
-                .id("jobs-heading")
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .w_full()
-                .min_w_0()
-                .gap_2()
-                .py_1()
-                .rounded_md()
-                // **No horizontal padding**, so `BACKGROUND JOBS` starts on the same x as `PLAN`
-                // and `OUTPUTS` above and below it; the fill runs the width of the section
-                // instead. Which is the shape that was asked for the last time a heading here
-                // became pressable: *"a whole rectangle use the hover colour so I know that I can
-                // click there."*
-                .hover(|style| {
-                    let fill = theme::hover_over(theme::surface());
-                    style
-                        .bg(rgb(fill))
-                        .text_color(rgb(theme::ink_on(fill)))
-                        .cursor_pointer()
-                })
-                .text_color(rgb(theme::text_faint()))
-                .text_xs()
-                // Drawn whether or not a pointer is near it. A disclosure whose only sign is a
-                // hover is one a researcher concludes does not exist (§199) — and this is the
-                // same `▾`/`▸` the transcript's step groups have used all along, so the fold in
-                // the panel and the fold in the conversation are one gesture.
-                .child(format!(
-                    "{} BACKGROUND JOBS",
-                    if self.jobs_expanded { "▾" } else { "▸" }
-                ))
-                .child(
-                    // Named states, not a total. `3 jobs` folded is a number you have to unfold
-                    // to act on, and not having to is the entire point of the fold.
-                    div()
-                        .flex_none()
-                        .text_xs()
-                        .text_color(rgb(tally.colour()))
-                        .child(tally.summary()),
-                )
-                .on_click(cx.listener(|workbench, _event, _window, cx| {
-                    workbench.jobs_expanded = !workbench.jobs_expanded;
-                    cx.notify();
-                })),
-        );
-        if !self.jobs_expanded {
-            return section;
-        }
+        // Always open: asked for after the fold hid a stopped-waiting-for-you worker behind a
+        // press nobody knew to make.
+        let heading = "Background Jobs";
 
+        let mut section = div().flex().flex_col().gap_2();
         // Background workers first, because one of them may be *stopped waiting for you* —
         // and until this existed that task simply hung, since the gate it hit runs on its
         // own thread and nothing in the UI could answer it (docs §31).
@@ -1525,7 +1210,7 @@ impl Workbench {
             body = body.child(self.job_row(job, cx));
         }
 
-        section.child(
+        section = section.child(
             // The bar sits *outside* the element it measures; inside, it would scroll along with
             // the thing it is reporting on.
             div()
@@ -1536,7 +1221,8 @@ impl Workbench {
                 .min_w_0()
                 .child(body)
                 .children(ui::scrollbar(&self.jobs_scroll)),
-        )
+        );
+        Some(pinboard_section(heading, section))
     }
 }
 
@@ -1899,98 +1585,34 @@ impl Workbench {
         };
 
         Some(
-            div()
-                .id("what-ran")
-                .flex()
-                .flex_col()
-                .w_full()
-                .min_w_0()
-                .gap_1()
-                .p_1()
-                .rounded_md()
-                .hover(|style| {
-                    let fill = theme::hover_over(theme::surface());
-                    style.bg(rgb(fill)).cursor_pointer()
-                })
-                .on_click(cx.listener(|workbench, _event, _window, cx| {
-                    workbench.commands_open = true;
-                    cx.notify();
-                }))
-                .child(
-                    ui::Label::new("WHAT RAN")
-                        .colour(theme::text_faint())
-                        .size(ui::Size::Compact),
-                )
-                .child(ui::Label::new(summary).colour(tone).size(ui::Size::Compact))
-                .into_any_element(),
-        )
-    }
-
-    /// One line for what this conversation's subagents *said they produced*.
-    ///
-    /// **The half §219 has been missing since the day it was written.** The recorder compares every
-    /// path a structured response names against the workspace, and every `persistent_id` the
-    /// dataverse explorer recommends against the search that was actually run. It found the
-    /// librarian fabricating its library and it found its own dataverse check broken — both times
-    /// because a person went and read a log file. This is the same finding, on the screen the
-    /// researcher is already looking at.
-    ///
-    /// Shown only when a subagent answered, so an ordinary conversation gains no furniture.
-    pub(crate) fn claims_line(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        // **Hidden unless asked for.** *"I dont like to see in the ui the What was claimed and
-        // the what ran because that noise to users."* Gated here rather than at the call site so
-        // both lines and `outputs_are_empty`'s count go quiet together — the panel must not
-        // decide it has something to say and then draw nothing (§277, §301). Kept reachable in
-        // Settings because this is the only thing that checks what was said against what is on
-        // disk, and it has been right twice about a fabricated DOI.
-        // `draft` rather than a mirrored field: it starts as the stored settings and Save writes
-        // it back, so the toggle previews live — which for a control whose whole effect is
-        // "does this appear" is the demonstration, not a leak of unsaved state.
-        if !self.draft.run_record {
-            return None;
-        }
-        let claims = self.thread_claims();
-        if claims.is_empty() {
-            return None;
-        }
-        let (summary, contradicted) = claims_summary(&claims);
-        let tone = if contradicted {
-            theme::accent()
-        } else {
-            theme::text_muted()
-        };
-
-        Some(
-            div()
-                .id("what-was-claimed")
-                .flex()
-                .flex_col()
-                .w_full()
-                .min_w_0()
-                .gap_1()
-                .p_1()
-                .rounded_md()
-                .hover(|style| {
-                    let fill = theme::hover_over(theme::surface());
-                    style.bg(rgb(fill)).cursor_pointer()
-                })
-                .on_click(cx.listener(|workbench, _event, _window, cx| {
-                    workbench.claims_open = true;
-                    cx.notify();
-                }))
-                .child(
-                    ui::Label::new("WHAT WAS CLAIMED")
-                        .colour(theme::text_faint())
-                        .size(ui::Size::Compact),
-                )
-                .child(ui::Label::new(summary).colour(tone).size(ui::Size::Compact))
-                .into_any_element(),
+            pinboard_section(
+                "Commands",
+                div()
+                    .id("what-ran")
+                    .w_full()
+                    .min_w_0()
+                    .rounded_md()
+                    .hover(|style| {
+                        let fill = theme::hover_over(theme::surface());
+                        style.bg(rgb(fill)).cursor_pointer()
+                    })
+                    .on_click(cx.listener(|workbench, _event, _window, cx| {
+                        workbench.commands_open = true;
+                        cx.notify();
+                    }))
+                    .child(ui::Label::new(summary).colour(tone).size(ui::Size::Compact)),
+            )
+            .into_any_element(),
         )
     }
 }
 
 impl Workbench {
-    pub(crate) fn outputs_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Everything a conversation produced, top to bottom: `What ran`, then `Files` — one flat
+    /// grid holding every output together, images and everything else, whatever folder each came
+    /// from. No longer split by folder or by kind: joined into one list for now, on the way to a
+    /// different display this section will get later.
+    pub(crate) fn outputs_section(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
         // What is actually on disk, rather than the agent's own artifact list: a file written by
         // a script inside `execute` registers no artifact, and those are most of them.
         let listing = self
@@ -2001,21 +1623,14 @@ impl Workbench {
             .map(|listing| listing.groups.as_slice())
             .unwrap_or_default();
         let count: usize = files.iter().map(|(_, items)| items.len()).sum();
-        // `output_listing` groups by file kind for ordering. The gallery's meaningful boundary
-        // is instead the directory the agent chose (§152), so restore one ordered sequence before
-        // grouping by parent. Cloning metadata only; no file is read here.
+        // `output_listing` groups by file kind for ordering. Cloning metadata only; no file is
+        // read here.
         let ordered_outputs: Vec<workspace::Output> = files
             .iter()
             .flat_map(|(_, items)| items.iter().cloned())
             .collect();
 
-        let mut section = div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .pt_2()
-            .border_t_1()
-            .border_color(rgb(theme::border()));
+        let mut items: Vec<gpui::AnyElement> = Vec::new();
 
         // **Asked before the guard below, and that is the whole point.** The case where this line
         // matters most is a turn that wrote nothing *into the conversation* — because everything it
@@ -2023,36 +1638,24 @@ impl Workbench {
         // added it after the early return, hid it in the one situation it exists for. A researcher
         // pressed the button, the file went to `/tmp`, and the panel stayed silent (§277).
         let ran = self.commands_line(cx);
-        // Asked before the same guard, for the same reason: a turn where the subagent produced
-        // nothing is exactly the turn with no files, and computing this after the early return
-        // would hide it in the one case it exists for (§277).
-        let said = self.claims_line(cx);
 
         // **Nothing at all when there is nothing.** This used to promise which artifacts would
         // appear before the filesystem had any. The recursive scan now makes §117's subfolders
         // visible, but an empty section still says less and is right — and "nothing" now includes
         // having run nothing.
-        if outputs_are_empty(
-            count,
-            self.buckets.len(),
-            usize::from(ran.is_some()),
-            usize::from(said.is_some()),
-        ) {
-            return section;
+        if outputs_are_empty(count, self.buckets.len(), usize::from(ran.is_some())) {
+            return items;
         }
 
-        // Above `FILES`, because "what ran" is the question that explains why the file list is
-        // shorter than expected — which is exactly §160's morning.
-        section = section.children(ran);
-        // And below it, because the shell is what wrote the files: a subagent's claim is read
-        // against the result of the commands above, not the other way round.
-        section = section.children(said);
+        items.extend(ran);
 
         if count > 0 {
-            section = section.child(
-                ui::Label::new(format!("FILES · {count}"))
-                    .colour(theme::text_faint())
-                    .size(ui::Size::Compact),
+            items.push(
+                pinboard_section(
+                    format!("Files · {count}"),
+                    self.output_grid("panel-files", &ordered_outputs, true, cx),
+                )
+                .into_any_element(),
             );
         }
 
@@ -2060,241 +1663,172 @@ impl Workbench {
             // The scan is intentionally bounded: an agent can create a virtualenv or unpack a
             // dataset under its workspace. Say when that protection bites, because a silent cap
             // would only turn §117's missing-folder defect into a missing-513th-file defect.
-            section = section.child(
+            items.push(
                 div()
                     .text_color(rgb(theme::text_muted()))
                     .text_xs()
-                    .child("Showing a bounded view. Open the folder to see the rest."),
+                    .child("Showing a bounded view. Open the folder to see the rest.")
+                    .into_any_element(),
             );
         }
 
-        // Images first and together, then everything else — the two groups the researcher asked
-        // for. Images lead because they are what a person opens the panel to look at; a CSV is
-        // opened to *check* something, which is a deliberate act further down.
-        //
-        // "Together" is now bounded by who produced them (§199): one tray per body of work, not
-        // one tray for the window.
-        for (band, (worker, produced)) in
-            by_producer(&ordered_outputs, &self.tasks, &self.authorship)
-                .into_iter()
-                .enumerate()
-        {
-            let (images, others) = split_images(&produced);
-            if !images.is_empty() {
-                section = section.child(self.output_grid(
-                    &format!("panel-{band}"),
-                    images_heading(images.len(), worker.as_deref()),
-                    &images,
-                    true,
-                    cx,
-                ));
-            }
-            for (at, group) in output_folder_groups(&others).iter().enumerate() {
-                if let [output] = group.outputs.as_slice() {
-                    // A lone file stays a row: it has the whole width for its name and shape, and
-                    // a grid of one is a tile with nothing to compare it to.
-                    section = section.child(self.output_panel_row(
-                        format!("panel-output-{}", output.name),
-                        output,
-                        worker.as_deref(),
-                        cx,
-                    ));
-                } else {
-                    // Still folder-grouped, because two runs' `results/` directories are still two
-                    // things — the image grid above is the only surface where kind outranks folder.
-                    section = section.child(
-                        self.output_grid(
-                            &format!("panel-{band}-{at}"),
-                            shorten_path_label(
-                                &output_folder_label(&group.folder, worker.as_deref()),
-                                PANEL_HEADING_CHARS,
-                            ),
-                            &group
-                                .outputs
-                                .iter()
-                                .map(|o| (*o).clone())
-                                .collect::<Vec<_>>(),
-                            true,
-                            cx,
-                        ),
-                    );
-                }
-            }
+        if let Some(button) = self.open_workspace_button() {
+            items.push(button);
         }
 
-        // Everything this conversation wrote, in one folder the researcher already owns.
-        // This *is* "download all the documents": the files are in their own Documents
-        // directory (`workspace.rs`), so there is nothing to package — the ask was only
-        // ever for a way to get at them.
-        //
-        // Dashed and last, because it is a way *out* of the panel rather than another row in it —
-        // and it reaches anything beyond §143's deliberate scan bounds.
-        if let Some(dir) = self.thread_workspace() {
-            section = section.child(
-                div()
-                    .id("open-workspace")
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_center()
-                    .w_full()
-                    .min_w_0()
-                    .p_2()
-                    .rounded_lg()
-                    .border_1()
-                    .border_dashed()
-                    .border_color(rgb(theme::border_strong()))
-                    .text_color(rgb(theme::text_muted()))
-                    .text_xs()
-                    .hover(|style| {
-                        style
-                            .text_color(rgb(theme::accent()))
-                            .border_color(rgb(theme::accent()))
-                            .cursor_pointer()
-                    })
-                    .child(if cfg!(windows) {
-                        "Open the folder in Explorer"
-                    } else {
-                        "Open the folder"
-                    })
-                    .on_click(move |_event, _window, _cx| {
-                        if let Err(error) = workspace::open(&dir) {
-                            tracing::warn!(%error, "could not open the workspace folder");
-                        }
-                    }),
-            );
-        }
+        items
+    }
 
-        for bucket in &self.buckets {
-            // Show a bounded number of titles — a literature search can return
-            // dozens, and the count already conveys the scale.
-            const MAX_SHOWN: usize = 4;
-            // **Datasets get a way in.** Their bucket items are titles truncated to 96
-            // characters, which for five records of one multi-site study is five identical rows;
-            // the modal has the identifier that tells them apart, the page link and the download
-            // (docs §223). Only when the structured list actually arrived, so a bucket from an
-            // older backend still renders as plain text rather than as a heading that does
-            // nothing.
-            let openable = match bucket.name {
-                "libraries" => !self.documents.is_empty(),
-                "datasets" => !bucket.items.is_empty(),
-                _ => false,
-            };
-            // **What the researcher is counting, not what the payload wrapped.** `libraries` holds
-            // one artifact per turn and `datasets` one entry per recommendation, so the bucket's
-            // own length answered *how many envelopes* for the first and *how many datasets* for
-            // the second — and `libraries · 1` beside two indexed papers read as the app losing
-            // one (§232). The structured lists are what a person means by these words.
-            let (label, count, rows) = match bucket.name {
-                "libraries" if !self.documents.is_empty() => (
-                    "library",
-                    self.documents.len(),
-                    self.documents
-                        .iter()
-                        .take(MAX_SHOWN)
-                        .map(|document| document.title.clone())
-                        .collect::<Vec<String>>(),
-                ),
-                "datasets" if !self.datasets.is_empty() => (
-                    bucket.name,
-                    self.datasets.len(),
-                    self.datasets
-                        .iter()
-                        .take(MAX_SHOWN)
-                        .map(|dataset| {
-                            dataset
-                                .persistent_id
-                                .strip_prefix("doi:")
-                                .unwrap_or(&dataset.persistent_id)
-                                .to_string()
-                        })
-                        .collect(),
-                ),
-                _ => (
-                    bucket.name,
-                    bucket.items.len(),
-                    bucket.items.iter().take(MAX_SHOWN).cloned().collect(),
-                ),
-            };
-            let mut heading = div()
-                // **Per bucket, not one id for all of them.** Every heading in this loop carried
-                // `"datasets-heading"`, so with two buckets on screen two sibling elements shared
-                // an element id — and gpui resolves interaction against that path. Whatever it
-                // did with the collision, it was not "call the listener on the datasets one".
-                .id(SharedString::from(format!("bucket-{}", bucket.name)))
+    /// Everything this conversation wrote, in one folder the researcher already owns.
+    /// This *is* "download all the documents": the files are in their own Documents
+    /// directory (`workspace.rs`), so there is nothing to package — the ask was only
+    /// ever for a way to get at them.
+    ///
+    /// Not a section of its own — it is a way *out* of the list rather than another output in
+    /// it, and it reaches anything beyond §143's deliberate scan bounds.
+    fn open_workspace_button(&self) -> Option<gpui::AnyElement> {
+        let dir = self.thread_workspace()?;
+        Some(
+            div()
+                .id("open-workspace")
                 .flex()
                 .flex_row()
                 .items_center()
-                .justify_between()
-                .gap_2()
-                // **A block, not a strip.** The first version hovered a bare text div, so the
-                // target was the width of the words and nothing announced it: *"if I not hover
-                // datasets thin rectangle I will never know that there is a modal there."* The
-                // same box `open-all-sources` uses — full width, padded, rounded — so the fill
-                // lands on a shape a pointer will cross on its way past.
+                .justify_center()
                 .w_full()
                 .min_w_0()
-                .px_2()
-                .py_1()
-                .rounded_md()
-                .text_color(rgb(theme::text()))
-                .text_sm()
-                // The datasets bucket carries a denominator when a search reported one, so the
-                // panel and the modal say the same thing about the same list (§300).
-                .child(if label == "datasets" {
-                    format!("{label} · {}", datasets_heading(count, self.search_totals))
+                .p_2()
+                .rounded_lg()
+                .border_1()
+                .border_dashed()
+                .border_color(rgb(theme::border_strong()))
+                .text_color(rgb(theme::text_muted()))
+                .text_xs()
+                .hover(|style| {
+                    style
+                        .text_color(rgb(theme::accent()))
+                        .border_color(rgb(theme::accent()))
+                        .cursor_pointer()
+                })
+                .child(if cfg!(windows) {
+                    "Open the folder in Explorer"
                 } else {
-                    format!("{label} · {count}")
-                });
-            if openable {
-                heading = heading
-                    // Said as well as coloured. A hover-only affordance is one a researcher finds
-                    // by accident, and this is the panel's only way into the dataset list.
-                    .child(ui::Label::new("open all").inherit().size(ui::Size::Compact))
-                    .hover(|style| {
-                        let fill = theme::hover_over(theme::surface());
+                    "Open the folder"
+                })
+                .on_click(move |_event, _window, _cx| {
+                    if let Err(error) = workspace::open(&dir) {
+                        tracing::warn!(%error, "could not open the workspace folder");
+                    }
+                })
+                .into_any_element(),
+        )
+    }
+}
+
+impl Workbench {
+    /// The Sources section of the Pinboard, or nothing when there is nothing to cite.
+    ///
+    /// `sources_section` (modals.rs) builds the rows and the "+N more" reveal; the heading — with
+    /// the same unverified count the modal's own footer explains — belongs to the caller now, so
+    /// the panel and the modal are not each inventing their own version of it.
+    pub(crate) fn sources_pinboard_section(&self, cx: &mut Context<Self>) -> Option<Div> {
+        if self.sources.is_empty() {
+            return None;
+        }
+        let title = format!("Sources ({})", self.sources.len());
+        Some(pinboard_section(title, self.pinboard_sources_list(cx)))
+    }
+
+    /// The Pinboard's own reference list, capped to [`SOURCES_IN_PANEL`].
+    ///
+    /// **Deliberately this panel's own copy, not a call into `modals.rs`'s `sources_section`.**
+    /// The two used to be one shared function, which meant this panel could not change how a row
+    /// looks without changing the modal's full list too. They happen to render the same way
+    /// today because nobody has asked for a difference yet — free to diverge whenever the panel
+    /// wants something the modal doesn't, with no dependency running either way.
+    fn pinboard_sources_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut section = div().flex().flex_col().gap_1();
+
+        let showing = SOURCES_IN_PANEL.min(self.sources.len());
+        for (at, source) in self.sources.iter().enumerate().take(showing) {
+            let verdict = self.checked.get(&source.citation);
+            // **Three states, not two.** `None` is *not looked up yet*; `Some(None)` is *looked
+            // up, and the registry has nothing*. Collapsing them with `.flatten()` made a
+            // reference still being resolved display the message meant for one that came back
+            // empty.
+            let looked_up = self.repaired.get(&source.citation);
+            let repair = looked_up.cloned().flatten();
+            let link = scholar_link(source, verdict, repair.as_ref());
+            let prose = without_url(&source.citation);
+
+            let mut row = div()
+                .id(SharedString::from(format!("panel-source-{at}")))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .w_full()
+                .mb_2()
+                .min_w_0()
+                .p_2()
+                .rounded_lg()
+                // The whole row opens the paper, and lights up to say so — only when there is
+                // somewhere to go.
+                .when_some(link.clone(), |row, url| {
+                    row.hover(|style| {
                         style
-                            .bg(rgb(fill))
-                            .text_color(rgb(theme::ink_on(fill)))
+                            .bg(rgb(theme::background()))
                             .cursor_pointer()
                     })
-                    .on_click({
-                        let which = bucket.name;
-                        cx.listener(move |workbench, _event, _window, cx| match which {
-                            "libraries" => {
-                                // The modal is an inventory, so refresh from Asta's durable index
-                                // at the moment the researcher asks to see it. This also repairs
-                                // conversations whose checkpoint predates the cumulative reducer.
-                                workbench.reload_documents();
-                                workbench.documents_open = true;
-                                cx.notify();
-                            }
-                            _ => workbench.open_datasets(cx),
-                        })
-                    });
-            }
-            let mut group = div().flex().flex_col().gap_1().child(heading);
-            for item in rows {
-                group = group.child(
+                    .on_click(move |_event, _window, _cx| {
+                        if let Err(error) = workspace::browse(&url) {
+                            tracing::warn!(%error, "could not open a source");
+                        }
+                    })
+                })
+                .child(
                     div()
-                        .w_full()
-                        .min_w_0()
-                        .text_color(rgb(theme::text_muted()))
-                        .text_xs()
-                        .child(item),
+                        .flex_none()
+                        .text_color(rgb(theme::accent()))
+                        .text_sm()
+                        .mr_1()
+                        .child(format!("[{}]", at + 1)),
                 );
-            }
-            if count > MAX_SHOWN {
-                group = group.child(
+
+            let body = div()
+                .flex()
+                .flex_col()
+                .flex_grow()
+                .min_w_0()
+                .gap_1()
+                .child(
                     div()
-                        .text_color(rgb(theme::text_muted()))
+                        .text_color(rgb(theme::text()))
                         .text_xs()
-                        .child(format!("+{} more", count - MAX_SHOWN)),
+                        // .text_size(px(13.))
+                        // .line_height(px(18.))
+                        .child(prose),
                 );
-            }
-            section = section.child(group);
+
+            row = row.child(body);
+            section = section.child(row);
         }
 
+        // The way in, and the count it hides: the rest are one press away, in the full modal.
+        let hidden = self.sources.len().saturating_sub(showing);
+        if hidden > 0 {
+            section = section.child(
+                ui::Button::new(SharedString::from("open-all-sources"))
+                    .icon(ui::Icon::new("icons/plus.svg"))
+                    .text(format!("View More"))
+                    .style(ui::ButtonStyle::Secondary)
+                    .alignment(Alignment::Center)
+                    .on_click(cx.listener(|workbench, _event, _window, cx| {
+                        workbench.sources_open = true;
+                        cx.notify();
+                    })),
+            );
+        }
         section
     }
 }

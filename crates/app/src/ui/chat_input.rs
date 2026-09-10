@@ -228,7 +228,7 @@ impl Workbench {
                             current_display
                                 .as_ref()
                                 .map(|(_, colour)| *colour)
-                                .unwrap_or(0xFFFFFF),
+                                .unwrap_or(theme::text_faint()),
                         ),
                 )
                 .child(
@@ -238,7 +238,7 @@ impl Workbench {
                         .child(current_display
                             .as_ref()
                             .map(|(name, _)| name.clone())
-                            .unwrap_or_else(|| "Auto".to_string()),)
+                            .unwrap_or_else(|| "Coordinator".to_string()),)
                 )
                 .on_hover(cx.listener(|workbench, hovering: &bool, _window, cx| {
                     workbench.agent_pill_hovered = *hovering;
@@ -288,7 +288,7 @@ impl Workbench {
                     .child(
                         ui::Icon::new("icons/agent-ellipse.svg")
                             .size(ui::IconSize::ExtraSmall)
-                            .colour(0xFFFFFF),
+                            .colour(theme::text_faint()),
                     )
                     .child(
                         div()
@@ -296,7 +296,7 @@ impl Workbench {
                             .flex_col()
                             .min_w_0()
                             .child(
-                                ui::Label::new("Auto")
+                                ui::Label::new("Coordinator")
                                     .colour(theme::text())
                                     .ellipsis(),
                             )

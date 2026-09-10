@@ -73,7 +73,7 @@ const ASTA_CITATION: &str = "AstaBench: Rigorous Benchmarking of AI Agents with 
 /// this is only the researcher-facing name requested in §154, so it cannot become a second
 /// project registry or collide with a real folder of the same name.
 const UNGROUPED_PROJECT_LABEL: &str = "Ungrouped Conversations";
-const ICON_PATHS: [&str; 32] = [
+const ICON_PATHS: [&str; 34] = [
     "icons/settings.svg",
     "icons/conversations.svg",
     "icons/research.svg",
@@ -106,6 +106,8 @@ const ICON_PATHS: [&str; 32] = [
     "icons/plus.svg",
     "icons/sidebar-simple-left.svg",
     "icons/sidebar-simple-right.svg",
+    "icons/stop-circle.svg",
+    "icons/lightbulb.svg",
 ];
 
 /// The four small UI icons, compiled into the executable rather than read beside it.
@@ -152,6 +154,8 @@ impl AssetSource for Assets {
             "icons/sidebar-simple-left.svg" => Some(include_bytes!("../assets/icons/sidebar-simple-left.svg")),
             "icons/sidebar-simple-right.svg" => Some(include_bytes!("../assets/icons/sidebar-simple-right.svg")),
             "icons/folder.svg" => Some(include_bytes!("../assets/icons/folder.svg")),
+            "icons/stop-circle.svg" => Some(include_bytes!("../assets/icons/stop-circle.svg")),
+            "icons/lightbulb.svg" => Some(include_bytes!("../assets/icons/lightbulb.svg")),
             _ => None,
         };
         Ok(bytes.map(Cow::Borrowed))
@@ -325,7 +329,7 @@ const TRANSCRIPT_INSET: f32 = 16.;
 ///
 /// Four, the same count the image gallery shows before its `+N` tile (§152). Enough to see whose
 /// work this is; few enough that the files below stay on screen.
-const SOURCES_IN_PANEL: usize = 4;
+const SOURCES_IN_PANEL: usize = 3;
 
 /// How tall the background-jobs list grows before it scrolls inside itself.
 ///
@@ -575,8 +579,8 @@ fn recovery_offer(named: usize, recoverable: usize) -> Option<(String, Option<St
 /// §277 was protecting is no longer in this panel: the offer to fetch those files sits on the
 /// answer that named them, in the transcript, and reads `Workbench::stray` — which no setting
 /// gates. The panel going quiet costs a diagnostic line; it cannot cost anybody their figures.
-fn outputs_are_empty(files: usize, buckets: usize, commands: usize, claims: usize) -> bool {
-    files == 0 && buckets == 0 && commands == 0 && claims == 0
+fn outputs_are_empty(files: usize, buckets: usize, commands: usize) -> bool {
+    files == 0 && buckets == 0 && commands == 0
 }
 
 /// The one line the Outputs panel shows about what a conversation ran, and whether it is loud.
@@ -611,53 +615,6 @@ fn commands_summary(commands: &[workspace::Command]) -> (String, bool) {
         summary.push_str(&format!(" · {escaped} named a file outside this conversation"));
     }
     (summary, escaped > 0)
-}
-
-/// The one line the Outputs panel shows about what this conversation's subagents *claimed*.
-///
-/// A free function for the same reason `commands_summary` is one: the wording is the feature, and
-/// it has to be assertable without a window.
-///
-/// **One clause, and it is the strongest one earned.** The line is scanned, not read; four clauses
-/// is a line nobody finishes, which is how §116's diagnostic stopped being read. Everything else is
-/// in the modal, one row per answer.
-fn claims_summary(claims: &[workspace::Claim]) -> (String, bool) {
-    let contradicted = claims.iter().filter(|claim| claim.contradicted()).count();
-    let blind = claims.iter().filter(|claim| claim.note.is_some()).count();
-    let elsewhere = claims.iter().filter(|claim| claim.used_outside()).count();
-    let unexamined = claims.iter().filter(|claim| claim.unexamined()).count();
-
-    let mut summary = format!(
-        "{} subagent answer{}",
-        claims.len(),
-        if claims.len() == 1 { "" } else { "s" }
-    );
-    if contradicted > 0 {
-        // The accusation, and the only one that colours the line: a file that is not there, or a
-        // `persistent_id` composed from memory — which is a citation a researcher would paste.
-        summary.push_str(&format!(" · {contradicted} claimed something that isn't there"));
-    } else if blind > 0 {
-        // Distinct from finding nothing wrong, and the distinction is the point: the dataverse
-        // comparison failed on every turn for two days and the log looked exactly like success.
-        summary.push_str(&format!(" · {blind} could not be checked"));
-    } else if elsewhere > 0 {
-        summary.push_str(&format!(
-            " · {elsewhere} used a file from outside this conversation"
-        ));
-    } else if unexamined > 0 {
-        // Not a fault — no rule covers those schemas. Said out loud anyway, because an unexamined
-        // answer and a verified one are the same silence, and silence reads as verified.
-        summary.push_str(&format!(" · {unexamined} with nothing to check"));
-    } else if claims
-        .iter()
-        .any(|claim| claim.claimed > 0 || claim.datasets.is_some())
-    {
-        // Earned, not assumed: every answer was examined, at least one had something to examine,
-        // and none of it was missing. Stated rather than left to a bare count, because leaving the
-        // good news implicit is what makes the bad news invisible.
-        summary.push_str(" · everything they named is there");
-    }
-    (summary, contradicted > 0)
 }
 
 /// One persistent identifier with its scheme removed, lowercased.
@@ -791,92 +748,6 @@ fn cost_line(experiments: u32, available: Option<u32>) -> String {
     }
 }
 
-/// How many background things are in each state.
-///
-/// Exists for the folded heading, which is the whole reason folding is safe: collapsed, this
-/// summary is the *only* thing on screen about work that is still moving, and a fold that hid a
-/// worker stopped at an approval gate without saying so would put back the hang §31 removed.
-///
-/// Counted over both lists because a researcher does not have two mental categories here. A
-/// LangGraph background subagent and an Asta task are different objects to this client — different
-/// endpoints, different polls, different rows — and identical to the person waiting on them.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct JobTally {
-    waiting: usize,
-    running: usize,
-    failed: usize,
-    done: usize,
-}
-
-impl JobTally {
-    fn of(tasks: &[protocol::AsyncTask], jobs: &[protocol::Job]) -> Self {
-        let mut tally = Self::default();
-        for task in tasks {
-            // Approval first: a task at the gate is `interrupted`, which is *not* terminal and
-            // not running either — it is stopped, waiting for a person.
-            if task.needs_attention() {
-                tally.waiting += 1;
-            } else if !task.is_finished() {
-                tally.running += 1;
-            } else if task.succeeded() {
-                tally.done += 1;
-            } else {
-                tally.failed += 1;
-            }
-        }
-        for job in jobs {
-            if !job.is_finished() {
-                tally.running += 1;
-            } else if job.succeeded() {
-                tally.done += 1;
-            } else {
-                tally.failed += 1;
-            }
-        }
-        tally
-    }
-
-    /// `1 waiting for you · 2 running`, most urgent first, silent about states that are empty.
-    ///
-    /// States are named rather than totalled. `3 jobs` tells a folded reader nothing they can act
-    /// on, and the reason to fold is not having to unfold.
-    fn summary(self) -> String {
-        let mut parts = Vec::new();
-        // "for you", not "for approval". The panel is read by researchers who do not write code,
-        // and the sentence has to say whose move it is.
-        if self.waiting > 0 {
-            parts.push(format!("{} waiting for you", self.waiting));
-        }
-        if self.running > 0 {
-            parts.push(format!("{} running", self.running));
-        }
-        if self.failed > 0 {
-            parts.push(format!("{} failed", self.failed));
-        }
-        if self.done > 0 {
-            parts.push(format!("{} done", self.done));
-        }
-        parts.join(" · ")
-    }
-
-    /// The colour of the most urgent state in it.
-    ///
-    /// The accent for a gate, because the accent is this app's one signal that something is
-    /// yours to act on (§199) — and a summary is the only thing a folded section can signal with.
-    fn colour(self) -> u32 {
-        if self.waiting > 0 {
-            theme::accent()
-        } else if self.running > 0 {
-            theme::running()
-        } else if self.failed > 0 {
-            theme::error()
-        } else {
-            theme::text_faint()
-        }
-    }
-}
-
-
 /// The geometry shared by painting and dragging a gallery scrollbar.
 ///
 /// It has to be one calculation. The first Windows pass found a painted thumb that could not be
@@ -999,11 +870,6 @@ impl Preview {
             let at = at.min(items.len() - 1);
             Self { items, at }
         })
-    }
-
-    /// One file, with nothing to step to. What a non-image row still opens.
-    fn single(output: workspace::Output) -> Option<Self> {
-        Self::opening(vec![output], 0)
     }
 
     fn current(&self) -> &workspace::Output {
@@ -2058,7 +1924,7 @@ impl Message {
             blocks,
             steps: Vec::new(),
             agents: Vec::new(),
-            steps_expanded: true,
+            steps_expanded: false,
             stopped: false,
             outputs: Vec::new(),
             unverified: Vec::new(),
@@ -2271,6 +2137,19 @@ struct Workbench {
     /// The project spine from `GET /project`. `None` until the first fetch lands
     /// (or if the backend isn't up yet) — the panel says so rather than lying.
     project: Option<Project>,
+    /// Suggestion prompts a turn has already gone out for, hidden from the transcript's
+    /// suggestion bubbles regardless of what `project.suggestions` says.
+    ///
+    /// `merge_spine` deliberately makes `project.suggestions` survive a spine snapshot that
+    /// doesn't mention them (docs on `merge_spine`), because the backend only recomputes them
+    /// opportunistically and erasing them on every silent snapshot made a suggestion vanish
+    /// mid-turn before it could be clicked. That same survival meant clearing
+    /// `project.suggestions` locally on send did nothing: the very next snapshot the backend
+    /// sent for the new turn still carried the old list, and merge put it right back. Tracked
+    /// here instead, keyed by prompt text, so a sent suggestion stays hidden independently of
+    /// whatever the backend keeps echoing back — until a genuinely new prompt earns its own
+    /// bubble.
+    dismissed_suggestions: std::collections::HashSet<String>,
     /// Research outputs, from the latest `values` snapshot of the current run.
     buckets: Vec<Bucket>,
     /// Long jobs (theorizer, DataVoyager) started by a turn and still being watched.
@@ -2422,12 +2301,6 @@ struct Workbench {
     /// — *what did that turn actually do* — is asked occasionally and read closely, which is the
     /// opposite of what a permanently-visible section is for.
     commands_open: bool,
-    /// The record of what this conversation's subagents *claimed* is open.
-    ///
-    /// A second modal rather than a tab inside the first, because they answer different questions
-    /// about different actors: `WHAT RAN` is the shell, this is what a subagent said it produced.
-    /// Folding them together would make the shorter one — usually this one — the harder to find.
-    claims_open: bool,
     /// The delete being confirmed would interrupt background work that says it is still running.
     ///
     /// Carried to the confirmation modal so the sentence that asks can say so. Not a refusal:
@@ -2663,10 +2536,6 @@ struct Workbench {
     /// The intent being edited in the approval modal. The one descriptive field worth changing at
     /// the gate, because it is what the run spends its experiments on.
     intent_field: Entity<Composer>,
-    /// Whether `BACKGROUND JOBS` is unfolded. Starts open, and reopens by itself the moment a
-    /// worker stops at the approval gate — the researcher's press is respected everywhere except
-    /// where it would hide a question addressed to them (§245).
-    jobs_expanded: bool,
     /// Where the jobs list is scrolled to, so the offset survives the rebuild every stream event
     /// causes. Without a handle of its own the list would jump back to the top on each tick.
     jobs_scroll: gpui::ScrollHandle,
@@ -2871,7 +2740,6 @@ impl Workbench {
             taking: None,
             update_dismissed: false,
             commands_open: false,
-            claims_open: false,
             delete_interrupts_work: false,
             collecting: None,
             collect_in_flight: false,
@@ -2879,6 +2747,7 @@ impl Workbench {
             recovery_on: None,
             install,
             project: None,
+            dismissed_suggestions: std::collections::HashSet::new(),
             buckets: Vec::new(),
             jobs: Vec::new(),
             tasks: Vec::new(),
@@ -2988,7 +2857,6 @@ impl Workbench {
             approving: None,
             declined: std::collections::HashSet::new(),
             intent_field,
-            jobs_expanded: true,
             jobs_scroll: gpui::ScrollHandle::new(),
             sources_filter,
             datasets_filter,
@@ -3206,7 +3074,6 @@ impl Workbench {
                             "A background service needs your input",
                             &worker,
                         );
-                        workbench.jobs_expanded = true;
                         if let Some(request) = elicitation {
                             workbench.open_mcp_elicitation_for(
                                 request,
@@ -3228,11 +3095,6 @@ impl Workbench {
                             "A background task needs your approval",
                             &worker,
                         );
-                        // Unfold the panel section that holds the Approve button. The fold is the
-                        // researcher's to set, but a folded section is the one state in which a
-                        // question addressed to them is invisible — so the gate appearing opens
-                        // it, and a press after that is respected (§245).
-                        workbench.jobs_expanded = true;
                     } else if finished {
                         workbench.status = if succeeded {
                             "a background task finished".into()
@@ -4099,6 +3961,19 @@ impl Workbench {
         self.pending_adoption
             .extend(awaiting_adoption(&self.attachments));
         self.attachments.clear();
+        // The suggestion bubbles live in the transcript until an actual turn goes out — not
+        // the moment one is clicked, since loading a suggestion into the composer is only a
+        // draft the researcher can still change their mind about. Dismissed by prompt text
+        // rather than cleared from `project.suggestions` directly: `merge_spine` makes that
+        // list survive a spine snapshot that doesn't mention it, so the very next snapshot this
+        // turn receives would otherwise hand the same list right back.
+        if let Some(project) = self.project.as_ref() {
+            let prompts = project
+                .suggestions
+                .iter()
+                .map(|suggestion| suggestion.prompt.clone());
+            self.dismissed_suggestions.extend(prompts);
+        }
         self.streaming = true;
         self.error = None;
         self.status = "starting…".into();
@@ -4893,6 +4768,16 @@ impl Workbench {
         self.jobs.clear();
         self.plan.clear();
         self.documents.clear();
+        // Neither had a clearing site at all — only a conditional reassignment in this
+        // function's own completion below, `if !snapshot.sources/reports.is_empty()` — so a
+        // conversation with fewer or no sources/reports than the one just left kept showing
+        // the old ones forever, not just until the fetch landed (reported as "the artifacts
+        // in the gallery view panel stay there" after switching conversations).
+        self.sources.clear();
+        self.reports.clear();
+        self.recommended_ids.clear();
+        self.recommended_datasets.clear();
+        self.dataset_picks.clear();
         // The record of who wrote what belongs to the conversation being left. Cleared with the
         // stamp, or the next frame would see an unchanged `None` and keep the old map.
         self.authorship.clear();
@@ -5896,6 +5781,20 @@ impl Workbench {
         self.jobs.clear();
         self.plan.clear();
         self.documents.clear();
+        // Same leak as `open_conversation` had: nothing here ever cleared these, so a brand
+        // new thread kept showing whatever sources/reports/dataset picks the previous
+        // conversation left behind — this function has no completion callback to clear them
+        // later either, so it has to happen here.
+        self.sources.clear();
+        self.reports.clear();
+        self.recommended_ids.clear();
+        self.recommended_datasets.clear();
+        self.dataset_picks.clear();
+        // `self.datasets` — what the panel actually renders — is a `reload_datasets` output,
+        // not `recommended_datasets` itself (see that function's own doc comment on why they
+        // differ); clearing the source and not calling this left the panel showing the
+        // previous conversation's rows until something else happened to trigger a reload.
+        self.reload_datasets();
         // The record of who wrote what belongs to the conversation being left. Cleared with the
         // stamp, or the next frame would see an unchanged `None` and keep the old map.
         self.authorship.clear();
@@ -6154,8 +6053,28 @@ impl Workbench {
 
 
 
+    /// `project.suggestions`, minus whatever `start_turn_as` has already sent — see
+    /// `dismissed_suggestions`'s own doc comment for why filtering here rather than clearing
+    /// the list itself.
+    pub(crate) fn active_suggestions(&self) -> Vec<&protocol::Suggestion> {
+        self.project
+            .as_ref()
+            .map(|project| {
+                project
+                    .suggestions
+                    .iter()
+                    .filter(|suggestion| !self.dismissed_suggestions.contains(&suggestion.prompt))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn suggestion_count(&self) -> usize {
+        self.active_suggestions().len()
+    }
+
     fn sync_transcript_list(&self) {
-        let wanted = self.transcript.len() + usize::from(self.streaming);
+        let wanted = self.transcript.len() + self.suggestion_count();
         let present = self.transcript_list.item_count();
         if wanted > present {
             self.transcript_list.splice(present..present, wanted - present);
@@ -6619,12 +6538,6 @@ impl Workbench {
         }
         if self.commands_open {
             self.commands_open = false;
-            self.restore_focus = true;
-            cx.notify();
-            return;
-        }
-        if self.claims_open {
-            self.claims_open = false;
             self.restore_focus = true;
             cx.notify();
             return;
@@ -7971,13 +7884,6 @@ impl Workbench {
         !id.is_empty() && self.recommended_ids.contains(&id)
     }
 
-    /// The claims this conversation's subagents recorded, oldest first.
-    pub(crate) fn thread_claims(&self) -> Vec<workspace::Claim> {
-        self.thread_workspace()
-            .map(|dir| workspace::claims(&dir))
-            .unwrap_or_default()
-    }
-
 }
 
 impl Render for Workbench {
@@ -8088,32 +7994,32 @@ impl Render for Workbench {
         } else {
             body.child(
                 div()
-                    .id("toggle-right-panel")
-                    .child(
-                        ui::Icon::new("icons/sidebar-simple-right.svg")
-                            .size(ui::IconSize::Small)
-                            .colour(theme::text())
-                    )
-                    .w(px(30.))
-                    .h(px(30.))
-                    .bg(rgb(theme::surface()))
-                    .m_2()
-                    .mt_4()
-                    .border_1()
-                    .border_color(rgb(theme::border()))
-                    .flex_none()
-                    .p_3()
                     .flex()
-                    .rounded_lg()
-                    .items_center()
-                    .justify_center()
-                    .hover(|style| style.cursor_pointer())
-                    .on_click(cx.listener(|workbench, _event, _window, cx| {
-                        workbench.panel_open = !workbench.panel_open;
-                        workbench.remember_panels();
-                        cx.notify();
-                    })),
-            )
+                    .flex_col()
+                    .flex_none()
+                    .m_2()
+                    .ml_1()
+                    .gap_1()
+                    .justify_between()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_none()
+                            .gap_1()
+                            .child(
+                                ui::Button::new("toggle-right-panel")
+                                    .icon(ui::Icon::new("icons/sidebar-simple-right.svg"))
+                                    .style(ui::ButtonStyle::SecondaryWhite)
+                                    .border(true)
+                                    .on_click(cx.listener(|workbench, _event, _window, cx| {
+                                        workbench.panel_open = !workbench.panel_open;
+                                        workbench.remember_panels();
+                                        cx.notify();
+                                    })),
+                            )
+                    )
+                )
         };
 
         let root = div()
@@ -8248,12 +8154,6 @@ impl Render for Workbench {
 
         let root = if self.commands_open {
             root.child(self.commands_modal(cx))
-        } else {
-            root
-        };
-
-        let root = if self.claims_open {
-            root.child(self.claims_modal(cx))
         } else {
             root
         };
@@ -8660,65 +8560,15 @@ mod tests {
     #[test]
     fn a_turn_that_wrote_nothing_here_still_has_something_to_say() {
         assert!(
-            !outputs_are_empty(0, 0, 1, 0),
+            !outputs_are_empty(0, 0, 1),
             "no files, no artifacts, one command — the panel must still show what ran, because \
              the missing files are the point"
         );
         // The genuinely empty case stays empty: a conversation gains no furniture for nothing.
-        assert!(outputs_are_empty(0, 0, 0, 0));
-        // And any one of the four is enough on its own.
-        assert!(!outputs_are_empty(1, 0, 0, 0));
-        assert!(!outputs_are_empty(0, 1, 0, 0));
-        // Including a subagent answer with no files behind it — which is the whole finding when a
-        // worker reports success over four empty folders (§207a).
-        assert!(!outputs_are_empty(0, 0, 0, 1));
-    }
-
-    /// What the Outputs panel says about what this conversation's subagents claimed.
-    ///
-    /// Read from the recorder's own fixture, so the wording is asserted against the shapes that
-    /// actually occur rather than against ones invented here.
-    #[test]
-    fn the_claims_line_leads_with_the_strongest_thing_it_has_earned() {
-        let fixture = include_str!("../tests/fixtures/claim-record.jsonl");
-        let claims = workspace::decode_claims(fixture);
-        let (summary, loud) = claims_summary(&claims);
-
-        assert!(summary.starts_with("5 subagent answers"), "{summary}");
-        // Two answers are contradicted — a missing index and an invented `persistent_id` — and
-        // that outranks the unreadable check and the borrowed PDF also present in this fixture.
-        assert!(summary.contains("2 claimed something that isn't there"), "{summary}");
-        assert!(loud, "a claim the workspace contradicts is drawn in the accent colour");
-    }
-
-    /// **An answer nothing looked at must not read as an answer that was verified.**
-    ///
-    /// This is `checked` earning its place. A schema with no path rule produces an empty `missing`
-    /// list, so a line that reported only findings would say "3 subagent answers" and mean
-    /// "3 verified" to every reader — the silence `NO_PATHS` exists to break.
-    #[test]
-    fn nothing_to_check_is_said_out_loud_rather_than_left_as_silence() {
-        let unexamined = workspace::decode_claims(
-            "{\"source\":\"hypothesis_generator\",\"schema\":\"HypothesisOutput\",\"checked\":false}",
-        );
-        let (summary, loud) = claims_summary(&unexamined);
-        assert_eq!(summary, "1 subagent answer · 1 with nothing to check");
-        assert!(!loud, "not a fault — no rule covers that schema");
-
-        // And the genuinely clean case says so rather than leaving the good news implicit.
-        let clean = workspace::decode_claims(
-            "{\"source\":\"data_voyager\",\"checked\":true,\"claimed\":4}",
-        );
-        assert_eq!(claims_summary(&clean).0, "1 subagent answer · everything they named is there");
-
-        // A check that could not run is neither of those, and outranks both.
-        let blind = workspace::decode_claims(
-            "{\"source\":\"dataverse_explorer\",\"checked\":true,\"datasets\":2,\
-              \"note\":\"dataverse_search.json could not be read\"}",
-        );
-        let (said, shouted) = claims_summary(&blind);
-        assert_eq!(said, "1 subagent answer · 1 could not be checked");
-        assert!(!shouted, "it is not an accusation; nothing was compared");
+        assert!(outputs_are_empty(0, 0, 0));
+        // And any one of the three is enough on its own.
+        assert!(!outputs_are_empty(1, 0, 0));
+        assert!(!outputs_are_empty(0, 1, 0));
     }
 
     /// **A count with no denominator is not an answer, and `29 of 0` is worse than either.**
@@ -8809,22 +8659,6 @@ mod tests {
             .filter(|dataset| !dataset.persistent_id.is_empty())
             .collect();
         assert_eq!(selectable.len(), rows.len() - 1);
-    }
-
-    /// A real file in the researcher's own Downloads folder is not a missing file.
-    ///
-    /// The recorder called these "missing" once and it read as *this file does not exist*, which
-    /// was false. The line has to be able to say the true thing — they will not travel with the
-    /// conversation — without making the accusation.
-    #[test]
-    fn a_borrowed_file_is_a_durability_warning_and_not_an_accusation() {
-        let borrowed = workspace::decode_claims(
-            "{\"source\":\"pdf_librarian\",\"checked\":true,\"claimed\":1,\
-              \"outside\":[\"/mnt/c/Users/LENOVO/Downloads/gnn.pdf\"]}",
-        );
-        let (summary, loud) = claims_summary(&borrowed);
-        assert!(summary.contains("1 used a file from outside this conversation"), "{summary}");
-        assert!(!loud, "the file is real; only its location is worth saying");
     }
 
     /// What the Outputs panel says about a conversation's commands.
@@ -9200,20 +9034,8 @@ mod tests {
         assert_eq!(groups[0].outputs.len(), 2);
         assert_eq!(groups[1].outputs.len(), 1);
         assert_eq!(
-            output_folder_label(&groups[0].folder, None),
+            output_folder_label(&groups[0].folder),
             "guinea_pig_eda_output / plots"
-        );
-        // The same folder, once the app knows whose thread that UUID is: the worker takes the
-        // UUID's place rather than vanishing with it, so the heading reads as a path of work.
-        assert_eq!(
-            output_folder_label(&groups[0].folder, Some("background worker")),
-            "background worker / guinea_pig_eda_output / plots"
-        );
-        // And a specialist inside the conversation, which has no UUID to replace: the name goes
-        // ahead of the folder rather than nowhere (§201).
-        assert_eq!(
-            output_folder_label(std::path::Path::new("plots"), Some("report writer")),
-            "report writer / plots"
         );
     }
 
@@ -9358,126 +9180,6 @@ mod tests {
         }
     }
 
-    /// One task, one thread, one name — the only attribution available without guessing.
-    #[test]
-    fn files_under_a_worker_thread_are_named_after_the_worker() {
-        let thread = "019fe9f6-9126-7710-a806-35d5e09170a4";
-        let outputs: Vec<workspace::Output> = [
-            PathBuf::from("summary.csv"),
-            PathBuf::from(thread).join("plots/yield.png"),
-        ]
-        .into_iter()
-        .map(|name| workspace::Output {
-            path: name.clone(),
-            name: name.to_string_lossy().into_owned(),
-            kind: workspace::Kind::Other,
-            bytes: 1,
-            modified: std::time::SystemTime::UNIX_EPOCH,
-        })
-        .collect();
-
-        let tasks = vec![protocol::AsyncTask {
-            task_id: "t-1".into(),
-            thread_id: thread.into(),
-            agent_name: "background_worker".into(),
-            status: "success".into(),
-            description: String::new(),
-            pending: None,
-            elicitation: None,
-            error: None,
-            activity: None,
-            todos: Vec::new(),
-            owner: String::new(),
-        }];
-
-        let groups = by_producer(&outputs, &tasks, &std::collections::HashMap::new());
-        assert_eq!(
-            groups.len(),
-            2,
-            "conversation and worker are two bodies of work"
-        );
-        assert_eq!(groups[0].0, None, "the conversation's own files lead");
-        assert_eq!(groups[1].0.as_deref(), Some("background worker"));
-
-        assert_eq!(produced_by(None, &tasks), None);
-        assert_eq!(
-            produced_by(Some(thread), &tasks).as_deref(),
-            Some("background worker"),
-        );
-        // A reload that carried no task list still knows a worker wrote these, and says only that.
-        assert_eq!(
-            produced_by(Some(thread), &[]).as_deref(),
-            Some("a background task"),
-        );
-        assert_eq!(images_heading(1, None), "1 image");
-        assert_eq!(
-            images_heading(5, Some("background worker")),
-            "5 images from background worker",
-        );
-    }
-
-    /// The half §199 could not do without the backend writing it down (§201).
-    #[test]
-    fn the_manifest_names_the_specialist_the_folder_cannot() {
-        let thread = "019fe9f6-9126-7710-a806-35d5e09170a4";
-        let outputs: Vec<workspace::Output> = [
-            PathBuf::from("plots").join("yield.png"),
-            PathBuf::from("notes.md"),
-            PathBuf::from(thread).join("worker.csv"),
-        ]
-        .into_iter()
-        .map(|name| workspace::Output {
-            path: name.clone(),
-            name: name.to_string_lossy().into_owned(),
-            kind: workspace::Kind::Other,
-            bytes: 1,
-            modified: std::time::SystemTime::UNIX_EPOCH,
-        })
-        .collect();
-
-        let tasks = vec![protocol::AsyncTask {
-            task_id: "t-1".into(),
-            thread_id: thread.into(),
-            agent_name: "background_worker".into(),
-            status: "success".into(),
-            description: String::new(),
-            pending: None,
-            elicitation: None,
-            error: None,
-            activity: None,
-            todos: Vec::new(),
-            owner: String::new(),
-        }];
-
-        // Forward slashes, as the backend writes them — matched against a name Windows spells
-        // with backslashes. The two must not be able to disagree.
-        let mut wrote = std::collections::HashMap::new();
-        wrote.insert(
-            "plots/yield.png".to_string(),
-            "exploratory_data_analysis".to_string(),
-        );
-        // Recorded inside the worker's own run, where the manifest sees *its* coordinator. The
-        // folder outranks it, or `background worker` would be renamed to `coordinator`.
-        wrote.insert(
-            format!("{thread}/worker.csv"),
-            "coordinator".to_string(),
-        );
-
-        let groups = by_producer(&outputs, &tasks, &wrote);
-        let named: Vec<Option<&str>> = groups.iter().map(|(by, _)| by.as_deref()).collect();
-        assert_eq!(
-            named,
-            vec![
-                None,
-                Some("exploratory data analysis"),
-                Some("background worker")
-            ],
-            "the conversation's own files lead, then one group per author"
-        );
-        assert_eq!(groups[0].1.len(), 1, "notes.md has no record and stays unlabelled");
-        assert_eq!(groups[0].1[0].name, "notes.md");
-    }
-
     /// `n` outputs, alternating image / not, named so a failure says which one moved.
     fn sample_outputs(kinds: &[workspace::Kind]) -> Vec<workspace::Output> {
         kinds
@@ -9494,30 +9196,6 @@ mod tests {
                 }
             })
             .collect()
-    }
-
-    #[test]
-    fn images_and_other_files_are_two_groups_that_keep_their_order() {
-        use workspace::Kind::{Data, Document, Figure};
-        // The researcher's own boundary: "I want to group images and in another group other
-        // files." A folder of seven plots and one summary CSV used to put the CSV in the middle
-        // of the strip you flick through looking for a figure.
-        let outputs = sample_outputs(&[Figure, Data, Figure, Document, Figure]);
-        let (images, others) = split_images(&outputs);
-        assert_eq!(
-            images.iter().map(|o| o.name.as_str()).collect::<Vec<_>>(),
-            ["file-0", "file-2", "file-4"]
-        );
-        assert_eq!(
-            others.iter().map(|o| o.name.as_str()).collect::<Vec<_>>(),
-            ["file-1", "file-3"],
-            "listing order has to survive the split, or the panel reshuffles"
-        );
-
-        // Neither group is invented: a run with no figures gets no image grid at all.
-        let (none, all) = split_images(&sample_outputs(&[Data, Document]));
-        assert!(none.is_empty());
-        assert_eq!(all.len(), 2);
     }
 
     #[test]
@@ -9709,7 +9387,7 @@ mod tests {
 
         // A lone file has nowhere to step, and asking must not move it anywhere.
         let mut single =
-            Preview::single(sample_outputs(&[Figure]).remove(0)).expect("one file");
+            Preview::opening(vec![sample_outputs(&[Figure]).remove(0)], 0).expect("one file");
         single.step(1);
         single.step(-1);
         assert_eq!(single.current().name, "file-0");
@@ -10881,79 +10559,6 @@ mod tests {
         assert!(trace.text.ends_with("tail"));
         assert!(trace.text.starts_with('…'));
         assert!(trace.text.chars().count() <= MAX_TRACE_CHARS + 1);
-    }
-
-    /// §245: what the heading says when the section is folded shut.
-    ///
-    /// Both lists at once, because a LangGraph worker and an Asta task are one category to the
-    /// person waiting and two objects to this client.
-    #[test]
-    fn the_folded_heading_names_every_state_that_has_something_in_it() {
-        let mut gated = worker_with("interrupted", &[], None);
-        gated.pending = Some(protocol::ApprovalRequest { actions: Vec::new() });
-        let tasks = vec![
-            gated,
-            worker_with("running", &[], None),
-            worker_with("success", &[], None),
-            worker_with("error", &[], None),
-        ];
-        let analysis = protocol::Job {
-            kind: protocol::JobKind::Analysis,
-            task_id: "t".into(),
-            question: "q".into(),
-            context_id: None,
-            status: "working".into(),
-            size: None,
-        };
-        let jobs = vec![
-            analysis.clone(),
-            protocol::Job { status: "completed".into(), ..analysis.clone() },
-            protocol::Job { status: "failed".into(), ..analysis },
-        ];
-
-        let tally = JobTally::of(&tasks, &jobs);
-        assert_eq!(
-            tally,
-            JobTally { waiting: 1, running: 2, failed: 2, done: 2 }
-        );
-        assert_eq!(
-            tally.summary(),
-            "1 waiting for you · 2 running · 2 failed · 2 done"
-        );
-        // A gate outranks everything else for the colour, because it is the only state that is
-        // the researcher's move.
-        assert_eq!(tally.colour(), theme::accent());
-    }
-
-    /// An `interrupted` worker is neither finished nor running — it is stopped, waiting.
-    #[test]
-    fn a_worker_at_the_gate_counts_as_waiting_not_running() {
-        let mut gated = worker_with("interrupted", &[], None);
-        gated.pending = Some(protocol::ApprovalRequest { actions: Vec::new() });
-        assert!(!gated.is_finished(), "interrupted is not terminal");
-        let tally = JobTally::of(std::slice::from_ref(&gated), &[]);
-        assert_eq!(tally.waiting, 1);
-        assert_eq!(tally.running, 0);
-        assert_eq!(tally.summary(), "1 waiting for you");
-    }
-
-    /// Nothing to say, and the heading says nothing — rather than `0 running`.
-    #[test]
-    fn an_empty_tally_has_an_empty_summary() {
-        let tally = JobTally::default();
-        assert_eq!(tally.summary(), "");
-        assert_eq!(tally.colour(), theme::text_faint());
-    }
-
-    /// Running beats failed and done for the colour: it is the state that is still changing.
-    #[test]
-    fn the_heading_colour_follows_the_most_urgent_state() {
-        let running = JobTally { running: 1, failed: 3, done: 9, ..Default::default() };
-        assert_eq!(running.colour(), theme::running());
-        let failed = JobTally { failed: 1, done: 9, ..Default::default() };
-        assert_eq!(failed.colour(), theme::error());
-        let done = JobTally { done: 1, ..Default::default() };
-        assert_eq!(done.colour(), theme::text_faint());
     }
 
     /// §245: a DataVoyager question is a paragraph by design, and the row is one column wide.

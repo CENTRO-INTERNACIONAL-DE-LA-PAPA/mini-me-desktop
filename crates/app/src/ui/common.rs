@@ -111,26 +111,6 @@ pub(crate) fn horizontal_drag_offset(
 }
 
 
-/// Images in one group, everything else in another, each keeping its listing order.
-///
-/// **The boundary the researcher asked for**, in their words: *"I want to group images and in
-/// another group other files."* §152's gallery grouped by the folder the agent chose, which was
-/// right about structure and wrong about kind — a folder holding seven plots and a summary CSV
-/// put the CSV in the middle of the strip, and the strip is the thing you flick through looking
-/// for a figure.
-///
-/// `Kind::Figure` is the test rather than the extension, so this cannot disagree with the
-/// thumbnail renderer about what an image is: both ask the same enum.
-pub(crate) fn split_images(
-    outputs: &[workspace::Output],
-) -> (Vec<workspace::Output>, Vec<workspace::Output>) {
-    outputs
-        .iter()
-        .cloned()
-        .partition(|output| output.kind == workspace::Kind::Figure)
-}
-
-
 impl Workbench {
     /// The bordered box a filter composer sits in.
     ///

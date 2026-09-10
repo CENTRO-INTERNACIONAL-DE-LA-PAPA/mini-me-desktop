@@ -38,7 +38,7 @@ from deepagents.backends.protocol import ExecuteResponse
 # Imported from upstream rather than reimplemented, so the local path truncates
 # execute output exactly as the sandbox path does — the cap protects the model's
 # context window and is not sandbox-specific.
-from backend.sandbox import _emit_sandbox_status, _truncate_execute_response
+from backend.sandbox import _truncate_execute_response
 
 from minime_local import authorship, ledger
 
@@ -610,7 +610,6 @@ class LocalWorkspaceBackend(LocalShellBackend):
             self._thread_id,
             project or "<none>",
         )
-        self._announced = False
         super().__init__(
             root_dir=self._work_dir,
             virtual_mode=False,
@@ -637,11 +636,6 @@ class LocalWorkspaceBackend(LocalShellBackend):
         exactly how the first live turn on this backend failed.
         """
         await asyncio.to_thread(self._work_dir.mkdir, parents=True, exist_ok=True)
-        if not self._announced:
-            self._announced = True
-            # The desktop status line waits on this; without it the UI shows
-            # "Creating sandbox…" forever on a cold thread.
-            _emit_sandbox_status("ready", f"Local workspace: {self._work_dir}")
         return self
 
     async def try_resolve(self):
