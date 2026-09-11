@@ -85,13 +85,14 @@ pub struct Theme {
 /// exactly one place. It used to be decided in three (the `live_theme!` defaults,
 /// `Settings::default`, and `apply_theme`'s fallback), which is the shape this project keeps
 /// getting wrong: several facts that have to agree, with more than one of them saying so.
-pub const THEMES: [(&str, Theme); 10] = [
+pub const THEMES: [(&str, Theme); 11] = [
     ("Violet Native Potato", VIOLET_POTATO),
     ("Violet Native Potato Light", VIOLET_POTATO_LIGHT),
     ("Magenta Native Potato", MAGENTA_POTATO),
     ("Magenta Native Potato Light", MAGENTA_POTATO_LIGHT),
     ("Bench", BENCH),
     ("Bench Night", BENCH_NIGHT),
+    ("Mini-Me", MINI_ME),
     ("Mini-Me Dark", MINI_ME_DARK),
     ("Slate", SLATE),
     ("Paper", PAPER),
@@ -99,10 +100,10 @@ pub const THEMES: [(&str, Theme); 10] = [
 ];
 
 /// The palette a fresh install opens on.
-pub const DEFAULT: Theme = THEMES[0].1;
+pub const DEFAULT: Theme = THEMES[6].1;
 
 /// Its name, as `settings.toml` writes it.
-pub const DEFAULT_NAME: &str = THEMES[0].0;
+pub const DEFAULT_NAME: &str = THEMES[6].0;
 
 /// Violet to act on, magenta under the pointer, CIP orange on the row you chose.
 ///
@@ -281,6 +282,26 @@ pub const BENCH_NIGHT: Theme = Theme {
     // that should be hard to read.
     error: 0xe89a97,
     running: 0x85b8e8,
+};
+
+pub const MINI_ME: Theme = Theme {
+    background: 0xF1EFEA,
+    surface: 0xF7F5F1,
+    elevated: 0xF7F5F1,
+    overlay: 0xF1EFEA,
+    hover: 0xF1EFEA,
+    accent_soft: 0xF7DDCD,
+    text: 0x1E1E1E,
+    text_muted: 0x74716B,
+    text_faint: 0x74716B,
+    border: 0xD8D4CD,
+    border_strong: 0xD8D4CD,
+    accent: 0xDE6732,
+    accent_hover: 0xDE6732,
+    success: 0x5bbd7a,
+    warning: 0xd9a441,
+    error: 0xf1676b,
+    running: 0x6aa9e0,
 };
 
 /// Warm charcoal and the Mini-Me orange. Neutrals carry a slight warm tint so they sit

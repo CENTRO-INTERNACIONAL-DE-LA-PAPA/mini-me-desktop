@@ -364,6 +364,24 @@ fn backend_build(config: &BackendConfig) -> Check {
 /// Windows-native has no `bash` to ask, so it runs the interpreter directly. Both paths run the
 /// **backend's** Python — a module importable in some other interpreter answers a question nobody
 /// asked.
+/// Whether a Dataverse sign-in is stored where the backend would look for it.
+///
+/// `None` means the question could not be asked — an older backend without the module, or a
+/// checkout that will not run — and is deliberately distinct from "signed out", which is a
+/// thing a researcher can fix by pressing a button.
+fn dataverse_sign_in(config: &BackendConfig) -> Option<bool> {
+    let script = format!(
+        "cd {} && .venv/bin/python -c \
+         'from backend.dataverse_auth import signed_in; print(int(signed_in()))'",
+        quote_path(&config.backend_dir())
+    );
+    let probed = probe(&config.shell_argv(&script));
+    if !probed.ok {
+        return None;
+    }
+    Some(probed.stdout.trim().ends_with('1'))
+}
+
 fn imports(config: &BackendConfig, module: &str) -> bool {
     let python = if config.wsl.is_some() || !cfg!(windows) {
         ".venv/bin/python"
@@ -852,6 +870,48 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
         }
     } else {
         checks.push(Check::skip("asta", "Asta CLI", RUNTIME_FIRST));
+    }
+
+    // --------------------------------------------------- 5b. the Dataverse sign-in
+    //
+    // **Its own row because its failure is silent.** CIP's Dataverse deployment has Horizon
+    // Authentication switched on, so it answers every unauthenticated call with 401. The agent
+    // survives that — one unreachable service no longer takes the graph down — which is exactly
+    // why it needs saying here: without a row, "Dataverse never finds anything" looks like a
+    // broken tool rather than a sign-in nobody was asked for.
+    //
+    // Asked of the token on disk rather than of the network. Setup already runs several probes
+    // and this one would be a request to a hosted service on every re-check; a stale token still
+    // reports as available in `/mcp-status`, and the button below is present either way — the
+    // same reasoning that keeps Asta's "Sign in again" on a green row.
+    if runtime_ok {
+        let sign_in = Fix::Run {
+            label: "Sign in to CIP Dataverse",
+            argv: config.shell_argv(&format!(
+                "cd {} && .venv/bin/python -m backend.dataverse_auth login",
+                quote_path(&config.backend_dir())
+            )),
+            note: "opens a browser; sign in with the CIP account that belongs to cipotato",
+        };
+        match dataverse_sign_in(config) {
+            Some(true) => checks.push(Check {
+                id: "dataverse",
+                label: "CIP Dataverse",
+                state: State::Pass,
+                detail: "signed in — dataset search is available".into(),
+                fixes: vec![sign_in],
+            }),
+            Some(false) => checks.push(Check::failing(
+                "dataverse",
+                "CIP Dataverse",
+                State::Warn,
+                "not signed in — dataset search will find nothing",
+                vec![sign_in],
+            )),
+            // The backend predates this module. Not a failure of anything, and inventing a
+            // warning for it would send someone looking for a problem they do not have.
+            None => {}
+        }
     }
 
     // ------------------------------------------------------------------- 6. the key
@@ -1432,6 +1492,7 @@ mod tests {
             project_dir: PathBuf::from("/nonexistent-checkout"),
             wsl: None,
             launch_command: vec!["true".into()],
+            prepare_command: None,
             attach_only: false,
             log_path: PathBuf::from("/dev/null"),
             secrets: Vec::new(),
@@ -1566,6 +1627,48 @@ mod tests {
 │ Refresh Token        │ ✅ Available                        │\n\
 │ Auto-Refresh         │ ✅ Enabled                          │\n\
 └──────────────────────┴─────────────────────────────────────┘";
+
+    /// The Dataverse sign-in row and the module it drives agree about their names.
+    ///
+    /// Two commands cross into Python here — `backend.dataverse_auth login` behind the button,
+    /// and a `signed_in()` call behind the row's state — and both fail the same way if a name
+    /// moves: the probe returns nothing, `dataverse_sign_in` reads that as "cannot ask", and the
+    /// row **disappears**. A researcher would see no Dataverse row at all and conclude the
+    /// feature was never there, which is the quietest possible failure.
+    ///
+    /// Read from the Python source rather than by running it: this has to hold on a machine with
+    /// no backend installed, which is most of the machines that run these tests.
+    #[test]
+    fn the_dataverse_sign_in_row_names_something_python_actually_defines() {
+        const MODULE: &str = include_str!("../../../mini-me/backend/dataverse_auth.py");
+
+        // The two entry points the app reaches for, spelled as the app spells them.
+        assert!(
+            MODULE.contains("def signed_in("),
+            "the row's state comes from `signed_in()`"
+        );
+        assert!(
+            MODULE.contains("\"login\""),
+            "the button runs `-m backend.dataverse_auth login`"
+        );
+
+        // And the app really does ask for those, so this test cannot pass by describing a
+        // command nobody builds.
+        let config = BackendConfig {
+            wsl: Some(crate::backend::WslTarget {
+                distro: None,
+                dir: "~/Mini-Me".into(),
+            }),
+            ..BackendConfig::default()
+        };
+        let login = config.shell_argv(&format!(
+            "cd {} && .venv/bin/python -m backend.dataverse_auth login",
+            crate::backend::quote_path(&config.backend_dir())
+        ));
+        let script = login.last().expect("the bash -lc payload");
+        assert!(script.contains("backend.dataverse_auth login"), "{script}");
+        assert!(script.contains(".venv/bin/python"), "{script}");
+    }
 
     #[test]
     fn the_asta_row_says_who_is_signed_in_and_for_how_long() {

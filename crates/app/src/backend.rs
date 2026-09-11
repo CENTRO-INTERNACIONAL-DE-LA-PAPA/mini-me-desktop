@@ -14,7 +14,7 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
@@ -188,6 +188,10 @@ pub struct BackendConfig {
     /// Command + args that start the dev backend. Kept configurable so packaging
     /// can swap it later.
     pub launch_command: Vec<String>,
+    /// Command + args that must finish *before* [`Self::launch_command`] — mirroring the
+    /// bundled source, installing what the lock names, generating the config. Run only on the
+    /// spawn path, and awaited without a health budget over it (see [`LaunchPlan`]).
+    pub prepare_command: Option<Vec<String>>,
     /// When set, never spawn — just talk to a backend someone else is running.
     pub attach_only: bool,
     /// File the sidecar's stdout/stderr is written to.
@@ -229,7 +233,7 @@ impl BackendConfig {
         }
         // The launch command embeds both the port and the execution environment, so it is
         // rebuilt rather than patched.
-        config.launch_command = launch_command_for(
+        let plan = launch_plan_for(
             &config.project_dir,
             config.port,
             config.wsl.as_ref(),
@@ -238,6 +242,8 @@ impl BackendConfig {
             config.owned,
             Some(&settings.model_spec()),
         );
+        config.launch_command = plan.serve;
+        config.prepare_command = plan.prepare;
         config.default_model = Some(settings.model_spec());
         config.approve_execute = settings.approve_execute;
         config.async_subagents = settings.async_subagents;
@@ -276,17 +282,11 @@ impl BackendConfig {
             None => host_owned,
         };
         let wsl = wsl.map(|(target, _)| target);
+        let plan = launch_plan_for(&project_dir, port, wsl.as_ref(), true, false, owned, None);
         Self {
             port,
-            launch_command: launch_command_for(
-                &project_dir,
-                port,
-                wsl.as_ref(),
-                true,
-                false,
-                owned,
-                None,
-            ),
+            launch_command: plan.serve,
+            prepare_command: plan.prepare,
             project_dir,
             wsl,
             attach_only: std::env::var_os("MINIME_BACKEND_ATTACH_ONLY").is_some(),
@@ -309,6 +309,46 @@ impl Default for BackendConfig {
     }
 }
 
+/// The two halves of a launch: what has to finish first, and the server itself.
+///
+/// They were one shell line — `cd DIR && <prepare> exec langgraph dev` — and a single process.
+/// That made the readiness budget for *booting a server* (60 seconds, see
+/// [`BackendSupervisor::wait_until_healthy`]) also the budget for *installing its dependencies*,
+/// which is a download measured in hundreds of megabytes whenever the lock moves. Separating
+/// them is the whole fix: the install is awaited without a stopwatch and reported while it runs,
+/// and only then is anything asked to answer a health check.
+#[derive(Clone, Debug)]
+pub struct LaunchPlan {
+    /// Run to completion before [`LaunchPlan::serve`], and only when the backend is not already
+    /// up. `None` when there is nothing to do.
+    pub prepare: Option<Vec<String>>,
+    /// The long-running server.
+    pub serve: Vec<String>,
+}
+
+#[cfg(test)]
+impl LaunchPlan {
+    /// The `bash -lc` script of the preparation step, or empty when there is none.
+    fn prepare_script(&self) -> String {
+        self.prepare
+            .as_ref()
+            .and_then(|argv| argv.last())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// The `bash -lc` script that starts the server.
+    fn serve_script(&self) -> String {
+        self.serve.last().cloned().unwrap_or_default()
+    }
+
+    /// Both halves, for assertions about something that must appear *somewhere* in the launch —
+    /// and, more usefully, about something that must appear **nowhere** in it.
+    fn both(&self) -> String {
+        format!("{}\n{}", self.prepare_script(), self.serve_script())
+    }
+}
+
 /// Build the launch argv.
 ///
 /// Prefer the checkout's own venv entry point over `uv run langgraph`: `uv run`
@@ -320,7 +360,7 @@ impl Default for BackendConfig {
 // choice out. Bundling them would hide the security-relevant defaults just to satisfy
 // a numeric style limit (the explicit-boundary rule from docs §41 and §96).
 #[allow(clippy::too_many_arguments)]
-fn launch_command_for(
+fn launch_plan_for(
     project_dir: &Path,
     port: u16,
     wsl: Option<&WslTarget>,
@@ -330,12 +370,14 @@ fn launch_command_for(
     // The `"provider::model_id"` the researcher chose, for calls that arrive with no run
     // config. See `model_env` — without it the backend reaches for an OpenAI default.
     default_model: Option<&str>,
-) -> Vec<String> {
+) -> LaunchPlan {
     if let Some(wsl) = wsl {
-        let mut argv = vec!["wsl.exe".to_string()];
+        // The `wsl.exe … bash -lc` wrapper is identical for both halves of the plan; only the
+        // script differs. Built once so the two can never disagree about which distro they mean.
+        let mut wrapper = vec!["wsl.exe".to_string()];
         if let Some(distro) = &wsl.distro {
-            argv.push("-d".into());
-            argv.push(distro.clone());
+            wrapper.push("-d".into());
+            wrapper.push(distro.clone());
         }
         // Go through a login shell so PATH/uv are set up as the user's own shell
         // would have them, and `exec` so the shell is *replaced* by the server —
@@ -344,9 +386,9 @@ fn launch_command_for(
         // Bind 0.0.0.0, not 127.0.0.1: WSL2's localhost forwarding reliably
         // reaches services bound to all interfaces, while loopback-only binds
         // are not always visible from Windows.
-        argv.push("--".into());
-        argv.push("bash".into());
-        argv.push("-lc".into());
+        wrapper.push("--".into());
+        wrapper.push("bash".into());
+        wrapper.push("-lc".into());
         // Host execution needs a couple of variables set *inside* the distro, so they go
         // in the command line rather than on `wsl.exe`'s own environment.
         let mut exports = String::new();
@@ -380,39 +422,53 @@ fn launch_command_for(
         // upstream has grown a `background` graph of its own, and a backend that cannot be
         // configured correctly must not start quietly — starting quietly without persistence is
         // the whole of §303. The failure lands in the sidecar log, where Setup already points.
-        let mut prepare = String::new();
+        // **Joined with `&&`, and run before the server rather than in front of it.** Each step
+        // below either tolerates its own failure internally (`|| true`) or is one the backend
+        // must not start without, so `&&` says exactly the right thing: the mirror and the
+        // checkpointer nudge cannot stop a launch, while a failed dependency install or a failed
+        // config generation can and should. See [`sync_dependencies_command`] for what happened
+        // when this shared a process — and a 60-second health budget — with `langgraph dev`.
+        let mut prepare: Vec<String> = Vec::new();
         // First, so the generated config is written over a checkout that is already current.
         // Only for a checkout the app owns: someone who pointed us at their own clone gets to
         // keep it — same rule the version pin had, and the only part of it worth keeping.
         if owned {
             if let Some(bundled) = bundled_backend_dir() {
-                prepare.push_str(&sync_source_command(&wsl_path(&bundled), &wsl.dir));
-                prepare.push_str("; ");
+                prepare.push(sync_source_command(&wsl_path(&bundled), &wsl.dir));
+                // Immediately after the mirror, which is what brings the new `uv.lock` in, and
+                // before anything reads the environment it describes.
+                prepare.push(sync_dependencies_command(&wsl.dir));
             }
         }
         // Durable conversation storage, for installs that were provisioned before it existed.
         // New ones get it from `setup-wsl.sh`; this is how the researchers already using the
         // app stop paying for a pickle store without having to be told about one (docs §96).
+        // After the sync, because `uv sync` prunes anything the lock does not name.
         if owned {
-            prepare.push_str(&ensure_checkpointer_command());
-            prepare.push_str("; ");
+            prepare.push(ensure_checkpointer_command());
         }
         // Run every launch, not gated on any feature: the generator writes the `checkpointer`
         // key upstream's own `langgraph.json` has none of, and it is what makes conversations
         // survive a restart at all (docs §303).
-        prepare.push_str(&generate_config_command(".venv/bin/python"));
-        prepare.push_str(" && ");
+        prepare.push(generate_config_command(".venv/bin/python"));
         let config_flag = format!(" --config {GENERATED_CONFIG}");
-        argv.push(format!(
-            "cd {dir} && {prepare}{exports}exec .venv/bin/langgraph dev --host 0.0.0.0 \
+
+        // `quote_path`, not `shell_quote`: the default is `~/Mini-Me`, and quoting the tilde
+        // would stop it expanding. A configured dir with a space in it used to split into a
+        // bogus command.
+        let dir = quote_path(&wsl.dir);
+        let prepare = (!prepare.is_empty()).then(|| {
+            let mut argv = wrapper.clone();
+            argv.push(format!("cd {dir} && {}", join_prepare_steps(&prepare)));
+            argv
+        });
+        let mut serve = wrapper;
+        serve.push(format!(
+            "cd {dir} && {exports}exec .venv/bin/langgraph dev --host 0.0.0.0 \
              --port {port}{config_flag} --no-reload --no-browser --n-jobs-per-worker {jobs}",
-            // `quote_path`, not `shell_quote`: the default is `~/Mini-Me`, and quoting
-            // the tilde would stop it expanding. A configured dir with a space in it
-            // used to split into a bogus command.
-            dir = quote_path(&wsl.dir),
             jobs = JOBS_PER_WORKER,
         ));
-        return argv;
+        return LaunchPlan { prepare, serve };
     }
 
     let venv_entry = if cfg!(windows) {
@@ -449,7 +505,12 @@ fn launch_command_for(
         argv.push("--config".into());
         argv.push(GENERATED_CONFIG.into());
     }
-    argv
+    // Nothing to prepare on the host path: it launches a checkout the researcher maintains
+    // themselves, and mirroring or syncing someone else's working clone is not ours to do.
+    LaunchPlan {
+        prepare: None,
+        serve: argv,
+    }
 }
 
 /// Open a log for appending, keeping one previous file when it grows past the cap.
@@ -480,6 +541,91 @@ pub fn open_log_appending(path: &std::path::Path) -> std::io::Result<File> {
 /// Eight megabytes holds many runs of an ordinarily quiet backend and is small enough that two of
 /// them are unremarkable in `%TEMP%`.
 const LOG_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+/// How long the preparation step may run before the app stops waiting on it.
+///
+/// Not a health budget — it is a stuck-detector. The step it covers legitimately takes minutes
+/// (a full `uv sync` moved 430 MB on a researcher's machine at 440 KiB/s), and killing a working
+/// download is exactly the failure this whole change exists to remove. Half an hour is long
+/// enough that reaching it means something is wrong, and short enough that the app does not hang
+/// forever if it is.
+const PREPARE_MAX: Duration = Duration::from_secs(30 * 60);
+
+/// The last thing the preparation step wrote, for showing the researcher that it is working.
+///
+/// Read from `from` — the offset the step's banner ended at — so this never reports the tail of
+/// a previous run as current progress. Bounded: the log is appended to across launches and may
+/// be megabytes, and this runs twice a second.
+fn last_progress_line(path: &Path, from: u64) -> Option<String> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    const TAIL: u64 = 8 * 1024;
+
+    let mut file = File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    // `from` wins over the tail window, so a step that has written nothing reads nothing — an
+    // explicit `len <= from` guard above this was removed for being unreachable: seeking to
+    // `from` on a file that has not grown past it already yields no bytes, and a branch no
+    // mutation can reach is protection in appearance only.
+    file.seek(SeekFrom::Start(from.max(len - len.min(TAIL))))
+        .ok()?;
+    let mut buf = Vec::new();
+    file.by_ref().take(TAIL).read_to_end(&mut buf).ok()?;
+
+    String::from_utf8_lossy(&buf)
+        // `\r` as well as `\n`: a progress bar redraws in place, and a line that was never
+        // terminated is still the most recent thing that happened.
+        .split(['\n', '\r'])
+        .map(|line| strip_ansi(line).trim().to_string())
+        .rfind(|line| !line.is_empty())
+        .map(|line| clip(&line, 90))
+}
+
+/// Drop the escape sequences a colouring tool writes, so they do not reach a UI label.
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // CSI sequences end at the first letter; that is enough for anything `uv` emits.
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Shorten to fit a status line, counting characters rather than bytes.
+fn clip(line: &str, max: usize) -> String {
+    if line.chars().count() <= max {
+        return line.to_string();
+    }
+    line.chars()
+        .take(max.saturating_sub(1))
+        .chain(['…'])
+        .collect()
+}
+
+/// What the researcher reads while the preparation step runs.
+///
+/// The elapsed clock is the part that matters: without it a slow step and a wedged one look
+/// identical, and the researcher's own report of this bug was *"It doesnt answer"*.
+fn prepare_status(last: Option<&str>, elapsed: Duration) -> String {
+    let secs = elapsed.as_secs();
+    let clock = if secs < 60 {
+        format!("{secs}s")
+    } else {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    };
+    match last {
+        Some(line) => format!("{line} · {clock}"),
+        None => format!("preparing the backend… {clock}"),
+    }
+}
 
 /// Epoch milliseconds for the spawn banner.
 ///
@@ -609,11 +755,6 @@ fn sync_source_command(source: &str, backend_dir: &str) -> String {
     for name in SOURCE_FILES {
         steps.push(format!("[ -f {src}/{name} ] && cp {src}/{name} {dir}/"));
     }
-    steps.push(format!(
-        "cmp -s {dir}/uv.lock {dir}/.mini-me-lock \
-         || {{ (cd {dir} && uv sync --extra dev) && cp {dir}/uv.lock {dir}/.mini-me-lock; }}"
-    ));
-
     // Guarded on the checkout still being a checkout. Mirroring into a directory that has lost
     // its `pyproject.toml` is how a half-populated tree gets treated as current — and the whole
     // chain is `|| true`, so without this the damage stays silent until `cd` fails four commands
@@ -623,6 +764,70 @@ fn sync_source_command(source: &str, backend_dir: &str) -> String {
          'mini-me: the backend checkout looks incomplete — run Setup' >&2; \
          {steps}; }} >/dev/null || true",
         steps = steps.join("; "),
+    )
+}
+
+/// Join the preparation steps so a failure in one actually stops the rest.
+///
+/// # Why each step is wrapped in its own group
+///
+/// `&&` and `||` have **equal precedence in the shell and associate left to right**, so a plain
+/// `a && b && c` join does not mean what it looks like when the steps end in `|| true`:
+///
+/// ```text
+/// { echo mirror; } || true && false || true && echo "generate ran anyway"
+/// ```
+///
+/// prints `generate ran anyway` and exits **0**. The `|| true` belonging to the *overlay* step
+/// rescues the *install* step that failed just before it, because what it is actually attached
+/// to is the whole accumulated left-hand side. Measured, not reasoned about — the joined script
+/// was printed and read, and the install's own missing `|| true` turned out to guarantee
+/// nothing at all.
+///
+/// Bracing each step binds its fallback to itself: a best-effort step still cannot stop the
+/// launch, and a step without a fallback finally can. This is the join, and
+/// `a_failing_step_is_not_rescued_by_the_next_ones_fallback` runs it rather than reading it.
+fn join_prepare_steps(steps: &[String]) -> String {
+    steps
+        .iter()
+        .map(|step| format!("{{ {step}; }}"))
+        .collect::<Vec<_>>()
+        .join(" && ")
+}
+
+/// Install what the lock names, when the lock has moved.
+///
+/// # Why this is its own command, and not a step inside the mirror
+///
+/// It used to be the last step of [`sync_source_command`], which ends `>/dev/null || true`, on
+/// the same shell line as `exec langgraph dev`. Both of those were wrong, and a researcher hit
+/// them together the first time they opened v0.3.34:
+///
+/// - **One process.** The health poll starts when the process spawns, so its 60-second budget
+///   covered the install. A lock change pulls ~430 MB — measured on a real machine at 440 KiB/s,
+///   about eleven minutes — so the app gave up, the researcher pressed Restart, and the restart
+///   killed the download that was in flight. `uv` keeps what finished, so each attempt got
+///   further; none of them ever reached the 240 MB file at the end. The app was unusable and the
+///   only visible symptom was that it "doesn't answer".
+/// - **`|| true` over `>/dev/null`.** A failed install was indistinguishable from a successful
+///   one, and surfaced later as an ImportError naming the wrong problem (F.1).
+///
+/// So: run to completion before the server is asked to exist, and **fail loudly**. The mirror
+/// around it stays best-effort — an unmounted Windows drive must not stop a backend that is
+/// already installed — but a dependency set that could not be installed is not a backend, and
+/// starting one anyway is how §303 happened.
+///
+/// The stamp is written only after `uv sync` succeeds, so an interrupted install is retried on
+/// the next launch rather than remembered as done.
+fn sync_dependencies_command(backend_dir: &str) -> String {
+    let dir = quote_path(backend_dir);
+    // `echo` before the work, not after: this is the line the researcher reads while waiting,
+    // and a message that only appears on completion explains a wait that has already ended.
+    format!(
+        "cmp -s {dir}/uv.lock {dir}/.mini-me-lock \
+         || {{ echo 'mini-me: dependencies changed — installing them now. On a slow \
+         connection this can take several minutes; the app is not stuck.' >&2; \
+         (cd {dir} && uv sync --extra dev) && cp {dir}/uv.lock {dir}/.mini-me-lock; }}"
     )
 }
 
@@ -1164,9 +1369,131 @@ impl BackendSupervisor {
         Ok(())
     }
 
+    /// Run the launch's preparation step to completion, reporting what it is doing.
+    ///
+    /// # Why this is awaited and not merely started
+    ///
+    /// Preparation is mostly instant — a file mirror and two guarded no-ops — right up until the
+    /// lock moves, and then it is a several-hundred-megabyte download. There is no budget over
+    /// it on purpose: the alternative was the 60-second health budget, which a researcher hit on
+    /// the first launch of v0.3.34 and could not get past, because every retry killed the
+    /// transfer that was in flight (see [`sync_dependencies_command`]).
+    ///
+    /// `progress` is called about twice a second with the last line the step wrote, so a
+    /// ten-minute install reads as `Downloading nvidia-nccl-cu13 (240.7MiB) · 3m10s` rather than
+    /// as a frozen window. The cap that remains is [`PREPARE_MAX`], which exists only so a
+    /// genuinely wedged step ends in a sentence the researcher can act on.
+    async fn prepare<P: FnMut(&str)>(&mut self, progress: &mut P) -> Result<()> {
+        let Some(argv) = self.config.prepare_command.clone() else {
+            return Ok(());
+        };
+        let (program, rest) = argv
+            .split_first()
+            .context("prepare_command must not be empty")?;
+
+        let log = open_log_appending(&self.config.log_path).with_context(|| {
+            format!(
+                "could not open the sidecar log at {}",
+                self.config.log_path.display()
+            )
+        })?;
+        // Where this step's output starts, so `last_progress_line` reads what *it* wrote rather
+        // than the tail of whatever ran before.
+        let from = {
+            use std::io::Write as _;
+            let mut banner = log.try_clone().context("could not dup the sidecar log")?;
+            let _ = writeln!(
+                banner,
+                "\n===== {} preparing {} =====",
+                now_stamp(),
+                self.config.location()
+            );
+            let _ = banner.flush();
+            std::fs::metadata(&self.config.log_path).map_or(0, |meta| meta.len())
+        };
+        let log_err = log.try_clone().context("could not dup the sidecar log")?;
+
+        tracing::info!(program = %program, "preparing the backend");
+        let mut child = Command::new(program)
+            .args(rest)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(log))
+            .stderr(Stdio::from(log_err))
+            .spawn()
+            .with_context(|| {
+                format!(
+                    "could not start the backend's preparation step in {}. Check that WSL is \
+                     running (`wsl --status`).",
+                    self.config.location()
+                )
+            })?;
+
+        let started = Instant::now();
+        loop {
+            match child
+                .try_wait()
+                .context("could not poll the preparation step")?
+            {
+                Some(status) if status.success() => {
+                    tracing::info!(seconds = started.elapsed().as_secs(), "backend prepared");
+                    return Ok(());
+                }
+                // **Loud, where it used to be `>/dev/null || true`.** A dependency set that
+                // could not be installed surfaces here, naming itself, instead of as an
+                // ImportError at boot naming the wrong problem (F.1).
+                Some(status) => anyhow::bail!(
+                    "preparing the backend failed with {status}. The last thing it wrote was: \
+                     {last}\n\nThe full output is in {log}. You can run it by hand with:\n    \
+                     wsl bash -lc \"cd {dir} && uv sync --extra dev\"",
+                    last = last_progress_line(&self.config.log_path, from)
+                        .unwrap_or_else(|| "nothing".into()),
+                    log = self.config.log_path.display(),
+                    dir = self.config.wsl.as_ref().map_or("<backend>", |wsl| &wsl.dir),
+                ),
+                None => {}
+            }
+            if started.elapsed() > PREPARE_MAX {
+                let _ = child.kill();
+                anyhow::bail!(
+                    "the backend's preparation step has run for {minutes} minutes without \
+                     finishing. The last thing it wrote was: {last}\n\nIt is most likely still \
+                     downloading. Run it in a terminal where you can watch it:\n    \
+                     wsl bash -lc \"cd {dir} && uv sync --extra dev\"",
+                    minutes = PREPARE_MAX.as_secs() / 60,
+                    last = last_progress_line(&self.config.log_path, from)
+                        .unwrap_or_else(|| "nothing".into()),
+                    dir = self.config.wsl.as_ref().map_or("<backend>", |wsl| &wsl.dir),
+                );
+            }
+            progress(&prepare_status(
+                last_progress_line(&self.config.log_path, from).as_deref(),
+                started.elapsed(),
+            ));
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
     /// Ensure *something* healthy is listening: attach if it is already up,
     /// otherwise spawn and wait. Returns a status string for the UI.
     pub async fn ensure_running(&mut self, client: &LangGraphClient) -> Result<Started> {
+        self.ensure_running_with(client, &mut |_| {}).await
+    }
+
+    /// As [`Self::ensure_running`], but reporting what the preparation step is doing.
+    ///
+    /// Separate rather than a parameter on the one method because three of the four callers have
+    /// nowhere to put a progress line — they run before there is a turn to attach it to. The one
+    /// that does is the turn itself, which is also the one a researcher is sitting in front of.
+    /// Generic over the callback rather than taking `&mut dyn FnMut`: a trait object is `!Send`
+    /// whatever it holds, which would have made *every* caller's future `!Send`. Three of them
+    /// are spawned on the runtime and need `Send`; the fourth is the turn, whose closure holds
+    /// `RefCell`s and can never be `Send`. Generics let each call site be judged on what it
+    /// actually passes.
+    pub async fn ensure_running_with<P: FnMut(&str)>(
+        &mut self,
+        client: &LangGraphClient,
+        progress: &mut P,
+    ) -> Result<Started> {
         if client.is_healthy().await {
             // **Ours, or somebody else's?** This is called once per turn, not once per launch, so
             // after the app spawns its own sidecar every later turn finds a healthy backend — and
@@ -1208,6 +1535,10 @@ impl BackendSupervisor {
                 self.config.base_url()
             );
         }
+        // **Before `start`, and not on the same line as it.** Everything the server needs to
+        // exist — the mirrored source, the installed dependencies, the generated config — is
+        // finished and checked here, so the budget below covers only what it is named for.
+        self.prepare(progress).await?;
         self.start()?;
         // `langgraph dev` imports the graph on boot, so first health can take a
         // while on a cold venv.
@@ -1647,7 +1978,6 @@ mod tests {
         );
     }
 
-
     /// **Conversations are saved whether or not background work is on (§303).**
     ///
     /// The bug this pins was invisible from either side on its own. `make_config.py` writes two
@@ -1664,7 +1994,7 @@ mod tests {
     /// throughout. What nothing asked was whether the launch uses it.
     #[test]
     fn conversations_are_saved_with_background_work_off() {
-        let with_background_off = launch_command_for(
+        let with_background_off = launch_plan_for(
             Path::new("/tmp/mini-me"),
             2024,
             Some(&WslTarget {
@@ -1677,16 +2007,22 @@ mod tests {
             true,
             None,
         );
-        let command = with_background_off.last().expect("the bash -lc payload");
+        let serve = with_background_off.serve_script();
+        let prepare = with_background_off.prepare_script();
+        let command = with_background_off.both();
+        let command = &command;
 
         assert!(
-            command.contains(&format!("--config {GENERATED_CONFIG}")),
+            serve.contains(&format!("--config {GENERATED_CONFIG}")),
             "a launch with background work off must still pass the generated config, or nothing \
-             configures a checkpointer and conversations are never written: {command}"
+             configures a checkpointer and conversations are never written: {serve}"
         );
+        // **In the preparation step, which finishes before the server is spawned.** That
+        // ordering used to be one `&&` on a shared command line; it is now the structure of the
+        // launch itself, and `the_install_is_not_racing_the_health_check` is what holds it.
         assert!(
-            command.contains("backend/local/make_config.py\" ."),
-            "and the config has to be generated before it can be passed: {command}"
+            prepare.contains("backend/local/make_config.py\" ."),
+            "and the config has to be generated before it can be passed: {prepare}"
         );
 
         // **The feature stays off.** Unbinding the two must not switch background work on for
@@ -1708,7 +2044,7 @@ mod tests {
     #[test]
     fn the_checkpointer_install_is_gated_on_owning_the_checkout() {
         let launch = |owned: bool| {
-            launch_command_for(
+            launch_plan_for(
                 Path::new("/tmp/mini-me"),
                 2024,
                 Some(&WslTarget {
@@ -1720,9 +2056,7 @@ mod tests {
                 owned,
                 None,
             )
-            .last()
-            .expect("the bash -lc payload")
-            .clone()
+            .prepare_script()
         };
 
         let ours = launch(true);
@@ -2382,7 +2716,7 @@ mod tests {
                 r"C:\Users\Researcher\Documents\Mini-Me",
             )
         };
-        let argv = launch_command_for(
+        let argv = launch_plan_for(
             Path::new("/tmp/mini-me"),
             2024,
             Some(&WslTarget {
@@ -2394,7 +2728,8 @@ mod tests {
             true,
             None,
         );
-        let command = argv.last().expect("the bash -lc payload");
+        let command = argv.serve_script();
+        let command = &command;
         // Assignments must land *before* `exec`, or the server never sees them.
         let exec_at = command.find("exec ").expect("an exec");
         for assignment in [
@@ -2455,7 +2790,7 @@ mod tests {
             distro: None,
             dir: "~/Mini-Me".into(),
         };
-        let named = launch_command_for(
+        let named = launch_plan_for(
             Path::new("/tmp/mini-me"),
             2024,
             Some(&wsl),
@@ -2464,7 +2799,10 @@ mod tests {
             true,
             Some("anthropic::claude-sonnet-4-5"),
         );
-        let command = named.last().expect("the bash -lc payload");
+        // Both, because the assertion that matters is the negative one below: a key must be
+        // absent from every command the launch runs, not merely from the one being read.
+        let command = named.both();
+        let command = &command;
         assert!(
             command.contains("MINIME_DEFAULT_MODEL='anthropic::claude-sonnet-4-5'"),
             "{command}"
@@ -2489,7 +2827,7 @@ mod tests {
             distro: None,
             dir: "~/Mini-Me".into(),
         };
-        let ours = launch_command_for(
+        let ours = launch_plan_for(
             Path::new("/tmp/mini-me"),
             2024,
             Some(&wsl),
@@ -2498,11 +2836,20 @@ mod tests {
             true,
             None,
         );
-        let command = ours.last().expect("the bash -lc payload");
+        let command = ours.prepare_script();
+        let command = &command;
 
-        // Before the server, and before the generated config is written over it.
-        let mirror = command.find("rm -rf ~/'Mini-Me'/.backend.new").expect("the mirror");
-        assert!(mirror < command.find("exec .venv/bin").expect("serve"), "{command}");
+        // Before the server — which is now a fact about *where* it runs rather than about two
+        // offsets into one string. The server command does no mirroring at all.
+        assert!(
+            command.contains("rm -rf ~/'Mini-Me'/.backend.new"),
+            "the mirror: {command}"
+        );
+        assert!(
+            !ours.serve_script().contains(".backend.new"),
+            "the server must not be mirroring source over itself: {}",
+            ours.serve_script()
+        );
 
         // **No shell variable, anywhere in the mirror.** A `for d in …` loop here arrived with
         // `$d` empty on a real Windows machine, which made `rm -rf {dir}/$d` into `rm -rf {dir}/`
@@ -2540,7 +2887,7 @@ mod tests {
 
         // A checkout somebody else owns is theirs. Same rule the version pin had, and the only
         // part of it worth keeping.
-        let theirs = launch_command_for(
+        let theirs = launch_plan_for(
             Path::new("/tmp/mini-me"),
             2024,
             Some(&wsl),
@@ -2550,7 +2897,7 @@ mod tests {
             None,
         );
         assert!(
-            !theirs.last().unwrap().contains("for d in backend skills"),
+            !theirs.both().contains("for d in backend skills"),
             "{theirs:?}"
         );
     }
@@ -2562,7 +2909,7 @@ mod tests {
             distro: None,
             dir: "~/Mini-Me".into(),
         };
-        let argv = launch_command_for(
+        let argv = launch_plan_for(
             Path::new("/tmp/mini-me"),
             2024,
             Some(&wsl),
@@ -2571,20 +2918,27 @@ mod tests {
             true,
             None,
         );
-        let command = argv.last().expect("the bash -lc payload");
-
-        // The generator runs *before* the server, joined with `&&` — if it fails the
-        // launch must stop, not start a coordinator holding tools that point at a graph
-        // nobody serves.
-        let generate = command.find("make_config.py").expect("the generator");
-        let serve = command
-            .find("exec .venv/bin/langgraph")
-            .expect("the server");
-        assert!(generate < serve, "{command}");
+        // The generator runs *before* the server — if it fails the launch must stop, not start
+        // a coordinator holding tools that point at a graph nobody serves.
+        //
+        // **How that is enforced changed, so this changed with it.** It was one `&&` on a shared
+        // command line, checked here by comparing two offsets. The generator is now the last
+        // step of the preparation command, whose steps are joined with `&&` and whose exit
+        // status is checked in Rust before anything is spawned —
+        // `a_failed_preparation_never_starts_a_server` is the test for that half.
         assert!(
-            command.contains("&& exec") || command.contains("&& MINIME"),
-            "{command}"
+            argv.prepare_script().contains("make_config.py"),
+            "{:?}",
+            argv.prepare
         );
+        assert!(
+            argv.prepare_script().contains(" && "),
+            "the preparation steps must be joined so a failing one stops the rest: {}",
+            argv.prepare_script()
+        );
+        let command = argv.serve_script();
+        let command = &command;
+        assert!(command.contains("exec .venv/bin/langgraph"), "{command}");
         assert!(
             command.contains("--config .mini-me-desktop.langgraph.json"),
             "{command}"
@@ -2607,7 +2961,7 @@ mod tests {
         // The two assertions are inverted rather than deleted, so the file records that this
         // pairing was once believed correct. What stays untouched is the third: unbinding
         // persistence from the feature must not switch the feature on.
-        let plain = launch_command_for(
+        let plain = launch_plan_for(
             Path::new("/tmp/mini-me"),
             2024,
             Some(&wsl),
@@ -2616,7 +2970,8 @@ mod tests {
             true,
             None,
         );
-        let plain = plain.last().expect("payload");
+        let plain = plain.both();
+        let plain = &plain;
         assert!(
             plain.contains("make_config"),
             "the config is generated whether or not background work is on: {plain}"
@@ -2626,6 +2981,276 @@ mod tests {
             "and passed, or no checkpointer is ever configured: {plain}"
         );
         assert!(!plain.contains("MINIME_ASYNC_SUBAGENTS"), "{plain}");
+    }
+
+    /// **Installing the dependencies is not on the clock that boots the server.**
+    ///
+    /// This is the whole of the change, stated as a shape: `uv sync` is in the preparation
+    /// command and the server is in the other one. While they shared a shell line they also
+    /// shared [`BackendSupervisor::wait_until_healthy`]'s 60-second budget — and a lock change
+    /// pulls hundreds of megabytes.
+    ///
+    /// The researcher's own report was *"It doesnt answer"*. Their log holds the proof: two
+    /// spawn banners five minutes apart, the second re-listing exactly the two files the first
+    /// had not finished (`nvidia-nccl-cu13` at 240.7 MiB and `xgboost` at 54.9 MiB). Every
+    /// restart killed the transfer in flight, so no attempt could ever reach the end of the
+    /// queue, and no amount of waiting or retrying would have helped.
+    #[test]
+    fn the_install_is_not_racing_the_health_check() {
+        let _env = env_lock::hold();
+        let plan = launch_plan_for(
+            Path::new("/tmp/mini-me"),
+            2024,
+            Some(&WslTarget {
+                distro: None,
+                dir: "~/Mini-Me".into(),
+            }),
+            true,
+            false,
+            true,
+            None,
+        );
+
+        let prepare = plan.prepare_script();
+        let serve = plan.serve_script();
+
+        assert!(
+            prepare.contains("uv sync --extra dev"),
+            "the install belongs to the step that is waited on: {prepare}"
+        );
+        assert!(
+            !serve.contains("uv sync"),
+            "the server command must not be able to start an install: {serve}"
+        );
+        assert!(serve.contains("exec .venv/bin/langgraph dev"), "{serve}");
+        assert!(
+            !prepare.contains("langgraph dev"),
+            "the preparation step must not start a server: {prepare}"
+        );
+
+        // **And it is not silenced.** The install used to sit inside a `>/dev/null || true`
+        // wrapper, so a failure was indistinguishable from success and surfaced later as an
+        // ImportError naming the wrong thing (F.1). The mirror around it stays best-effort.
+        // Asked of the builder's own output rather than of a slice of the joined script: the
+        // step contains `&&` inside a subshell, so splitting the plan on `&&` cut it in half and
+        // the assertions below were reading a fragment. Checking the two together also pins that
+        // the plan uses this command verbatim rather than a re-spelling of it.
+        let install = sync_dependencies_command("~/Mini-Me");
+        assert!(
+            prepare.contains(&install),
+            "the plan must run the install command as built: {prepare}"
+        );
+        let install = install.as_str();
+        assert!(
+            !install.contains("|| true"),
+            "a failed install must stop the launch: {install}"
+        );
+        assert!(
+            !install.contains(">/dev/null"),
+            "a failed install must leave something to read: {install}"
+        );
+        // The researcher reads this while they wait, so it has to be written before the work
+        // rather than after it.
+        assert!(
+            install.contains("the app is not stuck"),
+            "the wait needs to explain itself: {install}"
+        );
+        // Stamped only on success, so an interrupted install is retried rather than remembered
+        // as done — which is what turned one long download into an unbounded number of them.
+        let stamped = install.find(".mini-me-lock;").expect("the stamp");
+        assert!(
+            install.find("uv sync").expect("the sync") < stamped,
+            "{install}"
+        );
+    }
+
+    /// A step that failed is not rescued by the next step's fallback.
+    ///
+    /// **Run, not read.** The joined script is shell, and the bug this pins is a shell
+    /// precedence rule: `&&` and `||` bind equally and associate leftwards, so the `|| true`
+    /// ending a best-effort step attaches to everything before it — including a failed install.
+    /// Asserting that the install command contains no `|| true` was true and useless; the
+    /// script still exited 0. Only executing it says which.
+    #[test]
+    fn a_failing_step_is_not_rescued_by_the_next_ones_fallback() {
+        let run = |steps: &[&str]| {
+            let script =
+                join_prepare_steps(&steps.iter().map(|s| (*s).to_string()).collect::<Vec<_>>());
+            std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&script)
+                .output()
+                .expect("sh")
+                .status
+                .success()
+        };
+
+        // The shape of a real launch: a best-effort mirror, the install, a best-effort overlay
+        // copy, and the config generator.
+        assert!(
+            !run(&[
+                "{ echo mirror; } >/dev/null || true",
+                "false",
+                "{ echo overlay; } >/dev/null 2>&1 || true",
+                "true",
+            ]),
+            "a failed install must stop the launch"
+        );
+
+        // And the best-effort steps keep their fallbacks: an unmounted Windows drive must not
+        // stop a backend that is already installed.
+        assert!(
+            run(&[
+                "{ false; } >/dev/null || true",
+                "true",
+                "{ false; } >/dev/null 2>&1 || true",
+                "true",
+            ]),
+            "a best-effort step that failed must not stop the launch"
+        );
+
+        // The generator is last, and it is not best-effort: a config that could not be written
+        // must not become a server started without one (§303).
+        assert!(
+            !run(&["{ echo mirror; } >/dev/null || true", "true", "false"]),
+            "a failed config generator must stop the launch"
+        );
+    }
+
+    /// A preparation step that failed never becomes a server that half works.
+    ///
+    /// The other half of `background_work_registers_its_graph_before_the_server_starts`: that
+    /// one pins the shell `&&` joining the steps, this one pins that their exit status is
+    /// actually read. Before the split it was one process, so the shell enforced both; now the
+    /// second half is Rust and needs its own test.
+    #[tokio::test]
+    async fn a_failed_preparation_never_starts_a_server() {
+        let log = std::env::temp_dir().join(format!(
+            "mini-me-prepare-{}.log",
+            crate::provenance::now_ms()
+        ));
+        let _ = std::fs::remove_file(&log);
+
+        // The lock covers reading the environment and nothing more. Held across the awaits
+        // below it would be a `std` guard on a future that the runtime may resume anywhere,
+        // which is the one thing this lock must never become.
+        let _env = env_lock::hold();
+        let config = BackendConfig {
+            log_path: log.clone(),
+            attach_only: false,
+            // Nothing listens here, so `ensure_running` cannot attach and has to take the spawn
+            // path.
+            port: 1,
+            // Stands in for a `uv sync` that could not reach the network.
+            prepare_command: Some(vec![
+                "sh".into(),
+                "-c".into(),
+                "echo 'Downloading nvidia-nccl-cu13 (240.7MiB)'; \
+                 echo 'error: failed to fetch' >&2; exit 1"
+                    .into(),
+            ]),
+            // If this ever runs, the test has failed: it would hold the process for ten minutes.
+            launch_command: vec!["sh".into(), "-c".into(), "sleep 600".into()],
+            ..BackendConfig::default()
+        };
+        let ok = BackendConfig {
+            log_path: log.clone(),
+            prepare_command: Some(vec!["sh".into(), "-c".into(), "exit 0".into()]),
+            ..BackendConfig::default()
+        };
+        drop(_env);
+
+        let mut supervisor = BackendSupervisor::new(config);
+        let client = LangGraphClient::new("http://127.0.0.1:1");
+        let error = supervisor
+            .ensure_running_with(&client, &mut |_| {})
+            .await
+            .expect_err("a failed preparation must stop the launch");
+        let error = format!("{error:#}");
+
+        assert!(
+            supervisor.child.is_none(),
+            "the server must not be spawned when its dependencies could not be installed"
+        );
+        // The message has to carry what actually went wrong and what to do about it — the
+        // failure this replaces produced no message at all.
+        assert!(error.contains("error: failed to fetch"), "{error}");
+        assert!(error.contains("uv sync --extra dev"), "{error}");
+
+        // And a step that succeeds is simply not in the way.
+        let mut supervisor = BackendSupervisor::new(ok);
+        supervisor
+            .prepare(&mut |_| {})
+            .await
+            .expect("a preparation step that succeeds is not an error");
+
+        let _ = std::fs::remove_file(&log);
+    }
+
+    /// While it runs, the app says what it is doing — and how long it has been doing it.
+    ///
+    /// Without the clock a slow step and a wedged one look identical, which is how a working
+    /// eleven-minute download got reported as *"It doesnt answer"* and restarted four times.
+    #[test]
+    fn the_wait_says_what_it_is_waiting_for() {
+        assert_eq!(
+            prepare_status(None, Duration::from_secs(9)),
+            "preparing the backend… 9s"
+        );
+        assert_eq!(
+            prepare_status(
+                Some("Downloading nvidia-nccl-cu13 (240.7MiB)"),
+                Duration::from_secs(191)
+            ),
+            "Downloading nvidia-nccl-cu13 (240.7MiB) · 3m11s"
+        );
+
+        // Read from the offset the step started at, so the tail of a *previous* launch is never
+        // reported as current progress. The log is appended to across launches (§305), which is
+        // exactly what makes this necessary.
+        let path = std::env::temp_dir().join(format!(
+            "mini-me-progress-{}.log",
+            crate::provenance::now_ms()
+        ));
+        std::fs::write(&path, "old run: Application started up\n").expect("write");
+        let from = std::fs::metadata(&path).expect("stat").len();
+        assert_eq!(last_progress_line(&path, from), None);
+
+        // **The case that distinguishes the offset from reading the whole file.** The step has
+        // started and written only a blank line; the honest answer is "nothing yet", not the
+        // last line of the run before it. Without this the offset could be dropped entirely and
+        // every assertion here would still pass — which is what the first version of this test
+        // did (`the_endpoint_table_was_actually_found` exists for the same reason).
+        std::fs::write(&path, "old run: Application started up\n\n\n").expect("write");
+        assert_eq!(
+            last_progress_line(&path, from),
+            None,
+            "a blank line from this step must not surface the previous run's tail"
+        );
+
+        std::fs::write(
+            &path,
+            "old run: Application started up\nResolved 259 packages\n\u{1b}[2mDownloading \
+             xgboost (54.9MiB)\u{1b}[0m\n",
+        )
+        .expect("append");
+        assert_eq!(
+            last_progress_line(&path, from).as_deref(),
+            Some("Downloading xgboost (54.9MiB)"),
+            "the newest line, with its colouring stripped"
+        );
+
+        // A partial line still counts: a progress bar redraws in place and never sends a newline,
+        // and "nothing has happened" is the one thing this must not say while it is happening.
+        std::fs::write(&path, "Resolved 259 packages\rDownloaded 12 of 259").expect("write");
+        assert_eq!(
+            last_progress_line(&path, 0).as_deref(),
+            Some("Downloaded 12 of 259")
+        );
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(clip("abc", 90), "abc");
+        assert_eq!(clip(&"x".repeat(200), 5).chars().count(), 5);
     }
 
     #[test]

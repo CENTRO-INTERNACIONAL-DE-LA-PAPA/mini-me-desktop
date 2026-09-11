@@ -2178,7 +2178,7 @@ impl Workbench {
                             .gap_1()
                             .max_h(px(480.))
                             .overflow_y_scroll()
-                            .child(self.sources_section(None, cx)),
+                            .child(self.sources_section(cx)),
                     ),
             )
             .actions(
@@ -2210,38 +2210,17 @@ impl Workbench {
     }
 }
 
-
 impl Workbench {
-    /// The reference list, capped for the panel and whole for the modal.
+    /// The full reference list, filtered by the modal's own search field.
     ///
-    /// **One function rather than two, because they must agree.** A compact panel list and a full
-    /// one are the same rows with a different count — and the moment they are written separately,
-    /// the unverified mark or the link is in one and not the other (docs §194).
-    pub(crate) fn sources_section(&self, limit: Option<usize>, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut section = div()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .when(!self.sources.is_empty(), |section| {
-                section
-                    .pt_2()
-                    .border_t_1()
-                    .border_color(rgb(theme::border()))
-                    .child(
-                        ui::Label::new(match self.unverified_sources() {
-                            // **Counted where the eye lands, not only marked row by row.**
-                            // Silence under a reference means "nothing wrong with this one", and
-                            // until §185 it also meant "nothing checked this one" — so a
-                            // researcher scanning fourteen citations had no way to know how many
-                            // needed them. The header says how many, and the rows say which
-                            // (docs §185).
-                            0 => format!("SOURCES · {}", self.sources.len()),
-                            n => format!("SOURCES · {} · {n} UNVERIFIED", self.sources.len()),
-                        })
-                        .colour(theme::text_faint())
-                        .size(ui::Size::Compact),
-                    )
-            });
+    /// **The modal's own copy, deliberately not shared with the panel's.** The two used to be one
+    /// function so a compact list and a full one could not disagree about the unverified mark or
+    /// the link (docs §194) — but that meant `gallery_view.rs` reaching into this file to render
+    /// its own section, so the panel could never diverge from the modal without editing this
+    /// function too. `gallery_view.rs` now keeps its own copy for the panel; whatever the two have
+    /// in common today is coincidence, not a contract, and either is free to drift.
+    pub(crate) fn sources_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut section = div().flex().flex_col().gap_1();
 
         // A quiet line while the registry is being asked, and nothing at all once it is done.
         // There is no control here: see `Workbench::resolve_sources` for why verifying a citation
@@ -2253,17 +2232,14 @@ impl Workbench {
                     .min_w_0()
                     .text_color(rgb(theme::text_faint()))
                     .text_size(px(11.))
-                    .child(format!("checking {} references…", self.resolving)),
+                    .child(format!("Checking {} references…", self.resolving)),
             );
         }
 
         // Scored against the citation as written, which is what a researcher remembers: an
         // author's name, a year, a word from the title. The same fuzzy scorer as every other
         // filter here, so `2024 orchid` finds what you would expect it to.
-        let query = match limit {
-            Some(_) => String::new(),
-            None => self.sources_filter.read(cx).text().to_string(),
-        };
+        let query = self.sources_filter.read(cx).text().to_string();
         let matching: Vec<(usize, &protocol::Source)> = self
             .sources
             .iter()
@@ -2272,7 +2248,7 @@ impl Workbench {
             // the answer, or a filtered list renumbers the citations the prose points at.
             .filter(|(_, source)| match_score(&query, &source.citation).is_some())
             .collect();
-        let showing = limit.unwrap_or(matching.len());
+        let showing = matching.len();
         for (at, source) in matching.into_iter().take(showing) {
             let verdict = self.checked.get(&source.citation);
             // **Three states, not two.** `None` is *not looked up yet*; `Some(None)` is *looked
@@ -2701,160 +2677,4 @@ impl Workbench {
             )
     }
 
-    /// Every answer a subagent gave, newest first, beside what the workspace held.
-    ///
-    /// Newest first for the same reason the command list is: this is read to answer "what did that
-    /// just do", so the last answer is the one being looked for.
-    ///
-    /// The heading states the limit where the list is, rather than in a docstring nobody here will
-    /// read: **this compares what was *said* against what is on disk, and nothing more.** A
-    /// subagent that produced a file and described it wrongly looks the same as one that produced
-    /// nothing, and neither is the same as one that lied about its findings — which nothing here
-    /// can see at all.
-    pub(crate) fn claims_modal(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let claims = self.thread_claims();
-        let contradicted = claims.iter().filter(|claim| claim.contradicted()).count();
-
-        let mut body = div().flex().flex_col().w_full().min_w_0().gap_2().child(
-            ui::Label::new(
-                "What each subagent said it produced, beside what this conversation's folder \
-                 actually holds. A path in the accent colour is one the workspace does not have; \
-                 a faint one is real but sits outside this conversation, so it will not travel \
-                 with it. This records and does not block — nothing here stopped a turn — and it \
-                 compares names against disk, so a subagent that wrote a file and described it \
-                 wrongly is invisible to it.",
-            )
-            .muted()
-            .size(ui::Size::Compact),
-        );
-
-        for claim in claims.iter().rev() {
-            let mut row = div()
-                .flex()
-                .flex_col()
-                .w_full()
-                .min_w_0()
-                .gap_1()
-                .p_2()
-                .rounded_lg()
-                .bg(rgb(theme::surface()));
-
-            row = row.child(
-                ui::Label::new(format!("{} · {}", claim.at, claim.source))
-                    .colour(if claim.contradicted() {
-                        theme::error()
-                    } else {
-                        theme::text_faint()
-                    })
-                    .size(ui::Size::Compact),
-            );
-            row = row.child(
-                ui::Label::new(format!("answered with {}", claim.schema))
-                    .muted()
-                    .size(ui::Size::Compact),
-            );
-
-            // **Said before the lists, and separately.** A schema no rule covers produces no
-            // missing files, and an empty list under a heading reads as "checked, all fine" — the
-            // one answer this record is not allowed to imply.
-            if claim.unexamined() {
-                row = row.child(
-                    ui::Label::new("nothing here checks this kind of answer")
-                        .muted()
-                        .size(ui::Size::Compact),
-                );
-            } else if claim.claimed > 0 {
-                let verdict = if claim.missing.is_empty() {
-                    format!("named {} path(s), all present", claim.claimed)
-                } else {
-                    format!(
-                        "named {} path(s), {} not in this conversation",
-                        claim.claimed,
-                        claim.missing.len()
-                    )
-                };
-                row = row.child(ui::Label::new(verdict).muted().size(ui::Size::Compact));
-            }
-
-            // A check that could not run. Neither clean nor an accusation, and it gets its own
-            // sentence because in a log it is the same silence as success (§224).
-            if let Some(note) = &claim.note {
-                row = row.child(
-                    // "nothing was compared", rather than "could not be checked", because one of
-                    // the two notes is *recommended no datasets at all* — a fact about the run and
-                    // not a failure of the check. Both are true under this framing.
-                    ui::Label::new(format!("nothing was compared: {note}"))
-                        .colour(theme::accent())
-                        .size(ui::Size::Compact),
-                );
-            }
-
-            if let Some(datasets) = claim.datasets {
-                let verdict = if !claim.unsearched.is_empty() {
-                    format!(
-                        "recommended {datasets} dataset(s), {} absent from the search",
-                        claim.unsearched.len()
-                    )
-                } else if claim.note.is_some() {
-                    format!("recommended {datasets} dataset(s)")
-                } else {
-                    format!("recommended {datasets} dataset(s), all present in the search")
-                };
-                row = row.child(ui::Label::new(verdict).muted().size(ui::Size::Compact));
-            }
-
-            for path in &claim.missing {
-                row = row.child(
-                    ui::Label::new(format!("not in this conversation: {path}"))
-                        .colour(theme::accent())
-                        .size(ui::Size::Compact),
-                );
-            }
-            // Real files, in the researcher's own folders. Faint, because calling these missing
-            // once read as *this file does not exist*, which was false and cost the record its
-            // credibility for a week.
-            for path in &claim.outside {
-                row = row.child(
-                    ui::Label::new(format!("used from outside this conversation: {path}"))
-                        .colour(theme::text_faint())
-                        .size(ui::Size::Compact),
-                );
-            }
-            // A citation composed from memory, which is the one thing here that leaves the app —
-            // straight into a paper, if nobody says so.
-            for identifier in &claim.unsearched {
-                row = row.child(
-                    ui::Label::new(format!("never returned by the search: {identifier}"))
-                        .colour(theme::accent())
-                        .size(ui::Size::Compact),
-                );
-            }
-            body = body.child(row);
-        }
-
-        let title = if contradicted > 0 {
-            format!(
-                "What was claimed · {} · {contradicted} not borne out",
-                claims.len()
-            )
-        } else {
-            format!("What was claimed · {}", claims.len())
-        };
-
-        ui::Modal::new("claims", title)
-            .width(820.)
-            .focus(&self.delete_focus)
-            .body(body)
-            .actions(
-                ui::actions().child(div().flex_grow()).child(
-                    ui::Button::new("claims-close").text("Close").on_click(cx.listener(
-                        |workbench, _event, _window, cx| {
-                            workbench.claims_open = false;
-                            workbench.restore_focus = true;
-                            cx.notify();
-                        },
-                    )),
-                ),
-            )
-    }
 }

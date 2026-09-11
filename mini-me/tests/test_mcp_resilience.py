@@ -39,7 +39,7 @@ def test_a_failed_host_returns_no_tools_and_records_the_outage(monkeypatch) -> N
 
     _clear_mcp_state()
     monkeypatch.setattr(
-        mcp_tools, "_get_or_create_mcp_client", lambda _names: BrokenAdapter()
+        mcp_tools, "_get_or_create_mcp_client", lambda _names, _auth=None: BrokenAdapter()
     )
 
     assert _run(mcp_tools.get_mcp_tools(("dataverse",))) == []
@@ -60,7 +60,7 @@ def test_a_host_with_no_tools_is_not_reported_as_available(monkeypatch) -> None:
 
     _clear_mcp_state()
     monkeypatch.setattr(
-        mcp_tools, "_get_or_create_mcp_client", lambda _names: EmptyAdapter()
+        mcp_tools, "_get_or_create_mcp_client", lambda _names, _auth=None: EmptyAdapter()
     )
 
     assert _run(mcp_tools.get_mcp_tools(("asta",))) == []
@@ -84,7 +84,7 @@ def test_paired_cleaning_services_fail_independently(monkeypatch) -> None:
     monkeypatch.setattr(
         mcp_tools,
         "_get_or_create_mcp_client",
-        lambda names: Adapter(tuple(names)[0]),
+        lambda names, _auth=None: Adapter(tuple(names)[0]),
     )
 
     assert _run(mcp_tools.get_data_cleaning_mcp_tools()) == [crop_tool]
@@ -120,9 +120,10 @@ def test_adapter_uses_stateless_negotiation_and_server_ttl_cache(monkeypatch) ->
     captured = {}
 
     class Transport:
-        def __init__(self, url, *, headers=None):
+        def __init__(self, url, *, headers=None, auth=None):
             captured["url"] = url
             captured["headers"] = headers
+            captured["auth"] = auth
 
     class Client:
         def __init__(self, transport, **kwargs):
@@ -143,6 +144,10 @@ def test_adapter_uses_stateless_negotiation_and_server_ttl_cache(monkeypatch) ->
     assert isinstance(adapter, Adapter)
     assert captured["url"] == "https://agrovoc.fastmcp.app/mcp"
     assert captured["headers"] is None
+    # A public deployment carries no credentials of any kind. AGROVOC needs no sign-in, and
+    # attaching an OAuth provider to it would register a client against a server that never
+    # asked for one — see `test_dataverse_sign_in.py`.
+    assert captured["auth"] is None
     assert captured["client"]["mode"] == "auto"
     assert captured["client"]["cache"] is True
 
@@ -163,7 +168,7 @@ def test_successful_catalogs_are_refreshed_through_fastmcp_cache(monkeypatch) ->
 
     _clear_mcp_state()
     adapter = Adapter()
-    monkeypatch.setattr(mcp_tools, "_get_or_create_mcp_client", lambda _names: adapter)
+    monkeypatch.setattr(mcp_tools, "_get_or_create_mcp_client", lambda _names, _auth=None: adapter)
 
     assert _run(mcp_tools.get_mcp_tools(("agrovoc",))) == [tool]
     capped = tool.coroutine

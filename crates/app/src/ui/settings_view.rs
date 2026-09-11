@@ -1014,9 +1014,9 @@ impl Workbench {
                 // mode" would be a claim about who deserves it, and the researcher checking a
                 // citation before submission is exactly who needs it most (§301).
                 (
-                    "Show what ran and what was claimed",
-                    "Adds two lines to Outputs comparing what the agent said it did against \
-                     what is in this conversation's folder.",
+                    "Show what ran",
+                    "Adds a line to Outputs naming the commands this conversation ran, and \
+                     whether any of them wrote outside its folder.",
                     self.draft.run_record,
                     2,
                 ),

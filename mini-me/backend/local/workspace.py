@@ -580,7 +580,6 @@ class LocalWorkspaceBackend(LocalShellBackend):
             self._thread_id,
             project or "<none>",
         )
-        self._announced = False
         super().__init__(
             root_dir=self._work_dir,
             virtual_mode=False,
@@ -606,11 +605,6 @@ class LocalWorkspaceBackend(LocalShellBackend):
         ``mkdir`` on the event loop aborts the run with ``BlockingError``.
         """
         await asyncio.to_thread(self._work_dir.mkdir, parents=True, exist_ok=True)
-        if not self._announced:
-            self._announced = True
-            # The desktop status line waits on this; without it the UI shows
-            # "Creating sandbox…" forever on a cold thread.
-            _emit_sandbox_status("ready", f"Local workspace: {self._work_dir}")
         return self
 
     async def try_resolve(self):

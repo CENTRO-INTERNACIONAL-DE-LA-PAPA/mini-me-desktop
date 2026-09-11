@@ -141,6 +141,20 @@ struct RunningTurn {
     run_id: Option<String>,
 }
 
+/// What a restart reports while it is happening.
+///
+/// A restart stopped being a single answer that arrives when it is over. Since the launch waits
+/// for its preparation step instead of racing a 60-second health budget, "over" can be ten
+/// minutes away — see [`crate::backend::LaunchPlan`] — and ten silent minutes read as exactly
+/// the hang this was meant to remove.
+#[derive(Debug)]
+pub enum Restarting {
+    /// The preparation step said something: the last line it wrote, and how long it has run.
+    Working(String),
+    /// The restart finished, for better or worse. Always the last item on the channel.
+    Done(Result<Started>),
+}
+
 impl Sidecar {
     pub fn new(config: BackendConfig, model: Option<ModelChoice>) -> Result<Self> {
         let base_url = config.base_url();
@@ -688,7 +702,7 @@ impl Sidecar {
     /// replacing it — right for speed, and it means the Python overlay a running server holds in
     /// memory survives an app update. Reloading it needed the process gone, and nothing in the
     /// app could ask for that (docs §79).
-    pub fn restart_backend(&self) -> mpsc::UnboundedReceiver<Result<Started>> {
+    pub fn restart_backend(&self) -> mpsc::UnboundedReceiver<Restarting> {
         let (tx, rx) = mpsc::unbounded();
         let supervisor = self.supervisor.clone();
         let base_url = self.base_url.clone();
@@ -704,7 +718,17 @@ impl Sidecar {
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             }
-            let _ = tx.unbounded_send(supervisor.ensure_running(&client).await);
+            // **This button is the one the researcher pressed.** A restart during a dependency
+            // install used to be the worst thing they could do — it killed the download in
+            // flight — and it is now the thing that waits for it. Ten silent minutes would read
+            // as the same hang by another name, so progress goes down the same channel.
+            let progress = tx.clone();
+            let outcome = supervisor
+                .ensure_running_with(&client, &mut |line| {
+                    let _ = progress.unbounded_send(Restarting::Working(line.to_string()));
+                })
+                .await;
+            let _ = tx.unbounded_send(Restarting::Done(outcome));
         });
         rx
     }
@@ -1875,7 +1899,15 @@ async fn run_turn(
     emit(TurnEvent::Status("checking backend…".into()));
     {
         let mut supervisor = supervisor.lock().await;
-        let status = supervisor.ensure_running(client).await?;
+        // **The preparation step reports itself.** A launch after a dependency change installs
+        // hundreds of megabytes before there is a server to be healthy, and a status line frozen
+        // on "checking backend…" for eleven minutes is what a researcher reported as *"It doesnt
+        // answer"*. This is called about twice a second with the last line the install wrote.
+        let status = supervisor
+            .ensure_running_with(client, &mut |progress| {
+                emit(TurnEvent::Status(progress.to_string()));
+            })
+            .await?;
         emit(TurnEvent::Status(status.label().to_string()));
     }
 
