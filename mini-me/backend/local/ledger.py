@@ -6,13 +6,13 @@
 program, and pattern-matching it for writes "would produce a containment claim that is false in
 every case nobody thought of". Nothing here blocks anything.
 
-What is missing is not prevention — it is *knowing*. §160's sixteen files went to `/tmp` and the
+What is missing is not prevention — it is *knowing*. Sixteen files went to `/tmp` once and the
 researcher's Outputs panel was empty, and the way they found out was by looking, later, having been
-told. Under the conversation-wide approval grant (§41) nobody sees the commands at all: that grant
-exists because "a researcher who must click Approve twelve times stops reading by the third", which
-is correct, and it means the gate is stood down for exactly the runs that produce the most files.
+told. Under the conversation-wide approval grant nobody sees the commands at all: that grant exists
+because "a researcher who must click Approve twelve times stops reading by the third", which is
+correct, and it means the gate is stood down for exactly the runs that produce the most files.
 
-So this records. It is the half of §219's argument — *records and does not block* — applied to the
+So this records. It is the half of the argument — *records and does not block* — applied to the
 one tool that has never had either.
 
 # What is claimed, exactly
@@ -40,7 +40,7 @@ import re
 from pathlib import PurePosixPath
 from typing import Any, Iterable
 
-#: This module's own channel. `minime_local` lines reach the backend log the app writes, which is
+#: This module's own channel. `backend.local` lines reach the backend log the app writes, which is
 #: where anybody looking for an absent record will already be.
 logger = logging.getLogger(__name__)
 
@@ -55,8 +55,8 @@ RECORD_NAME = "commands.jsonl"
 #: The other record kept in that folder: what a subagent *said* it produced.
 #:
 #: Named here rather than in `backend/middleware/claims.py` because the folder is this module's,
-#: and two files writing into the same directory under two different notions of where it is, is
-#: the defect §278 was. The writer lives in the middleware; the address lives here.
+#: and two files writing into the same directory under two different notions of where it is would
+#: be a defect. The writer lives in the middleware; the address lives here.
 CLAIMS_NAME = "claims.jsonl"
 
 #: One command's text, clipped. A generated script can be tens of kilobytes and the record is meant
@@ -72,8 +72,8 @@ MAX_ENTRIES = 500
 #:
 #: `/usr/bin/python3`, `/bin/sh` and `/dev/null` appear in a large fraction of commands and none of
 #: them is a place a researcher's results land; a report that names them every time is a report that
-#: stops being read, which is §116's and §132's failure exactly. Excluding them is a claim about
-#: what is worth showing, not a claim that nothing can be written there.
+#: stops being read. Excluding them is a claim about what is worth showing, not a claim that
+#: nothing can be written there.
 SYSTEM_PREFIXES = ("/dev/", "/proc/", "/sys/", "/usr/", "/bin/", "/sbin/", "/lib/", "/etc/", "/opt/")
 
 # A `/`-rooted token. The lookbehind drops `https://…` and `file://…` — a URL is not a path, and
@@ -82,7 +82,7 @@ SYSTEM_PREFIXES = ("/dev/", "/proc/", "/sys/", "/usr/", "/bin/", "/sbin/", "/lib
 _POSIX_PATH = re.compile(r"(?<![\w:/])(/[A-Za-z0-9._~][^\s'\"<>|;&()\\]*)")
 # A quoted absolute path may contain spaces. Keep this separate from `_POSIX_PATH`: the plain
 # pattern remains intentionally conservative around shell syntax, while quotes give us an exact
-# boundary for the path that actually escaped in §302.
+# boundary for the path that actually escaped.
 _QUOTED_POSIX_PATH = re.compile(
     r"(?P<quote>['\"])(?P<path>/[^'\"\r\n]+)(?P=quote)"
 )
@@ -138,7 +138,7 @@ CLOCK_SLACK = 1.0
 #: The working-directory scan is on `execute`'s hot path. A command may unpack a dataset or build a
 #: virtualenv, so it has both a depth and an entry budget. Hitting either is reported by
 #: :func:`observed_writes`; a silent cap would merely turn the live defect into a missing-513th-file
-#: defect (§301).
+#: defect.
 SCAN_MAX_DEPTH = 3
 SCAN_MAX_ENTRIES = 512
 
@@ -295,7 +295,7 @@ def _observed_writes_in_roots(
     if truncated:
         where = ", ".join(str(root) for root in roots)
         logger.warning(
-            "minime_local: stopped observing writes in %s at the safety limit "
+            "backend.local: stopped observing writes in %s at the safety limit "
             "(%d entries, depth %d); later files may be absent from recovery",
             where,
             max_entries,
@@ -374,15 +374,14 @@ def append(
 ) -> str | None:
     """Add one line to one of the conversation's records. **Never raises.**
 
-    An unwritable record must cost a researcher nothing. `_say_where_it_ran` makes the same trade
-    and states the reason: taking `execute` down to protect a diagnostic is the wrong way round,
-    and this file already records making that mistake once.
+    An unwritable record must cost a researcher nothing. `_say_where_it_ran` in `workspace.py`
+    makes the same trade: taking `execute` down to protect a diagnostic is the wrong way round.
 
     **Returns where it wrote, or `None` with the reason swallowed** — and that return value is not
-    decoration. The first version answered nothing at all, so a caller could not tell a written
-    record from a failed one, and when the claims record silently failed to appear there were two
-    invisible paths and no way to choose between them (§285). Never raising and never saying are
-    different promises; this keeps the first and drops the second.
+    decoration. A caller cannot tell a written record from a failed one without it, and if the
+    claims record silently failed to appear there would be two invisible paths and no way to
+    choose between them. Never raising and never saying are different promises; this keeps the
+    first and drops the second.
     """
     try:
         from pathlib import Path
@@ -401,13 +400,8 @@ def append(
         target.write_text("\n".join(kept) + "\n", encoding="utf-8")
         return str(target)
     except Exception:  # noqa: BLE001 — see the docstring; nothing here may reach the researcher
-        # **The traceback, because "it returned None" is not a diagnosis.** The claims record
-        # failed to appear on a real machine and this line was `pass`; the caller could report
-        # *that* it failed and nothing could report *why*, so the next step was another release
-        # (§286). Warning rather than exception-level: a diagnostic that fails is worth one line,
-        # not a wall of text on every turn if the disk is full.
         logger.warning(
-            "minime_local: could not write %s in %s",
+            "backend.local: could not write %s in %s",
             name,
             work_dir,
             exc_info=True,
@@ -449,11 +443,9 @@ def outside_files(work_dir: str | PurePosixPath) -> dict[str, list[str]]:
     difference between the two lists is the difference between offering somebody their results and
     taking their data (see :func:`written_during`).
 
-    **Both halves are returned, and that is the point.** The first version answered only "here is
-    what can be copied", so a conversation whose files had since been swept from `/tmp` produced an
-    empty list indistinguishable from one that never wrote anything — and the button reported
-    `brought=0 refused=0`, which is a sentence with no information in it. A caller cannot explain
-    what it was not told.
+    **Both halves are returned, and that is the point.** A caller cannot explain what it was not
+    told, and a conversation whose files had since been swept from `/tmp` must not look identical
+    to one that never wrote anything.
 
     Deduplicated and in the order the commands produced them, which is the order a person
     remembers making them in.

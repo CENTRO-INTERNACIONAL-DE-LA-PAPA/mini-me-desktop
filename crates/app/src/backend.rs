@@ -46,63 +46,13 @@ pub struct WslTarget {
     pub dir: String,
 }
 
-/// Where the agent's files and shell commands run.
+/// Where the agent's files and shell commands run: always this machine.
 ///
 /// Upstream Mini-Me executes inside a remote LangSmith sandbox. For a local-first
-/// desktop app that is infrastructure we neither need nor want (docs §10/§11), and
-/// `Local` replaces it with a directory on this machine via the Python overlay in
-/// `overlay/` — **without modifying the Mini-Me checkout** (docs §18).
-#[derive(Clone, Debug, PartialEq)]
-pub enum Execution {
-    /// Upstream's remote LangSmith sandbox. Still the default.
-    Sandbox,
-    /// The host. `overlay_dir` goes on `PYTHONPATH`, where its `sitecustomize`
-    /// swaps the sandbox class at interpreter startup.
-    Local { overlay_dir: PathBuf },
-}
-
-/// Decide the execution locality.
-///
-/// **Host execution is the default** (2026-07-31). This is a local-first, single-user
-/// workbench: the researcher's files are on this machine, and shipping them to a rented
-/// VM to be read was always the wrong shape (docs §10/§11). What made defaulting safe
-/// is the approval gate — every `execute` call now stops and asks (docs §19).
-///
-/// `MINIME_EXECUTION_BACKEND=sandbox`, or `--sandbox`, still gets the old path, so the
-/// change is reversible for anyone who needs it.
-///
-/// `override_local` comes from `--local` / `--sandbox` and wins over the environment.
-/// A flag you just typed is more obviously in force than a variable your shell has
-/// been holding since an hour ago — and on Windows, `$env:` assignments outlive the
-/// command, which has already caused one confusing session.
-fn resolve_execution(override_local: Option<bool>) -> Execution {
-    let local = match override_local {
-        Some(local) => local,
-        None => {
-            let requested = std::env::var("MINIME_EXECUTION_BACKEND").unwrap_or_default();
-            let requested = requested.trim();
-            // Anything explicit is honoured; an unset variable now means local.
-            !requested.eq_ignore_ascii_case("sandbox") || requested.is_empty()
-        }
-    };
-    if !local {
-        return Execution::Sandbox;
-    }
-    Execution::Local {
-        overlay_dir: overlay_dir(),
-    }
-}
-
-/// Where the Python overlay lives.
-///
-/// Defaults to this repo's `overlay/`, resolved at compile time. That is sound here
-/// precisely *because* of how this app ships: the user builds it themselves from a
-/// checkout (`git pull` + `cargo build` is also the update story, docs §5), so the
-/// compiled-in path is a real path on their machine. `MINIME_OVERLAY_DIR` overrides
-/// it for a packaged layout.
-fn overlay_dir() -> PathBuf {
-    resource("MINIME_OVERLAY_DIR", "overlay")
-}
+/// desktop app that is infrastructure we neither need nor want (docs §10/§11), so this
+/// app runs the agent's code on the host (or, on Windows, inside WSL) unconditionally.
+/// What makes that safe is the approval gate — every `execute` call stops and asks
+/// (docs §19).
 
 /// Find a directory that ships with the app.
 ///
@@ -110,7 +60,7 @@ fn overlay_dir() -> PathBuf {
 ///
 /// 1. **An environment override**, for anything unusual.
 /// 2. **Next to the executable** — how a *packaged* build is laid out
-///    (`mini-me-desktop.exe` beside `overlay/`, `scripts/`, `vendor/`). Checked before
+///    (`mini-me-desktop.exe` beside `mini-me/`, `scripts/`, `vendor/`). Checked before
 ///    the compiled-in path so a shipped copy never reaches back to a source tree that
 ///    exists only on the machine it was built on.
 /// 3. **The repo**, resolved at compile time, which is the development case and was the
@@ -156,7 +106,7 @@ fn normalized(path: PathBuf) -> PathBuf {
     out
 }
 
-/// Where this repo's helper scripts live, resolved the same way as [`overlay_dir`].
+/// Where this repo's helper scripts live, resolved the same way as [`bundled_backend_dir`].
 ///
 /// `setup-wsl.sh` is the provisioning script the Setup pane offers to run, and it has
 /// to be named as a path the *backend's* shell can reach — inside WSL that means
@@ -176,8 +126,10 @@ fn scripts_dir() -> PathBuf {
 /// every log line looked healthy (§134). Shipping the source here replaces a network call needing
 /// credentials with a file copy needing nothing — `git pull` on this repo *is* the backend update.
 ///
-/// `vendor/Mini-Me` is still honoured behind it, for a packaged build laid out by
-/// `scripts/bundle-backend.sh`, and `MINIME_BUNDLED_BACKEND` overrides both.
+/// `MINIME_BUNDLED_BACKEND` overrides it. The old `vendor/Mini-Me` fallback (a clone of the
+/// separate private repo, populated by a since-removed `scripts/bundle-backend.sh`) is gone —
+/// `mini-me/` has been the only layout since the monorepo move, confirmed dead weight rather
+/// than a real fallback (nothing in this repository still produces or reads `vendor/Mini-Me`).
 pub(crate) fn bundled_backend_dir() -> Option<PathBuf> {
     // The variable names the checkout itself, not the directory holding it — someone overriding
     // it is pointing at a specific copy.
@@ -185,12 +137,8 @@ pub(crate) fn bundled_backend_dir() -> Option<PathBuf> {
         let dir = PathBuf::from(dir);
         return dir.join("langgraph.json").is_file().then_some(dir);
     }
-    [
-        resource("MINIME_SOURCE_DIR", "mini-me"),
-        resource("MINIME_VENDOR_DIR", "vendor").join("Mini-Me"),
-    ]
-    .into_iter()
-    .find(|dir| dir.join("langgraph.json").is_file())
+    let dir = resource("MINIME_SOURCE_DIR", "mini-me");
+    dir.join("langgraph.json").is_file().then_some(dir)
 }
 
 /// Render a path the way WSL sees it: `C:\\Users\\x` becomes `/mnt/c/Users/x`.
@@ -248,8 +196,6 @@ pub struct BackendConfig {
     pub attach_only: bool,
     /// File the sidecar's stdout/stderr is written to.
     pub log_path: PathBuf,
-    /// Where the agent's code runs — the remote sandbox, or this machine.
-    pub execution: Execution,
     /// Credentials the `asta` CLI needs, read from the keychain **once at startup**
     /// (see `secret_env`). Never logged.
     pub secrets: Vec<(String, String)>,
@@ -276,11 +222,8 @@ pub struct BackendConfig {
 }
 
 impl BackendConfig {
-    /// Build the configuration, letting a command-line flag override the environment.
-    ///
-    /// `Some(true)` forces host execution, `Some(false)` forces the sandbox, `None`
-    /// falls back to `MINIME_EXECUTION_BACKEND`.
-    pub fn with_execution_override(override_local: Option<bool>) -> Self {
+    /// Build the configuration used at real startup, reading Settings.
+    pub fn load() -> Self {
         let settings = crate::settings::Settings::load();
         let mut config = Self::with_recorded_dir(&settings);
         // Settings lose to an explicit environment variable, which is the debugging
@@ -288,20 +231,12 @@ impl BackendConfig {
         if std::env::var_os("MINIME_BACKEND_PORT").is_none() {
             config.port = settings.backend_port;
         }
-        let execution = resolve_execution(override_local.or_else(|| {
-            if std::env::var_os("MINIME_EXECUTION_BACKEND").is_some() {
-                None
-            } else {
-                Some(settings.local_execution)
-            }
-        }));
         // The launch command embeds both the port and the execution environment, so it is
         // rebuilt rather than patched.
         let plan = launch_plan_for(
             &config.project_dir,
             config.port,
             config.wsl.as_ref(),
-            &execution,
             settings.approve_execute,
             settings.async_subagents,
             config.owned,
@@ -310,7 +245,6 @@ impl BackendConfig {
         config.launch_command = plan.serve;
         config.prepare_command = plan.prepare;
         config.default_model = Some(settings.model_spec());
-        config.execution = execution;
         config.approve_execute = settings.approve_execute;
         config.async_subagents = settings.async_subagents;
         // Read here, on the main thread: see `secret_env`.
@@ -348,17 +282,7 @@ impl BackendConfig {
             None => host_owned,
         };
         let wsl = wsl.map(|(target, _)| target);
-        let execution = resolve_execution(None);
-        let plan = launch_plan_for(
-            &project_dir,
-            port,
-            wsl.as_ref(),
-            &execution,
-            true,
-            false,
-            owned,
-            None,
-        );
+        let plan = launch_plan_for(&project_dir, port, wsl.as_ref(), true, false, owned, None);
         Self {
             port,
             launch_command: plan.serve,
@@ -367,7 +291,6 @@ impl BackendConfig {
             wsl,
             attach_only: std::env::var_os("MINIME_BACKEND_ATTACH_ONLY").is_some(),
             log_path: default_log_path(),
-            execution,
             secrets: Vec::new(),
             approve_execute: true,
             async_subagents: false,
@@ -441,7 +364,6 @@ fn launch_plan_for(
     project_dir: &Path,
     port: u16,
     wsl: Option<&WslTarget>,
-    execution: &Execution,
     approve_execute: bool,
     async_subagents: bool,
     owned: bool,
@@ -467,22 +389,15 @@ fn launch_plan_for(
         wrapper.push("--".into());
         wrapper.push("bash".into());
         wrapper.push("-lc".into());
-        // Host execution needs two variables set *inside* the distro, so they go in
-        // the command line rather than on `wsl.exe`'s own environment.
+        // Host execution needs a couple of variables set *inside* the distro, so they go
+        // in the command line rather than on `wsl.exe`'s own environment.
         let mut exports = String::new();
-        for (name, value) in execution_env(execution, true, approve_execute)
+        for (name, value) in execution_env(true, approve_execute)
             .into_iter()
             .chain(feature_env(async_subagents))
             .chain(model_env(default_model))
         {
-            if name == "PYTHONPATH" {
-                exports.push_str(&format!(
-                    "PYTHONPATH=\"{}\" ",
-                    overlay_expression(&wsl.dir, &value)
-                ));
-            } else {
-                exports.push_str(&format!("{name}={} ", shell_quote(&value)));
-            }
+            exports.push_str(&format!("{name}={} ", shell_quote(&value)));
         }
         // The config we generate from upstream's just before launch (docs §30). `&&`, so a
         // generator failure stops the launch instead of silently starting a server whose
@@ -507,15 +422,6 @@ fn launch_plan_for(
         // upstream has grown a `background` graph of its own, and a backend that cannot be
         // configured correctly must not start quietly — starting quietly without persistence is
         // the whole of §303. The failure lands in the sidecar log, where Setup already points.
-        let overlay = execution_env(execution, true, approve_execute)
-            .into_iter()
-            .find(|(name, _)| name == "PYTHONPATH")
-            .map(|(_, value)| value)
-            .unwrap_or_default();
-        // Always, not only for async subagents: the backend loads the *in-distro* copy,
-        // so without this an updated app keeps running the overlay it was provisioned
-        // with (see `sync_overlay_command`).
-        //
         // **Joined with `&&`, and run before the server rather than in front of it.** Each step
         // below either tolerates its own failure internally (`|| true`) or is one the backend
         // must not start without, so `&&` says exactly the right thing: the mirror and the
@@ -523,10 +429,9 @@ fn launch_plan_for(
         // config generation can and should. See [`sync_dependencies_command`] for what happened
         // when this shared a process — and a 60-second health budget — with `langgraph dev`.
         let mut prepare: Vec<String> = Vec::new();
-        // First, so the overlay and the generated config are written over a checkout that is
-        // already current. Only for a checkout the app owns: someone who pointed us at their own
-        // clone gets to keep it — same rule the version pin had, and the only part of it worth
-        // keeping.
+        // First, so the generated config is written over a checkout that is already current.
+        // Only for a checkout the app owns: someone who pointed us at their own clone gets to
+        // keep it — same rule the version pin had, and the only part of it worth keeping.
         if owned {
             if let Some(bundled) = bundled_backend_dir() {
                 prepare.push(sync_source_command(&wsl_path(&bundled), &wsl.dir));
@@ -535,9 +440,6 @@ fn launch_plan_for(
                 prepare.push(sync_dependencies_command(&wsl.dir));
             }
         }
-        if !overlay.is_empty() {
-            prepare.push(sync_overlay_command(&overlay, &wsl.dir));
-        }
         // Durable conversation storage, for installs that were provisioned before it existed.
         // New ones get it from `setup-wsl.sh`; this is how the researchers already using the
         // app stop paying for a pickle store without having to be told about one (docs §96).
@@ -545,20 +447,11 @@ fn launch_plan_for(
         if owned {
             prepare.push(ensure_checkpointer_command());
         }
-        // **When there is an overlay, not when background work is on.** The generator lives in
-        // the overlay; a sandbox run has none, and gating this on `async_subagents` hid that —
-        // the first version of §303 generated unconditionally and produced
-        // `"/minime_local/make_config.py"` on the sandbox path, which `the_sandbox_path_is_left_
-        // exactly_as_it_was` caught immediately. The condition was never about the feature.
-        let config_flag = if overlay.is_empty() {
-            String::new()
-        } else {
-            prepare.push(generate_config_command(
-                &overlay_expression(&wsl.dir, &overlay),
-                ".venv/bin/python",
-            ));
-            format!(" --config {GENERATED_CONFIG}")
-        };
+        // Run every launch, not gated on any feature: the generator writes the `checkpointer`
+        // key upstream's own `langgraph.json` has none of, and it is what makes conversations
+        // survive a restart at all (docs §303).
+        prepare.push(generate_config_command(".venv/bin/python"));
+        let config_flag = format!(" --config {GENERATED_CONFIG}");
 
         // `quote_path`, not `shell_quote`: the default is `~/Mini-Me`, and quoting the tilde
         // would stop it expanding. A configured dir with a space in it used to split into a
@@ -765,38 +658,9 @@ fn ensure_checkpointer_command() -> String {
         .to_string()
 }
 
-/// The overlay copy that provisioning installs next to the checkout.
-///
-/// One definition, used by both the launch expression and the Setup pane's check — the
-/// two spelled it separately and immediately disagreed.
-fn provisioned_overlay(backend_dir: &str) -> String {
-    format!("{}/.desktop-overlay", backend_dir.trim_end_matches('/'))
-}
-
-/// Where the overlay is found inside the distro, as a shell expression.
-///
-/// Provisioning copies the overlay to `<checkout>/.desktop-overlay`, and that copy is
-/// preferred over the one in this repo. The repo's copy lives on the Windows filesystem,
-/// which the distro reaches only while the app's folder still exists and the drive is
-/// still mounted — and if it *isn't* reachable, Python imports nothing, raises nothing,
-/// and the backend silently falls back to the remote sandbox (docs §24).
-///
-/// Decided by the distro's own shell at launch, not by probing from Windows: a `wsl.exe`
-/// round trip costs seconds on every start, and there would be nowhere to cache the
-/// answer that would not go stale the moment the user re-provisioned.
-fn overlay_expression(wsl_dir: &str, fallback: &str) -> String {
-    let local = quote_path(&provisioned_overlay(wsl_dir));
-    format!(
-        "$(if [ -f {local}/sitecustomize.py ]; then printf %s {local}; \
-         else printf %s {fallback}; fi)",
-        local = local,
-        fallback = shell_quote(fallback),
-    )
-}
-
 /// The graph id the background worker is served under.
 ///
-/// Must match `BACKGROUND_GRAPH_ID` in `overlay/minime_local/async_agents.py` — the
+/// Must match `BACKGROUND_GRAPH_ID` in `backend/local/async_agents.py` — the
 /// coordinator's tool points at this id, and a mismatch fails mid-task rather than at
 /// startup.
 /// Not read at runtime — the Python side registers the graph and names the id itself.
@@ -821,17 +685,7 @@ const GENERATED_CONFIG: &str = ".mini-me-desktop.langgraph.json";
 /// One generator, invoked identically in both modes, because the alternative was writing
 /// the JSON from Rust for the host path and from Python inside the distro for WSL — the
 /// same logic twice, which is how the two drift.
-/// Refresh the overlay copy that lives beside the checkout.
 ///
-/// **The launch prefers the in-distro copy** (§25), which is what removed host execution's
-/// dependence on `/mnt/c` being reachable. The cost, unnoticed until it bit: that copy is
-/// made at *provisioning* time, so `git pull` + rebuild updated the repo's `overlay/` and
-/// the backend went on loading a months-old copy. A fix shipped in the overlay simply
-/// never ran — which is exactly how the Asta token fix appeared not to work.
-///
-/// Three small files, so copying them on every launch is cheaper than reasoning about
-/// when to. `|| true` because a *stale* overlay still beats a failed launch, and the
-/// repo's copy may genuinely be unreachable — the case the in-distro copy exists for.
 /// Everything the server imports, mirrored from `mini-me/` — and nothing else.
 ///
 /// `.venv` is built inside the distro and must never be copied over; `frontend/` is the web app.
@@ -858,7 +712,7 @@ const SOURCE_FILES: [&str; 7] = [
 /// no second remote. **`git pull` on the app is the backend update**, which is what the
 /// researcher asked for — *"so we dont need to pull and copy the backend"*.
 ///
-/// Same reasoning as [`sync_overlay_command`], and the same lesson §25 records: a copy taken at
+/// The same lesson §25 records: a copy taken at
 /// provisioning time goes stale, and the failure it produces is a fix that silently never runs.
 ///
 /// # Why it is safe to run unconditionally
@@ -977,33 +831,13 @@ fn sync_dependencies_command(backend_dir: &str) -> String {
     )
 }
 
-fn sync_overlay_command(source: &str, backend_dir: &str) -> String {
-    let target = quote_path(&provisioned_overlay(backend_dir));
-    format!(
-        "{{ mkdir -p {target} && cp -r {source}/. {target}/ ; }} >/dev/null 2>&1 || true",
-        source = shell_quote(source.trim_end_matches('/')),
-    )
-}
-
-/// Run the config generator **from the copy the server will actually import**.
+/// Run the config generator, relative to the checkout root the launch has already `cd`ed into.
 ///
-/// `overlay` is the same shell expression the runtime `PYTHONPATH` gets — it resolves to the
-/// in-distro copy when there is one and the Windows path only as a fallback. That matters more
-/// than it looks, because `make_config.py` writes *absolute* paths into the generated config,
-/// derived from its own `__file__`. Run it from `/mnt/c` and the config names `/mnt/c` — so the
-/// background graph and the SQLite checkpointer are imported across WSL's 9p mount every launch,
-/// which is slow, breaks when the Windows drive is not reachable, and re-opens the very
-/// dependence §25 removed. Measured in a real log: `Configuring custom checkpointer at
-/// /mnt/c/Users/.../overlay/minime_local/checkpointer.py` (docs §110).
-///
-/// Double-quoted rather than `shell_quote`d: the value is a command substitution, and quoting it
-/// as a literal would defeat it. Inside double quotes the substitution still runs and word
-/// splitting is suppressed, so a path with a space in it survives.
-fn generate_config_command(overlay: &str, python: &str) -> String {
-    format!(
-        "{python} \"{}/minime_local/make_config.py\" .",
-        overlay.trim_end_matches('/')
-    )
+/// `backend/local/` is part of the checkout now (mirrored by [`sync_source_command`] along with
+/// the rest of `backend/`), so there is no separate copy to resolve or prefer — the generator is
+/// always the one the server itself will import.
+fn generate_config_command(python: &str) -> String {
+    format!("{python} \"backend/local/make_config.py\" .")
 }
 
 /// Tell the backend which model to build when a request did not choose one.
@@ -1041,9 +875,8 @@ fn model_env(spec: Option<&str>) -> Vec<(String, String)> {
 
 /// The variable that turns background work on inside the backend.
 ///
-/// Separate from [`execution_env`] on purpose: that returns **nothing** for the remote
-/// sandbox, so folding this into it would silently disable background work under
-/// `--sandbox`. Kept apart, the two settings stay independent — which is what they are.
+/// Separate from [`execution_env`] on purpose: the two settings are independent, and
+/// keeping them apart is what lets either change without touching the other.
 fn feature_env(async_subagents: bool) -> Vec<(String, String)> {
     if !async_subagents {
         return Vec::new();
@@ -1051,19 +884,8 @@ fn feature_env(async_subagents: bool) -> Vec<(String, String)> {
     vec![("MINIME_ASYNC_SUBAGENTS".to_string(), "1".to_string())]
 }
 
-/// The environment that switches the backend to host execution.
-///
-/// Empty for [`Execution::Sandbox`], so the sandbox path is byte-for-byte the launch
-/// it always was. `for_wsl` selects how the overlay path is spelled.
-fn execution_env(execution: &Execution, for_wsl: bool, approve: bool) -> Vec<(String, String)> {
-    let Execution::Local { overlay_dir } = execution else {
-        return Vec::new();
-    };
-    let overlay = if for_wsl {
-        wsl_path(overlay_dir)
-    } else {
-        overlay_dir.to_string_lossy().into_owned()
-    };
+/// The environment host execution needs. `for_wsl` selects how the workspace path is spelled.
+fn execution_env(for_wsl: bool, approve: bool) -> Vec<(String, String)> {
     // Where a turn's files land. Chosen by the *app* rather than left to the backend's
     // default of `~/.mini-me/workspaces`, which inside WSL is a place a Windows researcher
     // cannot reach — see `workspace.rs` for why that one decision is what makes outputs
@@ -1076,15 +898,11 @@ fn execution_env(execution: &Execution, for_wsl: bool, approve: bool) -> Vec<(St
     };
 
     vec![
-        ("MINIME_EXECUTION_BACKEND".to_string(), "local".to_string()),
         (
             "MINIME_APPROVE_EXECUTE".to_string(),
             if approve { "1" } else { "0" }.to_string(),
         ),
         (crate::workspace::WORKSPACE_ENV.to_string(), workspace),
-        // Python imports `sitecustomize` from here at startup; that is the whole
-        // injection mechanism. Prepended, so an existing PYTHONPATH survives.
-        ("PYTHONPATH".to_string(), overlay),
     ]
 }
 
@@ -1276,11 +1094,10 @@ impl BackendConfig {
     }
 
     /// Human-readable execution locality, for the log line and the status bar.
+    ///
+    /// Always host execution now — the remote sandbox option was removed.
     pub fn execution_label(&self) -> &'static str {
-        match self.execution {
-            Execution::Sandbox => "remote sandbox",
-            Execution::Local { .. } => "host (local)",
-        }
+        "host (local)"
     }
 
     /// Wrap a POSIX shell command so it runs **where the backend runs**.
@@ -1315,39 +1132,11 @@ impl BackendConfig {
         }
     }
 
-    /// The overlay path as the backend's interpreter would have to import it, or `None`
-    /// when execution is remote and there is no overlay in play.
-    pub fn overlay_for_backend(&self) -> Option<String> {
-        let Execution::Local { overlay_dir } = &self.execution else {
-            return None;
-        };
-        Some(if self.wsl.is_some() {
-            wsl_path(overlay_dir)
-        } else {
-            overlay_dir.to_string_lossy().into_owned()
-        })
-    }
-
-    /// Where the overlay might be, **in the order the launch command prefers**.
-    ///
-    /// Exists so the Setup pane and the launch cannot drift apart. They did: the pane
-    /// reported the copy on the Windows drive while the launch was already preferring the
-    /// one provisioning had installed inside the distro — a check that reports a different
-    /// path from the one actually used is worse than no check.
-    ///
-    /// Host mode has one candidate on purpose. Provisioning copies the overlay there too,
-    /// but on a host run the repo's own copy is always reachable, so preferring one over
-    /// the other would add a branch that can never change the outcome.
-    pub fn overlay_candidates(&self) -> Vec<String> {
-        let Some(fallback) = self.overlay_for_backend() else {
-            return Vec::new();
-        };
-        let mut candidates = Vec::new();
-        if self.wsl.is_some() {
-            candidates.push(provisioned_overlay(&self.backend_dir()));
-        }
-        candidates.push(fallback);
-        candidates
+    /// Path to the backend's local-execution module, as the backend's own shell would open
+    /// it — used by the preflight "local execution" check to confirm the checkout actually
+    /// has it (see `preflight.rs`).
+    pub fn local_execution_module(&self) -> String {
+        format!("{}/backend/local/__init__.py", self.backend_dir().trim_end_matches('/'))
     }
 
     /// The provisioning command: `bash …/setup-wsl.sh <checkout>`, spelled for the
@@ -1357,7 +1146,8 @@ impl BackendConfig {
     /// When a backend copy ships with the app, its path is passed in so the script
     /// provisions from it instead of cloning. That is the difference between an install
     /// a scientist can complete and one that stops at a GitHub token prompt, because
-    /// Mini-Me is a private repository (see `scripts/bundle-backend.sh`).
+    /// Mini-Me is a private repository — the reason the backend is bundled as `mini-me/`
+    /// in this repository rather than fetched at provision time.
     pub fn setup_script(&self) -> String {
         let for_wsl = self.wsl.is_some();
         let spell = |path: &Path| {
@@ -1516,24 +1306,12 @@ impl BackendSupervisor {
         // child. (In WSL mode they are already inside the `bash -lc` string, because
         // `wsl.exe`'s own environment does not cross into the distro.)
         if self.config.wsl.is_none() {
-            for (name, value) in
-                execution_env(&self.config.execution, false, self.config.approve_execute)
-                    .into_iter()
-                    .chain(feature_env(self.config.async_subagents))
-                    .chain(model_env(self.config.default_model.as_deref()))
+            for (name, value) in execution_env(false, self.config.approve_execute)
+                .into_iter()
+                .chain(feature_env(self.config.async_subagents))
+                .chain(model_env(self.config.default_model.as_deref()))
             {
-                if name == "PYTHONPATH" {
-                    // Prepend rather than replace: whatever the user had still works.
-                    let existing = std::env::var("PYTHONPATH").unwrap_or_default();
-                    let combined = if existing.is_empty() {
-                        value
-                    } else {
-                        format!("{value}{}{existing}", if cfg!(windows) { ";" } else { ":" })
-                    };
-                    command.env(name, combined);
-                } else {
-                    command.env(name, value);
-                }
+                command.env(name, value);
             }
         }
 
@@ -1805,7 +1583,7 @@ pub enum Started {
     /// Already healthy, so it was left running by an earlier session — possibly an earlier
     /// *version*.
     Attached,
-    /// Spawned by this app, so it is running the overlay this app shipped.
+    /// Spawned by this app, so it is running the backend checkout this app shipped.
     Spawned,
 }
 
@@ -2200,64 +1978,6 @@ mod tests {
         );
     }
 
-
-    /// The generated config must be written by the copy the server imports, not the other one.
-    ///
-    /// `make_config.py` writes **absolute** paths into that config, taken from its own
-    /// `__file__`. So whichever copy runs it decides where the background graph and the SQLite
-    /// checkpointer are loaded from for the life of the process. Running it from `/mnt/c` puts
-    /// both across WSL's 9p mount — slow, and broken the moment the Windows drive is not
-    /// reachable, which is the dependence §25 existed to remove.
-    ///
-    /// It went unnoticed because nothing fails: the imports work, just from the wrong side, and
-    /// the only evidence is a path in a log line nobody reads (docs §110).
-    #[test]
-    fn the_config_generator_runs_from_the_in_distro_overlay() {
-        let argv = launch_plan_for(
-            Path::new("/tmp/mini-me"),
-            2024,
-            Some(&WslTarget {
-                distro: None,
-                dir: "~/Mini-Me".into(),
-            }),
-            &Execution::Local {
-                overlay_dir: PathBuf::from(r"C:\repo\overlay"),
-            },
-            true,
-            // Async subagents on. Since §303 the generated config no longer depends on this,
-            // but the original defect was found with it on and the test stays where it was.
-            true,
-            true,
-            None,
-        );
-        // **Both halves, and the count is why.** The generator now runs in the preparation
-        // step and PYTHONPATH is exported by the server, so the two probes this counts sit in
-        // different processes. That they still resolve the overlay identically is exactly the
-        // agreement worth pinning — splitting the launch is precisely how such a pair drifts.
-        let command = argv.both();
-        let command = &command;
-
-        // The generator is invoked through the same expression the runtime PYTHONPATH uses, so
-        // it prefers the provisioned copy and falls back to the Windows path only if that copy is
-        // missing. Counting the probe is what distinguishes the fix: before it there was exactly
-        // one — PYTHONPATH's — and the generator ran from a hardcoded Windows path.
-        assert_eq!(
-            command.matches("sitecustomize.py").count(),
-            2,
-            "the generator and PYTHONPATH must resolve the overlay the same way: {command}"
-        );
-        assert!(
-            command.contains("/minime_local/make_config.py\" ."),
-            "{command}"
-        );
-        // Not a quoted literal: `shell_quote` would have emitted a single-quoted /mnt/c path
-        // with no command substitution around it, which is exactly what shipped.
-        assert!(
-            !command.contains("'/mnt/c/repo/overlay/minime_local/make_config.py'"),
-            "the generator must not be pinned to the Windows copy: {command}"
-        );
-    }
-
     /// **Conversations are saved whether or not background work is on (§303).**
     ///
     /// The bug this pins was invisible from either side on its own. `make_config.py` writes two
@@ -2281,9 +2001,6 @@ mod tests {
                 distro: None,
                 dir: "~/Mini-Me".into(),
             }),
-            &Execution::Local {
-                overlay_dir: PathBuf::from(r"C:\repo\overlay"),
-            },
             true,
             // The default, and the whole point: this is the ordinary install.
             false,
@@ -2304,7 +2021,7 @@ mod tests {
         // ordering used to be one `&&` on a shared command line; it is now the structure of the
         // launch itself, and `the_install_is_not_racing_the_health_check` is what holds it.
         assert!(
-            prepare.contains("/minime_local/make_config.py\" ."),
+            prepare.contains("backend/local/make_config.py\" ."),
             "and the config has to be generated before it can be passed: {prepare}"
         );
 
@@ -2334,7 +2051,6 @@ mod tests {
                     distro: None,
                     dir: "~/Mini-Me".into(),
                 }),
-                &Execution::Sandbox,
                 true,
                 false,
                 owned,
@@ -2365,12 +2081,11 @@ mod tests {
     /// **the way the launch command runs it**: as a script, with nothing arranged on `sys.path`.
     ///
     /// That last clause is the whole point. The first version of this test imported
-    /// `make_config` as a module with the overlay root on `sys.path`, which passed while
-    /// production was failing: the launch invokes
-    /// `.venv/bin/python <overlay>/minime_local/make_config.py .`, and Python then puts the
-    /// *script's* directory on the path — `minime_local/`, not the overlay above it. A
-    /// `from minime_local import ...` at the top of the file therefore raised
-    /// `ModuleNotFoundError`, the generator exited non-zero, and the `&&` in the launch
+    /// `make_config` as a module with its package root on `sys.path`, which passed while
+    /// production was failing: the launch invokes `.venv/bin/python backend/local/make_config.py
+    /// .`, and Python then puts the *script's own directory* on the path — `backend/local/`, not
+    /// `backend/` above it. A `from backend.local import ...` at the top of the file therefore
+    /// raised `ModuleNotFoundError`, the generator exited non-zero, and the `&&` in the launch
     /// expression stopped the backend from starting at all (docs §98).
     ///
     /// So this shells out to the file by path, exactly as `generate_config_command` does. A test
@@ -2380,8 +2095,8 @@ mod tests {
     /// covers nothing is one nobody notices has stopped (docs §81).
     #[test]
     fn the_generated_config_survives_being_run_as_a_script() {
-        let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
-        let script = overlay.join("minime_local/make_config.py");
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../mini-me/backend/local/make_config.py");
         if std::process::Command::new("python3")
             .env("PYTHONIOENCODING", "utf-8")
             .arg("--version")
@@ -2477,104 +2192,55 @@ mod tests {
     }
 
     #[test]
-    fn the_sandbox_path_is_left_exactly_as_it_was() {
-        let _env = env_lock::hold();
-        // Regression guard: no stray variables on the default launch, so choosing
-        // nothing keeps upstream's behaviour byte for byte.
-        assert!(execution_env(&Execution::Sandbox, false, true).is_empty());
-        assert!(execution_env(&Execution::Sandbox, true, true).is_empty());
-
-        let argv = launch_plan_for(
-            Path::new("/tmp/mini-me"),
-            2024,
-            Some(&WslTarget {
-                distro: None,
-                dir: "~/Mini-Me".into(),
-            }),
-            &Execution::Sandbox,
-            true,
-            false,
-            true,
-            None,
-        );
-        // Both halves: every assertion below is about something that must be absent from the
-        // whole launch, and checking only one of two commands is how an absence stops meaning
-        // anything.
-        let command = argv.both();
-        let command = &command;
-        assert!(!command.contains("MINIME_EXECUTION_BACKEND"), "{command}");
-        // No overlay copy and no generated config: both are host-execution machinery, and the
-        // sandbox path must not acquire either.
-        //
-        // Named by what it copies, not by `cp -r`. That proxy meant "the overlay" only while the
-        // overlay was the sole thing copied into the distro; the source mirror uses the same
-        // command and made this assertion fail for a change it was never about.
-        assert!(!command.contains(".desktop-overlay"), "{command}");
-        assert!(!command.contains("--config"), "{command}");
-        // The source mirror, however, belongs on **both** paths. Which commit the checkout runs
-        // is not an execution concern — the same reasoning as the checkpointer below.
-        assert!(command.contains("mv ~/'Mini-Me'/.backend.new"), "{command}");
-        // Storage, however, is not an execution concern. Where conversations are kept is the
-        // same question whichever side runs the agent's code, so the checkpointer install
-        // belongs on this path too (docs §96).
-        assert!(command.contains("langgraph-checkpoint-sqlite"), "{command}");
-        assert!(command.contains("cd ~/'Mini-Me' && "), "{command}");
-        assert!(
-            command.contains("exec .venv/bin/langgraph dev"),
-            "{command}"
-        );
-    }
-
-    #[test]
     fn a_packaged_build_finds_its_files_beside_the_executable() {
         let _env = env_lock::hold();
         // A shipped copy must never reach back into a source tree that only exists on the
         // machine it was built on. `CARGO_MANIFEST_DIR` is baked in at compile time, so
-        // without this the packaged app would look for the overlay under whatever path
-        // the build machine happened to use — and silently fall back to the sandbox.
+        // without this the packaged app would look for its scripts under whatever path
+        // the build machine happened to use.
         let exe = std::env::current_exe().expect("test binary path");
-        let beside = exe.parent().expect("a parent").join("overlay");
+        let beside = exe.parent().expect("a parent").join("scripts");
         let _ = std::fs::remove_dir_all(&beside);
 
-        std::env::remove_var("MINIME_OVERLAY_DIR");
-        let from_repo = resource("MINIME_OVERLAY_DIR", "overlay");
+        std::env::remove_var("MINIME_SCRIPTS_DIR");
+        let from_repo = resource("MINIME_SCRIPTS_DIR", "scripts");
         assert!(
-            from_repo.ends_with("overlay") && !from_repo.starts_with(exe.parent().unwrap()),
+            from_repo.ends_with("scripts") && !from_repo.starts_with(exe.parent().unwrap()),
             "with nothing beside the exe it falls back to the repo: {}",
             from_repo.display()
         );
 
         std::fs::create_dir_all(&beside).expect("packaged layout");
         assert_eq!(
-            resource("MINIME_OVERLAY_DIR", "overlay"),
+            resource("MINIME_SCRIPTS_DIR", "scripts"),
             beside,
             "a directory beside the executable wins"
         );
 
         // An explicit override still beats both.
-        std::env::set_var("MINIME_OVERLAY_DIR", "/somewhere/else");
+        std::env::set_var("MINIME_SCRIPTS_DIR", "/somewhere/else");
         assert_eq!(
-            resource("MINIME_OVERLAY_DIR", "overlay"),
+            resource("MINIME_SCRIPTS_DIR", "scripts"),
             PathBuf::from("/somewhere/else")
         );
-        std::env::remove_var("MINIME_OVERLAY_DIR");
+        std::env::remove_var("MINIME_SCRIPTS_DIR");
         let _ = std::fs::remove_dir_all(&beside);
     }
 
     #[test]
     fn a_joined_path_reads_like_a_path() {
-        // The overlay is reached as `crates/app/../../overlay`, and that spelling was
-        // showing up verbatim in the log line and the Setup pane.
+        // Resolved as `crates/app/../../scripts`, and that spelling was showing up verbatim
+        // in the log line and the Setup pane.
         assert_eq!(
-            normalized(PathBuf::from("/repo/crates/app/../../overlay")),
-            PathBuf::from("/repo/overlay")
+            normalized(PathBuf::from("/repo/crates/app/../../scripts")),
+            PathBuf::from("/repo/scripts")
         );
         // A `..` that would escape the root has nowhere to go and must stay put rather
         // than silently rewriting the path to something else.
         assert_eq!(normalized(PathBuf::from("/..")), PathBuf::from("/.."));
         assert_eq!(
-            normalized(PathBuf::from("relative/../overlay")),
-            PathBuf::from("overlay")
+            normalized(PathBuf::from("relative/../scripts")),
+            PathBuf::from("scripts")
         );
     }
 
@@ -2642,7 +2308,6 @@ mod tests {
         let _env = env_lock::hold();
         std::env::remove_var("MINIME_BUNDLED_BACKEND");
         std::env::remove_var("MINIME_SOURCE_DIR");
-        std::env::remove_var("MINIME_VENDOR_DIR");
         let found = bundled_backend_dir().expect("mini-me/ is part of this repo");
         assert!(
             found.ends_with("mini-me"),
@@ -3051,9 +2716,6 @@ mod tests {
                 r"C:\Users\Researcher\Documents\Mini-Me",
             )
         };
-        let execution = Execution::Local {
-            overlay_dir: PathBuf::from(r"C:\repo\overlay"),
-        };
         let argv = launch_plan_for(
             Path::new("/tmp/mini-me"),
             2024,
@@ -3061,7 +2723,6 @@ mod tests {
                 distro: Some("Ubuntu".into()),
                 dir: "~/Mini-Me".into(),
             }),
-            &execution,
             true,
             true,
             true,
@@ -3072,56 +2733,33 @@ mod tests {
         // Assignments must land *before* `exec`, or the server never sees them.
         let exec_at = command.find("exec ").expect("an exec");
         for assignment in [
-            "MINIME_EXECUTION_BACKEND='local'",
             "MINIME_APPROVE_EXECUTE='1'",
             // The workspace the *app* chose, spelled the way the distro can open it —
             // this is what puts the researcher's outputs somewhere Explorer can reach
             // and the chat can render (docs §42).
             "MINIME_LOCAL_WORKSPACE='/mnt/c/Users/Researcher/Documents/Mini-Me'",
-            "PYTHONPATH=",
         ] {
             let at = command
                 .find(assignment)
                 .unwrap_or_else(|| panic!("{assignment} missing from: {command}"));
             assert!(at < exec_at, "{assignment} lands after exec: {command}");
         }
-        assert!(command.contains("PYTHONPATH=\"$(if [ -f "), "{command}");
-        // The in-distro copy is preferred, with the repo's copy on the Windows drive as
-        // the fallback — the whole point being that a working install stops depending on
-        // /mnt/c at all.
-        assert!(
-            command.contains("~/'Mini-Me/.desktop-overlay'/sitecustomize.py"),
-            "{command}"
-        );
-        assert!(
-            command.contains("printf %s '/mnt/c/repo/overlay'"),
-            "{command}"
-        );
-        // And it still ends up as one assignment in front of exec.
-        // The assignments end and `exec` begins — checked without pinning the exact
-        // neighbour, so adding a variable does not fail a test about the overlay path.
-        let exports_end = command.find("fi)\"").expect("the PYTHONPATH expression");
-        let exec_at = command
-            .find("exec .venv/bin/langgraph dev")
-            .expect("the server");
-        assert!(exports_end < exec_at, "{command}");
     }
 
     #[test]
     fn the_background_graph_id_is_the_same_on_both_sides() {
-        // Three files name this id: here, `make_config.py` (which registers the graph) and
+        // Two files name this id: here, `make_config.py` (which registers the graph) and
         // `async_agents.py` (whose tool points at it). They only had a comment saying they
         // must agree — and a disagreement fails when the coordinator first delegates,
         // mid-task and in front of the user, rather than at startup. Now it is checked.
         //
         // Reading the sources rather than importing them keeps this a plain unit test; the
         // Python is not ours to run from here.
-        let overlay = normalized(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay"));
-        for file in [
-            "minime_local/make_config.py",
-            "minime_local/async_agents.py",
-        ] {
-            let path = overlay.join(file);
+        let local = normalized(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../mini-me/backend/local"),
+        );
+        for file in ["make_config.py", "async_agents.py"] {
+            let path = local.join(file);
             let source = std::fs::read_to_string(&path)
                 .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
             assert!(
@@ -3130,70 +2768,6 @@ mod tests {
                 path.display()
             );
         }
-    }
-
-    #[test]
-    fn every_launch_refreshes_the_overlay_the_backend_actually_loads() {
-        // The launch prefers the copy inside the distro, so without this an updated app
-        // keeps running the overlay it was provisioned with — a fix shipped in the overlay
-        // never reaching the machine, which is exactly what happened with the Asta token.
-        let _env = env_lock::hold();
-        let argv = launch_plan_for(
-            Path::new("/tmp/mini-me"),
-            2024,
-            Some(&WslTarget {
-                distro: None,
-                dir: "~/Mini-Me".into(),
-            }),
-            &Execution::Local {
-                overlay_dir: PathBuf::from(r"C:\repo\overlay"),
-            },
-            true,
-            false,
-            true,
-            None,
-        );
-        // **"Before the server" is now structural, not textual.** It used to be two offsets
-        // into one shell line; the copy lives in the preparation step, which runs to completion
-        // and is checked before anything is spawned. Asserting on offsets in a string I
-        // concatenated myself would pass no matter what the app does.
-        let command = argv.prepare_script();
-        let command = &command;
-        assert!(command.contains("cp -r"), "the overlay sync: {command}");
-        assert!(
-            !argv.serve_script().contains("cp -r"),
-            "the server command must not be doing file copies: {}",
-            argv.serve_script()
-        );
-        assert!(
-            argv.serve_script().contains("exec .venv/bin/langgraph"),
-            "{:?}",
-            argv.serve
-        );
-        assert!(
-            command.contains("~/'Mini-Me/.desktop-overlay'"),
-            "{command}"
-        );
-        // Never fatal: a stale overlay beats a backend that will not start, and the repo's
-        // copy may be genuinely unreachable — the case the in-distro copy exists for.
-        assert!(command.contains("|| true"), "{command}");
-
-        // The sandbox path carries no *overlay*: it is host-execution machinery. It still
-        // mirrors the source, which is why this asks about the overlay by name.
-        let sandbox = launch_plan_for(
-            Path::new("/tmp/mini-me"),
-            2024,
-            Some(&WslTarget {
-                distro: None,
-                dir: "~/Mini-Me".into(),
-            }),
-            &Execution::Sandbox,
-            true,
-            false,
-            true,
-            None,
-        );
-        assert!(!sandbox.both().contains(".desktop-overlay"), "{sandbox:?}");
     }
 
     /// The backend source is mirrored from this repository on every launch.
@@ -3220,7 +2794,6 @@ mod tests {
             Path::new("/tmp/mini-me"),
             2024,
             Some(&wsl),
-            &Execution::Sandbox,
             true,
             false,
             true,
@@ -3258,7 +2831,6 @@ mod tests {
             Path::new("/tmp/mini-me"),
             2024,
             Some(&wsl),
-            &Execution::Sandbox,
             true,
             false,
             true,
@@ -3319,7 +2891,6 @@ mod tests {
             Path::new("/tmp/mini-me"),
             2024,
             Some(&wsl),
-            &Execution::Sandbox,
             true,
             false,
             false,
@@ -3334,9 +2905,6 @@ mod tests {
     #[test]
     fn background_work_registers_its_graph_before_the_server_starts() {
         let _env = env_lock::hold();
-        let execution = Execution::Local {
-            overlay_dir: PathBuf::from(r"C:\repo\overlay"),
-        };
         let wsl = WslTarget {
             distro: None,
             dir: "~/Mini-Me".into(),
@@ -3345,7 +2913,6 @@ mod tests {
             Path::new("/tmp/mini-me"),
             2024,
             Some(&wsl),
-            &execution,
             true,
             true,
             true,
@@ -3376,10 +2943,10 @@ mod tests {
             command.contains("--config .mini-me-desktop.langgraph.json"),
             "{command}"
         );
-        // Registering the graph is only half of it: without this variable the overlay
-        // never installs the middleware, so the coordinator has no `start_async_task`
-        // and quietly delegates to a normal subagent instead — which blocks the chat,
-        // exactly what the feature exists to avoid. That was the first live result.
+        // Registering the graph is only half of it: without this variable
+        // `async_agents.install` never installs the middleware, so the coordinator has no
+        // `start_async_task` and quietly delegates to a normal subagent instead — which blocks
+        // the chat, exactly what the feature exists to avoid. That was the first live result.
         assert!(command.contains("MINIME_ASYNC_SUBAGENTS='1'"), "{command}");
 
         // **With the feature off, only the feature is off.**
@@ -3398,7 +2965,6 @@ mod tests {
             Path::new("/tmp/mini-me"),
             2024,
             Some(&wsl),
-            &execution,
             true,
             false,
             true,
@@ -3439,9 +3005,6 @@ mod tests {
                 distro: None,
                 dir: "~/Mini-Me".into(),
             }),
-            &Execution::Local {
-                overlay_dir: PathBuf::from(r"C:\repo\overlay"),
-            },
             true,
             false,
             true,
@@ -3699,41 +3262,6 @@ mod tests {
         assert_eq!(shell_quote("it's"), r"'it'\''s'");
     }
 
-    #[test]
-    fn host_execution_is_the_default_and_sandbox_is_the_escape_hatch() {
-        let _env = env_lock::hold();
-        // Nothing set, or anything other than `local`, must keep the sandbox: host
-        // execution is not safe to default to until `execute` is human-gated (§18).
-        // Unset, or anything that is not `sandbox`, is now host execution — the
-        // default flipped once `execute` was gated (§19). `sandbox` is the escape hatch.
-        for value in ["", "local", "Local ", "anything"] {
-            std::env::set_var("MINIME_EXECUTION_BACKEND", value);
-            assert!(
-                matches!(resolve_execution(None), Execution::Local { .. }),
-                "for {value:?}"
-            );
-        }
-        for value in ["sandbox", " SANDBOX "] {
-            std::env::set_var("MINIME_EXECUTION_BACKEND", value);
-            assert!(
-                matches!(resolve_execution(None), Execution::Sandbox),
-                "for {value:?}"
-            );
-        }
-        std::env::remove_var("MINIME_EXECUTION_BACKEND");
-        assert!(matches!(resolve_execution(None), Execution::Local { .. }));
-
-        // A flag beats a stale variable in both directions — `--sandbox` has to be
-        // able to switch host execution *off* without the user hunting for what set it.
-        std::env::set_var("MINIME_EXECUTION_BACKEND", "local");
-        assert!(matches!(resolve_execution(Some(false)), Execution::Sandbox));
-        std::env::set_var("MINIME_EXECUTION_BACKEND", "sandbox");
-        assert!(matches!(
-            resolve_execution(Some(true)),
-            Execution::Local { .. }
-        ));
-        std::env::remove_var("MINIME_EXECUTION_BACKEND");
-    }
 }
 
 #[cfg(test)]
@@ -3807,13 +3335,23 @@ mod source_tests {
             .output()
             .map(|out| out.status.success())
             .unwrap_or(false);
-        let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../overlay");
+        // Lifted out of `backend/local/__init__.py` by source rather than imported: importing
+        // `backend.local` first runs `backend/__init__.py`, which needs dotenv/langchain/langgraph
+        // installed — this function itself needs nothing but the standard library.
+        let local_init = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../mini-me/backend/local/__init__.py");
         let read = |dir: &std::path::Path| -> String {
+            let source = std::fs::read_to_string(&local_init)
+                .expect("backend/local is beside the crate");
+            let start = source
+                .find("def _checkout_version")
+                .expect("_checkout_version is gone from backend/local/__init__.py");
+            let end = source
+                .find("\ndef install")
+                .expect("the next function");
             let script = format!(
-                "import sys; sys.path.insert(0, {overlay:?})\n\
-                 from minime_local import _checkout_version\n\
-                 print(_checkout_version({dir:?}))",
-                overlay = overlay.to_string_lossy(),
+                "from pathlib import Path\n{}\nprint(_checkout_version({dir:?}))",
+                &source[start..end],
                 dir = dir.to_string_lossy(),
             );
             let out = std::process::Command::new("python3")

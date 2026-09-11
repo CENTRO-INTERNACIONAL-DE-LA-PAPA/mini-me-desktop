@@ -9,9 +9,9 @@
 #
 #   dist/mini-me-desktop/
 #     mini-me-desktop-app(.exe)   the app
-#     overlay/                    host execution (docs §18)
 #     scripts/                    setup-wsl.sh, run from the Setup pane
-#     mini-me/                    the backend, so no GitHub account is needed
+#     mini-me/                    the backend, so no GitHub account is needed —
+#                                 host execution lives in mini-me/backend/local/ (docs §303)
 #
 # `resource()` in backend.rs looks beside the executable first, which is what makes this
 # layout work without any configuration.
@@ -61,7 +61,7 @@ mkdir -p "$OUT"
 cp "$BIN" "$OUT/"
 ok "$(basename "$BIN") ($(du -h "$BIN" | cut -f1))"
 
-for dir in overlay scripts; do
+for dir in scripts; do
   cp -r "$ROOT/$dir" "$OUT/$dir"
   ok "$dir/"
 done
@@ -70,19 +70,15 @@ find "$OUT" -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
 
 # ------------------------------------------------------------------- the backend
 #
-# `mini-me/` first, because that is the source this repository tracks and the directory
-# `bundled_backend_dir()` looks for before anything else. `vendor/Mini-Me` remains as the
-# fallback for a checkout that predates the monorepo move and still bundles from the
-# private repo — but it is no longer what a build here ships.
+# `mini-me/` is the only layout — the source this repository tracks, and the only
+# directory `bundled_backend_dir()` looks for. The old `vendor/Mini-Me` fallback (a
+# clone of the separate private repo, from before the monorepo move) is gone: nothing
+# in this repository still produces or reads it.
 BACKEND_SRC=""
 BACKEND_DEST=""
 if [ -f "$ROOT/mini-me/langgraph.json" ]; then
   BACKEND_SRC="$ROOT/mini-me"
   BACKEND_DEST="$OUT/mini-me"
-elif [ -f "$ROOT/vendor/Mini-Me/langgraph.json" ]; then
-  BACKEND_SRC="$ROOT/vendor/Mini-Me"
-  BACKEND_DEST="$OUT/vendor/Mini-Me"
-  bad "shipping vendor/Mini-Me — mini-me/ is missing, so this is the pre-monorepo layout"
 fi
 
 if [ -n "$BACKEND_SRC" ]; then
@@ -109,9 +105,7 @@ if [ -n "$BACKEND_SRC" ]; then
   ok "stamped ${STAMP:0:12} — an older install will notice and re-copy"
 else
   bad "no backend to bundle, so this bundle CANNOT install itself."
-  bad "Expected mini-me/langgraph.json in this repository. If this is a"
-  bad "pre-monorepo checkout, fix it with:"
-  bad "    bash scripts/bundle-backend.sh"
+  bad "Expected mini-me/langgraph.json in this repository — this checkout looks incomplete."
   bad "Continuing anyway — this bundle is only usable by someone with repo access."
 fi
 
@@ -136,10 +130,6 @@ their updater requires a folder named `vendor` beside the executable and refuses
 the bundle without one. Nothing reads what is in here.
 VENDOR
 ok "vendor/ (empty — so an older install still accepts this bundle)"
-
-if [ -f "$ROOT/vendor/BUNDLED.txt" ]; then
-  cp "$ROOT/vendor/BUNDLED.txt" "$OUT/vendor/BUNDLED.txt"
-fi
 
 cat > "$OUT/README.txt" <<'TXT'
 Mini-Me Desktop

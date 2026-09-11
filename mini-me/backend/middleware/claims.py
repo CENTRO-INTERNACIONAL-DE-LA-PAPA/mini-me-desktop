@@ -61,7 +61,7 @@ from backend import diagnostics
 from backend.schemas import ArtifactState
 
 if TYPE_CHECKING:
-    from backend.sandbox import LazyLangsmithSandbox
+    from backend.local.workspace import LocalWorkspaceBackend
 
 #: Its own channel, because an INFO that never lands cannot tell "checked, nothing wrong" from
 #: "never ran" — which is the entire question this module answers. See `backend/diagnostics.py`.
@@ -251,9 +251,9 @@ def content_of(result: Any) -> str | None:
     double more permissive than the real type, which is the mistake §221 was written about. It cost
     the whole dataverse check, which failed on every turn (§224).
 
-    Attribute access is kept as a fallback rather than removed, because two backends answer this
-    call — `LazyLangsmithSandbox` and the overlay's `LocalWorkspaceBackend` under host execution —
-    and a reader that only handled one shape is what got us here.
+    Attribute access is kept as a fallback rather than removed, because `LocalWorkspaceBackend`
+    may still hand back either shape depending on the call path, and a reader that only handled
+    one is what got us here.
     """
     data = getattr(result, "file_data", None)
     if data is None:
@@ -392,15 +392,15 @@ def _write(work_dir: str | PurePosixPath, record: dict[str, Any]) -> None:
 
     * A recorder that can end a subagent's turn is worse than no recorder — the same trade
       `aafter_agent` and `ledger.append` already make, for the reason stated there.
-    * `work_dir` comes from the *sandbox* backend. Under the desktop overlay that is a real folder
-      on this machine, already created by `aresolve`. Under a hosted sandbox it is a path on
-      another machine, and `mkdir(parents=True)` would quietly build an imitation of somebody
-      else's filesystem here — writing a record into a folder no app will ever read, next to
-      nothing, under a name that implies a conversation lives there. Requiring the folder to exist
-      already is the difference between "the app can read this" and "a path-shaped string".
+    * `work_dir` comes from `LocalWorkspaceBackend`, always a real folder on this machine once
+      `aresolve` has created it. Requiring the folder to exist already, rather than making it
+      with `mkdir(parents=True)`, is the difference between "the app can read this" and "a
+      path-shaped string" for a call site that has not resolved the workspace yet.
     """
     try:
         from pathlib import Path
+
+        from backend.local import ledger
 
         folder = Path(str(work_dir))
         if not folder.is_dir():
@@ -410,7 +410,6 @@ def _write(work_dir: str | PurePosixPath, record: dict[str, Any]) -> None:
                 record.get("source"),
             )
             return
-        from minime_local import ledger
 
         written = ledger.append(folder, record, name=ledger.CLAIMS_NAME)
         if written:
@@ -426,17 +425,6 @@ def _write(work_dir: str | PurePosixPath, record: dict[str, Any]) -> None:
                 record.get("source"),
                 folder,
             )
-    except ImportError:
-        # The overlay is desktop-only, and so is the panel that reads this. `artifacts.py` makes
-        # the same call and says the same thing: a sandboxed deployment has no local record.
-        #
-        # **INFO, not DEBUG.** This channel is set to INFO, so the debug line this used to emit
-        # went nowhere — and "the overlay is missing" is the single most useful sentence anyone
-        # looking for an absent panel row could read.
-        logger.info(
-            "claims: no minime_local on the path, so %s stays in this log and out of the panel",
-            record.get("source"),
-        )
     except Exception:  # noqa: BLE001 — see the docstring
         logger.exception("claims: could not write the record for %s", record.get("source"))
 
@@ -451,7 +439,7 @@ class ClaimsRecorder(AgentMiddleware[ArtifactState, Any, Any]):
 
     state_schema = ArtifactState
 
-    def __init__(self, source: str, sandbox_backend: "LazyLangsmithSandbox"):
+    def __init__(self, source: str, sandbox_backend: "LocalWorkspaceBackend"):
         super().__init__()
         self.source = source
         self.sandbox_backend = sandbox_backend

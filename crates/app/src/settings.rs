@@ -108,8 +108,6 @@ pub struct Settings {
     pub model_id: String,
     /// Only meaningful for the `custom` provider.
     pub base_url: String,
-    /// Run the agent's code on this machine rather than in the remote sandbox.
-    pub local_execution: bool,
     /// Ask before every `execute`. Off is for automation, not a recommendation.
     pub approve_execute: bool,
     pub backend_port: u16,
@@ -207,7 +205,6 @@ impl Default for Settings {
             provider: "anthropic".to_string(),
             model_id: PROVIDERS[0].suggested_model.to_string(),
             base_url: String::new(),
-            local_execution: true,
             approve_execute: true,
             backend_port: 2024,
             backend_dir: String::new(),
@@ -777,7 +774,6 @@ mod tests {
             provider: "custom".into(),
             model_id: "openai/gpt-4o-mini".into(),
             base_url: "https://openrouter.ai/api/v1".into(),
-            local_execution: true,
             approve_execute: true,
             backend_port: 2100,
             backend_dir: "~/Mini-Me".into(),

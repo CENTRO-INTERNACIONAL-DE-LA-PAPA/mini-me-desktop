@@ -211,6 +211,88 @@ def _memory_namespace_for_runtime(runtime: Runtime[Any]) -> tuple[str, ...]:
 # spine is never lost. The frontend normally always passes an explicit id.
 DEFAULT_PROJECT_ID = "default"
 
+#: The project the current HTTP request is about, for a conversation with no Project.
+#:
+#: A ``ContextVar`` rather than an argument because ``_project_namespace`` is called
+#: several frames below the route handler. Per-context, so two concurrent requests
+#: cannot read each other's.
+_http_project_scope: ContextVar[str] = ContextVar("_http_project_scope", default="")
+
+#: The conversation the current HTTP request is about, when it is in no Project.
+#:
+#: Separate from the project scope rather than folded into it: a route that received
+#: both would have to decide which wins, and the answer differs by caller. The rule is
+#: stated once, in :func:`_current_scope`, and both variables are plain inputs to it.
+_http_thread_scope: ContextVar[str] = ContextVar("_http_thread_scope", default="")
+
+#: A run's own ``configurable`` key naming the project folder a workspace shares. Read
+#: here (not imported from ``backend.local.workspace``, to avoid a circular import) —
+#: the two modules agree on the literal value deliberately, the same way the workspace
+#: folder and this spine agree about which conversation they belong to.
+_WORKSPACE_PROJECT_KEY = "__workspace_project__"
+
+#: The ``configurable`` key LangGraph puts the conversation id under, inside a run.
+_THREAD_KEY = "thread_id"
+
+
+def _sanitise_scope(name: str) -> str:
+    """One namespace segment for a project name, matching the folder it is stored beside.
+
+    The **same** rule as ``backend.local.workspace.workspace_project``, deliberately: a
+    project whose spine and whose folder disagreed about punctuation would be two
+    projects wearing one name.
+    """
+    name = (name or "").strip()
+    if not name:
+        return ""
+    cleaned = "".join(
+        character if (character.isalnum() or character in " -_") else "_" for character in name
+    ).strip(" ._")
+    return cleaned[:96]
+
+
+def _solo_scope(thread_id: str) -> str:
+    """The spine segment for a conversation that is in no project, or ``""`` for none.
+
+    Prefixed so the segment cannot be mistaken for a project name in the store, and so
+    a person reading the keys can see at a glance which records belong to a single
+    conversation.
+    """
+    cleaned = _sanitise_scope(thread_id)
+    return f"solo-{cleaned}" if cleaned else ""
+
+
+def _current_scope() -> str:
+    """Whose spine a project-namespace call is about: a project's, one conversation's, or nobody's.
+
+    **A project always wins over a conversation.** Filing a conversation into a project
+    is a statement that its work belongs with the rest of that project's.
+
+    HTTP first, then the run config, because only one of the two is ever populated: a
+    route handler sets the ContextVars and has no run config; a turn has a run config
+    and never touches them. A call that named neither falls through to an empty
+    segment — the pre-Projects shared record, left reachable deliberately for a caller
+    that names neither.
+    """
+    from_request = _http_project_scope.get()
+    if from_request:
+        return _sanitise_scope(from_request)
+    from_thread = _http_thread_scope.get()
+    if from_thread:
+        return _solo_scope(from_thread)
+    try:
+        from langgraph.config import get_config  # noqa: PLC0415
+
+        configurable = (get_config() or {}).get("configurable") or {}
+        project = _sanitise_scope(str(configurable.get(_WORKSPACE_PROJECT_KEY) or ""))
+        if project:
+            return project
+        # The turn's own conversation. Without this an ungrouped run writes its mission
+        # and its plan into the record every other ungrouped conversation reads.
+        return _solo_scope(str(configurable.get(_THREAD_KEY) or ""))
+    except Exception:  # noqa: BLE001 — outside a run and outside a request
+        return ""
+
 
 def _project_namespace(user_id: str, project_id: str) -> tuple[str, ...]:
     """Namespace for one Project's persistent spine (mission/completed/pending/plan).
@@ -225,8 +307,16 @@ def _project_namespace(user_id: str, project_id: str) -> tuple[str, ...]:
     platform's assistant_id). ``user_id`` first also matches the
     ``@auth.on.store`` guard, which forces client-facing store ops under
     ``(user_id, ...)``.
+
+    A fourth segment further scopes an ungrouped conversation to itself rather than to
+    the one shared record every ungrouped conversation used to read — see
+    :func:`_current_scope`. Every conversation that predates this scoping stays where
+    it is, at the three-segment namespace, because a call that names neither an HTTP
+    project/thread nor a run config resolves to an empty scope.
     """
-    return (user_id, "project", project_id)
+    scope = _current_scope()
+    base = (user_id, "project", project_id)
+    return (*base, scope) if scope else base
 
 
 def _projects_registry_namespace(user_id: str) -> tuple[str, ...]:

@@ -92,6 +92,44 @@ pub(crate) fn output_folder_label(folder: &std::path::Path) -> String {
     }
 }
 
+/// The worker thread a file sits under, when it sits under one.
+///
+/// The **only** attribution this client can make without guessing. A background worker runs on
+/// its own thread and writes into a folder named after it, so the folder *is* the record of who
+/// produced the file. Specialists consulted inside the conversation share the conversation's
+/// thread and its one directory, and nothing on the wire says which of them wrote a given file —
+/// so nothing here claims to know. That restraint is `provenance.rs`'s own rule from §73: a
+/// provenance record that quietly guesses is worse than none, because it will be believed.
+pub(crate) fn producing_thread(output: &workspace::Output) -> Option<&str> {
+    let first = std::path::Path::new(&output.name).components().next()?;
+    let name = first.as_os_str().to_str()?;
+    if workspace::looks_like_thread_id(name) {
+        Some(name)
+    } else {
+        None
+    }
+}
+
+/// Outputs split by who produced them: the conversation's own first, then one group per
+/// other author, in the order their first file appears.
+///
+/// **Ahead of the image/other split, not after it.** §152 put every image in one grid because
+/// images are what a person opens the panel to look at. That was right within one body of work
+/// and wrong across two: a researcher looking at *"15 images"* was looking at the conversation's
+/// plots and a worker's plots in one tray, with nothing saying where the boundary was (§199). A
+/// background worker is already a separate run with its own job row and its own folder; its
+/// figures are a separate body of work for the same reason.
+///
+/// Two sources of truth, in this order, each exact within its own domain (§201):
+///
+/// 1. **The folder**, for a background worker — its own thread, its own directory, true by
+///    construction and true even for a conversation reopened years later.
+/// 2. **The manifest**, for everything else — what `backend/local/authorship.py` wrote
+///    down as each file was produced.
+///
+/// The folder wins where both speak, because inside a worker's run the manifest records that
+/// worker's *own* coordinator and would rename `background worker` to `coordinator` — technically
+/// true of the inner graph and useless to the person reading the panel.
 /// A file that records what a search returned, rather than a result of the research.
 ///
 /// Kept out of the transcript's file cards only. Both are real outputs a researcher may want —
@@ -1454,7 +1492,7 @@ impl Workbench {
         // `w_full`, not `flex_none`: a flex-none column sizes to its widest child and then sits
         // wherever the parent's own alignment leaves it, which is the left edge in a plain flex
         // column. Left at the default `align-items: stretch` here (not `items_center`) so the
-        // "View More" button below — which sets no width of its own — still stretches to fill
+        // "Open Folder" button below — which sets no width of its own — still stretches to fill
         // the section; each *row* of tiles centers itself individually instead, wrapped in its
         // own full-width, `justify_center` strip.
         let mut grid = div().flex().flex_col().gap_2().w_full();
@@ -1484,20 +1522,22 @@ impl Workbench {
             );
         }
 
-        // Same "+N more" the last tile's scrim already offers, said in words too — a corner
-        // overlay on a capped grid is easy to miss, and this is the explicit way in, the same
-        // shape `open-all-sources` gives the Sources section.
-        if hidden > 0 {
-            let opening = items.to_vec();
+        // Always there once there's at least one file — not just when the grid is capped and
+        // hiding some — because "open the folder these came from" is useful the moment there is
+        // a folder, not only once there are enough files to overflow the tiles above it.
+        if !items.is_empty() {
             grid = grid.child(
-                ui::Button::new(SharedString::from(format!("open-all-{scope}")))
-                    .icon(ui::Icon::new("icons/plus.svg"))
-                    .text("View More")
+                ui::Button::new(SharedString::from(format!("open-folder-{scope}")))
+                    .icon(ui::Icon::new("icons/folder.svg"))
+                    .text("Open Folder")
                     .style(ui::ButtonStyle::Secondary)
                     .alignment(Alignment::Center)
-                    .on_click(cx.listener(move |workbench, _event, _window, cx| {
-                        workbench.preview = Preview::opening(opening.clone(), 0);
-                        cx.notify();
+                    .on_click(cx.listener(|workbench, _event, _window, _cx| {
+                        if let Some(dir) = workbench.thread_workspace() {
+                            if let Err(error) = workspace::open(&dir) {
+                                tracing::warn!(%error, "could not open the conversation's folder");
+                            }
+                        }
                     })),
             );
         }

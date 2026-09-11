@@ -38,7 +38,7 @@ BLOCKING = frozenset(
     }
 )
 
-ROOTS = ("mini-me/backend", "overlay/minime_local")
+ROOTS = ("mini-me/backend",)
 
 
 def _repo() -> Path:

@@ -14,8 +14,6 @@ namespaces match the ones the coordinator middleware uses.
 
 from __future__ import annotations
 
-from typing import Any
-
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
@@ -28,29 +26,14 @@ from backend.projects import (
     rename_project,
     set_thread_project,
 )
-from backend.routes.common import _request_user_id, _require_auth
+from backend.routes.common import _get_store_or_error, _parse_json_body, _require_user
 
 _MAX_NAME_CHARS = 120
 
 
-async def _get_store_or_error() -> Any:
-    from langgraph_api.store import get_store  # noqa: PLC0415
-
-    return await get_store()
-
-
-def _auth_user(request: Request) -> tuple[str | None, Response | None]:
-    if (unauth := _require_auth(request)) is not None:
-        return None, unauth
-    user_id = _request_user_id(request)
-    if not user_id:
-        return None, JSONResponse({"error": "unauthorized"}, status_code=401)
-    return user_id, None
-
-
 async def list_projects_route(request: Request) -> Response:
     """List the caller's projects (ensuring a default exists), newest first."""
-    user_id, err = _auth_user(request)
+    user_id, err = _require_user(request)
     if err is not None:
         return err
     store = await _get_store_or_error()
@@ -61,13 +44,12 @@ async def list_projects_route(request: Request) -> Response:
 
 async def create_project_route(request: Request) -> Response:
     """Create a new named project and return its registry record."""
-    user_id, err = _auth_user(request)
+    user_id, err = _require_user(request)
     if err is not None:
         return err
-    try:
-        body = await request.json()
-    except Exception:  # noqa: BLE001
-        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    body, err = await _parse_json_body(request)
+    if err is not None:
+        return err
     name = str((body or {}).get("name") or "").strip()[:_MAX_NAME_CHARS]
     if not name:
         return JSONResponse({"error": "name is required"}, status_code=400)
@@ -78,14 +60,13 @@ async def create_project_route(request: Request) -> Response:
 
 async def patch_project_meta_route(request: Request) -> Response:
     """Rename a project (registry metadata only)."""
-    user_id, err = _auth_user(request)
+    user_id, err = _require_user(request)
     if err is not None:
         return err
     project_id = request.path_params.get("project_id", "")
-    try:
-        body = await request.json()
-    except Exception:  # noqa: BLE001
-        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    body, err = await _parse_json_body(request)
+    if err is not None:
+        return err
     name = str((body or {}).get("name") or "").strip()[:_MAX_NAME_CHARS]
     if not name:
         return JSONResponse({"error": "name is required"}, status_code=400)
@@ -98,7 +79,7 @@ async def patch_project_meta_route(request: Request) -> Response:
 
 async def delete_project_route(request: Request) -> Response:
     """Delete a project's registry record and its spine."""
-    user_id, err = _auth_user(request)
+    user_id, err = _require_user(request)
     if err is not None:
         return err
     project_id = request.path_params.get("project_id", "")
@@ -114,14 +95,13 @@ async def delete_project_route(request: Request) -> Response:
 
 async def assign_thread_project_route(request: Request) -> Response:
     """Record which Project a conversation (thread) belongs to."""
-    user_id, err = _auth_user(request)
+    user_id, err = _require_user(request)
     if err is not None:
         return err
     thread_id = request.path_params.get("thread_id", "")
-    try:
-        body = await request.json()
-    except Exception:  # noqa: BLE001
-        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    body, err = await _parse_json_body(request)
+    if err is not None:
+        return err
     project_id = str((body or {}).get("project_id") or "").strip()
     if not thread_id or not project_id:
         return JSONResponse({"error": "thread_id and project_id are required"}, status_code=400)

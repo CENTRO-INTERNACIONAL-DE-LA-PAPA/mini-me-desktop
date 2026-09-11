@@ -88,9 +88,9 @@ class KeepSources(AgentMiddleware):
     """Write the papers a search returned into the workspace, as a file the researcher owns.
 
     *"I noticed that we are not saving the json file with the papers inside the thread folder. I
-    want the user to have it."* They were right: `find_papers` results lived in the Sources panel
-    and in `minime_local.sources._seen`, an in-process dict — nothing on disk, nothing that
-    survives the app closing, nothing to hand to a colleague.
+    want the user to have it."* They were right: `find_papers` results lived only in the Sources
+    panel — nothing on disk, nothing that survives the app closing, nothing to hand to a
+    colleague.
 
     `papers.json` carries `paper_tools.complete_sources`, so it holds **everything the searches
     returned** and not just the shortlist the model discussed. `FileSyncMiddleware` surfaces it in

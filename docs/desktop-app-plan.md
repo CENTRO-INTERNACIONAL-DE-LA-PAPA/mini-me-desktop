@@ -17381,3 +17381,34 @@ startup prerequisite.
 
 *Hundred-and-fifty-fifth: a stateless tool may stop for a human, but it must not stop the
 application from being human-usable.*
+
+## 306. The overlay outlived the reason it existed (2026-09-09)
+
+§18 put local execution in a `PYTHONPATH` overlay, in this repo, on purpose: the Mini-Me checkout
+it patched was someone else's, cloned fresh by every install, and the whole design was "leave that
+checkout byte-for-byte untouched so a `git pull` there can never conflict with us." That constraint
+is gone — `mini-me/` has been a vendored, directly-editable part of this repository for a while now,
+and `mini-me/backend/routes/artifacts.py` and `middleware/claims.py` had already started importing
+`minime_local` directly, ahead of the mechanism that was supposed to make that unnecessary.
+
+`overlay/minime_local/` is now `mini-me/backend/local/`, a normal subpackage. The patches it used
+to apply to `backend.*` modules at import time (`spine.py` → `backend/runtime.py` and
+`backend/routes/project.py`; `sources.py` → `backend/subagents.py`, `backend/mcp_tools.py`,
+`backend/paper_tools.py`, `backend/middleware/artifacts.py`) are direct edits to those files now —
+there is nothing left to patch when the target is code we already own. The handful of patches
+aimed at third-party packages we don't vendor (`deepagents`, `langgraph_runtime_inmem`) are still
+patches, but they're an explicit function call made once from `backend/agent.py` at startup, not
+something that fires because a `sitecustomize.py` happened to be sitting on `PYTHONPATH`.
+
+Alongside this, the remote LangSmith sandbox option (§10/§11/§19's "one opt-in seam, not a fork")
+is gone rather than merely defaulted-off. `LazyLangsmithSandbox` is deleted from `backend/sandbox.py`
+along with the `--sandbox`/`--local` flags, `MINIME_EXECUTION_BACKEND`, and the desktop app's
+execution-mode setting — every construction site builds `LocalWorkspaceBackend` directly, unconditionally.
+That's what made folding the overlay in straightforward rather than merely possible: the overlay's
+patch was only ever conditional (`local_execution_requested()`) because there was a second mode to
+not patch for. With one mode, the condition and the patching both disappear.
+
+§10, §11, §18, and §19 record real decisions and stay as written — this entry supersedes their
+*mechanism*, not their reasoning. The trade-offs they argued for (local-first, human-gated execute,
+no LangSmith dependency) are exactly what shipped; only the "kept separate so upstream never
+conflicts" and "one opt-in seam to a remote fallback" halves of the design are no longer true.

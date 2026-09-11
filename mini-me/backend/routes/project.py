@@ -34,8 +34,13 @@ from backend.project import (
     save_project,
 )
 from backend.projects import ensure_default_project
-from backend.runtime import DEFAULT_PROJECT_ID, _project_namespace
-from backend.routes.common import _request_user_id, _require_auth
+from backend.runtime import (
+    DEFAULT_PROJECT_ID,
+    _http_project_scope,
+    _http_thread_scope,
+    _project_namespace,
+)
+from backend.routes.common import _get_store_or_error, _parse_json_body, _require_user
 
 # Sane caps so a hand-edit can't write an unbounded blob into the store.
 _MAX_MISSION_CHARS = 500
@@ -44,12 +49,21 @@ _MAX_ITEM_CHARS = 300
 # Plan edit ops the route accepts (mirrors ``backend.plan.apply_plan_edit``).
 _PLAN_OPS = {"accept", "complete", "skip", "activate", "edit", "add", "remove", "reorder", "clear"}
 
+#: Query params the desktop app sends so this stateless route can scope the spine to
+#: the conversation it is about — see ``backend.runtime._current_scope``.
+_SCOPE_PROJECT_PARAM = "project"
+_SCOPE_THREAD_PARAM = "thread"
 
-async def _get_store_or_error() -> Any:
-    """Resolve the platform store lazily (import defers config load to runtime)."""
-    from langgraph_api.store import get_store  # noqa: PLC0415
 
-    return await get_store()
+def _set_request_scope(request: Request) -> tuple[Any, Any]:
+    """Arm the per-conversation scope for this request, and return its reset tokens."""
+    project_token = _http_project_scope.set(
+        request.query_params.get(_SCOPE_PROJECT_PARAM, "") or ""
+    )
+    thread_token = _http_thread_scope.set(
+        request.query_params.get(_SCOPE_THREAD_PARAM, "") or ""
+    )
+    return project_token, thread_token
 
 
 def _resolve_project_id(request: Request, body: Any = None) -> str:
@@ -111,32 +125,32 @@ async def get_project(request: Request) -> Response:
     logs a full `ScannerError` traceback for a route that is working perfectly (§303).
     ---
     """
-    if (unauth := _require_auth(request)) is not None:
-        return unauth
-    user_id = _request_user_id(request)
-    if not user_id:
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    user_id, err = _require_user(request)
+    if err is not None:
+        return err
 
-    project_id = _resolve_project_id(request)
-    store = await _get_store_or_error()
-    if project_id == DEFAULT_PROJECT_ID:
-        await ensure_default_project(store, user_id)
-    state = await load_project(store, _project_namespace(user_id, project_id))
-    return JSONResponse(build_project_payload(state, []))
+    project_token, thread_token = _set_request_scope(request)
+    try:
+        project_id = _resolve_project_id(request)
+        store = await _get_store_or_error()
+        if project_id == DEFAULT_PROJECT_ID:
+            await ensure_default_project(store, user_id)
+        state = await load_project(store, _project_namespace(user_id, project_id))
+        return JSONResponse(build_project_payload(state, []))
+    finally:
+        _http_project_scope.reset(project_token)
+        _http_thread_scope.reset(thread_token)
 
 
 async def patch_project(request: Request) -> Response:
     """Apply one hand-edit (mission / pending / plan op) to a project and persist."""
-    if (unauth := _require_auth(request)) is not None:
-        return unauth
-    user_id = _request_user_id(request)
-    if not user_id:
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    user_id, err = _require_user(request)
+    if err is not None:
+        return err
 
-    try:
-        body = await request.json()
-    except Exception:  # noqa: BLE001
-        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    body, err = await _parse_json_body(request)
+    if err is not None:
+        return err
 
     edit = _parse_edit(body)
     plan_op = _parse_plan_op(body)
@@ -151,18 +165,23 @@ async def patch_project(request: Request) -> Response:
             status_code=400,
         )
 
-    project_id = _resolve_project_id(request, body)
-    namespace = _project_namespace(user_id, project_id)
-    store = await _get_store_or_error()
-    state = await load_project(store, namespace)
-    if edit is not None:
-        state = apply_project_edit(state, edit)
-    if plan_op is not None:
-        state = ProjectState(
-            mission=state.get("mission") or "",
-            completed=dict(state.get("completed") or {}),
-            pending=list(state.get("pending") or []),
-            plan=apply_plan_edit(state.get("plan"), plan_op),
-        )
-    await save_project(store, namespace, state)
-    return JSONResponse(build_project_payload(state, []))
+    project_token, thread_token = _set_request_scope(request)
+    try:
+        project_id = _resolve_project_id(request, body)
+        namespace = _project_namespace(user_id, project_id)
+        store = await _get_store_or_error()
+        state = await load_project(store, namespace)
+        if edit is not None:
+            state = apply_project_edit(state, edit)
+        if plan_op is not None:
+            state = ProjectState(
+                mission=state.get("mission") or "",
+                completed=dict(state.get("completed") or {}),
+                pending=list(state.get("pending") or []),
+                plan=apply_plan_edit(state.get("plan"), plan_op),
+            )
+        await save_project(store, namespace, state)
+        return JSONResponse(build_project_payload(state, []))
+    finally:
+        _http_project_scope.reset(project_token)
+        _http_thread_scope.reset(thread_token)

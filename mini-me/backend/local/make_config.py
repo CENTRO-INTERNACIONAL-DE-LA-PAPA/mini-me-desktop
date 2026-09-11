@@ -1,17 +1,16 @@
-"""Write a LangGraph config that serves upstream's graph *and* a background one.
+"""Write a LangGraph config that serves the coordinator graph *and* a background one.
 
 Run just before `langgraph dev` starts, by the desktop app's launch command.
 
 **Why this exists.** `deepagents.AsyncSubAgentMiddleware` requires each async subagent to
-be a graph on the Agent Protocol server, and Mini-Me declares exactly one. That looked
-like a structural change to a checkout we do not modify — until two facts lined up:
-`langgraph dev` accepts `--config`, and the desktop app builds the launch command. So the
-extra graph is declared from the *client* side, and the checkout is untouched (docs §30).
+be a graph on the Agent Protocol server, and `langgraph.json` declares exactly one. `langgraph
+dev` accepts `--config`, and the desktop app builds the launch command — so the extra graph is
+declared from a generated config rather than by hand-editing `langgraph.json`.
 
-**Why it extends rather than reconstructs.** Upstream's config carries `dependencies`,
-`env` and `http` — the last of which mounts the custom routes the project spine and the
-background-job polling depend on. Rebuilding the file by hand would drop whichever of
-those upstream adds next, and the failure would look unrelated to this.
+**Why it extends rather than reconstructs.** The base config carries `dependencies`, `env` and
+`http` — the last of which mounts the custom routes the project spine and the background-job
+polling depend on. Rebuilding the file by hand would drop whichever of those changes next, and
+the failure would look unrelated to this.
 
 **Why it runs every launch.** It is derived from `langgraph.json`. Generated once at
 provisioning, it would keep serving yesterday's dependencies after a backend update.
@@ -36,14 +35,13 @@ OUTPUT_NAME = ".mini-me-desktop.langgraph.json"
 def sqlite_available() -> bool:
     """Whether the backend can load the SQLite checkpointer.
 
-    **Inlined rather than imported from `minime_local.checkpointer`, which is the sibling that
+    **Inlined rather than imported from `backend.local.checkpointer`, which is the sibling that
     owns this question.** The launch command runs this file *as a script*
-    (`.venv/bin/python <overlay>/minime_local/make_config.py .`), and Python then puts the
-    script's own directory on `sys.path` — `minime_local/`, not the overlay root above it. So
-    `from minime_local import ...` raises `ModuleNotFoundError`, the generator exits non-zero,
-    and the `&&` in the launch expression stops the backend from starting at all. Which is
-    exactly what shipping the import did: *"backend exited during startup with exit code: 1"*
-    (docs §98).
+    (`.venv/bin/python <checkout>/backend/local/make_config.py <checkout>`), and Python then puts
+    the script's own directory on `sys.path` — `backend/local/`, not the checkout root above it.
+    So `from backend.local import ...` raises `ModuleNotFoundError` unless the checkout root is
+    also on `sys.path`, and a generator that exits non-zero stops the backend from starting at
+    all (the launch command chains this with `&&`).
 
     Three lines of duplication against a launch that cannot start. The sibling keeps its own copy
     for the server's benefit; this one exists because a script is not a package.
@@ -55,8 +53,8 @@ def sqlite_available() -> bool:
     return True
 
 
-def build(checkout: str, overlay: str) -> str:
-    """Write the extended config beside upstream's and return its path."""
+def build(checkout: str, local_dir: str) -> str:
+    """Write the extended config beside the base one and return its path."""
     source = os.path.join(checkout, "langgraph.json")
     with open(source, encoding="utf-8") as handle:
         config = json.load(handle)
@@ -66,19 +64,19 @@ def build(checkout: str, overlay: str) -> str:
         raise SystemExit(f"{source}: no 'graphs' object to extend")
 
     if BACKGROUND_GRAPH_ID in graphs:
-        # Upstream has grown a graph of this name. Better to say so than to overwrite it.
+        # A graph of this name already exists. Better to say so than to overwrite it.
         raise SystemExit(
             f"{source} already declares a '{BACKGROUND_GRAPH_ID}' graph; "
-            "overlay/minime_local needs revisiting"
+            "backend/local/make_config.py needs revisiting"
         )
 
     graphs[BACKGROUND_GRAPH_ID] = (
-        os.path.join(overlay, "minime_local", "async_agents.py") + ":background_graph"
+        os.path.join(local_dir, "async_agents.py") + ":background_graph"
     )
 
     # Conversations in SQLite rather than one pickle of everything: constant boot instead of a
     # boot that grows with history, and per-row writes instead of a format where one unreadable
-    # byte takes every conversation with it (docs §93, §95).
+    # byte takes every conversation with it.
     #
     # **Only when the package is importable.** Naming a checkpointer the backend cannot load
     # would turn a missing optional dependency into a server that does not start; leaving the
@@ -86,11 +84,10 @@ def build(checkout: str, overlay: str) -> str:
     # install it, so this is a choice a researcher can see and make, not a silent downgrade.
     if sqlite_available():
         config["checkpointer"] = {
-            "path": os.path.join(overlay, "minime_local", "checkpointer.py")
-            + ":checkpointer"
+            "path": os.path.join(local_dir, "checkpointer.py") + ":checkpointer"
         }
     elif "checkpointer" in config:
-        # Upstream declared one and we cannot honour ours: leave theirs alone.
+        # A checkpointer is already declared and this one cannot be honoured: leave it alone.
         pass
 
     destination = os.path.join(checkout, OUTPUT_NAME)
@@ -102,14 +99,13 @@ def build(checkout: str, overlay: str) -> str:
 
 def main(argv: list[str]) -> int:
     checkout = argv[1] if len(argv) > 1 else "."
-    # The overlay is wherever this file lives — no second path to keep in sync, and it
-    # stays correct when provisioning copies the overlay into the distro.
-    overlay = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    written = build(checkout, overlay)
+    # `backend/local`, wherever this file lives — no second path to keep in sync.
+    local_dir = os.path.dirname(os.path.abspath(__file__))
+    written = build(checkout, local_dir)
     storage = (
         "sqlite" if sqlite_available() else "the built-in pickle (see Setup)"
     )
-    print(f"minime_local: wrote {written}; conversations in {storage}", file=sys.stderr)
+    print(f"backend.local: wrote {written}; conversations in {storage}", file=sys.stderr)
     return 0
 
 

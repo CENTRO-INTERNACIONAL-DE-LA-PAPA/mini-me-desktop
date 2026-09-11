@@ -43,6 +43,7 @@ from typing import Any
 from langchain_core.tools import tool
 
 from backend import diagnostics
+from backend.asta_jobs import _extract_json, _run
 from backend.runtime import _active_sandbox
 
 #: Reaches the log at INFO — see `backend/diagnostics.py` for why that needs saying.
@@ -493,37 +494,6 @@ def _decode_figures(output: str) -> tuple[list[str], str | None]:
     if not isinstance(names, list):
         return [], "the decoder returned no file list"
     return [name for name in names if isinstance(name, str)], None
-
-
-async def _run(sandbox: Any, command: str, timeout: int) -> str:
-    """Run a command in the sandbox and return its stdout, whichever shape it answers in.
-
-    Prefers the untruncated path: an experiments response is tens of kilobytes of JSON and a
-    truncated one is unparseable. Both response shapes are handled for the reason §224 taught the
-    hard way — a dict-shaped response read only for attributes yields an empty string, which is
-    indistinguishable from a command that printed nothing.
-    """
-    runner = getattr(sandbox, "aexecute_untruncated", None) or sandbox.aexecute
-    resp = await runner(command, timeout=timeout)
-    if isinstance(resp, dict):
-        return resp.get("output") or ""
-    return getattr(resp, "output", "") or ""
-
-
-def _extract_json(output: str) -> Any:
-    """Pull the first JSON value out of command output that may carry log lines around it."""
-    text = (output or "").strip()
-    if not text:
-        return None
-    for opener, closer in (("{", "}"), ("[", "]")):
-        start = text.find(opener)
-        end = text.rfind(closer)
-        if start != -1 and end > start:
-            try:
-                return json.loads(text[start : end + 1])
-            except json.JSONDecodeError:
-                continue
-    return None
 
 
 # ---------------------------------------------------------------------------

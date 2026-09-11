@@ -43,7 +43,11 @@ pub const ASSET_SUFFIX: &str = "-windows-x64.zip";
 ///
 /// All of them, not any: `target/release/` could plausibly acquire one of these names, and the
 /// cost of a false positive here is a researcher's git worktree overwritten by a zip.
-const BUNDLE_MARKERS: [&str; 2] = ["overlay", "scripts"];
+///
+/// Used to carry `"overlay"` too, back when host execution shipped as a separate directory
+/// injected onto `PYTHONPATH`; it is now `backend/local/` inside the bundled backend itself
+/// (one of [`BUNDLE_BACKENDS`]), so `"scripts"` is the only folder left that is always there.
+const BUNDLE_MARKERS: [&str; 1] = ["scripts"];
 
 /// And the backend, under either name it has had.
 ///
@@ -939,8 +943,8 @@ mod tests {
             );
         }
         assert!(
-            packager.contains("for dir in overlay scripts"),
-            "package.sh no longer copies overlay/ and scripts/ the way this check assumes"
+            packager.contains("for dir in scripts"),
+            "package.sh no longer copies scripts/ the way this check assumes"
         );
         // **The line, not the substring.** This check used to be `contains("$OUT/vendor")`,
         // which stayed true when the backend moved to `mini-me/` — the string survived in a

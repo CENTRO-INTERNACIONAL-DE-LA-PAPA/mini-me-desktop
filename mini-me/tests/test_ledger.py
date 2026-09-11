@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from minime_local import ledger
+from backend.local import ledger
 
 WORK = "/mnt/c/Users/piero/Documents/Mini-Me/019ff651-0cd7-71c1"
 
@@ -153,7 +153,7 @@ def test_a_real_command_through_the_real_backend_lands_in_the_record(tmp_path, m
     `monkeypatch` for the workspace variable, and pytest runs these serially, so nothing else is
     reading it while it is redirected — the property §271 cost a day to learn about the Rust side.
     """
-    from minime_local.workspace import LocalWorkspaceBackend
+    from backend.local.workspace import LocalWorkspaceBackend
 
     monkeypatch.setenv("MINIME_LOCAL_WORKSPACE", str(tmp_path))
     outside_target = tmp_path.parent / "outside-the-conversation.csv"
@@ -174,7 +174,7 @@ def test_a_real_command_through_the_real_backend_lands_in_the_record(tmp_path, m
 
 def test_a_command_that_stays_inside_reports_nothing_outside(tmp_path, monkeypatch):
     """The other half: a well-behaved run must not fill the record with false alarms."""
-    from minime_local.workspace import LocalWorkspaceBackend
+    from backend.local.workspace import LocalWorkspaceBackend
 
     monkeypatch.setenv("MINIME_LOCAL_WORKSPACE", str(tmp_path))
     backend = LocalWorkspaceBackend("thread-y")
@@ -290,7 +290,7 @@ def test_both_execute_tools_reach_the_record(tmp_path, monkeypatch):
     this recorded in `aexecute` alone — a correct component wired to one of two paths, which is the
     sixth time this project has made that exact mistake.
     """
-    from minime_local.workspace import LocalWorkspaceBackend
+    from backend.local.workspace import LocalWorkspaceBackend
 
     monkeypatch.setenv("MINIME_LOCAL_WORKSPACE", str(tmp_path))
     backend = LocalWorkspaceBackend("both-paths")
@@ -322,7 +322,7 @@ def test_a_nested_worker_records_with_its_conversation_without_offering_visible_
     Outputs and must not get a redundant recovery offer. Its command still belongs in the
     conversation's record rather than a hidden `.mini-me` folder under the worker.
     """
-    from minime_local import workspace as ws
+    from backend.local import workspace as ws
 
     monkeypatch.setenv("MINIME_LOCAL_WORKSPACE", str(tmp_path))
     monkeypatch.setattr(
@@ -353,8 +353,8 @@ def test_the_worker_pin_comes_from_its_tool_runtime_when_context_is_empty(monkey
     Losing this pin is the second half of the live complaint: the worker then gets a sibling folder
     that is "inside" to itself and invisible to the researcher's conversation.
     """
-    from minime_local import async_agents
-    from minime_local.workspace import WORKSPACE_THREAD_KEY
+    from backend.local import async_agents
+    from backend.local.workspace import WORKSPACE_THREAD_KEY
 
     runtime_config = {
         "recursion_limit": 37,
@@ -378,7 +378,7 @@ def test_a_command_that_raises_is_still_timed_out_of_the_record(tmp_path, monkey
     It may legitimately record nothing — there is no result to describe — but it must not take the
     command down with it, and the researcher must still get the exception.
     """
-    from minime_local.workspace import LocalWorkspaceBackend
+    from backend.local.workspace import LocalWorkspaceBackend
 
     monkeypatch.setenv("MINIME_LOCAL_WORKSPACE", str(tmp_path))
     backend = LocalWorkspaceBackend("raising")
@@ -444,7 +444,7 @@ def test_a_relative_write_from_an_outside_cwd_is_offered_for_recovery(tmp_path: 
     import sys
     import time
 
-    from minime_local.workspace import _record
+    from backend.local.workspace import _record
 
     conversation = tmp_path / "conversation"
     command_dir = tmp_path / "background-worker"
@@ -488,7 +488,7 @@ def test_a_relative_write_after_shell_cd_is_offered_for_recovery(tmp_path: Path,
     import shlex
     import time
 
-    from minime_local.workspace import LocalWorkspaceBackend
+    from backend.local.workspace import LocalWorkspaceBackend
 
     workspaces = tmp_path / "workspaces"
     external = tmp_path / "temporary-job"
@@ -540,7 +540,7 @@ def test_the_cwd_scan_says_when_either_safety_limit_bites(tmp_path: Path, caplog
     (nested / "deep.csv").write_text("deep")
     start, end = time.time() - 1, time.time() + 1
 
-    with caplog.at_level("WARNING", logger="minime_local.ledger"):
+    with caplog.at_level("WARNING", logger="backend.local.ledger"):
         found, count_cut = ledger.observed_writes(
             tmp_path, start, end, max_entries=2, max_depth=3
         )
@@ -584,7 +584,7 @@ def test_a_real_command_records_what_it_wrote_and_not_what_it_read(tmp_path, mon
     import os
     import time
 
-    from minime_local.workspace import LocalWorkspaceBackend
+    from backend.local.workspace import LocalWorkspaceBackend
 
     monkeypatch.setenv("MINIME_LOCAL_WORKSPACE", str(tmp_path))
     theirs = tmp_path.parent / "their-input.csv"
@@ -727,7 +727,7 @@ def test_a_route_finds_the_folder_a_project_conversation_actually_lives_in(tmp_p
     `root/<thread>`. The app counted two files written outside; the backend, reading the other
     folder, counted none. Both were confident and one was looking at nothing (§280).
     """
-    from minime_local.workspace import LocalWorkspaceBackend, existing_project
+    from backend.local.workspace import LocalWorkspaceBackend, existing_project
 
     monkeypatch.setenv("MINIME_LOCAL_WORKSPACE", str(tmp_path))
     # What a run in a project leaves behind.
@@ -741,7 +741,7 @@ def test_a_route_finds_the_folder_a_project_conversation_actually_lives_in(tmp_p
 
 def test_an_ungrouped_conversation_is_left_where_it_is(tmp_path, monkeypatch):
     """The folder that already exists wins, and for an ungrouped conversation that is the root."""
-    from minime_local.workspace import LocalWorkspaceBackend, existing_project
+    from backend.local.workspace import LocalWorkspaceBackend, existing_project
 
     monkeypatch.setenv("MINIME_LOCAL_WORKSPACE", str(tmp_path))
     (tmp_path / "thread-7").mkdir()
@@ -753,7 +753,7 @@ def test_an_ungrouped_conversation_is_left_where_it_is(tmp_path, monkeypatch):
 
 
 def test_a_conversation_with_no_folder_yet_lands_where_it_would_be_created(tmp_path, monkeypatch):
-    from minime_local.workspace import LocalWorkspaceBackend, existing_project
+    from backend.local.workspace import LocalWorkspaceBackend, existing_project
 
     monkeypatch.setenv("MINIME_LOCAL_WORKSPACE", str(tmp_path))
     assert existing_project(tmp_path, "brand-new") == ""
@@ -766,7 +766,7 @@ def test_the_record_a_route_reads_is_the_one_the_run_wrote(tmp_path, monkeypatch
     This is the assertion the whole arc was missing. Both sides were tested; that they agreed about
     *which folder* was never asserted, and they did not.
     """
-    from minime_local.workspace import LocalWorkspaceBackend
+    from backend.local.workspace import LocalWorkspaceBackend
 
     monkeypatch.setenv("MINIME_LOCAL_WORKSPACE", str(tmp_path))
     filed = tmp_path / "Late blight" / "thread-99"
@@ -797,7 +797,7 @@ def test_the_empty_folder_the_bug_left_behind_does_not_win(tmp_path, monkeypatch
     `is_dir()` found it and answered "ungrouped" — and the fix for reading the wrong folder went on
     reading the wrong folder (§280).
     """
-    from minime_local.workspace import LocalWorkspaceBackend, existing_project
+    from backend.local.workspace import LocalWorkspaceBackend, existing_project
 
     monkeypatch.setenv("MINIME_LOCAL_WORKSPACE", str(tmp_path))
     thread = "01a03ab8-2049-7363-9864-25d40e644180"
@@ -812,7 +812,7 @@ def test_the_empty_folder_the_bug_left_behind_does_not_win(tmp_path, monkeypatch
 
 def test_an_ungrouped_conversation_with_files_still_wins(tmp_path, monkeypatch):
     """The rule must not simply prefer projects: a real ungrouped conversation keeps its folder."""
-    from minime_local.workspace import existing_project
+    from backend.local.workspace import existing_project
 
     thread = "ungrouped-thread"
     (tmp_path / thread).mkdir()
@@ -830,7 +830,7 @@ def test_the_project_lookup_walks_the_root_once_per_thread(tmp_path, monkeypatch
     async handler for exactly this reason, and the honest floor is: at most one listing per
     thread, per process.
     """
-    from minime_local import workspace as ws
+    from backend.local import workspace as ws
 
     monkeypatch.setenv("MINIME_LOCAL_WORKSPACE", str(tmp_path))
     ws._PROJECT_BY_THREAD.clear()
@@ -890,7 +890,7 @@ def test_a_failed_write_says_why_and_still_does_not_raise(tmp_path, caplog):
     (§286).
     """
     (tmp_path / ledger.RECORD_DIR).write_text("not a folder", encoding="utf-8")
-    with caplog.at_level("WARNING", logger="minime_local.ledger"):
+    with caplog.at_level("WARNING", logger="backend.local.ledger"):
         assert ledger.append(tmp_path, {"command": "echo one"}) is None
     assert any("could not write" in r.getMessage() for r in caplog.records)
     # The traceback, not only the sentence — the exception type is the whole answer here.

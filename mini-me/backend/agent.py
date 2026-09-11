@@ -1,11 +1,20 @@
 """LangGraph graph factory and filesystem-backend composition.
 
 ``agent(config)`` is the deployed graph factory (wired via langgraph.json). It
-acquires a thread-scoped LangSmith Sandbox lazily, resolves per-request model
+acquires a thread-scoped local workspace, resolves per-request model
 routing + keys, loads MCP tools, assembles the runtime subagents and guardrail
 middleware, and returns a deep agent. ``make_backend`` composes the agent's
-filesystem backend (sandbox + store-backed /skills and /memories routes).
+filesystem backend (workspace + store-backed /skills and /memories routes).
 """
+
+# Must run before `from deepagents import create_deep_agent` below: this patches
+# `deepagents.create_deep_agent` (execute approval, background subagents, the subagent
+# registry) and a couple of its middleware modules, and LangGraph loads this file by path
+# rather than through the normal import machinery — so this is the only reliable point
+# before that import binds the name.
+from backend.local import install as _install_local_patches
+
+_install_local_patches()
 
 import asyncio
 
@@ -27,7 +36,7 @@ from backend.runtime import (
     resolve_asta_token,
 )
 from backend.models import _build_model_resolver, _require_model_keys
-from backend.sandbox import LazyLangsmithSandbox
+from backend.local.workspace import LocalWorkspaceBackend
 from backend.mcp_tools import (
     get_academic_research_mcp_tools,
     get_data_cleaning_mcp_tools,
@@ -51,7 +60,7 @@ from backend.paper_tools import find_papers
 from backend.theory_tools import generate_theories
 
 
-def make_backend(sandbox_backend: "LazyLangsmithSandbox"):
+def make_backend(sandbox_backend: "LocalWorkspaceBackend"):
     """Compose the agent's filesystem backend.
 
     Layout:
@@ -85,15 +94,14 @@ def make_backend(sandbox_backend: "LazyLangsmithSandbox"):
 
 
 async def agent(config: RunnableConfig):
-    """LangGraph factory for a thread-scoped LangSmith Sandbox.
+    """LangGraph factory for a thread-scoped local workspace.
 
-    The sandbox is acquired lazily — the factory returns immediately so
-    read-only requests (history fetches, thread switches, page reloads)
-    do not pay sandbox startup cost. The real sandbox is created on first
-    node execution via ``LazyLangsmithSandbox.aresolve()``.
+    The workspace directory is created lazily, on first node execution via
+    ``LocalWorkspaceBackend.aresolve()`` — the factory itself returns immediately so
+    read-only requests (history fetches, thread switches, page reloads) do no I/O.
     """
     thread_id = _get_thread_id(config)
-    sandbox_backend = LazyLangsmithSandbox(thread_id)
+    sandbox_backend = LocalWorkspaceBackend(thread_id)
     _active_sandbox.set(sandbox_backend)
 
     # Expose the run's active Project + thread to coordinator middleware

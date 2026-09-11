@@ -27,10 +27,6 @@ DIR="${1:-$HOME/.local/share/mini-me-desktop/backend}"
 # Expand a leading ~ if the caller passed one through as a literal.
 DIR="${DIR/#\~/$HOME}"
 
-# Resolved here, *before* anything cds anywhere. `${BASH_SOURCE[0]}` is whatever the
-# caller typed, so after `cd "$DIR"` a relative invocation resolves against the wrong
-# directory — which silently skipped the overlay install the first time this was run.
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 say() { printf '\n==> %s\n' "$1"; }
 ok()  { printf '    ok  %s\n' "$1"; }
@@ -84,8 +80,9 @@ ok "uv $(uv --version | awk '{print $2}')"
 #   1. A copy bundled with the app. THIS IS THE ONE THAT MATTERS for a real
 #      install: Mini-Me is a *private* repository, so `git clone` demands
 #      credentials that GitHub only issues as a personal access token — something
-#      no scientist should have to create in order to open an app. Whoever builds
-#      the installer runs scripts/bundle-backend.sh once, and this path is free.
+#      no scientist should have to create in order to open an app. The backend is
+#      `mini-me/`, tracked directly in this repository, so `scripts/package.sh`
+#      bundles it with no separate step, and this path is free.
 #   2. A checkout already on this machine — copied, not downloaded again.
 #   3. A checkout on the Windows side, same.
 #   4. git clone. The developer path, and the only one that can ask for a
@@ -132,12 +129,12 @@ if [ -f "$DIR/langgraph.json" ]; then
       # **Replaced per entry, not merged.** A merge leaves a module that upstream deleted
       # sitting importable on the machine, which is the same class of ghost this whole fix
       # is about. Only what the bundle carries is removed: `.venv` costs fifteen minutes to
-      # rebuild, and `.env`, the overlay and the server's state directory are this machine's.
+      # rebuild, and `.env` and the server's state directory are this machine's.
       for entry in "$SOURCE"/* "$SOURCE"/.[!.]*; do
         [ -e "$entry" ] || continue
         name="$(basename "$entry")"
         case "$name" in
-          .venv|.env|.git|.desktop-overlay|.langgraph_api) continue ;;
+          .venv|.env|.git|.langgraph_api) continue ;;
         esac
         rm -rf "${DIR:?}/$name"
       done
@@ -214,24 +211,8 @@ if git -C "$DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   fi
 fi
 
-# ------------------------------------------------------------------ the overlay
-#
-# Copied *into the distro* rather than left on the Windows filesystem. Host
-# execution works by putting this directory on the backend's PYTHONPATH, and a
-# path under /mnt/c is reachable only while the app's own folder still exists and
-# the drive is still mounted. Three small files; copying them removes a whole
-# class of silent failure (docs §25).
-OVERLAY_SRC="$(cd "$HERE/../overlay" 2>/dev/null && pwd || true)"
-if [ -n "$OVERLAY_SRC" ] && [ -f "$OVERLAY_SRC/sitecustomize.py" ]; then
-  say "Installing the local-execution overlay"
-  rm -rf "$DIR/.desktop-overlay"
-  cp -r "$OVERLAY_SRC" "$DIR/.desktop-overlay"
-  # Bytecode from the source copy would be stale here and is never wanted.
-  find "$DIR/.desktop-overlay" -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
-  ok "overlay installed here, so it no longer depends on the Windows drive"
-else
-  bad "could not find the overlay next to this script — the app will use its own copy"
-fi
+# Host execution lives in mini-me/backend/local/ — part of the backend package copied
+# above, not a separate directory to stage (docs §303).
 
 # **A stopping point, so the step above can be rehearsed.**
 #

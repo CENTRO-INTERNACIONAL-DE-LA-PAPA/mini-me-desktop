@@ -136,6 +136,20 @@ semantic-search cache. The Library modal reads the inventory rather than treatin
 search matches as the whole collection. Existing local PDF rows can be clicked to open the source
 document, including files whose Asta location is recorded as `file:///mnt/c/...`.
 
+### For whoever prepares the build
+
+Nothing to run first — the backend is `mini-me/`, tracked directly in this repository (no
+separate private repo, no personal access token, no bundling step). Build the app and package
+it:
+
+```bash
+cargo build --release -p mini-me-desktop-app
+bash scripts/package.sh
+```
+
+`package.sh` copies `mini-me/` into the bundle, so every install after that provisions from it
+without ever contacting GitHub.
+
 ## MCP integrations
 
 Ask the Data loads four hosted Model Context Protocol servers over HTTP. LangChain's first-party
@@ -345,8 +359,46 @@ as borrowed: the desktop runs it but does not provision or rewrite it.
 
 ### Run an optimized build
 
-GPUI compiles HLSL shaders in release mode and needs the Windows SDK shader compiler. Locate it in
-PowerShell when `GPUI_FXC_PATH` is not already configured:
+## Backend prerequisite
+
+Provisioned for you by the Setup pane. By hand, it is:
+
+```bash
+bash scripts/setup-wsl.sh [target-dir]
+```
+
+**`--extra dev` matters** (the script passes it) — the LangGraph CLI is an optional
+extra, so plain `uv sync` leaves you with no `langgraph` entry point. Keys do **not**
+go in that checkout's `.env` any more: they live in your OS keychain and travel with
+each request, so the app needs no secrets on disk.
+
+## Git inside WSL asks for a password
+
+Only on the **Windows** side does git have a credential helper; inside the distro it does
+not, so `git pull` there prompts — and GitHub has not accepted account passwords since
+2021, so the prompt cannot be satisfied. Reuse Windows' credential manager:
+
+```bash
+git config --global credential.helper "/mnt/c/Program Files/Git/mingw64/libexec/git-core/git-credential-manager.exe"
+```
+
+(If that path is wrong, `ls /mnt/c/Program\ Files/Git/mingw64/libexec/git-core/ | grep credential`.)
+
+## Release builds need `fxc.exe` (Windows)
+
+A **release** build of `gpui 0.2.2` pre-compiles its HLSL shaders; a debug build does not
+(`build.rs:259` gates the step on `#[cfg(not(debug_assertions))]`). So `cargo build` can
+work for months and `cargo build --release` still fail with:
+
+```
+Failed to find fxc.exe
+```
+
+`fxc.exe` is the DirectX shader compiler from the **Windows SDK**. gpui looks for it in
+`GPUI_FXC_PATH`, then on `PATH`, then at one hardcoded SDK version
+(`10.0.26100.0`) — so having a *different* SDK version installed is enough to fail.
+
+Point it at yours (PowerShell):
 
 ```powershell
 $env:GPUI_FXC_PATH = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter fxc.exe -ErrorAction SilentlyContinue | Sort-Object { $_.FullName -notmatch '\\x64\\' }, FullName -Descending | Select-Object -First 1).FullName
@@ -413,6 +465,23 @@ Useful overrides include `MINIME_BACKEND_WSL`, `MINIME_BACKEND_WSL_DIR`,
 `MINIME_BACKEND_DIR`, `MINIME_BACKEND_PORT`, `MINIME_BACKEND_URL`,
 `MINIME_BACKEND_ATTACH_ONLY`, and `MINIME_EXECUTION_BACKEND`. The `--local` and `--sandbox`
 flags override execution locality for one launch.
+
+### Host execution (the only mode)
+
+The agent's code runs **on this machine** — no LangSmith key, no cold start, no upload
+dance. Files land in `~/.mini-me/workspaces/<thread>/`, where you can open them yourself.
+There is no remote-sandbox alternative to opt into; local execution is unconditional.
+
+**Every `execute` call stops and asks first.** The run pauses, the app shows you the
+command verbatim, and nothing runs until you approve it. That is what makes running on
+your own machine reasonable rather than reckless. `MINIME_APPROVE_EXECUTE=0` disables the
+gate — it exists for automation, and is not a recommendation.
+
+This is implemented directly in `mini-me/backend/local/` — part of the backend package
+itself, not an external checkout patched at import time (see plan §18/§19 for the
+history: this used to be a `PYTHONPATH` overlay kept separate so it never conflicted with
+an upstream Mini-Me checkout; now that the backend is vendored in this repo, that
+separation no longer serves a purpose).
 
 ### Logs
 

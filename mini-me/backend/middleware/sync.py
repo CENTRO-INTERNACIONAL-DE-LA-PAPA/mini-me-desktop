@@ -32,12 +32,12 @@ from backend.schemas import (
 )
 
 if TYPE_CHECKING:
-    from backend.sandbox import LazyLangsmithSandbox
+    from backend.local.workspace import LocalWorkspaceBackend
 
 
 async def _collect_sandbox_files(
     *,
-    sandbox_backend: "LazyLangsmithSandbox",
+    sandbox_backend: "LocalWorkspaceBackend",
     work_dir: PurePosixPath,
     skills_dir: PurePosixPath,
     memories_dir: PurePosixPath,
@@ -99,7 +99,7 @@ class FileSyncMiddleware(AgentMiddleware[ArtifactState, Any, Any]):
 
     state_schema = ArtifactState
 
-    def __init__(self, sandbox_backend: "LazyLangsmithSandbox"):
+    def __init__(self, sandbox_backend: "LocalWorkspaceBackend"):
         super().__init__()
         self.sandbox_backend = sandbox_backend
         self._work_dir: PurePosixPath | None = None
@@ -154,7 +154,7 @@ class SandboxSyncMiddleware(AgentMiddleware[ArtifactState, Any, Any]):
 
     state_schema = ArtifactState
 
-    def __init__(self, sandbox_backend: "LazyLangsmithSandbox"):
+    def __init__(self, sandbox_backend: "LocalWorkspaceBackend"):
         super().__init__()
         self.sandbox_backend = sandbox_backend
         self.sandbox_work_dir: PurePosixPath | None = None

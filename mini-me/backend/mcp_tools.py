@@ -354,7 +354,7 @@ def _truncate_tool_result_any(result: Any, tool_name: str) -> Any:
 #: A `ContextVar` rather than a return value because the capping happens inside the tool's own
 #: coroutine, several frames below the middleware that wants it, through code this file does not
 #: own. Per-context, so two concurrent tool calls cannot read each other's — the same argument
-#: `minime_local.spine` makes for the same reason.
+#: `backend.runtime`'s HTTP-scope ContextVars make for the same reason.
 #:
 #: Set **only** when the answer was actually too big. Under the cap the model gets the whole thing
 #: and the consumer can read it from the result, so serialising a copy of every small answer would

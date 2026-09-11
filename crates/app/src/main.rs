@@ -1324,7 +1324,7 @@ impl Command {
             Command::CopySelected => "what you dragged over in the transcript (ctrl-c)",
             Command::SelectWhole => "every message, ready to copy (ctrl-shift-a)",
             Command::SpecialistInBackground => "sends the /name in the composer, without waiting",
-            Command::RestartBackend => "after updating the app — reloads its Python overlay",
+            Command::RestartBackend => "after updating the app — reloads its Python backend",
             Command::RenderReport => "typeset with citations, into this conversation's folder",
             Command::FileInProject => "its folder moves there too, so Explorer matches",
             Command::OpenAbout => {
@@ -4025,7 +4025,7 @@ impl Workbench {
     /// Stop the backend and start it again.
     ///
     /// The app *attaches* to a healthy backend rather than replacing it, which is right for
-    /// speed and wrong after an update: the Python overlay lives in that process's memory, so a
+    /// speed and wrong after an update: the Python backend lives in that process's memory, so a
     /// newly-pulled app kept talking to a server holding the previous one — with no symptom
     /// except a feature that did nothing (docs §79).
     /// Rebuild the agent graph and refresh which research services answered.
@@ -4092,7 +4092,7 @@ impl Workbench {
                     None => workbench.say("restart reported nothing back", cx),
                 }
                 // Everything read from the backend is now a fresh process's answer, including
-                // the specialist list the overlay writes as it assembles a coordinator.
+                // the specialist list the backend writes as it assembles a coordinator.
                 workbench.conversations_loaded = false;
                 workbench.refresh_conversations(cx);
                 workbench.run_preflight(cx);
@@ -4589,8 +4589,9 @@ impl Workbench {
                 workbench.status = "loading research tools…".into();
                 workbench.warming = true;
                 // Remembered, not just announced. Whether this app started the backend decides
-                // whether it is running this app's overlay, and the status line is gone by the
-                // time that matters (docs §80).
+                // whether it is running the checkout this app shipped rather than a stale one
+                // left over from an earlier version, and the status line is gone by the time
+                // that matters (docs §80).
                 workbench.backend_start = Some(status);
                 workbench.refresh_conversations(cx);
                 workbench.refresh_project(cx);
@@ -5996,7 +5997,7 @@ impl Workbench {
             }
             let link = link_for(source);
             // A corpus-id link needs no registry call: it was built from the id in the search
-            // result (`overlay/minime_local/sources.py`), so there is nothing composed in it to
+            // result (`backend/citations.py::link`), so there is nothing composed in it to
             // be wrong. Settled here, and settled as the *strongest* verdict rather than as
             // "nothing to check".
             if link.as_deref().is_some_and(references::is_corpus_link) {
@@ -11082,25 +11083,13 @@ fn main() {
         return;
     }
 
-    // `--local` / `--sandbox` override `MINIME_EXECUTION_BACKEND`; see
-    // `resolve_execution`. Last one wins if both are given.
-    let execution_override = args.iter().rev().find_map(|arg| match arg.as_str() {
-        "--local" => Some(true),
-        "--sandbox" => Some(false),
-        _ => None,
-    });
-    let config = backend::BackendConfig::with_execution_override(execution_override);
+    let config = backend::BackendConfig::load();
     tracing::info!(
         location = %config.location(),
         url = %config.base_url(),
         execution = config.execution_label(),
         "backend sidecar configured"
     );
-    if matches!(config.execution, backend::Execution::Local { .. }) {
-        // Loud on purpose: this is the setting that lets model-written commands touch
-        // the user's own machine (docs §18).
-        tracing::warn!("host execution is ON — the agent runs commands on this machine");
-    }
     if !config.looks_like_backend_repo() {
         tracing::warn!(
             dir = %config.project_dir.display(),

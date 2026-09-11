@@ -14,6 +14,7 @@ from starlette.responses import JSONResponse, Response
 
 from backend.routes.common import (
     _existing_sandbox_for_thread,
+    _parse_json_body,
     _require_auth,
     _resolve_within,
 )
@@ -368,10 +369,9 @@ async def render_report(request: Request) -> Response:
     if not thread_id:
         return JSONResponse({"error": "missing thread_id"}, status_code=400)
 
-    try:
-        payload = await request.json()
-    except Exception:  # noqa: BLE001
-        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    payload, err = await _parse_json_body(request)
+    if err is not None:
+        return err
 
     markdown = payload.get("markdown")
     title = payload.get("title") or "Research Report"

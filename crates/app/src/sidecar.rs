@@ -51,6 +51,154 @@ const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
 /// request — and someone may be sitting in front of the app waiting to answer it.
 const TASK_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(4);
 
+/// Something `watch()` can poll on an interval until it stops moving.
+///
+/// `Job` and `AsyncTask` used to each hand-roll their own sleep/poll/compare/send loop —
+/// mechanically identical, just copy-pasted with two different terminal-state vocabularies
+/// (`docs/refactoring-ideas.md` item 6). This trait is what stayed genuinely per-source (how
+/// to poll, and what "finished" means); `watch()` below is the shared mechanics.
+trait Watched: Clone + PartialEq + Send + 'static {
+    /// Extra context the poll needs beyond the item's own fields.
+    ///
+    /// A `Job` needs "which thread is this conversation on *right now*" — it can change
+    /// mid-watch via "New thread" — so it polls through the shared `ThreadId`. An `AsyncTask`
+    /// already carries its own fixed `thread_id` and needs only somewhere to remember whether
+    /// it has logged yet.
+    type Context: Send + 'static;
+
+    /// Poll for the current state. `Ok(None)` means "stop watching silently" — the thing
+    /// being watched has nowhere left to be checked (e.g. its thread is gone) — as distinct
+    /// from `Err`, a transient failure worth retrying.
+    fn poll(
+        &self,
+        client: &LangGraphClient,
+        context: &Self::Context,
+    ) -> impl std::future::Future<Output = Result<Option<Self>>> + Send;
+
+    /// Whether this has stopped moving. `watch()` sends this state once more, then returns.
+    fn is_finished(&self) -> bool;
+}
+
+/// Watch one item on an interval until it finishes or the receiver is dropped.
+///
+/// This is the client side of "one shared answer contract" (`docs/refactoring-ideas.md` item
+/// 0/6): a caller gets a handle back and watches it without hand-rolling its own poll loop.
+/// `on_change` runs only when the polled state actually differs from what was last sent — for
+/// logging, not for deciding whether to send (that part is not overridable, on purpose).
+fn watch<T: Watched>(
+    runtime: &tokio::runtime::Runtime,
+    base_url: String,
+    interval: std::time::Duration,
+    initial: T,
+    context: T::Context,
+    mut on_change: impl FnMut(&T) + Send + 'static,
+) -> mpsc::UnboundedReceiver<T> {
+    let (tx, rx) = mpsc::unbounded();
+    runtime.spawn(async move {
+        let client = LangGraphClient::new(base_url);
+        let mut current = initial;
+        loop {
+            tokio::time::sleep(interval).await;
+            match current.poll(&client, &context).await {
+                Ok(None) => return,
+                Ok(Some(next)) => {
+                    if next == current {
+                        continue;
+                    }
+                    on_change(&next);
+                    let finished = next.is_finished();
+                    current = next;
+                    if tx.unbounded_send(current.clone()).is_err() {
+                        return; // the window went away
+                    }
+                    if finished {
+                        return;
+                    }
+                }
+                // Transport failures are expected — the sidecar may be restarting, or a turn
+                // may be saturating it. Keep waiting rather than declaring a long job dead over
+                // one refused connection.
+                Err(error) => {
+                    tracing::debug!(%error, "poll failed; retrying");
+                }
+            }
+        }
+    });
+    rx
+}
+
+impl Watched for Job {
+    type Context = ThreadId;
+
+    async fn poll(&self, client: &LangGraphClient, thread: &ThreadId) -> Result<Option<Self>> {
+        // Read the thread each time rather than capturing it once: "New thread" can change
+        // it, and polling the old one would ask about a task that thread no longer knows.
+        let Some(thread_id) = thread.lock().expect("thread id mutex").clone() else {
+            return Ok(None);
+        };
+        let status = client.poll_job(&thread_id, self).await?;
+        let mut next = self.clone();
+        next.status = status;
+        Ok(Some(next))
+    }
+
+    fn is_finished(&self) -> bool {
+        Job::is_finished(self)
+    }
+}
+
+/// One-time-per-watch diagnostic flags for polling a background task's thread.
+///
+/// Not part of the generic shape (`Job` needs none of this) — kept as `AsyncTask`'s own
+/// `Context` instead of on `watch()` itself.
+#[derive(Default)]
+struct TaskWatchLog {
+    /// Said once, not once per four-second poll (docs §207).
+    reported: std::sync::atomic::AtomicBool,
+    /// Warned once. Was `debug!`, which the default filter hides, so a poll that failed every
+    /// four seconds left the panel saying "running" forever and said nothing anyone could see —
+    /// indistinguishable from a worker that was genuinely still working (docs §207).
+    complained: std::sync::atomic::AtomicBool,
+}
+
+impl Watched for AsyncTask {
+    type Context = TaskWatchLog;
+
+    async fn poll(&self, client: &LangGraphClient, log: &TaskWatchLog) -> Result<Option<Self>> {
+        let state = client.thread_state(&self.thread_id).await.inspect_err(|error| {
+            if !log.complained.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                tracing::warn!(
+                    thread = %self.thread_id,
+                    %error,
+                    "could not read a background task's thread; its status will not \
+                     update until this starts working (docs §207)"
+                );
+            }
+        })?;
+        if !log.reported.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            tracing::info!(
+                thread = %self.thread_id,
+                status = %state.status,
+                next = ?state.next,
+                activity = ?state.activity,
+                "watching a background task — this is the state its status is read from"
+            );
+        }
+        let mut next = self.clone();
+        next.status = state.status;
+        next.pending = state.pending;
+        next.elicitation = state.elicitation;
+        next.error = state.error;
+        next.activity = state.activity;
+        next.todos = state.todos;
+        Ok(Some(next))
+    }
+
+    fn is_finished(&self) -> bool {
+        AsyncTask::is_finished(self)
+    }
+}
+
 /// Progress from a setup fix the app is running on the user's behalf.
 #[derive(Debug, Clone)]
 pub enum FixEvent {
@@ -196,22 +344,6 @@ impl Sidecar {
 
     pub fn execution(&self) -> &'static str {
         self.execution
-    }
-
-    /// Whether the agent's code runs on this machine.
-    ///
-    /// **A typed answer, not a string comparison.** The About box asked
-    /// `execution() == "local"`, and the label is `"host (local)"` — so it never matched and the
-    /// window told every researcher their code ran in an isolated sandbox when it was running on
-    /// their own filesystem. That is the exact defect this repo reported upstream against
-    /// `guardrails.py` the same morning, reintroduced by comparing against a string I assumed
-    /// instead of read (docs §107). §79 had already settled the rule — matching on prose to
-    /// discover a fact is how the two get confused.
-    pub fn runs_locally(&self) -> bool {
-        matches!(
-            self.config.execution,
-            crate::backend::Execution::Local { .. }
-        )
     }
 
     /// Where the sidecar's own logs land — the first place to look when a turn
@@ -1431,46 +1563,14 @@ impl Sidecar {
     }
 
     pub fn watch_job(&self, job: Job) -> mpsc::UnboundedReceiver<Job> {
-        let (tx, rx) = mpsc::unbounded();
-        let base_url = self.base_url.clone();
-        let thread = self.thread.clone();
-
-        self.runtime.spawn(async move {
-            let client = LangGraphClient::new(base_url);
-            let mut job = job;
-            loop {
-                tokio::time::sleep(POLL_INTERVAL).await;
-                // Read the thread each time rather than capturing it: "New thread" can
-                // change it, and polling the old one would ask about a task that thread
-                // no longer knows.
-                let Some(thread_id) = thread.lock().expect("thread id mutex").clone() else {
-                    return;
-                };
-                match client.poll_job(&thread_id, &job).await {
-                    Ok(status) => {
-                        if status == job.status {
-                            continue;
-                        }
-                        job.status = status;
-                        let finished = job.is_finished();
-                        if tx.unbounded_send(job.clone()).is_err() {
-                            return; // the window went away
-                        }
-                        if finished {
-                            return;
-                        }
-                    }
-                    // Transport failures are expected — the sidecar may be restarting, or
-                    // a turn may be saturating it. Keep waiting rather than declaring a
-                    // 20-minute job dead over one refused connection.
-                    Err(error) => {
-                        tracing::debug!(task = %job.task_id, %error, "job poll failed; retrying")
-                    }
-                }
-            }
-        });
-
-        rx
+        watch(
+            &self.runtime,
+            self.base_url.clone(),
+            POLL_INTERVAL,
+            job,
+            self.thread.clone(),
+            |_| {},
+        )
     }
 
     /// Watch a background worker's thread: progress, and the moment it needs a person.
@@ -1484,84 +1584,23 @@ impl Sidecar {
     /// Polled faster than the Asta jobs because a person may be sitting in front of it
     /// waiting to say yes.
     pub fn watch_task(&self, task: AsyncTask) -> mpsc::UnboundedReceiver<AsyncTask> {
-        let (tx, rx) = mpsc::unbounded();
-        let base_url = self.base_url.clone();
-
-        self.runtime.spawn(async move {
-            let client = LangGraphClient::new(base_url);
-            let mut task = task;
-            // Said once per task, not once per four-second poll. Everything about "a finished
-            // worker keeps saying running" turns on what `next` holds, and until now the poll
-            // reported nothing at any level a researcher sees (§207).
-            let mut reported = false;
-            let mut complained = false;
-            loop {
-                tokio::time::sleep(TASK_POLL_INTERVAL).await;
-                match client.thread_state(&task.thread_id).await {
-                    Ok(state) => {
-                        if !reported {
-                            reported = true;
-                            tracing::info!(
-                                thread = %task.thread_id,
-                                status = %state.status,
-                                next = ?state.next,
-                                activity = ?state.activity,
-                                "watching a background task — this is the state its status is read from"
-                            );
-                        }
-                        let changed = state.status != task.status
-                            || state.pending != task.pending
-                            || state.elicitation != task.elicitation
-                            || state.error != task.error
-                            || state.activity != task.activity
-                            // A plan that advanced is news even when nothing else moved — it is
-                            // the only thing that changes during a 40-second command (§209).
-                            || state.todos != task.todos;
-                        task.status = state.status;
-                        task.pending = state.pending;
-                        task.elicitation = state.elicitation;
-                        task.error = state.error;
-                        task.activity = state.activity;
-                        task.todos = state.todos;
-                        if !changed {
-                            continue;
-                        }
-                        let finished = task.is_finished();
-                        tracing::info!(
-                            thread = %task.thread_id,
-                            status = %task.status,
-                            next = ?state.next,
-                            activity = ?task.activity,
-                            "a background task's state changed"
-                        );
-                        if tx.unbounded_send(task.clone()).is_err() {
-                            return;
-                        }
-                        if finished {
-                            return;
-                        }
-                    }
-                    Err(error) => {
-                        // **Was `debug!`, which the default filter hides.** A poll that fails every
-                        // four seconds leaves the panel saying `running` for ever and says nothing
-                        // a researcher can see — indistinguishable from a worker that is genuinely
-                        // still working. Once per task, so a backend restart does not fill the log.
-                        if !complained {
-                            complained = true;
-                            tracing::warn!(
-                                thread = %task.thread_id,
-                                %error,
-                                "could not read a background task's thread; its status will not \
-                                 update until this starts working (docs §207)"
-                            );
-                        }
-                        tracing::debug!(thread = %task.thread_id, %error, "task poll failed; retrying")
-                    }
-                }
-            }
-        });
-
-        rx
+        watch(
+            &self.runtime,
+            self.base_url.clone(),
+            TASK_POLL_INTERVAL,
+            task,
+            TaskWatchLog::default(),
+            |task| {
+                // A plan that advanced is news even when nothing else moved — it is the only
+                // thing that changes during a 40-second command (§209).
+                tracing::info!(
+                    thread = %task.thread_id,
+                    status = %task.status,
+                    activity = ?task.activity,
+                    "a background task's state changed"
+                );
+            },
+        )
     }
 
     /// Answer a background worker's approval request on its own thread.
