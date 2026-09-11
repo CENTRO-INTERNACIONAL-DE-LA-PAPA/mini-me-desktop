@@ -227,7 +227,8 @@ instead of three independently-maintained snapshots of the same thing — i.e. t
 
 ## 6. One generic Rust polling helper, replacing three hand-rolled loops
 
-**Status:** open — third concrete step toward item 0 (was "merge SSE + job-poll"; narrowed after
+**Status:** done for `watch_job`/`watch_task` (2026-09-11); Draft/DraftCost deliberately left as-is
+(see below) — third concrete step toward item 0 (was "merge SSE + job-poll"; narrowed after
 confirming turns genuinely don't fit the same shape as jobs)
 
 Three independently hand-rolled poll loops exist for the identical mechanical pattern (sleep →
@@ -252,6 +253,30 @@ underneath.
 - Confirmed this session: regular chat turns (SSE) do NOT belong in this abstraction — they're
   interactive/token-level and only exist while something is actively watching, unlike jobs, which
   are fire-and-forget and must survive the app restarting. Don't fold turns in here.
+
+**Landed:** added a `Watched` trait (`poll` + `is_finished`, an associated `Context` for whatever
+extra a source needs beyond its own fields) and one generic `watch<T: Watched>(runtime, base_url,
+interval, initial, context, on_change)` function to `sidecar.rs`. `Job`'s `Context` is the shared
+`ThreadId` mutex it already needed to re-read each tick ("New thread" can move it mid-watch);
+`AsyncTask`'s `Context` is a small `TaskWatchLog` holding the two one-shot logging flags the
+original loop had (`reported`/`complained` — both tied to a documented support issue, §207) so that
+diagnostic behavior wasn't lost in the unification, just relocated onto the type that actually
+needs it. `watch_job`/`watch_task` are now each a single call into `watch()`.
+
+**Small, disclosed trim, not hidden:** the original `watch_task` loop also logged a
+per-state-change `tracing::info!` including the raw `ThreadState.next` field. `on_change` only
+sees the resulting `AsyncTask` (which has no `next` field), so that one field is gone from the
+"state changed" log line; the `reported`/`complained` diagnostics (the ones actually tied to a
+past bug) are unchanged.
+
+- `crates/app/src/sidecar.rs` (`Watched`, `watch`, `TaskWatchLog`, `impl Watched for Job`,
+  `impl Watched for AsyncTask`, `watch_job`, `watch_task`)
+- Verified: `cargo check -p mini-me-desktop-app` clean; `cargo test -p mini-me-desktop-app` — 493
+  passed, 5 failed, and the same 5 fail identically with this change stashed out (confirmed by
+  re-running them against unmodified code) — all pre-existing and unrelated: 4 are
+  display/contrast-calibration assertions in `theme.rs` (environment-dependent, nothing to do with
+  polling), 1 (`backend::tests::a_failed_preparation_never_starts_a_server`) requires a working WSL
+  `uv sync` in this environment.
 
 ## 7. Custom-route boilerplate: auth+identity guard, vault-error shaping, JSON-body parsing
 
