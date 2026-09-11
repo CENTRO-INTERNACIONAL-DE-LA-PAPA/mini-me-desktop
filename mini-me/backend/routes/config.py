@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from typing import Awaitable, TypeVar
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -11,7 +12,24 @@ from starlette.responses import JSONResponse, Response
 import backend.vault as vault_store
 from backend.asta_auth import looks_like_token, token_status
 from backend.models import PROVIDER_SPECS, build_chat_model
-from backend.routes.common import _request_user_id, _require_auth
+from backend.routes.common import _parse_json_body, _require_auth, _require_user
+
+_T = TypeVar("_T")
+
+
+async def _vault_call(action: str, awaitable: Awaitable[_T]) -> _T | Response:
+    """Run one vault call, turning its two known failure modes into a Response.
+
+    Every handler below repeated this same `try/except` around whatever it
+    actually wanted from the vault, with only the ``action`` word in the
+    message changing (`"vault read failed"` / `"vault write failed"` / ...).
+    """
+    try:
+        return await awaitable
+    except vault_store.VaultUnavailable as exc:
+        return JSONResponse({"error": str(exc)}, status_code=503)
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse({"error": f"vault {action} failed: {exc}"}, status_code=502)
 
 
 # ---------------------------------------------------------------------------
@@ -24,57 +42,49 @@ from backend.routes.common import _request_user_id, _require_auth
 
 
 async def get_config(request: Request) -> Response:
-    if (unauth := _require_auth(request)) is not None:
-        return unauth
-    user_id = _request_user_id(request)
-    if not user_id:
-        return JSONResponse({"error": "no user identity"}, status_code=401)
-    try:
-        model_config = await vault_store.get_config(user_id)
-        connected = await vault_store.list_connected(user_id)
-    except vault_store.VaultUnavailable as exc:
-        return JSONResponse({"error": str(exc)}, status_code=503)
-    except Exception as exc:  # noqa: BLE001
-        return JSONResponse({"error": f"vault read failed: {exc}"}, status_code=502)
+    user_id, err = _require_user(request)
+    if err is not None:
+        return err
+
+    async def _both() -> tuple[dict, list]:
+        return await vault_store.get_config(user_id), await vault_store.list_connected(
+            user_id
+        )
+
+    result = await _vault_call("read", _both())
+    if isinstance(result, Response):
+        return result
+    model_config, connected = result
     return JSONResponse(
         {"model_config": model_config, "providers_connected": connected}
     )
 
 
 async def save_config(request: Request) -> Response:
-    if (unauth := _require_auth(request)) is not None:
-        return unauth
-    user_id = _request_user_id(request)
-    if not user_id:
-        return JSONResponse({"error": "no user identity"}, status_code=401)
-    try:
-        payload = await request.json()
-    except Exception:  # noqa: BLE001
-        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    user_id, err = _require_user(request)
+    if err is not None:
+        return err
+    payload, err = await _parse_json_body(request)
+    if err is not None:
+        return err
     model_config = payload.get("model_config")
     if not isinstance(model_config, dict):
         return JSONResponse(
             {"error": "'model_config' object is required"}, status_code=400
         )
-    try:
-        await vault_store.save_config(user_id, model_config)
-    except vault_store.VaultUnavailable as exc:
-        return JSONResponse({"error": str(exc)}, status_code=503)
-    except Exception as exc:  # noqa: BLE001
-        return JSONResponse({"error": f"vault write failed: {exc}"}, status_code=502)
+    result = await _vault_call("write", vault_store.save_config(user_id, model_config))
+    if isinstance(result, Response):
+        return result
     return JSONResponse({"saved": True})
 
 
 async def save_key(request: Request) -> Response:
-    if (unauth := _require_auth(request)) is not None:
-        return unauth
-    user_id = _request_user_id(request)
-    if not user_id:
-        return JSONResponse({"error": "no user identity"}, status_code=401)
-    try:
-        payload = await request.json()
-    except Exception:  # noqa: BLE001
-        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    user_id, err = _require_user(request)
+    if err is not None:
+        return err
+    payload, err = await _parse_json_body(request)
+    if err is not None:
+        return err
     provider = payload.get("provider")
     api_key = payload.get("api_key")
     base_url = payload.get("base_url") or None
@@ -82,30 +92,25 @@ async def save_key(request: Request) -> Response:
         return JSONResponse({"error": "unknown provider"}, status_code=400)
     if not isinstance(api_key, str) or not api_key.strip():
         return JSONResponse({"error": "'api_key' is required"}, status_code=400)
-    try:
-        await vault_store.save_key(user_id, provider, api_key.strip(), base_url)
-    except vault_store.VaultUnavailable as exc:
-        return JSONResponse({"error": str(exc)}, status_code=503)
-    except Exception as exc:  # noqa: BLE001
-        return JSONResponse({"error": f"vault write failed: {exc}"}, status_code=502)
+    result = await _vault_call(
+        "write", vault_store.save_key(user_id, provider, api_key.strip(), base_url)
+    )
+    if isinstance(result, Response):
+        return result
     return JSONResponse({"saved": True, "provider": provider})
 
 
 async def delete_key(request: Request) -> Response:
-    if (unauth := _require_auth(request)) is not None:
-        return unauth
-    user_id = _request_user_id(request)
-    if not user_id:
-        return JSONResponse({"error": "no user identity"}, status_code=401)
+    user_id, err = _require_user(request)
+    if err is not None:
+        return err
     provider = request.path_params["provider"]
     if provider not in PROVIDER_SPECS:
         return JSONResponse({"error": "unknown provider"}, status_code=400)
-    try:
-        existed = await vault_store.delete_key(user_id, provider)
-    except vault_store.VaultUnavailable as exc:
-        return JSONResponse({"error": str(exc)}, status_code=503)
-    except Exception as exc:  # noqa: BLE001
-        return JSONResponse({"error": f"vault delete failed: {exc}"}, status_code=502)
+    result = await _vault_call("delete", vault_store.delete_key(user_id, provider))
+    if isinstance(result, Response):
+        return result
+    existed = result
     return JSONResponse({"deleted": existed}, status_code=200 if existed else 404)
 
 
@@ -113,10 +118,9 @@ async def test_key(request: Request) -> Response:
     """Validate a key by issuing one minimal model call. Works in both modes."""
     if (unauth := _require_auth(request)) is not None:
         return unauth
-    try:
-        payload = await request.json()
-    except Exception:  # noqa: BLE001
-        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    payload, err = await _parse_json_body(request)
+    if err is not None:
+        return err
     provider = payload.get("provider")
     api_key = payload.get("api_key")
     model_id = payload.get("model_id")
@@ -152,31 +156,24 @@ async def test_key(request: Request) -> Response:
 
 async def get_asta_status(request: Request) -> Response:
     """Report whether the user has an Asta token stored, and when it expires."""
-    if (unauth := _require_auth(request)) is not None:
-        return unauth
-    user_id = _request_user_id(request)
-    if not user_id:
-        return JSONResponse({"error": "no user identity"}, status_code=401)
-    try:
-        token = await vault_store.get_asta_token(user_id)
-    except vault_store.VaultUnavailable as exc:
-        return JSONResponse({"error": str(exc)}, status_code=503)
-    except Exception as exc:  # noqa: BLE001
-        return JSONResponse({"error": f"vault read failed: {exc}"}, status_code=502)
+    user_id, err = _require_user(request)
+    if err is not None:
+        return err
+    result = await _vault_call("read", vault_store.get_asta_token(user_id))
+    if isinstance(result, Response):
+        return result
+    token = result
     return JSONResponse(token_status(token or "", int(time.time())))
 
 
 async def save_asta_token(request: Request) -> Response:
     """Validate and store a pasted Asta access token; reject empty/expired pastes."""
-    if (unauth := _require_auth(request)) is not None:
-        return unauth
-    user_id = _request_user_id(request)
-    if not user_id:
-        return JSONResponse({"error": "no user identity"}, status_code=401)
-    try:
-        payload = await request.json()
-    except Exception:  # noqa: BLE001
-        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    user_id, err = _require_user(request)
+    if err is not None:
+        return err
+    payload, err = await _parse_json_body(request)
+    if err is not None:
+        return err
     token = payload.get("token")
     if not isinstance(token, str) or not looks_like_token(token):
         return JSONResponse(
@@ -190,26 +187,19 @@ async def save_asta_token(request: Request) -> Response:
             {"error": "that token is already expired — run `asta auth login` again, then paste a fresh one"},
             status_code=400,
         )
-    try:
-        await vault_store.save_asta_token(user_id, token)
-    except vault_store.VaultUnavailable as exc:
-        return JSONResponse({"error": str(exc)}, status_code=503)
-    except Exception as exc:  # noqa: BLE001
-        return JSONResponse({"error": f"vault write failed: {exc}"}, status_code=502)
+    result = await _vault_call("write", vault_store.save_asta_token(user_id, token))
+    if isinstance(result, Response):
+        return result
     return JSONResponse({"saved": True, **status})
 
 
 async def delete_asta_token(request: Request) -> Response:
     """Remove the user's stored Asta token."""
-    if (unauth := _require_auth(request)) is not None:
-        return unauth
-    user_id = _request_user_id(request)
-    if not user_id:
-        return JSONResponse({"error": "no user identity"}, status_code=401)
-    try:
-        existed = await vault_store.delete_asta_token(user_id)
-    except vault_store.VaultUnavailable as exc:
-        return JSONResponse({"error": str(exc)}, status_code=503)
-    except Exception as exc:  # noqa: BLE001
-        return JSONResponse({"error": f"vault delete failed: {exc}"}, status_code=502)
+    user_id, err = _require_user(request)
+    if err is not None:
+        return err
+    result = await _vault_call("delete", vault_store.delete_asta_token(user_id))
+    if isinstance(result, Response):
+        return result
+    existed = result
     return JSONResponse({"deleted": existed}, status_code=200 if existed else 404)

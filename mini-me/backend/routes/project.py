@@ -40,7 +40,7 @@ from backend.runtime import (
     _http_thread_scope,
     _project_namespace,
 )
-from backend.routes.common import _request_user_id, _require_auth
+from backend.routes.common import _get_store_or_error, _parse_json_body, _require_user
 
 # Sane caps so a hand-edit can't write an unbounded blob into the store.
 _MAX_MISSION_CHARS = 500
@@ -64,13 +64,6 @@ def _set_request_scope(request: Request) -> tuple[Any, Any]:
         request.query_params.get(_SCOPE_THREAD_PARAM, "") or ""
     )
     return project_token, thread_token
-
-
-async def _get_store_or_error() -> Any:
-    """Resolve the platform store lazily (import defers config load to runtime)."""
-    from langgraph_api.store import get_store  # noqa: PLC0415
-
-    return await get_store()
 
 
 def _resolve_project_id(request: Request, body: Any = None) -> str:
@@ -132,11 +125,9 @@ async def get_project(request: Request) -> Response:
     logs a full `ScannerError` traceback for a route that is working perfectly (§303).
     ---
     """
-    if (unauth := _require_auth(request)) is not None:
-        return unauth
-    user_id = _request_user_id(request)
-    if not user_id:
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    user_id, err = _require_user(request)
+    if err is not None:
+        return err
 
     project_token, thread_token = _set_request_scope(request)
     try:
@@ -153,16 +144,13 @@ async def get_project(request: Request) -> Response:
 
 async def patch_project(request: Request) -> Response:
     """Apply one hand-edit (mission / pending / plan op) to a project and persist."""
-    if (unauth := _require_auth(request)) is not None:
-        return unauth
-    user_id = _request_user_id(request)
-    if not user_id:
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    user_id, err = _require_user(request)
+    if err is not None:
+        return err
 
-    try:
-        body = await request.json()
-    except Exception:  # noqa: BLE001
-        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    body, err = await _parse_json_body(request)
+    if err is not None:
+        return err
 
     edit = _parse_edit(body)
     plan_op = _parse_plan_op(body)

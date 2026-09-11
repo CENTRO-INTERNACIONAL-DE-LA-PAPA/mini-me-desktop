@@ -240,6 +240,57 @@ underneath.
   interactive/token-level and only exist while something is actively watching, unlike jobs, which
   are fire-and-forget and must survive the app restarting. Don't fold turns in here.
 
+## 7. Custom-route boilerplate: auth+identity guard, vault-error shaping, JSON-body parsing
+
+**Status:** done (2026-09-11)
+
+A fresh audit (outside the job/turn-unification track above) found three small, genuinely
+identical patterns repeated across `mini-me/backend/routes/*.py`, none overlapping items 0-6:
+
+- **Auth + identity guard** — `if (unauth := _require_auth(request)) is not None: return unauth`
+  then `user_id = _request_user_id(request); if not user_id: return 401` was inlined 7 times in
+  `config.py`, 2 times in `project.py`, and once more as a locally-defined `_auth_user` helper in
+  `projects.py` (so even the "already extracted" version was its own private copy, not shared).
+- **Vault-call error shaping** — every one of `config.py`'s 7 vault-touching handlers repeated the
+  identical `except vault_store.VaultUnavailable → 503` / `except Exception → 502` pair, differing
+  only in the one word naming the action (`"read"`/`"write"`/`"delete"`).
+- **JSON-body parsing** — `try: body = await request.json() / except: 400 invalid JSON body`
+  appeared 8 times across `artifacts.py`, `config.py`, `project.py`, `projects.py`, `rendering.py`.
+
+Added `_require_user`, `_parse_json_body`, and (moved up from `projects.py`/`project.py`, which had
+each grown their own copy) `_get_store_or_error` to `routes/common.py`; added a small
+`_vault_call(action, awaitable)` wrapper local to `config.py` (vault is only ever touched there).
+All handlers in `config.py`, `project.py`, `projects.py`, `rendering.py` now use these instead of
+repeating the pattern inline.
+
+**Deliberately left alone**: `artifacts.py::discovery_submit`'s JSON-parse — it folds a parse
+failure and a non-dict body into the *same* refusal with its own message (documented at §252: "an
+unreadable body is a refusal, not an approval"), which is a real, deliberate behavioral difference
+from the other 7 sites, not the same thing wearing different words.
+
+- `mini-me/backend/routes/common.py` (new `_require_user`, `_parse_json_body`,
+  `_get_store_or_error`), `routes/config.py`, `routes/project.py`, `routes/projects.py`,
+  `routes/rendering.py`
+- Verified: `uv run pytest tests/` — 546 passed, 1 skipped, 2 failed, both pre-existing and
+  unrelated (confirmed against items 1/2's already-documented failure set: the WSL-vs-native-
+  Windows real-subprocess-shell mismatch in `test_autodiscovery_tools.py`, and the Windows-path-
+  separator bug in `test_pdf_fetch.py::test_dest_path_uses_title_then_ref`).
+
+---
+
+## Flagged, not actioned: `road_strip` in the sidebar
+
+Not added as a numbered item — this is a live in-progress feature marker, not settled debloat, and
+needs a call from whoever owns that plan rather than being removed on a debloat pass:
+
+`crates/app/src/ui/sidebar.rs:843-1074` (~230 lines, `road_strip` and helpers) has been commented
+out wholesale behind `// ToDo: [!!] ROAD COMMENTED FOR NOW UNTIL IMPLEMENTED IN CHAT [!!]` since
+`f064ef2` (2026-09-02). Its only caller in `main.rs` is also commented out. But the supporting state
+is still fully wired and doing nothing: `road_open: bool` is a live persisted `Settings` field
+(`settings.rs:176,217,791,816`), and `toggle_road()`/`remember_panels()` still read/write it
+(`main.rs:6105-6128`) despite `toggle_road`'s only caller also being commented out. Real dead-ish
+scope, but "paused, marked for later" rather than "abandoned" — confirm before treating it as debloat.
+
 ---
 
 ## Declined (considered, not doing)
