@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import asyncio
 import mimetypes
@@ -188,6 +188,63 @@ async def start_sandbox(request: Request) -> Response:
     return JSONResponse({"state": "ready"})
 
 
+#: A job's own vocabulary already agrees on these three words for "won't change again" —
+#: `_state_of` in `asta_jobs.py` normalizes each source's native spelling down to this set.
+_TERMINAL_STATUSES = ("completed", "failed", "canceled")
+
+
+async def _poll_asta_job(
+    request: Request,
+    *,
+    id_param: str,
+    validate_id: Callable[[str], bool],
+    poll: Callable[[LocalWorkspaceBackend, str], Awaitable[dict]],
+    persist: Callable[[LocalWorkspaceBackend, str, dict], Awaitable[None]] | None,
+) -> Response:
+    """Shared body of every "poll one Asta job in this thread's sandbox" route.
+
+    theorizer/analyze-data/discovery status each did the identical five steps —
+    validate the id, resolve the thread's sandbox, bind the user's Asta token,
+    poll, best-effort persist on a terminal state — and only differed in which id
+    param they read, which validator applies, and which poll/persist function to
+    call. Those differences stay in each route's own closure; only the shape is
+    shared.
+    """
+    if (unauth := _require_auth(request)) is not None:
+        return unauth
+    thread_id = request.path_params["thread_id"]
+    job_id = request.path_params[id_param]
+    if not thread_id or not job_id:
+        return JSONResponse({"error": f"missing thread_id or {id_param}"}, status_code=400)
+    if not validate_id(job_id):
+        return JSONResponse({"error": f"invalid {id_param}"}, status_code=400)
+
+    adapter = await _existing_sandbox_for_thread(thread_id)
+    if adapter is None:
+        # Sandbox expired: we can't poll from here. Frontend stops polling.
+        return JSONResponse({"status": "unavailable"})
+
+    # This route runs outside agent(), so bind the user's Asta token into the
+    # ContextVar the sandbox reads — otherwise the poll authenticates `asta` with
+    # the stale process-wide ASTA_TOKEN env var and a completed run polls as
+    # "running" forever even after the user refreshes their token.
+    async with asta_token_scope(_request_user_id(request)):
+        try:
+            result = await poll(adapter, job_id)
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse({"status": "error", "message": str(exc)})
+
+        # On a terminal state, persist the outcome into the sandbox so the agent
+        # can read it on a later turn (it has filesystem tools) and so the run is
+        # a durable artifact. Best-effort; never blocks returning.
+        if persist is not None and result.get("status") in _TERMINAL_STATUSES:
+            try:
+                await persist(adapter, job_id, result)
+            except Exception:  # noqa: BLE001
+                pass  # persistence is best-effort; the card still updates
+    return JSONResponse(result)
+
+
 async def theorizer_status(request: Request) -> Response:
     """Poll an Asta Theorizer task in the thread's sandbox and return its status.
 
@@ -204,41 +261,16 @@ async def theorizer_status(request: Request) -> Response:
     logs a full `ScannerError` traceback for a route that is working perfectly (§303).
     ---
     """
-    if (unauth := _require_auth(request)) is not None:
-        return unauth
-    thread_id = request.path_params["thread_id"]
-    task_id = request.path_params["task_id"]
-    if not thread_id or not task_id:
-        return JSONResponse({"error": "missing thread_id or task_id"}, status_code=400)
-    if not is_valid_task_id(task_id):
-        return JSONResponse({"error": "invalid task_id"}, status_code=400)
-
-    adapter = await _existing_sandbox_for_thread(thread_id)
-    if adapter is None:
-        # Sandbox expired: we can't poll from here. Frontend stops polling.
-        return JSONResponse({"status": "unavailable"})
-
-    # This route runs outside agent(), so bind the user's Asta token into the
-    # ContextVar the sandbox reads — otherwise the poll authenticates `asta` with
-    # the stale process-wide ASTA_TOKEN env var and a completed run polls as
-    # "running" forever even after the user refreshes their token.
-    async with asta_token_scope(_request_user_id(request)):
-        try:
-            result = await poll_theory_status(adapter, task_id)
-        except Exception as exc:  # noqa: BLE001
-            return JSONResponse({"status": "error", "message": str(exc)})
-
-        # On a terminal state, persist the outcome into the sandbox so the agent
-        # can read the theories on a later turn (it has filesystem tools) and so
-        # the run is a durable artifact — completed theories, or an error log
-        # naming the real failure reason. Best-effort; never blocks returning.
-        if result.get("status") in ("completed", "failed", "canceled"):
-            question = request.query_params.get("q", "")
-            try:
-                await persist_theory_outputs(adapter, task_id, question, result)
-            except Exception:  # noqa: BLE001
-                pass  # persistence is best-effort; the card still updates
-    return JSONResponse(result)
+    question = request.query_params.get("q", "")
+    return await _poll_asta_job(
+        request,
+        id_param="task_id",
+        validate_id=is_valid_task_id,
+        poll=poll_theory_status,
+        persist=lambda adapter, task_id, result: persist_theory_outputs(
+            adapter, task_id, question, result
+        ),
+    )
 
 
 async def analyze_data_status(request: Request) -> Response:
@@ -251,37 +283,17 @@ async def analyze_data_status(request: Request) -> Response:
     hosted service). Returns ``completed``/``failed``/``input-required``/``running``,
     or ``unavailable`` if the thread's sandbox is gone.
     """
-    if (unauth := _require_auth(request)) is not None:
-        return unauth
-    thread_id = request.path_params["thread_id"]
-    task_id = request.path_params["task_id"]
-    if not thread_id or not task_id:
-        return JSONResponse({"error": "missing thread_id or task_id"}, status_code=400)
-    if not is_valid_task_id(task_id):
-        return JSONResponse({"error": "invalid task_id"}, status_code=400)
-
-    adapter = await _existing_sandbox_for_thread(thread_id)
-    if adapter is None:
-        return JSONResponse({"status": "unavailable"})
-
     context_id = request.query_params.get("ctx", "")
-    # See poll_theory_status: bind the user's Asta token for this out-of-agent poll.
-    async with asta_token_scope(_request_user_id(request)):
-        try:
-            result = await poll_analysis_status(adapter, task_id, context_id)
-        except Exception as exc:  # noqa: BLE001
-            return JSONResponse({"status": "error", "message": str(exc)})
-
-        # On a terminal state, persist the outcome + export the charts/notebook
-        # into the sandbox so the agent can read the analysis on a later turn and
-        # the files surface in the UI. Best-effort; never blocks returning.
-        if result.get("status") in ("completed", "failed", "canceled"):
-            question = request.query_params.get("q", "")
-            try:
-                await persist_analysis_outputs(adapter, task_id, question, result)
-            except Exception:  # noqa: BLE001
-                pass  # persistence is best-effort; the card still updates
-    return JSONResponse(result)
+    question = request.query_params.get("q", "")
+    return await _poll_asta_job(
+        request,
+        id_param="task_id",
+        validate_id=is_valid_task_id,
+        poll=lambda adapter, task_id: poll_analysis_status(adapter, task_id, context_id),
+        persist=lambda adapter, task_id, result: persist_analysis_outputs(
+            adapter, task_id, question, result
+        ),
+    )
 
 
 #: One-shot approval tokens, keyed by token, valued by `(thread_id, run_id, experiments)`.
@@ -481,32 +493,19 @@ async def discovery_status(request: Request) -> Response:
     honest progress number comes from. Deliberately does **not** touch the per-experiment endpoint
     — that is the only place figures live and it is ~458KB a node.
     """
-    if (unauth := _require_auth(request)) is not None:
-        return unauth
-    thread_id = request.path_params["thread_id"]
-    run_id = request.path_params["run_id"]
-    if not is_valid_run_id(run_id):
-        return JSONResponse({"error": "invalid run_id"}, status_code=400)
-
-    adapter = await _existing_sandbox_for_thread(thread_id)
-    if adapter is None:
-        return JSONResponse({"status": "unavailable"})
-
-    async with asta_token_scope(_request_user_id(request)):
-        try:
-            result = await poll_discovery_status(adapter, run_id)
-        except Exception as exc:  # noqa: BLE001
-            return JSONResponse({"status": "error", "message": str(exc)})
-
+    async def _persist(adapter: LocalWorkspaceBackend, run_id: str, result: dict) -> None:
         # A finished run has seven days before its datasets expire, so this is not optional —
         # it is the only copy that outlives the service (docs §247).
-        if result.get("status") in ("completed", "failed", "canceled"):
-            try:
-                metadata = await read_metadata(adapter, run_id)
-                await persist_discovery_outputs(adapter, run_id, metadata, result)
-            except Exception:  # noqa: BLE001
-                pass  # persistence is best-effort; the caller still gets the status
-    return JSONResponse(result)
+        metadata = await read_metadata(adapter, run_id)
+        await persist_discovery_outputs(adapter, run_id, metadata, result)
+
+    return await _poll_asta_job(
+        request,
+        id_param="run_id",
+        validate_id=is_valid_run_id,
+        poll=poll_discovery_status,
+        persist=_persist,
+    )
 
 
 async def discovery_figures(request: Request) -> Response:

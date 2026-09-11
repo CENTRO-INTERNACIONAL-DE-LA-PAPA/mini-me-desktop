@@ -132,7 +132,7 @@ through whichever of the three callers happens to hit a given path.
 
 ## 3. Consolidate the three Asta poll-status HTTP routes
 
-**Status:** open — second concrete step toward item 0
+**Status:** done (2026-09-11)
 
 `theorizer_status`, `analyze_data_status`, and `discovery_status` in
 `mini-me/backend/routes/artifacts.py` are near-identical: validate id → look up existing sandbox →
@@ -147,7 +147,20 @@ right shape is a shared `poll_asta_job(kind, sandbox, id, persist_fn, markdown_f
 one generic route, not a stream-based collapse — this is the "how you check back" half of the
 `Deferred(watch_handle)` shape in item 0.
 
-- `mini-me/backend/routes/artifacts.py` (~lines 191-291, 477+)
+Added `_poll_asta_job(request, *, id_param, validate_id, poll, persist)` to
+`routes/artifacts.py`, holding the one shape all three actually shared (validate id → resolve
+sandbox → bind Asta token → poll → best-effort persist on a terminal state → respond).
+`theorizer_status`/`analyze_data_status`/`discovery_status` are now thin closures over it —
+each still owns its own id validator (`is_valid_task_id` vs `is_valid_run_id`, still genuinely
+different per item 2), its own poll/persist function signatures (analyze-data's extra
+`context_id`, discovery's extra metadata read before persisting), and its own docstring/route
+registration. Nothing about *why* each is a job was unified — only the orchestration around
+"poll it, then maybe persist it" that was byte-for-byte identical three times.
+
+- `mini-me/backend/routes/artifacts.py` (`_poll_asta_job`, `theorizer_status`,
+  `analyze_data_status`, `discovery_status`)
+- Verified: `uv run pytest tests/` — 546 passed, 1 skipped, same 2 pre-existing failures as
+  items 1/2/7 (deselected, not silently ignored).
 - Considered and declined: routing job status through `get_stream_writer()`/SSE, the way
   `sandbox_status` works. Doesn't apply here — `sandbox_status` fires during an active, still-open
   run (seconds); these jobs are designed to let the run end immediately and get checked on much
