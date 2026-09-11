@@ -90,7 +90,9 @@ def test_slugify_sanitizes_and_bounds() -> None:
 
 def test_dest_path_uses_title_then_ref() -> None:
     p = fetch_paper.dest_path("./papers", {"title": "Denoeud 2014 Coffea Genome"}, "DOI:...")
-    assert str(p) == "papers/denoeud-2014-coffea-genome.pdf"
+    # `Path` equality is separator-agnostic; a hardcoded `str(p) == "papers/...pdf"` isn't —
+    # it only holds on POSIX, and fails on native Windows where `str(p)` uses `\`.
+    assert p == Path("papers/denoeud-2014-coffea-genome.pdf")
     # No title ⇒ fall back to a slug of the reference.
     p2 = fetch_paper.dest_path("./papers", {}, "ARXIV:2005.14165")
     assert p2.name == "arxiv200514165.pdf"

@@ -513,8 +513,25 @@ def test_a_real_sized_response_survives_the_shell():
     """
     import base64
     import os
+    import re
     import subprocess
     import tempfile
+
+    def _wsl_path(native: str) -> str:
+        """A native Windows path, as WSL's `bash` (what `_RUN` below actually shells out to
+        on this machine) sees the same file: under its `/mnt/<drive>` mount, not `C:\\...`.
+
+        A drive letter means nothing to WSL and `\\` is not a separator there, so a raw
+        `C:\\Users\\...` path silently resolves to nothing (§247's own `/mnt/c` convention,
+        already documented in `backend/local/workspace.py` and `backend/routes/artifacts.py`,
+        is what production relies on for the same reason). A no-op on an already-POSIX temp
+        dir, i.e. running this suite from inside WSL itself, the other supported way to run it.
+        """
+        match = re.fullmatch(r"([A-Za-z]):[\\/](.*)", native)
+        if not match:
+            return native
+        drive, rest = match.groups()
+        return f"/mnt/{drive.lower()}/{rest.replace(chr(92), '/')}"
 
     # A PNG big enough that its base64 alone clears the per-argument limit twice over.
     png = base64.b64encode(b"\x89PNG\r\n\x1a\n" + os.urandom(340_000)).decode()
@@ -523,20 +540,25 @@ def test_a_real_sized_response_survives_the_shell():
 
     with tempfile.TemporaryDirectory() as work:
         run_dir = f"{work}/discovery/run"
-        shell = _figures_shell(_RUN, "node_2_0", run_dir)
+        # The shell script itself is built from the WSL-visible path — `_figures_shell`'s
+        # `mkdir`/decode-target/staging paths all need to resolve inside the shell that runs
+        # them, which native `os.makedirs`/`open` below do not go through.
+        shell = _figures_shell(_RUN, "node_2_0", _wsl_path(run_dir))
         # Stand in for the CLI with something that emits the payload from a file, as it would.
         os.makedirs(run_dir, exist_ok=True)
         with open(f"{work}/response.json", "w") as handle:
             handle.write(payload)
         stub = shell.replace(
             f"asta autodiscovery experiment {_RUN} node_2_0 --format json",
-            f"cat {work}/response.json",
+            f"cat {shlex.quote(_wsl_path(f'{work}/response.json'))}",
         )
         out = subprocess.run(["bash", "-c", stub], capture_output=True, text=True, timeout=120)
         assert "Argument list too long" not in (out.stderr + out.stdout), out.stderr[:300]
         answered = json.loads(out.stdout)
         assert answered["ok"] is True, answered
         assert answered["figures"] == ["figure-01.png"]
+        # Native path: the file was written by WSL, but it's the same file on disk this
+        # (native Windows) Python process can read straight back through the `/mnt/c` mount.
         written = f"{run_dir}/node_2_0/figure-01.png"
         assert os.path.getsize(written) > 300_000
         # The staging file is removed, so a conversation folder does not accumulate them.
