@@ -287,21 +287,21 @@ pub const BENCH_NIGHT: Theme = Theme {
 pub const MINI_ME: Theme = Theme {
     background: 0xF1EFEA,
     surface: 0xF7F5F1,
-    elevated: 0xF7F5F1,
-    overlay: 0xF1EFEA,
-    hover: 0xF1EFEA,
+    elevated: 0xFBFAF8,
+    overlay: 0xFFFFFF,
+    hover: 0,
     accent_soft: 0xF7DDCD,
     text: 0x1E1E1E,
-    text_muted: 0x74716B,
-    text_faint: 0x74716B,
-    border: 0xD8D4CD,
-    border_strong: 0xD8D4CD,
-    accent: 0xDE6732,
-    accent_hover: 0xDE6732,
-    success: 0x5bbd7a,
-    warning: 0xd9a441,
-    error: 0xf1676b,
-    running: 0x6aa9e0,
+    text_muted: 0x55555F,
+    text_faint: 0x5B5B66,
+    border: 0xDCD8D1,
+    border_strong: 0xC3BEB5,
+    accent: 0xA8451A,
+    accent_hover: 0x8C3813,
+    success: 0x14663A,
+    warning: 0x855C05,
+    error: 0xB32431,
+    running: 0x1F5FA8,
 };
 
 /// Warm charcoal and the Mini-Me orange. Neutrals carry a slight warm tint so they sit
@@ -999,8 +999,8 @@ mod tests {
             apply(&theme);
             assert_eq!(current(), theme, "{name} did not survive a round trip");
         }
-        assert_eq!(DEFAULT, VIOLET_POTATO);
-        assert_eq!(DEFAULT_NAME, "Violet Native Potato");
+        assert_eq!(DEFAULT, MINI_ME);
+        assert_eq!(DEFAULT_NAME, "Mini-Me");
         // What a fresh install writes must name a theme that exists, or it silently falls back.
         assert!(
             THEMES.iter().any(|(name, _)| *name == DEFAULT_NAME),
