@@ -99,3 +99,38 @@ def _state_of(task: dict[str, Any] | None) -> str | None:
 def is_valid_task_id(task_id: str) -> bool:
     """True if `task_id` is a well-formed A2A task UUID (guards a poll route)."""
     return bool(task_id) and bool(_UUID_RE.fullmatch(task_id))
+
+
+#: The status vocabulary every Asta-job adapter (theorizer, DataVoyager, AutoDiscovery)
+#: already normalizes its own service's native words into — the shared `JobState`
+#: `docs/refactoring-ideas.md` item 0 asks for, sitting *above* each adapter rather than
+#: replacing any of them. Each adapter still speaks its own service's raw vocabulary
+#: internally (an A2A task's `status.state`, or AutoDiscovery's own uppercase REST status);
+#: only the word it hands back to this backend's own routes needs to agree, and until now
+#: nothing declared that agreement — `routes/artifacts.py` kept its own separately-spelled
+#: copy of the same three words, matching by coincidence rather than by reference.
+_TERMINAL_JOB_STATES = frozenset({"completed", "failed", "canceled"})
+
+
+def is_terminal_job_status(status: str | None) -> bool:
+    """Whether this backend's own job vocabulary calls `status` finished."""
+    return status in _TERMINAL_JOB_STATES
+
+
+def fold_a2a_terminal_state(state: str | None) -> str | None:
+    """Fold an A2A task's raw terminal `status.state` into this backend's job vocabulary.
+
+    `rejected` -> `failed` (Asta's `rejected` and `failed` mean the same thing to a
+    researcher: the run stopped and produced nothing); `canceled` passes through unchanged.
+    Returns `None` for anything not terminal — `input-required`, `running`, or an
+    unrecognised word — so the caller keeps treating those as still going, matching
+    `autodiscovery_tools.py::normalise_status`'s own "an unknown word is not terminal" rule.
+
+    theorizer and DataVoyager arrived at exactly this fold independently and identically;
+    this is that one piece, shared. The raw `state` stays available to the caller for
+    messages like "Asta ended the run as {state} without reporting a reason" — folding it
+    away here would blur "rejected" and "failed" in text a researcher or a log reads.
+    """
+    if state in ("failed", "canceled", "rejected"):
+        return "failed" if state == "rejected" else state
+    return None

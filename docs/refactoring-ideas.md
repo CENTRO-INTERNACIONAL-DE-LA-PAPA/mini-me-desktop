@@ -11,7 +11,8 @@ Status values: `open` (not started), `done` (landed, with commit/date).
 
 ## 0. One shared answer contract: reply now, or defer with a watchable handle
 
-**Status:** open — anchor goal, not a single scoped task
+**Status:** open — anchor goal, not a single scoped task. Backend `JobState` half landed
+(2026-09-11, see below); the shared submit-side entry helper has not.
 
 **The complaint this answers:** Sending a message to the backend
 today can resolve in at least four structurally different ways depending on what it touches — a
@@ -58,6 +59,36 @@ vocabulary say opposite words for the same two states — `completed`/`failed` v
 call the shared entry point" instead of "invent a new route, a new vocabulary, and new polling
 code." Items 2, 3, 5, and 6 below are concrete steps toward this; none of them require doing all
 of this at once.
+
+**Landed (2026-09-11): the backend half of `JobState`.** theorizer and DataVoyager's poll
+functions turned out to share one piece of vocabulary translation *verbatim* — folding an A2A
+task's raw `rejected` state into this backend's own `failed`, byte-for-byte identical in both
+files. And `routes/artifacts.py`'s shared `_poll_asta_job` (item 3) carried its own
+separately-spelled `_TERMINAL_STATUSES = ("completed", "failed", "canceled")` tuple, agreeing
+with theorizer/DataVoyager/AutoDiscovery's own vocabularies only by coincidence, not by
+reference. Added `is_terminal_job_status`/`fold_a2a_terminal_state` to `asta_jobs.py` — the
+"shared `JobState` used everywhere *above* the adapter" this item asks for — and pointed all
+three job kinds' terminal check at it. Each adapter still speaks its own service's raw
+vocabulary internally (A2A `status.state` vs. AutoDiscovery's uppercase REST status); only the
+word each hands back now has one declared, shared meaning instead of three tuples that happened
+to agree.
+
+**Deliberately NOT done as part of this pass, and not a small omission:**
+- **The shared submit-side entry helper** ("run the work; hand back a result or a watch
+  handle") — theorizer/DataVoyager/AutoDiscovery still each independently decide "return a task
+  id" in their own `_submit`/`draft_run`/`submit_run`. Building that helper means changing the
+  functions the coordinator actually calls on every live research turn, including
+  AutoDiscovery's credit-gated submit path — which is exactly item 5's territory. Scoping it out
+  is the next real step, but it's a bigger behavioral surface than anything landed so far on
+  this list and deserves its own look before touching it.
+- **Unifying Rust's `Job::is_finished()` with this Python `JobState`.** Checked, and declined:
+  Rust's terminal-state list (`"completed"|"failed"|"canceled"|"cancelled"|"unavailable"|"error"`)
+  is deliberately a *superset* — `"unavailable"` and `"error"` are transport/route-layer signals
+  ("the sandbox is gone," "the poll itself failed") that never flow through a real Asta job
+  state at all, so they have no equivalent in the backend's `JobState`. Forcing the two to share
+  one type would either drop Rust's transport-layer states or invent backend meanings for them
+  that don't exist. Same shape as item 2's "AutoDiscovery's `normalise_status` stays separate"
+  call — a real difference, not a gap to close.
 
 ---
 

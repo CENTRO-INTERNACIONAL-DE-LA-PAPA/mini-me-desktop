@@ -11,6 +11,7 @@ from pathlib import PurePosixPath
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
+from backend.asta_jobs import is_terminal_job_status
 from backend.local.workspace import LocalWorkspaceBackend
 from backend.schemas import _is_supported_artifact_file
 from backend.autodiscovery_tools import (
@@ -188,11 +189,6 @@ async def start_sandbox(request: Request) -> Response:
     return JSONResponse({"state": "ready"})
 
 
-#: A job's own vocabulary already agrees on these three words for "won't change again" —
-#: `_state_of` in `asta_jobs.py` normalizes each source's native spelling down to this set.
-_TERMINAL_STATUSES = ("completed", "failed", "canceled")
-
-
 async def _poll_asta_job(
     request: Request,
     *,
@@ -237,7 +233,7 @@ async def _poll_asta_job(
         # On a terminal state, persist the outcome into the sandbox so the agent
         # can read it on a later turn (it has filesystem tools) and so the run is
         # a durable artifact. Best-effort; never blocks returning.
-        if persist is not None and result.get("status") in _TERMINAL_STATUSES:
+        if persist is not None and is_terminal_job_status(result.get("status")):
             try:
                 await persist(adapter, job_id, result)
             except Exception:  # noqa: BLE001

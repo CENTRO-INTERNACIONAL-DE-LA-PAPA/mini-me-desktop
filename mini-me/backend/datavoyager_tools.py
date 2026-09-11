@@ -37,7 +37,14 @@ from typing import Any
 
 from langchain_core.tools import tool
 
-from backend.asta_jobs import _UUID_RE, _extract_json, _run, _state_of, is_valid_task_id
+from backend.asta_jobs import (
+    _UUID_RE,
+    _extract_json,
+    _run,
+    _state_of,
+    fold_a2a_terminal_state,
+    is_valid_task_id,
+)
 from backend.runtime import _active_sandbox
 
 #: Reaches the log at INFO — see `backend/diagnostics.py` for why that needs saying.
@@ -411,11 +418,11 @@ async def poll_analysis_status(
             "analysis_text": _analysis_text(task),
             "artifacts": _artifact_names(task),
         }
-    if state in ("failed", "canceled", "rejected"):
+    if (status := fold_a2a_terminal_state(state)) is not None:
         reason = _failure_reason(task, state)
         logger.warning("analyze-data task %s ended %s: %s", task_id, state, reason)
         return {
-            "status": "failed" if state == "rejected" else state,
+            "status": status,
             "task_id": task_id,
             "reason": reason,
         }

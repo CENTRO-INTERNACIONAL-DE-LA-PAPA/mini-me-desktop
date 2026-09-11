@@ -23,7 +23,7 @@ from typing import Any
 
 from langchain_core.tools import tool
 
-from backend.asta_jobs import _UUID_RE, _run, _state_of, is_valid_task_id
+from backend.asta_jobs import _UUID_RE, _run, _state_of, fold_a2a_terminal_state, is_valid_task_id
 from backend.runtime import _active_sandbox
 
 logger = logging.getLogger(__name__)
@@ -338,11 +338,11 @@ async def poll_theory_status(sandbox: Any, task_id: str) -> dict[str, Any]:
     state = _state_of(task)
     if state == "completed" and task is not None:
         return {"status": "completed", "task_id": task_id, **_parse_theories(task)}
-    if state in ("failed", "canceled", "rejected"):
+    if (status := fold_a2a_terminal_state(state)) is not None:
         reason = _failure_reason(task, state)
         logger.warning("theorizer task %s ended %s: %s", task_id, state, reason)
         return {
-            "status": "failed" if state == "rejected" else state,
+            "status": status,
             "task_id": task_id,
             "reason": reason,
         }
