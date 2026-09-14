@@ -3258,7 +3258,7 @@ dependencies = [
 
 [[package]]
 name = "mini-me-desktop-app"
-version = "0.3.37"
+version = "0.3.38"
 dependencies = [
  "anyhow",
  "base64",
