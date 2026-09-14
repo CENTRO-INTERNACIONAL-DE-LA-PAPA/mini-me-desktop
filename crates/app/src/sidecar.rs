@@ -1003,7 +1003,12 @@ impl Sidecar {
                 Ok(state) => {
                     let _ = tx.unbounded_send(state);
                 }
-                Err(error) => tracing::warn!(%error, "could not read a conversation"),
+                // `{error:#}`, not `%error`: `anyhow`'s plain `Display` prints only this
+                // call's own context line — always the same "reading the conversation
+                // failed" — and swallows the cause underneath it (connection refused, a
+                // 404, a bad JSON body), which is the only part that actually explains an
+                // intermittent failure.
+                Err(error) => tracing::warn!(error = format!("{error:#}"), "could not read a conversation"),
             }
         });
         rx

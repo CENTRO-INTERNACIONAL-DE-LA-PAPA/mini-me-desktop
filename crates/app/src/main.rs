@@ -4944,6 +4944,20 @@ impl Workbench {
                     workbench.refresh_project(cx);
                     cx.notify();
                 });
+            } else {
+                // The fetch failed — `sidecar::open_conversation` already logged why, and
+                // dropped its sender without ever sending, so this is the only place left
+                // that can end the wait. Without it `opening` stayed `true` forever: the
+                // pane sat on "opening…" with no error and no way out but restarting the
+                // app, for a fetch that had already given up.
+                let _ = this.update(cx, |workbench, cx| {
+                    if workbench.sidecar.thread_id().as_deref() != Some(owner.as_str()) {
+                        return;
+                    }
+                    workbench.opening = false;
+                    workbench.status = "could not open that conversation — try again".into();
+                    cx.notify();
+                });
             }
         })
         .detach();
