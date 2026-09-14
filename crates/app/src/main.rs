@@ -1081,17 +1081,15 @@ enum Section {
     Model,
     Research,
     Backend,
-    Setup,
 }
 
 impl Section {
     /// In rail order.
-    const ALL: [Section; 5] = [
+    const ALL: [Section; 4] = [
         Section::Appearance,
         Section::Model,
         Section::Research,
         Section::Backend,
-        Section::Setup,
     ];
 
     fn label(self) -> &'static str {
@@ -1100,7 +1098,6 @@ impl Section {
             Section::Model => "Model",
             Section::Research => "Research",
             Section::Backend => "Backend",
-            Section::Setup => "Setup",
         }
     }
 
@@ -1110,7 +1107,6 @@ impl Section {
             Section::Model => "model",
             Section::Research => "research",
             Section::Backend => "backend",
-            Section::Setup => "setup",
         }
     }
 }
@@ -1266,7 +1262,7 @@ enum Command {
     OpenAbout,
     OpenProvenance,
     OpenSettings,
-    OpenSetup,
+    OpenOnboarding,
     Quit,
 }
 
@@ -1287,7 +1283,7 @@ impl Command {
         Command::OpenAbout,
         Command::OpenProvenance,
         Command::OpenSettings,
-        Command::OpenSetup,
+        Command::OpenOnboarding,
         Command::Quit,
     ];
 
@@ -1308,7 +1304,7 @@ impl Command {
             Command::OpenAbout => "About Mini-Me",
             Command::OpenProvenance => "Show this conversation's provenance",
             Command::OpenSettings => "Settings",
-            Command::OpenSetup => "Setup & diagnostics",
+            Command::OpenOnboarding => "Run setup checks",
             Command::Quit => "Quit",
         }
     }
@@ -1332,7 +1328,7 @@ impl Command {
             }
             Command::OpenProvenance => "which specialists were consulted, and in what order",
             Command::OpenSettings => "model, keys, execution (ctrl-,)",
-            Command::OpenSetup => "check what the backend still needs",
+            Command::OpenOnboarding => "re-run the install checks and fixes shown on first launch",
             Command::Quit => "close the window and the sidecar",
         }
     }
@@ -2108,6 +2104,13 @@ struct RunningFix {
 /// How much of a fix's output the pane keeps.
 const FIX_LOG_LINES: usize = 200;
 
+/// One collapsed line for a finished onboarding step, once it is no longer the active row.
+struct OnboardingStepResult {
+    check_id: &'static str,
+    label: String,
+    ok: bool,
+}
+
 /// One editable primitive from an MCP elicitation form.
 struct McpElicitationField {
     interrupt: String,
@@ -2266,6 +2269,20 @@ struct Workbench {
     /// A fix the app is running for the user: what it is, and what it has printed so far.
     /// `Some` means a command is live, which is what disables the other buttons.
     running_fix: Option<RunningFix>,
+    /// Onboarding modal: open flag, and whether the one-button sequence is currently
+    /// walking the check list on its own (as opposed to a person clicking one fix by hand).
+    onboarding_open: bool,
+    onboarding_auto_running: bool,
+    /// The `check.id` the auto-run is currently driving, so the body knows which row's
+    /// `running_fix` belongs to it.
+    onboarding_step: Option<&'static str>,
+    /// Set when the auto-run reaches a check that needs the user to act outside the app
+    /// (a `Fix::Manual`, a `Fix::Adopt`, or a sign-in link) — paused, not failed.
+    onboarding_awaiting_manual: Option<&'static str>,
+    /// One-line verdicts for steps that already ran and are no longer the active row, so
+    /// their box can collapse instead of keeping every finished step's full log on screen.
+    onboarding_history: Vec<OnboardingStepResult>,
+    onboarding_focus: gpui::FocusHandle,
     /// A run paused at the approval gate: the command it wants to run, awaiting a
     /// decision. While this is set the turn is *open*, not finished.
     pending_approval: Option<ApprovalRequest>,
@@ -2791,6 +2808,12 @@ impl Workbench {
             checking: false,
             judge_after_recheck: false,
             running_fix: None,
+            onboarding_open: false,
+            onboarding_auto_running: false,
+            onboarding_step: None,
+            onboarding_awaiting_manual: None,
+            onboarding_history: Vec::new(),
+            onboarding_focus: cx.focus_handle(),
             pending_approval: None,
             pending_mcp_elicitation: None,
             approve_rest_of_turn: false,
@@ -2890,17 +2913,21 @@ impl Workbench {
             composer.update(cx, |composer, cx| composer.set_text(value, cx));
         }
         let has_key = settings::secret(&draft.key_name()).is_some();
-        if !draft.problems(has_key).is_empty() {
+        // Only nudge into plain Settings once onboarding is behind them. On a first run the
+        // model-key check is one of the onboarding steps, and opening Settings underneath
+        // the onboarding modal at the same moment would be a confusing double-popup.
+        if draft.onboarding_completed && !draft.problems(has_key).is_empty() {
             workbench.settings_open = true;
             workbench.settings_note =
                 "Add a model key to get started — it goes into your OS keychain.".to_string();
         }
 
-        // Check the machine on every launch, and let the *first* report decide which pane
-        // the user lands on. A missing key is a Settings problem; a missing WSL or backend
-        // is a Setup problem, and Setup has to win — pasting a key into an app that cannot
-        // start its backend fixes nothing, and the first thing a new user sees should be
-        // the thing actually standing in their way.
+        // Check the machine on every launch, and let the *first* report decide whether the
+        // onboarding modal opens by itself. A missing key is a Settings problem; a missing
+        // WSL or backend is an onboarding problem, and onboarding has to win on a fresh
+        // install — pasting a key into an app that cannot start its backend fixes nothing,
+        // and the first thing a new user sees should be the thing actually standing in
+        // their way.
         workbench.run_preflight(cx);
 
         // A launch opens at the workspace root. The previous project used to be a second project
@@ -3370,20 +3397,24 @@ impl Workbench {
                         Some(check) => format!("setup: {} — {}", check.label, check.detail),
                         None => format!("setup: {}", report.summary()),
                     };
-                    // Only the first report may open a pane by itself. After that the user
-                    // has seen the state of things, and a background re-check yanking the
-                    // pane open under their cursor would be rude.
-                    let first = workbench.report.is_none();
                     let blocked = !report.ready();
                     workbench.report = Some(report);
                     if std::mem::take(&mut workbench.judge_after_recheck) {
                         workbench.judge_finished_fix();
                     }
-                    if first && blocked {
-                        // The first report is the guided first run: open the window on the
-                        // page that says what is wrong.
-                        workbench.settings_section = Section::Setup;
-                        workbench.settings_open = true;
+                    if workbench.onboarding_auto_running {
+                        // A re-check triggered by the auto-run itself (either the very first
+                        // one, or the one a successful fix always triggers) — advance to the
+                        // next pending step, or land on "Done".
+                        workbench.onboarding_advance(cx);
+                    } else if !workbench.onboarding_open && blocked {
+                        // A first-run report opens the guided pane on its own, same as
+                        // always. But so does any later one: a mandatory step (a `Fail`,
+                        // never an optional `Warn`) missing or broken means the app cannot
+                        // work at all, whether or not onboarding was already finished once
+                        // before — that deserves the guided pane every time it's
+                        // discovered, not a status-bar line nobody reads.
+                        workbench.open_onboarding(cx);
                     }
                     cx.notify();
                 });
@@ -3393,12 +3424,134 @@ impl Workbench {
         cx.notify();
     }
 
-    /// Show the Setup pane, re-checking as it opens — a stale report is worse than none,
-    /// because the whole point is to reflect what the machine is like *now*.
-    fn open_setup(&mut self, cx: &mut Context<Self>) {
-        self.settings_section = Section::Setup;
-        self.settings_open = true;
+    /// Show the onboarding modal, re-checking as it opens — a stale report is worse than
+    /// none, because the whole point is to reflect what the machine is like *now*.
+    fn open_onboarding(&mut self, cx: &mut Context<Self>) {
+        self.onboarding_open = true;
+        self.onboarding_auto_running = false;
+        self.onboarding_step = None;
+        self.onboarding_awaiting_manual = None;
+        self.onboarding_history.clear();
         self.run_preflight(cx);
+    }
+
+    /// Bound to the modal's "Get Started" button: begin auto-running every pending check's
+    /// fix in sequence.
+    fn start_onboarding(&mut self, cx: &mut Context<Self>) {
+        self.onboarding_auto_running = true;
+        self.onboarding_advance(cx);
+    }
+
+    /// The one-button sequencer. Finds the next check that still needs work and either runs
+    /// its fix, pauses for the user to act on it by hand, or — if nothing is left — marks
+    /// onboarding complete.
+    ///
+    /// A thin driver on top of `run_preflight`/`start_fix`, not a parallel execution path:
+    /// it is re-entered from the tail of both, so a fix finishing and a re-check resolving
+    /// both funnel back through here.
+    fn onboarding_advance(&mut self, cx: &mut Context<Self>) {
+        if !self.onboarding_auto_running {
+            return;
+        }
+        let Some(report) = &self.report else {
+            // Still checking — `run_preflight`'s completion handler calls back in here.
+            return;
+        };
+        let Some(check) = report
+            .checks
+            .iter()
+            .find(|check| matches!(check.state, preflight::State::Fail | preflight::State::Warn))
+        else {
+            // Nothing left to fix.
+            self.onboarding_auto_running = false;
+            self.onboarding_step = None;
+            self.mark_onboarded();
+            return;
+        };
+        // The step we were driving just resolved (successfully, since the auto-run only
+        // ever reaches here again via a successful fix's re-check) — collapse it to a
+        // one-line verdict before moving the spotlight to the next row.
+        if let Some(previous) = self.onboarding_step {
+            if previous != check.id {
+                if let Some(fix) = &self.running_fix {
+                    if fix.check_id == previous && fix.done && fix.ok {
+                        self.onboarding_history.push(OnboardingStepResult {
+                            check_id: previous,
+                            label: fix.label.clone(),
+                            ok: true,
+                        });
+                    }
+                }
+            }
+        }
+        self.onboarding_step = Some(check.id);
+        match check.fixes.first() {
+            None => {
+                // A Fail/Warn with no fix at all — nothing the auto-run can do; stop rather
+                // than spin.
+                self.onboarding_auto_running = false;
+            }
+            Some(preflight::Fix::Run { label, argv, .. }) => {
+                if self.running_fix.as_ref().is_some_and(|fix| !fix.done) {
+                    // Already running (this fix's own success re-check just landed) — wait
+                    // for its callback rather than starting a second command.
+                    return;
+                }
+                // This exact fix already reported success against this exact check, and the
+                // check still isn't passing — `judge_finished_fix` has already explained why
+                // (most often: WSL installed, but Windows needs a restart before the distro
+                // can start). Firing the same command again is not a second attempt, it is a
+                // loop: on a real machine that meant a fresh UAC prompt every few seconds
+                // instead of the restart notice ever reaching the user. Stop and wait for
+                // them instead.
+                if self
+                    .running_fix
+                    .as_ref()
+                    .is_some_and(|fix| fix.check_id == check.id && fix.ok)
+                {
+                    self.onboarding_auto_running = false;
+                    self.onboarding_awaiting_manual = Some(check.id);
+                    return;
+                }
+                self.start_fix(label.to_string(), argv.clone(), check.id, cx);
+            }
+            Some(preflight::Fix::Manual(_)) | Some(preflight::Fix::Adopt { .. }) => {
+                self.onboarding_auto_running = false;
+                self.onboarding_awaiting_manual = Some(check.id);
+            }
+        }
+    }
+
+    /// Bound to "Retry" after a fix fails: re-issue the same fix.
+    fn retry_onboarding_step(&mut self, cx: &mut Context<Self>) {
+        self.onboarding_auto_running = true;
+        self.onboarding_advance(cx);
+    }
+
+    /// Bound to "Continue" once the user has done whatever a `Fix::Manual`/`Fix::Adopt` step
+    /// needed outside the app: re-check, and resume the sequence if that step now passes.
+    fn resume_onboarding(&mut self, cx: &mut Context<Self>) {
+        let awaited = self.onboarding_awaiting_manual;
+        self.onboarding_auto_running = true;
+        self.onboarding_step = awaited;
+        self.run_preflight(cx);
+    }
+
+    /// Record that onboarding is done — either everything passed, or the user chose to skip
+    /// the rest — so it does not reopen by itself on the next launch.
+    ///
+    /// Re-read from disk and written back rather than saving `self.draft`, which is the
+    /// *Settings pane's* editing buffer: see `remember_panels` for the same reasoning.
+    fn mark_onboarded(&mut self) {
+        let mut stored = settings::Settings::load();
+        if stored.onboarding_completed {
+            return;
+        }
+        stored.onboarding_completed = true;
+        if let Err(error) = stored.save() {
+            tracing::warn!(%error, "could not remember that onboarding finished");
+        }
+        self.draft.onboarding_completed = true;
     }
 
     /// Point the app at a checkout the user already has.
@@ -3783,6 +3936,10 @@ impl Workbench {
                             if ok {
                                 workbench.judge_after_recheck = true;
                                 workbench.run_preflight(cx);
+                            } else if workbench.onboarding_auto_running {
+                                // Stop the sequence here — the log stays up as-is, and the
+                                // modal's primary button switches to "Retry".
+                                workbench.onboarding_auto_running = false;
                             }
                         }
                     }
@@ -4399,8 +4556,9 @@ impl Workbench {
                 // "backend did not become healthy within 120 attempts" tells the user
                 // nothing they can act on. Open the diagnosis instead of the log path.
                 if looks_like_a_setup_failure(&message) {
-                    self.error = Some(format!("{message} — see Setup for what is missing"));
-                    self.open_setup(cx);
+                    self.error =
+                        Some(format!("{message} — see the setup checks for what is missing"));
+                    self.open_onboarding(cx);
                     return;
                 }
                 // Point at the sidecar log: backend-side failures (a missing key,
@@ -4942,6 +5100,20 @@ impl Workbench {
                     workbench.opening = false;
                     workbench.status = "done".into();
                     workbench.refresh_project(cx);
+                    cx.notify();
+                });
+            } else {
+                // The fetch failed — `sidecar::open_conversation` already logged why, and
+                // dropped its sender without ever sending, so this is the only place left
+                // that can end the wait. Without it `opening` stayed `true` forever: the
+                // pane sat on "opening…" with no error and no way out but restarting the
+                // app, for a fetch that had already given up.
+                let _ = this.update(cx, |workbench, cx| {
+                    if workbench.sidecar.thread_id().as_deref() != Some(owner.as_str()) {
+                        return;
+                    }
+                    workbench.opening = false;
+                    workbench.status = "could not open that conversation — try again".into();
                     cx.notify();
                 });
             }
@@ -6692,11 +6864,6 @@ impl Workbench {
         // the mark at top-left threw away the theme being looked at (docs §50).
         self.draft.theme = self.applied_theme.clone();
         self.settings_note.clear();
-        // Opened by the keyboard or the palette rather than from Setup, so it lands on the
-        // page most people came for. Reaching Setup is now one click in the rail.
-        if self.settings_section == Section::Setup {
-            self.settings_section = Section::Model;
-        }
         // The one moment a fresh list is worth a request: somebody is about to read it.
         self.refresh_models(cx);
         let values: Vec<(Field, String)> = self
@@ -6840,11 +7007,6 @@ impl Workbench {
                         // The field that had focus may not exist on the new page, and focus on
                         // an unrendered element stops key bindings arriving (docs §71).
                         workbench.focus_settings_page(window, cx);
-                        // Landing on Setup should show what is true *now*: a stale report is
-                        // the one thing worse than none (the reason `open_setup` re-checks).
-                        if section == Section::Setup {
-                            workbench.run_preflight(cx);
-                        }
                         cx.notify();
                     }),
                 ),
@@ -7003,7 +7165,7 @@ impl Workbench {
                 cx.notify();
             }
             Command::OpenSettings => self.open_settings(None, cx),
-            Command::OpenSetup => self.open_setup(cx),
+            Command::OpenOnboarding => self.open_onboarding(cx),
             Command::Quit => cx.quit(),
         }
     }
@@ -8186,6 +8348,14 @@ impl Render for Workbench {
         // the chat 420px for as long as it is open.
         let root = if self.settings_open {
             root.child(self.settings_pane(cx))
+        } else {
+            root
+        };
+
+        // A modal in its own right, alongside Settings, not a page inside it — reachable on
+        // first run before there is anything else worth opening.
+        let root = if self.onboarding_open {
+            root.child(self.onboarding_modal(cx))
         } else {
             root
         };

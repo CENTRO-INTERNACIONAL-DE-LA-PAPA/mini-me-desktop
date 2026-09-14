@@ -11,6 +11,7 @@ pub(crate) mod provenance_view;
 pub(crate) mod settings_view;
 pub(crate) mod palette_view;
 pub(crate) mod modals;
+pub(crate) mod onboarding;
 pub(crate) mod status_bar;
 
 pub(crate) mod components;

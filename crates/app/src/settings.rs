@@ -197,6 +197,15 @@ pub struct Settings {
     /// named the files, so turning this off cannot strand anybody's plots (§301).
     #[serde(default)]
     pub run_record: bool,
+    /// Whether the onboarding modal has been completed (or explicitly skipped) once.
+    ///
+    /// `#[serde(default = "yes")]` so an *existing* `settings.toml` from before this field
+    /// existed parses as already onboarded — nobody upgrading gets nagged. A genuinely fresh
+    /// install has no `settings.toml` at all, so it never goes through `toml::from_str` and
+    /// this default is never consulted; it falls through to `Default::default()` below, which
+    /// sets `false`. That is the one signal this app has for "first run."
+    #[serde(default = "yes")]
+    pub onboarding_completed: bool,
 }
 
 impl Default for Settings {
@@ -217,6 +226,7 @@ impl Default for Settings {
             road_open: true,
             backend_dir_owned: true,
             run_record: false,
+            onboarding_completed: false,
         }
     }
 }
@@ -793,6 +803,9 @@ mod tests {
             // Also not the default, for the same reason: someone who turned the run record on
             // must not find it off again after a restart.
             run_record: true,
+            // Also not the default, for the same reason: someone who finished onboarding
+            // must not be nagged with it again after a restart.
+            onboarding_completed: true,
         };
         let text = toml::to_string_pretty(&settings).expect("serialise");
         assert_eq!(
