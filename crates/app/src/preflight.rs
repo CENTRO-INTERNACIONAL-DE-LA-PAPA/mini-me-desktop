@@ -32,7 +32,7 @@ use crate::backend::{bundled_backend_dir, quote_path, shell_quote, BackendConfig
 const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Why a check was skipped when the runtime itself never answered.
-const RUNTIME_FIRST: &str = "the runtime above has to work";
+const RUNTIME_FIRST: &str = "the step above has to work";
 
 /// Where the `asta` CLI comes from.
 ///
@@ -92,7 +92,7 @@ pub enum Fix {
     Adopt { label: &'static str, dir: String },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Check {
     /// Stable identifier, so tests and the UI can name a row without matching prose.
     pub id: &'static str,
@@ -104,6 +104,18 @@ pub struct Check {
     /// "we found a Mini-Me at ~/Mini-Me" and "install a fresh copy" are both real answers
     /// to a missing checkout, and which one is right is the user's call, not ours.
     pub fixes: Vec<Fix>,
+    /// Whether a turn can succeed forever without this — as opposed to merely *not yet*
+    /// blocking one, which is all `state != Fail` says on its own.
+    ///
+    /// A property of the check itself, set once at each call site, rather than derived from
+    /// the current `state`: the checkpointer check can only ever be `Pass` or `Fail` and is
+    /// **not** optional even while green, and Asta/Dataverse stay optional even while green,
+    /// because the whole point is to answer "do I need to deal with this" independently of
+    /// whether it currently happens to be fine. Deriving it from `state == Warn` would also
+    /// have quietly re-created the bug `checkpointer`'s own history warns about: that check
+    /// used to be a `Warn` and looked optional, and a researcher lost their conversation
+    /// history to a row that read as safe to ignore (see the comment above it).
+    pub optional: bool,
 }
 
 impl Check {
@@ -114,6 +126,7 @@ impl Check {
             state: State::Pass,
             detail: detail.into(),
             fixes: Vec::new(),
+            optional: false,
         }
     }
 
@@ -127,6 +140,7 @@ impl Check {
             state: State::Skip,
             detail: format!("not checked — {because} first"),
             fixes: Vec::new(),
+            optional: false,
         }
     }
 
@@ -143,7 +157,15 @@ impl Check {
             state,
             detail: detail.into(),
             fixes,
+            optional: false,
         }
+    }
+
+    /// Marks a check as one a turn can succeed forever without — Asta and Dataverse, the
+    /// only two the coordinator has never needed to run at all.
+    fn optional(mut self) -> Self {
+        self.optional = true;
+        self
     }
 }
 
@@ -305,40 +327,39 @@ fn probe(argv: &[String]) -> Probe {
 /// one button, because hijacking a launch for the fifteen minutes `uv sync` can take is a worse
 /// trade than saying so plainly.
 ///
-/// Silent when there is nothing to compare — a developer checkout carries no stamp, and running
-/// the app from source is not a machine out of date.
-fn backend_build(config: &BackendConfig) -> Check {
-    let Some(bundled) = bundled_backend_stamp() else {
-        return Check::pass(
-            "backend-build",
-            "Backend build",
-            "running from source — nothing bundled to compare against",
-        );
-    };
+/// `None` when there is nothing to compare — a developer checkout carries no stamp, and
+/// running the app from source is not a machine out of date. **Not shown as a row at all**
+/// in that case, rather than a permanent, uninformative Pass: every developer checkout would
+/// otherwise carry a step that can never say anything but "running from source", which is
+/// not a fact about *this machine's setup* the way the other eight rows are.
+fn backend_build(config: &BackendConfig) -> Option<Check> {
+    let bundled = bundled_backend_stamp()?;
     let installed = installed_backend_stamp(config);
     if installed.as_deref() == Some(bundled.as_str()) {
-        return Check::pass(
+        return Some(Check::pass(
             "backend-build",
             "Backend build",
-            "matches the copy bundled with this app",
-        );
+            "up to date with this version of the app",
+        ));
     }
 
     let short = |stamp: &str| stamp.chars().take(12).collect::<String>();
     let detail = match &installed {
-        // Named rather than counted: "older" invites the question this line should answer.
+        // The build ids trail in parentheses rather than lead: a day-to-day user needs the
+        // plain sentence, not a hash, but someone reporting a bug still gets one to quote.
         Some(stamp) => format!(
-            "installed {} but this app ships {} — subagents may be running last month's rules",
+            "an older version of the backend is installed ({} vs {}) — update to get this \
+             app's latest fixes and safeguards",
             short(stamp),
             short(&bundled)
         ),
         None => format!(
-            "installed before this app stamped its backend; this app ships {} — \
-             subagents may be running last month's rules",
+            "an older version of the backend is installed (this app ships {}) — update to \
+             get this app's latest fixes and safeguards",
             short(&bundled)
         ),
     };
-    Check::failing(
+    Some(Check::failing(
         "backend-build",
         "Backend build",
         State::Fail,
@@ -349,7 +370,7 @@ fn backend_build(config: &BackendConfig) -> Check {
             note: "copies the bundled backend over the installed one and refreshes its packages — \
                    your API keys and conversations are untouched",
         }],
-    )
+    ))
 }
 
 /// Whether the backend's own interpreter can import a module.
@@ -519,9 +540,9 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
             // Not the full location — the header already carries it, and repeating a long
             // path in a 420px pane pushed everything else off the useful part of the row.
             if in_wsl {
-                "a distro started and answered".to_string()
+                "Linux support for Windows is installed and working".to_string()
             } else {
-                "bash is available on this machine".to_string()
+                "this machine can run the commands the backend needs".to_string()
             },
         ));
     } else if in_wsl {
@@ -529,7 +550,7 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
         // message is more use than a mojibake one anyway.
         let (detail, fix) = if runtime.launched {
             (
-                "WSL is present but no distro answered".to_string(),
+                "Linux support for Windows is installed, but it isn't responding".to_string(),
                 Fix::Run {
                     label: "Install Ubuntu",
                     // Deliberately *not* `--no-launch`, though it looks made for this: it
@@ -537,19 +558,23 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
                     // `HKCU\...\Lxss`, so `wsl -l -v` does not list it and the only cure is
                     // to run the install again without the flag
                     // (microsoft/WSL#10646). That failure is indistinguishable from the
-                    // state this button exists to escape. The launch it would have
-                    // suppressed is handled by denying stdin instead — see `elevated`.
+                    // state this button exists to escape.
                     argv: elevated(&["wsl.exe", "--install", "-d", "Ubuntu"]),
-                    note: "Windows will ask for admin rights; may need a restart",
+                    note: "Windows will ask for admin rights, then opens its own window — \
+                           this app can't show its progress, so watch that window; may need \
+                           a restart",
                 },
             )
         } else {
             (
-                "wsl.exe was not found — WSL is not installed".to_string(),
+                "the backend needs Windows' built-in Linux support, which isn't installed yet"
+                    .to_string(),
                 Fix::Run {
                     label: "Install WSL",
                     argv: elevated(&["wsl.exe", "--install"]),
-                    note: "Windows will ask for admin rights, then needs a restart",
+                    note: "Windows will ask for admin rights, then opens its own window — \
+                           this app can't show its progress, so watch that window; then \
+                           needs a restart",
                 },
             )
         };
@@ -565,7 +590,7 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
             "runtime",
             "Shell",
             State::Fail,
-            format!("no usable bash — {}", runtime.message()),
+            format!("this machine can't run the backend's commands — {}", runtime.message()),
             vec![Fix::Manual(
                 "The backend needs a POSIX shell. On Windows that means WSL: unset \
                  MINIME_BACKEND_WSL to use it (docs §21)."
@@ -579,27 +604,56 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
     let can_probe = runtime_ok || !in_wsl;
 
     // -------------------------------------------------------------- 2. the checkout
+    //
+    // Local execution's own module (`backend/local/__init__.py`) is checked here rather than
+    // as a separate row: it ships inside this same checkout, arriving (or not) from the exact
+    // same git clone / `setup_script()` run as `langgraph.json` — the only way for the two to
+    // disagree is a checkout old enough to predate the module's merge, or someone deleting one
+    // file by hand. Neither is common enough to earn its own permanent line in a first-run
+    // checklist; folded in here, it still gets caught and still gets the same reinstall fix.
     let checkout_ok = if can_probe {
         let found = exists(config, "langgraph.json");
         if found {
-            checks.push(Check::pass(
-                "checkout",
-                "Mini-Me backend",
-                format!("langgraph.json found in {}", config.backend_dir()),
-            ));
-            checks.push(backend_build(config));
+            let local_execution = config.local_execution_module();
+            let has_local_execution = if in_wsl {
+                probe(&config.shell_argv(&format!("test -f {}", quote_path(&local_execution)))).ok
+            } else {
+                std::path::Path::new(&local_execution).is_file()
+            };
+            if has_local_execution {
+                checks.push(Check::pass(
+                    "checkout",
+                    "Mini-Me backend",
+                    format!("installed and ready, in {}", config.backend_dir()),
+                ));
+            } else {
+                checks.push(Check::failing(
+                    "checkout",
+                    "Mini-Me backend",
+                    State::Fail,
+                    format!(
+                        "installed in {}, but part of it is missing — the install looks \
+                         incomplete",
+                        config.backend_dir()
+                    ),
+                    vec![Fix::Run {
+                        label: "Reinstall the backend",
+                        argv: config.shell_argv(&config.setup_script()),
+                        note: "re-syncs the checkout — your API keys and conversations are \
+                               untouched",
+                    }],
+                ));
+            }
+            checks.extend(backend_build(config));
         } else {
             // Offer to adopt an existing checkout *before* offering to install a second
             // one. Someone who already has Mini-Me on this machine should not be made to
-            // download gigabytes again — and adopting keeps their branches intact,
-            // because the app never runs destructive git on what it does not own.
+            // provision a second copy — and adopting keeps their branches intact, because
+            // the app never runs destructive git on what it does not own.
             let mut fixes = Vec::new();
-            let mut detail = format!("not installed in {}", config.backend_dir());
+            let mut detail = "not installed on this machine yet".to_string();
             if let Some(found) = discover_checkout(config) {
-                detail = format!(
-                    "not in {}, but there is one at {found}",
-                    config.backend_dir()
-                );
+                detail = format!("not installed yet, but an existing copy was found at {found}");
                 fixes.push(Fix::Adopt {
                     label: "Use the one I have",
                     dir: found,
@@ -608,7 +662,11 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
             fixes.push(Fix::Run {
                 label: "Install Mini-Me",
                 argv: config.shell_argv(&config.setup_script()),
-                note: "downloads the backend and its Python packages — 5 to 15 minutes",
+                // The backend source ships bundled with this app now — copying it into WSL is
+                // instant. What actually takes time is `uv sync` pulling Python packages from
+                // PyPI, which is the only network step left in this fix.
+                note: "copies the bundled backend and installs its Python packages — a few \
+                       minutes",
             });
             checks.push(Check::failing(
                 "checkout",
@@ -642,14 +700,14 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
             checks.push(Check::pass(
                 "dependencies",
                 "Python dependencies",
-                format!("{entry} is installed"),
+                "everything the backend needs is installed",
             ));
         } else {
             checks.push(Check::failing(
                 "dependencies",
                 "Python dependencies",
                 State::Fail,
-                format!("{entry} is missing — the dev extra was never synced"),
+                "some of the software the backend depends on hasn't been installed yet",
                 vec![Fix::Run {
                     label: "Install Python packages",
                     argv: config.shell_argv(&format!(
@@ -664,7 +722,7 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
         checks.push(Check::skip(
             "dependencies",
             "Python dependencies",
-            "the checkout above has to be there",
+            "the backend install above has to finish",
         ));
     }
 
@@ -694,7 +752,7 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
             checks.push(Check::pass(
                 "checkpointer",
                 "Conversation storage",
-                "SQLite — conversations are written to disk as they happen",
+                "your conversations are saved to disk as you go",
             ));
         } else {
             // **A `Fail`, not a `Warn`, and it says the consequence.** This read "the pickle
@@ -706,8 +764,8 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
                 "checkpointer",
                 "Conversation storage",
                 State::Fail,
-                "conversations are not being saved — without this the backend keeps them in \
-                 memory and they are gone when it restarts"
+                "your conversations aren't being saved — they only live in memory and are lost \
+                 if the backend restarts"
                     .to_string(),
                 vec![Fix::Run {
                     label: "Save conversations to disk",
@@ -724,46 +782,33 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
         checks.push(Check::skip(
             "checkpointer",
             "Conversation storage",
-            "the checkout above has to be there",
+            "the backend install above has to finish",
         ));
     }
 
-    // ---------------------------------------------------------------- 4. local execution
+    // ------------------------------------------------------------------- 4. the key
     //
-    // Host execution is the only mode: the module that makes it work ships inside
-    // `backend/local/` as part of the checkout itself. If it's missing — an incomplete
-    // sync, or a checkout old enough to predate the merge — `execute` would fail
-    // immediately, so this is a hard failure rather than a fallback warning: there is no
-    // other backend left to fall back to.
-    let local_execution = config.local_execution_module();
-    if can_probe {
-        let found = if in_wsl {
-            probe(&config.shell_argv(&format!("test -f {}", quote_path(&local_execution)))).ok
-        } else {
-            std::path::Path::new(&local_execution).is_file()
-        };
-        if found {
-            checks.push(Check::pass(
-                "local-execution",
-                "Local execution",
-                format!("found at {local_execution}"),
-            ));
-        } else {
-            checks.push(Check::failing(
-                "local-execution",
-                "Local execution",
-                State::Fail,
-                format!("missing at {local_execution}"),
-                vec![Fix::Manual(
-                    "Run Setup to (re)install the backend checkout.".into(),
-                )],
-            ));
-        }
+    // Ahead of the optional integrations below rather than after them: this is the one
+    // thing every turn needs, and the auto-run walks checks in this order, so a researcher
+    // used to be asked to sign in to Asta and Dataverse — both skippable — before ever being
+    // asked for the key that actually lets a turn run at all.
+    if has_model_key {
+        checks.push(Check::pass(
+            "model-key",
+            "Model API key",
+            "your API key is stored securely on this device",
+        ));
     } else {
-        checks.push(Check::skip(
-            "local-execution",
-            "Local execution",
-            RUNTIME_FIRST,
+        checks.push(Check::failing(
+            "model-key",
+            "Model API key",
+            State::Fail,
+            "you haven't added an API key for the selected AI provider yet",
+            vec![Fix::Manual(
+                "Open Settings and paste your key — it goes into the OS keychain, never \
+                 into a file."
+                    .into(),
+            )],
         ));
     }
 
@@ -802,21 +847,27 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
                     note: "use the account with theory-generation access",
                 };
                 if claims.ok && !claims.stdout.contains(THEORY_PERMISSION) {
-                    checks.push(Check::failing(
-                        "asta",
-                        "Asta CLI",
-                        State::Warn,
-                        format!("{identity} — this account cannot run the theorizer"),
-                        vec![
-                            sign_in,
-                            Fix::Manual(format!(
-                                "Literature search works; the theorizer needs the \
-                                 `{THEORY_PERMISSION}` permission, which this account does \
-                                 not have. Sign in with the account that does, or ask Asta \
-                                 to enrol this one."
-                            )),
-                        ],
-                    ));
+                    checks.push(
+                        Check::failing(
+                            "asta",
+                            "Asta CLI",
+                            State::Warn,
+                            format!(
+                                "signed in as {identity}, but this account can't generate \
+                                 research theories"
+                            ),
+                            vec![
+                                sign_in,
+                                Fix::Manual(format!(
+                                    "Literature search works; the theorizer needs the \
+                                     `{THEORY_PERMISSION}` permission, which this account does \
+                                     not have. Sign in with the account that does, or ask Asta \
+                                     to enrol this one."
+                                )),
+                            ],
+                        )
+                        .optional(),
+                    );
                 } else {
                     checks.push(Check {
                         id: "asta",
@@ -830,46 +881,53 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
                         // lapses this is the only cure, and a button that appears only
                         // once you are broken is one you cannot find.
                         fixes: vec![sign_in],
+                        optional: true,
                     });
                 }
             } else {
-                checks.push(Check::failing(
+                checks.push(
+                    Check::failing(
+                        "asta",
+                        "Asta CLI",
+                        State::Warn,
+                        "installed, but you're not signed in yet",
+                        vec![Fix::Run {
+                            label: "Sign in to Asta",
+                            argv: config.shell_argv("asta auth login"),
+                            note: "opens a browser; the app refreshes the token itself after this",
+                        }],
+                    )
+                    .optional(),
+                );
+            }
+        } else {
+            checks.push(
+                Check::failing(
                     "asta",
                     "Asta CLI",
                     State::Warn,
-                    "installed, but not signed in where the backend runs",
-                    vec![Fix::Run {
-                        label: "Sign in to Asta",
-                        argv: config.shell_argv("asta auth login"),
-                        note: "opens a browser; the app refreshes the token itself after this",
-                    }],
-                ));
-            }
-        } else {
-            checks.push(Check::failing(
-                "asta",
-                "Asta CLI",
-                State::Warn,
-                "not installed — literature search and the theorizer need it",
-                vec![
-                    Fix::Run {
-                        label: "Install the Asta CLI",
-                        argv: config.shell_argv(&format!(
-                            "uv tool install {} && uv tool update-shell",
-                            shell_quote(ASTA_INSTALL_URL)
-                        )),
-                        note: "about a minute",
-                    },
-                    Fix::Manual(
-                        "Afterwards, paste ASTA_TOKEN and ASTA_API_KEY in Settings — the \
-                         CLI reads them from its environment when a command runs."
-                            .into(),
-                    ),
-                ],
-            ));
+                    "not installed — used for literature search and generating research theories",
+                    vec![
+                        Fix::Run {
+                            label: "Install the Asta CLI",
+                            argv: config.shell_argv(&format!(
+                                "uv tool install {} && uv tool update-shell",
+                                shell_quote(ASTA_INSTALL_URL)
+                            )),
+                            note: "about a minute",
+                        },
+                        Fix::Manual(
+                            "Afterwards, paste ASTA_TOKEN and ASTA_API_KEY in Settings — the \
+                             CLI reads them from its environment when a command runs."
+                                .into(),
+                        ),
+                    ],
+                )
+                .optional(),
+            );
         }
     } else {
-        checks.push(Check::skip("asta", "Asta CLI", RUNTIME_FIRST));
+        checks.push(Check::skip("asta", "Asta CLI", RUNTIME_FIRST).optional());
     }
 
     // --------------------------------------------------- 5b. the Dataverse sign-in
@@ -898,41 +956,24 @@ pub fn inspect(config: &BackendConfig, has_model_key: bool) -> Report {
                 id: "dataverse",
                 label: "CIP Dataverse",
                 state: State::Pass,
-                detail: "signed in — dataset search is available".into(),
+                detail: "signed in — you can search CIP's datasets".into(),
                 fixes: vec![sign_in],
+                optional: true,
             }),
-            Some(false) => checks.push(Check::failing(
-                "dataverse",
-                "CIP Dataverse",
-                State::Warn,
-                "not signed in — dataset search will find nothing",
-                vec![sign_in],
-            )),
+            Some(false) => checks.push(
+                Check::failing(
+                    "dataverse",
+                    "CIP Dataverse",
+                    State::Warn,
+                    "not signed in — dataset search won't find anything until you do",
+                    vec![sign_in],
+                )
+                .optional(),
+            ),
             // The backend predates this module. Not a failure of anything, and inventing a
             // warning for it would send someone looking for a problem they do not have.
             None => {}
         }
-    }
-
-    // ------------------------------------------------------------------- 6. the key
-    if has_model_key {
-        checks.push(Check::pass(
-            "model-key",
-            "Model API key",
-            "stored in the OS keychain",
-        ));
-    } else {
-        checks.push(Check::failing(
-            "model-key",
-            "Model API key",
-            State::Fail,
-            "no key stored for the selected provider",
-            vec![Fix::Manual(
-                "Open Settings and paste your key — it goes into the OS keychain, never \
-                 into a file."
-                    .into(),
-            )],
-        ));
     }
 
     Report {
@@ -1085,33 +1126,54 @@ fn decode(bytes: &[u8], wide: bool) -> String {
 /// the researcher to open an admin terminal, or to let Windows ask them. `Start-Process
 /// -Verb RunAs` is that prompt.
 ///
-/// `-Wait` so the fix's own "finished" means finished, and `$p.ExitCode` so a refused UAC
-/// prompt reports failure rather than success.
+/// `-Wait` so the fix's own "finished" means finished.
 ///
-/// The command is run *through `cmd.exe`* only to get `> log 2>&1`. See [`elevated_log`]:
-/// an elevated child cannot write into our pipes, so redirecting to a file is the only way
-/// to find out what it said.
+/// **The exit code is not trusted.** `wsl --install` needs a reboot before the distro it
+/// registers can actually start, and what `wsl.exe` itself exits with in between is not a
+/// reliable signal either way — a researcher watched it print success text and still exit
+/// non-zero. The only event this app can see at all is the elevated window closing, so that
+/// is what counts: reaching the `exit 0` below means `Start-Process` got as far as running
+/// the program and waiting for it, and `judge_finished_fix` is what turns that into "restart
+/// your machine" rather than a false "done". A refused UAC prompt never reaches that line —
+/// `Start-Process -Verb RunAs` throws before it, which still surfaces as a failure here.
+///
+
+/// **This elevates the real program directly — no `cmd.exe`, no redirection, no output
+/// captured.** Two earlier shapes of this both failed on a real company laptop:
+///
+/// - Wrapping the command in `cmd.exe /c ... > log 2>&1` so the app could tail the elevated
+///   child's otherwise-invisible console (it owns its own — docs §60) put `<`/`>` characters
+///   straight into `-ArgumentList`, which made `Start-Process` itself throw "This command
+///   cannot be run because the system cannot find all the information required" *before*
+///   `cmd.exe` ever started — nothing was ever written, and the window just opened and
+///   closed. The identical command typed by hand in an already-elevated console worked
+///   fine, which placed the fault in the argument list, not in WSL.
+/// - Moving that same redirection into a small `.cmd` file on disk (so `-ArgumentList`
+///   would carry nothing but a quoted path) traded that crash for a different failure:
+///   Windows/the machine's security tooling treats a freshly written, unsigned script
+///   file elevated by an app as exactly the pattern malware uses, and refuses to run it
+///   ("the publisher is unknown") — measured on the same laptop.
+///
+/// Elevating `wsl.exe` itself sidesteps both: it is Microsoft's own signed binary, and
+/// there is nothing dynamic on disk for anything to distrust. The price is the log this
+/// app can show — there isn't one. The elevated process gets its own real, visible console
+/// window (nothing redirects it away this time), so a researcher can watch `wsl.exe`'s
+/// progress there directly, including the interactive Ubuntu username/password prompt it
+/// asks for at the end — which is *why* nothing here denies it stdin the way the
+/// file-redirected version had to. `onboarding_fix_log` says as much instead of showing a
+/// live log for this fix.
 fn elevated(argv: &[&str]) -> Vec<String> {
     if !cfg!(windows) {
         return argv.iter().map(|part| part.to_string()).collect();
     }
-    // Every part here is a compile-time constant without spaces, so only the log path —
-    // which runs through the user's account name — needs quoting for cmd. Leaving the
-    // first token unquoted also keeps cmd's "strip the outer pair" rule out of it.
-    let command = argv.join(" ");
-    let log = elevated_log().display().to_string();
-    // `< NUL` matters as much as the redirect. `wsl --install -d Ubuntu` finishes by
-    // launching the new distro, which asks — interactively — for a UNIX username and
-    // password. With stdout going to a file that question is *invisible*, and the window
-    // would sit there forever looking finished. At EOF the prompt gives up instead, leaving
-    // a distro that answers as root, which is all the sidecar needs. An elevated fix can
-    // never be interactive anyway: its console is not one we can put a question in.
-    let inner = format!("/c {command} < NUL > \"{log}\" 2>&1");
+    let (program, rest) = argv.split_first().expect("elevated command needs a program");
+    let args = rest.join(" ");
     // Single-quoted for PowerShell, doubling any quote inside — nothing here contains one
     // today, and a future path must not be able to break out of the string.
     let script = format!(
-        "$p = Start-Process -FilePath 'cmd.exe' -ArgumentList '{}' -Verb RunAs -Wait -PassThru; exit $p.ExitCode",
-        inner.replace('\'', "''")
+        "Start-Process -FilePath '{}' -ArgumentList '{}' -Verb RunAs -Wait; exit 0",
+        program.replace('\'', "''"),
+        args.replace('\'', "''"),
     );
     vec![
         "powershell.exe".into(),
@@ -1452,13 +1514,14 @@ mod tests {
         unsafe { std::env::set_var("MINIME_BUNDLED_BACKEND", &bundled) };
 
         // Running from source: nothing is bundled to compare against, and a machine that has
-        // never been handed a stamped build is not a machine out of date.
-        assert_eq!(backend_build(&config).state, State::Pass);
+        // never been handed a stamped build is not a machine out of date — so there is no row
+        // at all, rather than a Pass that can only ever say "running from source".
+        assert_eq!(backend_build(&config), None);
 
         std::fs::write(bundled.join(BACKEND_STAMP), "ccbe00ee1741\n").expect("stamp");
 
         // Installed before stamps existed — which is every machine on the day this ships.
-        let unstamped = backend_build(&config);
+        let unstamped = backend_build(&config).expect("a bundled stamp exists now");
         assert_eq!(
             unstamped.state,
             State::Fail,
@@ -1469,7 +1532,7 @@ mod tests {
 
         // A different build.
         std::fs::write(installed.join(BACKEND_STAMP), "0000deadbeef").expect("stamp");
-        let stale = backend_build(&config);
+        let stale = backend_build(&config).expect("a bundled stamp exists now");
         assert_eq!(stale.state, State::Fail);
         assert!(stale.detail.contains("0000deadbeef"), "names what is installed: {}", stale.detail);
         assert!(stale.detail.contains("ccbe00ee1741"), "and what it should be: {}", stale.detail);
@@ -1477,7 +1540,7 @@ mod tests {
         // The same build says so, and offers nothing — a pane full of actions nobody needs is
         // how the real one stops being read.
         std::fs::write(installed.join(BACKEND_STAMP), "  ccbe00ee1741  \n").expect("stamp");
-        let current = backend_build(&config);
+        let current = backend_build(&config).expect("a bundled stamp exists now");
         assert_eq!(current.state, State::Pass, "whitespace is not a different build");
         assert!(current.fixes.is_empty());
 
@@ -1537,7 +1600,7 @@ mod tests {
             .expect("a dependencies row");
         assert_eq!(dependencies.state, State::Skip);
         assert!(
-            dependencies.detail.contains("checkout"),
+            dependencies.detail.contains("install"),
             "{}",
             dependencies.detail
         );
@@ -1789,22 +1852,26 @@ mod encoding_tests {
         if cfg!(windows) {
             assert_eq!(argv[0], "powershell.exe");
             let script = argv.last().expect("the script");
-            // `RunAs` is the UAC prompt; `-Wait` makes "finished" mean finished; the exit
-            // code is what turns a refused prompt into a reported failure.
+            // `RunAs` is the UAC prompt; `-Wait` makes "finished" mean finished. `exit 0`
+            // rather than `wsl.exe`'s own exit code: that code is not a reliable signal for
+            // `wsl --install`, so the elevated window closing at all is treated as success. A
+            // refused UAC prompt still fails, because `Start-Process` throws before this line.
             assert!(script.contains("-Verb RunAs"), "{script}");
             assert!(script.contains("-Wait"), "{script}");
-            assert!(script.contains("exit $p.ExitCode"), "{script}");
-            assert!(script.contains("wsl.exe --install -d Ubuntu"), "{script}");
+            assert!(script.contains("exit 0"), "{script}");
+            // The real, signed binary is elevated directly — not `cmd.exe`, and not a
+            // script file written to disk. Both of those were measured, on a real
+            // company laptop, to fail: `<`/`>` in `-ArgumentList` made `Start-Process`
+            // itself throw before anything ran, and a freshly written `.cmd` file got
+            // refused as an unknown publisher once that was fixed.
+            assert!(script.contains("-FilePath 'wsl.exe'"), "{script}");
+            assert!(script.contains("-ArgumentList '--install -d Ubuntu'"), "{script}");
+            assert!(!script.contains("cmd.exe"), "{script}");
+            assert!(!script.contains('<'), "{script}");
+            assert!(!script.contains('>'), "{script}");
             // Not `--no-launch`, which can leave the distro unregistered
-            // (microsoft/WSL#10646) — the interactive prompt is denied stdin instead, or an
-            // invisible question hangs the window forever (docs §61).
+            // (microsoft/WSL#10646).
             assert!(!script.contains("--no-launch"), "{script}");
-            assert!(script.contains("< NUL"), "{script}");
-            // The whole point of going through cmd: an elevated child has its own console,
-            // so without this redirect its output is lost and the pane has nothing to show
-            // (docs §60).
-            let log = elevated_log().display().to_string();
-            assert!(script.contains(&format!("> \"{log}\" 2>&1")), "{script}");
         } else {
             // Everywhere else it must stay the plain command, or the Linux dev path breaks.
             assert_eq!(argv, vec!["wsl.exe", "--install", "-d", "Ubuntu"]);

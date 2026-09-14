@@ -761,7 +761,8 @@ fn sync_source_command(source: &str, backend_dir: &str) -> String {
     // later with a message about the wrong thing.
     format!(
         "{{ [ -f {dir}/pyproject.toml ] || echo \
-         'mini-me: the backend checkout looks incomplete — run Setup' >&2; \
+         'mini-me: the backend checkout looks incomplete — run the setup checks in the app' \
+         >&2; \
          {steps}; }} >/dev/null || true",
         steps = steps.join("; "),
     )

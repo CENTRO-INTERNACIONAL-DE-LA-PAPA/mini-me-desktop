@@ -1602,12 +1602,12 @@ mod tests {
             .expect("the helper logs somewhere")
             .to_string_lossy()
             .into_owned();
-        // The Setup pane itself lives in ui/settings_view.rs (main.rs holds only
-        // state/logic since the UI split); check both so this test does not depend on
-        // exactly which file the rendering code happens to live in.
+        // The Setup pane was replaced by the onboarding modal in ui/onboarding.rs (main.rs
+        // holds only state/logic since the UI split); check both so this test does not
+        // depend on exactly which file the rendering code happens to live in.
         let pane = concat!(
             include_str!("main.rs"),
-            include_str!("ui/settings_view.rs"),
+            include_str!("ui/onboarding.rs"),
         );
         assert!(
             pane.contains(&name),
